@@ -74,6 +74,7 @@ from ouroboros.context_budget import estimate_message_chars as _estimate_message
 from ouroboros.llm_local import (
     _LocalLaneMixin,  # noqa: F401
     LocalContextTooLargeError,  # noqa: F401
+    _split_leading_reasoning,
 )
 from ouroboros.llm_messages import (
     _MessageShapingMixin,  # noqa: F401
@@ -146,9 +147,11 @@ def _declared_types(schema: Any) -> Set[str]:
     if not isinstance(schema, dict):
         return set()
     kinds = schema.get("type")
-    found = {kinds} if isinstance(kinds, str) else {kind for kind in kinds or () if isinstance(kind, str)}
+    found = {kinds} if isinstance(kinds, str) else {
+        kind for kind in (kinds if isinstance(kinds, (list, tuple)) else ()) if isinstance(kind, str)}
     for key in ("anyOf", "oneOf"):
-        for branch in schema.get(key) or ():
+        branches = schema.get(key)
+        for branch in branches if isinstance(branches, (list, tuple)) else ():
             found |= _declared_types(branch)
     return found
 
@@ -159,6 +162,8 @@ def _xml_tool_argument(value: str, schema: Any) -> Any:
     kinds = _declared_types(schema)
     if "string" in kinds:
         return value
+    if "boolean" in kinds and value.strip() in ("True", "False"):
+        return value.strip() == "True"
     try:
         parsed = json.loads(value)
     except ValueError:
@@ -222,9 +227,10 @@ def _parse_tool_call_block(body: str, tool_schemas: Optional[Dict[str, Any]]) ->
     if parameter.sub("", function.group(2)).strip():
         raise ValueError("text outside <parameter> blocks")
     name = function.group(1).strip()
-    schema = (tool_schemas or {}).get(name)
+    schema = (tool_schemas or {}).get(name) if isinstance(tool_schemas, dict) else None
     properties = schema.get("properties") if isinstance(schema, dict) else None
-    return name, {key: _xml_tool_argument(value, (properties or {}).get(key))
+    properties = properties if isinstance(properties, dict) else {}
+    return name, {key: _xml_tool_argument(value, properties.get(key))
                   for key, value in parameter.findall(function.group(2))}
 
 
@@ -510,6 +516,12 @@ class LLMClient(
     @staticmethod
     def _strip_reasoning_wrappers(text: str):
         """Strip leading think/reasoning wrappers before the first <tool_call> only."""
+        reasoning_parts: list = []
+        # The same leading split the plain-answer path uses (``llm_local``): reasoning the template opened in the
+        # prompt arrives only closed (Qwen3.5 and later), and may itself mention a <tool_call>.
+        text, leading = _split_leading_reasoning(text)
+        if leading:
+            reasoning_parts.append(leading)
         # Split at first <tool_call> so we never touch JSON inside tool payloads.
         tool_call_start = re.search(r"<tool_call\b", text, re.IGNORECASE)
         if tool_call_start:
@@ -518,14 +530,6 @@ class LLMClient(
         else:
             prefix = text
             suffix = ""
-
-        reasoning_parts: list = []
-        # Reasoning that a template opened in the prompt arrives closed but never opened (Qwen3.5 and later).
-        closed = re.search(r"</think>", prefix, re.IGNORECASE)
-        if closed and not re.search(r"<think>", prefix[:closed.start()], re.IGNORECASE):
-            if prefix[:closed.start()].strip():
-                reasoning_parts.append(prefix[:closed.start()].strip())
-            prefix = prefix[closed.end():]
 
         def _extract(tag: str, s: str) -> str:
             pattern = re.compile(
@@ -585,7 +589,7 @@ class LLMClient(
                         "arguments": json.dumps(args),
                     },
                 })
-            except (json.JSONDecodeError, ValueError) as exc:
+            except (json.JSONDecodeError, ValueError, TypeError, AttributeError) as exc:
                 log.warning("Rejected local <tool_call> block: %s (%s)", raw[:200], exc)
                 return msg
 

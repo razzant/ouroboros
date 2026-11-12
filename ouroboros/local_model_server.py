@@ -15,6 +15,59 @@ def input_fingerprint(payload: dict) -> str:
                                     separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+
+def object_tool_arguments(messages: Any) -> Any:
+    """Messages whose replayed tool-call arguments are objects instead of the JSON text the OpenAI wire carries.
+
+    Hugging Face chat templates may iterate a call's arguments (``tool_call.arguments|items`` in Qwen3.5 and later);
+    on text that fails, so the second round of every tool task would. Text that is not a JSON object stays."""
+    if not isinstance(messages, list):
+        return messages
+    converted = []
+    for message in messages:
+        calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if isinstance(calls, list):
+            fixed = []
+            for call in calls:
+                function = call.get("function") if isinstance(call, dict) else None
+                arguments = function.get("arguments") if isinstance(function, dict) else None
+                if isinstance(arguments, str):
+                    try:
+                        parsed = json.loads(arguments)
+                    except ValueError:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        call = {**call, "function": {**function, "arguments": parsed}}
+                fixed.append(call)
+            message = {**message, "tool_calls": fixed}
+        converted.append(message)
+    return converted
+
+
+def render_tool_arguments_on_retry(render):
+    """A formatter call that renders messages as given and, only if the template fails on them, again with object
+    arguments: a template that prints the text keeps it, one that needs a mapping gets one (measurement too)."""
+    def call(self, *, messages, **kwargs):
+        try:
+            return render(self, messages=messages, **kwargs)
+        except Exception:
+            objects = object_tool_arguments(messages)
+            if objects == messages:
+                raise
+            return render(self, messages=objects, **kwargs)
+
+    call._ouroboros_object_arguments = True
+    return call
+
+
+def install_object_tool_arguments() -> None:
+    """Patch this server process's Jinja formatter once (the vendor server renders every model template with it)."""
+    from llama_cpp import llama_chat_format
+
+    formatter = llama_chat_format.Jinja2ChatFormatter
+    if not getattr(formatter.__call__, "_ouroboros_object_arguments", False):
+        formatter.__call__ = render_tool_arguments_on_retry(formatter.__call__)
+
 def measure_chat_input(model: Any, payload: dict) -> dict:
     """Render through the selected provider formatter without running inference.
 
@@ -78,6 +131,7 @@ def main():
     """Use the vendor's CLI/configuration/uvicorn lifecycle without a second server."""
     from llama_cpp.server import __main__ as server
 
+    install_object_tool_arguments()
     create_app = server.create_app
     server.create_app = lambda *args, **kwargs: with_measurement_route(create_app(*args, **kwargs))
     try:

@@ -468,3 +468,89 @@ def test_the_wizard_presets_and_the_factory_window_start_a_fresh_install():
     assert local_model_settings({"LOCAL_MODEL_CONTEXT_LENGTH": 8192})["LOCAL_MODEL_CONTEXT_LENGTH"] == 8192
     # The runtime counts as installed only when the server it is started as can import.
     assert "llama_cpp.server.app" in RUNTIME_PROBE
+
+
+
+class TestReplayedCallsAndReasoningShapes(unittest.TestCase):
+    """The second round of a tool task, and the reasoning shapes both paths must read alike."""
+
+    def test_a_replayed_call_renders_as_an_object_only_when_the_template_needs_one(self):
+        from ouroboros.local_model_server import object_tool_arguments, render_tool_arguments_on_retry
+
+        history = [{"role": "user", "content": "read it"},
+                   {"role": "assistant", "content": "", "tool_calls": [{"id": "c0", "type": "function", "function": {
+                       "name": "read_file", "arguments": '{"path": "README.md", "limit": 3}'}}]},
+                   {"role": "tool", "tool_call_id": "c0", "content": "one"}]
+        seen = []
+
+        def iterating(_self, *, messages, **kwargs):  # a Qwen3.5+ template: tool_call.arguments|items
+            arguments = messages[1]["tool_calls"][0]["function"]["arguments"]
+            if not isinstance(arguments, dict):
+                raise TypeError("Can only get item pairs from a mapping.")
+            seen.append(arguments)
+            return "rendered"
+
+        def printing(_self, *, messages, **kwargs):  # a template that writes the text as it is
+            seen.append(messages[1]["tool_calls"][0]["function"]["arguments"])
+            return "rendered"
+
+        self.assertEqual(render_tool_arguments_on_retry(iterating)(None, messages=history), "rendered")
+        self.assertEqual(seen.pop(), {"path": "README.md", "limit": 3})
+        self.assertEqual(render_tool_arguments_on_retry(printing)(None, messages=history), "rendered")
+        self.assertEqual(seen.pop(), '{"path": "README.md", "limit": 3}')
+        self.assertEqual(history[1]["tool_calls"][0]["function"]["arguments"], '{"path": "README.md", "limit": 3}')
+        odd = [history[0], {"role": "assistant", "tool_calls": [{"function": {"name": "x", "arguments": "not json"}}]}]
+        self.assertEqual(object_tool_arguments(odd), odd)
+        with self.assertRaises(TypeError):  # a template error the conversion cannot change stays the error
+            render_tool_arguments_on_retry(iterating)(None, messages=odd)
+
+    def test_the_server_process_installs_the_retry_once(self):
+        import sys
+        import types
+        from ouroboros.local_model_server import install_object_tool_arguments
+
+        class Formatter:
+            def __call__(self, *, messages, **kwargs):
+                return messages
+
+        package, module = types.ModuleType("llama_cpp"), types.ModuleType("llama_cpp.llama_chat_format")
+        module.Jinja2ChatFormatter, package.llama_chat_format = Formatter, module
+        saved = {name: sys.modules.get(name) for name in ("llama_cpp", "llama_cpp.llama_chat_format")}
+        sys.modules.update({"llama_cpp": package, "llama_cpp.llama_chat_format": module})
+        try:
+            install_object_tool_arguments()
+            first = Formatter.__call__
+            install_object_tool_arguments()
+            self.assertIs(Formatter.__call__, first)
+            self.assertTrue(first._ouroboros_object_arguments)
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = value
+
+    def test_reasoning_that_mentions_a_call_still_ends_at_its_own_closing_line(self):
+        from ouroboros.llm import LLMClient
+        from ouroboros.llm_local import _split_leading_reasoning as split
+
+        reply = ("I will answer with a <tool_call> block naming get_time.\n</think>\n\n"
+                 "<tool_call>\n<function=get_time>\n</function>\n</tool_call>")
+        parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"get_time"})
+        self.assertEqual(parsed["tool_calls"][0]["function"]["name"], "get_time")
+        self.assertTrue(parsed["content"].startswith("I will answer with a <tool_call> block"))
+        mention = "Qwen ends its reasoning with </think> and then answers."
+        self.assertEqual(split(mention), (mention, ""))
+        self.assertEqual(split("checking\n</think>\nIt is noon."), ("It is noon.", "checking"))
+
+    def test_odd_schemas_never_raise_and_a_declared_boolean_reads_python_style(self):
+        from ouroboros.llm import LLMClient
+
+        reply = "<tool_call>\n<function=f>\n<parameter=flag>\nFalse\n</parameter>\n</function>\n</tool_call>"
+        for schemas in ({"f": {"type": "object", "properties": ["flag"]}}, {"f": {"properties": {"flag": {"type": 5}}}},
+                        {"f": {"properties": {"flag": {"anyOf": {"type": "string"}}}}}, ["not a mapping"]):
+            parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"f"}, schemas)
+            self.assertEqual(json.loads(parsed["tool_calls"][0]["function"]["arguments"]), {"flag": "False"}, schemas)
+        typed = {"f": {"type": "object", "properties": {"flag": {"type": "boolean"}}}}
+        parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"f"}, typed)
+        self.assertEqual(json.loads(parsed["tool_calls"][0]["function"]["arguments"]), {"flag": False})

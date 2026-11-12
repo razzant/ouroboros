@@ -60,7 +60,10 @@ def _split_leading_reasoning(text: str) -> Tuple[str, str]:
     paired = re.match(r"<think>(.*?)</think>", stripped, re.DOTALL | re.IGNORECASE)
     if paired:
         return stripped[paired.end():].strip(), paired.group(1).strip()
-    closed = re.search(r"</think>", stripped, re.IGNORECASE)
+    if stripped.startswith("<tool_call>"):
+        return text, ""  # a reply that opens with a call has no reasoning before it; its arguments are not reasoning
+    # The template closes reasoning on a line of its own; a sentence that merely mentions the tag is an answer.
+    closed = re.search(r"(?:^|\n)[ \t]*</think>[ \t]*(?:\n|$)", stripped, re.IGNORECASE)
     if closed and not re.search(r"<think>", stripped[:closed.start()], re.IGNORECASE):
         return stripped[closed.end():].strip(), stripped[:closed.start()].strip()
     return text, ""
