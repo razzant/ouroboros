@@ -186,7 +186,7 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is on an explicit pause; its card shows who paused it and how to continue.' });
     }
     const route = snapshot.modelRoute;
-    if (route) {  // in the words of the Consciousness tab's own row (consciousness_dashboard.cardWords)
+    if (route) {  // the words of the Consciousness tab's row and the Models page: "Main model", "Local model"
         const name = route.local ? 'Local model' : parseModelSource(route.value).model || route.value;
         lines.push({ tone: 'muted', text: `Thinks with ${name}${route.layer === 'main' ? ' (Main model)' : ''}.` });
     }

@@ -1192,8 +1192,9 @@ def test_status_snapshot_carries_the_alarm_facts(clock):
 
 
 def test_status_snapshot_names_the_model_its_next_wake_thinks_with(clock, monkeypatch):
-    """``model_route``: the consciousness slot's model when the slot names one, else Main's, with the route's
-    local flag (``route_choice.following_route``); a route that cannot be read is null, never a guess."""
+    """``model_route``: the route the next wake takes, with its local flag; ``layer`` ``consciousness`` when its own
+    slot decides it (``route_choice.model_role_slot_override``), else ``main``; a route that cannot be read is null,
+    never a guess."""
     from ouroboros import route_choice
 
     monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-6-astra")
@@ -1204,7 +1205,10 @@ def test_status_snapshot_names_the_model_its_next_wake_thinks_with(clock, monkey
     assert route() == {"value": "anthropic/claude-opus-5-5", "layer": "consciousness", "local": False}
     monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "")
     assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": False}
-    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "true")  # an empty slot with its own local flag: Main's model, local
+    # An empty slot whose own local flag differs from Main's decides the route: Main's model, run locally.
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "true")
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "consciousness", "local": True}
+    monkeypatch.setenv("USE_LOCAL_MAIN", "true")  # equal flags: Main's own route, local
     assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": True}
     monkeypatch.setattr(route_choice, "following_route", lambda *_a, **_k: (_ for _ in ()).throw(OSError("unreadable")))
     assert route() is None

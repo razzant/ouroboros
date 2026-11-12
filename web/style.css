@@ -6061,13 +6061,13 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-table-note { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .costs-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 /* The consciousness allowance under its field (costs.js allowancePresentation): the clock's own spend in its words, what
-   that leaves out in the meta ink and the door to Consciousness; then at most two status sentences (.ui-status), each
+   that leaves out in the meta ink and the door to Consciousness; then up to three status sentences (.ui-status), each
    its fact in the line's tone and what follows from it in the meta ink, a held wake's ending in its card's door. */
 .costs-allowance-spend { margin: 0; }
 .costs-allowance-spend .cost-cell-note { display: inline; }
 .costs-allowance-state { display: grid; gap: var(--space-2); }
 .costs-allowance-state:empty { display: none; }
-.costs-allowance-line { margin: 0; max-width: 72ch; }
+.costs-allowance-line { margin: 0; max-width: 72ch; min-width: 0; overflow-wrap: anywhere; }
 .costs-allowance-note { color: var(--text-meta); }
 /* Reserve each sentence link's touch overshoot before the next status or disclosure (ui.css "Touch reach"). */
 @media (pointer: coarse) {

@@ -95,21 +95,20 @@ def _iso(ts: float) -> str:
 
 
 def model_route() -> Optional[Dict[str, Any]]:
-    """The model the next wake thinks with, read from the settings as they are now (no network, no store):
-    ``route_choice.following_route``, the consciousness slot's model when the slot names one (``layer``
-    ``consciousness``), else Main's (``main``), with the route's local flag. ``None`` when it cannot be read."""
-    from ouroboros.model_slots import MODEL_ROLE_SETTINGS
-    from ouroboros.route_choice import following_route
-    from ouroboros.settings_integrity import runtime_setting
+    """The model the next wake thinks with, read from the settings as they are now (no network, no store), with
+    the route's local flag: ``layer`` ``consciousness`` when its own slot decides the route (a model of its own, or
+    Main's under the slot's own local flag: ``route_choice.model_role_slot_override``), else ``main``, the route
+    a wake follows (``following_route``). ``None`` when it cannot be read."""
+    from ouroboros.route_choice import following_route, model_role_slot_override
 
     try:
-        model, local = following_route("consciousness")
-        own = str(runtime_setting(MODEL_ROLE_SETTINGS["consciousness"], "") or "").strip()
+        slot = model_role_slot_override({"model_role": "consciousness"})
+        model, local = slot or following_route("consciousness")
     except Exception:  # every status read asks again; the unknown is the null itself, so the log stays quiet
         log.debug("The consciousness model route could not be read from the settings", exc_info=True)
         return None
-    model = str(model or "").strip()
-    return {"value": model, "layer": "consciousness" if own else "main", "local": bool(local)} if model else None
+    model, layer = str(model or "").strip(), "main" if slot is None else "consciousness"
+    return {"value": model, "layer": layer, "local": bool(local)} if model else None
 
 
 def allowance_fact(window: Dict[str, Any]) -> Dict[str, Any]:
