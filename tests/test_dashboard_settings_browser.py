@@ -349,9 +349,13 @@ def test_no_tab_scrolls_sideways_at_the_floor_and_a_three_way_choice_keeps_one_l
     tops = page.locator(f'#page-dashboard [data-setting-row="OUROBOROS_CONSCIOUSNESS_AUTONOMY"] [data-setting-value]').evaluate_all(
         "(buttons) => buttons.map((button) => Math.round(button.getBoundingClientRect().top))")
     assert len(tops) == 3 and len(set(tops)) == 1, f"Advises, Acts and Evolves stand on one line at 320 px: {tops}"
-    # A number and a door keep their place at the row's end; a range goes under its words.
+    # A number and a door keep their place at the row's end; a range goes under its words. "At the row's end" is
+    # beside the words: right of the name and no lower than the last line under it. (The control is centred against
+    # the name and its line of meaning, so beside three such lines a 34 px number starts a pixel under the name's own
+    # line: its top against the name's bottom said nothing about where it stands.)
     ends = page.evaluate("""() => Object.fromEntries(['OUROBOROS_CONSCIOUSNESS_MAX_TASKS', 'consciousness-allowance', 'OUROBOROS_BG_WAKEUP'].map((id) => {
         const row = document.querySelector(`#page-dashboard [data-setting-row="${id}"]`);
-        const title = row.querySelector('.ui-row-title').getBoundingClientRect(), actions = row.querySelector('.ui-row-actions').getBoundingClientRect();
-        return [id, actions.top < title.bottom]; }))""")
+        const box = (selector) => row.querySelector(selector).getBoundingClientRect();
+        const [title, meta, actions] = [box('.ui-row-title'), box('.ui-row-meta'), box('.ui-row-actions')];
+        return [id, actions.left >= title.right - 1 && actions.top < Math.max(title.bottom, meta.bottom)]; }))""")
     assert ends == {"OUROBOROS_CONSCIOUSNESS_MAX_TASKS": True, "consciousness-allowance": True, "OUROBOROS_BG_WAKEUP": False}, ends
