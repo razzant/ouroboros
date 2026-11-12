@@ -349,7 +349,8 @@ function needRowHtml(row) {
  * Draw the home into `root` and take its presses. `open(path, { row, opener })` opens a row's page or door; `ctx`
  * is the shell's (`ws`, `showPage`, `readSettings`, `stateSnapshots`). Answers `{ mark(path), search(words), refresh(),
  * dispose() }`: `mark` names the row whose page is shown beside the home; `search` puts words into the search field and
- * shows their results; `refresh` reads the facts again and repaints.
+ * shows their results, until the first press on them (words the owner typed stay); `refresh` reads the facts again
+ * and repaints.
  */
 export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatus, ask = openConfirmDialog } = {}) {
     root.innerHTML = `<div class="settings-column settings-home-column">
@@ -369,6 +370,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     let current = '';
     let needs = [];
     let shownQuery = '';
+    let handed = '';  // the words `search` put into the field, until the owner types there
     let serial = 0;
     let busy = '';
     let needsHtml = '';
@@ -495,17 +497,28 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             else if (row) void runNeed(row);
             return;
         }
-        if (hit('[data-settings-ask]')) { void askOuroboros(shownQuery, { showPage: ctx.showPage }); return; }
+        // Words the shell searched for an address no page has (`search`) served their purpose with the first press on
+        // their results: the field is emptied, so a later return shows the home. Words the owner typed stay.
+        const spend = () => {
+            if (!handed || searchEl.value !== handed) return;
+            const held = listEl.contains(root.ownerDocument?.activeElement);  // beside the page it opened, the pressed row keeps the focus
+            searchEl.value = handed = '';
+            paintList();
+            if (held) listEl.querySelector('[aria-current="page"]')?.focus?.({ preventScroll: true });
+        };
+        if (hit('[data-settings-ask]')) { void askOuroboros(shownQuery, { showPage: ctx.showPage }); spend(); return; }
         const row = hit('[data-settings-open]');
         if (!row || !root.contains(row)) return;
         const found = row.dataset.settingsResult ? searchSettings(shownQuery).find((entry) => entry.id === row.dataset.settingsResult) : null;
         open(row.dataset.settingsOpen, { row: found?.row || '', opener: row });
+        spend();
     };
+    const onType = () => { handed = ''; paintList(); };
     // A setting saved while the home is on screen may start or end a wait for a restart: the document is read again.
     const onSaved = () => { if (root.getClientRects?.().length) void read('settings', serial); };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
     root.addEventListener('click', onClick);
-    searchEl.addEventListener('input', paintList);
+    searchEl.addEventListener('input', onType);
     globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
     paint();
     return {
@@ -514,7 +527,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             paintRows();
         },
         search(words) {
-            searchEl.value = String(words || '');
+            searchEl.value = handed = String(words || '');
             paintList();
             searchEl.parentElement?.scrollIntoView?.({ block: 'start' });
         },
@@ -523,7 +536,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             serial += 1;
             offStore();
             root.removeEventListener('click', onClick);
-            searchEl.removeEventListener('input', paintList);
+            searchEl.removeEventListener('input', onType);
             globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
         },
     };
