@@ -1540,9 +1540,9 @@ lands there with the list open. Until then a row claims nothing
 about where its message is; when the room's history holds none (`No message yet.`,
 or `No message saved in this chat.` once ended), belongs to another room, or cannot
 be checked, its details say so. `View question`
-goes to the exact question and answers nothing; every question of the room's turn is reachable: a work's row
-links one, and each further one, or one no listed work holds, has its own row, named by the question's first
-words under its card's status word. A row offers exactly the
+goes to the exact question and answers nothing; every question of the room's turn is reachable: a confirmed work's
+row links one, and each further one, one whose work is unconfirmed, or one no listed work holds, has its own row,
+named by the question's first words under its card's status word; that row's name goes to the question too. A row offers exactly the
 controls the server lists for its work, each at its exact task, on the shared
 task controls: Stop ends the whole work (every episode still running, the newest
 first), `Stop earlier attempt` only what earlier attempts left running, and
