@@ -188,7 +188,8 @@ def _bound_delta_meta(meta: dict) -> None:
 
     while _meta_bytes(meta) > _MAX_META_BYTES:
         delta, previous = meta.get("knowledge_delta") or {}, meta.get("knowledge_previous")
-        options = [(field, delta[field]) for field in _DELTA_LISTS if isinstance(delta.get(field), list) and delta[field]]
+        options = [(field, delta[field]) for field in _DELTA_LISTS
+                   if isinstance(delta.get(field), list) and delta[field]]
         if isinstance(meta.get("knowledge_outline"), str):
             options.append(("outline", meta["knowledge_outline"]))
         if isinstance(previous, dict) and isinstance(previous.get("reason"), str):
@@ -345,11 +346,16 @@ def _knowledge_write(
             text=f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True),
             meta=meta))
     text = f"⚠️ TOOL_ERROR: Knowledge write not completed: {result.reason}."
+    changes = None
     if result.reason == "revision_conflict" and result.held is not None and result.current is not None:
         # The held version plus what came since is the whole current note: the note is not resent.
-        text += (f" Nothing was written. Reconcile your change with what came since, then pass "
-                 f"expected_revision={result.current.revision!r}.\n\n")
-        text += knowledge_versions.render_changes(result.current, result.held, tool_result_limit("knowledge_write") - len(text))
+        changes = (text + f" Nothing was written. Reconcile your change with what came since, then pass "
+                   f"expected_revision={result.current.revision!r}.\n\n"
+                   + knowledge_versions.render_changes(result.current, result.held))
+        if len(changes) > tool_result_limit("knowledge_write"):
+            changes = None  # all or whole: never a clipped diff; the complete current source follows instead
+    if changes is not None:
+        text = changes
         meta["knowledge_changes_since"] = result.held["facts"]["revision"]
     elif not result.show_source:  # a refused edit item is named; the note it was looked for in is not resent
         text += " Nothing was written."
@@ -431,9 +437,9 @@ def get_tools() -> List[ToolEntry]:
                 "edit). reason, optional on every mode, is kept in the note's history, never in its body. "
                 "expected_revision (from knowledge_read, a receipt or a refusal) is required to replace an existing note: "
                 "overwrite, edit, revert, archive, restore and an append with summary; creating a note and a bare append "
-                "need none. A stale revision writes nothing and returns what changed since that version when the "
-                "note's history holds it, else the current note. A receipt names the version it replaced, who wrote it, "
-                "and the calls that read it and revert to it. The overview always stays active. Legacy index prose stays "
+                "need none. A stale revision writes nothing and returns every change since that version, whole, when "
+                "the note's history holds it and one reply carries them all, else the current note. A receipt "
+                "names the version it replaced, who wrote it, and the calls that read it and revert to it. The overview always stays active. Legacy index prose stays "
                 "until an authored global overview retires it."),
             "parameters": {"type": "object", "properties": {
                 "topic": topic, "scope": scope,

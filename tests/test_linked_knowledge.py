@@ -803,6 +803,28 @@ def test_a_stale_revision_its_history_holds_gets_the_changes_instead_of_the_whol
     assert "revision_required" in required and required.endswith(current.text)
 
 
+def test_a_stale_revision_gets_every_change_since_or_the_whole_note_never_a_clipped_diff(tmp_path, monkeypatch):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="mine")
+    target = address(tmp_path, "plan")
+    held = store.write_knowledge_note(target, "# Plan\n\n" + "".join(
+        f"## Part {index}\n\nold words {index}.\n\n" for index in range(6))).current
+    current = store.write_knowledge_note(target, held.text.replace("old words", "new words"),
+                                         expected_revision=held.revision).current
+
+    def stale():
+        return tools._knowledge_write(ctx, "plan", "# Plan\n\nMine.\n", scope="global", expected_revision=held.revision)
+
+    whole = tools._knowledge_write(ctx, "plan", "Mine.", scope="global", expected_revision="0" * 64)  # today's reply
+    complete = stale()
+    assert "6 block(s)" in complete and complete.count("\n- old\n") == 6 and complete.count("\n+ new\n") == 6
+    assert current.text not in complete and whole.endswith(current.text) and "What changed" not in whole
+    monkeypatch.setattr(tools, "tool_result_limit", lambda name: len(complete))
+    assert stale() == complete  # exactly at the bound: every change, whole
+    monkeypatch.setattr(tools, "tool_result_limit", lambda name: len(complete) - 1)
+    assert stale() == whole  # one character over: the complete current source, exactly as today
+    assert store.read_knowledge_note(target).raw == current.raw
+
+
 def test_a_stale_revision_beyond_the_tail_gets_the_whole_note_as_before(tmp_path, monkeypatch):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="mine")
     target = address(tmp_path, "far")

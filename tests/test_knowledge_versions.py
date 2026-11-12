@@ -8,6 +8,7 @@ import re
 from ouroboros import knowledge as store
 from ouroboros import knowledge_versions as versions
 from ouroboros import markdown_source
+from ouroboros import text_change
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext
 
@@ -141,23 +142,20 @@ def test_the_backward_scan_finds_every_row_across_block_edges(tmp_path, monkeypa
         assert hashlib.sha256(text.encode("utf-8")).hexdigest() == revision
 
 
-def test_the_changes_since_a_held_version_stay_inside_their_bound(tmp_path):
+def test_the_changes_since_a_held_version_show_every_block_whole(tmp_path):
     target = address(tmp_path)
     held = store.write_knowledge_note(target, "# Plan\n\n" + "".join(
         f"## Part {index}\n\n{'old words ' * 150}\n\n" for index in range(6)) + "## Small\n\ntiny\n").current
     current = store.write_knowledge_note(target, held.text.replace("old words", "new words").replace("tiny", "small"),
                                          expected_revision=held.revision).current
     facts = versions.held_version(target.shelf.parent / "knowledge_history.jsonl", target, held.revision, 1 << 23)
-    rendered = versions.render_changes(current, facts, 7500)
-    assert len(rendered) <= 7500 and "(text not shown here)" in rendered and "7 block(s)" in rendered
-    assert "- tiny" in rendered and "+ small" in rendered  # the short block keeps its text; the longest lost theirs
-    removed = re.search(r"removed: knowledge_read\(.*version='(\w+)', start_char=(\d+), end_char=(\d+)\)", rendered)
-    added = re.search(r"added: knowledge_read\(topic='notes/река', scope='global', start_char=(\d+), end_char=(\d+)\)", rendered)
-    assert removed.group(1) == held.revision and held.text[int(removed.group(2)):int(removed.group(3))].startswith("old")
-    assert current.text[int(added.group(1)):int(added.group(2))].startswith("new")
-    assert "- old words" in rendered and "+ new words" in rendered  # what fits is shown whole
-    tight = versions.render_changes(current, facts, 2000)
-    assert len(tight) <= 2000 and "more block(s) from line" in tight and "the complete current text shows them" in tight
+    rendered = versions.render_changes(current, facts)
+    change = text_change.exact_change(held.text, current.text)
+    assert len(change) == 7 and "7 block(s)" in rendered and len(rendered) > 7500  # no bound shapes it
+    for _start, removed, added in change:  # each block's text, whole, on its own lines
+        assert f"\n- {removed}\n" in rendered and f"\n+ {added}\n" in rendered
+    assert rendered.count("\n@ line ") == 7 and "not shown" not in rendered and "more block(s)" not in rendered
+    assert rendered.endswith("The complete current text is knowledge_read(topic='notes/река', scope='global').\n")
 
 
 def test_removed_sections_name_heading_size_and_first_line_cut_to_120(tmp_path):

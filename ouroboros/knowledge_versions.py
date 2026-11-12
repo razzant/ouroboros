@@ -369,66 +369,34 @@ def _quoted(text: str, sign: str) -> list[str]:
     return [f"{sign} {piece}" for piece in pieces]
 
 
-def render_changes(note: Any, held: Mapping[str, Any], limit: int) -> str:
-    """What changed between the version a stale write holds and the current text, inside ``limit`` chars.
+def render_changes(note: Any, held: Mapping[str, Any]) -> str:
+    """Every change between the version a stale write holds and the current text, each block whole.
 
-    Each block is ``- removed`` / ``+ added`` with the current line and the heading it sits under;
-    when the blocks' text does not fit, the longest blocks are cut first, each with its sizes and the
-    reads that show it, and then the last blocks are named instead of listed. The rows written since
-    and the outline are never cut. The held version plus these blocks is the current note."""
-    old, address = held["text"], note.address
-    old_raw, new_raw = old.encode("utf-8"), note.raw
+    After the rows written since that version, each block is ``- removed`` / ``+ added`` with its
+    line and the heading it sits under in the current note; then the outline and the full read.
+    The held version plus these blocks is the current note. Nothing here is cut: a reply that
+    cannot carry all of it sends the complete current note instead (``tools/knowledge.py``)."""
+    address, new_raw = note.address, note.raw
     headings = note.source.headings if note.source else ()
-    blocks, old_at, new_at, old_chars, new_chars, shift = [], 0, 0, 0, 0, 0
-    for start, removed, added in text_change.exact_change(old, note.text):
-        old_chars += len(old_raw[old_at:start].decode("utf-8"))
-        new_start = start + shift
-        new_chars += len(new_raw[new_at:new_start].decode("utf-8"))
-        old_at, new_at = start, new_start
-        under = next((h for h in reversed(headings) if h.span.start_byte <= new_start), None)
-        blocks.append({"removed": removed, "added": added, "line": new_raw.count(b"\n", 0, new_start) + 1,
-                       "under": f"under {'#' * under.level} {under.title}" if under else "before the first heading",
-                       "old": (old_chars, old_chars + len(removed)), "new": (new_chars, new_chars + len(added))})
+    change, body, shift = text_change.exact_change(held["text"], note.text), [], 0
+    for start, removed, added in change:
+        at = start + shift  # the block's first byte in the current note
+        line, under = new_raw.count(b"\n", 0, at) + 1, next((h for h in reversed(headings) if h.span.start_byte <= at), None)
+        where = f"under {'#' * under.level} {under.title}" if under else "before the first heading"
+        body.append(f"@ line {line}, {where}: {len(removed)} chars removed, {len(added)} added")
+        body += _quoted(removed, "-") + _quoted(added, "+")
         shift += len(added.encode("utf-8")) - len(removed.encode("utf-8"))
     facts = held["facts"]
-    arguments = f"topic={address.topic!r}, scope={address.scope!r}"
     head = [f"The revision you sent is an earlier version of this note, written {facts['ts']} by focus "
             f"{focus_text(facts['focus'])} ({facts['mode']}; reason: {reason_text(facts['reason'])}). "
             f"Current revision: {note.revision}.", "Written since that version, oldest first:"]
     head += [f"- {item['ts']} · focus {focus_text(item['focus'])} · {item['mode']} · reason: {reason_text(item['reason'])}"
              f" → {item['revision']}" for item in held["since"]] or ["- (no row: the file changed outside the writer)"]
-    head.append(f"What changed from your version to the current text ({len(blocks)} block(s); your version plus "
+    head.append(f"What changed from your version to the current text ({len(change)} block(s); your version plus "
                 "these blocks is the current note):")
     tail = ["Outline of the current note:", render_outline(note).rstrip("\n"),
-            f"The complete current text is knowledge_read({arguments})."]
-
-    def render(cut: set[int], listed: int) -> str:
-        body = []
-        for index, block in enumerate(blocks[:listed]):
-            body.append(f"@ line {block['line']}, {block['under']}: {len(block['removed'])} chars removed, "
-                        f"{len(block['added'])} added" + (" (text not shown here)" if index in cut else ""))
-            if index not in cut:
-                body += _quoted(block["removed"], "-") + _quoted(block["added"], "+")
-                continue
-            if block["removed"]:
-                body.append(f"  removed: knowledge_read({arguments}, version={facts['revision']!r}, "
-                            f"start_char={block['old'][0]}, end_char={block['old'][1]})")
-            if block["added"]:
-                body.append(f"  added: knowledge_read({arguments}, start_char={block['new'][0]}, end_char={block['new'][1]})")
-        if listed < len(blocks):
-            body.append(f"… {len(blocks) - listed} more block(s) from line {blocks[listed]['line']} of the current "
-                        "note are not listed here; the complete current text shows them.")
-        return "\n".join(head + body + tail) + "\n"
-
-    cut: set[int] = set()
-    for index in sorted(range(len(blocks)), key=lambda i: -(len(blocks[i]["removed"]) + len(blocks[i]["added"]))):
-        if len(render(cut, len(blocks))) <= limit:
-            break
-        cut.add(index)  # the longest blocks lose their text first
-    listed = len(blocks)
-    while listed and len(render(cut, listed)) > limit:
-        listed -= 1  # even without their text, the blocks' own lines do not fit: name the rest
-    return render(cut, listed)
+            f"The complete current text is knowledge_read(topic={address.topic!r}, scope={address.scope!r})."]
+    return "\n".join(head + body + tail) + "\n"
 
 
 def reason_text(value: Any) -> str:
