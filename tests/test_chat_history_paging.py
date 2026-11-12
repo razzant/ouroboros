@@ -422,6 +422,10 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
     status, beside = request(tmp_path)
     assert status == 200 and "main owner" in texts(beside) and not texts(beside) & room_rows
 
+    registry.unlink()  # lost: a registry missing beside its commit witness is never "no Projects"
+    status, lost = request(tmp_path)
+    assert status == 503 and not texts(lost) & room_rows
+
     registry.write_bytes(intact)
     restored = list(pages(tmp_path))
     assert "main owner" in {text for page in restored for text in texts(page)}

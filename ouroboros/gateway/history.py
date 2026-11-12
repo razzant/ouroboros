@@ -158,10 +158,9 @@ def _project_history_context(
     try:
         project_chat_ids, classified = reserved_project_chat_ids(data_dir, strict=True), True
     except Exception:  # the rooms its readable rows name are still Projects; any other is unknown
-        project_chat_ids, classified = readable_rooms(data_dir), False
-        if strict or (thread_id == 1 and project_chat_ids is None):  # no row reads: Main's rows cannot be told apart
+        if strict or (thread_id == 1 and readable_rooms(data_dir) is None):  # unread or lost: Main's rows are unknown
             raise StoreError("Project registry unavailable") from None
-        project_chat_ids = project_chat_ids or set()
+        project_chat_ids, classified = readable_rooms(data_dir) or set(), False
     try:
         rooms = RoomResolver(data_dir, strict=strict)
     except ValueError:

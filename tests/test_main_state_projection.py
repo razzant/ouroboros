@@ -663,5 +663,7 @@ def test_project_chat_ids_is_unknown_never_empty_while_no_row_of_the_registry_ca
     data = json.loads(intact)
     registry.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
     assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]
+    registry.unlink()  # lost beside its commit witness: unknown too
+    assert _state(gateway)["project_chat_ids"] is None
     registry.write_bytes(intact)
     assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]
