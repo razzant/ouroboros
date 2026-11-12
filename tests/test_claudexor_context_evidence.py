@@ -1131,3 +1131,92 @@ def test_a_failed_read_of_the_served_account_keeps_the_receipt_rebinding(tmp_pat
         up["now"] = True
         _route, evidence = _resolve(monkeypatch, tmp_path, model_route=served)
         assert evidence.window_tokens == 872_000 and ce.evidence_model_route(evidence, MODEL) == served  # settled
+
+
+def _owner_mode_build(monkeypatch, root, mode, windows, snapshot, *, early=True):
+    """One start in the owner's ``mode`` with the given catalog windows in order (the early question's, then the usual
+    point's; a 0 times out), and the catalog calls it made."""
+    from ouroboros import config, context_fit as cf, server_runtime
+    from ouroboros.llm import LLMClient
+    from ouroboros.memory_view import snapshot_json
+
+    monkeypatch.setattr(config, "runtime_settings", lambda: {"OUROBOROS_MODEL": MODEL, "OUROBOROS_CONTEXT_MODE": mode})
+    monkeypatch.setattr(config, "DATA_DIR", root)
+    monkeypatch.setattr(server_runtime, "apply_runtime_provider_defaults", lambda s: (s, False, []))
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: root)
+    answers = list(windows)
+
+    def fetch(*_a, **_kw):
+        window = answers.pop(0) if len(answers) > 1 else answers[0]
+        if not window:
+            raise TimeoutError("controlled daemon timeout")
+        value = _catalog("account-b", "identity-b", window)
+        value["models"][0].update(contextWindow=window, maxOutputTokens=16_384)
+        return value
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(fetch))
+    calls = []
+    resolver = cf.RouteQuestion if early else (lambda _task, _resolver: _resolver)
+
+    def counted(task, *, allow_fetch):
+        calls.append(1)
+        return cf.resolve_context_fit_route(task, allow_fetch=allow_fetch)
+    core = cf.ContextCore("Core governance. " * 1500, "BIBLE text. " * 300, "ARCH text. " * 800, "DEV text. " * 300,
+                          "Semi stable.", "Dynamic.", '"Assignment"', False, memory_view_json=snapshot_json(snapshot))
+    task = {"model": MODEL, "model_role": "main", "task_metadata": {}}
+    plan = cf.build_context_fit_plan(None, core, task, preferred_mode=mode, route_resolver=resolver(task, counted))
+    return plan, len(calls)
+
+
+def _memory(scale=1, owner_rows=0):
+    from tests import _memory_view_synthetic as syn
+
+    return syn.snapshot(story=syn.pages(18 * scale, 2500), conversations=[
+        syn.conversation(i, words=6, word_chars=800) for i in range(4 * scale)],
+        room_facts=syn.room("1", lane2=12, lane1=[syn.spoken(i, "human", 20_000) for i in range(owner_rows)]))
+
+
+@pytest.mark.parametrize(("mode", "early", "pool"), [("low", 0, 95_000), ("low", 45_000, 0), ("nano", 30_000, 0)])
+def test_a_window_below_the_owners_mode_target_narrows_and_is_asked_again(tmp_path, monkeypatch, mode, early, pool):
+    """Fix round 5 (Carbon r34 B1, its three cases): in the owner's Low or Nano, an early window at or below the mode's
+    target sets the start bound itself, so its cuts are the window's: the guard asks again and the plan shows the
+    usual point's memory (872,000), the target's view. Here the early read times out onto a 95,000 pool bound, or
+    answers 45,000 (Low) or 30,000 (Nano) before the usual point answers 872,000."""
+    if pool:  # a fresh 95K statement of another account: the failed early read's pool bound
+        from ouroboros.llm import LLMClient
+        monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+            lambda *_a, **_kw: {**_catalog("account-a", "identity-a", pool), "models": [
+                {**_catalog()["models"][0], "contextWindow": pool, "maxContextWindow": pool}]}))
+        _probe(tmp_path / "early", options={"source_id": "test-source", "credential_profile_id": "account-a"})
+    target, _calls = _owner_mode_build(monkeypatch, tmp_path / "target", mode, [872_000], _memory(), early=False)
+    plan, calls = _owner_mode_build(monkeypatch, tmp_path / "early", mode, [early, 872_000], _memory())
+    assert calls == 2 and plan.window_tokens == 872_000  # asked again; the usual point's answer is used
+    assert plan.projection(mode).system_content_json == target.projection(mode).system_content_json
+
+
+def test_the_same_small_window_twice_is_asked_again_and_walked_once(tmp_path, monkeypatch):
+    """Fix round 5: owner Low with the same 45,000 window early and at the usual point: the guard asks once more, and
+    the plan is the target's (the second walk is skipped on the same frame)."""
+    target, _calls = _owner_mode_build(monkeypatch, tmp_path / "target", "low", [45_000], _memory(), early=False)
+    plan, calls = _owner_mode_build(monkeypatch, tmp_path / "early", "low", [45_000, 45_000], _memory())
+    assert calls == 2 and plan.window_tokens == 45_000
+    assert plan.projection("low").system_content_json == target.projection("low").system_content_json
+
+
+@pytest.mark.parametrize("case", ["owner-budget-only", "physical-fold"])
+def test_above_the_mode_target_only_the_windows_physical_fold_narrows(tmp_path, monkeypatch, case):
+    """Fix round 5: with the window above the owner's mode target, cuts the budget took are the owner's own: owner Low
+    at 400,000 over a memory its 250,000 budget cuts asks no extra question. The window's physical fold of this room's
+    uncovered owner rows (owner Nano, rows larger than a 200,000 window's room) is the window's: it is asked again,
+    and the plan shows the usual point's (872,000) memory, the target's."""
+    if case == "owner-budget-only":
+        plan, calls = _owner_mode_build(monkeypatch, tmp_path, "low", [400_000], _memory(scale=30))
+        floor = plan.projection("low").memory_facts["floor"]
+        assert floor["by_budget"] and calls == 1 and plan.window_tokens == 400_000  # owner's cuts: quiet
+        return
+    memory = _memory(owner_rows=60)
+    target, _calls = _owner_mode_build(monkeypatch, tmp_path / "target", "nano", [872_000], memory, early=False)
+    early, _calls = _owner_mode_build(monkeypatch, tmp_path / "alone", "nano", [200_000], memory, early=False)
+    assert early.projection("nano").memory_facts["floor"]["steps"].get("F7")  # 200K folds owner rows, 872K does not
+    assert not target.projection("nano").memory_facts["floor"]["steps"].get("F7")
+    plan, calls = _owner_mode_build(monkeypatch, tmp_path / "early", "nano", [200_000, 872_000], memory)
+    assert calls == 2 and plan.projection("nano").system_content_json == target.projection("nano").system_content_json

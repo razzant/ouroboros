@@ -696,8 +696,11 @@ class RouteQuestion:
 def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mode: str, preferred: str,
                        state: Any, delivered: Mapping[str, Any]) -> bool:
     """Whether a start shows less memory than the selected view because of its window: a mode below the owner's, a
-    rescued input, host forms or any step of the walk the window took, collapsed task lines (F1) included (the owner's
-    own mode budget is no narrowing of the window's). An unknown window narrows nothing."""
+    rescued input, host forms or any step of the walk the window took, collapsed task lines (F1) included. Cuts the
+    owner's own mode budget took are no narrowing of the window's, but only while that budget is below the window: a
+    window at or below the mode's target sets the start bound itself. Under the budget, only the window's physical
+    fold of this room's uncovered owner rows is the window's; it needs ordinary memory above the budget and takes F7
+    (``memory_floor.fit_memory_view``). An unknown window narrows nothing."""
     if not state.known_window:
         return False
     if delivered or mode != preferred:
@@ -706,8 +709,10 @@ def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mo
     floor = facts.get("floor") or {}
     target = context_budget.context_mode_limits(preferred, preferred, state.output_reserve)[0]
     budget = bool(target) and target < state.window_record.total_equivalent
-    cut = any((floor.get("steps") or {}).values())
-    return bool(cut and not floor.get("by_budget")) or bool(facts.get("host_sections_addressed") and not budget)
+    steps = floor.get("steps") or {}
+    cut = any(steps.values())
+    owners = budget and not (floor.get("ordinary_unfit") and steps.get("F7"))  # no physical fold: the budget cut alone
+    return bool(cut and not (floor.get("by_budget") and owners)) or bool(facts.get("host_sections_addressed") and not budget)
 
 
 def _failed_route_evidence(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
