@@ -98,10 +98,9 @@ def ensure_execution_thread(gateway: Any, *, route: Any, root: str, mode: str, a
     return created_id
 
 
-def start_review_thread_turn(
-    gateway: Any, thread_id: str, run_request: Dict[str, Any], *, idempotency_key: str,
-) -> Dict[str, Any]:
-    """Keep turn geometry; the thread owns its project and execution address."""
+def thread_turn_request(run_request: Dict[str, Any]) -> Dict[str, Any]:
+    """The turn body a recorded thread start sends: its geometry kept, the thread owning its project and
+    execution address. The append and its noncreating lookup (``delegate_accepted.locate``) send the same."""
     request = {
         key: value for key, value in run_request.items()
         if key not in {"_use_thread", "_thread_id", "scope", "execution"}
@@ -110,7 +109,14 @@ def start_review_thread_turn(
     geometry = {key: execution[key] for key in ("workspaceKind", "scopePaths", "isolation") if key in execution}
     if geometry:
         request["execution"] = geometry
-    return gateway.start_thread_turn(thread_id, request, idempotency_key=idempotency_key)
+    return request
+
+
+def start_review_thread_turn(
+    gateway: Any, thread_id: str, run_request: Dict[str, Any], *, idempotency_key: str,
+) -> Dict[str, Any]:
+    """Append the recorded start's turn (``thread_turn_request``) under its invocation key."""
+    return gateway.start_thread_turn(thread_id, thread_turn_request(run_request), idempotency_key=idempotency_key)
 
 
 def profile_rotation_receipts(gateway: Any, run_id: str) -> list[dict]:

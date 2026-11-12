@@ -105,7 +105,8 @@ def tag_absent_run_read(response: Any, error: Any) -> None:
 
 
 class ClaudexorObservationGateway:
-    """The compact attention wait, as the owned HTTP client speaks it (mixed into the gateway)."""
+    """The compact attention wait and the noncreating start lookup, as the owned HTTP client speaks them
+    (mixed into the gateway)."""
 
     def wait_run_attention(self, targets: List[Dict[str, Any]], *, wait_ms: Optional[int],
                            timeout_sec: Optional[float], include_blocking: bool = False) -> Dict[str, Any]:
@@ -136,6 +137,17 @@ class ClaudexorObservationGateway:
             raise
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "Claudexor wait-many returned no object")
+        return body
+
+    def lookup_run(self, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
+        """``POST /v2/runs/lookup``: the command a recorded ``POST /v2/runs`` holds, read with that start's own
+        body and key; it never creates one. Every answer names its store unasked; it is returned unprojected."""
+        from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+        body = self._request("POST", "/v2/runs/lookup", json_body=dict(request),
+                             headers={"Idempotency-Key": str(idempotency_key)})
+        if not isinstance(body, dict):
+            raise ClaudexorUnavailable("malformed_response", "Claudexor run lookup returned no object")
         return body
 
 
