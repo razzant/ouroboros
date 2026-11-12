@@ -1,7 +1,7 @@
 // The served wizard shares the SPA's escaping, request, login and status owners.
 import { fetchJson } from './api_client.js';
 import {
-    agentsOnlyAccess, agentsStepHtml, mainSourceReason,
+    accessRowState, agentsStepHtml, mainSourceReason,
     EARLIER_SAVE_KEPT_TEXT,
     EARLIER_SAVE_OTHER_VALUES_TEXT,
     completionAttemptId,
@@ -304,26 +304,15 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
         if (error) error.textContent = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
+        const access = accessRowState({ connected: state.agentsConnected, sources: modelCatalog.model_sources,
+            read: catalogReadState(modelCatalog), checking: Boolean(catalogRequest), readErrors: summarizeReadErrors(modelCatalog.errors),
+            previewError: agentsStep?.previewError, configured: hasApiAccess() || hasLocalModel(), continueBlocked: Boolean(next?.disabled) });
         const note = document.getElementById('onboarding-access-note');
-        if (note) {
-            const read = catalogReadState(modelCatalog);
-            const messages = [catalogRequest ? 'Checking model sources…' : '',
-                !catalogRequest && read !== 'ok' && state.agentsConnected.length
-                    ? `Model discovery is ${read === 'not_read' ? 'not available yet' : read}. ${summarizeReadErrors(modelCatalog.errors)} Your choices are kept.` : '',
-                agentsStep?.previewError ? `Automatic assignments could not be prepared: ${agentsStep.previewError} Retry, or Continue to choose models yourself.` : ''];
-            note.textContent = messages.filter(Boolean).join(' ');
-            note.hidden = !note.textContent;
-        }
-        const agentsOnly = !hasApiAccess() && !hasLocalModel() && agentsOnlyAccess(state.agentsConnected, modelCatalog.model_sources);
+        if (note) Object.assign(note, { textContent: access.note, hidden: !access.note });
         const retry = document.getElementById('onboarding-access-retry');
-        if (retry) {
-            // A healthy read that names the connected accounts agents only leaves discovery nothing to retry.
-            retry.hidden = (!state.agentsConnected.length || (agentsOnly && catalogReadState(modelCatalog) === 'ok')) && !agentsStep?.previewError;
-            retry.disabled = Boolean(catalogRequest || agentsStep?.previewPending);
-        }
+        if (retry) Object.assign(retry, { hidden: access.retryHidden, disabled: Boolean(catalogRequest || agentsStep?.previewPending) });
         const optional = root.querySelector('[data-collapse="api-access"] > summary .selection-badge');
-        if (optional) optional.hidden = agentsOnly;  // the way forward named beside Continue is not "Optional"
-        if (optional) optional.textContent = hasApiAccess() || hasLocalModel() ? 'Configured' : 'Optional';
+        if (optional) Object.assign(optional, { textContent: access.badge, hidden: !access.badge });
         const accessRow = document.getElementById('onboarding-access-row');
         if (accessRow) accessRow.hidden = Boolean(note?.hidden && retry?.hidden);
         const recover = document.getElementById('skip-presets-btn');
@@ -795,7 +784,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 <div id="onboarding-access-note" class="wizard-inline-note" role="status" hidden></div>
                 <button id="onboarding-access-retry" class="btn btn-default" type="button" hidden>Retry model discovery</button>
             </div>
-            <details class="wizard-collapse" data-collapse="api-access" ${state.apiAccessOpen || hasApiAccess() ? 'open' : ''}>
+            <details class="wizard-collapse" data-collapse="api-access" ${state.apiAccessOpen || hasApiAccess() || hasLocalModel() ? 'open' : ''}>
                 <summary><span>API keys and local models</span><span class="selection-badge">${hasApiAccess() || hasLocalModel() ? 'Configured' : 'Optional'}</span></summary>
                 <div class="wizard-collapse-body">${renderProvidersStep()}</div>
             </details>
@@ -1045,7 +1034,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                     ${state.completedRestartMode || consciousness.running() ? '' : `
                     <div class="wizard-footer">
                         <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
-                        <div class="footer-copy">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
+                        <div class="footer-copy${saveUnknown ? ' footer-warning' : ''}">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
                             <button class="btn btn-default" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
                             ${state.currentStep === 'accounts' ? `<button class="btn btn-default" id="quick-start-btn" type="button" ${hasModelSubscription() ? '' : 'hidden'}>Review &amp; start</button>` : ''}
