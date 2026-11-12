@@ -660,7 +660,7 @@ export { accountName };
 export function accountMetaParts(row, payload, { quotaRead = READ_OK, nowMs = Date.now(), action = {} } = {}) {
     const parts = [];
     // The one user-settable routing fact, stated where the rotation claim lives.
-    if (row.enabled === false) parts.push({ text: 'disabled — excluded from rotation' });
+    if (row.enabled === false) parts.push({ text: 'Out of rotation' });
     const resources = resourceSummary(row, payload, { known: quotaRead === READ_OK, action });
     const quota = quotaSummary(payload?.quota || [], row.harness, row.profile_id,
         { quotaRead, nowMs, absences: payload?.quota_absences || [] });

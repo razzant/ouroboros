@@ -14,7 +14,7 @@ import {
 } from './mcp_header_fields.js';
 import { endpointChange, openMcpImportDialog } from './mcp_import_dialog.js';
 import { controlIcon } from './page_icons.js';
-import { CODECS, CONFIRMS, bindSettingRows, commitSetting, outcomeLine, setButtonBusy, settingsRow, writeEntry } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, writeEntry } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { rowsOf } from './settings_rows.js';
 import { setResult } from './ui_primitives.js';
@@ -386,7 +386,7 @@ function editorHtml(server) {
         ${field('env', 'Environment (JSON)', area('env', json(server.env), 3, '{"PORT": "8080", "DEBUG": "1"}'),
             'Ordinary values passed directly to the process. A saved key overrides the same name.')}`;
     return `
-        <article class="tools-editor" data-mcp-card data-mcp-index="${index}"${live ? ` data-entry-id="${escapeHtml(pageId(server))}"` : ''}>
+        <article class="settings-stack tools-editor" data-mcp-card data-mcp-index="${index}"${live ? ` data-entry-id="${escapeHtml(pageId(server))}"` : ''}>
             ${live ? `<p class="settings-page-lead">${stateHtml(server)}</p>` : ''}
             <section class="ui-card settings-card">
                 <div class="settings-rows"><div class="ui-row settings-row" data-kind="switch">
@@ -727,7 +727,6 @@ function drawEditor() {
 }
 
 const VIA = { streamable_http: 'HTTP', sse: 'SSE', stdio: 'Local program' };
-const CHEVRON = '<span class="settings-row-chevron" aria-hidden="true">›</span>';
 
 /** A server's head on the list: its name, its state in the status's own words and how it is reached; Sign in when
  *  the status asks for it; its switch. Pressing the head opens the server's page. */
@@ -736,12 +735,12 @@ function headHtml(server) {
     const busy = wanted.has(server);
     return `<div class="ui-row settings-head" data-entry-id="${escapeHtml(pageId(server))}"${need ? ' data-actions' : ''}>
         <span class="settings-head-glyph" aria-hidden="true">${controlIcon('plug', 16)}</span>
-        <button type="button" class="settings-head-open" data-entry-open>
+        <button type="button" class="settings-head-open ui-hit-area" data-entry-open>
             <span class="ui-row-title">${escapeHtml(serverName(server))}</span>
             <span class="ui-row-meta">${stateHtml(server)}<span> · ${VIA[server.transport] || escapeHtml(String(server.transport))}</span></span>
         </button>
         <div class="ui-row-actions">${need ? `<button type="button" class="btn btn-default btn-sm" data-entry-sign-in>${need}</button>` : ''}
-            ${switchHtml(`data-entry-switch aria-label="Use ${escapeHtml(serverName(server))}"${busy ? ' disabled aria-busy="true"' : ''}`, busy ? wanted.get(server) : Boolean(server.enabled))}${CHEVRON}</div>
+            ${switchHtml(`data-entry-switch aria-label="Use ${escapeHtml(serverName(server))}"${busy ? ' disabled aria-busy="true"' : ''}`, busy ? wanted.get(server) : Boolean(server.enabled))}${doorSign()}</div>
     </div>`;
 }
 
@@ -772,7 +771,7 @@ function paintList() {
     const heads = !loaded ? '' : !mcpServers.length ? '<p class="settings-card-lead">No tool server yet. Add one, or import a file other agent programs use.</p>'
         : mcpServers.map((server, index) => (isServer(server) && pageId(server) ? headHtml(server)
             : `<div class="ui-row settings-row" data-mcp-invalid="${index}"><p class="ui-row-title">Entry ${index + 1} cannot be read</p>
-                <p class="ui-row-meta">It is kept as it is until you remove it.</p>
+                <p class="ui-row-meta"><span>It is kept as it is until you remove it.</span></p>
                 <div class="ui-row-actions"><button type="button" class="btn btn-default btn-sm" data-mcp-invalid-remove>Remove</button></div></div>`)).join('');
     if (view.heads === heads) return;
     const list = view.el.querySelector('[data-tools-list]');

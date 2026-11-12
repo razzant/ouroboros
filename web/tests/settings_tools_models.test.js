@@ -305,7 +305,7 @@ test('the fallbacks keep their per-role entries through an order change, a remov
 test('the Models list shows each role\'s route in the picture\'s order, and the Context door posts nothing', async (t) => {
     const page = await open(t, 'models');
     assert.deepEqual(page.container.querySelectorAll('[data-entry-id]').map((node) => node.dataset.entryId),
-        ['main', 'fallback/1', 'fallback/2', 'fallback/3', 'light', 'safety', 'vision', 'consciousness', 'websearch']);
+        ['main', 'fallback/1', 'fallback/2', 'fallback/3', 'light', 'vision', 'consciousness', 'safety', 'websearch']);
     assert.match(head(page.container, 'main').textContent, /Main model.*gpt-main.*Codex subscription · account studio-01/s);
     assert.match(head(page.container, 'fallback/2').textContent, /2.*kimi.*OpenRouter · by API key/s);
     const value = (id) => inside(page.container.querySelector(`[data-setting-row="${id}"]`), '[data-row-value]')?.textContent;

@@ -1,6 +1,7 @@
 import { APP_SETTINGS_ORIGIN, apiClient, fetchJson } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { saveCheckerSettings, saveSafetyLevel, saveSafetyRules } from './consciousness_api.js';
+import { isDoorId } from './settings_pages.js';
 import { rowById } from './settings_rows.js';
 import { errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
 
@@ -663,13 +664,19 @@ function parseTyped(row, text) {
     return { value: number };
 }
 
+/** The sign at the end of a row that leads somewhere, one for every page (settings.css draws it as the home's two
+ *  glyphs): › opens a page of Settings, ↗ (`data-out`) leaves Settings. `to` is a Settings path or a door id. */
+export const doorSign = (to = '') => `<span class="settings-row-chevron" aria-hidden="true"${isDoorId(to) ? ' data-out' : ''}>›</span>`;
+
 function controlHtml(row, control, ctx) {
     const id = rowDomId(row);
     const described = [`${id}-meta`, `${id}-result`, ctx.describedBy?.(row) || ''].filter(Boolean).join(' ');
+    // An empty text field says its state in the row's own word ("None"), as an empty number says "No limit".
+    const emptyWord = control.kind === 'text' && control.empty ? control.empty[0].toUpperCase() + control.empty.slice(1) : '';
     const input = (index, label = '') => `<input ${index ? '' : `id="${id}" `}class="ui-control" data-setting-control autocomplete="off"`
         + ` type="${control.kind === 'secret' ? 'password' : 'text'}"`
         + `${control.kind === 'number' || control.kind === 'pair' ? ` inputmode="${control.noLimit ? 'numeric' : 'decimal'}"` : ''}`
-        + `${control.noLimit ? ' placeholder="No limit"' : ''}${label ? ` aria-label="${escapeHtmlAttr(label)}"` : ''} aria-describedby="${described}">`;
+        + `${control.noLimit ? ' placeholder="No limit"' : emptyWord ? ` placeholder="${escapeHtmlAttr(emptyWord)}"` : ''}${label ? ` aria-label="${escapeHtmlAttr(label)}"` : ''} aria-describedby="${described}">`;
     const unit = control.unit ? `<span class="settings-row-unit">${escapeHtmlAttr(control.unit)}</span>` : '';
     const field = (body) => `<span class="settings-row-field">${control.unit === '$' ? unit + body : body + unit}</span>`;
     const named = `aria-labelledby="${id}-name" aria-describedby="${described}"`;
@@ -690,7 +697,7 @@ function controlHtml(row, control, ctx) {
         `<button type="button" class="settings-choice" role="radio" aria-checked="false" data-setting-value="${escapeHtmlAttr(option.value)}">`
         + `<span class="settings-choice-name">${escapeHtmlAttr(option.label ?? option.value)}<span class="settings-choice-mark" data-setting-mark></span></span>`
         + `<span class="settings-choice-note">${escapeHtmlAttr(option.note || '')}</span></button>`).join('')}</div>`;
-    case 'door': return '<span class="settings-row-chevron" aria-hidden="true">›</span>';
+    case 'door': return doorSign(control.to);
     default: return ctx.custom?.(row) || '';
     }
 }
@@ -702,7 +709,7 @@ export function settingsRow(row, ctx = {}) {
     const id = rowDomId(row);
     const name = escapeHtmlAttr(row.name);
     const meta = `<span id="${id}-meta" data-setting-meta>${escapeHtmlAttr(row.meta || '')}</span>`;
-    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(control.kind || 'custom')}"`;
+    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(control.kind || 'custom')}"${control.noLimit ? ' data-no-limit' : ''}`;
     if (control.kind === 'door') {  // the whole row is the press: phrasing content only
         return `<button type="button" ${attrs} data-setting-door><span class="ui-row-title">${name}</span>`
             + `<span class="ui-row-meta">${meta}</span><span class="ui-row-actions">${controlHtml(row, control, ctx)}</span></button>`;

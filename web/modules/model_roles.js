@@ -6,7 +6,7 @@ import { SAFETY_MODEL_KEYS } from './consciousness_api.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { controlIcon } from './page_icons.js';
 import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, refreshModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
-import { CODECS, CONFIRMS, bindSettingRows, commitSetting, outcomeLine, setButtonBusy, settingsRow, webSearchPreviewWords } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, webSearchPreviewWords } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { HAND_WRITTEN, rowsOf } from './settings_rows.js';
 import { setResult } from './ui_primitives.js';
@@ -361,7 +361,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const accountField = node.querySelector('[data-model-role-account-field]');
             if (accountField) accountField.hidden = account.hidden;
             const credentialHarness = catalog.model_sources.find((entry) => entry.id === sourceId(row))?.credentialHarness || '';
-            const accountHtml = selectHtml('', [{ options: profileOptionsFor(profiles[credentialHarness], row.account, { accountsKnown: store.accountsKnown && Boolean(credentialHarness) }) }], row.account);
+            const accountHtml = selectHtml('', [{ options: profileOptionsFor(profiles[credentialHarness], row.account, { accountsKnown: store.accountsKnown && Boolean(credentialHarness), labelled: Boolean(only) }) }], row.account);
             const accountOptions = accountHtml.slice(accountHtml.indexOf('>') + 1, accountHtml.lastIndexOf('</select>'));
             if (account.innerHTML !== accountOptions) account.innerHTML = accountOptions;
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
@@ -627,7 +627,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
 const MAP_KEYS = [MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, MODEL_PROCESSING_PREFERENCES_KEY];
 const MAP_FIELDS = { [MODEL_ACCOUNTS_KEY]: ['account', ''], [MODEL_CONTEXT_KEY]: ['context', 0], [MODEL_PROCESSING_PREFERENCES_KEY]: ['processing', ''] };
 const FALLBACKS_KEY = 'OUROBOROS_MODEL_FALLBACKS';
-const ROLE_ORDER = ['light', 'safety', 'vision', 'consciousness'];
+const ROLE_ORDER = ['light', 'vision', 'consciousness', 'safety'];
 const truthy = (value) => value === true || /^(true|1|yes|on)$/i.test(String(value ?? '').trim());
 // A key's value as one text: what is sent, and what a read is compared with when an answer never came.
 const canon = (key, value) => JSON.stringify(key.startsWith('USE_LOCAL_') ? truthy(value) : MAP_KEYS.includes(key) ? modelRoleMap(value) : String(value ?? ''));
@@ -724,7 +724,6 @@ export function routeWords(value, { local = false, account = '', follows = 'Main
         : `${API_PROVIDER_LABELS[kind] || kind}${source.includes('@') ? ` (${source.split('@')[1]})` : ''} · by API key` };
 }
 
-const CHEVRON = '<span class="settings-row-chevron" aria-hidden="true">›</span>';
 // A subscription's own mark; any other route takes the plain one.
 function markHtml(harness) {
     const mark = harness ? harnessPresentation(harness) : null;
@@ -766,7 +765,7 @@ function mountModels(container, { path, ctx }) {
     let fold = null;
     let shown = '';   // the fallbacks as drawn: a press acts on these, never on a list that changed meanwhile
     // A row's value at its end, before its chevron: made once, then only its words change.
-    const say = (id, text) => {
+    const say = (id, text, follows = false) => {
         const node = container.querySelector(`[data-setting-row="${id}"]`);
         let span = node?.querySelector('[data-row-value]');
         if (node && !span) {
@@ -776,6 +775,7 @@ function mountModels(container, { path, ctx }) {
             box.insertBefore(span, box.firstChild);
         }
         if (span && span.textContent !== text) span.textContent = text;
+        if (span && follows) span.setAttribute('data-follows', ''); else span?.removeAttribute('data-follows');
     };
     const paint = (settings) => {
         const slots = Object.fromEntries(slotsOf(settings).map((slot) => [slot.slot, slot]));
@@ -794,14 +794,14 @@ function mountModels(container, { path, ctx }) {
             const words = routeWords(entry.value, { account: entry.account, local: localFallback });
             return `<div class="ui-row settings-head" data-entry-id="fallback/${index + 1}" data-actions>
                 <span class="settings-head-glyph settings-head-order" aria-hidden="true">${index + 1}</span>
-                <button type="button" class="settings-head-open" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta">${escapeHtml(words.source)}</span></button>
+                <button type="button" class="settings-head-open ui-hit-area" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta">${escapeHtml(words.source)}</span></button>
                 <div class="ui-row-actions"><button type="button" class="btn btn-ghost btn-sm" data-fallback-move="-1" aria-label="Move fallback ${index + 1} up" ${index ? '' : 'disabled'}>↑</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-move="1" aria-label="Move fallback ${index + 1} down" ${index < list.length - 1 ? '' : 'disabled'}>↓</button>
-                    <button type="button" class="btn btn-ghost btn-sm" data-fallback-remove>Remove</button>${CHEVRON}</div></div>`;
+                    <button type="button" class="btn btn-ghost btn-sm" data-fallback-remove>Remove</button>${doorSign()}</div></div>`;
         }).join('') || '<p class="settings-card-lead">No fallback yet.</p>';
         for (const slot of ROLE_ORDER) {
             const words = route(slot, slot === 'safety' ? 'Light' : 'Main');
-            say(`models:${slot}`, words.name);
+            say(`models:${slot}`, words.name, words.follows);
         }
         say('models:websearch', Object.fromEntries(SEARCH_SOURCES)[settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto'] || String(settings.OUROBOROS_WEBSEARCH_BACKEND));
         say('models:context', CONTEXT_WORDS[String(settings.OUROBOROS_CONTEXT_MODE || '').toLowerCase()] || String(settings.OUROBOROS_CONTEXT_MODE || ''));

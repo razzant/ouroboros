@@ -21,7 +21,7 @@ import { knownProgram, maintenanceLatestLine } from './harness_maintenance.js';
 import { harnessPresentation } from './harness_presentation.js';
 import { strokeIcon } from './page_icons.js';
 import { editorLine, keyHeads, keyPath, keyTitle, mountKeyPage, parseKeyPath, setKeyEnabled } from './settings_connections.js';
-import { bindSettingRows, settingsRow } from './settings_controls.js';
+import { bindSettingRows, doorSign, settingsRow } from './settings_controls.js';
 import { readSkills } from './settings_extension_forms.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { PROVIDER_SECRET_KEYS, providerIconHtml } from './settings_provider_cards.js';
@@ -34,8 +34,8 @@ import { setResult } from './ui_primitives.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 const CUSTOM_KEY_PATH = 'accounts/key/custom';
-const CHEVRON = '<span class="settings-row-chevron" aria-hidden="true">›</span>';
-const chipHtml = (chip) => (chip ? `<span class="ui-chip accounts-chip" data-tone="${chip.tone}">${escapeHtml(chip.text)}</span>` : '');
+const CHEVRON = doorSign();
+const chipHtml = (chip) => (chip ? `<span class="ui-chip settings-chip" data-tone="${chip.tone}">${escapeHtml(chip.text)}</span>` : '');
 const switchHtml = (attrs, on) => `<label class="ui-switch"><input type="checkbox" role="switch" aria-checked="${on}" ${attrs}${on ? ' checked' : ''}>`
     + '<span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>';
 const landed = (outcome) => outcome?.state === 'saved' || outcome?.state === 'saved_then_failed';
@@ -121,7 +121,7 @@ let list = null;  // the mounted list: a key's page says there what it added or 
 function providerHeadHtml(group, facts) {
     return `<div class="ui-row settings-head" data-entry-id="${escapeHtml(group.harness)}" data-open-path="accounts/${encodeURIComponent(group.harness)}">
         <span class="settings-head-glyph" aria-hidden="true">${providerMarkHtml(group.harness)}</span>
-        <button type="button" class="settings-head-open" data-entry-open>
+        <button type="button" class="settings-head-open ui-hit-area" data-entry-open>
             <span class="ui-row-title">${escapeHtml(group.label)}${chipHtml(facts.chip)}</span>
             <span class="ui-row-meta">${escapeHtml(facts.meta)}</span>
         </button>
@@ -133,7 +133,7 @@ function keyHeadHtml(head, busy) {
     const use = head.fixed ? '' : switchHtml(`data-entry-switch aria-label="${escapeHtml(`Use ${head.title}`)}"${busy ? ' disabled aria-busy="true"' : ''}`, head.enabled);
     return `<div class="ui-row settings-head" data-entry-id="${escapeHtml(head.id)}" data-open-path="${escapeHtml(head.path)}">
         <span class="settings-head-glyph" aria-hidden="true">${providerIconHtml(head.card) || KEY_GLYPH}</span>
-        <button type="button" class="settings-head-open" data-entry-open>
+        <button type="button" class="settings-head-open ui-hit-area" data-entry-open>
             <span class="ui-row-title" data-i18n-skip>${escapeHtml(head.title)}${chipHtml(head.chip)}</span>
             <span class="ui-row-meta">${escapeHtml(head.meta)}</span>
         </button>
@@ -367,7 +367,7 @@ function mountProvider(container, { path }) {
         const glance = known && reads.quotaRead === READ_OK && rows.length > 3 ? quotaBars(rows, payload, reads) : null;
         find('[data-provider-quota]').hidden = !glance;
         if (!glance) return;
-        const html = glance.bars.map((bar) => `<i class="accounts-bar" data-state="${bar.state}"><b style="height:${bar.state === 'ok' && bar.left !== null ? Math.max(6, Math.round(bar.left * 100)) : 0}%"></b></i>`).join('');
+        const html = glance.bars.map((bar) => `<i class="accounts-bar" data-state="${bar.state}"><b style="--accounts-bar-left:${bar.state === 'ok' && bar.left !== null ? Math.max(6, Math.round(bar.left * 100)) : 0}%"></b></i>`).join('');
         if (bars !== html) find('[data-provider-bars]').innerHTML = bars = html;
         find('[data-provider-turns]').textContent = glance.words;
     };

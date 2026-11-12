@@ -44,6 +44,8 @@ owner | web/style.css | @media (hover: hover) » .update-pill:is(.has-local, [da
 owner | web/style.css | .chat-budget-pill[data-attention="1"] | background
 owner | web/style.css | .chat-question-nav:hover | background
 owner | web/style.css | @media (hover: hover) » .chat-budget-pill[data-attention="1"]:hover | background
+owner | web/settings.css | .accounts-bar[data-state="need"] > b | background
+owner | web/settings.css | .agent-family-accounts .harness-account-row[data-tone="warn"] | background
 owner | web/model_wait.css | .model-wait-row[data-owner="1"] | background, border-color
 owner | web/room_work.css | .rw-row .rw-pill-question | background, color
 owner | web/room_work.css | .rw-row[data-tone="wait"] .rw-state | color
@@ -88,6 +90,7 @@ warning | web/settings.css | .resource-message[data-tone="warn"] | background, c
 warning | web/settings.css | .resource-window[data-spent="true"] .resource-fill | background
 warning | web/settings.css | .settings-choice[aria-checked="true"] .settings-choice-mark | background, color
 warning | web/settings.css | .settings-inline-note[data-tone="warn"] | color
+warning | web/settings.css | .settings-row-value[data-tone="warn"] | color
 warning | web/onboarding.css | .agent-family-status[data-tone="warn"] | color
 warning | web/onboarding.css | .agent-service-note[data-tone="warn"] | color
 warning | web/onboarding.css | .available-subagent-status-reason | color

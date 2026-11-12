@@ -51,7 +51,7 @@ export function languageBlockHtml({ onboarding = false } = {}) {
                     <div class="settings-rows">
                         <div class="ui-row settings-row" data-setting-row="appearance:translations" data-kind="custom">
                             <p class="ui-row-title">Translations</p>
-                            <div class="ui-row-meta">The light model writes them and they are kept with this installation. A label without one stays English.</div>
+                            <div class="ui-row-meta"><span>The light model writes them and they are kept with this installation. A label without one stays English.</span></div>
                             <div class="ui-row-actions">
                                 <button type="button" class="btn btn-default btn-sm" data-i18n-import>Import JSON…</button>
                                 <input type="file" accept="application/json,.json" data-i18n-import-file hidden>

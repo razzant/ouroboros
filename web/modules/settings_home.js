@@ -25,7 +25,7 @@ import { fmt, translateString } from './i18n.js';
 import { readNotifyPrefs } from './notifications.js';
 import { PAGE_ICONS, SHELL_ICONS, controlIcon, strokeIcon } from './page_icons.js';
 import { readSkills, skillForms } from './settings_extension_forms.js';
-import { settingsPageFor } from './settings_pages.js';
+import { isDoorId, settingsPageFor } from './settings_pages.js';
 import { policyValueLabel } from './settings_policy.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from './settings_rows.js';
 import { getSpeech } from './speech_providers.js';
@@ -36,7 +36,7 @@ import { availableSubagentsLoadValue } from './subagents_settings.js';
 import { updateVerdict } from './updates.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
-export const isDoorId = (path) => /^(dashboard|page|main):/.test(String(path || ''));
+export { isDoorId };
 
 /** A page's title for `path`: its module's words, else the home row that opens it, else the path. */
 export function settingsTitle(path) {
@@ -320,7 +320,7 @@ export function homeGroupsHtml(rows = HOME_ROWS) {
 export function resultsHtml(query, found) {
     const hits = found.map((entry) => doorHtml({ to: entry.to, name: entry.name, glyph: entry.glyph, answer: entry.where, result: entry.id })).join('');
     const ask = `<button type="button" class="settings-door" data-settings-ask><span class="settings-door-glyph" aria-hidden="true">${glyphHtml('chat')}</span>`
-        + `<span class="settings-door-words"><span class="settings-door-title" data-i18n-fmt="settings.ask">${escapeHtml(fmt('Ask Ouroboros: "{words}"', { words: query.trim() }))}</span>`
+        + `<span class="settings-door-words"><span class="settings-door-title" data-i18n-fmt="settings.ask">${escapeHtml(fmt('Ask Ouroboros: “{words}”', { words: query.trim() }))}</span>`
         + `<span class="settings-door-answer">The words wait in Main as a draft you send.</span></span><span class="settings-door-end" aria-hidden="true">${OUT_ICON}</span></button>`;
     return `${hits ? groupHtml('Settings', hits) : '<p class="settings-search-empty">No setting has these words.</p>'}${groupHtml('', ask)}`;
 }

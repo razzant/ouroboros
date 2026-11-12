@@ -69,11 +69,11 @@ test('the last line asks Ouroboros with the words, whatever was found', () => {
     const none = resultsHtml('never email my clients', []);
     assert.match(none, /No setting has these words\./);
     assert.match(none, /data-settings-ask/);
-    assert.match(none, /Ask Ouroboros: &quot;never email my clients&quot;/);
+    assert.match(none, /Ask Ouroboros: “never email my clients”/);
     const entries = searchEntries({ forms: [] });
     const some = resultsHtml(' Total budget ', searchSettings('Total budget', entries));
     assert.match(some, /data-settings-result="TOTAL_BUDGET"/);
-    assert.match(some, /Ask Ouroboros: &quot;Total budget&quot;/, 'the words are carried trimmed');
+    assert.match(some, /Ask Ouroboros: “Total budget”/, 'the words are carried trimmed');
     assert.ok(some.lastIndexOf('data-settings-ask') > some.lastIndexOf('data-settings-result'), 'the Ask line is the last line');
     assert.doesNotMatch(some, /No setting has these words/);
 });
