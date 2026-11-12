@@ -45,9 +45,9 @@ def set_theme(page, theme):
 QUESTIONS = [
     # quiz id, the row's lifecycle fields, the hue, the token its dot resolves to
     ("waiting", {"state": "open", "wait_for_answer": True}, "owner", "--amber"),
-    ("unanswered", {"state": "open"}, "neutral", "--text-meta"),
-    ("continued", {"state": "open", "wait_for_answer": True, "wait_ended_at": "2026-10-19T10:00:00Z"}, "neutral", "--text-meta"),
-    ("finished", {"state": "expired_terminal", "wait_for_answer": True}, "neutral", "--text-meta"),
+    ("unanswered", {"state": "open"}, "owner", "--amber"),
+    ("continued", {"state": "open", "wait_for_answer": True, "wait_ended_at": "2026-10-19T10:00:00Z"}, "owner", "--amber"),
+    ("finished", {"state": "expired_terminal", "wait_for_answer": True}, "owner", "--amber"),
     ("answered", {"state": "answered", "answered_index": 0}, "ok", "--tone-recorded-mark"),
     ("replaced", {"state": "superseded"}, "ink", "--text-disabled"),
     ("closed", {"state": "closed", "closed_reason": "Closed by the owner."}, "ink", "--text-disabled"),
@@ -56,9 +56,10 @@ QUESTIONS = [
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_question_head_mark_is_amber_only_while_the_task_waits(subscription_ui, theme):
-    """Every lifecycle of the question head draws the shared 7px dot in its hue; a closed question is disabled,
-    a finished one neutral (DESIGN "Quiz card"), and an answer in flight turns the waiting dot neutral."""
+def test_question_head_mark_is_amber_while_mains_pill_counts_the_question(subscription_ui, theme):
+    """Every lifecycle of the question head draws the shared 7px dot in its hue: amber while Main's pill counts the
+    question (its task waits, went on or finished), a closed question disabled, and an answer in flight turns the
+    waiting dot neutral."""
     page = open_app(subscription_ui)
     set_theme(page, theme)
     rows = [{"type": "quiz", "task_id": "marks", "quiz_id": quiz_id, "question": f"{quiz_id}?",
@@ -107,7 +108,7 @@ def test_question_head_mark_is_amber_only_while_the_task_waits(subscription_ui, 
         assert mark["color"] == mark["tokens"][token], (quiz_id, mark, token)
     assert marks["waiting"]["word"] == "Waiting for your answer"
     assert marks["finished"]["word"] == "Unanswered · task finished" and marks["closed"]["word"] == "Question closed"
-    assert marks["waiting"]["color"] != marks["unanswered"]["color"], "the owner's dot must differ from neutral"
+    assert marks["waiting"]["color"] != marks["unreadable"]["color"], "the owner's dot must differ from neutral"
     assert marks["sending"]["color"] == marks["sending"]["tokens"]["--text-meta"], marks["sending"]
     # The recorded answer's dot is the owner's own (DESIGN "Quiz card"): the ok green on white, his blue on dark.
     owner = page.evaluate("__probe('var(--user-sender)')")

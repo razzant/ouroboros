@@ -84,3 +84,13 @@ def test_settings_prints_the_same_words(root, monkeypatch):  # noqa: F811
                                       capture_output=True, text=True, encoding="utf-8",
                                       input=json.dumps({"rows": rows, "costs": costs})).stdout)
     assert shown == [review_price_text(review_price(root, "critic", MODEL)), "cost unknown"]
+
+
+def test_a_charge_below_the_printed_precision_is_never_a_zero():
+    from ouroboros.review_price import ReviewPrice
+
+    tiny = ReviewPrice(usd=0.00003, reviews=1, low=0.00003, high=0.00003)
+    assert review_price_text(tiny, "first call") == "<$0.0001 per first call (1 measured)"
+    spread = ReviewPrice(usd=0.02, reviews=3, low=0.00003, high=0.05)
+    assert review_price_text(spread) == "≈$0.02 per review (median of 3 measured, <$0.0001–$0.05)"
+    assert review_price_text(ReviewPrice(usd=0.0, reviews=2, low=0.0, high=0.0)) == "no API cost per review"

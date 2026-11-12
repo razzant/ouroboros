@@ -1,4 +1,5 @@
 """Local capacity is a serving-instance fact, independent of training and health."""
+from ouroboros.local_model import RUNTIME_PROBE
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
@@ -448,7 +449,7 @@ def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns
         return real_popen([cmd[0], str(stand_in), *cmd[3:]], **kwargs)
 
     def run(cmd, **kwargs):  # llama-cpp-python is not installed here.
-        if cmd[1:] == ["-c", "import llama_cpp"]:
+        if cmd[1:] == ["-c", RUNTIME_PROBE]:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         return real_run(cmd, **kwargs)
 

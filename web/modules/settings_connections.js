@@ -9,7 +9,7 @@
 // of them writes at once (`keyHeads`, `mountKeyPage`, below).
 import { apiClient } from './api_client.js';
 import { adoptConnectionLabels, connectionLabel } from './connection_labels.js';
-import { API_PROVIDER_ORDER, apiConnections, apiProviderLabel, compatibleEndpoint, parseModelSource } from './route_editor_primitives.js';
+import { API_PROVIDER_ORDER, apiConnections, apiProviderLabel, compatibleEndpoint, connectionReferencesText, parseModelSource } from './route_editor_primitives.js';
 import { CONFIRMS, bindSettingRows, commitSetting, outcomeLine, readSettings, setButtonBusy, settingsRow } from './settings_controls.js';
 import { checkerFieldsNote, checkerReads, checkerUses, deploymentOf } from './settings_policy.js';
 import { rowById } from './settings_rows.js';
@@ -587,13 +587,22 @@ export function keyHeads(settings = {}, { tests = TESTS } = {}) {
 
 /** An editor's result line for an Outcome: the shared sentences, and `Saved` with when it applies for a landed write
  *  (never the value: a key is a secret). */
-export function editorLine(outcome, saved = 'Saved') {
+export function editorLine(outcome, saved = 'Saved', connections = []) {
     if (!outcome) return {};
     if (outcome.state === 'unchanged') return { text: 'Nothing changed.', tone: 'muted' };
     const line = outcomeLine({ keys: [], control: { kind: 'secret' } }, { ...outcome, old: undefined, withheld: outcome.withheld || 'structure' });
     if (!line) return {};
     const text = outcome.state === 'saved' ? line.text.replace(/^Saved/, saved) : line.text;
-    return { text: line.note ? `${text}. ${line.note}` : text, tone: line.tone, details: line.details };
+    const words = { text: line.note ? `${text}. ${line.note}` : text, tone: line.tone, details: line.details };
+    const references = referencesLine(outcome, connections);
+    return references.text ? { ...words, text: `${words.text}. ${references.text}`, tone: 'warn' } : words;
+}
+
+/** A key saved, turned off or removed: the rows that still name a key which cannot send, as the save's answer lists
+ *  them (`connection_references`), or nothing. */
+export function referencesLine(outcome, connections = []) {
+    const text = connectionReferencesText(outcome?.references, connections);
+    return text ? { text, tone: 'warn' } : {};
 }
 
 /** Write the list of added keys from a fresh read: `change(rows, fresh)` answers the next list, or null when the key
@@ -626,7 +635,8 @@ export function setKeyEnabled({ kind, name = '' }, enabled, { ask } = {}) {
  * Mount one key's page: `accounts/key/<kind>` (the built-in key), `accounts/key/<kind>/<name>` (a key added beside
  * it) or `accounts/key/new`. Its form is the key's own fields with Test and its own Save; Turn off and Remove stand
  * under it, and Remove asks first. `ctx` is the shell's (`readSettings`, `openSettings`, `ask`); `test` sends one
- * short model request; `left(note)` is called after the key was added or removed, with the sentence for the list.
+ * short model request; `left(note, added, warning)` is called after the key was added or removed, with the sentence
+ * for the list and the roles that still name a key which cannot send.
  */
 export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiClient.providerTest(body), left = () => {} } = {}) {
     const key = parseKeyPath(path) || { kind: '', name: '', fresh: true };
@@ -651,7 +661,8 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
     const flatRow = (fields) => ({ id: `accounts:key:${kind}`, keys: fields.map((field) => field.settingKey), page: 'accounts',
         name: card().title, control: { kind: 'custom' }, writer: 'generic' });
     const storedRow = () => (key.name ? connectionRows(settings?.[CONNECTIONS_KEY]).find((row) => row.kind === kind && row.name === key.name) || null : null);
-    const entry = () => apiConnections(settings || {}).find((item) => item.id === id()) || null;
+    const keys = () => apiConnections(settings || {});     // the read's keys, so a sentence names a key by its label
+    const entry = () => keys().find((item) => item.id === id()) || null;
 
     function draw() {
         resetSecretReveals(container);
@@ -803,9 +814,12 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         }
         setButtonBusy(find('[data-editor-save]'), false);
         if (gone) return;
-        if (landed(outcome) && key.fresh) { left(`Added ${card().title} · ${find('[data-connection-label]').value.trim()}.`, keyId(kind, name)); return; }
+        if (landed(outcome) && key.fresh) {
+            left(`Added ${card().title} · ${find('[data-connection-label]').value.trim()}.`, keyId(kind, name), referencesLine(outcome, keys()).text || '');
+            return;
+        }
         if (landed(outcome) || outcome.state === 'changed_elsewhere') await reload();
-        say(editorLine(outcome));
+        say(editorLine(outcome, 'Saved', keys()));
     }
 
     async function toggle() {
@@ -815,7 +829,7 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         const outcome = await setKeyEnabled({ kind, name: key.name }, !on, { ask: ctx.ask });
         if (gone) return;
         await reload();
-        say(landed(outcome) ? {} : editorLine(outcome));
+        say(landed(outcome) ? referencesLine(outcome, keys()) : editorLine(outcome, 'Saved', keys()));
     }
 
     async function remove() {
@@ -834,10 +848,10 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         }
         if (gone) return;
         TESTS.delete(id());
-        if (landed(outcome)) { left(`Removed ${title}.`); return; }
+        if (landed(outcome)) { left(`Removed ${title}.`, '', referencesLine(outcome, keys()).text || ''); return; }
         setButtonBusy(find('[data-editor-remove]'), false);
         if (outcome.state === 'changed_elsewhere') await reload();
-        say(editorLine(outcome));
+        say(editorLine(outcome, 'Saved', keys()));
     }
 
     async function reload() {

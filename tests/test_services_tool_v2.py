@@ -796,6 +796,10 @@ def test_user_files_service_without_outputs_reports_audit_gap(tmp_path, monkeypa
     stopped = json.loads(registry.execute("stop_service", {"name": "user_file_service"}))
 
     assert "ARTIFACT_AUDIT_GAP" in stopped["artifact_audit_gap"]
+    # The same advice as the shell tools' notes: a fact and both ways to register, no order to rerun.
+    from ouroboros.tools.shell_audit import REGISTER_OUTPUT_ADVICE
+
+    assert stopped["artifact_audit_gap"].endswith(REGISTER_OUTPUT_ADVICE) and "rerun" not in stopped["artifact_audit_gap"]
     assert stopped["artifact_output_failed"] is False
 
 

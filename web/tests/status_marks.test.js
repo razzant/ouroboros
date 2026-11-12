@@ -9,10 +9,17 @@ import { summarizeRoom } from '../modules/project_activity.js';
 import { roomStatusView } from '../modules/work_status.js';
 import { room } from './work_fixture.js';
 
-test('the owner move outranks everything and stands alone as the amber dot', () => {
-    for (const mark of ['moving', 'still', 'pause', 'ring', 'none']) {
+test('the owner move outranks everything: it tints moving work and stands alone as the amber dot elsewhere', () => {
+    assert.deepEqual(markView({ mark: 'moving', owner: true, unread: true, outcome: 'done' }), { shape: 'moving', hue: 'owner' });
+    for (const mark of ['still', 'pause', 'ring', 'none']) {
         assert.deepEqual(markView({ mark, owner: true, unread: true, outcome: 'done' }), { shape: 'dot', hue: 'owner' });
     }
+    // An aggregate (the Projects header, the ☰) passes no shape while the owner's move stands: the lone dot.
+    assert.deepEqual(markView({ mark: 'none', owner: true }), { shape: 'dot', hue: 'owner' });
+    assert.deepEqual(markView({ owner: true, unread: true }), { shape: 'dot', hue: 'owner' });
+    // No owner's move: the marks are as before.
+    assert.deepEqual(markView({ mark: 'moving' }), { shape: 'moving', hue: 'ink' });
+    assert.deepEqual(markView({ mark: 'still' }), { shape: 'still', hue: 'ink' });
 });
 
 test('new messages tint the work shape, and are a crimson dot where nothing works', () => {
@@ -74,8 +81,9 @@ test('the owner move a server room lists reads the same on the bar and the sideb
         const listed = room(activity, { turn });
         const bar = roomStatusView({ room: listed, works: [] });
         const row = summarizeRoom(listed);
-        assert.deepEqual(markView({ mark: bar.mark, owner: bar.owner }), { shape: 'dot', hue: 'owner' }, activity);
-        assert.deepEqual(markView({ mark: row.mark, owner: row.owner }), { shape: 'dot', hue: 'owner' }, activity);
+        const owned = { shape: activity === 'working' ? 'moving' : 'dot', hue: 'owner' };
+        assert.deepEqual(markView({ mark: bar.mark, owner: bar.owner }), owned, activity);
+        assert.deepEqual(markView({ mark: row.mark, owner: row.owner }), owned, activity);
         const quiet = room(activity);
         assert.equal(roomStatusView({ room: quiet, works: [] }).owner, false, activity);
         assert.equal(summarizeRoom(quiet).owner, false, activity);

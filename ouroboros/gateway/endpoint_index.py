@@ -509,8 +509,9 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/update/apply": Shape(
         "200:UpdateApplySuccessResponse 400,403:ErrorResponse 409,500:UpdateApplyErrorResponse", "UpdateApplyRequest",
         note="200: inspect status (manual, assisted_started, restart_required, or ok with restarting); adoption requires the landed transaction/merge identity and running_sha after startup"),
-    "GET /api/cost-breakdown": Shape("200:CostBreakdownResponse 503:ErrorResponse",
-                                     note="503: the ledger is unavailable (accounting.available false); spend is unknown, not zero"),
+    "GET /api/cost-breakdown": Shape("200:CostBreakdownResponse 503:ErrorResponse", query="period",
+                                     note="503: the ledger is unavailable (accounting.available false); spend is unknown, not zero; "
+                                          "?period=24h|7d|30d adds that period's view"),
     "GET /api/storage": Shape("200:StorageResponse", query="count",
                               note="passive; ?count=<finished_at> omits a count the client already holds"),
     "POST /api/storage/measure": Shape("202:StorageResponse", note="starts one count in a child, or joins the running one"),

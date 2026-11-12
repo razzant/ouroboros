@@ -332,8 +332,8 @@ class CommitAttemptRecord:
     review_record_id: str = ""
     # Exact preparation inputs (known prior record ids and a retained rebuttal).
     review_input: Dict[str, Any] = field(default_factory=dict)
-    # Why the gate let this attempt continue where Blocking would have stopped it (``review_overrides``): a later
-    # commit continuing this attempt, in any process, lands over it. "" when its review met no such decision.
+    # The FAIL or no verdict the gate let this attempt go on past (``review_overrides``): what a later continuation
+    # of it, in any process, went on over when no review record says more. "" when its review met none.
     review_override_reason: str = ""
 
 

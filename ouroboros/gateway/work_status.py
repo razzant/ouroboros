@@ -601,13 +601,65 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
     return work
 
 
-def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True) -> Dict[str, Any]:
+def place_questions(works: List[Dict[str, Any]], questions: Iterable[Mapping[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Put every current question that waits for the owner (``main_decisions.question_waits``, the rule Main's
+    pill counts by) where its room shows it. A Project's question belongs to
+    the Project's room and Main's own to Main; a question whose task is a member of a work of that room joins the
+    work's ``turn`` (its row and card lead to it) as an ``open_question``, unless the member's own wait already put
+    it there as the ``question`` its task waits for. An open question is the owner's turn and never the work's word:
+    the work keeps its activity, its reason and its ``release`` (one that goes on with an assumption goes on by
+    itself). Returns the questions no work of their room holds (their task ended, or works elsewhere), by room, for
+    ``roll_up_room``."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.gateway.main_decisions import question_waits
+
+    holders: Dict[tuple, Dict[str, Any]] = {}
+    for work in works:
+        for task_id in (work.get("members") or {}).get("ids") or ():
+            holders.setdefault((str(work.get("room") or 0), str(task_id)), work)
+    waiting = [row for row in questions or () if str(row.get("task_id") or "") and question_waits(row)]
+    # A member's own wait can name its question without the quiz: with exactly one open question of that task, the
+    # wait is that question and takes its address; with several, each stands beside it with its own.
+    unanswered: Dict[tuple, List[str]] = {}
+    for row in waiting:
+        if row.get("quiz_state") == "open" and row.get("quiz_id"):
+            key = (_question_room(row, WEB_UI_CHAT_ID), str(row["task_id"]))
+            unanswered.setdefault(key, []).append(str(row["quiz_id"]))
+    loose: Dict[str, List[Dict[str, Any]]] = {}
+    for row in waiting:
+        task_id, quiz_id = str(row.get("task_id") or ""), str(row.get("quiz_id") or "")
+        room = _question_room(row, WEB_UI_CHAT_ID)
+        item = {"kind": "open_question", "task_id": task_id, **({"quiz_id": quiz_id} if quiz_id else {})}
+        if row.get("quiz_state") not in {"open", "expired_terminal"}:
+            item["code"] = "delivery_unknown"  # answered: only its unknown delivery waits (``question_waits``)
+        work = holders.get((room, task_id))
+        held = loose.setdefault(room, []) if work is None else work["turn"]
+        if unanswered.get((room, task_id)) == [quiz_id]:
+            for entry in held:
+                if entry.get("kind") == "question" and entry.get("task_id") == task_id and not entry.get("quiz_id"):
+                    entry["quiz_id"] = quiz_id
+        # The same question is said once; an item that names no quiz never stands for an exact one.
+        if not any(entry.get("kind") in {"question", "open_question"} and entry.get("task_id") == task_id
+                   and entry.get("quiz_id") == (quiz_id or None) for entry in held):
+            held.append(item)
+    return {room: items for room, items in loose.items() if items}
+
+
+def _question_room(row: Mapping[str, Any], main_chat: Any) -> str:
+    """The room a current question belongs to: its Project's, else Main's."""
+    return str(row.get("project_chat_id") if row.get("project_id") else main_chat)
+
+
+def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True,
+                 questions: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
     """One room from its works: the most active work speaks; whose turn it is never replaces it. The mark moves
     while anything in the room actually runs, a paused work's finishing review included: in a room, motion wins and
-    each work's row says the rest."""
+    each work's row says the rest. ``questions`` are the room's own that no work of it holds (``place_questions``):
+    they are the owner's turn there too, also in a room at rest."""
+    questions = [dict(item) for item in questions]
     if not works:
         activity = "idle" if complete else "unknown"
-        return {"activity": activity, "transition": "none", "call": "", "turn": [], "amber": False,
+        return {"activity": activity, "transition": "none", "call": "", "turn": questions, "amber": bool(questions),
                 "mark": "none" if complete else "ring", "confirmed": complete, "works": []}
     known = [work["activity"] for work in works if work["activity"] != "unknown"]
     activity = min(known, key=_rank) if known else "unknown"
@@ -619,7 +671,7 @@ def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True) -> Di
             and any(work["transition"] == "pausing" for work in working):
         transition = "pausing"
     calls = {work["call"] for work in working if work.get("call")}
-    turn = [{"work_id": work["work_id"], **item} for work in works for item in work["turn"]]
+    turn = [{"work_id": work["work_id"], **item} for work in works for item in work["turn"]] + questions
     confirmed = complete and all(work["confirmed"] for work in works)
     live = any(work.get("live") for work in works)
     unknown = any(tail.get("state") == "unknown" for work in works for tail in work.get("tails") or ())
@@ -628,11 +680,23 @@ def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True) -> Di
             "confirmed": confirmed, "works": [work["work_id"] for work in works]}
 
 
+def _same_question(one: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    """The same task's question, by its quiz id when both name one."""
+    quizzes = (one.get("quiz_id"), other.get("quiz_id"))
+    return one.get("task_id") == other.get("task_id") and (None in quizzes or quizzes[0] == quizzes[1])
+
+
 def roll_up_summary(rooms: Mapping[Any, Mapping[str, Any]], works: List[Mapping[str, Any]],
                     *, complete: bool = True) -> Dict[str, Any]:
     """The tray's one line: counts by activity, how many wait for the owner, and confirmation."""
     counts = {activity: 0 for activity in ACTIVITY_ORDER}
     for work in works:
         counts[work["activity"] if work["activity"] in counts else "unknown"] += 1
-    return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works),
+    # What waits for the owner: each work with a turn once, and each question no work holds (``place_questions``)
+    # unless a counted work already carries it (a private Presence question is asked in Main while its work stands
+    # in its Project): one question is counted once, though both rooms show it.
+    carried = [item for work in works for item in work["turn"] if item.get("kind") in {"question", "open_question"}]
+    loose = sum(1 for room in rooms.values() for item in room.get("turn") or ()
+                if not item.get("work_id") and not any(_same_question(item, held) for held in carried))
+    return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works) + loose,
             "confirmed": complete and all(room.get("confirmed", True) for room in rooms.values())}

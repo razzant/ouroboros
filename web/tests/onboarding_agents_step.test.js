@@ -944,15 +944,16 @@ test('pagehide binds to Window, preserves bfcache, and detaches late work synchr
 
     assert.equal(dom.documentListeners.some(([event]) => event === 'pagehide'), false,
         'Document is not the pagehide target');
-    assert.equal(dom.windowListeners.length, 3,
-        'pagehide plus the shared status surface activation hooks are bounded');
+    assert.equal(dom.windowListeners.length, 4,
+        'pagehide, the shared status surface activation hooks and the Agents list language listener are bounded');
+    assert.ok(dom.windowListeners.some(([type]) => type === 'ouro:language-changed'), 'the Agents list says its prices again on a language change');
     const [type, onPageHide] = dom.windowListeners[0];
     assert.equal(type, 'pagehide');
     handlers[handlers.length - 1]();
     await flush();
 
     onPageHide({ persisted: true });
-    assert.equal(dom.windowListeners.length, 3, 'bfcache keeps the live step mounted');
+    assert.equal(dom.windowListeners.length, 4, 'bfcache keeps the live step mounted');
 
     const lifecycleBefore = calls.filter(([url]) => url.startsWith('/api/claudexor/login')).length;
     onPageHide({ persisted: false });
