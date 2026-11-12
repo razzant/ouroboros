@@ -3,7 +3,7 @@
  * A page module registers its family once, when it is imported: `prefix` is the first part of a Settings path
  * (`agents` serves `agents`, `agents/<id>` and `agents/new`), `title` a string or `(path) => string`, and
  * `mount(container, { path, row, ctx })` renders the body for that path and may return `{ unmount() }`. The shell
- * imports the page modules; a path no page serves shows the chrome with nothing inside. */
+ * imports the page modules; a path no page serves opens the home with the path's last word searched. */
 
 const PAGES = new Map();
 
