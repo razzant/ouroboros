@@ -432,7 +432,8 @@ def test_a_current_question_is_its_rooms_turn_as_mains_pill_counts_it():
     ])
     assert live["turn"] == [{"kind": "open_question", "task_id": "helper", "quiz_id": "q1"}]
     assert asleep["turn"] == [{"kind": "open_question", "task_id": "s", "quiz_id": "q2"}]
-    assert waits["turn"] == [{"kind": "question", "task_id": "b"}]  # said once, as the wait its task holds
+    # Said once, as the wait its task holds: the wait that named no quiz takes the one open question's address.
+    assert waits["turn"] == [{"kind": "question", "task_id": "b", "quiz_id": "q3"}]
     # The works keep their word and who moves them: an open question is the owner's turn, never the work's state.
     assert [(work["activity"], work["release"]) for work in works] == [
         ("working", "self"), ("waiting", "self"), ("waiting", "owner")]
@@ -449,6 +450,25 @@ def test_a_current_question_is_its_rooms_turn_as_mains_pill_counts_it():
     assert ws.roll_up_room([])["amber"] is False and ws.place_questions([{**live, "turn": []}], []) == {}
     # The tray's count: each work with a turn once, and each question no work holds.
     assert ws.roll_up_summary({"42": room, "77": rest}, works)["turn"] == 3 + 2
+
+
+def test_a_wait_that_names_no_quiz_never_absorbs_an_exact_question():
+    """An exact current question keeps its address: a member's wait that names no quiz takes the address of its
+    task's one open question (it stays the question the task waits for); with several, each stands beside it as its own
+    item, and the tray still counts each question once."""
+    def waiting():
+        return {**_work("waiting", work_id="b", turn=[{"kind": "question", "task_id": "b"}]), "room": 42,
+                "release": "owner", "members": {"ids": ["b"]}}
+    project = ("p1", 42)
+    one = waiting()
+    assert ws.place_questions([one], [_question("b", "q1", project=project)]) == {}
+    assert one["turn"] == [{"kind": "question", "task_id": "b", "quiz_id": "q1"}]
+    two = waiting()
+    ws.place_questions([two], [_question("b", "q1", project=project), _question("b", "q2", project=project)])
+    assert two["turn"] == [{"kind": "question", "task_id": "b"},
+                           {"kind": "open_question", "task_id": "b", "quiz_id": "q1"},
+                           {"kind": "open_question", "task_id": "b", "quiz_id": "q2"}]
+    assert ws.roll_up_summary({"42": ws.roll_up_room([two])}, [two])["turn"] == 1
 
 
 def test_an_answer_whose_delivery_is_unknown_is_named_by_its_code():

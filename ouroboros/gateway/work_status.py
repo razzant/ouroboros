@@ -617,22 +617,37 @@ def place_questions(works: List[Dict[str, Any]], questions: Iterable[Mapping[str
     for work in works:
         for task_id in (work.get("members") or {}).get("ids") or ():
             holders.setdefault((str(work.get("room") or 0), str(task_id)), work)
+    waiting = [row for row in questions or () if str(row.get("task_id") or "") and question_waits(row)]
+    # A member's own wait can name its question without the quiz: with exactly one open question of that task, the
+    # wait is that question and takes its address; with several, each stands beside it with its own.
+    unanswered: Dict[tuple, List[str]] = {}
+    for row in waiting:
+        if row.get("quiz_state") == "open" and row.get("quiz_id"):
+            key = (_question_room(row, WEB_UI_CHAT_ID), str(row["task_id"]))
+            unanswered.setdefault(key, []).append(str(row["quiz_id"]))
     loose: Dict[str, List[Dict[str, Any]]] = {}
-    for row in questions or ():
+    for row in waiting:
         task_id, quiz_id = str(row.get("task_id") or ""), str(row.get("quiz_id") or "")
-        if not task_id or not question_waits(row):
-            continue
-        room = str(row.get("project_chat_id") if row.get("project_id") else WEB_UI_CHAT_ID)
+        room = _question_room(row, WEB_UI_CHAT_ID)
         item = {"kind": "open_question", "task_id": task_id, **({"quiz_id": quiz_id} if quiz_id else {})}
         if row.get("quiz_state") not in {"open", "expired_terminal"}:
             item["code"] = "delivery_unknown"  # answered: only its unknown delivery waits (``question_waits``)
         work = holders.get((room, task_id))
         held = loose.setdefault(room, []) if work is None else work["turn"]
-        # A member's own wait names its question, sometimes without its quiz: the same question is said once.
+        if unanswered.get((room, task_id)) == [quiz_id]:
+            for entry in held:
+                if entry.get("kind") == "question" and entry.get("task_id") == task_id and not entry.get("quiz_id"):
+                    entry["quiz_id"] = quiz_id
+        # The same question is said once; an item that names no quiz never stands for an exact one.
         if not any(entry.get("kind") in {"question", "open_question"} and entry.get("task_id") == task_id
-                   and entry.get("quiz_id") in (None, quiz_id or None) for entry in held):
+                   and entry.get("quiz_id") == (quiz_id or None) for entry in held):
             held.append(item)
     return {room: items for room, items in loose.items() if items}
+
+
+def _question_room(row: Mapping[str, Any], main_chat: Any) -> str:
+    """The room a current question belongs to: its Project's, else Main's."""
+    return str(row.get("project_chat_id") if row.get("project_id") else main_chat)
 
 
 def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True,
