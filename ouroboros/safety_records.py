@@ -177,8 +177,9 @@ def tell_owner_over_flag(ctx, tool_name, arguments, subject, verdicts, level) ->
     """The Supervisor's own row to my human when Ouroboros's identical re-issue is let through over a flag whose final
     reading marked the act as one my human would want to stop (``"owner": true``). Host-composed from typed facts
     through the terminal outbox, signed as the Supervisor's, one per work and destination: the declared words' places
-    and every recipient, else the exact call, shown with every known secret shape masked (``delivery_id``, so reworded
-    words to the same place, a restart or a later finding there add none). A first mark a failed second check left
+    and every recipient, else the exact call (``delivery_id``, so reworded words to the same place, a restart or a later
+    finding there add none). The call, the flag's reason and its quote pass the shared secret list
+    (``redaction.redact_projection``) before the row shows them. A first mark a failed second check left
     unconfirmed tells nobody. ``subject`` resolves what the call says and where (``safety._exit_subject``), read only
     for a marked flag. Never in the tool's result, never changing what the call does; claims no delivery."""
     final = verdicts[-1] if verdicts else {}
@@ -195,6 +196,10 @@ def tell_owner_over_flag(ctx, tool_name, arguments, subject, verdicts, level) ->
         work, root = _root_id(ctx), canonical_data_root(ctx)
         if not work:
             return
+
+        def masked(text) -> str:
+            return " ".join(str(redact_projection(str(text or "")).value).split())
+
         said, destinations, exact, _labels = subject()
         if exact:  # any call that declares no words and place: the exact call is its destination
             shown = " ".join(_render_subject_json(redact_projection(arguments or {}).value).split())
@@ -208,11 +213,11 @@ def tell_owner_over_flag(ctx, tool_name, arguments, subject, verdicts, level) ->
             label = task_presentation_snapshot(root, work, fallback="").get("target_label") or ""
         except Exception:
             label = ""  # the row outranks its label
-        quote = " ".join(str(final.get("quote") or "").split())
+        quote = masked(final.get("quote"))
         text = "\n".join([
             "Safety Supervisor · not Ouroboros's words",
             call,
-            f"Flag ({level}): {final.get('reason') or ''}",
+            f"Flag ({level}): {masked(final.get('reason'))}",
             *([f"Quoted: «{quote[:300]}{'…' if len(quote) > 300 else ''}»"] if quote else []),
             f"Work: {label} ({work})" if label else f"Work: {work}",
             "Ouroboros re-issued this after the flag and the host admitted the attempt; "
