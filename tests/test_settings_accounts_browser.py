@@ -125,7 +125,21 @@ def test_key_switch_save_test_and_confirmed_removal(accounts_ui):
     page.goto(ui["url"] + "/#settings")
     listing = open_settings(page, "accounts")
     head = listing.locator('[data-entry-id="openrouter@research"]')
+    expect(head.locator("[data-entry-switch]")).to_be_checked()
+    waiting = []
+
+    def hold_read(route):
+        waiting.append(route)
+        page.evaluate("window.keyReadHeld = true")
+
+    page.route("**/api/settings", hold_read)
     head.locator(".ui-switch").click()
+    page.wait_for_function("window.keyReadHeld === true")
+    expect(head.locator("[data-entry-switch]")).not_to_be_checked()
+    assert not ui["posts"], "the optimistic switch changes before the fresh read and write"
+    page.unroute("**/api/settings", hold_read)
+    waiting.pop().fallback()
+    expect(head.locator("[data-entry-switch]")).to_be_enabled()
     expect(head.locator("[data-entry-switch]")).not_to_be_checked()
     body = ui["posts"][-1][1]
     assert set(body) == {"OUROBOROS_CONNECTIONS", "if_unchanged"}
