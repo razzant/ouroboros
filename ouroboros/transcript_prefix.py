@@ -45,10 +45,24 @@ SCOPED_SANCTION_ATTR = "_transcript_rewrite_scoped"
 REWRITE_EPOCH_ATTR = "_transcript_rewrite_epoch"
 
 
+#: Per route (the model string a request goes to), what the last answered request on it carried: short digests
+#: of its tool list, of each system block and of its later messages, and when it started. A provider keeps one
+#: cache per model, so a request is compared with the last answered one on its own route, never with a round
+#: another model served.
+ROUTE_SENDS_ATTR = "_transcript_prefix_routes"
+LAST_ROUTE_ATTR = "_transcript_prefix_last_route"
+#: The route and start of the candidate being dispatched; its answer makes it the route's record.
+PENDING_ROUTE_ATTR = "_transcript_prefix_pending"
+#: ``accumulated_usage`` key of the candidate's prefix fact, for the dispatch that binds its physical context.
+ATTEMPT_PREFIX_KEY = "_attempt_prefix"
+#: Every seam that rewrote the view since the last answered request, in order (the stamps keep one per scope).
+ORIGINS_ATTR = "_transcript_prefix_origins"
+_ROUTES_KEPT = 4  # full records a checkpoint carries; an older route keeps its name and reads ``unrecorded``
+
 #: The observer's per-slot state a continuation checkpoint carries (``owner_wait``): the last
-#: sent digests, an unconsumed origin stamp, the rewrite count and a change already counted.
+#: sent digests, an unconsumed origin stamp, the rewrite count, a change already counted and the routes' records.
 OBSERVER_STATE_ATTRS = (DIGEST_ATTR, TOOLS_DIGEST_ATTR, SANCTION_ATTR, REWRITE_EPOCH_ATTR, "_reasoning_retirement_break",
-                        SCOPED_SANCTION_ATTR)
+                        SCOPED_SANCTION_ATTR, ROUTE_SENDS_ATTR, LAST_ROUTE_ATTR, ORIGINS_ATTR)
 
 
 def sanction_rewrite(slot: Any, by: str = "compaction", scope: str = "messages") -> None:
@@ -56,6 +70,8 @@ def sanction_rewrite(slot: Any, by: str = "compaction", scope: str = "messages")
 
     A message rewrite also advances the rewrite epoch; a ``system`` or ``tools`` stamp only names
     a break of that scope (C2 S4, 06.11.2026)."""
+    seams = getattr(slot, ORIGINS_ATTR, None)
+    setattr(slot, ORIGINS_ATTR, [*(seams if isinstance(seams, list) else ()), str(by)])
     if scope == "messages":
         setattr(slot, SANCTION_ATTR, by)
         setattr(slot, REWRITE_EPOCH_ATTR, rewrite_epoch(slot) + 1)
@@ -248,6 +264,7 @@ def observe_send(
     current_tools = tools_digest(tools)
     setattr(slot, DIGEST_ATTR, current)
     setattr(slot, TOOLS_DIGEST_ATTR, current_tools)
+    _remember_route_send(slot, messages, current, current_tools)
     sanction = _stamps(slot, sanctioned_by)
     setattr(slot, SANCTION_ATTR, None)
     setattr(slot, SCOPED_SANCTION_ATTR, None)
@@ -317,6 +334,162 @@ def departure(slot: Any, messages: Sequence[Mapping[str, Any]], tools: Any) -> O
     index = next((i for i, (old, message) in enumerate(zip(previous, messages))
                   if old != message_digest(message)), None)
     return None if index is None else (index, "system" if index == 0 else "messages")
+
+
+def _short(digest: Any) -> str:
+    return str(digest)[:16]
+
+
+def _system_block_digests(message: Mapping[str, Any]) -> List[str]:
+    """One identity per system block, read as ``message_digest`` reads text; a string row is one block."""
+    content = message.get("content")
+    return [_short(_sha(_content_identity([block]))) for block in (content if isinstance(content, list) else [content])]
+
+
+def _system_block_name(message: Mapping[str, Any], index: int) -> str:
+    """The changed block by the name the round facts already use for it (``context_view_facts.block_label``)."""
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else [content]
+    if not 0 <= index < len(blocks):
+        return "removed block"
+    from ouroboros.context_view_facts import block_label
+    return block_label(message, index, blocks[index], None)
+
+
+def _route_record(messages: Sequence[Mapping[str, Any]], tools_identity: str, digests: Optional[List[str]] = None) -> dict:
+    head = bool(messages) and str(messages[0].get("role") or "") == "system"
+    later = digests[1 if head else 0:] if digests is not None else [message_digest(m) for m in messages[1 if head else 0:]]
+    return {"tools": _short(tools_identity), "blocks": _system_block_digests(messages[0]) if head else [],
+            "messages": [_short(digest) for digest in later]}
+
+
+def _remember_route_send(slot: Any, messages: Sequence[Mapping[str, Any]], digests: List[str], tools_identity: str) -> None:
+    """The answered request becomes its route's record; a send that named no route leaves the records as they are."""
+    pending = getattr(slot, PENDING_ROUTE_ATTR, None)
+    setattr(slot, PENDING_ROUTE_ATTR, None)
+    setattr(slot, ORIGINS_ATTR, [])  # the answered request carried every seam named so far
+    if not isinstance(pending, Mapping) or not pending.get("route"):
+        return
+    route = str(pending["route"])
+    kept = getattr(slot, ROUTE_SENDS_ATTR, None)
+    routes = {key: value for key, value in (kept if isinstance(kept, Mapping) else {}).items() if key != route}
+    routes[route] = {**_route_record(messages, tools_identity, digests), "at": pending.get("at")}
+    for stale in [name for name, held in routes.items() if "messages" in held][:-_ROUTES_KEPT]:
+        routes[stale] = {"dropped": True}  # its name stays: a later request on it has no base, and says so
+    setattr(slot, ROUTE_SENDS_ATTR, routes)
+    setattr(slot, LAST_ROUTE_ATTR, route)
+
+
+def attempt_prefix_fact(slot: Any, messages: Sequence[Mapping[str, Any]], tools: Any, route: str,
+                        now: Optional[float] = None) -> dict:
+    """What the candidate does to its route's cached start, read from the host's own answered sends on that route.
+
+    ``departs`` names the first place it differs from the last answered request on the same route, in the wire
+    order tools, system blocks, messages: ``append`` (it only extends that request), ``tools``, ``system`` (with
+    the block's ``index`` ``of`` the block count), ``messages`` (with the ``index`` ``of`` the earlier message
+    count, the system row counted as ``prompt_prefix_break`` counts it), ``first`` (no answered request on this
+    slot yet), ``route`` (answered requests, none on this route) or ``unrecorded`` (a slot restored from before
+    this record existed, or a route whose record a checkpoint no longer carries). ``origins`` are the seams that
+    rewrote the view since the last answered request, in order, ``from_route`` the route of that request when it
+    was another one, ``since_s`` the seconds from the start of this route's last answered request to this
+    candidate's start (a cache lifetime runs from a request's start). It is an observation of the AUTHORED
+    prefix, by ``message_digest``'s identity (reasoning, outer whitespace and image detail are not in it), of what
+    the host sent: it never says what the provider's cache did, and an ``append`` beside a large write is not a
+    contradiction to resolve here; the attempt's measured counts are that fact. The candidate's route and start
+    wait on the slot until its answer records it (``observe_send``); a candidate never answered moves no base."""
+    if slot is None or not route:
+        return {}
+    import time
+
+    now = time.time() if now is None else now
+    record = _route_record(messages, tools_digest(tools))
+    kept = getattr(slot, ROUTE_SENDS_ATTR, None)
+    routes = kept if isinstance(kept, Mapping) else {}
+    base = routes.get(route)
+    fact: Dict[str, Any] = {}
+    if isinstance(base, Mapping) and base.get("dropped"):
+        base, fact["departs"] = None, "unrecorded"
+    elif not isinstance(base, Mapping):
+        fact["departs"] = "route" if routes else ("unrecorded" if isinstance(_baseline(slot)[0], list) else "first")
+    elif base.get("tools") != record["tools"]:
+        fact["departs"] = "tools"
+    elif base.get("blocks") != record["blocks"]:
+        old = base.get("blocks") or []
+        index = next((i for i, (a, b) in enumerate(zip(old, record["blocks"])) if a != b), min(len(old), len(record["blocks"])))
+        fact.update(departs="system", index=index, of=len(record["blocks"]), block=_system_block_name(messages[0], index))
+    else:
+        old, new = base.get("messages") or [], record["messages"]
+        index = next((i for i, (a, b) in enumerate(zip(old, new)) if a != b), None)
+        if index is None and len(new) >= len(old):
+            fact["departs"] = "append"
+        else:
+            head = 1 if record["blocks"] else 0
+            fact.update(departs="messages", index=(len(new) if index is None else index) + head, of=len(old) + head)
+    seams = getattr(slot, ORIGINS_ATTR, None)  # a slot restored from before the list still has its stamps
+    origins = list(dict.fromkeys(str(by) for by in (seams if isinstance(seams, list) else _stamps(slot).values()) if by))
+    if origins:
+        fact["origins"] = origins
+    last = getattr(slot, LAST_ROUTE_ATTR, None)
+    if last and last != route:
+        fact["from_route"] = str(last)
+    if isinstance(base, Mapping) and isinstance(base.get("at"), (int, float)):
+        fact["since_s"] = round(max(0.0, now - float(base["at"])), 1)
+    setattr(slot, PENDING_ROUTE_ATTR, {"route": route, "at": now})
+    return fact
+
+
+_CACHE_LIFETIME_SEC = {"5m": 300.0, "1h": 3600.0}  # the provider's two published cache lifetimes (a tariff fact)
+
+
+def prefix_class(fact: Any, ttl: Any = "") -> tuple[str, str]:
+    """What a request did to its route's cached start, named for a reader from the stored fact: ``(class, detail)``.
+
+    The order is the provider's own: a model keeps its own cache, then tools, system blocks, messages, and last the
+    entry's lifetime. ``paused`` is arithmetic over two recorded facts (the seconds since this route's previous
+    answered request and the lifetime ``ttl`` names), read as "paused longer than the cache lifetime its requests
+    ask for"; it says nothing of the provider's state, and without a named lifetime it is never derived. A row
+    that carries no fact (written before the record, or sent outside Main's own loop) is ``not_recorded``."""
+    if not isinstance(fact, Mapping) or not fact.get("departs") or fact.get("departs") == "unrecorded":
+        return "not_recorded", ""
+    departs, origins = str(fact["departs"]), ", ".join(str(item) for item in fact.get("origins") or ())
+    if departs == "first":
+        return "first_request", ""
+    if departs == "route":
+        return "entered_model", str(fact.get("from_route") or "")
+    if departs == "tools":
+        return "tools_changed", origins
+    if departs == "system":
+        return "system_changed", str(fact.get("block") or "")
+    if departs == "messages":
+        return "history_rewritten", origins
+    lifetime, since = _CACHE_LIFETIME_SEC.get(str(ttl or "")), fact.get("since_s")
+    if lifetime is not None and isinstance(since, (int, float)) and since > lifetime:
+        return "paused", ""
+    return ("returned_to_model", str(fact["from_route"])) if fact.get("from_route") else ("append", "")
+
+
+def remember_attempt_prefix(ctx: Any) -> None:
+    """Main's fit measurement leaves the candidate's prefix fact for the dispatch that binds its physical context."""
+    slot = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    usage = getattr(ctx, "accumulated_usage", None)
+    if slot is None or not isinstance(usage, dict):
+        return
+    try:
+        route = str(getattr(ctx, "active_model", "") or "") + (" (local)" if getattr(ctx, "active_use_local", False) else "")
+        usage[ATTEMPT_PREFIX_KEY] = attempt_prefix_fact(slot, ctx.messages, getattr(ctx, "tool_schemas", None), route)
+    except Exception:  # a record of the send, never a condition of it
+        usage.pop(ATTEMPT_PREFIX_KEY, None)
+        log.debug("attempt prefix fact unavailable", exc_info=True)
+
+
+def with_attempt_prefix(physical: Any, usage: Any) -> Any:
+    """The physical context carrying the candidate's prefix fact into its ledger row (``PhysicalAttemptContext.prefix``)."""
+    fact = usage.get(ATTEMPT_PREFIX_KEY) if isinstance(usage, Mapping) else None
+    if physical is None or not isinstance(fact, Mapping) or not fact:
+        return physical
+    from dataclasses import replace
+
+    return replace(physical, prefix=dict(fact))
 
 
 def retire_unbound_reasoning(slot: Any, messages: List[Dict[str, Any]], tools: Any) -> Optional[Dict[str, Any]]:

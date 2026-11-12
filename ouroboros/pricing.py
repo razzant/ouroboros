@@ -172,9 +172,10 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
     return _cost_from_pricing(pricing, prompt_tokens, completion_tokens, cache_usage)
 
 
-def _cost_from_pricing(pricing: tuple, prompt_tokens: int, completion_tokens: int,
-                       cache_usage: Optional[Dict[str, Any]], *, exact_cache_tiers: bool = False) -> Optional[float]:
-    """Price one complete tariff; endpoint bounds compare whole costs, not rate maxima."""
+def _cost_addends(pricing: tuple, prompt_tokens: int, completion_tokens: int, cache_usage: Optional[Dict[str, Any]],
+                  *, exact_cache_tiers: bool = False) -> Optional[Tuple[float, ...]]:
+    """One complete tariff's five addends in dollars for one call: uncached input, cache reads, default-tier
+    cache writes, extended-tier cache writes, output; None when a price it needs is unknown."""
     cache_row = cache_usage if isinstance(cache_usage, dict) else {}
     cached_tokens = int(cache_row.get("cached_tokens") or 0)
     cache_write_tokens = int(cache_row.get("cache_write_tokens") or 0)
@@ -211,14 +212,58 @@ def _cost_from_pricing(pricing: tuple, prompt_tokens: int, completion_tokens: in
                             else float(write_price or 0.0) * (2.0 / 1.25))
     if default_write_tokens and write_price is None or extended_write_tokens and extended_write_price is None:
         return None
-    cost = (
-        regular_input * input_price / 1_000_000
-        + cached_tokens * float(cached_price or 0.0) / 1_000_000
-        + default_write_tokens * float(write_price or 0.0) / 1_000_000
-        + extended_write_tokens * float(extended_write_price or 0.0) / 1_000_000
-        + completion_tokens * output_price / 1_000_000
+    return (
+        regular_input * input_price / 1_000_000,
+        cached_tokens * float(cached_price or 0.0) / 1_000_000,
+        default_write_tokens * float(write_price or 0.0) / 1_000_000,
+        extended_write_tokens * float(extended_write_price or 0.0) / 1_000_000,
+        completion_tokens * output_price / 1_000_000,
     )
+
+
+def _cost_from_pricing(pricing: tuple, prompt_tokens: int, completion_tokens: int,
+                       cache_usage: Optional[Dict[str, Any]], *, exact_cache_tiers: bool = False) -> Optional[float]:
+    """Price one complete tariff; endpoint bounds compare whole costs, not rate maxima."""
+    addends = _cost_addends(pricing, prompt_tokens, completion_tokens, cache_usage, exact_cache_tiers=exact_cache_tiers)
+    if addends is None:
+        return None
+    cost = addends[0] + addends[1] + addends[2] + addends[3] + addends[4]  # the order the one expression added them in
     return cost if exact_cache_tiers else round(cost, 6)
+
+
+COST_CLASSES = ("cache_write", "cache_read", "output", "uncached_input")
+
+
+def display_tariffs(provider: Optional[str]) -> Tuple[Dict[str, tuple], str]:
+    """The route's tariffs a price DISPLAY may use, never fetched: what this process holds, else what the install's
+    dated catalogue record holds (OpenRouter; the server prices no call itself). Keys are
+    ``normalize_model_identity`` names; the second value is the record's date when the record answered."""
+    route = str(provider or "openrouter").strip().lower()
+    rows = get_pricing(provider=route, allow_live_fetch=False)
+    if rows or route != "openrouter":
+        return rows, ""
+    from ouroboros.llm_pricing import recorded_openrouter_pricing
+
+    return recorded_openrouter_pricing()
+
+
+def cost_class_weights(pricing: Optional[tuple], usage: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    """What ``pricing`` charges one call for each class of its tokens (``COST_CLASSES``), as WEIGHTS for sharing
+    that call's RECORDED cost out by class; None when a price or a token count it needs is unknown.
+
+    ``usage`` carries the usage-row fields (``prompt_tokens``, ``completion_tokens``, ``cached_tokens``,
+    ``cache_write_tokens``, ``prompt_cache_ttl``, the reported ``cache_write_tokens_by_ttl``). These are the
+    addends ``_cost_from_pricing`` sums; only their ratios are meant, the recorded cost stays the amount."""
+    if not pricing or usage.get("prompt_tokens") is None or usage.get("completion_tokens") is None:
+        return None
+    if (int(usage.get("cache_write_tokens") or 0) > 0 and str(usage.get("prompt_cache_ttl") or "") not in ("5m", "1h")
+            and not isinstance(usage.get("cache_write_tokens_by_ttl"), dict)):
+        return None  # written at a lifetime the row does not name: never assumed to be the cheaper one
+    addends = _cost_addends(pricing, max(0, int(usage["prompt_tokens"])), max(0, int(usage["completion_tokens"])), usage)
+    if addends is None:
+        return None
+    uncached, read, write_default, write_extended, output = addends
+    return {"cache_write": write_default + write_extended, "cache_read": read, "output": output, "uncached_input": uncached}
 
 
 def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:

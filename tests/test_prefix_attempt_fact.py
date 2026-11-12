@@ -1,0 +1,229 @@
+"""What a request does to its route's cached start is recorded on the attempt that sends it.
+
+A provider keeps one cache per model and reads it in the wire order tools, system blocks,
+messages, so the record compares a candidate with the last answered request on its own route
+and names the first place they differ. The observer's single baseline (``observe_send``)
+compares with the previous send on any model; these cases pin what that baseline cannot say:
+a return to a model after rounds on another, which system block changed, and that the fact
+reaches the attempt's ledger row.
+"""
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from ouroboros import loop, transcript_prefix as prefix
+from ouroboros.physical_attempt_context import PhysicalAttemptContext
+from tests._usage_store_testing import dispatched_attempts
+from tests.test_llm_claudexor import setup as gateway_fixture
+from tests.test_model_wait import live_wait as wait_fixture
+from tests.test_subscription_main_wait import main_call as main_fixture
+
+setup, live_wait, main_call = gateway_fixture, wait_fixture, main_fixture
+
+OPUS, CODEX = "anthropic/claude-opus-5.5", "claudexor::codex=gpt-6-astra"
+TOOLS = [{"type": "function", "function": {"name": "read_file", "description": "Read a file.", "parameters": {}}}]
+
+
+def system(rules="rules", memory="memory", context="context"):
+    marked = {"cache_control": {"type": "ephemeral"}}
+    return {"role": "system", "content": [{"type": "text", "text": rules, **marked},
+                                          {"type": "text", "text": memory, **marked},
+                                          {"type": "text", "text": context}]}
+
+
+def turn(n):
+    return [{"role": "assistant", "content": f"step {n}"}, {"role": "tool", "tool_call_id": f"c{n}", "content": f"result {n}"}]
+
+
+def send(slot, messages, route, *, tools=TOOLS, now=0.0, round_idx=1):
+    """One answered request: the candidate's fact at dispatch, then the answer's observation."""
+    fact = prefix.attempt_prefix_fact(slot, messages, tools, route, now=now)
+    prefix.observe_send(slot, messages, round_idx=round_idx, tools=tools)
+    return fact
+
+
+def test_the_first_request_and_a_pure_extension_of_it():
+    slot = SimpleNamespace()
+    start = [system(), {"role": "user", "content": "task"}]
+    assert send(slot, start, OPUS, now=100.0) == {"departs": "first"}
+    assert send(slot, start + turn(1), OPUS, now=130.5) == {"departs": "append", "since_s": 30.5}
+
+
+def test_a_return_to_a_model_is_compared_with_that_models_last_request():
+    slot = SimpleNamespace()
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    on_codex = start + turn(1)
+    assert send(slot, on_codex, CODEX, now=10.0) == {"departs": "route", "from_route": OPUS}
+    send(slot, on_codex + turn(2), CODEX, now=20.0)
+    # Back on the first model, three rounds later: its own last request is the baseline, and only rows were added.
+    back = prefix.attempt_prefix_fact(slot, on_codex + turn(2) + turn(3), [*TOOLS], OPUS, now=50.0)
+    assert back == {"departs": "append", "from_route": CODEX, "since_s": 50.0}
+    # The single baseline alone would have compared with the Codex request and said nothing of the route.
+    assert prefix.departure(slot, on_codex + turn(2) + turn(3), TOOLS) is None
+
+
+def test_the_changed_system_block_is_named_by_its_position():
+    slot = SimpleNamespace()
+    rows = [{"role": "user", "content": "task"}, *turn(1)]
+    send(slot, [system(), *rows], OPUS)
+    memory = prefix.attempt_prefix_fact(slot, [system(memory="memory, one page later"), *rows], TOOLS, OPUS, now=1.0)
+    assert (memory["departs"], memory["index"], memory["of"]) == ("system", 1, 3)
+    context = prefix.attempt_prefix_fact(slot, [system(context="another capture"), *rows], TOOLS, OPUS, now=1.0)
+    assert (context["departs"], context["index"], context["of"]) == ("system", 2, 3)
+    # A marker that moves is not content: the same blocks with other cache markers still only extend the request.
+    unmarked = system()
+    for block in unmarked["content"]:
+        block.pop("cache_control", None)
+    assert prefix.attempt_prefix_fact(slot, [unmarked, *rows, *turn(2)], TOOLS, OPUS, now=1.0)["departs"] == "append"
+
+
+def test_the_earliest_difference_in_wire_order_wins():
+    slot = SimpleNamespace()
+    rows = [{"role": "user", "content": "task"}, *turn(1), *turn(2)]
+    send(slot, [system(), *rows], OPUS)
+    other_tools = [{"type": "function", "function": {"name": "read_file", "description": "Reads one file.", "parameters": {}}}]
+    changed_everything = [system(memory="new"), {"role": "user", "content": "task"}, *turn(9)]
+    assert prefix.attempt_prefix_fact(slot, changed_everything, other_tools, OPUS, now=1.0)["departs"] == "tools"
+    folded = [system(), {"role": "user", "content": "task"}, {"role": "user", "content": "[fold of steps 1-2]"}]
+    fact = prefix.attempt_prefix_fact(slot, folded, TOOLS, OPUS, now=1.0)
+    assert (fact["departs"], fact["index"], fact["of"]) == ("messages", 2, 6)  # the system row is message 0
+    shorter = [system(), *rows[:3]]
+    fact = prefix.attempt_prefix_fact(slot, shorter, TOOLS, OPUS, now=1.0)
+    assert (fact["departs"], fact["index"], fact["of"]) == ("messages", 4, 6)
+
+
+def test_the_seams_that_rewrote_the_view_are_named_and_not_consumed():
+    slot = SimpleNamespace()
+    rows = [{"role": "user", "content": "task"}, *turn(1)]
+    send(slot, [system(), *rows], OPUS)
+    prefix.sanction_rewrite(slot, "compaction")
+    prefix.sanction_rewrite(slot, "continuation_restored", scope="system")
+    prefix.sanction_rewrite(slot, "handover", scope="system")  # a second seam of one scope: the stamp keeps the last, the fact both
+    fact = prefix.attempt_prefix_fact(slot, [system(context="again"), rows[0]], TOOLS, OPUS, now=5.0)
+    assert fact["origins"] == ["compaction", "continuation_restored", "handover"]
+    # The answer's observer still receives both stamps: the record only read them.
+    seen = prefix.observe_send(slot, [system(context="again"), rows[0]], round_idx=2, tools=TOOLS)
+    assert (seen["kind"], seen["sanctioned_by"]) == ("system_rewritten", "handover")
+    assert "origins" not in prefix.attempt_prefix_fact(slot, [system(context="again"), rows[0], *turn(2)], TOOLS, OPUS, now=6.0)
+
+
+def test_only_an_answered_request_becomes_the_routes_record():
+    slot = SimpleNamespace()
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    # A candidate that was never answered (a failed send) leaves the record of the last answered request.
+    prefix.attempt_prefix_fact(slot, [system(memory="other"), start[1]], TOOLS, OPUS, now=5.0)
+    again = prefix.attempt_prefix_fact(slot, start + turn(1), TOOLS, OPUS, now=9.0)
+    assert again == {"departs": "append", "since_s": 9.0}
+    # An observation that named no route (a helper's send) changes no record either.
+    setattr(slot, prefix.PENDING_ROUTE_ATTR, None)
+    prefix.observe_send(slot, [system(memory="helper view")], round_idx=3, tools=TOOLS)
+    assert prefix.attempt_prefix_fact(slot, start + turn(1), TOOLS, OPUS, now=12.0)["departs"] == "append"
+
+
+def test_a_slot_restored_from_before_the_record_says_so_and_a_checkpoint_carries_the_routes():
+    old = SimpleNamespace()
+    prefix.observe_send(old, [system(), {"role": "user", "content": "task"}], round_idx=1, tools=TOOLS)
+    assert prefix.attempt_prefix_fact(old, [system()], TOOLS, OPUS, now=1.0) == {"departs": "unrecorded"}
+
+    slot = SimpleNamespace()
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    saved = json.loads(json.dumps({key: getattr(slot, key) for key in prefix.OBSERVER_STATE_ATTRS if hasattr(slot, key)}))
+    restored = SimpleNamespace(**saved)
+    assert prefix.attempt_prefix_fact(restored, start + turn(1), TOOLS, OPUS, now=4.0) == {"departs": "append", "since_s": 4.0}
+    assert prefix.attempt_prefix_fact(restored, [system(rules="new rules"), start[1]], TOOLS, OPUS, now=4.0)["index"] == 0
+
+
+def test_a_task_keeps_a_bounded_number_of_routes():
+    slot = SimpleNamespace()
+    start = [system(), {"role": "user", "content": "task"}]
+    for n in range(prefix._ROUTES_KEPT + 1):
+        send(slot, start, f"model-{n}", now=float(n))
+    routes = getattr(slot, prefix.ROUTE_SENDS_ATTR)
+    assert [name for name, held in routes.items() if "messages" in held] == [f"model-{n}" for n in range(1, prefix._ROUTES_KEPT + 1)]
+    # The route whose record was let go keeps its name: its next request has no base and says so, never "first" or "entered".
+    assert routes["model-0"] == {"dropped": True}
+    dropped = prefix.attempt_prefix_fact(slot, start, TOOLS, "model-0", now=9.0)
+    assert dropped["departs"] == "unrecorded" and "since_s" not in dropped and prefix.prefix_class(dropped, "1h") == ("not_recorded", "")
+    assert prefix.attempt_prefix_fact(slot, start, TOOLS, "model-new", now=9.0)["departs"] == "route"
+
+
+def _physical(**extra):
+    return PhysicalAttemptContext(
+        profile="owner_max", rendered_mode="max", measurement_basis="fresh_route_usage", route_fp="fp",
+        round_id="exec:round:1", target_total_tokens=None, capacity_total_tokens=1000, context_target_miss=False,
+        automatic_pass_used=False, **extra)
+
+
+def test_the_fact_rides_the_physical_context_into_the_ledger_row():
+    from dataclasses import asdict
+
+    from ouroboros.usage_ledger import UsageLedgerCorrupt, _validate_candidate_facts
+
+    ctx = SimpleNamespace(tools=SimpleNamespace(_ctx=SimpleNamespace()), accumulated_usage={}, tool_schemas=TOOLS,
+                          messages=[system(), {"role": "user", "content": "task"}], active_model=OPUS, active_use_local=False)
+    prefix.remember_attempt_prefix(ctx)
+    bound = prefix.with_attempt_prefix(_physical(), ctx.accumulated_usage)
+    assert bound.prefix == {"departs": "first"} and asdict(bound)["prefix"] == {"departs": "first"}
+    assert bound == _physical()  # the record is no part of the context's identity
+    assert PhysicalAttemptContext(**asdict(bound)).prefix == {"departs": "first"}
+    # Without a fact the context passes through untouched; without a context there is nothing to carry.
+    assert prefix.with_attempt_prefix(_physical(), {}) == _physical() and prefix.with_attempt_prefix(_physical(), {}).prefix is None
+    assert prefix.with_attempt_prefix(None, ctx.accumulated_usage) is None
+
+    row = {"candidate_measurement_kind": "canonical_json_v1", "candidate_raw_sha256": "0" * 64,
+           "candidate_context_sha256": "1" * 64, "candidate_raw_size_bytes": 2, "candidate_context_size_bytes": 1,
+           "physical_context": asdict(bound)}
+    _validate_candidate_facts(row, 1)  # the row the ledger writes for this send is one it accepts back
+    row["physical_context"].pop("prefix")
+    _validate_candidate_facts(row, 1)  # and a row written before the record existed still is
+    row["physical_context"]["prefix"] = "append"
+    with pytest.raises(UsageLedgerCorrupt, match="prefix"):
+        _validate_candidate_facts(row, 1)
+
+
+def test_real_sends_leave_the_fact_on_their_ledger_rows(main_call):
+    """Through the loop's own dispatch and the real usage store: first request, an extension, a rewritten start."""
+    from tests.test_llm_claudexor import result
+
+    ctx, gateway, *_ = main_call
+    slot = ctx.tools._ctx
+
+    def send(round_idx):
+        ctx.round_idx = round_idx
+        answer, _cost = loop._dispatch_round_model(ctx, loop._measure_round_main_fit(ctx, automatic_pass_used=False), attempt_cap=1)
+        assert answer
+        prefix.observe_send(slot, ctx.messages, round_idx=round_idx, tools=ctx.tool_schemas)  # as the loop does after an answer
+        gateway.results.append(result())
+        gateway.dispatch.append("response_received")
+
+    send(1)
+    ctx.messages.extend(turn(2))
+    send(2)
+    ctx.messages[0] = {**ctx.messages[0], "content": "another capture of the system text"}
+    send(3)
+    facts = [(row.get("physical_context") or {}).get("prefix") for row in dispatched_attempts(ctx.drive_root)]
+    assert [fact["departs"] for fact in facts] == ["first", "append", "system"]
+    assert (facts[2]["index"], facts[2]["of"]) == (0, 1) and "since_s" in facts[1] and "from_route" not in facts[2]
+
+
+def test_one_reader_names_the_class_in_the_providers_own_order():
+    name = prefix.prefix_class
+    assert name(None) == name({}) == name({"departs": "unrecorded"}) == ("not_recorded", "")
+    assert name({"departs": "first"}) == ("first_request", "")
+    assert name({"departs": "route", "from_route": CODEX}) == ("entered_model", CODEX)
+    assert name({"departs": "tools", "origins": ["continuation_restored"], "from_route": CODEX, "since_s": 9e9}, "1h") == \
+        ("tools_changed", "continuation_restored")  # an earlier departure already accounts for the row
+    assert name({"departs": "system", "index": 1, "of": 3, "block": "my story and identity"}) == ("system_changed", "my story and identity")
+    assert name({"departs": "messages", "index": 4, "of": 9, "origins": ["compaction", "handover"]}) == ("history_rewritten", "compaction, handover")
+    # A pure extension: the pause is arithmetic over two recorded facts and a named lifetime, never a stored cause.
+    assert name({"departs": "append", "since_s": 3601.0}, "1h") == ("paused", "")
+    assert name({"departs": "append", "since_s": 3601.0}, "default") == name({"departs": "append", "since_s": 3601.0}) == ("append", "")
+    assert name({"departs": "append", "since_s": 301.0, "from_route": CODEX}, "5m") == ("paused", "")
+    assert name({"departs": "append", "since_s": 12.0, "from_route": CODEX}, "1h") == ("returned_to_model", CODEX)
+    assert name({"departs": "append", "since_s": 12.0}, "1h") == ("append", "")

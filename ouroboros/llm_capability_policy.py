@@ -202,6 +202,8 @@ class _CapabilityPolicyMixin:
                 cl = m.get("context_length")
                 if mid and isinstance(cl, (int, float)) and cl > 0:
                     context_lengths[mid] = recorded.setdefault(mid, {})["context_length"] = int(cl)
+                if mid and isinstance(m.get("pricing"), dict):  # the tariff a display reads without a fetch (``llm_pricing``)
+                    recorded.setdefault(mid, {})["pricing"] = m["pricing"]
             cls._CONTEXT_LENGTH_CACHE, cls._CONTEXT_LENGTH_OBSERVED_AT = context_lengths, utc_now_iso()
             # Image input is a fact about this exact route: one parser, stored
             # under the OpenRouter route scope with this response's time, so any
