@@ -117,3 +117,38 @@ def test_origin_stamp_preserves_hidden_room_zero(tmp_path):
 
     assert focus_signature(_ctx(tmp_path, room=0))["focus"]["room_id"] == "0"
     assert focus_signature(_ctx(tmp_path, room=1))["focus"]["room_id"] == "1"
+
+
+def test_a_publication_writes_its_history_row_first_and_nothing_without_it(tmp_path, monkeypatch):
+    from ouroboros import memory_publication as publication
+
+    path, journal = tmp_path / "memory" / "plain.md", tmp_path / "memory" / "plain_journal.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"Old.\n")
+    revision = _revision(path)
+    author = {"task_id": "t", "focus": {"role": "main"}, "route": "unknown"}
+    monkeypatch.setattr(publication, "append_jsonl", lambda *args, **kwargs: False)
+    refused = publication.publish_memory_file(path, revision, lambda old: "New.\n", journal=journal, author=author,
+                                              source_type="test")
+    assert (refused.ok, refused.reason, refused.revision) == (False, "history_unavailable", revision)
+    assert path.read_bytes() == b"Old.\n" and not journal.exists()
+    assert "could not record this version" in publication.publication_refusal(refused, "memory/plain.md")
+    mem = Memory(tmp_path)
+    mem.ensure_files()
+    identity = mem.identity_path().read_bytes()
+    reply = _update_identity(_ctx(tmp_path), "I keep one continuous memory across my rooms. " * 3,
+                             _revision(mem.identity_path()))
+    assert "history_unavailable" in reply and "could not record this version" in reply
+    assert mem.identity_path().read_bytes() == identity
+    monkeypatch.undo()
+    order, real_append, real_write = [], publication.append_jsonl, publication.write_bytes_atomic
+    monkeypatch.setattr(publication, "append_jsonl",
+                        lambda *args, **kwargs: order.append(("row", path.read_bytes(), kwargs)) or real_append(*args, **kwargs))
+    monkeypatch.setattr(publication, "write_bytes_atomic", lambda *args: order.append(("file",)) or real_write(*args))
+    saved = publication.publish_memory_file(path, revision, lambda old: "New.\n", journal=journal, author=author,
+                                            source_type="test")
+    assert saved.ok and path.read_bytes() == b"New.\n"
+    assert [step[0] for step in order] == ["row", "file"] and order[0][1] == b"Old.\n"
+    assert order[0][2] == {"ensure_record_boundary": True, "require_lock": True}
+    row = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+    assert (row["old_content"], row["new_sha256"]) == ("Old.\n", saved.revision)

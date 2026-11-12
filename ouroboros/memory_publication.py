@@ -1,7 +1,9 @@
 """Revision-checked publication of shared plain memory files.
 
-Inference happens before this seam. Only the source check, atomic replacement
-and history append share the short per-file lock, like knowledge publication.
+Inference happens before this seam. Only the source check, history append and
+atomic replacement share the short per-file lock, like knowledge publication:
+the history row is written first, so a version the file holds is always in its
+journal, and a row that cannot be written leaves the file untouched.
 """
 from __future__ import annotations
 
@@ -40,7 +42,10 @@ def publish_memory_file(path: Path, expected_revision: str | None, render: Calla
     """A missing file accepts None/empty; an existing file requires its byte revision.
 
     A read error is never treated as an empty source. Conflicts publish neither
-    source nor journal. Successful history retains both versions and origin.
+    source nor journal. Successful history retains both versions and origin; the
+    row precedes the replacement and its append is checked (``history_unavailable``
+    publishes nothing). A row whose replacement then fails names a version that
+    never landed, as a knowledge capture does.
     """
     with _publication_lock(path):
         raw = path.read_bytes() if path.exists() else None
@@ -53,18 +58,23 @@ def publish_memory_file(path: Path, expected_revision: str | None, render: Calla
         content = render(old)
         new_raw = content.encode("utf-8")
         new_revision = sha256(new_raw).hexdigest()
-        write_bytes_atomic(path, new_raw)
-        append_jsonl(journal, {
+        if not append_jsonl(journal, {
             "ts": utc_now_iso(), "task_id": author["task_id"], "source_type": source_type,
             "focus": author["focus"], "route": author["route"],
             "old_len": len(old), "new_len": len(content),
             "old_sha256": revision, "new_sha256": new_revision,
             "old_content": old, "new_content": content,
             "old_preview": old[:500], "new_preview": content[:500],
-        })
+        }, ensure_record_boundary=True, require_lock=True):
+            return Publication(False, "history_unavailable", revision, old, old)
+        write_bytes_atomic(path, new_raw)
         return Publication(True, "saved", new_revision, old, content)
 
 
 def publication_refusal(result: Publication, path: str) -> str:
+    if result.reason == "history_unavailable":
+        return (f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: history_unavailable; current_revision={result.revision!r}. "
+                f"Its history journal could not record this version, so {path} was not changed; "
+                "the same call can be retried.")
     return (f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {result.reason}; current_revision={result.revision!r}. "
             f"Read {path}, reconcile your change, then retry with expected_revision from that read.")
