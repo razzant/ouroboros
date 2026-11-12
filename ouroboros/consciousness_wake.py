@@ -26,12 +26,14 @@ import logging
 import pathlib
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.consciousness_authority import (CONSCIOUSNESS_CATEGORY, CONSCIOUSNESS_INITIATOR, WAKE_CAUSE_OWN_CLOCK,
                                                WORK_KIND_CONSCIOUSNESS, disabled_tools_for, is_consciousness_origin,
                                                normalize_level, runtime_mode_cap_for)
+from ouroboros.consciousness_transitions import (CHAT_BOUNDARY_KEYS, TRANSITIONS_VERSION, TransitionChain,
+                                                 accepted_transitions)
 from ouroboros.chat_chain import row_address, source_row_id
 from ouroboros.context_health import safe_read
 from ouroboros.deadline_utils import ago_text
@@ -45,7 +47,6 @@ PROMPT_REL = pathlib.Path("prompts") / "CONSCIOUSNESS.md"
 WAKE_OBSERVATION_KEY = "wake_observation"  # task metadata: the bound observation's source and projection
 WAKE_CONTINUITY_KEY = "wake_continuity"  # task metadata: the notes this wake carries to the next (``previous_wake_text``)
 OBSERVATION_BOUNDARY_VERSION = 1
-TRANSITIONS_VERSION = 2  # complete per-task transition inventory, including closed tasks
 PLACEHOLDERS = ("reason", "last_wake_ago", "events", "level", "level_line", "withheld_tools",
                 "spent_usd", "daily_usd", "running", "max_tasks", "interval", "spend_by_cause", "counted_roots", "places", "previous_wake")
 LEVEL_LINES = {
@@ -632,6 +633,8 @@ class WakeObservation:
     captured_at: str
     # The chat position, transition state and memory sequence a wake that accepts this observation persists.
     boundary: Optional[Dict[str, Any]] = None
+    # The accepted transition chain this observation read; the link its acceptance writes extends it.
+    chain: Optional[TransitionChain] = field(default=None, repr=False, compare=False)
 
     def counts(self) -> Dict[str, int]:
         counts = dict(Counter(kind for kind, _offset, _line in self.events))  # first-seen order
@@ -712,9 +715,6 @@ class WakeObservation:
         return ("\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows) + "\n").encode("utf-8")
 
 
-_CHAT_BOUNDARY_KEYS = ("version", "upper", "segment_start", "segment_sha256")
-
-
 def _task_window(root, prior, chat_rows):
     """Capture typed signatures and only changed/question/chat-addressed bodies together, decoded off the lock.
 
@@ -756,29 +756,12 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
 
     root, gaps = pathlib.Path(drive_root), set()
     accepted = boundary if isinstance(boundary, dict) else {}
-    prior = accepted.get("transitions")
-    source_unreadable = False
-    if isinstance(prior, dict) and "source_ref" in prior:
-        from ouroboros.artifacts import read_actor_source_bytes
-
-        try:
-            ref = prior["source_ref"]
-            raw = read_actor_source_bytes(root, ref["task_id"], ref)
-            header = json.loads(raw.splitlines()[0])
-            stored = header["boundary"]
-            inventory = stored["transitions"]
-            if (header.get("kind") != "wake_observation" or header.get("captured_at") != accepted.get("captured_at")
-                    or any(stored.get(key) != accepted.get(key) for key in _CHAT_BOUNDARY_KEYS)
-                    or stored.get("memory") != accepted.get("memory")
-                    or inventory.get("version") != TRANSITIONS_VERSION
-                    or not isinstance(inventory.get("inventory"), dict)
-                    or any(not isinstance(keys, list) or not all(isinstance(key, str) for key in keys)
-                           for keys in inventory["inventory"].values())):
-                raise ValueError("wake source does not match accepted boundary")
-            prior = inventory
-        except Exception as exc:
-            source_unreadable = True
-            gaps.add(f"unreadable_transition_source: {type(exc).__name__}")
+    try:  # the chain the boundary names, its previous-form wake source, or the state it holds inline
+        prior, chain = accepted_transitions(root, accepted)
+        source_unreadable = False
+    except Exception as exc:
+        prior, chain, source_unreadable = accepted.get("transitions"), None, True
+        gaps.add(f"unreadable_transition_source: {type(exc).__name__}")
     try:
         chat_rows, window = _chat_window(root, accepted or None, since, gaps)
     except Exception as exc:
@@ -869,13 +852,13 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
                 cards.append((str(block.get("asked_at") or ""), _card_line(
                     task_id, str(quiz_id), block, now=now, owner_wait=row.get("owner_wait"))))
     trigger = _trigger_line(reason)
-    chat_boundary = window.get("boundary") or {key: accepted[key] for key in _CHAT_BOUNDARY_KEYS if key in accepted}
+    chat_boundary = window.get("boundary") or {key: accepted[key] for key in CHAT_BOUNDARY_KEYS if key in accepted}
     state_to_accept = {**chat_boundary, **({"transitions": state} if isinstance(state, dict) else {}),
                        **({"memory": memory_boundary} if memory_boundary is not None else {})}
     return WakeObservation(trigger=trigger, events=tuple(events),
                            outstanding=tuple(line for _stamp, line in sorted(cards, reverse=True)),
                            window=window, gaps=tuple(sorted(gaps)), captured_at=_iso(now),
-                           boundary=None if source_unreadable else state_to_accept or None)
+                           boundary=None if source_unreadable else state_to_accept or None, chain=chain)
 
 
 def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
@@ -956,7 +939,7 @@ def bind_wake_observation(drive_root: Any, task: Dict[str, Any], observation: Wa
         if pointer != projection:  # the start's and a real overflow's guarantee: the bare pointer
             facts["pointer_text"] = pointer
         if observation.boundary is not None and (observation.boundary.get("transitions") or {}).get("version") == TRANSITIONS_VERSION:
-            accepted = {key: observation.boundary[key] for key in _CHAT_BOUNDARY_KEYS if key in observation.boundary}
+            accepted = {key: observation.boundary[key] for key in CHAT_BOUNDARY_KEYS if key in observation.boundary}
             accepted.update(transitions={"version": TRANSITIONS_VERSION, "source_ref": source},
                             task_id=str(task["id"]), captured_at=observation.captured_at)
             if "memory" in observation.boundary:
