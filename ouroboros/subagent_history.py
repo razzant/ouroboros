@@ -41,22 +41,24 @@ def _price_class(identity: Any) -> list[str]:
     return [str(identity.get("target_id") or ""), str(identity.get("processing_preference") or "")]
 
 
-def _first_call_cost(drive_root, task_id: str, *names: Any) -> Optional[dict]:
-    """What this task's first call on the row's model cost, as the usage ledger settled it: the first attempt
-    of the task that came back with input counted. The ledger names a model as its route sends it, so
-    ``names`` (the row's target, the name its first answer was recorded under) and the ledger's spelling meet
-    in ``normalize_model_identity``. ``usd`` is None when that attempt carries no price; an unreadable ledger
-    (the display wait, never longer) or no such attempt is no sample."""
+def _first_call_cost(drive_root, task_id: str, first: Mapping[str, Any], target: str) -> Optional[dict]:
+    """What the task's first call on the row's own route cost, as the usage ledger settled it: the task's
+    first attempt on the provider and model of its first usable answer (``first``) that came back with input
+    counted. Another route's attempt under the same model name is never it. The ledger names a model as its
+    route sends it, so the row's ``target`` and the name the answer was recorded under meet the ledger's
+    spelling in ``normalize_model_identity``. ``usd`` is None when that attempt carries no price; an
+    unreadable ledger (the display wait, never longer) or no such attempt is no sample."""
     from ouroboros import usage_store
     from ouroboros.provider_models import normalize_model_identity
 
-    own = {normalize_model_identity(str(name)) for name in names if name}
+    own = {normalize_model_identity(str(name)) for name in (target, first.get("resolved_model")) if name}
     try:
         with usage_store.read(drive_root, allow_stale=True) as txn:
             row = next((row for row in txn.conn.execute(
-                "SELECT model, cost_usd FROM attempts INDEXED BY attempts_task WHERE task_id=? "
+                "SELECT model, cost_usd FROM attempts INDEXED BY attempts_task WHERE task_id=? AND provider=? "
                 "AND source='agent.task' AND state='settled' AND COALESCE(prompt_tokens, 0) > 0 "
-                "ORDER BY seq_first", (task_id,)) if normalize_model_identity(str(row["model"] or "")) in own), None)
+                "ORDER BY seq_first", (task_id, str(first.get("provider") or "")))
+                if normalize_model_identity(str(row["model"] or "")) in own), None)
     except Exception:
         log.debug("first-call cost unavailable from the usage ledger", exc_info=True)
         return None
@@ -64,31 +66,32 @@ def _first_call_cost(drive_root, task_id: str, *names: Any) -> Optional[dict]:
 
 
 def _kept_first_calls(old: Any, rows: Mapping[str, Any], actor: str, sample: Optional[dict]) -> dict:
-    """Every kept row's first-call samples, ``sample`` added to ``actor``'s: one per task, of the row's
-    current price class only, the newest ``FIRST_CALLS_KEPT``. A row that left the projection takes its samples."""
-    kept = {key: [item for item in ring if isinstance(item, dict)] for key, ring in
-            (old.items() if isinstance(old, dict) else ()) if key in rows and isinstance(ring, list)}
-    if sample and actor in rows:
-        ring = [item for item in kept.get(actor, ()) if item.get("of") == sample["of"]
-                and item.get("task_id") != sample["task_id"]]
-        kept[actor] = [*ring, sample][-FIRST_CALLS_KEPT:]
-    return {key: ring for key, ring in kept.items() if ring}
+    """Every kept row's first-call samples, ``sample`` offered to ``actor``'s. A row keeps the samples of its
+    recorded price class, one per task (the first recorded), the newest ``FIRST_CALLS_KEPT`` by the date of
+    their execution: a late or repeated observation neither erases nor outranks newer measurements, and a
+    row that left the projection takes its samples."""
+    old, kept = old if isinstance(old, dict) else {}, {}
+    for key, row in rows.items():
+        of, tasks, ring = _price_class(row.get("identity") if isinstance(row, dict) else None), set(), []
+        for item in [*(old.get(key) if isinstance(old.get(key), list) else ()), *([sample] if sample and key == actor else ())]:
+            if isinstance(item, dict) and item.get("of") == of and item.get("task_id") not in tasks:
+                tasks.add(item.get("task_id"))
+                ring.append(item)
+        if ring:
+            kept[key] = sorted(ring, key=lambda item: _timestamp_key(item.get("ts")))[-FIRST_CALLS_KEPT:]
+    return kept
 
 
 def first_call_facts(drive_root=None) -> dict[str, dict[str, str]]:
-    """Each kept row's measured first-call price in the review seats' words (``review_price_text``): the median
-    of its kept samples of its current price class. No sample is no fact; samples without a price are "cost unknown"."""
+    """Each kept row's measured first-call price in the review seats' words (``review_price_text``): the
+    median of its kept samples. No sample is no fact; samples without a price are "cost unknown"."""
     import statistics
 
     from ouroboros.review_price import ReviewPrice, review_price_text
 
-    stored = _projection(drive_root)
-    rows, kept = stored.get("latest_by_subagent"), stored.get(FIRST_CALLS_KEY)
-    facts: dict[str, dict[str, str]] = {}
-    for actor, samples in (kept.items() if isinstance(kept, dict) and isinstance(rows, dict) else ()):
-        row = rows.get(actor)
-        of = _price_class(row.get("identity") if isinstance(row, dict) else None)
-        own = [item for item in samples if isinstance(item, dict) and item.get("of") == of] if isinstance(samples, list) else []
+    kept, facts = _projection(drive_root).get(FIRST_CALLS_KEY), {}
+    for actor, samples in (kept.items() if isinstance(kept, dict) else ()):
+        own = [item for item in samples if isinstance(item, dict)] if isinstance(samples, list) else []
         usd = [float(item["usd"]) for item in own if isinstance(item.get("usd"), (int, float)) and not isinstance(item.get("usd"), bool)]
         if own:
             price = ReviewPrice(usd=statistics.median(usd), reviews=len(usd), low=min(usd), high=max(usd)) if usd else None
@@ -161,9 +164,8 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
     neither refresh its date nor displace a newer fact. Task, invocation and
     attempt ids are kept as trace references when present, and ``identity``
     carries the originally requested effort. ``first_call`` is one measured sample of what the
-    row's first answered call cost (``_first_call_cost``): each kept row holds its last
-    ``FIRST_CALLS_KEPT`` of its current price class, one per task. The existing actor-count
-    bound keeps this a compact projection; the event log retains full history.
+    row's first call cost (``_first_call_cost``), kept beside the receipts (``_kept_first_calls``).
+    The existing actor-count bound keeps this a compact projection; the event log retains full history.
     """
     from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
@@ -273,7 +275,7 @@ def record_task_execution(task: Mapping[str, Any], usage: Mapping[str, Any], *, 
     # fallback's) on a route that bills money: the subscription engine and the local lane state no per-call cash.
     from ouroboros.usage_accounting import paid_admission
     first = next((row for row in calls if isinstance(row, dict) and row.get("usable_solve_response")), None)
-    first_call = (_first_call_cost(drive_root, str(task.get("id") or ""), model, first.get("resolved_model"))
+    first_call = (_first_call_cost(drive_root, str(task.get("id") or ""), first, model)
                   if first and selected(first) and paid_admission(first.get("provider"), None) else None)
     fallback = {key: other[key] for key in ("model", "llm_call_id", "ts") if key in other}
     if other:
