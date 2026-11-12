@@ -146,7 +146,7 @@ const mountPermissions = rowsPage('permissions', {
             + card({ title: 'What it may change', rows: rows('OUROBOROS_RUNTIME_MODE') })
             + card({ title: 'Who watches its actions', lead: 'The Safety Supervisor is a second model that reads a step before it runs.',
                 rows: rows('OUROBOROS_SAFETY_MODE', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'permissions:rules', 'permissions:supervisor', 'permissions:second-check'),
-                after: note('data-safety-skips role="status"') + note('data-safety-spares role="status"') + note('data-safety-exits hidden')
+                after: note('data-safety-skips role="status"') + note('data-safety-spares role="status" hidden') + note('data-safety-exits hidden')
                     + note('data-safety-organization-rules hidden', 'Your organization’s rules apply too; its administrator sets them.') })
             + card({ title: 'Who checks its results', lead: 'Reviewers are other models that read finished work.',
                 rows: rows('OUROBOROS_TASK_REVIEW_MODE', 'OUROBOROS_REVIEW_ENFORCEMENT', 'permissions:reviewers') })

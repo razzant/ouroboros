@@ -912,7 +912,7 @@ def test_a_long_waits_refusals_collapse_into_a_short_row():
         f"This round's asks from its first provider content refusal on: {FALLBACK}, 42 asks: {CONTENT_FILTER} 41 times "
         '(first at t0, last at t40; upstream "Anthropic"), answered once; its failed asks: cost $0.0300 reported, billing '
         "basis not reported; 11 cost unknown. primary/model, 40 asks: a request that never reached the provider 40 "
-        f'times; its failed asks: no cost in this record. The provider said: "{REFUSED}" Its category: not given on this '
+        f'times; its failed asks: cost not kept in this record. The provider said: "{REFUSED}" Its category: not given on this '
         "connection."), facts
     assert len(facts) < 800
 
@@ -920,7 +920,7 @@ def test_a_long_waits_refusals_collapse_into_a_short_row():
 def test_a_local_routes_failed_asks_and_a_row_that_keeps_no_cost_say_so():
     """A local route's failed asks read "local route, no provider charge" whatever its refusals stated and whichever of
     its rows comes first, never a sum or "cost unknown"; a failed ask whose row keeps no cost (only a kept refusal
-    states its money) reads "no cost in this record"; "cost unknown" stays for a refusal whose provider reported none.
+    states its money) reads "cost not kept in this record"; "cost unknown" stays for a refusal whose provider reported none.
     Never $0 (before: the local route read "cost $0.0000 estimated …; 2 cost unknown")."""
     from ouroboros.loop_transport import _failure_words
     from ouroboros.primary_route_observation import note_content_refusal, refusal_facts
@@ -946,7 +946,7 @@ def test_a_local_routes_failed_asks_and_a_row_that_keeps_no_cost_say_so():
     assert refusal_facts(total, 3) == (
         f"This round's asks from its first provider content refusal on: {FALLBACK}, 3 asks: {CONTENT_FILTER} once (at "
         f"t-s1; upstream not named), {_failure_words('transport_unavailable')} once, answered once; its failed asks: "
-        "cost unknown, billing basis not reported; 1 with no cost in this record. local/model (local), 3 asks: "
+        "cost unknown, billing basis not reported; 1 with cost not kept in this record. local/model (local), 3 asks: "
         f"{_failure_words('provider_error')} once, {CONTENT_FILTER} 2 times (first at t-l2, last at t-l3; upstream not "
         "named); its failed asks: local route, no provider charge. The refusal carried no sentence on this connection. "
         "Its category: not given on this connection.")
