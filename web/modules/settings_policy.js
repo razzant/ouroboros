@@ -54,32 +54,9 @@ export const checkerReads = (deployment, settingKey) => (deployment?.checker?.fi
 export const checkerFieldsNote = (labels) => (labels.length
     ? `${labels.join(' and ')}: set by your organization, its Safety Supervisor uses ${labels.length > 1 ? 'them' : 'it'}.` : '');
 
-/** Show `input` (one flat setting outside an API-key row) as the checker reads it: read-only with `note`, or as it was. */
-export function fixCheckerField(input, note, deployment, settingKey, label) {
-    if (!input) return;
-    const fixed = checkerReads(deployment, settingKey);
-    input.readOnly = fixed;
-    if (note) Object.assign(note, { hidden: !fixed, textContent: fixed ? checkerFieldsNote([label]) : '' });
-}
-
 /** Which required extension a custom setting is fixed for (``deployment.extensions``), else ''. */
 export const organizationSettingOwner = (deployment, key) => ((deployment?.extensions?.required || [])
     .find((row) => (row?.settings || []).includes(key))?.name || '');
-
-/** A secret row whose value the organization fixes: read-only, no Show, Clear or Remove, and one sentence saying
- * whose value it is. Its masked value stays in the field, so a save carries it back unchanged. */
-export function fixOrganizationSecret(row, deployment, key) {
-    const owner = organizationSettingOwner(deployment, key);
-    if (!row || !owner) return;
-    row.querySelectorAll('input').forEach((input) => { input.readOnly = true; });
-    row.querySelectorAll('[data-row-secret-toggle], [data-row-secret-clear], [data-custom-secret-remove]')
-        .forEach((button) => { button.hidden = true; });
-    const note = row.ownerDocument.createElement('div');
-    note.className = 'settings-inline-note';
-    note.dataset.organizationSetting = key;
-    note.textContent = `Set by your organization for ${owner}; its value is not shown.`;
-    (row.querySelector('.secret-input-row')?.parentElement || row).appendChild(note);
-}
 
 /** A stored policy value as the owner reads it. `light` is a word of two scales: the Safety scale's is asked for by
  *  its axis (`coverage`), else it is Access's. */

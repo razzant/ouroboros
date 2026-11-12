@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { allowedOptions, applyPolicyToRows, checkerFieldsNote, checkerReads, checkerUses, deploymentNote, deploymentOf, fixCheckerField,
+import { allowedOptions, applyPolicyToRows, checkerFieldsNote, checkerReads, checkerUses, deploymentNote, deploymentOf,
     policyValueLabel, safetyExitsNote } from '../modules/settings_policy.js';
 import { rowById } from '../modules/settings_rows.js';
 import { connectionRowFacts } from '../modules/settings_connections.js';
@@ -68,13 +68,6 @@ test('a built-in checker fixes only the flat fields it reads, and says so beside
     assert.equal(checkerFieldsNote(['Base URL', 'API key']),
         'Base URL and API key: set by your organization, its Safety Supervisor uses them.');
     assert.equal(checkerFieldsNote([]), '');
-    const input = { readOnly: false };
-    const note = { hidden: true, textContent: '' };
-    fixCheckerField(input, note, legacy, 'OPENAI_BASE_URL', 'Legacy OpenAI Base URL');
-    assert.deepEqual([input.readOnly, note.hidden], [true, false]);
-    assert.match(note.textContent, /^Legacy OpenAI Base URL: set by your organization/);
-    fixCheckerField(input, note, null, 'OPENAI_BASE_URL', 'Legacy OpenAI Base URL');
-    assert.deepEqual([input.readOnly, note.hidden, note.textContent], [false, true, ''], 'unmanaged: as it was');
     const shared = { enabled: true, configured: true, usedBy: ['Main'], legacyAddress: 'https://organization.invalid/v1' };
     assert.match(connectionRowFacts(shared).meta, /change the address in Settings → Accounts and keys/);
     assert.doesNotMatch(connectionRowFacts({ ...shared, fixed: true }).meta, /change the address/,
