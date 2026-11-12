@@ -15,7 +15,7 @@ import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
-from tests.ui_chat_viewport_smoke import wait_drawer_closed
+from tests.settings_browser_helpers import open_settings
 from tests.ui_console_errors import PageErrors, record_console_errors, record_failed_loads, unexpected_console_errors
 
 pytestmark = [pytest.mark.ui_browser]
@@ -108,7 +108,8 @@ def _test_row(page, row, verdict):
 
     with page.expect_response('**/api/providers/test') as tested:
         row.locator('[data-connection-test]').click()
-    expect(row.locator('[data-connection-test-status]')).to_have_text(verdict)
+    # The wizard's row says its verdict in its own status; a key's Settings page in its editor's result line.
+    expect(row.locator('[data-editor-result], [data-connection-test-status]')).to_have_text(verdict)
     return tested.value.request.post_data_json
 
 
@@ -149,7 +150,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         expect(status).to_have_text('Ready')
         expect(meta).to_be_visible()
         expect(meta).to_contain_text(f'Legacy OpenAI Base URL {legacy_url} with the OpenAI API key'
-                                     ' · change the address in Settings → Accounts · used by Main')
+                                     ' · change the address in Settings → Accounts and keys · used by Main')
         expect(default.locator('[data-connection-field="base_url"]')).to_have_value('')
         expect(default.locator('[data-connection-field="api_key"]')).to_have_value('')
         expect(default.locator('[data-connection-remove]')).to_be_hidden()
@@ -251,53 +252,24 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
 
         # Settings reads the same pair: Ready with the same address, and Main's source keeps its access.
         page.wait_for_url(ui["url"] + "/", wait_until="domcontentloaded")
-        page.click('[data-nav-page="settings"]')
-        expect(page.locator('#settings-status')).to_have_text('Settings refreshed')
-        settings_card = page.locator('[data-provider-card="compatible"]')
-        if settings_card.locator('.settings-provider-body').is_hidden():  # Settings opens it only for added keys
-            settings_card.locator('[data-provider-toggle]').click()
-        settings_row = settings_card.locator('[data-connection-row][data-builtin="1"]')
-        expect(settings_row.locator('[data-connection-status]')).to_have_text('Ready')
-        expect(settings_row.locator('[data-connection-meta]')).to_contain_text(legacy_url)
-        expect(page.locator('#s-openai-base-url')).to_have_value(legacy_url)
-        report["settings_meta"] = settings_row.locator('[data-connection-meta]').inner_text()
-        settings_row.scroll_into_view_if_needed()
-        report["frames"]["settings-accounts"] = _frame(page, evidence, "settings-accounts", settings_row)
-        # Settings' Test reads the same pair, the key as typed in its own OpenAI row; official OpenAI asks for itself
-        # alone (answered here: no request leaves for the vendor).
-        kept = page.locator('#s-openai').input_value()
-        assert kept and kept != LEGACY_KEY, "Settings holds its own mask, never the key"
+        official_page = open_settings(page, "accounts/key/openai")
+        kept = official_page.locator('#s-openai').input_value()
+        assert kept and kept != LEGACY_KEY, "Settings keeps the saved mask"
+        official_page.locator('[data-settings-fold] > summary').click()
+        expect(official_page.locator('[data-setting-row="OPENAI_BASE_URL"] input')).to_have_value(legacy_url)
+        settings_page = open_settings(page, "accounts/key/openai-compatible")
+        settings_row = settings_page.locator('[data-connection-row]')
         before = len(legacy_calls)
         assert _test_row(page, settings_row, 'Works') == _legacy_test(legacy_url, kept)
         assert _sent(legacy_calls[before:]) == {f"Bearer {LEGACY_KEY}"}
-        openai_card = page.locator('[data-provider-card="openai"]')
-        if openai_card.locator('.settings-provider-body').is_hidden():
-            openai_card.locator('[data-provider-toggle]').click()
-        page.locator('#s-openai').fill(EDITED_KEY)
-        expect(settings_row.locator('[data-connection-test-status]')).to_have_text('')
-        before = len(legacy_calls)
-        assert _test_row(page, settings_row, 'Works') == _legacy_test(legacy_url, EDITED_KEY)
-        assert _sent(legacy_calls[before:]) == {f"Bearer {EDITED_KEY}"}
-        official = openai_card.locator('[data-connection-row][data-builtin="1"]')
+        report["frames"]["settings-accounts"] = _frame(page, evidence, "settings-accounts", settings_row)
+        official_page = open_settings(page, "accounts/key/openai")
+        official = official_page.locator('[data-connection-row]')
+        official_page.locator('#s-openai').fill(EDITED_KEY)
         page.route('**/api/providers/test', lambda route: route.fulfill(json={"ok": True}))
         assert _test_row(page, official, 'Works') == {"provider_id": "openai", "overrides": {"OPENAI_API_KEY": EDITED_KEY}}
         page.unroute('**/api/providers/test')
-        page.locator('#s-openai').fill(kept)
-        # An unsaved legacy address is what Test asks about too: the kept key stays on its saved address, nothing
-        # reaches the new one, and a typed key may test it.
-        address = page.locator('#s-openai-base-url')
-        address.fill(dedicated_url)
-        expect(settings_row.locator('[data-connection-test-status]')).to_have_text('')
-        moved = "Not ready — This server's address changed since its key was saved. Enter its key again to test the new address."
-        assert _test_row(page, settings_row, moved) == _legacy_test(dedicated_url, kept)
-        assert not dedicated_calls
-        page.locator('#s-openai').fill(EDITED_KEY)
-        assert _test_row(page, settings_row, 'Works') == _legacy_test(dedicated_url, EDITED_KEY)
-        assert _sent(dedicated_calls) == {f"Bearer {EDITED_KEY}"}
-        dedicated_calls.clear()
-        page.locator('#s-openai').fill(kept)
-        address.fill(legacy_url)
-        page.click('[data-settings-tab="models"]')
+        open_settings(page, "models/role/main")
         settings_main = page.locator('[data-model-role="main"] [data-model-role-source]')
         expect(settings_main).to_have_value('api:openai-compatible')
         assert '(no key)' not in settings_main.locator('option:checked').inner_text()
@@ -494,174 +466,70 @@ MOVED = "Not ready — This server's address changed since its key was saved. En
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 @pytest.mark.parametrize("shape", ["legacy", "both-pairs"])
 def test_settings_row_describes_the_pair_its_test_sends(direct_server_with_data, tmp_path, shape, engine):
-    """Settings' built-in compatible row reads the saved pair's facts only while its draft still reaches that pair,
-    the one its Test sends. The legacy address and the OpenAI key are edited beside the row: moving the legacy pair
-    there makes the row a draft (it vouches for nothing yet), and going back restores the saved facts. With a
-    dedicated pair saved, both are beside the point until the dedicated address is cleared. Nothing is saved."""
+    """Each key's Test follows the pair selected by its draft; editing withdraws the old verdict.
+
+    The legacy address is a separate committed row now. Cross-card unsaved edits and Ready/cache-note
+    labels belonged to the retired shared form; the wizard above still proves its draft behavior.
+    """
     from playwright.sync_api import expect, sync_playwright
 
     ui = direct_server_with_data
     evidence = diagnostic_directory(tmp_path / "frames", f"settings-pair-{shape}-{engine}", publish=True)
-    report = {"candidate_identity": ui["candidate_identity"], "engine": engine, "shape": shape, "frames": {}, "steps": []}
     with _endpoint(["legacy-model"]) as (legacy_url, legacy_calls), _endpoint(["other-model"]) as (other_url, other_calls), \
             _endpoint(["dedicated-model"]) as (dedicated_url, dedicated_calls), sync_playwright() as pw:
         if shape == "legacy":
             _seed_legacy_install(ui, legacy_url)
         else:
-            ui["stop_server"]()  # seed only while stopped
+            ui["stop_server"]()
             path = ui["data_dir"] / "settings.json"
             settings = json.loads(path.read_text(encoding="utf-8"))
-            settings.update({"OPENAI_COMPATIBLE_BASE_URL": dedicated_url, "OPENAI_COMPATIBLE_API_KEY": DEDICATED_KEY,
-                             "OPENAI_BASE_URL": legacy_url, "OPENAI_API_KEY": LEGACY_KEY,
-                             **dict.fromkeys(("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"),
-                                             "openai-compatible::dedicated-model")})
+            settings.update(OPENAI_BASE_URL=legacy_url, OPENAI_API_KEY=LEGACY_KEY,
+                            OPENAI_COMPATIBLE_BASE_URL=dedicated_url, OPENAI_COMPATIBLE_API_KEY=DEDICATED_KEY)
             path.write_text(json.dumps(settings), encoding="utf-8")
             ui["start_server"]()
         saved_before = (ui["data_dir"] / "settings.json").read_bytes()
         browser = getattr(pw, engine).launch(headless=True)
-        page = browser.new_context(viewport={"width": 980, "height": 780}, device_scale_factor=2).new_page()
-        # Inject only a dated provider fact into the real Settings response: the test exercises its display,
-        # not a paid provider learning a cache-hint refusal. The server and every Test request stay real.
-        def with_cache_hint(route):
-            response = route.fetch()
-            data = response.json()
-            entry = next(item for item in data["_meta"]["connections"] if item["id"] == "openai-compatible")
-            entry["cache_hints"] = {"refused": True, "learned_at": "2026-10-20T10:00:00Z"}
-            route.fulfill(response=response, json=data)
-
-        page.route("**/api/settings", with_cache_hint)
-        uncaught = []
-        page.on("pageerror", lambda error: uncaught.append(str(error)))
-        page.goto(ui["url"], wait_until="domcontentloaded")
-        page.wait_for_selector("#page-chat", timeout=30_000)
-        page.click('[data-nav-page="settings"]')
-        expect(page.locator("#settings-status")).to_have_text("Settings refreshed", timeout=30_000)
-        for card in ("compatible", "openai"):
-            toggle = page.locator(f'[data-provider-card="{card}"] [data-provider-toggle]')
-            if toggle.get_attribute("aria-expanded") != "true":
-                toggle.click()
-        row = page.locator('[data-provider-card="compatible"] [data-connection-row][data-builtin="1"]')
-        official = page.locator('[data-provider-card="openai"] [data-connection-row][data-builtin="1"]')
-        status, meta, verdict = (row.locator(f"[data-connection-{part}]") for part in ("status", "meta", "test-status"))
-        cache_note = row.locator("[data-connection-cache]")
-        address, key, base = page.locator("#s-openai-base-url"), page.locator("#s-openai"), row.locator('[data-connection-field="base_url"]')
-        kept = key.input_value()
-        assert kept and kept != LEGACY_KEY, "Settings holds its own mask, never the key"
-        calls = {legacy_url: legacy_calls, other_url: other_calls, dedicated_url: dedicated_calls}
-        legacy_meta = f"Legacy OpenAI Base URL {legacy_url} with the OpenAI API key"
-        dedicated_test = {"provider_id": "openai-compatible", "api_key_setting": "OPENAI_COMPATIBLE_API_KEY", "overrides": {}}
-
-        mismatches = []
-
-        def painted_as(name, check):
-            """What the row should say; a miss is kept with the step, so one run shows every state it got wrong."""
-            try:
-                check()
-            except AssertionError as error:
-                mismatches.append({"step": name, "miss": " ".join(str(error).split())[:300]})
-
-        def step(name, row_status, *, shown=None, kept_verdict=None, test=None, answer=None, reached=None):
-            """The row as painted, a frame of it, then (when asked) its real Test: what it sent and who heard it."""
-            painted_as(name, lambda: expect(status).to_have_text(row_status, timeout=3000))
-            if row_status == "Not saved":
-                painted_as(name, lambda: expect(cache_note).to_be_hidden(timeout=3000))
+        try:
+            page = browser.new_page(viewport={"width": 1087, "height": 740})
+            page.goto(ui["url"], wait_until="domcontentloaded")
+            official = open_settings(page, "accounts/key/openai")
+            kept = official.locator('#s-openai').input_value()
+            assert kept and kept != LEGACY_KEY
+            official.locator('[data-settings-fold] > summary').click()
+            expect(official.locator('[data-setting-row="OPENAI_BASE_URL"] input')).to_have_value(legacy_url)
+            editor = open_settings(page, "accounts/key/openai-compatible")
+            row = editor.locator('[data-connection-row]')
+            base = row.locator('[data-connection-field="base_url"]')
+            key = row.locator('[data-connection-field="api_key"]')
+            result = row.locator('[data-editor-result]')
+            expect(base).to_have_value(dedicated_url if shape == "both-pairs" else "")
+            expected = {"provider_id": "openai-compatible", "api_key_setting": "OPENAI_COMPATIBLE_API_KEY", "overrides": {}}
+            assert _test_row(page, row, "Works") == (expected if shape == "both-pairs" else _legacy_test(legacy_url, kept))
+            assert _sent(dedicated_calls if shape == "both-pairs" else legacy_calls) == {f"Bearer {DEDICATED_KEY if shape == 'both-pairs' else LEGACY_KEY}"}
+            # A saved dedicated key cannot be sent to a newly typed destination without entering it again.
+            base.fill(other_url)
+            expect(result).to_have_text("")
+            if shape == "both-pairs":
+                _test_row(page, row, MOVED)
+                assert not other_calls
             else:
-                painted_as(name, lambda: expect(cache_note).to_be_visible(timeout=3000))
-                painted_as(name, lambda: expect(cache_note).to_contain_text("refused by this server"))
-            if shown is None:
-                painted_as(name, lambda: expect(meta).to_be_hidden(timeout=3000))
-            else:
-                painted_as(name, lambda: expect(meta).to_contain_text(shown, timeout=3000))
-                if shown != legacy_meta:
-                    painted_as(name, lambda: expect(meta).not_to_contain_text("Legacy", timeout=3000))
-            if kept_verdict is not None:
-                painted_as(name, lambda: expect(verdict).to_have_text(kept_verdict, timeout=3000))
-            row.scroll_into_view_if_needed()
-            painted = {"step": name, "row": status.inner_text(), "meta": meta.inner_text() if meta.is_visible() else "",
-                       "verdict": verdict.inner_text(), "official": official.locator("[data-connection-status]").inner_text()}
-            report["frames"][name] = _frame(page, evidence, name, row)
-            if test is not None:
-                before = {url: len(sent) for url, sent in calls.items()}
-                painted["test_request"] = _test_row(page, row, answer)
-                assert painted["test_request"] == test, painted
-                # The probe is the one POST; a model-list read the page makes meanwhile is not this Test.
-                probes = {url: [call for call in sent[before[url]:] if call["method"] == "POST"] for url, sent in calls.items()}
-                painted["upstream"] = {url: sent for url, sent in probes.items() if sent}
-                assert {url: _sent(sent) for url, sent in painted["upstream"].items()} == (reached or {}), painted
-            report["steps"].append(painted)
-
-        if shape == "legacy":
-            expect(address).to_have_value(legacy_url)
-            expect(base).to_have_value("")
-            step("saved", "Ready", shown=legacy_meta, test=_legacy_test(legacy_url, kept), answer="Works",
-                 reached={legacy_url: {f"Bearer {LEGACY_KEY}"}})
-            # The legacy address, edited beside the row: the row no longer says Ready at the saved address, and the
-            # kept key stays on its own address.
-            address.fill(other_url)
-            step("address-edited", "Not saved", kept_verdict="", test=_legacy_test(other_url, kept), answer=MOVED)
-            address.fill(legacy_url)
-            step("address-restored", "Ready", shown=legacy_meta, kept_verdict="")
-            # The OpenAI key the pair travels with: its Clear, then its row's Remove, each followed by the saved mask.
-            page.locator('.secret-clear[data-target="s-openai"]').click()
-            step("key-cleared", "Not saved", test=_legacy_test(legacy_url, ""), answer="Not ready — Provider is not configured")
-            key.fill(kept)
-            step("key-restored", "Ready", shown=legacy_meta, kept_verdict="")
-            official.locator("[data-connection-remove]").click()
-            step("key-removed", "Not saved", kept_verdict="")
-            key.fill(kept)
-            step("key-restored-again", "Ready", shown=legacy_meta)
-            # A dedicated address typed in the row selects the dedicated pair; the legacy address is then beside the
-            # point, so editing it keeps the verdict. Clearing the row returns to the saved legacy pair.
-            base.fill(dedicated_url)
-            step("dedicated-typed", "Not saved", kept_verdict="", answer="Works", reached={dedicated_url: {None}},
-                 test={"provider_id": "openai-compatible", "api_key_setting": "OPENAI_COMPATIBLE_API_KEY",
-                       "overrides": {"OPENAI_COMPATIBLE_BASE_URL": dedicated_url}})
-            address.fill(other_url)
-            step("dedicated-typed-address-edited", "Not saved", kept_verdict="Works")
-            address.fill(legacy_url)
+                assert _test_row(page, row, "Works")["overrides"] == {"OPENAI_COMPATIBLE_BASE_URL": other_url}
+                assert _sent(other_calls) == {None}
+            key.fill(EDITED_KEY)
+            expect(result).to_have_text("")
+            _test_row(page, row, "Works")
+            assert _sent(other_calls[-1:]) == {f"Bearer {EDITED_KEY}"}
+            # Clearing the dedicated address sends through the saved legacy pair, not the dedicated draft key.
             base.fill("")
-            step("dedicated-cleared", "Ready", shown=legacy_meta, kept_verdict="")
-        else:
-            expect(base).to_have_value(dedicated_url)
-            step("saved", "Ready", shown="Enabled", test=dedicated_test, answer="Works",
-                 reached={dedicated_url: {f"Bearer {DEDICATED_KEY}"}})
-            # The dedicated pair is the endpoint: the legacy address and the OpenAI key change nothing it sends.
-            address.fill(other_url)
-            step("legacy-address-edited", "Ready", shown="Enabled", kept_verdict="Works")
-            page.locator('.secret-clear[data-target="s-openai"]').click()
-            step("legacy-key-cleared", "Ready", shown="Enabled", kept_verdict="Works")
-            key.fill(kept)
-            address.fill(legacy_url)
-            # Clearing the dedicated address selects the legacy pair: a draft whose Test reaches the legacy address
-            # with the legacy key, until the legacy address moves too.
-            base.fill("")
-            step("dedicated-cleared", "Not saved", kept_verdict="", answer="Works", reached={legacy_url: {f"Bearer {LEGACY_KEY}"}},
-                 test=_legacy_test(legacy_url, kept, OPENAI_COMPATIBLE_BASE_URL=""))
-            address.fill(other_url)
-            step("dedicated-cleared-address-edited", "Not saved", kept_verdict="", answer=MOVED,
-                 test=_legacy_test(other_url, kept, OPENAI_COMPATIBLE_BASE_URL=""))
-            address.fill(legacy_url)
-            base.fill(dedicated_url)
-            step("restored", "Ready", shown="Enabled", kept_verdict="")
-
-        page.set_viewport_size({"width": 390, "height": 844})
-        menu = page.locator("#page-settings [data-mobile-nav-toggle]")
-        if menu.is_visible():
-            if menu.get_attribute("aria-expanded") == "true":
-                menu.click()
-            wait_drawer_closed(page)
-        address.fill(other_url)
-        painted_as("narrow-address-edited", lambda: expect(status).to_have_text(
-            "Ready" if shape == "both-pairs" else "Not saved", timeout=3000))
-        row.scroll_into_view_if_needed()
-        report["frames"]["narrow-address-edited"] = _frame(page, evidence, "narrow-address-edited", row)
-        report["steps"].append({"step": "narrow-address-edited", "row": status.inner_text()})
-        address.fill(legacy_url)
-        assert not other_calls, "no request reached the edited address"
-        assert (ui["data_dir"] / "settings.json").read_bytes() == saved_before, "nothing was saved"
-        report.update(mismatches=mismatches, uncaught_page_errors=uncaught)
-        (evidence / "settings-pair-proof.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        assert not mismatches, json.dumps(mismatches, indent=1)
-        assert all(not frame["overflow"] and frame["body"][1] <= frame["viewport"][0] + 1 for frame in report["frames"].values())
-        assert not uncaught
-        browser.close()
+            sent = _test_row(page, row, "Works")
+            assert sent["api_key_setting"] == "OPENAI_API_KEY"
+            assert sent["overrides"]["OPENAI_BASE_URL"] == legacy_url
+            assert _sent(legacy_calls[-1:]) == {f"Bearer {LEGACY_KEY}"}
+            for width in (1087, 390):
+                page.set_viewport_size({"width": width, "height": 740})
+                row.scroll_into_view_if_needed()
+                frame = _frame(page, evidence, f"key-test-{width}", row)
+                assert not frame["overflow"] and frame["body"][1] <= width + 1
+            assert (ui["data_dir"] / "settings.json").read_bytes() == saved_before
+        finally:
+            browser.close()

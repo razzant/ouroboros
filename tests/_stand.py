@@ -20,6 +20,7 @@ import threading
 from typing import Any, Dict, List, NamedTuple
 
 from tests._cost_driver import (
+    CLOCKS,
     _boot_census,
     _boundary,
     _event_ctx,
@@ -152,7 +153,8 @@ def _turns(meter: Any, srv: Any, result: Dict[str, Any], root: pathlib.Path, fac
     from supervisor.active_activity import get_direct_activity_registry
     from tests import _turn_shapes as shapes
 
-    utils._RACY_NS = skill_identity._RACY_NS = 0  # as in B10: a file read within a clock tick of its write is read again
+    # As in B10 (``CLOCKS``): a file read within a clock tick of its write is read again.
+    utils._RACY_NS = skill_identity._RACY_NS = int(CLOCKS["racy_ns"])
     no_carrier_can_start()
     ctx, k = _event_ctx(srv), int(facts.get("k") or 1)
     out: Dict[str, Any] = {"history": shapes.turn_history(root, k), "steady": shapes.steady_state(root, refused=refused, window=shapes.WIDE_WINDOW)}

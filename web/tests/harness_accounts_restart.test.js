@@ -15,7 +15,6 @@ import { RESTART_ENDPOINT, createClaudexorStatusStore } from '../modules/claudex
 import {
     destroyHarnessAccounts,
     initHarnessAccounts,
-    renderAgentAccountsSection,
 } from '../modules/harness_accounts.js';
 
 const fakeResponse = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -208,11 +207,8 @@ function mountSection() {
     return { elements, doc, win: { addEventListener() {}, removeEventListener() {} } };
 }
 
-test('the section offers Restart Claudexor after Refresh, in words, once an owned engine was ever started', () => {
-    const markup = renderAgentAccountsSection();
-    const toolbar = markup.slice(markup.indexOf('settings-toolbar'));
-    assert.match(toolbar, /id="btn-harness-refresh">Refresh<\/button>\s*<button type="button" class="btn btn-default" id="btn-claudexor-restart" hidden>Restart Claudexor<\/button>/);
-    assert.doesNotMatch(toolbar, /title=|accesskey/i, 'no hover-only text and no keyboard shortcut');
+// The frame that holds the two buttons is the provider's page (web/tests/settings_accounts.test.js proves it there).
+test('Restart Claudexor is offered, in words, once an owned engine was ever started', () => {
     assert.equal(RESTART_LABEL, 'Restart Claudexor');
 
     assert.equal(restartOffered(STATUS_UP), true);

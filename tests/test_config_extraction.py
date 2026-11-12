@@ -50,6 +50,10 @@ _ADDED_OWNERS = {
     "GIT_READ_CAPTURE_TIMEOUT_SEC": runtime_limits,
     "IMMEDIATE_SETTINGS": settings_scales,
     "RESTART_REQUIRED_SETTINGS": settings_scales,
+    # When a saved choice is consumed (the Settings row's timing): one label over the sets above, the route
+    # keys and the keys the consciousness clock reads at each wake decision.
+    "CONSCIOUSNESS_CLOCK_SETTINGS": settings_scales,
+    "setting_effect": settings_scales,
     # The owner's optional cap on acting tasks: its key, legacy value, disk format and its reads (pool-capacity D).
     "OWNER_CAP_KEY": settings_scales,
     "OWNER_CAP_LEGACY": settings_scales,

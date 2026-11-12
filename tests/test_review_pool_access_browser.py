@@ -1,13 +1,13 @@
-"""Settings → Agents catalogue Access through the actual served candidate (#1609).
+"""Settings › Agents catalogue Access through the actual served candidate (#1609).
 
 The review pool is the catalogue's marked rows (PR1639); a session row's Access is
 Full by default, Working files, or an explicit Read only. A byte-faithful candidate
 checkout serves its own Python and JS (origin proof) over an isolated data root
 seeded with a catalogue: a session row with no saved Access, Working files, Read
 only, an API reviewer and an unmarked Read-only row. Every choice goes through the
-real Settings page, the real POST, the pool read, Reload, a fresh page, a server
-restart and the pool builder the review core runs; a seat runs with its own row's
-rights, and an API row never carries any.
+real agent's page (its form's Save, its Reviewer switch), the real owner transaction,
+the pool read, a fresh page, a server restart and the pool builder the review core
+runs; a seat runs with its own row's rights, and an API row never carries any.
 """
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+
+from tests.settings_browser_helpers import open_entry, open_settings, press_editor_save, settings_page
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 pytestmark = [pytest.mark.ui_browser]
@@ -140,67 +142,68 @@ def _open(page, url):
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_selector("#page-chat", timeout=30_000)
     page.click('[data-nav-page="settings"]')
-    expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
-    page.click('[data-settings-tab="agents"]')
-    expect(page.locator("[data-subagent-row]")).to_have_count(len(IDS), timeout=30_000)
-    expect(page.locator("#settings-status")).not_to_contain_text("Loading settings", timeout=30_000)
-    # The pool read is enrichment: wait until its facts reached the API reviewer's card.
-    expect(_row(page, API_ROW).locator("[data-subagent-review-facts]")).not_to_contain_text(
-        "price appears after saving", timeout=30_000)
+    level = open_settings(page, "agents", timeout=30_000)
+    expect(level.locator("[data-entry-id]")).to_have_count(len(IDS), timeout=30_000)
+    return level
 
 
-def _row(page, index):
-    return page.locator("[data-subagent-row]").nth(index)
+def _agent(page, index):
+    """One agent's page, opened from the list, once the pool read reached it (it is enrichment)."""
+    from playwright.sync_api import expect
+
+    open_settings(page, "agents", timeout=30_000)
+    form = open_entry(page, IDS[index], timeout=30_000).locator("[data-subagent-row]")
+    expect(form.locator("[data-subagent-review-facts]")).not_to_contain_text("price appears after saving", timeout=30_000)
+    return form
 
 
 def _shown(page):
-    """Per catalogue row: [Reviewer mark, Access value or None when the row has no select]."""
-    return page.locator("[data-subagent-row]").evaluate_all("""rows => rows.map(row => {
-        const access = row.querySelector('[data-subagent-field="access"]');
-        return [row.querySelector('[data-subagent-field="review_eligible"]').checked, access ? access.value : null];
-    })""")
+    """Per catalogue row, read on its own page: [Reviewer mark, Access value or None when it has no select]."""
+    shown = []
+    for index in range(len(IDS)):
+        form = _agent(page, index)
+        access = form.locator('[data-subagent-field="access"]')
+        shown.append([form.locator('[data-subagent-field="review_eligible"]').is_checked(),
+                      access.input_value() if access.count() else None])
+    return shown
 
 
-def _access(page, index):
-    return _row(page, index).locator('[data-subagent-field="access"]')
+def _set_access(page, index, value):
+    """Choose an Access on the agent's page and press its Save."""
+    _agent(page, index).locator('[data-subagent-field="access"]').select_option(value)
+    assert press_editor_save(page, timeout=30_000).startswith("Saved")
 
 
-def _mark(page, index):
-    return _row(page, index).locator('[data-subagent-field="review_eligible"]')
+def _set_mark(page, index, on):
+    """The Reviewer switch of the agent's page writes at once."""
+    form = _agent(page, index)
+    if form.locator('[data-subagent-field="review_eligible"]').is_checked() is not on:
+        form.locator('.agent-use:has([data-subagent-field="review_eligible"]) .ui-switch').click()
+    page.wait_for_function("""([path, on]) => {
+        const level = [...document.querySelectorAll('#page-settings [data-settings-page]')].find((el) => el.dataset.settingsPage === path);
+        const input = level?.querySelector('[data-subagent-field="review_eligible"]');
+        return input && input.checked === on && input.getAttribute('aria-busy') !== 'true'; }""",
+                           arg=[f"agents/{IDS[index]}", on], timeout=30_000)
 
 
-def _save(page, posts):
-    with page.expect_response("**/api/review-pool"), \
-            page.expect_response(lambda r: r.url.endswith("/api/settings") and r.request.method == "POST") as saved:
-        page.locator("#btn-save-settings").click()
-    assert saved.value.ok and saved.value.json()["status"] == "saved", saved.value.text()
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
-    # An edited roster travels first, in the owner checker transaction, then the generic body.
+def _posted(posts):
+    """The last roster the owner transaction carried, per row: [Reviewer mark, Access]."""
     written = [body.get("settings", body) for body in posts]
     catalog = next(body["OUROBOROS_SUBAGENTS"] for body in reversed(written) if "OUROBOROS_SUBAGENTS" in body)
     catalog = json.loads(catalog) if isinstance(catalog, str) else catalog
     return {row["subagent_id"]: [row.get("review_eligible") is True, row.get("access")] for row in catalog["items"]}
 
 
-def _reload(page, *, discard=False):
-    with page.expect_response("**/api/review-pool"):
-        page.locator("#btn-reload-settings").click()
-        if discard:
-            page.get_by_role("button", name="Discard and continue", exact=True).click()
-    page.wait_for_function("() => !document.querySelector('#btn-reload-settings').disabled")
-
-
 def _center(locator):
     locator.evaluate("el => el.scrollIntoView({block: 'center'})")
 
 
-def _assert_caveat(page, index, width):
-    """The selected Details disclosure exposes readable Access help, linked to the control."""
-    row = _row(page, index)
-    details = row.locator('[data-subagent-details]')
+def _assert_caveat(form, index, width):
+    """The agent's Details disclosure exposes readable Access help, linked to the control."""
+    details = form.locator('[data-subagent-details]')
     if details.get_attribute('open') is None:
         details.locator('summary').click()
-    select, caveat = _access(page, index), row.locator('[id$="-access-help"]')
+    select, caveat = form.locator('[data-subagent-field="access"]'), form.locator('[id$="-access-help"]')
     _center(caveat)
     assert select.is_visible() and caveat.is_visible()
     covered = caveat.evaluate("""el => { const box = el.getBoundingClientRect();
@@ -215,19 +218,22 @@ def _assert_caveat(page, index, width):
         assert box and box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5, box
 
 
-def _assert_labels(page, width):
-    for index in SESSION_ROWS:
-        _assert_caveat(page, index, width)
-    api = _row(page, API_ROW)
-    assert api.locator('[data-subagent-field="access"], [id$="-access-help"]').count() == 0
-    assert api.locator('[data-subagent-field="delivery"]').input_value() == "native"
-    for index, (marked, _) in enumerate(_shown(page)):
-        facts = _row(page, index).locator("[data-subagent-review-facts]").inner_text()
-        assert _mark(page, index).is_checked() is marked
+def _assert_labels(page, width, engine="", shots=""):
+    """Every agent's page: a session's Access with its help, an API row without any, the Reviewer row in words."""
+    for index, row_id in enumerate(IDS):
+        form = _agent(page, index)
+        facts = form.locator("[data-subagent-review-facts]")
         if index in SESSION_ROWS:
-            assert "uses a session seat and time" in facts, facts
-        label = _row(page, index).locator(".available-subagent-reviewer")
+            _assert_caveat(form, index, width)
+            assert "uses a session seat and time" in facts.text_content(), facts.text_content()
+        else:
+            assert form.locator('[data-subagent-field="access"], [id$="-access-help"]').count() == 0
+            assert form.locator('[data-subagent-field="delivery"]').input_value() == "native"
+        label = form.locator('.agent-use:has([data-subagent-field="review_eligible"]) .ui-row-title')
         assert label.inner_text().strip() == "Reviewer" and label.is_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        if shots:
+            _evidence(f"{engine}-{shots}-row-{index + 1}-{row_id}", target=page)
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -253,6 +259,9 @@ def test_catalogue_access_saves_reloads_restarts_and_reaches_the_pool(direct_ser
                                          for row in json.loads(_get(url, "/api/review-pool"))["pool"]]}
         return settings, stored
 
+    def reviewers(page):
+        return settings_page(page, "agents").locator('[data-agents-filter="reviewers"]')
+
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()
         try:
@@ -264,70 +273,71 @@ def test_catalogue_access_saves_reloads_restarts_and_reaches_the_pool(direct_ser
             # Configuration only: nothing here may wake, log in or refresh an agent engine.
             context.route(re.compile(r".*/api/claudexor/(wake|login|quota|credential-profiles).*"),
                           lambda route: (engine_calls.append(route.request.url), route.abort()))
+            # This scene proves the real roster transaction and Access, not provider discovery. The isolated
+            # server has no provider catalog; serve a successful empty read so Circles' unrelated catalog listener
+            # does not reject it. Settings, the owner write, and the review-pool read remain the real endpoints.
+            context.route("**/api/model-catalog*", lambda route: route.fulfill(json={"items": [], "model_sources": [], "errors": []}))
             page = context.new_page()
             _open(page, url)
 
             # As seeded: Full is the unsaved default, both lower choices kept, the API row has none.
             seeded = [[True, "full"], [True, "workspace_write"], [True, "readonly"], [True, None], [False, "readonly"]]
+            expect(reviewers(page)).to_have_text("Reviewers 4")
+            _evidence(f"{engine}-01-desktop-list", target=page)
             assert _shown(page) == seeded
-            expect(page.locator("[data-review-pool-count]")).to_have_text("Reviewers: 4")
-            _assert_labels(page, 1360)
+            _assert_labels(page, 1360, engine, "01-desktop")
             settings, stored = record("seeded", seeded)
             assert stored["full-default"] == [True, None], "the seeded row carries no Access of its own"
             _expect_pool(url, {"full-default": "full", "working-files": "workspace_write", "read-only": "readonly",
                                "api-reviewer": ""})
             _expect_core(facts["steps"]["seeded"]["core"], {"full-default": "full", "working-files": "workspace_write",
                                                              "read-only": "readonly", "api-reviewer": ""})
-            _evidence(f"{engine}-01-desktop-viewport", target=page)
-            for index, row_id in enumerate(IDS):
-                _row(page, index).scroll_into_view_if_needed()
-                _evidence(f"{engine}-01-desktop-row-{index + 1}-{row_id}", target=_row(page, index))
 
-            # An unsaved draft is discarded by Reload and never reaches the bytes.
+            # An unsaved choice stays on its page, says so, and never reaches the bytes; Discard drops it.
             untouched = settings_path.read_bytes()
-            _access(page, 2).select_option("full")
-            _mark(page, 4).check()
-            expect(page.locator("#settings-status")).to_have_text("Unsaved changes")
-            _reload(page, discard=True)
-            assert _shown(page) == seeded
+            form = _agent(page, 2)
+            form.locator('[data-subagent-field="access"]').select_option("full")
+            discard = form.locator("[data-editor-discard]")
+            expect(discard).to_be_visible()
+            assert _agent(page, 2).locator('[data-subagent-field="access"]').input_value() == "full", "kept while unsaved"
+            _agent(page, 2).locator("[data-editor-discard]").click()
+            expect(settings_page(page, f"agents/{IDS[2]}").locator('[data-subagent-field="access"]')).to_have_value("readonly")
             assert settings_path.read_bytes() == untouched and not posts
 
             # Lower the Full row to Read only, raise the Read-only row to Full, take the
             # Working-files row out of the pool and put the Read-only helper in it.
-            _access(page, 0).select_option("readonly")
-            _access(page, 2).select_option("full")
-            _mark(page, 1).uncheck()
-            _mark(page, 4).check()
-            edited = [[True, "readonly"], [False, "workspace_write"], [True, "full"], [True, None], [True, "readonly"]]
-            assert _shown(page) == edited, "a mark never touches the row's Access"
-            expect(page.locator("[data-review-pool-count]")).to_have_text("Reviewers: 4")
-            posted = _save(page, posts)
+            _set_access(page, 0, "readonly")
+            _set_access(page, 2, "full")
+            _set_mark(page, 1, False)
+            _set_mark(page, 4, True)
             expected = {"full-default": [True, "readonly"], "working-files": [False, "workspace_write"],
                         "read-only": [True, "full"], "api-reviewer": [True, None], "read-only-helper": [True, "readonly"]}
-            assert posted == expected
-            settings, stored = record("edited", _shown(page))
+            assert _posted(posts) == expected
+            assert all(body.get("settings") for body in posts), "every roster write is the owner transaction"
+            edited = [[True, "readonly"], [False, "workspace_write"], [True, "full"], [True, None], [True, "readonly"]]
+            assert _shown(page) == edited, "a mark never touches the row's Access"
+            open_settings(page, "agents", timeout=30_000)
+            expect(reviewers(page)).to_have_text("Reviewers 4")
+            settings, stored = record("edited", edited)
             assert stored == expected
             pool = {"full-default": "readonly", "read-only": "full", "api-reviewer": "", "read-only-helper": "readonly"}
             _expect_pool(url, pool)
             _expect_core(facts["steps"]["edited"]["core"], pool)
-            assert _shown(page) == edited
-            _reload(page)
-            assert _shown(page) == edited
             fresh = context.new_page()
             _open(fresh, url)
             assert _shown(fresh) == edited
             _assert_labels(fresh, 1360)
-            _evidence(f"{engine}-02-saved-row-1-full-to-readonly", target=_row(fresh, 0))
-            _evidence(f"{engine}-02-saved-row-3-readonly-to-full", target=_row(fresh, 2))
+            _evidence(f"{engine}-02-saved-row-1-full-to-readonly", target=_agent(fresh, 0))
+            _evidence(f"{engine}-02-saved-row-3-readonly-to-full", target=_agent(fresh, 2))
             fresh.close()
 
-            # Working files chosen in the page; the unmarked row returns to the pool unchanged.
-            _access(page, 0).select_option("workspace_write")
-            _mark(page, 1).check()
+            # Working files chosen on the page; the unmarked row returns to the pool unchanged.
+            _set_access(page, 0, "workspace_write")
+            _set_mark(page, 1, True)
             final = [[True, "workspace_write"], [True, "workspace_write"], [True, "full"], [True, None], [True, "readonly"]]
             assert _shown(page) == final
-            expect(page.locator("[data-review-pool-count]")).to_have_text("Reviewers: 5")
-            _save(page, posts)
+            open_settings(page, "agents", timeout=30_000)
+            expect(reviewers(page)).to_have_text("Reviewers 5")
             _, before_restart = _stored(server)
 
             # Every choice survives a server restart and a new page, byte for byte.
@@ -344,19 +354,14 @@ def test_catalogue_access_saves_reloads_restarts_and_reaches_the_pool(direct_ser
                     "api-reviewer": "", "read-only-helper": "readonly"}
             _expect_pool(url, pool)
             _expect_core(facts["steps"]["after_restart"]["core"], pool)
-            facts["review_pool_note"] = page.locator("[data-review-pool-note]").inner_text()
+            open_settings(page, "agents", timeout=30_000)
+            facts["review_pool_note"] = settings_page(page, "agents").locator("[data-review-pool-note]").text_content()
 
             # The caveat and labels stay readable text at a phone width, with no sideways scroll.
             page.set_viewport_size({"width": 390, "height": 844})
             # The off-canvas sidebar slides away first; only then is the layout the phone sees.
             page.wait_for_function("() => document.getAnimations().every(a => a.playState !== 'running')")
-            _assert_labels(page, 390)
-            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-            for index, row_id in enumerate(IDS):
-                _row(page, index).scroll_into_view_if_needed()
-                _evidence(f"{engine}-03-narrow-row-{index + 1}-{row_id}", target=_row(page, index))
-            _center(_row(page, SESSION_ROWS[-1]).locator('[id$="-access-help"]'))
-            _evidence(f"{engine}-03-narrow-viewport-readonly-caveat", target=page)
+            _assert_labels(page, 390, engine, "03-narrow")
             assert not engine_calls and not errors, (engine_calls, errors)
         finally:
             browser.close()
