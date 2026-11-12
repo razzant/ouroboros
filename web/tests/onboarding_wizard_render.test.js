@@ -430,7 +430,7 @@ test('a confirmed restart comes from the attempt\'s own receipt, never from a gu
         assert.deepEqual(server.replaced, [], 'a plain tab does not navigate past a pending restart');
         const html = doc.getElementById('root').innerHTML;
         assert.match(html, /Setup saved — restart to apply it/);
-        assert.match(html, /Ouroboros saved <code>pro<\/code> as the runtime mode for the next boot/);
+        assert.match(html, /Pro access applies from the next start/);
     }, { fetch: server.fetch, location: server.location });
 });
 

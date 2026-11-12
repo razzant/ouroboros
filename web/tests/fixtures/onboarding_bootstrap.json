@@ -143,7 +143,7 @@
         "id": "openrouter-key",
         "inputType": "password",
         "label": "OpenRouter API Key",
-        "note": "Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.",
+        "note": "Best when you want one router for OpenAI, Anthropic, Google, and more.",
         "placeholder": "sk-or-v1-...",
         "settingKey": "OPENROUTER_API_KEY",
         "settingsInputId": "s-openrouter",
@@ -154,7 +154,7 @@
         "id": "openai-key",
         "inputType": "password",
         "label": "OpenAI API Key",
-        "note": "Optional. If this is the only remote key, the next step prefills OpenAI's own model ids.",
+        "note": "",
         "placeholder": "sk-...",
         "settingKey": "OPENAI_API_KEY",
         "settingsInputId": "s-openai",
@@ -165,7 +165,7 @@
         "id": "cloudru-key",
         "inputType": "password",
         "label": "Cloud.ru Foundation Models API Key",
-        "note": "Optional. If this is the only remote key, the next step prefills Cloud.ru's own model ids.",
+        "note": "",
         "placeholder": "Cloud.ru API key",
         "settingKey": "CLOUDRU_FOUNDATION_MODELS_API_KEY",
         "settingsInputId": "s-cloudru-key",
@@ -176,7 +176,7 @@
         "id": "gigachat-credentials",
         "inputType": "password",
         "label": "GigaChat Authorization Key",
-        "note": "Optional. If this is the only remote key, the next step prefills GigaChat's own model ids.",
+        "note": "",
         "placeholder": "Base64 client_id:secret",
         "settingKey": "GIGACHAT_CREDENTIALS",
         "settingsInputId": "s-gigachat-credentials",
@@ -209,7 +209,7 @@
         "id": "minimax-key",
         "inputType": "password",
         "label": "MiniMax API Key",
-        "note": "Optional. If this is the only remote key, the next step prefills MiniMax's own model ids.",
+        "note": "",
         "placeholder": "MiniMax API key",
         "settingKey": "MINIMAX_API_KEY",
         "settingsInputId": "s-minimax-key",
@@ -231,7 +231,7 @@
         "id": "deepseek-key",
         "inputType": "password",
         "label": "DeepSeek API Key",
-        "note": "Optional. If this is the only remote key, the next step prefills DeepSeek's own model ids.",
+        "note": "",
         "placeholder": "sk-...",
         "settingKey": "DEEPSEEK_API_KEY",
         "settingsInputId": "s-deepseek-key",
@@ -242,7 +242,7 @@
         "id": "zai-key",
         "inputType": "password",
         "label": "Z.ai API Key (GLM)",
-        "note": "Optional. If this is the only remote key, the next step prefills Z.ai's own GLM model ids.",
+        "note": "",
         "placeholder": "...",
         "settingKey": "ZAI_API_KEY",
         "settingsInputId": "s-zai-key",
@@ -264,7 +264,7 @@
         "id": "anthropic-key",
         "inputType": "password",
         "label": "Anthropic API Key",
-        "note": "Optional. Saved for models routed straight to Anthropic, and for Claude tooling.",
+        "note": "Saved for models routed straight to Anthropic, and for Claude tooling.",
         "placeholder": "sk-ant-...",
         "settingKey": "ANTHROPIC_API_KEY",
         "settingsInputId": "s-anthropic",
@@ -369,28 +369,28 @@
     "runtimeModes": [
       {
         "className": "light",
-        "copy": "Self-modification of the main repo is disabled. Best for trying Ouroboros out without repo self-modification.",
+        "copy": "Works on your projects. Never changes its own code.",
         "label": "Light",
         "tone": "Safest",
         "value": "light"
       },
       {
         "className": "advanced",
-        "copy": "Self-modification of the evolutionary layer is allowed (current behaviour). Protected core/contract/release files stay guarded by Advanced mode.",
+        "copy": "May grow its own skills and outer layer.",
         "label": "Advanced",
         "tone": "Default",
         "value": "advanced"
       },
       {
         "className": "pro",
-        "copy": "Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal review gate.",
+        "copy": "May change its protected core. Every change goes through review.",
         "label": "Pro",
         "tone": "Power",
         "value": "pro"
       },
       {
         "className": "cyber-pro",
-        "copy": "Host and configuration authority, including credentials, models, Supervisor and protected rewrites. Review still runs and the Blocking or Advisory choice is kept, but review findings do not block actions in Cyber Pro: they are evidence for Ouroboros, which decides.",
+        "copy": "Full say over itself and this computer. Reviews advise, it decides.",
         "label": "Cyber Pro",
         "tone": "Maximum power",
         "value": "cyber_pro"
@@ -412,11 +412,11 @@
         "title": "Choose models"
       },
       {
-        "copy": "Reviewers read how Ouroboros understood a request, its plans, its results and its changes. Decide whether their critical findings block the work or only inform Ouroboros.",
-        "footer": "Pick both review enforcement and the initial runtime mode before Ouroboros starts.",
+        "copy": "Choose how reviews affect work and how much access Ouroboros gets.",
+        "footer": "",
         "id": "review_mode",
-        "railCopy": "Advisory vs blocking",
-        "title": "Choose review mode"
+        "railCopy": "Strictness + reach",
+        "title": "Choose review and access"
       },
       {
         "copy": "Review subscription quotas and optional API spending limits.",
