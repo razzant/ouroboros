@@ -425,6 +425,34 @@ def test_a_history_row_that_stores_a_change_reads_its_versions_whole_and_its_lin
     assert document(tmp_path, {**entry, "field": ["old_content"]})["text"] == second
 
 
+def test_a_project_journals_change_row_reads_its_versions_and_takes_the_project_note_as_its_newer_end(tmp_path):
+    """A field read on a Project's knowledge journal (``knowledge:project:<id>``) rebuilds a change row's versions as on
+    the global one, and its live seed is the Project's own note: with the base row damaged the replaced text comes back
+    from that note; with the note gone it is a typed miss."""
+    import json
+
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+
+    target = resolve_knowledge_address(tmp_path, "заметки/вторая", f"project:{PROJECT}")
+    a = write_knowledge_note(target, "# Вторая\n\nOne.\n").current
+    b = write_knowledge_note(target, "# Вторая\n\nOne, two.\n", expected_revision=a.revision).current
+    c = write_knowledge_note(target, "# Вторая\n\nOne, two, three.\n", expected_revision=b.revision).current
+    journal = tmp_path / "projects" / PROJECT / "knowledge_history.jsonl"
+    raw = journal.read_bytes()
+    offsets = [0] + [index + 1 for index, byte in enumerate(raw[:-1]) if byte == 0x0A]
+    stored = [json.loads(line) for line in raw.splitlines()]
+    assert len(stored) == 3 and all("change" in row and "new_content" not in row for row in stored[1:])
+    entry = {"kind": "entry", "journal": f"knowledge:project:{PROJECT}", "offset": offsets[2]}
+    assert document(tmp_path, {**entry, "field": ["new_content"]})["text"] == c.text
+    assert document(tmp_path, {**entry, "field": ["old_content"]})["text"] == b.text
+    journal.write_bytes(raw[:offsets[1]] + b"#" * (offsets[2] - 1 - offsets[1]) + raw[offsets[2] - 1:])
+    assert document(tmp_path, {**entry, "field": ["old_content"]})["text"] == b.text  # back from the Project's note
+    target.path.unlink()
+    with pytest.raises(MemoryReadError) as gap:
+        document(tmp_path, {**entry, "field": ["old_content"]})
+    assert gap.value.code == "not_found" and f"the line at byte offset {offsets[1]} is not a JSON row" in gap.value.message
+
+
 def test_the_history_listing_names_where_a_change_rows_two_texts_read_whole(tmp_path):
     """A listed row that carries a change also names, by reference only, the address of each of its two texts (no
     text is rebuilt for a page), and a read through either address returns that version, verified; a whole row and a
