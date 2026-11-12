@@ -12,7 +12,10 @@ same frozen facts:
   the start), with the host-measured ``elapsed_ms`` of the whole call, distinct
   from a process's own ``duration_ms``. ``status`` is the outcome bucket and
   ``tool_result_code`` the exact published code; a call a control ended before its
-  handler returned is ``interrupted`` with its ``control_reason``.
+  handler returned is ``interrupted`` with its ``control_reason``. A row the host
+  settles itself (``host_error``, ``interrupted``, a refused browser call) carries
+  no handler bucket or code; a pause can also refuse a launch through the handler,
+  whose typed refusal names it in ``tool_result_meta.control_reason``.
 - ``tool_call_timeout`` — the caller's wait ended; the worker may still settle
   later. Timeout and settlement are independent facts and may land in either order.
   It names where the worker stood at that moment (``worker_position``), so an

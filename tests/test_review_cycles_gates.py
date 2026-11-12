@@ -96,6 +96,52 @@ def test_finalize_blocked_review_records_block_class(tmp_path, monkeypatch):
     rows = state.filter_attempts(repo_key=make_repo_key(pathlib.Path(tmp_path)))
     assert rows and rows[-1].block_class == "verdict"
     assert rows[-1].root_task_id == "t1"  # ctx.task_id is its own root
+    assert rows[-1].phase == "blocking_review", "a reviewer's refusal keeps its phase"
+
+
+def test_an_owner_stop_is_named_by_its_cause_never_as_a_review_refusal(tmp_path, monkeypatch):
+    """The owner's stop of a commit review: its cause in words, its own phase and continuation source, the review's
+    findings kept, and no light-model call spent after the stop; a reviewer's refusal still synthesizes."""
+    import ouroboros.cancel_intents as intents
+    import ouroboros.tools.git as git_mod
+    from ouroboros import review_custody
+    from ouroboros.review_state import load_state, make_repo_key
+    from ouroboros.task_continuation import load_review_continuation
+
+    ctx = types.SimpleNamespace(drive_root=tmp_path, task_id="t1")
+    assert review_custody.review_stop_cause(ctx) == "" and not review_custody.review_retry_cancelled(ctx)
+    monkeypatch.setattr(intents, "cancel_pending", lambda root, task, **k: task == "t1")
+    assert review_custody.review_stop_cause(ctx) == "stopped" and review_custody.review_retry_cancelled(ctx)
+    monkeypatch.setattr(intents, "cancel_pending", lambda *a, **k: (_ for _ in ()).throw(OSError("unreadable")))
+    assert review_custody.review_stop_cause(ctx) == "stop_unreadable" and review_custody.review_retry_cancelled(ctx)
+    assert set(review_custody.REVIEW_STOP_WORDS) == {"stopped", "owner_deadline", "stop_unreadable"}
+    assert "owner" not in review_custody.REVIEW_STOP_WORDS["stopped"], "a stop is not always the owner's"
+
+    monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **k: "")
+    calls = []
+    monkeypatch.setattr("ouroboros.tools.review_synthesis.synthesize_to_canonical_issues",
+                        lambda findings, **k: calls.append("synthesis") or list(findings))
+    monkeypatch.setattr("ouroboros.review_state.compute_obligation_semantic_redirects",
+                        lambda *a, **k: calls.append("dedup") or {})
+    findings = [{"item": "x", "reason": "r", "severity": "critical", "verdict": "FAIL"}]
+    for task, reason in (("t-stop", "owner_stopped"), ("t-refused", "critical_findings")):
+        work = types.SimpleNamespace(
+            repo_dir=tmp_path, drive_root=tmp_path, task_id=task, task_metadata={},
+            _current_review_tool_name="commit_reviewed", _last_triad_models=[], _last_scope_model="",
+            _last_triad_raw_results=[], _last_scope_raw_result={}, _review_degraded_reasons=[])
+        git_mod._finalize_blocked_review(
+            work, "msg", 0.0, combined_msg=f"{reason} words", block_reason=reason, combined_findings=findings,
+            pre_fingerprint={"fingerprint": "fp"}, post_fingerprint={"fingerprint": "fp"}, block_class="verdict",
+            phase="owner_control" if reason == "owner_stopped" else "blocking_review")
+        if reason == "owner_stopped":
+            assert calls == [], "no model is spent after the owner's stop"
+    rows = {row.task_id: row for row in load_state(pathlib.Path(tmp_path)).filter_attempts(
+        repo_key=make_repo_key(pathlib.Path(tmp_path)))}
+    assert rows["t-stop"].phase == "owner_control" and rows["t-stop"].block_reason == "owner_stopped"
+    assert rows["t-stop"].critical_findings, "the review's findings stay on the stopped attempt"
+    assert rows["t-refused"].phase == "blocking_review" and calls == ["synthesis", "dedup"]
+    assert load_review_continuation(pathlib.Path(tmp_path), "t-stop").source == "owner_stopped"
+    assert load_review_continuation(pathlib.Path(tmp_path), "t-refused").source == "blocked_review"
 
 
 # ---------------------------------------------------------------------------
