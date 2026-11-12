@@ -1032,10 +1032,11 @@ def _finalize_host_stop(ctx: ToolContext, record: ServiceRecord, payload: Dict[s
             artifact_note = f"\n\n⚠️ ARTIFACT_OUTPUT_ERROR:\n- service output finalization failed: {type(exc).__name__}: {exc}"
             artifact_failed = True
     elif record.cwd_root == "user_files":
+        from ouroboros.tools.shell_audit import REGISTER_OUTPUT_ADVICE
+
         payload["artifact_audit_gap"] = (
-            "⚠️ ARTIFACT_AUDIT_GAP: service ran in user_files cwd without outputs=[...]. "
-            "If it created a deliverable, rerun/register the file with outputs or "
-            "write_file(root=artifact_store) before claiming it."
+            "⚠️ ARTIFACT_AUDIT_GAP: the service ran in this user_files cwd and declared no outputs=[...]. "
+            f"{REGISTER_OUTPUT_ADVICE}"
         )
     if artifact_note:
         payload["artifact_outputs"] = artifact_note.strip()
