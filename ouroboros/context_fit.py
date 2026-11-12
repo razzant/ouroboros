@@ -696,10 +696,8 @@ class RouteQuestion:
 def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mode: str, preferred: str,
                        state: Any, delivered: Mapping[str, Any]) -> bool:
     """Whether a start shows less memory than the selected view because of its window: a mode below the owner's, a
-    rescued input, host forms or memory cuts the window took (the owner's own mode budget is no narrowing of the
-    window's). An unknown window narrows nothing."""
-    from ouroboros.memory_floor import _ORDINARY
-
+    rescued input, host forms or any step of the walk the window took, collapsed task lines (F1) included (the owner's
+    own mode budget is no narrowing of the window's). An unknown window narrows nothing."""
     if not state.known_window:
         return False
     if delivered or mode != preferred:
@@ -708,7 +706,7 @@ def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mo
     floor = facts.get("floor") or {}
     target = context_budget.context_mode_limits(preferred, preferred, state.output_reserve)[0]
     budget = bool(target) and target < state.window_record.total_equivalent
-    cut = any(count for step, count in (floor.get("steps") or {}).items() if step not in _ORDINARY)
+    cut = any((floor.get("steps") or {}).values())
     return bool(cut and not floor.get("by_budget")) or bool(facts.get("host_sections_addressed") and not budget)
 
 

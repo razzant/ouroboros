@@ -927,3 +927,24 @@ def test_the_guards_repeat_is_a_pass_of_its_own_not_work_done_again(tmp_path, mo
         assert again == once and line == once_line  # the guard's repeat adds no work done again, and no health fact
     else:
         assert again == {**once, "catalog_calls_again": 1} and "catalog_calls 1" in line
+
+
+@pytest.mark.parametrize("early", ["takes-F1", "takes-no-step"])
+def test_an_early_view_that_only_collapses_task_lines_counts_as_narrowed(early):
+    """Fix round 2 (Fable 5.2 finding 1, the reviewer's seam test): a walk that took any step, collapsed task lines (F1)
+    included, shows less than the selected view, so the guard asks again; a walk that took none stays quiet."""
+    from types import SimpleNamespace
+    from ouroboros import context_fit as cf, memory_floor as mf
+    from tests import _memory_view_synthetic as syn
+
+    snapshot = syn.snapshot(room_facts=syn.room("1", lane2=6))
+    args = dict(mode="max", owner_mode="max", known_window=True, output_reserve=8192, ratio=1, non_memory_tokens=10_000)
+    low, high = 1, 872_000  # the largest window whose walk takes any step
+    while high - low > 1:
+        mid = (low + high) // 2
+        low, high = (mid, high) if dict(mf.render_view_for_mode(snapshot, window_tokens=mid, **args).level.steps) else (low, mid)
+    window = low if early == "takes-F1" else 872_000
+    view = mf.render_view_for_mode(snapshot, window_tokens=window, **args)
+    assert set(dict(view.level.steps)) == ({"F1"} if early == "takes-F1" else set()) and not view.facts["floor"]["by_budget"]
+    state = SimpleNamespace(known_window=True, output_reserve=8192, window_record=SimpleNamespace(total_equivalent=window))
+    assert cf.narrowed_by_window({"max": (None, view.facts)}, "max", "max", state, {}) is (early == "takes-F1")
