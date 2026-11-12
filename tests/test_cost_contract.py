@@ -521,7 +521,7 @@ def test_the_work_law_fails_a_breach_no_gap_names_and_excuses_only_its_own(monke
 
 
 def test_a_host_dependent_gap_is_a_non_strict_xfail_that_still_fails_other_growth():
-    """The L3 broad row's excused growth depends on the host's own sections (the owner's macOS: open +3; the Ubuntu
+    """The L3 broad row's excused growth depends on the host's own sections (a macOS development host: open +3; the Ubuntu
     runner holds the law), so its xfail is not strict; every other row stays strict, and on that row growth it does
     not name, or past its ceiling, still fails for real (a plain AssertionError)."""
     from tests._turn_law import HOST_DEPENDENT_GAPS

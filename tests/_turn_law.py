@@ -35,7 +35,7 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
     ("L3", "T:main:broad"): (
         "40 more live rooms with story and 10 running roots in a 118,000-token window whose tool schemas take "
         "72,260: the start keeps Low and its reply reserve of 32,000 by moving host sections behind their readers "
-        "(section_floor), as many as this host's own sections need. On the owner's macOS host it moves four "
+        "(section_floor), as many as this host's own sections need. On a macOS development host it moves four "
         "(runtime, review pool, drive state, world), each a new request part written once (observability."
         "_write_parts: 10 new parts for the 7 of the turn before, open +3); on the Ubuntu CI runner (run "
         "43119287886) the law holds within its allowance. NEVER: the count is the host sections the start could "
