@@ -1,7 +1,7 @@
 // A small DOM double for row-level chat modules (chat_reply.js, chat_row_menu.js): bubbling events, focus,
 // geometry, and the selector grammar those modules use — tags, classes, attributes ([a], [a="v"], [a^="v"]),
 // :not(…), :disabled, :scope, the descendant and child combinators and selector lists. Real engines, hit
-// testing and layout are checked in the browser lane.
+// testing and layout are checked in the browser lane. `appendHtml` builds a module's markup into nodes.
 // A passive listener cannot cancel its event, as in a browser: its preventDefault() does nothing.
 function call(listener, event, passive) {
     if (!passive) return listener(event);
@@ -209,6 +209,37 @@ export function domDouble() {
         node.append(...children);
         return node;
     } };
+}
+
+const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", '#96': '`' };
+const decodeEntities = (text) => text.replace(/&(amp|lt|gt|quot|#39|#96);/g, (_all, name) => ENTITIES[name]);
+
+/** The markup a module writes (tags, quoted attributes, text, escapeHtmlAttr's entities) built under `parent`, as an
+ *  `innerHTML` assignment would build it: `data-*` fills the dataset, an input's `value` its value, and text joins the
+ *  element's own text, so `textContent` reads it (text before and after a child is not kept apart). */
+export function appendHtml(parent, html) {
+    const stack = [parent];
+    for (const [, closing, tag, attrs, text] of String(html).matchAll(/<(\/?)([a-z][\w-]*)([^>]*)>|([^<]+)/gi)) {
+        if (text !== undefined) { stack.at(-1)._text += decodeEntities(text); continue; }
+        const name = tag.toLowerCase();
+        if (closing) {
+            const at = stack.findLastIndex((node) => node.tagName.toLowerCase() === name);
+            if (at > 0) stack.length = at;
+            continue;
+        }
+        const node = new Node(parent.ownerDocument, name);
+        for (const [, key, value = ''] of attrs.matchAll(/([\w-]+)(?:="([^"]*)")?/g)) {
+            if (key === 'class') node.className = decodeEntities(value);
+            else if (key === 'hidden' || key === 'disabled') node[key] = true;
+            else if (key.startsWith('data-')) node.dataset[key.slice(5).replace(/-([a-z])/g, (_all, c) => c.toUpperCase())] = decodeEntities(value);
+            else node.setAttribute(key, decodeEntities(value));
+        }
+        if (name === 'input') node.value = node.getAttribute('value') ?? '';
+        stack.at(-1).append(node);
+        if (!VOID_TAGS.has(name)) stack.push(node);
+    }
+    return parent;
 }
 
 /** Install the double as the global document/window for modules that read them at call time. */

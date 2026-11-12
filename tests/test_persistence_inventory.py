@@ -902,8 +902,7 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # accepted-rebuttals file and the dispatch markers, and added the frozen payload view under
 # ``state/review_checkouts/views/`` (one section-2 row each in PERSISTENCE.md): 415 -> 410.
 # #2151's pure observability helper hid two named paths and introduced three false
-# data-root spellings. Resolving its return restores the audited 410-path population;
-# the local evolution export introduced by #2137 is also a sentinel below.
+# data-root spellings. Resolving its return restores the audited 410-path population.
 # 410 -> 411: #2177 retains a parked pre-start task's inline image as
 # ``source_handles/context_checkpoints/inline-image-*.image`` (``budget_pause``; its section-7 row).
 # 411 -> 413: the published MCP catalogs (``state/mcp/catalogs`` and its ``server-*.json`` envelopes,
@@ -986,6 +985,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # directory always existed as each blob's parent; no writer spelling was added or removed.
 # 465 -> 466: the vendor program observation adds one named singleton,
 # ``state/harness_programs.json`` (``ouroboros/harness_program_facts.py``); its own row.
+# 466 -> 467: the legacy private-copy registry's bytes, kept by its startup import as
+# ``archive/subagent_worktrees_<sha256>.json`` (``subagent_worktrees.import_legacy_registry``; the records row).
+# 467 -> 466: retiring ``generate_evolution_stats`` removes its local export,
+# ``task_results/artifacts/*/evolution-*.json``, and that export's sentinel below.
 # 466 -> 468: the accepted wake transition chain, ``state/consciousness_transitions`` and its
 # ``<sha256>.json`` links (``ouroboros/consciousness_transitions.py``); its own row.
 EXPECTED_SCAN_PATHS = 468
@@ -1005,7 +1008,6 @@ SENTINELS = frozenset({
     "logs/chat.jsonl",
     "memory/identity.md",
     "task_results/artifacts/*",
-    "task_results/artifacts/*/evolution-*.json",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-reentry-*.json",
     "task_results/artifacts/*/source_handles/context_checkpoints/presence-transport-queue-*.json",
     "task_trees/*/blackboard.jsonl",
