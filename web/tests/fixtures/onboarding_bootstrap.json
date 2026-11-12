@@ -504,21 +504,21 @@
       "chatFormat": "",
       "contextLength": 65536,
       "filename": "Qwen3.5-9B-Q4_K_M.gguf",
-      "label": "Qwen3.5-9B Q4_K_M (5.7 GB)",
+      "label": "Qwen3.5-9B Q4_K_M (5.7 GB file)",
       "source": "unsloth/Qwen3.5-9B-GGUF"
     },
     "qwen36-35b-a3b": {
       "chatFormat": "",
       "contextLength": 65536,
       "filename": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
-      "label": "Qwen3.6-35B-A3B Q4_K_M (22 GB)",
+      "label": "Qwen3.6-35B-A3B Q4_K_M (22 GB file)",
       "source": "unsloth/Qwen3.6-35B-A3B-GGUF"
     },
     "qwen38-27b": {
       "chatFormat": "",
       "contextLength": 65536,
       "filename": "Qwen3.8-27B-UD-Q4_K_M.gguf",
-      "label": "Qwen3.8-27B Q4_K_M (16.6 GB)",
+      "label": "Qwen3.8-27B Q4_K_M (16.6 GB file)",
       "source": "unsloth/Qwen3.8-27B-GGUF"
     }
   },
