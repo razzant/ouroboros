@@ -3,8 +3,8 @@
 Dashboard -> Storage shows one line per place from ``place_removers`` and ``query_data(kind="storage")``
 returns the same facts; both read them on every request, with or without a count. A place names its
 removers (``PLACE_REMOVERS``): the maintenance child's job rows (``maintenance_jobs``: the row's state,
-``last_error`` while its last run threw, ``record_compression``'s totals for the plane in that place), the
-server's five retirer passes (drive settlement, private copies, review checkouts, session scratch, engine
+``last_error`` while its last run threw, ``record_compression``'s totals for the plane in that place; a job
+that counts nothing released carries no ``released``), the server's five retirer passes (drive settlement, private copies, review checkouts, session scratch, engine
 program copies: ``maintenance_jobs.record_pass`` rows with ``released`` and typed ``holds`` since when) and,
 for the engine place, the engine's last retention pass (the read-only ``GET /v2/maintenance/gc``, which
 never starts one; answered within a wall bound, connect and read together, the read itself ended by a
@@ -64,7 +64,7 @@ class StorageRemover(TypedDict):
     compressed: NotRequired[int]  # record_compression: files compressed so far in this place's plane
     saved_bytes: NotRequired[Optional[int]]  # record_compression: that plane's allocation saved; null where unreported
     freed_bytes: NotRequired[int]  # the engine pass
-    released: NotRequired[int]  # a retirer pass: items it released
+    released: NotRequired[int]  # a retirer pass: items it released; absent from a job that keeps no such count
     holds: NotRequired[List[Dict[str, Any]]]  # a retirer pass or the engine pass: typed holds {class, count, example, since}
     held: NotRequired[int]  # the engine pass: folders it held (project roots and native homes); a retirer pass: items held
     held_since: NotRequired[str]  # the earliest of those holds
@@ -105,10 +105,14 @@ def _job(name: str, rows: Optional[Dict[str, Dict[str, Any]]], place: str) -> St
     total = totals.get(_COMPRESSION_PLANES.get(place, "")) or {}
     if "compressed" in total:  # this place's own plane, never a job-wide sum under two places
         fact["compressed"], fact["saved_bytes"] = int(total.get("compressed") or 0), total.get("saved_bytes")
-    if "holds" in row:  # a retirer pass (maintenance_jobs.record_pass) or the trash job: what it released, what it holds, since when
+    # A retirer pass (maintenance_jobs.record_pass), the trash job or the retirement job's closed gate: what it
+    # holds, since when, and what it released where it counts that.
+    if "holds" in row:
         holds = [dict(hold) for hold in row.get("holds") or () if isinstance(hold, dict)]
+        fact["holds"], fact["held"] = holds, sum(int(h.get("count") or 0) for h in holds)
         released = row.get("released") if "released" in row else row.get("removed")  # the trash job counts what it removed
-        fact["released"], fact["holds"], fact["held"] = int(released or 0), holds, sum(int(h.get("count") or 0) for h in holds)
+        if released is not None:  # a job that keeps no such count says none: unknown, never zero
+            fact["released"] = int(released)
         since = sorted(str(hold["since"]) for hold in holds if hold.get("since"))
         if since:
             fact["held_since"] = since[0]
@@ -243,14 +247,14 @@ def _engine_pass(last: Dict[str, Any]) -> StorageRemover:
 def holds_by_remover(found: Dict[str, List[StorageRemover]]) -> Dict[str, Dict[str, Any]]:
     """The mind's view of what is held and what moved: per remover that holds something or released
     something in its last pass, ``{released, holds: [{class, count, example, since}], at}`` (each remover once
-    though it serves several places; the engine's pass included when its record is here). Empty when nothing
-    is held and nothing moved: a fact absent, never zero."""
+    though it serves several places; the engine's pass included when its record is here; ``released`` only
+    from a remover that counts it). Empty when nothing is held and nothing moved: a fact absent, never zero."""
     out: Dict[str, Dict[str, Any]] = {}
     for removers in found.values():
         for fact in removers:
             if fact["id"] in out or not (fact.get("holds") or fact.get("released") or fact.get("held")):
                 continue
-            out[fact["id"]] = {"released": int(fact.get("released") or 0), "at": fact.get("at"),
+            out[fact["id"]] = {**({"released": fact["released"]} if "released" in fact else {}), "at": fact.get("at"),
                                "holds": [dict(hold) for hold in fact.get("holds") or ()]}
             if fact["id"] == "engine" and fact.get("freed_bytes") is not None:
                 out["engine"]["freed_bytes"] = fact["freed_bytes"]

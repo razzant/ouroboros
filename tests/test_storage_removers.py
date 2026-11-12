@@ -346,6 +346,8 @@ def test_a_closed_recovery_gate_is_the_retirement_job_hold_and_an_open_one_leave
         ("source_recovery_pending", 1, "startup recovery report missing")]
     assert closed["state"] == "done" and closed["held"] == 1 and closed["held_since"] == closed["holds"][0]["since"]
     assert storage_fact(data)["holds"]["runtime_retirement"]["holds"] == closed["holds"]
+    assert "released" not in closed and "released" not in storage_fact(data)["holds"]["runtime_retirement"], \
+        "the job keeps no released count: none is said, never a zero"
 
     maintenance_retirement.record_startup(data, gaps=False)
     opened = retirement()

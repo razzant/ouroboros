@@ -113,10 +113,11 @@ function jobPhrase(fact, now) {
     if (fact.last_error) {
         return fmt('{job}: stopped by an error ({error}, {when})', { job, error: fact.last_error.class, when: whenLabel(fact.last_error.at, now) });
     }
-    if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a retirer pass: what it released, what it holds and why
+    if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a pass's report: what it released, what it holds and why
+        // A count only from a pass that keeps one: a job that holds without counting what it released says none, never 0.
         const parts = [fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job,
-            plural(fact.released || 0, '{n} released', '{count} released'), holdsPhrase(fact, now),
-            fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
+            isSize(fact.released) ? plural(fact.released, '{n} released', '{count} released') : '',
+            holdsPhrase(fact, now), fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
         return parts.filter(Boolean).join(' · ');
     }
     if (fact.id === 'record_compression' && fact.state !== 'unsupported' && fact.compressed > 0) {

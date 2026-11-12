@@ -338,6 +338,13 @@ test('a retirer pass says what it released and what it holds, by typed reason si
     assert.match(removerLine(unknownClass, NOW), /holding 1 since .*: 1 some new reason$/, 'a class this client lacks words for is shown by its name');
     const withErrors = [{ id: 'engine_runtime_prune', state: 'done', at, released: 0, errors: 2, first_error: 'x' }];
     assert.equal(removerLine(withErrors, NOW), `Engine program copies: last change ${whenLabel(at, NOW)} · 0 released · 2 errors`);
+    // A job that holds without counting what it released (the retirement job's closed gate): the count is said only
+    // where the fact carries it, never as a zero.
+    const gate = [{ id: 'runtime_retirement', state: 'done', at, held: 1, held_since: at,
+        holds: [{ class: 'source_recovery_pending', count: 1, example: 'startup recovery report missing', since: at }] }];
+    assert.equal(removerLine(gate, NOW), `Retirement: last change ${whenLabel(at, NOW)} · `
+        + `holding 1 since ${whenLabel(at, NOW)}: 1 startup recovery is not confirmed complete: task trees and service logs wait`);
+    assert.doesNotMatch(removerLine(gate, NOW), /released/);
     const rows = placeRows(count({ places: [{ id: 'session_scratch', group: 'temporary', roots: ['/var/tmp/obs-1'], present: true, same_volume: true,
         bytes: 5e8, logical_bytes: 5e8, files: 10, unreadable: 0, parts: [], rest: { count: 0, bytes: 0 } }] }), 7, { session_scratch: quiet }, NOW);
     assert.equal(rows[0].label, 'Session scratch');
