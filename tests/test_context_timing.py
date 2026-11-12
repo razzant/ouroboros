@@ -6,7 +6,8 @@ import threading
 
 import pytest
 
-from ouroboros.context_timing import collector_rests, counted, measured_sections, section_spans, timed, timed_section
+from ouroboros.context_timing import (adopt, another_pass, apart, collector_rests, counted, measured_sections,
+                                      section_spans, timed, timed_section)
 
 
 @timed_section("demo")
@@ -100,6 +101,40 @@ def test_another_threads_window_does_not_see_this_ones_work():
     assert seen["spans"] == {}
 
 
+def test_work_counted_apart_joins_a_measured_window_only_when_adopted():
+    """Fix round 1 (Fable 1): ``apart`` keeps work run beside a window in a window of its own; ``adopt`` adds its counts
+    and keys (a repeat there counts as done again) to the window being measured. Outside one, or with nothing counted
+    apart, it changes nothing."""
+    with apart() as holder:
+        counted("reads", key="k")
+    adopt(holder)  # no window is measured here: nothing to add to
+    with measured_sections():
+        adopt({})  # a question that never opened its window
+        assert section_spans()["work"] == {}
+        adopt(holder)
+        counted("reads", key="k")
+        assert section_spans()["work"] == {"reads": 2, "reads_again": 1}
+
+
+def test_a_pass_repeated_by_design_counts_again_only_what_one_pass_repeats():
+    """Fix round 2 (Carbon S1): a second pass the window makes by design (``another_pass``) adds its counts; a key counts
+    as done again only when one pass repeats it, or when work after both passes does."""
+    with measured_sections():
+        counted("reads", key="k")
+        with another_pass():
+            counted("reads", key="k")  # the repeat by design
+            counted("reads", key="j")  # first done in this pass
+            assert section_spans()["work"] == {"reads": 3}
+            counted("reads", key="j")  # done twice within that pass
+        assert section_spans()["work"] == {"reads": 4, "reads_again": 1}
+        counted("reads", key="k")  # done again after both passes
+        counted("reads", key="j")  # done again after the pass that first did it
+        assert section_spans()["work"] == {"reads": 6, "reads_again": 3}
+    with another_pass():  # outside a measured window it counts nothing and fails nothing
+        counted("reads", key="k")
+    assert section_spans() == {}
+
+
 def test_the_collector_rests_for_a_block_and_resumes_after_it():
     """The collector is off inside the block and back on after it, an exception included; a collector the host already
     switched off stays off."""
@@ -150,8 +185,10 @@ def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
     def build(**_kwargs):
         if realtime:
             assert _kwargs["route_resolver"] is route_resolver
-        else:
-            assert "route_resolver" not in _kwargs
+        else:  # the fit's own route question, asked beside the build from inside its measured scope (W2 H4)
+            from ouroboros.context_fit import RouteQuestion
+            assert isinstance(_kwargs["route_resolver"], RouteQuestion)
+            _kwargs["route_resolver"].asked.wait()  # its question is the fit's; nothing outlives the build here
         seen.append(context_timing._SPANS.get() is not None and not gc.isenabled())
         raise RuntimeError("stop after the context build")
 
@@ -167,3 +204,22 @@ def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
         agent._prepare_task_context({"id": "timed", "type": "task", "chat_id": 1, "text": "hi"})
     assert seen == [True]
     assert context_timing._SPANS.get() is None and gc.isenabled()
+
+
+def test_a_turns_prologue_rides_on_its_first_rounds_receipt():
+    """W2 H7: the restore, route rebind and tools of a resumed turn run before any round's window; the loop measures them
+    and the first round's receipt names them under ``prologue`` (its total) once, and no later round again."""
+    from types import SimpleNamespace
+    from ouroboros.context_timing import measured_sections, section_spans, timed
+    from ouroboros.llm_observability import round_receipt, round_window
+
+    slot = SimpleNamespace(_round_prep_since=None)
+    with measured_sections():
+        timed("rebind.route", lambda: None)
+        timed("restore.tools", lambda: None)
+        slot._round_prologue = section_spans()
+    with round_window(slot):
+        first = round_receipt()["host_steps"]["sections_ms"]
+    assert {"prologue", "prologue.rebind.route", "prologue.restore.tools"} <= set(first)
+    with round_window(slot):
+        assert not any(name.startswith("prologue") for name in round_receipt()["host_steps"]["sections_ms"])

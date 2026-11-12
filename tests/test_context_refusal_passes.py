@@ -203,7 +203,9 @@ def test_a_refused_first_send_retries_the_view_its_route_rebind_narrowed(main_ca
     text, _usage, _trace = _run(ctx, tools, events, built)
     assert text == "Done." and len(gateway.creates) == 2  # the narrowed view answered
     first, retry = (payload for payload, _key in gateway.uploads)
-    assert retry["account"] == first["account"] != {"mode": "pin", "profileId": "account-b"}  # Auto again: no chain
+    # Auto again, no chain: the unknown start named no account; the retry names the account its rebound plan rests on
+    # (account-b's known window sized it) as a preference, never the fallback's pin (W2 H5).
+    assert (first["account"], retry["account"]) == ({"mode": "auto"}, {"mode": "auto", "preferredProfileId": "account-b"})
     assert len(json.dumps(retry["messages"])) < len(json.dumps(first["messages"]))  # strictly smaller, same route
     rebound = tools._ctx.context_fit_plan
     assert rebound.model_route["accountFingerprint"] == "fingerprint-b" and rebound.window_record.usable is not None
