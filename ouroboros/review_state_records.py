@@ -1,18 +1,16 @@
 """Record types of the review ledger and the pure rules that shape them.
 
-The obligation, readiness-debt and commit-attempt records, the
-retention and TTL bounds they are trimmed to, the repo-scope filter that keeps a
-multi-repo ledger honest, obligation fingerprinting and id allocation, attempt
-identity/ordering and merging, and the timestamp helpers. Every rule here is a
-pure function of its inputs. Extracted from ouroboros/review_state.py (v7 D06
-split, re-cut on the v7next tip); review_state.py re-exports every name.
+The commit-attempt record, the retention and TTL bounds it is trimmed to, the
+repo-scope filter that keeps a multi-repo ledger honest, the retired advisory
+lane's debt predicate, attempt identity/ordering and merging, and the timestamp
+helpers. Every rule here is a pure function of its inputs. Extracted from
+ouroboros/review_state.py (v7 D06 split, re-cut on the v7next tip);
+review_state.py re-exports every name.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Dict, List, Optional
 
@@ -64,9 +62,6 @@ _STATE_SCHEMA_VERSION = 3
 _MAX_ATTEMPT_HISTORY = 50
 
 
-_MAX_COMMIT_READINESS_DEBTS = 50
-
-
 _DEFAULT_TOOL_NAME = "commit_reviewed"
 
 
@@ -77,56 +72,6 @@ _REVIEW_ATTEMPT_TTL_SEC = 1800
 
 
 _REVIEW_ATTEMPT_GRACE_SEC = 120
-
-
-_OPEN_COMMIT_READINESS_DEBT_STATUSES = frozenset({"detected", "queued", "reopened"})
-
-
-_CANONICAL_OBLIGATION_ITEM_RE = re.compile(r"[a-z0-9_]+")
-
-
-def _normalize_fingerprint_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
-
-
-def _normalize_obligation_item_key(item_name: Any) -> str:
-    text = _normalize_fingerprint_text(item_name)
-    if not text:
-        return ""
-    if text.startswith("bug_") or text.startswith("risk_"):
-        return ""
-    if not _CANONICAL_OBLIGATION_ITEM_RE.fullmatch(text):
-        return ""
-    return text
-
-
-def _stable_digest(*parts: Any) -> str:
-    key = " | ".join(_normalize_fingerprint_text(part) for part in parts)
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
-
-
-def _make_obligation_fingerprint(item: Any, reason: Any) -> str:
-    canonical_item = _normalize_obligation_item_key(item)
-    if canonical_item:
-        # Include reason so same checklist item with different bugs does not coalesce.
-        return f"finding:{canonical_item}:{_stable_digest(canonical_item, reason)}"
-    return f"finding:{_stable_digest(item, reason)}"
-
-
-def _looks_like_public_obligation_id(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(re.fullmatch(r"obl-\d{4,}", text))
-
-
-def _max_iso_ts(left: str, right: str) -> str:
-    return max(str(left or ""), str(right or ""))
-
-
-def _min_iso_ts(left: str, right: str) -> str:
-    candidates = [str(value or "") for value in (left, right) if str(value or "")]
-    if not candidates:
-        return ""
-    return min(candidates)
 
 
 def _filter_repo_scope(records: List[Any], repo_key: str | None) -> List[Any]:
@@ -144,15 +89,6 @@ def _filter_repo_scope(records: List[Any], repo_key: str | None) -> List[Any]:
     ]
 
 
-def _commit_readiness_debts_view(state: Any) -> List["CommitReadinessDebtItem"]:
-    debts = getattr(state, "commit_readiness_debts", None)
-    if isinstance(debts, list):
-        return debts
-    debts = list(debts or [])
-    setattr(state, "commit_readiness_debts", debts)
-    return debts
-
-
 def _is_archived_advisory_debt(row: Any) -> bool:
     """A stored debt row of the retired advisory lane: one minted from an old run's
     readiness warning (``source=advisory_review`` with a ``readiness_warning:advisory:``
@@ -160,20 +96,14 @@ def _is_archived_advisory_debt(row: Any) -> bool:
     any more (the marker is the one freshness fact, read against the preflight look).
 
     That lane is an archive (owner decision): the row is kept exactly as stored,
-    never current debt, never verified for no longer being observed, never pruned,
-    its id never reused.
+    beside what the retired obligation layer stored; ``review_status`` counts it in
+    ``advisory_run_archive``.
     """
     if not isinstance(row, dict):
         return False
     fingerprint = str(row.get("fingerprint") or "")
     return fingerprint == "advisory_stale" or (
         row.get("source") == "advisory_review" and fingerprint.startswith("readiness_warning:advisory:"))
-
-
-_OBLIGATION_STR_DEFAULTS = {"obligation_id": "", "item": "", "severity": "critical", "reason": "", "source_attempt_ts": "", "source_attempt_msg": "", "status": "still_open", "resolved_by": "", "repo_key": _LEGACY_CURRENT_REPO_KEY}
-
-
-_DEBT_STR_DEFAULTS = {"debt_id": "", "category": "", "summary": "", "severity": "warning", "status": "detected", "repo_key": _LEGACY_CURRENT_REPO_KEY, "fingerprint": "", "title": "Commit readiness debt", "source": "review_state", "first_seen_at": "", "last_seen_at": "", "updated_at": "", "verified_at": ""}
 
 
 _ATTEMPT_STR_DEFAULTS = {"commit_message": "", "snapshot_hash": "", "block_reason": "", "block_details": "", "task_id": "", "repo_key": _LEGACY_CURRENT_REPO_KEY, "tool_name": _DEFAULT_TOOL_NAME, "pre_review_fingerprint": "", "post_review_fingerprint": "", "fingerprint_status": "", "scope_model": "", "block_class": "", "rebuttal_sha256": "", "review_contract_fingerprint": "", "review_retry_key": "", "root_task_id": "", "review_owner_session_id": "", "review_record_id": "", "review_budget_repo_key": "", "review_override_reason": ""}
@@ -203,65 +133,12 @@ def _filter_lifecycle_records(
     ]
 
 
-def _allocate_prefixed_id(items: List[Any], attr: str, next_seq: int, prefix: str) -> tuple[str, int]:
-    """The next free id; an item is a record or a stored row (an archived mapping)."""
-    values = (item.get(attr) if isinstance(item, dict) else getattr(item, attr, "") for item in items)
-    used = {str(value or "").strip() for value in values} - {""}
-    seq = max(1, int(next_seq or 1))
-    while True:
-        candidate = f"{prefix}{seq:04d}"
-        seq += 1
-        if candidate not in used:
-            return candidate, seq
-
-
 def _append_finding_lines(lines: List[str], findings: List[Dict[str, Any]], header: str) -> None:
     lines.append(f"   {header} ({len(findings)}):")
     for finding in findings:
         label = str(finding.get("item") or finding.get("reason") or "?")
         reason = _rs()._truncate_review_reason(finding.get("reason", ""), limit=160)
         lines.append(f"     - {label}: {reason}")
-
-
-@dataclass
-class ObligationItem:
-    """Unresolved obligation from a blocking commit attempt."""
-
-    obligation_id: str
-    item: str
-    severity: str
-    reason: str
-    source_attempt_ts: str
-    source_attempt_msg: str
-    status: str = "still_open"
-    resolved_by: str = ""
-    repo_key: str = _LEGACY_CURRENT_REPO_KEY
-    fingerprint: str = ""
-    created_ts: str = ""
-    updated_ts: str = ""
-
-
-@dataclass
-class CommitReadinessDebtItem:
-    """Repo-scoped readiness debt derived from review friction."""
-
-    debt_id: str
-    category: str
-    summary: str
-    severity: str = "warning"
-    status: str = "detected"
-    repo_key: str = _LEGACY_CURRENT_REPO_KEY
-    fingerprint: str = ""
-    title: str = "Commit readiness debt"
-    source: str = "review_state"
-    source_obligation_ids: List[str] = field(default_factory=list)
-    evidence: List[str] = field(default_factory=list)
-    first_seen_at: str = ""
-    last_seen_at: str = ""
-    updated_at: str = ""
-    verified_at: str = ""
-    occurrence_count: int = 0
-    consecutive_observations: int = 0
 
 
 @dataclass
@@ -283,6 +160,7 @@ class CommitAttemptRecord:
     phase: str = "review"
     blocked: bool = False
     advisory_findings: List[Dict[str, Any]] = field(default_factory=list)
+    # Ids the retired obligation layer gave this row's findings; history only, never written again.
     obligation_ids: List[str] = field(default_factory=list)
     readiness_warnings: List[str] = field(default_factory=list)
     late_result_pending: bool = False
@@ -372,18 +250,6 @@ def _coerce_int(value: Any, default: int = 0) -> int:
         return int(value)
     except Exception:
         return default
-
-
-def _infer_next_prefixed_sequence(items: List[Any], prefix: str) -> int:
-    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$", re.IGNORECASE)
-    max_seen = 0
-    for item in items:
-        value = str(getattr(item, "obligation_id", "") or getattr(item, "debt_id", "") or "").strip()
-        match = pattern.fullmatch(value)
-        if not match:
-            continue
-        max_seen = max(max_seen, _coerce_int(match.group(1), 0))
-    return max_seen + 1 if max_seen > 0 else 1
 
 
 def _normalize_findings(items: List[Any]) -> List[Dict[str, Any]]:

@@ -300,7 +300,6 @@ class TestPersistencePathNotTruncated:
         state = AdvisoryReviewState.__new__(AdvisoryReviewState)
         state.advisory_runs = []
         state.attempts = [ca]
-        state.open_obligations = []
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
         state.last_stale_repo_key = ""
@@ -313,34 +312,6 @@ class TestPersistencePathNotTruncated:
             f"commit_message was truncated. Expected {len(long_msg)} chars, "
             f"got {len(saved_attempt.commit_message)}: {saved_attempt.commit_message[:80]}..."
         )
-
-    def test_long_commit_message_in_obligation_source(self):
-        """_update_obligations_from_attempt must store full commit_message in source_attempt_msg."""
-        from ouroboros.review_state import (
-            AdvisoryReviewState,
-        )
-
-        long_msg = "fix: " + "B" * 300  # 305 chars — well above old [:200] cap
-
-        state = AdvisoryReviewState()
-        # _update_obligations_from_attempt filters by verdict==FAIL and severity==critical
-        ca = _make_commit_attempt([
-            {"item": "code_quality", "severity": "critical", "reason": "r", "verdict": "FAIL"}
-        ])
-        ca.commit_message = long_msg
-        ca.repo_key = ""
-        ca.status = "blocked"
-
-        # Trigger _update_obligations_from_attempt directly
-        state._update_obligations_from_attempt(ca)
-
-        obs = state.get_open_obligations()
-        assert obs, "Expected at least one obligation to be created"
-        assert obs[0].source_attempt_msg == long_msg, (
-            f"source_attempt_msg was truncated. Expected {len(long_msg)} chars, "
-            f"got {len(obs[0].source_attempt_msg)}: {obs[0].source_attempt_msg[:80]}..."
-        )
-
 
 # ---------------------------------------------------------------------------
 # review_evidence omission budget contract

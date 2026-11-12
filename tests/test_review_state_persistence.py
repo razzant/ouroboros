@@ -39,20 +39,36 @@ def _payload(root):
 def _legacy_payload(state):
     """The prior asdict + indented JSON contract, independent of the new encoder."""
     state = copy.deepcopy(state)
-    store._prepare_state_for_persistence(state)
     for attempt in state.attempts:
         if not hasattr(attempt, "author_disposition"):
             attempt.author_disposition = {}
     data = asdict(state)
-    # The retired advisory lane's debts are stored after the live ones, in the same list.
-    data["commit_readiness_debts"] += data.pop("archived_advisory_debts")
+    # What the retired obligation layer stored is saved under its own keys, as stored.
+    data.update(data.pop("retired_review_rows"))
     # Displaced stale markers are stored only when present: one scope keeps the legacy shape.
     if not data["earlier_stale_markers"]:
         del data["earlier_stale_markers"]
     data["state_version"] = data["schema_version"] = store._STATE_SCHEMA_VERSION
-    data["next_obligation_seq"] = int(state.next_obligation_seq or 1)
-    data["next_commit_readiness_debt_seq"] = int(state.next_commit_readiness_debt_seq or 1)
     return json.loads(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+# What a body with Blocking stored for the obligation layer, in shapes its loader rewrote: a duplicate pair
+# coalescing would merge, an unknown field, a debt of each lane and odd-typed counters.
+RETIRED = {
+    "open_obligations": [
+        {"obligation_id": "obl-0001", "item": "tests_affected", "severity": "critical", "reason": "same",
+         "status": "still_open", "repo_key": "r", "fingerprint": "finding:tests_affected:x",
+         "legacy_note": {"nested": [1, 2.5, True, None]}},
+        {"obligation_id": "obl-0002", "item": "tests_affected", "severity": "critical", "reason": "same",
+         "status": "still_open", "repo_key": "r", "fingerprint": "finding:tests_affected:x"}],
+    "next_obligation_seq": True,
+    "commit_readiness_debts": [
+        {"debt_id": "crd-0001", "source": "advisory_review", "fingerprint": "readiness_warning:advisory:0123",
+         "status": "queued"},
+        {"debt_id": "crd-0002", "category": "obligation_repeat", "fingerprint": "obligation_repeat:obl-0001",
+         "status": "queued", "occurrence_count": "3"}],
+    "next_commit_readiness_debt_seq": 9,
+}
 
 
 def _writes(monkeypatch):
@@ -84,8 +100,7 @@ def test_compact_encoding_preserves_full_legacy_payload_and_nested_evidence(tmp_
         state_version=1, attempts=[attempt],
         advisory_runs=[{"snapshot_hash": "snapshot", "commit_message": "message", "status": "stale", "ts": "stamp",
                         "raw_result": "all words"}],
-        open_obligations=[store.ObligationItem("obl-7", "tests_affected", "critical", "reason", "stamp", "msg")],
-        commit_readiness_debts=[store.CommitReadinessDebtItem("crd-9", "review", "keep debt")],
+        retired_review_rows=RETIRED,
         last_stale_from_edit_ts="stamp", last_stale_reason="changed", last_stale_repo_key="repo",
         last_stale_task_id="editor",
     )
@@ -103,7 +118,7 @@ def test_compact_encoding_preserves_full_legacy_payload_and_nested_evidence(tmp_
     assert "\n" not in _path(tmp_path).read_text(encoding="utf-8")
     loaded = store._load_state_unlocked(tmp_path, strict_attempt_authority=True)
     assert loaded.attempts[0].triad_raw_results == expected["attempts"][0]["triad_raw_results"]
-    assert loaded.next_obligation_seq == 8 and loaded.next_commit_readiness_debt_seq == 10
+    assert loaded.retired_review_rows == RETIRED
     # Machine JSON is compact; owner-authored settings retain their indentation.
     other = tmp_path / "other.json"
     atomic_write_json(other, {"unchanged": [1, 2]})
@@ -111,6 +126,31 @@ def test_compact_encoding_preserves_full_legacy_payload_and_nested_evidence(tmp_
     settings = tmp_path / "settings.json"
     atomic_write_json(settings, {"unchanged": [1, 2]})
     assert settings.read_text(encoding="utf-8") == json.dumps({"unchanged": [1, 2]}, indent=2)
+
+
+def test_the_retired_obligation_rows_survive_every_save_as_stored_and_a_fresh_state_writes_none(tmp_path):
+    """Home (step 5): what the retired obligation layer stored stays under its own keys, right after the attempts,
+    exactly as stored through an ordinary attempt write, a blocked one with findings included: no coalescing, no
+    counter coercion, no new obligation; ``retired_review_rows`` reads it back. A state that never held such rows
+    saves none of the four keys."""
+    def blocked(state):
+        state.record_attempt(store.CommitAttemptRecord(
+            ts="2026-10-09T08:00:00+00:00", commit_message="m", status="blocked", repo_key="r", task_id="t",
+            attempt=1, critical_findings=[{"item": "tests_affected", "reason": "same", "severity": "critical",
+                                           "verdict": "FAIL"}]))
+
+    _path(tmp_path).parent.mkdir(parents=True)
+    _path(tmp_path).write_text(json.dumps({"state_version": 3, "attempts": [], **RETIRED}), encoding="utf-8")
+    store.update_state(tmp_path, blocked)
+    saved = _payload(tmp_path)
+    keys = list(saved)
+    assert keys[keys.index("attempts") + 1:keys.index("attempts") + 5] == list(RETIRED)
+    assert {key: saved[key] for key in RETIRED} == RETIRED
+    assert store.load_state(tmp_path).retired_review_rows == RETIRED
+
+    fresh = tmp_path / "fresh"
+    store.update_state(fresh, blocked)
+    assert not set(RETIRED) & set(_payload(fresh)) and store.load_state(fresh).retired_review_rows == {}
 
 
 def test_unknown_object_is_not_stringified_and_cannot_replace_durable_evidence(tmp_path):
@@ -177,25 +217,13 @@ def test_only_explicit_unchanged_results_skip_a_save_and_keep_return_contract(tm
     assert writes == [_path(tmp_path)]  # arbitrary false/None still keeps the old save behavior
 
 
-@pytest.mark.parametrize("legacy", ["missing_field", "coalescing", "counter_type"])
+@pytest.mark.parametrize("legacy", ["missing_field"])
 def test_false_changed_fact_still_persists_load_and_preparation_changes(tmp_path, monkeypatch, legacy):
     state = store.AdvisoryReviewState(attempts=[_attempt()])
     store.save_state(tmp_path, state)
     raw = json.loads(_path(tmp_path).read_text(encoding="utf-8"))
     if legacy == "missing_field":
         del raw["attempts"][0]["author_disposition"]
-    elif legacy == "coalescing":
-        obligation = asdict(store.ObligationItem("obl-7", "tests_affected", "critical", "same", "old", "m"))
-        raw["open_obligations"] = [obligation, {**obligation, "obligation_id": "obl-8"}]
-    elif legacy == "hydration":
-        raw["commit_readiness_debts"] = [asdict(store.CommitReadinessDebtItem("crd-9", "review", "debt"))]
-    elif legacy == "roster":
-        raw["attempts"][0]["triad_raw_results"] = "malformed legacy roster"
-    elif legacy == "ordering":
-        older = {**raw["attempts"][0], "ts": "2000-01-01T00:00:00+00:00"}
-        raw["attempts"].append(older)
-    else:
-        raw["next_obligation_seq"] = True
     _path(tmp_path).write_text(json.dumps(raw), encoding="utf-8")
     monkeypatch.setattr(store, "_utc_now", lambda: "2026-10-09T09:00:00+00:00")
     expected = _legacy_payload(store._load_state_unlocked(tmp_path, strict_attempt_authority=True))
@@ -204,7 +232,6 @@ def test_false_changed_fact_still_persists_load_and_preparation_changes(tmp_path
     store.update_state(tmp_path, lambda _: store.ReviewStateMutation(False, changed=False))
 
     assert _payload(tmp_path) == expected and writes == [_path(tmp_path)]
-    assert type(_payload(tmp_path)["next_obligation_seq"]) is int
     store.update_state(tmp_path, lambda _: store.ReviewStateMutation(False, changed=False))
     assert writes == [_path(tmp_path)]  # once normalized, the identical transaction skips
 

@@ -12,7 +12,7 @@ import json
 import re
 from types import SimpleNamespace
 
-from ouroboros.tools import review_helpers, review_synthesis
+from ouroboros.tools import review_helpers
 from ouroboros.tools.plan_dialogue import _source_view
 
 TS_PROBE = (
@@ -52,21 +52,6 @@ def test_prior_findings_reach_the_reviewer_as_recorded():
     assert f"code_quality: {REASON}" in section and "Read API_KEY=env" in section
     assert _fenced_json(section) == {"evidence": finding["evidence"], "verdict": "FAIL"}
     assert "REDACTED" not in section
-
-
-def test_synthesis_prompt_quotes_claims_and_obligations_as_recorded(monkeypatch):
-    prompts: list[str] = []
-    monkeypatch.setattr(review_synthesis, "_call_synthesis_llm",
-                        lambda prompt, *, ctx=None: prompts.append(prompt) or None)
-    findings = [{"item": "a", "verdict": "FAIL", "severity": "critical", "reason": REASON},
-                {"item": "b", "verdict": "FAIL", "severity": "critical", "reason": "TOKEN=abc unchecked"}]
-    obligation = SimpleNamespace(obligation_id="obl-1", item="a", reason=REASON)
-
-    assert review_synthesis.synthesize_to_canonical_issues(findings, open_obligations=[obligation]) == findings
-    [prompt] = prompts
-    assert json.dumps(findings, ensure_ascii=False, indent=2) in prompt
-    assert json.dumps(REASON, ensure_ascii=False) in prompt
-    assert "REDACTED" not in prompt
 
 
 def test_the_pattern_redactor_is_gone_from_the_review_facade():

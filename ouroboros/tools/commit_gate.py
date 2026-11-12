@@ -445,38 +445,6 @@ def _record_commit_attempt(
         tool_name = _current_review_tool_name(ctx)
         task_id = str(getattr(ctx, "task_id", "") or "")
 
-        _findings_for_attempt = critical_findings
-        if status == "blocked" and critical_findings and block_reason != "owner_stopped":  # no model after a stop
-            try:
-                from ouroboros.tools.review_synthesis import synthesize_to_canonical_issues
-                from ouroboros.review_state import load_state as _ls_synth
-                _state_snap = _ls_synth(dr)
-                _open_obs = _state_snap.get_open_obligations(repo_key=repo_key)
-                _findings_for_attempt = synthesize_to_canonical_issues(
-                    list(critical_findings),
-                    open_obligations=_open_obs,
-                    ctx=ctx,
-                )
-            except Exception as _synth_exc:  # the findings stay as reviewers wrote them
-                log.debug("review_synthesis: pre-lock synthesis skipped: %s", _synth_exc)
-
-        # C9.3: resolve semantic-dedup redirects for free-text (bug_*/risk_*) obligations
-        # from a PRE-LOCK snapshot — the light-model call must stay OUTSIDE the review
-        # state lock. Fail-open: any failure yields no redirect (a finding opens a new
-        # obligation) and never blocks the gate. Only blocked attempts mint obligations.
-        _obligation_redirects: Dict[str, str] = {}
-        if status == "blocked" and _findings_for_attempt and block_reason != "owner_stopped":
-            try:
-                from ouroboros.review_state import (
-                    compute_obligation_semantic_redirects,
-                    load_state as _ls_dedup,
-                )
-                _obligation_redirects = compute_obligation_semantic_redirects(
-                    _ls_dedup(dr), _findings_for_attempt, repo_key=repo_key, drive_root=dr
-                )
-            except Exception as _dedup_exc:  # no redirect: a finding opens its own obligation
-                log.debug("obligation semantic dedup skipped: %s", _dedup_exc)
-
         from ouroboros.tools.review_change_custody import continued_attempt, late_write_check
         outlived = late_write_check(ctx, phase if status == "reviewing" else "", review_record_id, triad_raw_results, scope_raw_result)
 
@@ -536,7 +504,7 @@ def _record_commit_attempt(
                 duration_sec=duration_sec,
                 task_id=task_id,
                 critical_findings=_list_or_default(
-                    _findings_for_attempt,
+                    critical_findings,
                     list(getattr(existing, "critical_findings", []) or []),
                 ),
                 repo_key=repo_key,
@@ -608,7 +576,7 @@ def _record_commit_attempt(
             if status != "reviewing" and "late_result_pending" not in legacy_kwargs and cyber_review_authority():
                 attempt.late_result_pending = bool(getattr(existing, "late_result_pending", False)) or _attempt_has_active_review_custody(attempt)
             stamp_paid_review_owner(attempt, paid=bool(paid) or bind_owner)
-            state.record_attempt(attempt, semantic_redirects=_obligation_redirects)
+            state.record_attempt(attempt)
 
         update_state(dr, _mutate)
 
@@ -641,7 +609,6 @@ def _record_commit_attempt(
                                 "parent_task_id": str(getattr(ctx, "parent_task_id", "") or ""),
                             },
                             latest_attempt,
-                            latest_state.get_open_obligations(repo_key=repo_key),
                             source=source,
                         )
                         if continuation is not None:

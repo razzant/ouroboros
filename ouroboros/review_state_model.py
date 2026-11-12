@@ -1,11 +1,11 @@
 """The in-memory review ledger and every transition it permits.
 
 ``AdvisoryReviewState`` is the whole mutable state of one drive's review history:
-commit attempts, open obligations and commit-readiness debts, their lifecycle
-transitions, freshness and expiry rules, and the projections the review surfaces read;
-the retired advisory lane's rows and the debts it minted ride along only as a verbatim
-archive, never read as freshness, guidance or debt. It owns no persistence — loading,
-saving, locking and repo identity stay with ``review_state``. Extracted from
+commit attempts and the stale markers, their lifecycle transitions, freshness and
+expiry rules, and the projections the review surfaces read; the retired advisory
+lane's rows and what the retired obligation layer stored ride along only as a
+verbatim archive, never read as freshness, guidance or open work. It owns no
+persistence — loading, saving, locking and repo identity stay with ``review_state``. Extracted from
 ouroboros/review_state.py (v7 D06 split, re-cut on the v7next tip);
 review_state.py re-exports the class at its historical binding. The class-level
 defaults and the f-string reads the call-time handle cannot carry stay
@@ -21,15 +21,10 @@ from ouroboros.review_state_records import (
     _REVIEW_ATTEMPT_GRACE_SEC,
     _REVIEW_ATTEMPT_TTL_SEC,
     _STATE_SCHEMA_VERSION,
-    _stable_digest,
 )
 
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
-    from ouroboros.review_state_records import (
-        CommitAttemptRecord,
-        CommitReadinessDebtItem,
-        ObligationItem,
-    )
+    from ouroboros.review_state_records import CommitAttemptRecord
 
 
 def _rs():
@@ -54,10 +49,6 @@ class AdvisoryReviewState:
     # Nothing writes, normalizes or interprets them; saving writes them back unchanged.
     advisory_runs: List[Any] = field(default_factory=list)
     attempts: List[CommitAttemptRecord] = field(default_factory=list)
-    open_obligations: List[ObligationItem] = field(default_factory=list)
-    next_obligation_seq: int = 1
-    commit_readiness_debts: List[CommitReadinessDebtItem] = field(default_factory=list)
-    next_commit_readiness_debt_seq: int = 1
     last_stale_from_edit_ts: str = ""
     last_stale_reason: str = ""
     last_stale_repo_key: str = ""
@@ -66,12 +57,10 @@ class AdvisoryReviewState:
     # last_stale_* is the newest marker; the markers of other scopes it displaced stay
     # here, by checkout key ("" = unscoped): {"ts", "reason", "task_id"} (#2573).
     earlier_stale_markers: Dict[str, Dict[str, str]] = field(default_factory=dict)
-    # The debts the retired lane minted (``_is_archived_advisory_debt``), exactly as stored:
-    # never current debt, verified or pruned, ids never reused; saved after the live debts.
-    archived_advisory_debts: List[Dict[str, Any]] = field(default_factory=list)
     # What the retired obligation layer stored (``open_obligations``, ``commit_readiness_debts`` with the advisory
     # lane's debts among them, and their ``next_*_seq`` counters), under their original keys and exactly as stored:
-    # history only, never open work.
+    # history only, never open work; written back unchanged, so an earlier body reading the file after a rollback
+    # finds them where it left them.
     retired_review_rows: Dict[str, Any] = field(default_factory=dict)
 
     def latest_attempt(self) -> Optional[CommitAttemptRecord]:
@@ -223,19 +212,9 @@ class AdvisoryReviewState:
             note += "; checkout scope ambiguous or unrecorded, so it applies to every checkout"
         return note
 
-    def add_blocking_attempt(self, attempt: CommitAttemptRecord) -> None:
-        """Compatibility alias for existing callers/tests."""
-        attempt.status = "blocked"
-        attempt.blocked = True
-        self.record_attempt(attempt)
-
-    def record_attempt(
-        self, attempt: CommitAttemptRecord, *, semantic_redirects: Optional[Dict[str, str]] = None
-    ) -> CommitAttemptRecord:
-        """Upsert one reviewed attempt into durable state. ``semantic_redirects`` maps a
-        free-text finding fingerprint to an existing open obligation id (computed OUTSIDE
-        the lock by the caller, C9.3) so a reworded restatement of an open obligation
-        folds into it instead of opening a duplicate."""
+    def record_attempt(self, attempt: CommitAttemptRecord) -> CommitAttemptRecord:
+        """Upsert one reviewed attempt into durable state; its findings stay as given. A landing clears the stale
+        markers of its checkout (``on_successful_commit``)."""
         now = _rs()._utc_now()
         attempt.tool_name = str(attempt.tool_name or _rs()._DEFAULT_TOOL_NAME)
         attempt.repo_key = str(attempt.repo_key or _rs()._LEGACY_CURRENT_REPO_KEY)
@@ -249,17 +228,8 @@ class AdvisoryReviewState:
             attempt.finished_ts = now
 
         merged = self._upsert_attempt(attempt)
-
-        if merged.status == "blocked" or merged.blocked:
-            merged.blocked = True
-            merged.obligation_ids = self._update_obligations_from_attempt(
-                merged, semantic_redirects=semantic_redirects
-            )
-            self._upsert_attempt(merged)
-        elif merged.status == "succeeded":
+        if merged.status == "succeeded":
             self.on_successful_commit(repo_key=merged.repo_key)
-        self._sync_commit_readiness_debts(repo_key=merged.repo_key or None)
-
         return merged
 
     def _upsert_attempt(self, attempt: CommitAttemptRecord) -> CommitAttemptRecord:
@@ -303,418 +273,17 @@ class AdvisoryReviewState:
                 continue
             _rs()._strip_attempt_heavy_payload(item)
 
-    def _allocate_obligation_id(self) -> str:
-        candidate, next_seq = _rs()._allocate_prefixed_id(
-            self.open_obligations,
-            "obligation_id",
-            self.next_obligation_seq,
-            "obl-",
-        )
-        self.next_obligation_seq = next_seq
-        return candidate
-
-    def _hydrate_obligation(self, obligation: ObligationItem) -> None:
-        obligation.repo_key = str(obligation.repo_key or _rs()._LEGACY_CURRENT_REPO_KEY)
-        obligation.fingerprint = str(
-            obligation.fingerprint
-            or _rs()._make_obligation_fingerprint(obligation.item, obligation.reason)
-        )
-        base_ts = (
-            str(obligation.updated_ts or "")
-            or str(obligation.created_ts or "")
-            or str(obligation.source_attempt_ts or "")
-            or _rs()._utc_now()
-        )
-        if not obligation.created_ts:
-            obligation.created_ts = str(obligation.source_attempt_ts or base_ts)
-        if not obligation.updated_ts:
-            obligation.updated_ts = str(obligation.source_attempt_ts or obligation.created_ts)
-
-    def _coalesce_open_obligations(self) -> None:
-        merged_open: Dict[tuple[str, str], ObligationItem] = {}
-        ordered: List[ObligationItem] = []
-        for obligation in list(self.open_obligations or []):
-            self._hydrate_obligation(obligation)
-            if obligation.status != "still_open":
-                ordered.append(obligation)
-                continue
-            merge_key = (obligation.repo_key, obligation.fingerprint or obligation.obligation_id)
-            existing = merged_open.get(merge_key)
-            if existing is None:
-                merged_open[merge_key] = obligation
-                ordered.append(obligation)
-                continue
-            if (
-                not _rs()._looks_like_public_obligation_id(existing.obligation_id)
-                and _rs()._looks_like_public_obligation_id(obligation.obligation_id)
-            ):
-                existing.obligation_id = obligation.obligation_id
-            if not existing.item and obligation.item:
-                existing.item = obligation.item
-            if not existing.reason and obligation.reason:
-                existing.reason = obligation.reason
-            if not existing.severity and obligation.severity:
-                existing.severity = obligation.severity
-            if obligation.source_attempt_ts and (
-                obligation.source_attempt_ts >= existing.source_attempt_ts
-            ):
-                existing.source_attempt_ts = obligation.source_attempt_ts
-                if obligation.source_attempt_msg:
-                    existing.source_attempt_msg = obligation.source_attempt_msg
-            existing.created_ts = _rs()._min_iso_ts(existing.created_ts, obligation.created_ts)
-            existing.updated_ts = _rs()._max_iso_ts(existing.updated_ts, obligation.updated_ts)
-        self.open_obligations = ordered
-
-    def _touch_obligation(
-        self,
-        obligation: ObligationItem,
-        attempt: CommitAttemptRecord,
-        *,
-        item: str,
-        reason: str,
-        severity: str,
-    ) -> None:
-        seen_ts = str(attempt.ts or _rs()._utc_now())
-        obligation.item = str(obligation.item or item or "")
-        obligation.severity = str(obligation.severity or severity or "critical")
-        obligation.repo_key = str(obligation.repo_key or attempt.repo_key or _rs()._LEGACY_CURRENT_REPO_KEY)
-        if not obligation.reason and reason:
-            obligation.reason = str(reason)
-        obligation.source_attempt_ts = seen_ts
-        obligation.source_attempt_msg = str(attempt.commit_message or "")
-        obligation.fingerprint = str(
-            obligation.fingerprint
-            or _rs()._make_obligation_fingerprint(obligation.item, obligation.reason or reason)
-        )
-        if not obligation.created_ts:
-            obligation.created_ts = seen_ts
-        obligation.updated_ts = seen_ts
-
-    def _allocate_commit_readiness_debt_id(self) -> str:
-        candidate, next_seq = _rs()._allocate_prefixed_id(
-            [*_rs()._commit_readiness_debts_view(self), *getattr(self, "archived_advisory_debts", ())],
-            "debt_id",
-            self.next_commit_readiness_debt_seq,
-            "crd-",
-        )
-        self.next_commit_readiness_debt_seq = next_seq
-        return candidate
-
-    def _hydrate_commit_readiness_debt(self, debt: CommitReadinessDebtItem) -> None:
-        debt.repo_key = str(debt.repo_key or _rs()._LEGACY_CURRENT_REPO_KEY)
-        if not debt.fingerprint:
-            debt.fingerprint = f"{debt.category}:{_stable_digest(debt.summary, debt.repo_key)}"
-        base_ts = (
-            str(debt.updated_at or "")
-            or str(debt.last_seen_at or "")
-            or str(debt.first_seen_at or "")
-            or _rs()._utc_now()
-        )
-        if not debt.first_seen_at:
-            debt.first_seen_at = base_ts
-        if not debt.last_seen_at:
-            debt.last_seen_at = base_ts
-        if not debt.updated_at:
-            debt.updated_at = base_ts
-        debt.source_obligation_ids = _rs()._dedupe_strings(list(debt.source_obligation_ids or []))
-        debt.evidence = _rs()._dedupe_strings(list(debt.evidence or []))[:5]
-        debt.occurrence_count = max(1, int(debt.occurrence_count or 1))
-        if debt.status in _rs()._OPEN_COMMIT_READINESS_DEBT_STATUSES:
-            debt.consecutive_observations = max(1, int(debt.consecutive_observations or debt.occurrence_count or 1))
-        else:
-            debt.consecutive_observations = max(0, int(debt.consecutive_observations or 0))
-
-    def _build_commit_readiness_debt_observations(
-        self,
-        *,
-        repo_key: str | None = None,
-    ) -> List[Dict[str, Any]]:
-        observations: Dict[str, Dict[str, Any]] = {}
-
-        def _remember(observation: Dict[str, Any]) -> None:
-            fingerprint = str(observation.get("fingerprint", "") or "").strip()
-            if not fingerprint:
-                return
-            existing = observations.setdefault(fingerprint, observation)
-            if existing is observation:
-                return
-            existing["source_obligation_ids"] = _rs()._dedupe_strings(
-                list(existing.get("source_obligation_ids") or [])
-                + list(observation.get("source_obligation_ids") or [])
-            )
-            existing["evidence"] = _rs()._dedupe_strings(
-                list(existing.get("evidence") or [])
-                + list(observation.get("evidence") or [])
-            )[:5]
-
-        blocked_attempts = [attempt for attempt in self.filter_attempts(repo_key=repo_key) if attempt.status == "blocked" or attempt.blocked]
-        open_obs = {item.obligation_id: item for item in self.get_open_obligations(repo_key=repo_key)}
-        obligation_counts: Dict[str, int] = {}
-        for attempt in blocked_attempts:
-            for obligation_id in _rs()._dedupe_strings(list(attempt.obligation_ids or [])):
-                obligation_counts[obligation_id] = obligation_counts.get(obligation_id, 0) + 1
-        for obligation_id, count in sorted(obligation_counts.items()):
-            if count < 2:
-                continue
-            obligation = open_obs.get(obligation_id)
-            if obligation is None:
-                continue
-            item_name = str(getattr(obligation, "item", "") or obligation_id)
-            summary = f"{item_name} repeated across {count} blocked reviewed attempts."
-            evidence = [f"{obligation_id}: blocked_attempts={count}"]
-            if getattr(obligation, "reason", ""):
-                evidence.insert(0, f"{item_name}: {getattr(obligation, 'reason', '')}")
-            _remember({
-                "category": "obligation_repeat",
-                "title": "Repeated blocked obligation",
-                "summary": summary,
-                "severity": "warning",
-                "repo_key": str(getattr(obligation, "repo_key", "") or repo_key or ""),
-                "fingerprint": f"obligation_repeat:{obligation_id}",
-                "source": "review_state",
-                "source_obligation_ids": [obligation_id],
-                "evidence": evidence,
-            })
-
-        scoped_attempts = self.filter_attempts(repo_key=repo_key) if repo_key is not None else list(self.attempts)
-        latest_attempt = scoped_attempts[-1] if scoped_attempts else None
-        if (
-            latest_attempt
-            and latest_attempt.readiness_warnings
-            and str(getattr(latest_attempt, "status", "") or "") != "succeeded"
-        ):
-            for warning in latest_attempt.readiness_warnings:
-                warning_text = str(warning or "").strip()
-                if not warning_text:
-                    continue
-                _remember({
-                    "category": "readiness_warning",
-                    "title": "Readiness warning debt",
-                    "summary": warning_text,
-                    "severity": "warning",
-                    "repo_key": str(getattr(latest_attempt, "repo_key", "") or repo_key or ""),
-                    "fingerprint": f"readiness_warning:attempt:{_stable_digest(warning_text)}",
-                    "source": "review_state",
-                    "source_obligation_ids": list(getattr(latest_attempt, "obligation_ids", []) or []),
-                    "evidence": [warning_text],
-                })
-
-        return list(observations.values())
-
-    def _sync_commit_readiness_debts(self, *, repo_key: str | None = None) -> None:
-        now = _rs()._utc_now()
-        debts = _rs()._commit_readiness_debts_view(self)
-        for debt in debts:
-            self._hydrate_commit_readiness_debt(debt)
-
-        observed = {
-            (
-                str(item.get("repo_key", "") or _rs()._LEGACY_CURRENT_REPO_KEY),
-                str(item.get("fingerprint", "") or ""),
-            ): item
-            for item in self._build_commit_readiness_debt_observations(repo_key=repo_key)
-        }
-        existing = {
-            (debt.repo_key, debt.fingerprint or debt.debt_id): debt
-            for debt in debts
-        }
-
-        for key, item in observed.items():
-            current = existing.get(key)
-            if current is None:
-                current = _rs().CommitReadinessDebtItem(
-                    debt_id=self._allocate_commit_readiness_debt_id(),
-                    category=str(item.get("category", "") or ""),
-                    summary=str(item.get("summary", "") or ""),
-                    severity=str(item.get("severity", "warning") or "warning"),
-                    status="detected",
-                    repo_key=str(item.get("repo_key", "") or _rs()._LEGACY_CURRENT_REPO_KEY),
-                    fingerprint=str(item.get("fingerprint", "") or ""),
-                    title=str(item.get("title", "Commit readiness debt") or "Commit readiness debt"),
-                    source=str(item.get("source", "review_state") or "review_state"),
-                    source_obligation_ids=[str(x) for x in (item.get("source_obligation_ids") or [])],
-                    evidence=[str(x) for x in (item.get("evidence") or [])][:5],
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    updated_at=now,
-                    occurrence_count=1,
-                    consecutive_observations=1,
-                )
-                debts.append(current)
-                existing[key] = current
-                continue
-
-            previous_status = str(current.status or "detected")
-            if previous_status == "detected":
-                current.status = "queued"
-            elif previous_status == "verified":
-                current.status = "reopened"
-            current.category = str(item.get("category", "") or current.category)
-            current.summary = str(item.get("summary", "") or current.summary)
-            current.severity = str(item.get("severity", "") or current.severity or "warning")
-            current.repo_key = str(item.get("repo_key", "") or current.repo_key)
-            current.fingerprint = str(item.get("fingerprint", "") or current.fingerprint)
-            current.title = str(item.get("title", "") or current.title)
-            current.source = str(item.get("source", "") or current.source)
-            current.source_obligation_ids = _rs()._dedupe_strings(list(item.get("source_obligation_ids") or []))
-            current.evidence = _rs()._dedupe_strings(list(item.get("evidence") or []))[:5]
-            current.last_seen_at = now
-            current.updated_at = now
-            current.occurrence_count = int(current.occurrence_count or 0) + 1
-            current.consecutive_observations = int(current.consecutive_observations or 0) + 1
-            current.verified_at = ""
-
-        for debt in _rs()._filter_repo_scope(debts, repo_key):
-            debt_key = (debt.repo_key, debt.fingerprint or debt.debt_id)
-            if debt_key in observed:
-                continue
-            if debt.status in _rs()._OPEN_COMMIT_READINESS_DEBT_STATUSES:
-                debt.status = "verified"
-                debt.verified_at = now
-                debt.updated_at = now
-                debt.consecutive_observations = 0
-
-        open_items = [debt for debt in debts if str(debt.status or "") in _rs()._OPEN_COMMIT_READINESS_DEBT_STATUSES]
-        closed_items = [debt for debt in debts if str(debt.status or "") not in _rs()._OPEN_COMMIT_READINESS_DEBT_STATUSES]
-        open_items.sort(key=lambda debt: str(debt.updated_at or debt.last_seen_at or debt.first_seen_at or ""), reverse=True)
-        closed_items.sort(key=lambda debt: str(debt.updated_at or debt.last_seen_at or debt.first_seen_at or ""), reverse=True)
-        remaining = max(0, _rs()._MAX_COMMIT_READINESS_DEBTS - len(open_items))
-        self.commit_readiness_debts = open_items + closed_items[:remaining]
-
-    def get_open_commit_readiness_debts(
-        self,
-        repo_key: str | None = None,
-    ) -> List[CommitReadinessDebtItem]:
-        debts = _rs()._commit_readiness_debts_view(self)
-        results: List[CommitReadinessDebtItem] = []
-        for debt in _rs()._filter_repo_scope(debts, repo_key):
-            self._hydrate_commit_readiness_debt(debt)
-            if debt.status not in _rs()._OPEN_COMMIT_READINESS_DEBT_STATUSES:
-                continue
-            results.append(debt)
-        return results
-
-    def _update_obligations_from_attempt(
-        self, attempt: CommitAttemptRecord, *, semantic_redirects: Optional[Dict[str, str]] = None
-    ) -> List[str]:
-        """Accumulate critical findings as stable obligations. ``semantic_redirects``
-        (fingerprint -> obligation_id, precomputed off-lock, C9.3) lets a reworded
-        free-text finding that misses the exact fingerprint fold into the open
-        obligation it duplicates instead of opening a new one."""
-        if not attempt.critical_findings:
-            return []
-        redirects = semantic_redirects or {}
-
-        self._coalesce_open_obligations()
-        existing = {
-            ob.obligation_id: ob
-            for ob in self.get_open_obligations(repo_key=attempt.repo_key)
-        }
-        by_fingerprint = {
-            str(ob.fingerprint or ""): ob
-            for ob in self.get_open_obligations(repo_key=attempt.repo_key)
-            if str(ob.fingerprint or "")
-        }
-        touched_ids: List[str] = []
-
-        for f in attempt.critical_findings:
-            if not isinstance(f, dict):
-                continue
-            if str(f.get("verdict", "")).upper() != "FAIL":
-                continue
-            if str(f.get("severity", "")).lower() != "critical":
-                continue
-            item = str(f.get("item", "unknown"))
-            reason = str(f.get("reason", ""))
-            severity = str(f.get("severity", "critical"))
-            raw_explicit_id = str(f.get("obligation_id", "") or "").strip()
-            # A reviewer-supplied id folds into the OPEN obligation of this repo it names,
-            # under any item: one root defect is one obligation across both parts of the
-            # brief. A malformed or unknown id names nothing, so it cannot corrupt debt
-            # links; a mis-cited open id folds a distinct defect into it, which then
-            # re-surfaces under its own fingerprint while still broken (as below).
-            explicit = None
-            if _rs()._looks_like_public_obligation_id(raw_explicit_id):
-                explicit = existing.get(raw_explicit_id)
-            fingerprint = _rs()._make_obligation_fingerprint(item, reason)
-
-            # A reworded restatement that misses the exact fingerprint folds into the
-            # open obligation the off-lock detector matched it to (C9.3), but only if
-            # that obligation is still open here (fail-open: a vanished target opens a
-            # new obligation). Honesty about the residual risk: the fold keeps the
-            # SURVIVING obligation's item/reason, so a WRONG high-confidence merge of
-            # two genuinely distinct critical findings drops the redirected finding's
-            # text — and if the survivor is later resolved, the dropped one's blocking
-            # clears for that attempt. It is NOT permanently lost: a still-broken
-            # finding re-surfaces as a fresh obligation on the next review attempt (its
-            # own fingerprint, the resolved survivor no longer an open candidate), so
-            # the gate self-heals. The detector is biased hard to false-DUP (high
-            # confidence + same-root-cause/same-action only) precisely because a
-            # false-MERGE here is the costly direction; it never blocks review.
-            redirected = existing.get(redirects.get(fingerprint, "")) if redirects else None
-            obligation = None
-            if explicit is not None:
-                obligation = explicit
-            elif fingerprint in by_fingerprint:
-                obligation = by_fingerprint[fingerprint]
-            elif redirected is not None:
-                obligation = redirected
-            else:
-                obligation = _rs().ObligationItem(
-                    obligation_id=self._allocate_obligation_id(),
-                    item=item,
-                    severity=severity,
-                    reason=reason,
-                    source_attempt_ts=str(attempt.ts or ""),
-                    source_attempt_msg=str(attempt.commit_message or ""),
-                    status="still_open",
-                    repo_key=attempt.repo_key,
-                    fingerprint=fingerprint,
-                )
-                self.open_obligations.append(obligation)
-
-            self._touch_obligation(
-                obligation,
-                attempt,
-                item=item,
-                reason=reason,
-                severity=severity,
-            )
-            existing[obligation.obligation_id] = obligation
-            by_fingerprint[obligation.fingerprint] = obligation
-            touched_ids.append(obligation.obligation_id)
-
-        self._coalesce_open_obligations()
-        return _rs()._dedupe_strings(touched_ids)
-
-    def get_open_obligations(self, repo_key: str | None = None) -> List[ObligationItem]:
-        return [
-            ob for ob in _rs()._filter_repo_scope(self.open_obligations, repo_key)
-            if ob.status == "still_open"
-        ]
-
     def on_successful_commit(self, repo_key: str | None = None) -> None:
-        now = _rs()._utc_now()
+        """A landing clears the stale markers of its checkout and the unscoped one; ``repo_key=None`` clears every
+        marker."""
         if repo_key is None:
-            self.open_obligations = []
             self.last_stale_from_edit_ts = ""
             self.last_stale_reason = ""
             self.last_stale_repo_key = ""
             self.last_stale_task_id = ""
             self.earlier_stale_markers = {}
-            for debt in _rs()._commit_readiness_debts_view(self):
-                self._hydrate_commit_readiness_debt(debt)
-                if debt.status in _rs()._OPEN_COMMIT_READINESS_DEBT_STATUSES:
-                    debt.status = "verified"
-                    debt.verified_at = now
-                    debt.updated_at = now
-                    debt.consecutive_observations = 0
             return
 
-        self.open_obligations = [
-            ob for ob in self.open_obligations
-            if ob not in _rs()._filter_repo_scope(self.open_obligations, repo_key)
-        ]
         if self.last_stale_repo_key in ("", repo_key):
             self.last_stale_from_edit_ts = ""
             self.last_stale_reason = ""
@@ -722,7 +291,6 @@ class AdvisoryReviewState:
             self.last_stale_task_id = ""
         earlier = getattr(self, "earlier_stale_markers", None) or {}
         self.earlier_stale_markers = {key: row for key, row in earlier.items() if key not in ("", repo_key)}
-        self._sync_commit_readiness_debts(repo_key=repo_key)
 
     def expire_stale_attempts(
         self,

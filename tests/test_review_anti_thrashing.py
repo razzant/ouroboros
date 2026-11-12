@@ -10,7 +10,7 @@ import json
 import pathlib
 import subprocess
 
-from ouroboros.review_state import AdvisoryReviewState, make_repo_key
+from ouroboros.review_state import make_repo_key
 from ouroboros.tools.review import _build_review_history_section as triad_hist
 from ouroboros.tools.review_helpers import (
     _ANTI_THRASHING_RULE_VERDICT,
@@ -165,40 +165,3 @@ def test_brief_history_section_backtick_in_a_round_detail_does_not_break_fence()
     assert json.loads(block) == {"note": detail}
 
 
-# ---------------------------------------------------------------------------
-# One root defect, one obligation: a reused open id folds under any item.
-# ---------------------------------------------------------------------------
-
-def test_a_reused_open_obligation_id_folds_under_any_item_and_no_other_id_folds():
-    """A Part 2 seat that reports a Part 1 obligation's defect under its own item and
-    reuses the open id folds into it: one root defect stays one obligation across both
-    parts of the brief. An unknown or malformed id names nothing, so its finding opens
-    its own obligation, and so does the same id cited in another repository."""
-    from ouroboros.review_state import CommitAttemptRecord
-
-    def blocked(ts, *findings, repo_key="r"):
-        return CommitAttemptRecord(
-            ts=ts, commit_message="m", status="blocked", repo_key=repo_key, blocked=True,
-            critical_findings=[{"verdict": "FAIL", "severity": "critical", **f} for f in findings])
-
-    state = AdvisoryReviewState()
-    state.record_attempt(blocked("2026-10-14T00:00:00Z",
-                                 {"item": "development_compliance", "reason": "a second resolver re-decides the owner"}))
-    (first,) = state.get_open_obligations(repo_key="r")
-
-    state.record_attempt(blocked("2026-10-14T00:01:00Z", {
-        "item": "architecture_fit", "reason": "the new resolver is a second home of the owner's fact",
-        "obligation_id": first.obligation_id}))
-    assert [ob.obligation_id for ob in state.get_open_obligations(repo_key="r")] == [first.obligation_id]
-
-    state.record_attempt(blocked(
-        "2026-10-14T00:02:00Z",
-        {"item": "implicit_contracts", "reason": "a cache key changed meaning", "obligation_id": "obl-9999"},
-        {"item": "regression_surface", "reason": "a sibling path still fails", "obligation_id": "not-an-id"}))
-    state.record_attempt(blocked("2026-10-14T00:03:00Z", {
-        "item": "architecture_fit", "reason": "a resolver duplicates its owner",
-        "obligation_id": first.obligation_id}, repo_key="other"))
-    opened = state.get_open_obligations(repo_key="r")
-    assert len(opened) == 3 and first.obligation_id in {ob.obligation_id for ob in opened}
-    assert "obl-9999" not in {ob.obligation_id for ob in opened}
-    assert len(state.get_open_obligations(repo_key="other")) == 1

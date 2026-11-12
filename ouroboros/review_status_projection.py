@@ -108,16 +108,27 @@ _ARCHIVE_NOTE = (
 )
 
 
+def _retired_debts(state: Any) -> Tuple[List[Any], List[Any]]:
+    """The stored debt rows as ``(the retired advisory lane's, the obligation layer's)``."""
+    from ouroboros.review_state_records import _is_archived_advisory_debt
+
+    debts = (getattr(state, "retired_review_rows", None) or {}).get("commit_readiness_debts")
+    debts = debts if isinstance(debts, list) else []
+    advisory = [row for row in debts if _is_archived_advisory_debt(row)]
+    return advisory, [row for row in debts if not _is_archived_advisory_debt(row)]
+
+
 def _advisory_run_archive(state: Any, drive_root: pathlib.Path) -> Dict[str, Any]:
     """Where this store keeps the retired advisory lane's rows and the debts they minted
     (owner decision: archive only); ``{}`` when it keeps none. ``path`` is the file this
     projection read, so a split child's own drive is never mistaken for another root."""
     from ouroboros.review_state import _STATE_RELPATH
 
-    if not state.advisory_runs and not state.archived_advisory_debts:
+    advisory_debts = _retired_debts(state)[0]
+    if not state.advisory_runs and not advisory_debts:
         return {}
     return {"path": str(drive_root.resolve(strict=False) / _STATE_RELPATH), "advisory_runs": len(state.advisory_runs),
-            "advisory_debts": len(state.archived_advisory_debts), "note": _ARCHIVE_NOTE}
+            "advisory_debts": len(advisory_debts), "note": _ARCHIVE_NOTE}
 
 
 _OBLIGATION_ARCHIVE_NOTE = (
@@ -132,12 +143,10 @@ def _obligation_archive(state: Any, drive_root: pathlib.Path) -> Dict[str, Any]:
     """Where this store keeps what the retired obligation layer stored, counted as stored (the retired advisory
     lane's debts stay in ``advisory_run_archive``); ``{}`` when it keeps none."""
     from ouroboros.review_state import _STATE_RELPATH
-    from ouroboros.review_state_records import _is_archived_advisory_debt
 
-    rows = getattr(state, "retired_review_rows", None) or {}
-    obligations, debts = rows.get("open_obligations"), rows.get("commit_readiness_debts")
+    obligations = (getattr(state, "retired_review_rows", None) or {}).get("open_obligations")
     obligations = obligations if isinstance(obligations, list) else []
-    debts = [row for row in debts if not _is_archived_advisory_debt(row)] if isinstance(debts, list) else []
+    debts = _retired_debts(state)[1]
     if not obligations and not debts:
         return {}
     return {"path": str(drive_root.resolve(strict=False) / _STATE_RELPATH), "open_obligations": len(obligations),

@@ -82,7 +82,6 @@ def test_summary_and_background_token_budgets():
     from ouroboros import consolidator
 
     expectations = {
-        "ouroboros/tools/review_synthesis.py": "max_tokens=16384",
         # The Light answer ceiling is one named constant since the memory
         # writers landed; the floor itself is pinned on the constant below.
         "ouroboros/consolidator.py": "max_tokens=LIGHT_ANSWER_CEILING_TOKENS",

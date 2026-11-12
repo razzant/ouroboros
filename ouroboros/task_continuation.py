@@ -211,7 +211,6 @@ def retire_settled_continuations(
 def build_review_continuation(
     task: Dict[str, Any],
     attempt: Any,
-    open_obligations: List[Any],
     *,
     source: str,
     warning: str = "",
@@ -223,7 +222,7 @@ def build_review_continuation(
     warnings = [str(item) for item in (getattr(attempt, "readiness_warnings", []) or []) if str(item).strip()]
     if warning:
         warnings.append(str(warning))
-    if attempt is None and not open_obligations:
+    if attempt is None:
         if source != "task_exception" or not warnings:
             return None
         return ReviewContinuation(
@@ -248,8 +247,6 @@ def build_review_continuation(
         block_details=str(getattr(attempt, "block_details", "") or ""),
         critical_findings=list(getattr(attempt, "critical_findings", []) or []),
         advisory_findings=list(getattr(attempt, "advisory_findings", []) or []),
-        obligation_ids=list(getattr(attempt, "obligation_ids", []) or []),
-        open_obligations=[_obligation_to_dict(item) for item in open_obligations],
         readiness_warnings=warnings,
         degraded_reasons=list(getattr(attempt, "degraded_reasons", []) or []),
         warnings=[str(item) for item in warnings if str(item).strip()],
@@ -280,14 +277,7 @@ def capture_review_continuation_from_state(
         if repo_key
         else state.latest_attempt_for(task_id=task_id)
     )
-    obligation_repo_key = str(getattr(attempt, "repo_key", "") or repo_key or "")
-    continuation = build_review_continuation(
-        task,
-        attempt,
-        state.get_open_obligations(repo_key=obligation_repo_key or None),
-        source=source,
-        warning=warning,
-    )
+    continuation = build_review_continuation(task, attempt, source=source, warning=warning)
     if continuation is None:
         return None
     return save_review_continuation(drive_root, continuation, expect_task_id=task_id)
@@ -334,23 +324,6 @@ def _continuation_from_dict(data: Dict[str, Any], *, expected_task_id: str = "")
         updated_ts=str(data.get("updated_ts", "") or ""),
         review_record_id=str(data.get("review_record_id", "") or ""),
     )
-
-
-def _obligation_to_dict(item: Any) -> Dict[str, Any]:
-    if isinstance(item, dict):
-        return item
-    return {
-        "obligation_id": str(getattr(item, "obligation_id", "") or ""),
-        "fingerprint": str(getattr(item, "fingerprint", "") or ""),
-        "item": str(getattr(item, "item", "") or ""),
-        "severity": str(getattr(item, "severity", "") or ""),
-        "reason": str(getattr(item, "reason", "") or ""),
-        "status": str(getattr(item, "status", "") or ""),
-        "source_attempt_ts": str(getattr(item, "source_attempt_ts", "") or ""),
-        "source_attempt_msg": str(getattr(item, "source_attempt_msg", "") or ""),
-        "created_ts": str(getattr(item, "created_ts", "") or ""),
-        "updated_ts": str(getattr(item, "updated_ts", "") or ""),
-    }
 
 
 def _quarantine_corrupt_continuation(drive_root: Any, task_id: str, *, reason: str) -> None:

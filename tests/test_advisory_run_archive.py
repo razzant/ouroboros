@@ -7,8 +7,9 @@ a ``readiness_warning:advisory:`` fingerprint) — survives every ordinary save 
 stored and is named where it lives (``review_status.advisory_run_archive``, the store
 actually read), while the context, the ``review_status`` projection and the task evidence
 read as if it were absent. An ``advisory_stale`` debt copy of the stale marker is archived
-the same way; the preflight look and its marker stay live beside it, and live debts keep
-their ordinary lifecycle.
+the same way; the preflight look and its marker stay live beside it. Since step 5 the
+obligation layer's own debts are an archive too, kept in the same stored list and named by
+``review_status.obligation_archive``; no live debt remains.
 
 Retired with that decision, because their subject no longer exists: rendering old runs in
 the historical ledger, the ``review_status`` run list and its run-derived freshness
@@ -162,11 +163,10 @@ def test_archive_rows_survive_ordinary_attempt_and_commit_saves_exactly_as_store
     def assert_archive_as_stored():
         saved = _saved(drive)
         # The exact original subtrees, byte for byte: unknown fields, the whole raw_result, more
-        # than five evidence lines, empty and missing timestamps, null and odd-typed values.
-        assert _compact(saved["advisory_runs"]) == _compact(original["advisory_runs"])
-        assert _compact(saved["commit_readiness_debts"][-len(archived):]) == _compact(archived), (
-            "kept as stored, after the live")
-        assert [row["debt_id"] for row in saved["commit_readiness_debts"]].count("crd-0005") == 1
+        # than five evidence lines, empty and missing timestamps, null and odd-typed values, and
+        # the debts in their stored order, neither verified, pruned nor joined by a new one.
+        for key in ("advisory_runs", "commit_readiness_debts"):
+            assert _compact(saved[key]) == _compact(original[key]), key
         return saved
 
     # The ordinary production writes: reviewed attempts under the locked read-modify-write.
@@ -174,20 +174,11 @@ def test_archive_rows_survive_ordinary_attempt_and_commit_saves_exactly_as_store
         repo_key, 1, readiness_warnings=["modern warning"],
         critical_findings=[{"item": "tests_affected", "reason": "add a test", "severity": "critical",
                             "verdict": "FAIL"}])))
-    saved = assert_archive_as_stored()
-    live_rows = {row["debt_id"]: row for row in saved["commit_readiness_debts"][:-len(archived)]}
-    # The modern warning's debt takes the next free id: the archived crd-0005 is never reused.
-    assert live_rows["crd-0006"]["fingerprint"].startswith("readiness_warning:attempt:")
-    # Each half of the archive predicate alone is live debt, verified when no longer observed.
-    assert {live_rows[debt_id]["status"] for debt_id in ("crd-0001", "crd-0002")} == {"verified"}
-    assert [debt.debt_id for debt in load_state(drive).get_open_commit_readiness_debts(repo_key=repo_key)] == ["crd-0006"]
-
+    assert_archive_as_stored()
     update_state(drive, lambda state: state.record_attempt(_succeeded(repo_key, 2)))
-    assert {row["status"] for row in assert_archive_as_stored()["commit_readiness_debts"][:-len(archived)]} == {
-        "verified"}
+    assert_archive_as_stored()
     update_state(drive, lambda state: state.on_successful_commit(repo_key=None))
     assert_archive_as_stored()
-    assert load_state(drive).get_open_commit_readiness_debts() == []
 
 
 def test_review_status_names_the_store_it_read_and_existing_readers_return_the_rows(ctx):
@@ -282,42 +273,6 @@ def test_review_status_names_the_obligation_archive_and_projects_no_obligation_o
     assert status["advisory_run_archive"]["advisory_debts"] == 4, "the advisory archive keeps its own count"
     assert not retired & set(status) and "obligation" not in status["next_step"].lower()
     assert "OBLIGATION-SENTINEL" not in json.dumps(status) and "live crd-" not in json.dumps(status)
-
-
-def test_live_debts_keep_their_lifecycle_and_bound_beside_the_archive(tmp_path):
-    repo_key = make_repo_key(_checkout(tmp_path))
-    drive = tmp_path / "drive"
-    archived = _archived_debts(repo_key)
-    closed = [{"debt_id": f"crd-{n:04d}", "category": "obligation_repeat", "summary": f"closed {n}",
-               "status": "verified", "repo_key": repo_key, "fingerprint": f"obligation_repeat:obl-{n:04d}",
-               "source": "review_state", "updated_at": f"2026-07-01T00:{n % 60:02d}:00+00:00"}
-              for n in range(100, 160)]
-    _inject_archive(drive, [], [*archived, *_live_debts(repo_key), *closed])
-
-    def debts():
-        saved = _saved(drive)["commit_readiness_debts"]
-        assert _compact(saved[-len(archived):]) == _compact(archived), "the archive is never resolved or pruned"
-        return {row["debt_id"]: row for row in saved[:-len(archived)]}
-
-    assert [debt.debt_id for debt in load_state(drive).get_open_commit_readiness_debts(repo_key=repo_key)] == [
-        "crd-0001", "crd-0002"]
-    # Nothing observes the live debts now: they are verified, and the retention bound
-    # prunes only live closed rows — the archive rides outside it.
-    update_state(drive, lambda state: state.record_attempt(_blocked(repo_key, 1)))
-    live = debts()
-    assert len(live) == 50 and {live[debt_id]["status"] for debt_id in ("crd-0001", "crd-0002")} == {"verified"}
-    # The stale marker is the one freshness fact: it mints no debt, and the archived
-    # ``advisory_stale`` copy is neither reopened nor verified.
-    def stale_then_review(state):
-        state.mark_look_stale("2026-01-01T00:00:00+00:00", reason_ts="2026-10-28T11:00:00+00:00", reason="an edit",
-                              stale_repo_key=repo_key, stale_task_id="task-a")
-        state.record_attempt(_blocked(repo_key, 2))
-
-    update_state(drive, stale_then_review)
-    assert "crd-0003" not in debts() and load_state(drive).get_open_commit_readiness_debts() == []
-    update_state(drive, lambda state: state.on_successful_commit(repo_key=None))
-    debts()
-    assert load_state(drive).get_open_commit_readiness_debts() == []
 
 
 def test_a_preflight_look_still_stales_on_edit_beside_fresh_archive_rows(ctx):
