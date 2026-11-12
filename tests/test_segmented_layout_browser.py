@@ -301,14 +301,16 @@ def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_ser
             assert save()["OUROBOROS_TASK_REVIEW_MODE"] == "required"
 
             open_behavior()
-            assert page.locator(f'{group} [data-setting-value="required"]').get_attribute("aria-pressed") == "true"
+            # A strip claims no choice until its value is read: wait for the read, never for a time.
+            expect(page.locator(f'{group} [data-setting-value="required"]')).to_have_attribute("aria-pressed", "true")
             press("off", " ")  # Space chooses too
             assert page.locator(f'{group} [data-setting-value="off"]').get_attribute("aria-pressed") == "true"
             assert save()["OUROBOROS_TASK_REVIEW_MODE"] == "off"
 
             open_behavior()
             chosen = page.locator(f'{group} [data-setting-value="off"]')
-            assert chosen.get_attribute("aria-pressed") == "true" and "Off" in chosen.inner_text()
+            expect(chosen).to_have_attribute("aria-pressed", "true")
+            assert "Off" in chosen.inner_text()
             assert page.locator(f'{group} [data-setting-value="required"]').get_attribute("aria-pressed") == "false"
         finally:
             browser.close()
