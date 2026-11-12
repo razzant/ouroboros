@@ -1045,6 +1045,10 @@ def test_run_command_without_outputs_notes_absolute_user_file_writes(tmp_path, m
     assert result.startswith("exit_code=0"), result  # the command's own answer leads; the note trails it
     assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
     assert "without being registered as task outputs" in result
+    # The note closes the command's own text (a cut view keeps a result's tail); only the dispatcher's
+    # one-line runtime fact may follow it.
+    after = result.split("otherwise nothing is needed.", 1)[1].strip()
+    assert not after or (after.startswith("Runtime selection:") and "\n" not in after), after
     assert target.read_text(encoding="utf-8") == "<h1>ok</h1>"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
 
@@ -1198,6 +1202,7 @@ def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, mo
     assert (typed.status, typed.code) == ("ok", "ARTIFACT_OUTPUT_UNDECLARED")
     assert typed.meta["undeclared_outputs"] == [str(target.resolve())]
     assert result.startswith("# script_path="), result  # the script's own answer leads; the note trails it
+    assert result.rstrip().endswith("otherwise nothing is needed.")
     assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
     assert "without being registered as task outputs" in result
     assert str(target) in result

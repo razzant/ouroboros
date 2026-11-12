@@ -471,7 +471,7 @@ def _run_shell(
             output_context=output_context,
         )
         artifact_note += f"\n- output baseline unavailable before the run ({baseline_problem}): a registered output may predate it" if baseline_problem and artifact_note else ""
-        audit_note = f"\n\n{undeclared_note}" if undeclared_note else ""
+        audit_note = ""
         if cwd_root == "user_files" and not outputs and not undeclared_note:  # one note about one fact
             # Remove scratch effects without hiding a simultaneous real deliverable.
             _after_for_audit = after_changed
@@ -511,6 +511,7 @@ def _run_shell(
             result = _masked_green_disclosure(ctx, _publish_process_result(ctx, "ARTIFACT_OUTPUT_ERROR", text, exit_code=0, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta), cmd)
             return _disclose_output_audit_failure(ctx, result, audit_error)
         text = autocorrect_note + f"{_describe_returncode(0, cwd=work_dir, binding=binding)}\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{audit_note}{scratch_note}{executor_note}"
+        text += f"\n\n{undeclared_note}" if undeclared_note else ""  # last: a cut view keeps a result's tail
         code = "ARTIFACT_OUTPUT_UNDECLARED" if undeclared_note else "SHELL_REGEX_AUTO_CORRECTED" if regex_autocorrected else "OK"
         result = _masked_green_disclosure(ctx, _publish_process_result(ctx, code, text, exit_code=0, artifact_registered=bool(artifact_registered and not artifact_failed), shell_regex_auto_corrected=regex_autocorrected, meta={**process_meta, **undeclared_outputs_meta(undeclared_user_outputs)}), cmd)
         return _disclose_output_audit_failure(ctx, result, audit_error)
