@@ -35,7 +35,6 @@ const list = (value) => (Array.isArray(value) ? value : []);
 // still unanswered while its work goes on or after it ended: the owner's turn, never the work's word.
 const asked = (state) => list(state?.turn).some((item) => item?.kind === 'question');
 const QUESTIONS = new Set(['question', 'open_question']);
-const questioned = (state) => list(state?.turn).some((item) => QUESTIONS.has(item?.kind));
 
 /** The state one chat instance shows before its first body: an idle room and no works. */
 export function emptyWorkState() {
@@ -235,16 +234,23 @@ export function roomSpeaker(room, works = [], word = activityWord(room)) {
     return list(room?.works).map((id) => byId.get(id)).find((work) => work && activityWord(work) === word) || null;
 }
 
-/** What waits for the owner in a room ('question' | 'unanswered' | 'action'), '' when nothing does or its own word
- *  says so: a question a task waits on, else one still unanswered while its work goes on or after it ended. */
-export const roomAmber = (room) => (!room?.amber || (room.activity === 'waiting' && asked(room)) ? ''
-    : asked(room) ? 'question' : questioned(room) ? 'unanswered' : 'action');
+/** What waits for the owner in a room ('question' | 'action' | 'unanswered' | 'delivery'), '' when nothing does or
+ *  its own word says so: a question a task waits on, else an action only the owner takes, else a question still
+ *  unanswered while its work goes on or after it ended, or only answers whose delivery is unknown. */
+export const roomAmber = (room) => {
+    if (!room?.amber || (room.activity === 'waiting' && asked(room))) return '';
+    if (asked(room)) return 'question';
+    const open = list(room.turn).filter((item) => item?.kind === 'open_question');
+    if (list(room.turn).some((item) => item?.kind === 'action') || !open.length) return 'action';
+    return open.every((item) => item.code === 'delivery_unknown') ? 'delivery' : 'unanswered';
+};
 
 /** The amber mark said in words, for the room's accessible name: the colour is never the only way it is told. An
  *  unanswered question nobody waits on is never said as a wait. */
 export const amberNote = (kind) => (kind === 'question' ? tr('work.amber.question', 'A question waits for your answer')
     : kind === 'unanswered' ? tr('work.amber.unanswered', 'An unanswered question is here')
-        : kind === 'action' ? tr('work.amber.action', 'Something here waits for you') : '');
+        : kind === 'delivery' ? tr('work.amber.delivery', 'An answer here was recorded; its delivery is unknown')
+            : kind === 'action' ? tr('work.amber.action', 'Something here waits for you') : '');
 
 /**
  * The room's status in its bar: the server's room in short words, with the client's own facts on top. Tone is the

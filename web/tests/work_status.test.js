@@ -15,9 +15,9 @@ import { censusTaskPhase, desiredLiveCardPhase, pausePhaseLabel, taskActivityPre
 import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
-    OUTCOME_TONES, activityWord, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
+    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
     memberPaused, memberState, ownStopPress, reasonText, reconcileWorkState, resumeAttemptClause, resumeAttemptWords,
-    resumeTargets, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
+    resumeTargets, roomAmber, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
 import { SERVER_REASONS, SERVER_SLEEPS, room, serverMark, work as builtWork } from './work_fixture.js';
 
@@ -81,6 +81,25 @@ test('the mark is the server\'s shape; whose move it is stands beside it, said i
     for (const [name, { rooms }] of Object.entries(CASES)) {
         for (const [chat, served] of Object.entries(rooms || {})) assert.equal(view(name, Number(chat)).mark, served.mark, name);
     }
+});
+
+test('a room\'s note says what waits: a question a task stands on, then an action, then an open question or its delivery', () => {
+    const note = (...turn) => amberNote(roomAmber(room('idle', { turn })));
+    const standing = { kind: 'question', task_id: 'a', quiz_id: 'q' };
+    const action = { kind: 'action', task_id: 'b' };
+    const open = { kind: 'open_question', task_id: 'c', quiz_id: 'q' };
+    const delivery = { kind: 'open_question', task_id: 'd', quiz_id: 'q', code: 'delivery_unknown' };
+    assert.equal(note(open, standing, action), 'A question waits for your answer');
+    // An owner action outranks an unanswered question, in either order.
+    assert.equal(note(open, action), 'Something here waits for you');
+    assert.equal(note(action, open), 'Something here waits for you');
+    assert.equal(note(open), 'An unanswered question is here');
+    // Only answers whose delivery is unknown: the note says that, never an unanswered question; one open beside it
+    // is said as unanswered, in either order.
+    assert.equal(note(delivery), 'An answer here was recorded; its delivery is unknown');
+    assert.equal(note(delivery, open), 'An unanswered question is here');
+    assert.equal(note(open, delivery), 'An unanswered question is here');
+    assert.equal(note(), '', 'nothing waits: no note');
 });
 
 test('only the client facts overlay the room, each with its mark: socket closed, own send, start, own Stop press', () => {
