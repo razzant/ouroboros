@@ -422,7 +422,7 @@ def get_tools() -> List[ToolEntry]:
                 "Create, revise, append, revert or reversibly archive durable Markdown understanding. YAML carries type, "
                 "optional title and an authored summary; unknown metadata survives. Each active summary stays resident in "
                 "the index's whole view (a global note's in every room and place I work in, a project note's in that "
-                "project; never in a Safety check); body text never replaces it. Under physical window pressure, the outline names every active "
+                "project), never in a Safety check; body text never replaces it. Under physical window pressure, the outline names every active "
                 "topic and keeps type person summaries; others remain readable with knowledge_list. A summary names the "
                 "note's enduring scope and when to open it, and is not a dated log of the latest edit. "
                 "Modes. overwrite replaces the note with content; its frontmatter fields merge with the retained ones. "
