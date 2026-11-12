@@ -73,11 +73,11 @@ def _text_revision(root: Any) -> int:
 def _stream_ends(root: Any) -> tuple:
     """The dialogue streams' ends (``dialogue_store.stream_end``, the readers' change counter): an append and
     a newly planned segment move them. The archive import stores rows under unchanged ends, but only into
-    intervals planned before it: while one is pending ``resolve_row`` answers importing, and a miss is looked up
-    once more after both streams answered imported (``_target_facts``), so no not-found decision outlives an
-    import. Apart from a text revision (``_text_revision``) no code rewrites the rows or skipped lines of an
-    imported interval in place; were it done by hand, this process would see it after the next append, text
-    revision or restart."""
+    intervals planned before it: while one is pending a row not found answers importing (``resolve_row``), and
+    ``_target_facts`` looks once more after a miss, so no absence outlives an import. An ambiguous address
+    answers before that check and stays unknown: no import makes it exact. Apart from a text revision
+    (``_text_revision``) no code rewrites the rows or skipped lines of an imported interval in place; were it
+    done by hand, this process would see it after the next append, text revision or restart."""
     from ouroboros import dialogue_store as ds
 
     return tuple(ds.stream_end(root, stream) for stream in ds.STREAMS)
@@ -117,8 +117,10 @@ def _target_facts(rooms: Any, ref: Mapping[str, Any]) -> tuple:
     from ouroboros.chat_chain import _row_chat_id, resolve_row
     from ouroboros.presence_owner_contact import private_main_row
 
-    for _look in range(2):  # a miss looks once more: a stream that answered it was imported by then, so the rows
-        target, statuses = None, set()  # an import stored during the first look, under unchanged marks, are read
+    # A miss looks once more. A stream whose miss was not an ambiguous address answered imported in the first
+    # look (``resolve_row``), so the second reads the rows an import stored meanwhile, under unchanged marks.
+    for _look in range(2):
+        target, statuses = None, set()
         for stream in ("chat", "progress"):
             target, found = resolve_row(root, address, stream=stream)
             if target:
