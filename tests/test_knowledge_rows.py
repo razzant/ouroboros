@@ -160,6 +160,27 @@ def _chain(tmp_path, count=5):
     return journal, texts, offsets
 
 
+def test_a_row_is_read_only_where_a_journal_line_starts(tmp_path):
+    """``Texts.row`` reads a row only at a line start: after a base row whose line ends with CRLF, the change row at its
+    exact offset reads both its versions; an offset between that CR and its LF, or inside a line, names no row."""
+    journal = tmp_path / "knowledge_history.jsonl"
+    old, new = "# Река\r\nOld.\r\n", "# Река\r\nNew.\r\n"
+    head = {"topic": TOPIC, "address": {"scope": "global"}, "publication": "source_capture", "old_sha256": "",
+            "new_sha256": sha(old), "old_content": "", "new_content": old}
+    first = (json.dumps(head, ensure_ascii=False) + "\r\n").encode("utf-8")  # a line some other tool ended with CRLF
+    after = {**head, "old_sha256": sha(old), "new_sha256": sha(new)}
+    del after["old_content"], after["new_content"]
+    after.update(rows.encode(old, new, (0, head)))
+    journal.write_bytes(first + (json.dumps(after, ensure_ascii=False) + "\n").encode("utf-8"))
+    at = len(first)
+    assert "new_content" not in after and after["base"]["offset"] == 0
+    assert read(journal, at, "new") == new and read(journal, at, "old") == old
+    assert rows.Texts(journal).row(0)["new_sha256"] == sha(old)
+    for offset in (at - 1, 3):  # between the CR and its LF; inside the first line
+        with pytest.raises(rows.TextUnavailable, match=f"^no journal line starts at byte offset {offset}$"):
+            rows.Texts(journal).row(offset)
+
+
 def test_a_base_naming_its_own_row_or_a_later_one_is_never_followed(tmp_path):
     """A base names an earlier row. One that names the row itself or a row after it is no base: neither the forward
     path nor the hash search follows it (no loop, no forward link), so that row's version is a typed miss; the same row
