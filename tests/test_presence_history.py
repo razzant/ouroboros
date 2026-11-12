@@ -1019,7 +1019,7 @@ def test_a_focus_view_of_a_room_with_imports_reads_and_folds_oldest_first_by_tim
     latest times and its latest place row follow time, and under window pressure the floor turns the
     years-old imported words into addresses before the fresh live ones (F7p, oldest first). Rows keep their
     physical addresses and positions."""
-    from ouroboros import memory_floor
+    from ouroboros import memory_floor, memory_forms
     from ouroboros import memory_view as mv
     from tests import _memory_inventory_shared as shared
     shared.world(tmp_path)
@@ -1050,7 +1050,12 @@ def test_a_focus_view_of_a_room_with_imports_reads_and_folds_oldest_first_by_tim
     assert view.room["since"].startswith("2024-01-01") and facts["place"]["latest"] == "2026-09-05T10:02:00+00:00"
     assert facts["place"]["last_address"] == lane[-1]["address"]
     walked = [ident for step, ident, *_ in memory_floor.floor_elements(view) if step == "F7p"]
-    assert walked == [item["address"] for item in lane], walked
+    # Each row yields first to its opening, then (physical pressure) to its bare address; both oldest first by time.
+    addresses = [item["address"] for item in lane]
+    assert walked == addresses + ["bare:" + address for address in addresses], walked
+    stages = {ident: memory_forms.stage_of(view, "F7p", ident) for ident in walked}
+    assert {stages[a] for a in addresses} == {"room_emergency"} and {stages["bare:" + a] for a in addresses} == {"physical_rows"}
+    assert all(memory_forms.supersedes("F7p", "bare:" + a) == (("F7p", a),) for a in addresses)
 
 
 def test_a_frozen_older_page_steps_over_rows_imported_after_it_froze(tmp_path, monkeypatch):
