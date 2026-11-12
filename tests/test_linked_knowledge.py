@@ -832,7 +832,8 @@ def test_a_null_reason_takes_the_omitted_path_and_archive_still_requires_one(tmp
 
 def test_a_blank_version_outside_revert_takes_the_omitted_path_and_a_revert_still_needs_one(tmp_path):
     """A model fills version with whitespace as well as with nothing (the experiment saw ' ' 18 times): a blank
-    value names no revision, so outside revert it is ignored and said; inside revert 'requires version' stays,
+    value names no revision, so outside revert it is ignored and said, a long one by its length (9,000 spaces
+    echoed whole overflowed the receipt of the write that had landed); inside revert 'requires version' stays,
     and a non-blank version outside revert still refuses, typed."""
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="blank"))
@@ -842,12 +843,13 @@ def test_a_blank_version_outside_revert_takes_the_omitted_path_and_a_revert_stil
     def write(**arguments):
         return registry.execute("knowledge_write", {"topic": "blank", "scope": "global", **arguments})
 
-    for blank, old, new in ((" ", "One.", "Two."), ("\t\n ", "Two.", "Three.")):
+    for blank, echo, old, new in ((" ", "' '", "One.", "Two."), ("\t\n ", r"'\t\n '", "Two.", "Three."),
+                                  (" " * 9000, "<9000 whitespace characters>", "Three.", "Third.")):
         revision = store.read_knowledge_note(target).revision
         saved = _meta(write(mode="edit", old_str=old, content=new, expected_revision=revision, version=blank))
-        assert saved["ignored_arguments"] == [f"version={blank!r} ignored: only mode=revert takes a version"], saved
+        assert saved["ignored_arguments"] == [f"version={echo} ignored: only mode=revert takes a version"], saved
     current = store.read_knowledge_note(target)
-    assert current.text.endswith("# Blank\n\nThree.\n")
+    assert current.text.endswith("# Blank\n\nThird.\n")
     appended = _meta(write(mode="append", content="Four.\n", version=" "))
     assert appended["ignored_arguments"] == ["version=' ' ignored: only mode=revert takes a version"]
     current, before = store.read_knowledge_note(target), _files(tmp_path)
