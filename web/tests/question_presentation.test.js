@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { carryOpenQuestions, questionMark, questionPresentation, questionWaits, unknownDeliveryRemovable, vouchedBy, waitFacts }
+import { carryOpenQuestions, questionMark, questionPresentation, questionWaits, vouchedBy, waitFacts }
     from '../modules/question_presentation.js';
 
 // Each fixture row is the pointer row the Python producer emits for that case
@@ -48,9 +48,11 @@ test('the head mark beside each word: amber exactly while Main\'s pill counts th
     // An owed delivery keeps its lifecycle's dot beside its own word.
     assert.equal(hue({ quiz_state: 'answered', question_delivery: { state: 'owed' } }), 'ok');
     assert.equal(hue({ quiz_state: 'closed', question_delivery: { state: 'owed' } }), 'ink');
-    // A late answer whose delivery became unknown waits for the owner to stop counting it (Remove from pending).
-    assert.equal(hue({ quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'late_answer_delivery_unknown' } }),
-        'owner');
+    // A Project's late answer whose delivery became unknown waits for the owner to stop counting it (Remove from
+    // pending); Main's own the pill does not count, and its card offers nothing to press: not amber.
+    const unknown = { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'late_answer_delivery_unknown' } };
+    assert.equal(hue({ ...unknown, project_id: 'p' }), 'owner');
+    assert.equal(hue(unknown), 'ok');
 });
 
 test('waiting needs positive evidence and a closed bound ends it', () => {

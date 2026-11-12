@@ -166,10 +166,9 @@ const MARK_HUES = { answered: 'ok', superseded: 'ink', closed: 'ink' };
 
 /** The question head's mark as a status-mark view ({ shape, hue }, web/modules/status_mark.js). */
 export function questionMark(row = {}) {
-    // A card carries its state as `quiz_state` or as `state`: the pill's rule reads the one field.
-    const asked = { ...row, quiz_state: row.quiz_state || row.state };
-    // An answer whose late delivery became unknown waits for the owner to stop counting it (Remove from pending).
-    if (questionWaits(asked) || unknownDeliveryRemovable(row)) return { shape: 'dot', hue: 'owner' };
+    // A card carries its state as `quiz_state` or as `state`: the pill's rule reads the one field. Amber exactly while
+    // the pill counts it: a Project's answer whose delivery is unknown (Remove from pending) is, Main's own is not.
+    if (questionWaits({ ...row, quiz_state: row.quiz_state || row.state })) return { shape: 'dot', hue: 'owner' };
     return { shape: 'dot', hue: MARK_HUES[lifecycleKey(row)] || 'neutral' };
 }
 
