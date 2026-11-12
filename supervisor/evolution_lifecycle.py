@@ -1306,11 +1306,19 @@ def notify_owner_cycle_outcome(campaign: Dict[str, Any], tx: Dict[str, Any]) -> 
     objective = str(campaign.get("objective") or "").strip()
     obj_short = (objective[:160] + "…") if len(objective) > 160 else objective
     if outcome == "absorbed":
-        commit_sha = str(tx.get("commit_sha") or "").strip()[:12]
+        from ouroboros.review_overrides import landed_outcome
+        from supervisor import queue
+
+        commit_sha = str(tx.get("commit_sha") or "").strip()
+        # Only a landed row says how this commit's review ended (a FAIL or no verdict); nothing here may say PASS.
+        review = landed_outcome(queue.DRIVE_ROOT, commit_sha)
         msg = (
-            f"🧬 Evolution cycle absorbed (commit {commit_sha}).\n"
+            f"🧬 Evolution cycle absorbed (commit {commit_sha[:12]}).\n"
             f"Objective: {obj_short or 'autonomous self-improvement'}\n"
-            "The reviewed self-modification is now live (restart verified). Reply if you want it reverted."
+            "The self-modification is now live (restart verified); "
+            + (f"it landed over a review FAIL or no verdict ({review})." if review
+               else "no landing over a review FAIL or missing verdict is recorded for it.")
+            + " Reply if you want it reverted."
         )
     else:
         reason = str(tx.get("abandoned_reason") or "unspecified")

@@ -1,9 +1,11 @@
-"""The owner-visible trace of review decisions Blocking would have stopped (``ouroboros/review_overrides.py``).
+"""The owner-visible trace of a review that returned FAIL or no verdict (``ouroboros/review_overrides.py``).
 
-One writer keeps the event, the install counter and the work's card fact (count, latest reason) on its root task;
-a commit Git records later joins ``landed`` only from the call that met such a decision or from the reviewed attempt
-its author continuation names; the agent's restart notice and a settled adoption name those commits in one line,
-"running" only on the adoption record's word.
+One writer keeps the event, the install counter and the work's card fact (count, latest reason) on its root task; the
+author's explicit continuation over such an outcome adds ``continued`` and a commit Git records over it adds
+``landed``, each only from the call that met the outcome or the reviewed attempt its author continuation names. The
+card shows each part only when recorded, in Python and in the app alike; the agent's restart notice, a settled
+adoption and an evolution cycle's notice name the landed commits with their outcome, "running" only on the adoption
+record's word, and never PASS.
 """
 from __future__ import annotations
 
@@ -17,13 +19,15 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.review_overrides import (
-    COUNTER_REL, card_line, landed_line, note_override_landing, record_override,
+    COUNTER_REL, card_line, landed_line, landed_outcome, note_author_continuation, note_override_landing,
+    record_override,
 )
 from ouroboros.utils import read_json_dict
 from tests._git_review_pipeline_shared import _make_ctx
 from tests._store_shared import read_result, seed_result
 
-GATE = "over a review Blocking would have stopped (the review gate did not prohibit continuation)"
+GATE = "over a review FAIL or no verdict"
+WHY = "I read the finding and choose to continue."
 
 
 def _events(ctx):
@@ -45,10 +49,29 @@ def _commit(repo, name):
 
 
 def _landed(ctx, *rows):
+    """Counter rows ``(sha, reason[, disposition, rationale])``, as ``note_override_landing`` writes them."""
     (ctx.drive_root / COUNTER_REL).parent.mkdir(parents=True, exist_ok=True)
     (ctx.drive_root / COUNTER_REL).write_text(json.dumps({"count": len(rows), "landed": [
-        {"sha": sha, "reason": reason, "task_id": "t", "at": "2026-11-11T10:00:00+00:00"} for sha, reason in rows]}),
-        encoding="utf-8")
+        {"sha": sha, "reason": reason, "task_id": "t", "at": "2026-11-11T10:00:00+00:00",
+         **dict(zip(("disposition", "rationale"), author))} for sha, reason, *author in rows]}), encoding="utf-8")
+
+
+def _fact(root, task_id):
+    return (read_result(root, task_id) or {}).get("review_overrides") or {}
+
+
+def _evolution_notice(monkeypatch, data_dir, sha):
+    """The owner's notice of an absorbed evolution cycle, as ``notify_owner_cycle_outcome`` sends it."""
+    from supervisor import evolution_lifecycle
+
+    sent: list = []
+    monkeypatch.setattr("supervisor.queue.DRIVE_ROOT", data_dir)
+    monkeypatch.setattr("supervisor.state.load_state", lambda: {"owner_chat_id": 7})
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda chat, text, **kw: sent.append(text))
+    evolution_lifecycle.notify_owner_cycle_outcome({"objective": "Sharpen"}, {"cycle_outcome": "absorbed",
+                                                                              "commit_sha": sha})
+    assert len(sent) == 1 and "reviewed" not in sent[0] and "PASS" not in sent[0], sent
+    return sent[0]
 
 
 def test_each_decision_counts_on_its_work_card_beside_the_event_and_the_counter(tmp_path, monkeypatch):
@@ -60,7 +83,7 @@ def test_each_decision_counts_on_its_work_card_beside_the_event_and_the_counter(
     child.task_id, child.task_metadata = "child-1", {"root_task_id": "root-1"}
     _decide(ctx, "critical_findings", "[CRITICAL] tests_affected: broken")
     _decide(child, "review_quorum", "Too few reviewers answered")
-    fact = read_result(ctx.drive_root, "root-1")["review_overrides"]
+    fact = _fact(ctx.drive_root, "root-1")
     assert fact["count"] == 2 and fact["latest"]["reason"] == "review_quorum" and fact["latest"]["task_id"] == "child-1"
     assert fact["latest"]["text"] == "Too few reviewers answered"
     first, second = _events(ctx)
@@ -69,7 +92,7 @@ def test_each_decision_counts_on_its_work_card_beside_the_event_and_the_counter(
     assert first["review_overrides"]["count"] == 1, "the live copy is the fact this decision left"
     counter = read_json_dict(ctx.drive_root / COUNTER_REL)
     assert counter["count"] == 2 and [row["block_reason"] for row in counter["recent"]] == ["critical_findings", "review_quorum"]
-    assert card_line(fact) == "Review: 2× continued where Blocking would have stopped · latest: review quorum"
+    assert card_line(fact) == "Review: FAIL or no verdict 2× (latest: review quorum)"
     assert card_line({"count": 0}) == card_line(None) == "", "no decision, no field"
     # A work with no record to hold it: no partial row is minted; the event and the counter keep the decision.
     ghost = copy.copy(ctx)
@@ -78,8 +101,40 @@ def test_each_decision_counts_on_its_work_card_beside_the_event_and_the_counter(
     assert read_result(ctx.drive_root, "ghost") is None and "review_overrides" not in _events(ctx)[-1]
     assert read_json_dict(ctx.drive_root / COUNTER_REL)["count"] == 3
     _decide(ctx, "critical_findings", "word " * 100)  # a long reason keeps a head that says it is cut
-    latest = read_result(ctx.drive_root, "root-1")["review_overrides"]["latest"]["text"]
+    latest = _fact(ctx.drive_root, "root-1")["latest"]["text"]
     assert len(latest) <= 300 and latest.endswith("word…") and latest.startswith("word word")
+
+
+def test_the_author_continuation_and_the_landing_add_their_parts_and_keep_the_others(tmp_path):
+    """The card's three parts live on one field: a later outcome keeps the author's continuation and the landing, an
+    old ``{count, latest}`` field shows its one part with no zeros, and an author continuation counts only over an
+    attempt that met a FAIL or no verdict."""
+    ctx = _make_ctx(tmp_path)
+    ctx.task_id = "root-1"
+    seed_result(ctx.drive_root, "root-1", {"status": "running", "review_overrides": {"count": 3, "latest": {
+        "at": "2026-11-11T10:00:00+00:00", "reason": "critical_findings", "task_id": "root-1", "text": "finding"}}})
+    old = _fact(ctx.drive_root, "root-1")
+    assert card_line(old) == "Review: FAIL or no verdict 3× (latest: critical findings)", "an old field: one part"
+    ctx._author_commit_source = SimpleNamespace(review_override_reason="", review_record_id="rec-0")
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": "clean"})
+    assert _fact(ctx.drive_root, "root-1") == old, "a continuation over a clean review is no part of the trace"
+    ctx._author_commit_source = SimpleNamespace(review_override_reason="critical_findings", review_record_id="rec-1")
+    note_author_continuation(ctx, {"disposition": "rejected", "rationale": "x" * 400})
+    continued = _fact(ctx.drive_root, "root-1")["continued"]
+    assert continued["count"] == 1 and continued["latest"]["record_id"] == "rec-1"
+    assert continued["latest"]["reason"] == "critical_findings" and continued["latest"]["disposition"] == "rejected"
+    assert len(continued["latest"]["rationale"]) == 300 and continued["latest"]["rationale"].endswith("x…")
+    ctx._author_commit_record = {"disposition": "rejected", "rationale": WHY}
+    note_override_landing(ctx, "a" * 40)
+    _decide(ctx, "review_quorum")  # a later outcome keeps both parts
+    fact = _fact(ctx.drive_root, "root-1")
+    assert fact["count"] == 4 and fact["continued"] == continued and fact["landed"]["count"] == 1
+    assert fact["landed"]["latest"]["sha"] == "a" * 40
+    assert _events(ctx)[-1]["review_overrides"] == fact, "the live copy carries every part"
+    assert card_line(fact) == ('Review: FAIL or no verdict 4× (latest: review quorum) · author continued 1× (latest: '
+                               f'rejected — "{"x" * 79}…") · landed over it: 1 commit')
+    [row] = read_json_dict(ctx.drive_root / COUNTER_REL)["landed"]
+    assert (row["disposition"], row["rationale"], row["reason"]) == ("rejected", WHY, "critical_findings")
 
 
 @pytest.mark.parametrize("split", [False, True])
@@ -137,11 +192,13 @@ def test_a_commit_lands_over_a_decision_only_from_its_call_or_the_attempt_it_con
         assert "landed" not in read_json_dict(ctx.drive_root / COUNTER_REL), "the task drive keeps no landing"
 
 
-@pytest.mark.parametrize("case", ["warm", "restarted", "successor", "clean"])
+@pytest.mark.parametrize("case", ["warm", "restarted", "successor", "clean", "fixed", "refused"])
 def test_the_author_continuation_lands_over_its_attempts_decision_in_any_context(tmp_path, monkeypatch, case):
     """Through the real gate: Advisory hands the reviewed outcome back before Git and the author's continuation commits
     it. Its validated reference names the durable attempt that keeps the decision, so the same context, a fresh one (a
-    restarted worker) and a Continue successor land the commit alike; a review that met no decision lands nothing."""
+    restarted worker) and a Continue successor land the commit alike, and the continuing work's card counts the
+    author's continuation and the landing beside the outcome. A review that met no decision, a FAIL the author fixed
+    before a passing wave, lands nothing over it; a continuation Git refused counts the decision, never a landing."""
     from ouroboros import commit_admission, owner_continue
     from ouroboros.mutation_attribution import capture_mutation_baseline
     from ouroboros.review_dispatch import invoke_review_paid_stamp
@@ -167,20 +224,32 @@ def test_the_author_continuation_lands_over_its_attempts_decision_in_any_context
         write_task_result(ctx.drive_root, task_id, "running")
         capture_mutation_baseline(ctx.drive_root, task_id, [{"surface_type": "system_repo", "host_root": str(ctx.repo_dir)}])
     (ctx.repo_dir / "change.py").write_text("value = 2\n", encoding="utf-8")
+    waves: list = []
 
     def reviewer(actual, message, **kw):  # the paid model alone is scripted; the gate's decision seam is real
         invoke_review_paid_stamp(actual._review_paid_stamp)
-        finding = {"item": "code_quality", "severity": "critical", "verdict": "PASS" if case == "clean" else "FAIL",
+        fails = case != "clean" and not (case == "fixed" and waves)  # the fixed code's second wave passes
+        waves.append(fails)
+        finding = {"item": "code_quality", "severity": "critical", "verdict": "FAIL" if fails else "PASS",
                    "reason": "wrong value"}
         actual._last_triad_raw_results = [{"slot_id": "critic", "status": "responded", "parsed": [finding], "raw_text": "x"}]
-        if case != "clean":
+        if fails:
             actual._last_review_critical_findings, actual._last_review_block_reason = [finding], "critical_findings"
             assert review._handle_review_block_or_warning(actual, False, "critical feedback", "") is None
         return None, CouplingOutcome(verdict="PASS", status="responded"), "", []
 
+    def head():
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir, check=True, capture_output=True,
+                              encoding="utf-8").stdout.strip()
+
+    base = head()
     monkeypatch.setattr(git, "_run_parallel_review", reviewer)
     first = git._repo_commit_push(ctx, "Change value", skip_advisory_review=True)
     assert first.startswith("Review outcome returned before commit"), first
+    if case == "fixed":  # the author fixes the code and a new paid wave passes it
+        (ctx.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
+        first = git._repo_commit_push(ctx, "Change value", skip_advisory_review=True)
+        assert first.startswith("Review outcome returned before commit") and waves == [True, False], first
     reference = json.loads(first.split("\n", 1)[1])["review_reference"]
     author = ctx
     if case in {"restarted", "successor"}:  # a context built afresh, as a restarted worker or the successor builds it
@@ -190,13 +259,42 @@ def test_the_author_continuation_lands_over_its_attempts_decision_in_any_context
     monkeypatch.setattr(owner_continue, "recorded_continuation", lambda _root, before, after: (before, after) == (
         "author", "successor"))  # the owner's recorded Continue from the author to its successor
     monkeypatch.setattr(git, "_run_parallel_review", lambda *a, **k: pytest.fail("the continuation buys no review"))
+    if case == "refused":  # Git refuses the commit after the gate settled the author's continuation
+        monkeypatch.setattr(git, "_commit_reviewed_candidate", lambda *a: ("", "⚠️ GIT_ERROR (commit): hook refused"))
     said = git._repo_commit_push(author, "Change value", review_reference=reference, author_disposition={
-        "disposition": "rejected", "rationale": "I read the finding and choose to continue."})
+        "disposition": "rejected", "rationale": WHY})
+    sha = head()
+    landed = (read_json_dict(ctx.drive_root / COUNTER_REL) or {}).get("landed") or []
+    outcome = (read_json_dict(ctx.drive_root / COUNTER_REL) or {}).get("count")
+    work = _fact(ctx.drive_root, "successor" if case == "successor" else "author")
+    assert card_line(_fact(ctx.drive_root, "author")).startswith(
+        "" if case == "clean" else "Review: FAIL or no verdict 1× (latest: critical findings)"), case
+    if case in {"clean", "fixed"}:
+        assert load_state(ctx.drive_root).attempts[-1].status == "succeeded", said
+        assert landed == [] and outcome == (None if case == "clean" else 1), (case, said)
+        assert "continued" not in work and "landed" not in work and card_line(work) == (
+            "" if case == "clean" else "Review: FAIL or no verdict 1× (latest: critical findings)")
+        assert landed_line(ctx.repo_dir, ctx.drive_root, base=base, target=sha, running=False) == ""
+        assert "no landing over a review FAIL or missing verdict is recorded for it." in _evolution_notice(monkeypatch, ctx.drive_root, sha)
+        return
+    said_by = f'rejected — "{WHY}"'
+    assert work["continued"]["count"] == 1 and work["continued"]["latest"]["reason"] == "critical_findings", said
+    assert work["continued"]["latest"]["rationale"] == WHY and work["continued"]["latest"]["record_id"]
+    if case == "refused":
+        assert "GIT_ERROR" in said and sha == base and landed == [] and "landed" not in work, said
+        assert card_line(work) == f"Review: FAIL or no verdict 1× (latest: critical findings) · author continued 1× (latest: {said_by})"
+        return
     assert load_state(ctx.drive_root).attempts[-1].status == "succeeded", said
-    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir, check=True, capture_output=True,
-                         encoding="utf-8").stdout.strip()
-    landed = [row["sha"] for row in (read_json_dict(ctx.drive_root / COUNTER_REL) or {}).get("landed") or []]
-    assert landed == ([] if case == "clean" else [sha]), (case, said)
+    assert [row["sha"] for row in landed] == [sha] and landed[0]["disposition"] == "rejected", (case, said)
+    assert work["landed"]["count"] == 1 and work["landed"]["latest"]["sha"] == sha
+    parts = f"author continued 1× (latest: {said_by}) · landed over it: 1 commit"
+    assert card_line(work) == ("Review: " + parts if case == "successor" else
+                               f"Review: FAIL or no verdict 1× (latest: critical findings) · {parts}"), case
+    named = f"{sha[:12]} (review FAIL: critical findings; author continued: {said_by})"
+    assert landed_line(ctx.repo_dir, ctx.drive_root, base=base, target=sha, running=False) == (
+        f"Committed {GATE}: {named}; deployment unconfirmed, as no record yet binds a running process to them.")
+    assert (f"now live (restart verified); it landed over a review FAIL or no verdict (review FAIL: critical findings; "
+            f"author continued: {said_by}).") in _evolution_notice(monkeypatch, ctx.drive_root, sha)
 
 
 def test_the_restart_line_names_only_landed_commits_of_its_range_and_says_running_only_when_adopted(tmp_path):
@@ -204,18 +302,22 @@ def test_the_restart_line_names_only_landed_commits_of_its_range_and_says_runnin
     repo = ctx.repo_dir
     old = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
     base = _commit(repo, "base")
-    first, plain, last = _commit(repo, "one"), _commit(repo, "two"), _commit(repo, "three")
-    _landed(ctx, (old, "critical_findings"), (first, "critical_findings"), (last, "review_quorum"))
+    first, plain, middle, last = _commit(repo, "one"), _commit(repo, "two"), _commit(repo, "check"), _commit(repo, "three")
+    _landed(ctx, (old, "critical_findings"), (first, "critical_findings", "accepted", "x" * 100),
+            (middle, "tests_preflight_blocked"), (last, "review_quorum"))
     line = landed_line(repo, ctx.drive_root, base=base, target="HEAD", running=False)
-    assert line == (f"Committed {GATE}: {last[:12]} (review quorum), {first[:12]} (critical findings); deployment "
-                    "unconfirmed, as no record yet binds a running process to them.")
+    assert line == (f"Committed {GATE}: {last[:12]} (no review verdict: review quorum), {middle[:12]} (check FAIL: "
+                    f'tests preflight blocked), {first[:12]} (review FAIL: critical findings; author continued: accepted '
+                    f'— "{"x" * 79}…"); deployment unconfirmed, as no record yet binds a running process to them.')
     assert old[:12] not in line and plain[:12] not in line
     running = landed_line(repo, ctx.drive_root, base=base, target=last, running=True)
-    assert running == f"Now running {GATE}: {last[:12]} (review quorum), {first[:12]} (critical findings)."
+    assert running.startswith(f"Now running {GATE}: {last[:12]} (no review verdict: review quorum), ") and running.endswith(").")
     for said in (line, running):
-        assert "merged" not in said and "accepted" not in said
+        assert "merged" not in said and "Blocking" not in said and "PASS" not in said
     assert landed_line(repo, ctx.drive_root, base=last, target="HEAD", running=False) == ""
     assert landed_line(repo, ctx.drive_root, base="", target="HEAD", running=False) == "", "an unknown base names nothing"
+    assert landed_outcome(ctx.drive_root, last) == "no review verdict: review quorum"
+    assert landed_outcome(ctx.drive_root, plain) == landed_outcome(ctx.drive_root, "") == "", "no row, no outcome"
 
 
 def test_the_agent_restart_notice_carries_the_line_from_the_running_baseline(tmp_path, monkeypatch):
@@ -234,8 +336,8 @@ def test_the_agent_restart_notice_carries_the_line_from_the_running_baseline(tmp
     server = SimpleNamespace(uuid=uuid, time=time, _pending_restart={}, _live_running_task_ids=lambda _ctx: ["busy"],
                              _perform_supervisor_restart=lambda *a, **k: pytest.fail("the drain waits for live work"))
     server_restart._handle_restart_in_supervisor(server, {"type": "restart_request", "reason": "body change"}, host)
-    assert sent[0] == (f"♻️ Restart requested by agent: body change\nCommitted {GATE}: {landed[:12]} (critical "
-                       "findings); deployment unconfirmed, as no record yet binds a running process to them.",
+    assert sent[0] == (f"♻️ Restart requested by agent: body change\nCommitted {GATE}: {landed[:12]} (review FAIL: "
+                       "critical findings); deployment unconfirmed, as no record yet binds a running process to them.",
                        "restart_notice")
     sent.clear()
     _landed(ctx)  # nothing landed over a decision: the notice says only what it always said
@@ -251,7 +353,7 @@ def test_a_settled_adoption_names_its_landed_commits_running_only_when_adopted(t
     ctx = _make_ctx(tmp_path)
     previous = _commit(ctx.repo_dir, "previous")
     candidate = _commit(ctx.repo_dir, "candidate")
-    _landed(ctx, (candidate, "critical_findings"))
+    _landed(ctx, (candidate, "critical_findings", "rejected", WHY))
     monkeypatch.setattr(body_adoption, "finalize_on_boot", lambda *a, **k: {
         "outcome": outcome, "note": f"Adoption note ({outcome}).", "adoption_id": "a1", "task_id": "",
         "candidate": candidate, "previous": previous, "branch": "ouroboros", "tests": {"tier": "smoke"}})
@@ -260,7 +362,7 @@ def test_a_settled_adoption_names_its_landed_commits_running_only_when_adopted(t
     monkeypatch.setattr("supervisor.state.load_state", lambda: {"owner_chat_id": 7})
     monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda chat, text, **kw: sent.append(text))
     result = body_adoption.settle_on_boot(ctx.drive_root, ctx.repo_dir, supervisor_ready=True)
-    named = f"{candidate[:12]} (critical findings)"
+    named = f'{candidate[:12]} (review FAIL: critical findings; author continued: rejected — "{WHY}")'
     if said is None:
         assert named not in result["note"] and named not in "".join(sent)
     else:
@@ -270,6 +372,7 @@ def test_a_settled_adoption_names_its_landed_commits_running_only_when_adopted(t
 def test_a_failing_join_or_store_never_fails_the_gate_the_commit_or_the_notice(tmp_path, monkeypatch):
     ctx = _make_ctx(tmp_path)
     ctx.task_id, ctx._current_review_attempt_number = "t1", 2
+    seed_result(ctx.drive_root, "t1", {"status": "running"})
 
     def unreadable(*_args):
         raise OSError("repository identity unreadable")
@@ -279,7 +382,7 @@ def test_a_failing_join_or_store_never_fails_the_gate_the_commit_or_the_notice(t
     assert _events(ctx)[-1]["block_reason"] == "critical_findings"
     assert read_json_dict(ctx.drive_root / COUNTER_REL)["count"] == 1
     ctx._review_override_this_call = ""
-    ctx._author_commit_source = SimpleNamespace(review_override_reason="critical_findings")
+    ctx._author_commit_source = SimpleNamespace(review_override_reason="critical_findings", review_record_id="r")
 
     def unwritable(*_args):
         raise OSError("counter unwritable")
@@ -287,7 +390,71 @@ def test_a_failing_join_or_store_never_fails_the_gate_the_commit_or_the_notice(t
     monkeypatch.setattr("ouroboros.review_overrides.update_json_locked", unwritable)
     note_override_landing(ctx, "a" * 40)  # Git already succeeded: the landing's failure is logged, never raised
     assert "landed" not in read_json_dict(ctx.drive_root / COUNTER_REL)
+    assert _fact(ctx.drive_root, "t1")["landed"]["count"] == 1, "the card counts the landing the counter lost"
+
+    def no_store(*_args, **_kwargs):
+        raise OSError("task store unwritable")
+
+    monkeypatch.setattr("ouroboros.task_store.patch_document", no_store)
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})  # never raised into the gate
+    note_override_landing(ctx, "b" * 40)
+    assert "continued" not in _fact(ctx.drive_root, "t1")
     assert landed_line(ctx.repo_dir, None, base="a", target="b", running=False) == "", "an unreadable counter names nothing"
+    (ctx.drive_root / COUNTER_REL).write_text("{not json", encoding="utf-8")
+    assert landed_outcome(ctx.drive_root, "a" * 40) == landed_outcome(None, "a" * 40) == ""
+    assert "no landing over a review FAIL or missing verdict is recorded for it." in _evolution_notice(monkeypatch, ctx.drive_root, "a" * 40)
+
+
+_TWIN = """
+import { reviewGateLine } from '%(card)s';
+let input = ''; for await (const chunk of process.stdin) input += chunk;
+process.stdout.write(JSON.stringify(JSON.parse(input).map(reviewGateLine)));
+"""
+
+
+def _app_lines(facts):
+    import shutil
+    from pathlib import Path
+
+    node = shutil.which("node")
+    assert node, "Node is required for the Python-to-web twin witness"
+    card = Path(__file__).resolve().parents[1] / "web" / "modules" / "review_gate_card.js"
+    probe = subprocess.run([node, "--input-type=module", "-e", _TWIN % {"card": card.as_uri()}], input=json.dumps(facts),
+                           encoding="utf-8", capture_output=True, timeout=60, check=True)
+    return json.loads(probe.stdout)
+
+
+def test_the_app_line_is_the_python_line_for_every_recorded_part_and_for_none():
+    """``card_line`` and ``reviewGateLine`` say the same line for one fact: each part only when recorded (an old field
+    with no ``continued`` or ``landed`` shows no zero), the author's reason cut at the same character, a non-ASCII
+    one too, and nothing for an absent or malformed fact."""
+    latest = {"at": "2026-11-12T10:00:00+00:00", "reason": "critical_findings", "task_id": "w", "text": "finding"}
+    author = {"at": "2026-11-12T10:01:00+00:00", "disposition": "accepted", "rationale": "the lock order is intended",
+              "reason": "review_quorum", "record_id": "rec-1"}
+    landed = {"count": 2, "latest": {"sha": "f" * 40, "at": "2026-11-12T10:02:00+00:00"}}
+    facts = [
+        {"count": 3, "latest": {**latest, "reason": "review_quorum"}}, {"count": 12}, {"count": 2, "continued": {}},
+        {"count": 3, "latest": latest, "continued": {"count": 1, "latest": author}, "landed": landed},
+        {"continued": {"count": 2, "latest": {**author, "rationale": "y" * 300}}, "landed": {"count": 1}},
+        {"continued": {"count": 1, "latest": {**author, "rationale": "\U0001f642" * 100}}},
+        {"continued": {"count": 1, "latest": {"disposition": "deferred"}}}, {"continued": {"count": 1, "latest": {
+            "rationale": "why"}}}, {"continued": {"count": 1}}, {"landed": landed},
+        None, {}, {"count": 0}, {"count": "3"}, {"count": True}, {"continued": {"count": 0}, "landed": {}}, "fact",
+    ]
+    expected = [
+        "Review: FAIL or no verdict 3× (latest: review quorum)", "Review: FAIL or no verdict 12× (latest: unknown)",
+        "Review: FAIL or no verdict 2× (latest: unknown)",
+        'Review: FAIL or no verdict 3× (latest: critical findings) · author continued 1× (latest: accepted — "the lock '
+        'order is intended") · landed over it: 2 commits',
+        f'Review: author continued 2× (latest: accepted — "{"y" * 79}…") · landed over it: 1 commit',
+        f'Review: author continued 1× (latest: accepted — "{chr(0x1f642) * 79}…")',
+        "Review: author continued 1× (latest: deferred)", 'Review: author continued 1× (latest: "why")',
+        "Review: author continued 1×", "Review: landed over it: 2 commits", *[""] * 7,
+    ]
+    lines = [card_line(fact) for fact in facts]
+    assert lines == expected
+    assert _app_lines(facts) == lines, "the app's line is the Python line"
+    assert all("Blocking" not in line for line in lines)
 
 
 _CARD_ON_LOAD = """
@@ -317,8 +484,9 @@ process.stdout.write(JSON.stringify(painted));
 
 @pytest.mark.parametrize("finished", [True, False], ids=["finished", "running"])
 def test_a_page_load_shows_a_works_field_from_the_history_endpoint(tmp_path, finished):
-    """The real history endpoint carries the work's fact on its row and the real card paints it before Details, with no
-    detail read, for a finished and a running work; a work without decisions shows nothing. Without it the line is absent."""
+    """The real history endpoint carries the work's fact on its row and the real card paints the Python line before
+    Details, every recorded part of it, with no detail read, for a finished and a running work; a work without
+    decisions shows nothing. Without it the line is absent."""
     import asyncio
     import shutil
     from pathlib import Path
@@ -346,6 +514,10 @@ def test_a_page_load_shows_a_works_field_from_the_history_endpoint(tmp_path, fin
         if task_id == "gate-work":
             ctx.task_id = task_id
             _decide(ctx, "critical_findings", "[CRITICAL] tests_affected: the new refusal path has no test")
+            ctx._author_commit_source = SimpleNamespace(review_override_reason="critical_findings", review_record_id="r")
+            ctx._author_commit_record = {"disposition": "accepted", "rationale": "The lock order is intended."}
+            note_author_continuation(ctx, ctx._author_commit_record)
+            note_override_landing(ctx, "f" * 40)
         if not finished:
             continue
         _store_task_result(env, task, "Done.", {"rounds": 1, "cost": 0}, {"tool_calls": []})
@@ -361,8 +533,11 @@ def test_a_page_load_shows_a_works_field_from_the_history_endpoint(tmp_path, fin
     probe = subprocess.run([node, "--input-type=module", "-e", script], input=json.dumps(messages), encoding="utf-8",
                            capture_output=True, timeout=60, check=True)
     painted = json.loads(probe.stdout)
-    assert "Review: 1× continued where Blocking would have stopped · latest: critical findings" in painted["gate"], painted
-    assert painted["plain"] is not None and "continued where Blocking" not in painted["plain"], painted
+    line = card_line(_fact(root, "gate-work"))
+    assert line == ('Review: FAIL or no verdict 1× (latest: critical findings) · author continued 1× (latest: accepted '
+                    '— "The lock order is intended.") · landed over it: 1 commit')
+    assert line in painted["gate"], painted
+    assert painted["plain"] is not None and "Review:" not in painted["plain"], painted
     assert painted["reads"] == [], "the page load needs no per-card detail read"
     assert painted["finished"] == [finished, finished], "the works' cards are in their real phase"
     carried = {(m["task_id"], m["review_overrides"]["count"]) for m in messages if "review_overrides" in m}

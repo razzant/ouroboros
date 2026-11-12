@@ -1,34 +1,61 @@
-// The work's review-gate field (ouroboros/review_overrides.py): how many times the review gate let this work go on
-// where Blocking enforcement would have stopped it, and the latest reason. One compact phrase on the card's meta line
-// and one Details item, both replaced in place by the task detail or the live `review_advisory_override` event: never
-// a row per decision, and never a claim that a change was committed, merged or runs.
+// The work's review-gate field (ouroboros/review_overrides.py): how many times a review of this work returned FAIL or
+// no verdict, how often its author explicitly went on over one and how many commits landed over one, each part only
+// when recorded (an absent part is unknown, never zero). One compact phrase on the card's meta line and one Details
+// item, both replaced in place by the task detail or the live `review_advisory_override` event: never a row per
+// decision, and never a claim that a change was merged or runs.
 
-/** Twin of `review_overrides.card_line`: the count and the latest reason, or '' without a decision. */
+const QUOTED = 80;  // review_overrides.QUOTED: the head of an author's reason the compact line quotes
+
+/** Twin of `review_overrides._head`: at most `limit` characters, a cut head ending in an ellipsis that says so. */
+const headOf = (text, limit) => {
+    const points = Array.from(String(text || ''));
+    return points.length <= limit ? points.join('') : `${points.slice(0, limit - 1).join('').trimEnd()}…`;
+};
+const counted = (part) => (Number.isSafeInteger(part?.count) && part.count > 0 ? part.count : 0);
+const reasonWords = (fact) => String(fact?.latest?.reason || 'unknown').replaceAll('_', ' ');
+/** Twin of `review_overrides._decision`: the author's disposition and the head of its reason. */
+const decisionWords = (latest, limit = QUOTED) => {
+    const why = headOf(latest?.rationale, limit);
+    return [String(latest?.disposition || ''), why ? `"${why}"` : ''].filter(Boolean).join(' — ');
+};
+
+/** Twin of `review_overrides.card_line`: each recorded part, or '' without one. */
 export function reviewGateLine(fact) {
-    const count = fact?.count;
-    if (!Number.isSafeInteger(count) || count < 1) return '';
-    return `Review: ${count}× continued where Blocking would have stopped · latest: ${reasonWords(fact)}`;
+    const continued = fact?.continued, landed = counted(fact?.landed), said = decisionWords(continued?.latest);
+    const parts = [
+        counted(fact) ? `FAIL or no verdict ${fact.count}× (latest: ${reasonWords(fact)})` : '',
+        counted(continued) ? `author continued ${continued.count}×${said ? ` (latest: ${said})` : ''}` : '',
+        landed ? `landed over it: ${landed} commit${landed === 1 ? '' : 's'}` : '',
+    ].filter(Boolean);
+    return parts.length ? `Review: ${parts.join(' · ')}` : '';
 }
 
-const reasonWords = (fact) => String(fact?.latest?.reason || 'unknown').replaceAll('_', ' ');
-
-/** @returns {boolean} whether the card's field or Details item changed; an older count never replaces a newer one. */
+/** @returns {boolean} whether the card's field or Details item changed; an older read never replaces a newer one. */
 export function syncReviewGateItem(record, detail) {
     const fact = detail?.review_overrides;
     const line = reviewGateLine(fact);
-    if (!record || !line || fact.count <= (record.reviewGateCount || 0)) return false;
-    record.reviewGateCount = fact.count;
+    // Each part only grows, so the sum of its counts orders two reads of one work's fact.
+    const total = counted(fact) + counted(fact?.continued) + counted(fact?.landed);
+    if (!record || !line || total <= (record.reviewGateTotal || 0)) return false;
+    record.reviewGateTotal = total;
     record.reviewGateLine = line;
-    const latest = fact.latest || {};
+    const latest = fact.latest || {}, continued = fact.continued || {}, landed = fact.landed || {};
     const by = latest.task_id && latest.task_id !== record.groupId ? ` (task ${latest.task_id})` : '';
-    const body = `${fact.count === 1 ? 'Once' : `${fact.count} times`} the review gate let this work continue where `
-        + 'Blocking enforcement would have stopped it: it did not prohibit continuation, which says nothing about '
-        + `what was committed or runs.\nLatest${by}: ${reasonWords(fact)}${latest.text ? ` — ${latest.text}` : ''}`;
+    const times = (count) => (count === 1 ? 'once' : `${count} times`);
+    const body = [
+        counted(fact) ? `A review of this work returned FAIL or no verdict ${times(fact.count)}.\nLatest${by}: `
+            + `${reasonWords(fact)}${latest.text ? ` — ${latest.text}` : ''}` : '',
+        counted(continued) ? `The author explicitly continued ${times(continued.count)}; latest: `
+            + (decisionWords(continued.latest, Infinity) || 'not recorded') : '',
+        counted(landed) ? `Landed over it: ${landed.count} commit${landed.count === 1 ? '' : 's'}; latest: `
+            + (String(landed.latest?.sha || '').slice(0, 12) || 'not recorded') : '',
+    ].filter(Boolean).join('\n');
+    const at = [latest.at, continued.latest?.at, landed.latest?.at].map((value) => String(value || '')).sort().pop();
     const key = `review-gate|${record.groupId}`;
     const item = {
-        phase: 'warn', headline: 'Review gate did not prohibit continuation',
-        fullHeadline: 'Review gate did not prohibit continuation', body, fullBody: body, receipt: true, count: 1,
-        ts: '', sourceTs: String(latest.at || ''), dedupeKey: key,
+        phase: 'warn', headline: 'Review returned FAIL or no verdict',
+        fullHeadline: 'Review returned FAIL or no verdict', body, fullBody: body, receipt: true, count: 1,
+        ts: '', sourceTs: at, dedupeKey: key,
         lineKey: `review-gate-${String(record.groupId).replace(/[^A-Za-z0-9_-]/g, '-')}`,
     };
     const current = record.items.find((entry) => entry.dedupeKey === key);
