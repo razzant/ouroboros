@@ -392,7 +392,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
                         ? 'No models were listed for this source. Your selection is kept.'
-                        : 'Uses your subscription. No API key required.') : price);
+                        : 'Uses your subscription. No API key required.') : price || 'Price unknown');
             // The price is already composed through the translation seam: the overlay leaves it alone and reads the rest.
             if (price) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];

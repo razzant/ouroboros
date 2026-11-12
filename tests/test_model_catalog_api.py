@@ -634,3 +634,30 @@ def test_a_model_listed_first_without_a_price_keeps_none_when_a_later_record_sta
     payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
     [item] = [item for item in payload["items"] if item["value"] == "vendor/x"]
     assert "price" not in item
+
+
+def test_the_limits_name_what_they_cannot_count_and_nothing_where_every_route_has_a_price():
+    """Dashboard › Costs says it under the limits: a call on a route without a known price adds nothing to known
+    spend (`usage_accounting.paid_admission`), so the limits count without it."""
+    from ouroboros.pricing import known_spend_gaps, price_source
+
+    routed = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OUROBOROS_MODEL_LIGHT": "openai::gpt-6-mini",
+              "OUROBOROS_MODEL_FALLBACKS": "openai::gpt-6", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
+    # An empty Safety runs on Light's slot; Vision and Consciousness follow Main, which has a catalog price.
+    assert known_spend_gaps(routed) == ["Light", "Safety Supervisor", "Fallback"]
+    assert known_spend_gaps({**routed, "OUROBOROS_MODEL_SAFETY": "anthropic/claude-opus-5.5",
+                             "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_FALLBACKS": ""}) == []
+    assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["all model roles"]
+    assert known_spend_gaps({"OUROBOROS_MODEL": "claudexor::codex=gpt-6"}) == [], "a subscription spends time, not money"
+    assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "USE_LOCAL_MAIN": "true",
+                             "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == [], "a local model costs nothing"
+    # Built-in web search by its first leg: a direct key has no catalog, OpenRouter has one, ddgs is free.
+    base = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OPENROUTER_API_KEY": "k"}
+    assert known_spend_gaps({**base, "OPENAI_API_KEY": "k", "OUROBOROS_WEBSEARCH_BACKEND": "openai"}) == ["Web search"]
+    assert known_spend_gaps({**base, "OUROBOROS_WEBSEARCH_BACKEND": "openrouter"}) == []
+    # Enabled API helpers on a route without a price; a switched-off one spends nothing.
+    helper = {"route": {"kind": "api_model", "target_id": "deepseek::deepseek-v4"}}
+    assert known_spend_gaps({**base, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}, {"items": [helper]}) == ["Agents"]
+    assert known_spend_gaps({**base, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}, {"items": [{**helper, "enabled": False}]}) == []
+    assert price_source("cloudru", {"OUROBOROS_RUB_USD_RATE": "0.012"}) == "catalog"
+    assert price_source("cloudru", {}) == "unknown", "roubles without a rate are no known price"

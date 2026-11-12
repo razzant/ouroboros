@@ -134,9 +134,9 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     assert.deepEqual(said('light'), ['Uses your subscription. No API key required.']);
     assert.deepEqual(said('vision'), ['Uses Main.']);
     assert.deepEqual(said('safety'), ['Uses Light.']);
-    assert.deepEqual(said('consciousness'), [''], 'an OpenRouter model whose catalog states no price reads as before');
+    assert.deepEqual(said('consciousness'), ['Price unknown'], 'an OpenRouter model whose catalog states no price');
     const [direct, gone] = said('fallback');
-    assert.equal(direct, '', 'a direct key says nothing new, though OpenRouter prices the same id');
+    assert.equal(direct, 'Price unknown', 'a direct key names no price of its own, though OpenRouter prices the same id');
     assert.match(gone, /Accounts/, 'a key that cannot send says so first');
     assert.doesNotMatch(gone, /\$/);
     editor.destroy();
@@ -220,7 +220,7 @@ async function mainRole(settings = {}) {
     return { editor, status, suggestions, input, host };
 }
 
-test('a role on Fast or Economy shows no catalog price: its tier is priced by its own endpoint', async () => {
+test('a role on Fast or Economy names no catalog price: its tier is priced by its own endpoint, so the price is unknown', async () => {
     for (const settings of [{}, { OUROBOROS_PROCESSING_PREFERENCE: 'standard' }]) {
         const { editor, status, suggestions, input } = await mainRole(settings);
         assert.equal(status.textContent, '$4 in / $20 out per 1M tokens', JSON.stringify(settings));
@@ -235,7 +235,7 @@ test('a role on Fast or Economy shows no catalog price: its tier is priced by it
     for (const settings of [{ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}' }, { OUROBOROS_PROCESSING_PREFERENCE: 'economy' },
         { OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"light":"standard"}' }]) {
         const { editor, status, suggestions } = await mainRole(settings);
-        assert.equal(status.textContent, '', JSON.stringify(settings));
+        assert.equal(status.textContent, 'Price unknown', JSON.stringify(settings));
         assert.equal(status.dataset.i18nFmt, undefined, 'no composed price: the overlay reads the line again');
         assert.match(suggestions, /data-model-value="anthropic\/claude-opus-5\.5"/, 'the model is still offered');
         assert.doesNotMatch(suggestions, /ui-model-option-meta/);
@@ -251,8 +251,8 @@ test('a fallback with no tier of its own names a price only while Main and the d
         return text;
     };
     assert.equal(await line({}), '$4 in / $20 out per 1M tokens');
-    assert.equal(await line({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}' }), '', "Main's calls through it pay Fast");
-    assert.equal(await line({ OUROBOROS_PROCESSING_PREFERENCE: 'economy' }), '', 'a lead on the default pays Economy');
+    assert.equal(await line({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}' }), 'Price unknown', "Main's calls through it pay Fast");
+    assert.equal(await line({ OUROBOROS_PROCESSING_PREFERENCE: 'economy' }), 'Price unknown', 'a lead on the default pays Economy');
     assert.equal(await line({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast","fallback":["standard"]}' }),
         '$4 in / $20 out per 1M tokens', 'its own tier is the one paid');
 });
