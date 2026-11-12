@@ -824,3 +824,33 @@ def test_exact_account_ack_retains_its_binding_and_expires_on_account_change(tmp
     replaced_account = _probe(tmp_path, options={**options, "account_fingerprint": "identity-b"},
                               allow_fetch=False)
     assert replaced_account.window_tokens == 0
+
+
+@pytest.mark.parametrize("held", ["failed-read", "later-statement"])
+def test_an_output_limit_dated_earlier_replaces_a_failed_read_never_a_later_statement(tmp_path, monkeypatch, held):
+    """Fix round 2 (Carbon B1): a failed read of the output limit states nothing, so the engine's answer dated before it
+    (its catalog's ``observedAt``) is stored and sizes the reserve; a statement dated later still keeps an answer read
+    earlier out, as for windows."""
+    import datetime
+    from ouroboros import response_limits
+    from ouroboros.llm import LLMClient
+
+    exact = {"source_id": "test-source", "credential_profile_id": "account-a", "account_fingerprint": "identity-a"}
+
+    def answers(minutes_ago, maximum):
+        value = _catalog()
+        value["observedAt"] = (ce.utc_now() - datetime.timedelta(minutes=minutes_ago)).isoformat()
+        value["models"][0]["maxOutputTokens"] = maximum
+        monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda *_a, **_kw: copy.deepcopy(value)))
+
+    if held == "failed-read":
+        monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+            lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+        response_limits.resolve_response_limit(tmp_path, provider="claudexor", model=MODEL, options=exact, allow_fetch=True)
+    else:
+        answers(1, 32_000)
+        _probe(tmp_path)
+    answers(5, 16_384)  # the engine's catalog, observed before the held row was written
+    _probe(tmp_path)
+    fp = response_limits._response_fingerprint(provider="claudexor", model=MODEL, options=exact)
+    assert ce._read(tmp_path)["response_limits"][fp]["max_output_tokens"] == (16_384 if held == "failed-read" else 32_000)

@@ -25,6 +25,8 @@ class ResponseLimit:
 # Dispatch reaches one fixed endpoint for these providers (llm_routing); Claudexor's
 # URL is a locality fact. A configured base URL there identifies nothing.
 SINGLE_ENDPOINT_PROVIDERS = frozenset({"openai", "anthropic", "deepseek", "openrouter", "claudexor"})
+# The source suffix of a record a failed metadata read wrote: no statement (``capability_evidence._later_statement``).
+FAILED_READ = "metadata read failed"
 
 
 def positive_limit(value: Any) -> int:
@@ -169,7 +171,7 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
         read = "no maximum observed for this route"
         try:
             if read_failed:  # this probe's own catalog read failed: it answers here too, never read a second time
-                read = "metadata read failed"
+                read = FAILED_READ
             elif provider in {"openai-compatible", "minimax"}:
                 _openai_compatible_metadata_window(model, base_url, True, api_key, provider=provider,
                                                   evidence_root=drive_root)
@@ -180,7 +182,7 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
                 # unless the process's read of it just failed: that failure answers this reader too.
                 LLMClient._fetch_openrouter_capabilities()
                 if LLMClient.metadata_fetch_attempted_and_failed():
-                    read = "metadata read failed"
+                    read = FAILED_READ
             elif provider == "claudexor":
                 ev = _claudexor_metadata_evidence(model, base_url, None, options, evidence_root=drive_root)
                 if ev.account_fingerprint:
@@ -190,7 +192,7 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
             else:
                 read = ""  # No metadata source for this provider: nothing was read.
         except Exception:
-            read = "metadata read failed"  # No inferred maximum after a failed metadata read.
+            read = FAILED_READ  # No inferred maximum after a failed metadata read.
         cached = _read(drive_root).get("response_limits", {}).get(fp)
         absent = not cached or (not cached.get("max_output_tokens")
                                 and _age_seconds(cached.get("observed_at", "")) > _FAILED_TTL_SEC)

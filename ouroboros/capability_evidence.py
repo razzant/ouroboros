@@ -397,8 +397,12 @@ def _drop_expired_probes(data: Dict[str, Any]) -> None:
 
 def _later_statement(held: Any, value: Dict[str, Any]) -> bool:
     """``held`` states an observation dated after ``value``'s: an answer read earlier never replaces it (two reads
-    finishing out of order). A failed attempt states nothing; an unreadable date or one from the future decides nothing."""
-    if not isinstance(held, dict) or held.get("status") == STATUS_FAILED:
+    finishing out of order). A failed attempt states nothing: a ``failed`` probe, or an output limit a failed read wrote
+    (named by its source, as rows written before this rule are too); an unreadable date or one from the future decides
+    nothing."""
+    from ouroboros.response_limits import FAILED_READ
+
+    if not isinstance(held, dict) or held.get("status") == STATUS_FAILED or str(held.get("source") or "").endswith(FAILED_READ):
         return False
     dates = [parse_deadline_ts(str(row.get("ts") or row.get("observed_at") or "")) for row in (held, value)]
     return None not in dates and dates[1] < dates[0] <= utc_now()
