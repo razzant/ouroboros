@@ -321,12 +321,12 @@ def test_loop_keeps_legacy_process_status_and_error_buckets(
         ),
         (
             ToolResult(
-                status="blocked",
+                status="ok",
                 code="ARTIFACT_OUTPUT_UNDECLARED",
-                text="⚠️ ARTIFACT_OUTPUT_UNDECLARED: declare outputs. exit_code=0",
+                text="exit_code=0\nSTDOUT:\nok\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files.",
                 meta={"exit_code": 0},
             ),
-            True,
+            False,  # a note on a finished command: no error, its own bucket kept
             "artifact_output_undeclared",
         ),
         (

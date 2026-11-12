@@ -1020,13 +1020,13 @@ def test_run_command_outputs_block_protected_repo_files(tmp_path, monkeypatch):
     assert not (data / "task_results" / "artifacts" / "task1" / "BIBLE.md").exists()
 
 
-def test_run_command_without_outputs_blocks_absolute_user_file_writes(tmp_path, monkeypatch):
+def test_run_command_without_outputs_notes_absolute_user_file_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry, repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     target = desktop / "live-regression.html"
 
-    result = registry.execute(
+    typed = registry.execute_result(
         "run_command",
         {
             "cmd": [
@@ -1038,8 +1038,13 @@ def test_run_command_without_outputs_blocks_absolute_user_file_writes(tmp_path, 
         },
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
-    assert "without declaring outputs" in result
+    result = typed.text
+    # A finished command with a note: no error, the note's own code, and the paths as a typed fact.
+    assert (typed.status, typed.code) == ("ok", "ARTIFACT_OUTPUT_UNDECLARED")
+    assert typed.meta["undeclared_outputs"] == [str(target.resolve())] and typed.meta["undeclared_outputs_total"] == 1
+    assert result.startswith("exit_code=0"), result  # the command's own answer leads; the note trails it
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
+    assert "without being registered as task outputs" in result
     assert target.read_text(encoding="utf-8") == "<h1>ok</h1>"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
 
@@ -1071,7 +1076,8 @@ def test_run_command_artifact_error_still_invalidates_repo_advisory(tmp_path, mo
         },
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
+    assert result.startswith("exit_code=0"), result
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
     assert calls
     assert calls[-1][1]["source_tool"] == "run_command"
     assert "changed.txt" in calls[-1][1]["changed_paths"]
@@ -1101,7 +1107,7 @@ def test_run_command_without_outputs_allows_absolute_user_file_reads(tmp_path, m
     assert "exit_code=0" in result
 
 
-def test_run_command_without_outputs_blocks_absolute_user_file_open_writes(tmp_path, monkeypatch):
+def test_run_command_without_outputs_notes_absolute_user_file_open_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry, repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
@@ -1119,10 +1125,55 @@ def test_run_command_without_outputs_blocks_absolute_user_file_open_writes(tmp_p
         },
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
-    assert "without declaring outputs" in result
+    assert result.startswith("exit_code=0"), result  # the command's own answer leads; the note trails it
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
+    assert "without being registered as task outputs" in result
     assert target.read_text(encoding="utf-8") == "<h1>ok</h1>"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
+
+
+def test_undeclared_output_note_and_fact_stay_bounded_and_whole():
+    """The sentence names a handful of paths and counts the rest; the typed fact keeps whole paths only
+    (a cut path is a false address) inside the result's encoded meta budget, with the total beside them."""
+    import json
+
+    from ouroboros.tools.shell_audit import undeclared_outputs_meta, undeclared_outputs_note
+
+    assert undeclared_outputs_note([]) == "" and undeclared_outputs_meta([]) == {}
+    paths = [f"/home/проект-{index}/" + "отчёт" * 60 + ".md" for index in range(9)]
+    note = undeclared_outputs_note(paths)
+    assert note.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets")
+    assert paths[4] in note and paths[5] not in note and "(+4 more)" in note and "Re-run" not in note
+    fact = undeclared_outputs_meta(paths)
+    assert fact["undeclared_outputs_total"] == 9 and 0 < len(fact["undeclared_outputs"]) < 9
+    assert fact["undeclared_outputs"] == paths[:len(fact["undeclared_outputs"])]
+    assert len(json.dumps(fact["undeclared_outputs"], ensure_ascii=True)) <= 2048
+
+
+@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
+def test_undeclared_output_audit_skips_what_ouroboros_owns_in_every_mode(tmp_path, monkeypatch, mode):
+    """A fresh file inside Ouroboros's own data drive or program checkout is its own data, never a
+    person's deliverable, in every runtime mode: under unrestricted agency the access check admits
+    everything, so ownership is asked on its own. A real user file beside them is still named."""
+    import time
+
+    from ouroboros.tools.shell_audit import _mentioned_user_file_outputs_without_declaration
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    registry, repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+    started = time.time()
+    own_data = data / "task_drives" / "task1" / "notes.txt"
+    own_source = repo / "module.py"
+    theirs = desktop / "report.html"
+    for path in (own_data, own_source, theirs):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    body = "; ".join(f"open({str(path)!r}, 'w').write('x')" for path in (own_data, own_source, theirs))
+
+    found = _mentioned_user_file_outputs_without_declaration(
+        registry._ctx, ["python3", "-c", body], None, command_start_ts=started, cwd=repo)
+
+    assert found == [str(theirs.resolve())]
 
 
 def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, monkeypatch):
@@ -1135,7 +1186,7 @@ def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, mo
     registry, _repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     target = desktop / "script-write.html"
 
-    result = registry.execute(
+    typed = registry.execute_result(
         "run_script",
         {
             "script": f"from pathlib import Path\nPath({str(target)!r}).write_text('<h1>ok</h1>')\n",
@@ -1143,8 +1194,12 @@ def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, mo
         },
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
-    assert "run_script wrote user_files without declaring outputs" in result
+    result = typed.text
+    assert (typed.status, typed.code) == ("ok", "ARTIFACT_OUTPUT_UNDECLARED")
+    assert typed.meta["undeclared_outputs"] == [str(target.resolve())]
+    assert result.startswith("# script_path="), result  # the script's own answer leads; the note trails it
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
+    assert "without being registered as task outputs" in result
     assert str(target) in result
     # #447/D5: the nudge must not REPLACE the payload. It held line 1 (the typed
     # policy-denial surface the classifier reads) and returned nothing else, so a
@@ -1167,8 +1222,9 @@ def test_run_command_without_outputs_detects_shell_redirection_to_user_files(tmp
         {"cmd": ["sh", "-c", f"echo ok > {shlex.quote(target.as_posix())}"], "cwd": str(desktop)},
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
-    assert "without declaring outputs" in result
+    assert result.startswith("exit_code=0"), result  # the command's own answer leads; the note trails it
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
+    assert "without being registered as task outputs" in result
     assert target.read_text(encoding="utf-8").strip() == "ok"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
 
@@ -1695,23 +1751,26 @@ def test_user_files_read_block_status_is_policy_denial(tmp_path, monkeypatch):
     assert len(buckets["policy_denials"]) == 1
 
 
-def test_artifact_output_nudge_split_from_registration_failure():
-    """The exit_code=0 undeclared-outputs NUDGE is typed apart from the real
-    'declared output registration failed' case: the nudge is a policy denial,
-    the registration failure stays a genuine blocking error."""
+def test_artifact_output_note_is_no_failure_and_registration_failure_is():
+    """The undeclared-outputs note rides a finished command: no error, its own bucket kept for
+    the journal and the trace. The real 'declared output registration failed' case stays a
+    genuine blocking error. A retired marker-first text reads the same way."""
     from ouroboros.loop_tool_execution import _extract_result_metadata, _is_tool_execution_failure
     from ouroboros.outcomes import _BLOCKING_TOOL_STATUSES, _POLICY_DENIAL_STATUSES
+    from ouroboros.tools.tool_result import TOOL_CODE_SPECS
 
-    nudge = (
+    spec = TOOL_CODE_SPECS["ARTIFACT_OUTPUT_UNDECLARED"]
+    assert (spec.status, spec.outcome_bucket) == ("ok", "artifact_output_undeclared")
+    note = (
         "⚠️ ARTIFACT_OUTPUT_UNDECLARED: command appears to write user_files outputs "
         "without declaring outputs=[...]. Paths: /x/y.txt.\n\nexit_code=0\n"
     )
-    assert _is_tool_execution_failure(True, nudge) is True  # honest ⚠️ in the trace
-    nudge_meta = _extract_result_metadata("run_command", nudge, True)
-    assert nudge_meta["status"] == "artifact_output_undeclared"
-    assert nudge_meta["status"] in _POLICY_DENIAL_STATUSES
+    assert _is_tool_execution_failure(True, note) is False
+    note_meta = _extract_result_metadata("run_command", note, False)
+    assert note_meta["status"] == "artifact_output_undeclared"
 
     real = "⚠️ ARTIFACT_OUTPUT_ERROR: command succeeded but declared output registration failed.\nexit_code=0\n"
+    assert _is_tool_execution_failure(True, real) is True
     real_meta = _extract_result_metadata("run_command", real, True)
     assert real_meta["status"] == "artifact_output_error"
     assert real_meta["status"] in _BLOCKING_TOOL_STATUSES

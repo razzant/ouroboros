@@ -45,10 +45,12 @@ from ouroboros.tools.registry import (
 from ouroboros.tools import shell_audit as _shell_audit
 from ouroboros.tools.deliverables_shell import lexical_user_files_block_reason  # noqa: F401
 from ouroboros.tools.shell_audit import (
-    _UNDECLARED_OUTPUTS_MARKER,
     _disclose_output_audit_failure,
     _masked_green_disclosure,
+    _UNDECLARED_OUTPUTS_MARKER,  # noqa: F401
     _mentioned_user_file_outputs_without_declaration,
+    undeclared_outputs_meta,
+    undeclared_outputs_note,
     _presence_allows_user_output,  # noqa: F401
     _allowed_output_roots,  # noqa: F401
 )
@@ -139,16 +141,6 @@ from ouroboros.tools.shell_process import (  # noqa: E402
     _publish_unfinished_process_facts,
 )
 
-
-
-# v6.90.x (submarine unwind) — the DECLARATION-NUDGE marker, deliberately typed
-# APART from the real ``ARTIFACT_OUTPUT_ERROR`` registration failure above. The
-# command SUCCEEDED (exit_code=0) and this only asks for ``outputs=[...]`` to be
-# declared, so its status lands in the v6.57.0 POLICY-DENIAL partition
-# (``_outcome_tool_errors._POLICY_DENIAL_STATUSES``) instead of degrading execution
-# to ``tool_failure``. The submarine wave-3 incident was exactly this: a moot nudge
-# on an already-registered artifact fed the failure record. SSOT for both
-# ``run_command`` and ``run_script`` so the two nudges cannot drift apart.
 
 
 _SHELL_BUILTINS = frozenset([
@@ -468,18 +460,7 @@ def _run_shell(
             # The child already finished. This observational failure must not
             # reach the spawn-error handler and overwrite its measured facts.
             undeclared_user_outputs, audit_error = [], type(exc).__name__
-        if undeclared_user_outputs:
-            # Declaration NUDGE, not a failure — see _UNDECLARED_OUTPUTS_MARKER.
-            text = (
-                autocorrect_note
-                + f"{_UNDECLARED_OUTPUTS_MARKER}: command appears to write user_files outputs "
-                "without declaring outputs=[...]. Declare generated user-visible files so "
-                "they are copied into the task artifact store before claiming completion. "
-                f"Paths: {', '.join(undeclared_user_outputs[:5])}.\n\n"
-                + f"{_describe_returncode(0, cwd=work_dir, binding=binding)}\n"
-                + _format_process_output(res.stdout or "", res.stderr or "")
-            )
-            return _masked_green_disclosure(ctx, _publish_process_result(ctx, "ARTIFACT_OUTPUT_UNDECLARED", text, exit_code=0, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta), cmd)
+        undeclared_note = undeclared_outputs_note(undeclared_user_outputs)
         artifact_note, artifact_failed, artifact_registered = _register_process_outputs(
             ctx,
             outputs,
@@ -491,8 +472,8 @@ def _run_shell(
             output_context=output_context,
         )
         artifact_note += f"\n- output baseline unavailable before the run ({baseline_problem}): a registered output may predate it" if baseline_problem and artifact_note else ""
-        audit_note = ""
-        if cwd_root == "user_files" and not outputs:
+        audit_note = f"\n\n{undeclared_note}" if undeclared_note else ""
+        if cwd_root == "user_files" and not outputs and not undeclared_note:  # one note about one fact
             # Remove scratch effects without hiding a simultaneous real deliverable.
             _after_for_audit = after_changed
             if scratch_abs and repo_root is not None:
@@ -531,7 +512,8 @@ def _run_shell(
             result = _masked_green_disclosure(ctx, _publish_process_result(ctx, "ARTIFACT_OUTPUT_ERROR", text, exit_code=0, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta), cmd)
             return _disclose_output_audit_failure(ctx, result, audit_error)
         text = autocorrect_note + f"{_describe_returncode(0, cwd=work_dir, binding=binding)}\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{audit_note}{scratch_note}{executor_note}"
-        result = _masked_green_disclosure(ctx, _publish_process_result(ctx, "SHELL_REGEX_AUTO_CORRECTED" if regex_autocorrected else "OK", text, exit_code=0, artifact_registered=bool(artifact_registered and not artifact_failed), shell_regex_auto_corrected=regex_autocorrected, meta=process_meta), cmd)
+        code = "ARTIFACT_OUTPUT_UNDECLARED" if undeclared_note else "SHELL_REGEX_AUTO_CORRECTED" if regex_autocorrected else "OK"
+        result = _masked_green_disclosure(ctx, _publish_process_result(ctx, code, text, exit_code=0, artifact_registered=bool(artifact_registered and not artifact_failed), shell_regex_auto_corrected=regex_autocorrected, meta={**process_meta, **undeclared_outputs_meta(undeclared_user_outputs)}), cmd)
         return _disclose_output_audit_failure(ctx, result, audit_error)
     except OwnerPauseRefused as exc:
         return _publish_tool_result(ctx, launch_refusal_result(exc))
@@ -680,15 +662,8 @@ def _run_script(
         )
     except Exception as exc:
         undeclared_user_outputs, audit_error = [], type(exc).__name__
-    audit_note = ""
-    if undeclared_user_outputs:
-        # Same declaration NUDGE class as run_command's — see _UNDECLARED_OUTPUTS_MARKER.
-        audit_note = (
-            f"{_UNDECLARED_OUTPUTS_MARKER}: run_script wrote user_files without declaring outputs: "
-            + ", ".join(undeclared_user_outputs)
-            + ". Re-run with outputs=[...] or write the canonical deliverable via root=artifact_store."
-        )
-    result = wrap_script_result(ctx, result, audit_note, script_path)
+    audit_note = undeclared_outputs_note(undeclared_user_outputs)
+    result = wrap_script_result(ctx, result, audit_note, script_path, undeclared_outputs_meta(undeclared_user_outputs))
     return _disclose_output_audit_failure(ctx, result, audit_error)
 
 
