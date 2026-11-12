@@ -283,6 +283,9 @@ def _knowledge_write(
         old_str = None
     try:
         sanitized = _sanitize_topic(topic)
+        lifecycle = mode in ("archive", "restore")
+        if mode not in _MODES or not isinstance(content, (str, type(None))):
+            raise ValueError("content must be Markdown; mode must be " + ", ".join(_MODES))
         if new_str is not None:  # the one-pair edit's replacement as other editors spell it: content
             if not isinstance(new_str, str):
                 raise ValueError("new_str must be text, the replacement of old_str (empty text deletes it)")
@@ -297,9 +300,6 @@ def _knowledge_write(
                                  + ("pass old_str with it" if mode == "edit" else f"mode={mode} takes its text as content"))
             else:
                 notes.append(ignored_argument_note("new_str", new_str, "only an edit with old_str takes a replacement"))
-        lifecycle = mode in ("archive", "restore")
-        if mode not in _MODES or not isinstance(content, (str, type(None))):
-            raise ValueError("content must be Markdown; mode must be " + ", ".join(_MODES))
         if mode == "archive" and sanitized in knowledge_store.ALWAYS_ACTIVE_TOPICS:
             raise ValueError("the overview must stay active")
         if not isinstance(reason, str) or (mode == "archive" and not reason.strip()):

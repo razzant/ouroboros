@@ -699,7 +699,8 @@ def test_the_one_pair_edit_takes_its_replacement_as_content_or_new_str(tmp_path)
             ({"old_str": "Newer two.", "content": "A", "new_str": "B"}, "new_str and content both give"),
             ({"summary": "The pair.", "new_str": "B"}, "same as content; pass old_str with it"),
             ({"mode": "append", "content": "x", "new_str": "y"}, "mode=append takes its text as content"),
-            ({"mode": "overwrite", "new_str": "# Pair\n"}, "mode=overwrite takes its text as content")):
+            ({"mode": "overwrite", "new_str": "# Pair\n"}, "mode=overwrite takes its text as content"),
+            ({"mode": "rewrite", "new_str": "B"}, "mode must be overwrite, append, edit, revert, archive, restore")):
         reply = write(**arguments)
         assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply, (arguments, reply)
     assert _files(tmp_path) == before
