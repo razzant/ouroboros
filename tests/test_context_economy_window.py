@@ -194,6 +194,13 @@ def test_the_facts_line_names_window_room_and_target_excess_apart(monkeypatch):
                                    "_context_measurement_basis": "fresh_model_usage"},
                      _context_capacity_total_tokens=500_000)
     assert "predicted free ~134,464" in witness and "fresh same-model" in witness
+    # Inside the reply reservation and under the send ceiling the request still goes out, and the line says so; a
+    # request that fits, and one above the ceiling (it is refused before the send), carry no such words.
+    inside = {**base, "_context_capacity_total_tokens": 500_000, "_context_send_ceiling_tokens": 491_808}
+    line = _facts(monkeypatch, **{**inside, "_context_prompt_estimate": 450_000})
+    assert "predicted free ~-15,536 (inside the reply reservation; sent while the input stays under ~491,808)" in line
+    for estimate in (300_000, 495_000):
+        assert "inside the reply reservation" not in _facts(monkeypatch, **{**inside, "_context_prompt_estimate": estimate})
     # A size refusal's own density counts every candidate its passes change: an estimate, never a stated count.
     refused = _facts(monkeypatch, **base, _context_measurement_basis="refused_input", _context_capacity_total_tokens=500_000)
     assert ("input ~300,000 before this line (host estimate at the density of the size-refused request: its "

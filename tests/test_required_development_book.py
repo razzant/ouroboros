@@ -627,7 +627,9 @@ def test_a_real_round_refuses_only_the_books_own_excess_and_keeps_the_view(main_
     grown = [*plan.messages_for("low"),
              {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {
                  "name": "read_file", "arguments": "{}"}}]},
-             {"role": "tool", "tool_call_id": "c1", "content": "A chosen read. " * 12_000}]  # more than the room left
+             # With the book the request passes its send ceiling (the stated window less the reply floor); the same
+             # transcript without the book stays under it.
+             {"role": "tool", "tool_call_id": "c1", "content": "A chosen read. " * 26_000}]
     ctx.messages[:] = grown
     ctx.tool_schemas = SCHEMAS
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
@@ -636,7 +638,8 @@ def test_a_real_round_refuses_only_the_books_own_excess_and_keeps_the_view(main_
     answer, _cost, mode = loop._call_round_model(ctx)
     assert mode == "low"
     if not required:
-        # The same transcript without the book fits this window: the ordinary send, the control that this is the book's.
+        # The same transcript without the book is admitted on this window: the ordinary send, the control that the
+        # refusal below is the book's own.
         assert answer and len(gateway.creates) == 1
         return
     assert answer is None and not gateway.creates, "a request the window cannot hold is never sent"
@@ -661,13 +664,15 @@ def test_a_real_round_refuses_only_the_books_own_excess_and_keeps_the_view(main_
     assert continuation_offer({**row, "root_task_id": "grown", "task_contract": {KEY: True}}, "grown")["eligible"]
 
 
-EXPOSED = "Exposed command output.\n" * 8_000
+EXPOSED = "Exposed command output.\n" * 24_000  # larger than the reply reserve: a start without it fits the window below
 
 
 @pytest.mark.parametrize("excess", ["book_only", "ordinary_too"])
 def test_an_exposed_body_never_pays_for_the_book_at_the_real_round(main_call, tmp_path, fixed_density, excess):
-    """A shown tool body the first refusal pass may address stays when the request is over only by the required book;
-    what the same request without the book would also exceed is still recovered as before, from that body."""
+    """A shown tool body the first refusal pass may address stays when the request is over only by the required book
+    (without it the send would go out); what the same request without the book would also exceed is still recovered
+    as before, from that body."""
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from tests.test_context_source_view import _observation, _tool
     from tests.test_subscription_main_wait import MODEL, ROUTE
 
@@ -686,7 +691,9 @@ def test_an_exposed_body_never_pays_for_the_book_at_the_real_round(main_call, tm
                                   round_id="r").measurement
     book = fit_before.required_book_tokens
     shortfall = book // 2 if excess == "book_only" else book + 8_000
-    plan = build(fit_before.estimated_input_tokens + fit_before.response_reserve_tokens - shortfall)
+    # Over its send ceiling (the stated window less the reply floor) by ``shortfall``: by less than the book, or by
+    # the book and 8,000 more.
+    plan = build(fit_before.estimated_input_tokens + NANO_MIN_HEADROOM_TOKENS - shortfall)
     assert plan.low_projection.system_content_json == roomy.low_projection.system_content_json
     ctx.messages[:] = [*head, *exposed, *latest]
     ctx.tool_schemas = SCHEMAS
@@ -741,40 +748,52 @@ def test_the_facts_row_sizes_the_ordinary_target_without_repeating_the_book_note
 
 
 def test_a_fallback_too_small_for_the_book_changes_no_memory(tmp_path, fixed_density, monkeypatch):
-    """A primary outage walks to a configured route the book does not fit: its view stays, the request is refused."""
+    """A primary outage walks to a configured route the book does not fit: the request is refused there and the
+    primary's view stays. The candidate enters a model this work was never answered on, so it is sized with its own
+    work room like any such move; the book costs it no form: its memory is exactly what the same move shows without
+    the book."""
     from ouroboros import config, fallback_cooldown
     from tests.test_primary_view_return import _registry
 
     primary, reserve = "openai/gpt-primary", "openai/gpt-reserve"
-    plan = _plan(tmp_path, _core(tmp_path, required=True, book_tokens=60_000), "low", 1_000_000)
     ordinary = _plan(tmp_path, _core(tmp_path), "low", 1_000_000)
     small = math.ceil(ordinary.low_projection.estimated_tokens * RATIO) + RESERVE + 2_000  # holds it without the book
-    plan = replace(plan, model=primary, model_role="main")
     monkeypatch.setattr(context, "_context_fit_route", lambda task, **_kw: (
         {"model": task["model"], "provider": "openrouter", "base_url": "", "use_local": False},
         SimpleNamespace(status="confirmed", stale=False, route_fp=task["model"],
                         window_tokens={primary: 1_000_000, reserve: small}[task["model"]])))
     monkeypatch.setattr(config, "fallback_candidate_targets", lambda **_kw: [SimpleNamespace(model_id=reserve)])
-    fallback_cooldown.reset_for_tests()
-    registry = _registry(tmp_path)
-    registry._ctx.primary_route["model"] = registry._ctx.active_model = primary
-    messages = plan.messages_for("low")
-    shown, sent = messages[0], {}
 
-    def refused_round(call):
-        sent.update(view=call.messages[0], plan=call.context_fit_plan, mode=call.active_context_mode)
-        call.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
-        return None, 0.0, call.active_context_mode
+    def walk(root, plan):
+        fallback_cooldown.reset_for_tests()
+        registry = _registry(root)
+        registry._ctx.primary_route["model"] = registry._ctx.active_model = primary
+        plan = replace(plan, model=primary, model_role="main")
+        messages = plan.messages_for("low")
+        shown, sent = messages[0], {}
 
-    monkeypatch.setattr(loop, "_call_round_model", refused_round)
-    msg, model, _local, after, mode = loop._run_cross_model_fallback_chain(
-        llm=SimpleNamespace(), ctx=registry._ctx, tools=registry, messages=messages, active_model=primary,
-        active_use_local=False, tool_schemas=SCHEMAS, active_effort="medium", max_retries=3, drive_logs=tmp_path,
-        task_id="outage", round_idx=2, event_queue=None, accumulated_usage={"_last_llm_error_kind": "transport_unavailable"},
-        task_type="", emit_progress=lambda *_a, **_kw: None, context_fit_plan=plan, active_context_mode="low")
-    assert msg is None and model == primary and mode == "low"
-    assert sent["view"] == shown  # the candidate carried the same memory and the book; nothing paid for it
-    assert sent["mode"] == "low" and messages[0] == shown
+        def refused_round(call):
+            sent.update(view=call.messages[0], plan=call.context_fit_plan, mode=call.active_context_mode)
+            call.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+            return None, 0.0, call.active_context_mode
+
+        monkeypatch.setattr(loop, "_call_round_model", refused_round)
+        msg, model, _local, _after, mode = loop._run_cross_model_fallback_chain(
+            llm=SimpleNamespace(), ctx=registry._ctx, tools=registry, messages=messages, active_model=primary,
+            active_use_local=False, tool_schemas=SCHEMAS, active_effort="medium", max_retries=3, drive_logs=root,
+            task_id="outage", round_idx=2, event_queue=None, accumulated_usage={"_last_llm_error_kind": "transport_unavailable"},
+            task_type="", emit_progress=lambda *_a, **_kw: None, context_fit_plan=plan, active_context_mode="low")
+        assert msg is None and model == primary and mode == "low" and sent["mode"] == "low"
+        assert messages[0] == shown  # the primary's own view is untouched by the refused candidate
+        return sent
+
+    (tmp_path / "with").mkdir()
+    (tmp_path / "without").mkdir()
+    book = walk(tmp_path / "with", _plan(tmp_path, _core(tmp_path, required=True, book_tokens=60_000), "low", 1_000_000))
+    plain = walk(tmp_path / "without", ordinary)
+    assert len(_book_blocks(book["plan"], "low")) == 1 and not _book_blocks(plain["plan"], "low")  # the book rode along
+    floors = [walked["plan"].low_projection.memory_facts["floor"] for walked in (book, plain)]
+    assert floors[0]["steps"] == floors[1]["steps"] and floors[0]["runs"] == floors[1]["runs"]  # nothing paid for it
 
 
 # --- A known incompatibility at a pooled start is the task's outcome ------------------------------------------------

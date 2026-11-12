@@ -718,9 +718,13 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
             how = "host estimate at the density of the size-refused request: its provider-stated input over its estimate"
         floor = int(usage.get("_context_response_reserve_tokens") or reserve or 0)
         parts.append(f"input ~{int(estimate):,} before this line ({how}) + reply reservation {int(reserve or 0):,}")
-        # Known-window admission acts on this prediction; a reservation is no provider observation.
+        # A reservation is no provider observation: admission refuses only above the send ceiling (the stated
+        # numbers read most favourably), so a request inside the reservation still goes out, and the line says so.
+        ceiling = int(usage.get("_context_send_ceiling_tokens") or 0)
         parts.append(f"predicted free ~{int(capacity) - int(estimate) - floor:,}"
                      + (f" (reply floor {floor:,})" if floor != int(reserve or 0) else "")
+                     + (f" (inside the reply reservation; sent while the input stays under ~{ceiling:,})"
+                        if int(capacity) - floor < int(estimate) <= ceiling else "")
                      if capacity is not None and refused is None else
                      "free unknown (acceptance established no reply room)")
         book = int(usage.get("_context_required_book_tokens") or 0)

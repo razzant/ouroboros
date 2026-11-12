@@ -42,6 +42,9 @@ class PhysicalAttemptContext:
     # (``transcript_prefix.attempt_prefix_fact``): never the provider's verdict, which is the row's measured counts.
     # None on rows written before it existed and on sends without a Main candidate.
     prefix: Optional[dict] = field(default=None, compare=False)
+    # The largest input the pre-send check admits for this candidate (``WindowRecord.send_ceiling``); None on rows
+    # written before it existed and where the window is unknown: the check then charges the whole reserve.
+    send_ceiling_tokens: Optional[int] = None
 
 
 OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledger records as made

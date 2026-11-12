@@ -130,8 +130,9 @@ def required_book_fact(usage):
     if not book:
         return ""
     estimate, reserve = (int(usage.get(key) or 0) for key in ("_context_prompt_estimate", "_context_response_reserve_tokens"))
-    capacity = usage.get("_context_capacity_total_tokens")
-    room = f" against {int(capacity) - reserve:,} usable" if capacity is not None else " on a window nothing measured"
+    capacity, ceiling = usage.get("_context_capacity_total_tokens"), int(usage.get("_context_send_ceiling_tokens") or 0)
+    room = (" on a window nothing measured" if capacity is None else f" against {int(capacity) - reserve:,} usable"
+            if ceiling <= int(capacity) - reserve else f" against the {ceiling:,} this window admits")
     continues = "; a Continue keeps it" if size_refusal_cause(usage) in TECHNICAL_REASON_CODES else ""
     return (f"\nThis task directly requires the whole development handbook (~{book:,} tokens), which stayed; "
             f"without it the input is ~{max(0, estimate - book):,}{room}. {REQUIRED_BOOK_CHOICES.format(continues)}")

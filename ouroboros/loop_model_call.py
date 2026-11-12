@@ -758,7 +758,8 @@ def _remember_main_fit(ctx: _RoundModelCallContext, disposition: Any) -> None:
     usage["_context_target_miss"] = disposition.action == "send_target_miss"
     usage["_context_automatic_pass_used"] = disposition.automatic_pass_used
     usage["_context_predicted_capacity_miss"] = disposition.predicted_capacity_miss
-    for name in ("anchor_input_tokens", "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "window", "required_book_tokens"):
+    for name in ("anchor_input_tokens", "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "window",
+                 "required_book_tokens", "send_ceiling_tokens"):
         usage[f"_context_{name}"] = getattr(measurement, name)  # the estimate's provenance and the window floor
     remember_attempt_prefix(ctx)  # what this candidate does to its route's cached start, for its ledger row
 
@@ -1514,7 +1515,8 @@ def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit
     pays the rest before a just-chosen body, which goes last, only in a round a provider's refusal started
     (``refused``): for the measured target left, or against an unknown one when nothing in the round changed
     (``earlier_change``, owner 2A). No step pays for a directly required handbook (owner 1.11): an excess it alone
-    explains, or an unknown one beside it, stops the pass.
+    explains (the same request without it fits, or stays under its send ceiling), or an unknown one beside it, stops
+    the pass.
     """
     changed, remaining, charged = False, target, 0
     ctx.refusal_policy = {"provider_refused": bool(refused)}  # a shown chosen read yields only to a provider
@@ -1524,7 +1526,9 @@ def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit
         if getattr(ctx.context_fit_plan, "window_record", None) is not None:
             fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) or fit
         if book := getattr(fit.measurement, "required_book_tokens", 0) - charged:
-            if remaining is None or remaining - (slack or 0) <= book:
+            ceiling = getattr(fit.measurement, "send_ceiling_tokens", None)  # without the book the send would go out
+            if (remaining is None or remaining - (slack or 0) <= book
+                    or (ceiling is not None and fit.measurement.estimated_input_tokens - book <= ceiling)):
                 return changed
             remaining, charged = remaining - book, charged + book
         shed = _apply_refusal_step(ctx, step, fit, remaining, slack)

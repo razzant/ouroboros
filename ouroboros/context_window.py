@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 
+_TOTAL_PROVEN = frozenset({"refusal", "local_health"})  # sources that prove a total: ``WindowRecord.send_ceiling``
+
+
 @dataclass(frozen=True)
 class WindowLimit:
     tokens: int
@@ -44,6 +47,15 @@ class WindowRecord:
     def boundary(self) -> Optional[int]:
         limits = [limit.tokens for limit in (self.input, self.total) if limit]
         return min(limits) if limits else None
+
+    def send_ceiling(self, floor: int) -> Optional[int]:
+        """The largest input a send is admitted at, each stated number read most favourably (the fit keeps
+        ``usable``): an input limit whole; a total less the whole reserve where it is known to hold the reply too
+        (a size refusal said so, or a local server stated its one buffer), else less ``floor``, the reply floor.
+        A provider that counts the reply refuses such a send once, and that refusal confirms the total."""
+        limits = ([self.input.tokens] if self.input else []) + ([self.total.tokens - (
+            self.reserve if self.total.source in _TOTAL_PROVEN else min(self.reserve, int(floor)))] if self.total else [])
+        return max(0, min(limits)) if limits else None
 
     @property
     def limiting(self) -> Optional[WindowLimit]:
@@ -170,7 +182,7 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
             if ce._age_seconds(row["ts"]) <= ce._CONFIRMED_TTL_SEC and not any(
                     later.get("accepted", 0) > row["refused"] for later in rows[index + 1:]):
                 current = limits.get(row["kind"])
-                if current is None or row["refused"] < current.tokens:
+                if current is None or row["refused"] <= current.tokens:  # at the stated number too: it confirms the kind
                     limits[row["kind"]] = WindowLimit(row["refused"], row["kind"], "refusal", row["ts"])
             break
     output = getattr(evidence, "response_limit", {}) or {}
@@ -190,6 +202,8 @@ def record_refusal(usage, plan, refused_input: int = 0) -> None:
     ``refused_input`` is the caller's measured provider-unit size of the refused request (anchored on an
     accepted request of this conversation), passed only when measured: Codex states no number, and a
     route that never records its refusals keeps planning at a larger acceptance and is refused again.
+    A numberless refusal of a request sent inside the reply reservation of a stated total says that total holds the
+    reply too, so it is recorded as the total's own refusal (``WindowRecord.send_ceiling`` then charges the reserve).
     Without a stated limit or a measured size a refusal adds no ceiling, and a refusal of one input string's
     length (``INPUT_STRING_LENGTH_CODES``) adds none at any size: it says nothing of the token window."""
     from ouroboros import capability_evidence as ce
@@ -203,8 +217,11 @@ def record_refusal(usage, plan, refused_input: int = 0) -> None:
     if not limit:
         if (int(refused_input or 0) > 0
                 and str(usage.get("_last_llm_provider_code") or "").lower() not in INPUT_STRING_LENGTH_CODES):
+            record, size = getattr(plan, "window_record", None), int(refused_input)
+            total = record.total.tokens if record is not None and record.total else 0
+            confirms = total - (record.reserve if record is not None else 0) < size <= total
             record_observation(ce.canonical_evidence_root(), observation_scope(plan),
-                               refused=int(refused_input), kind="input")
+                               refused=total if confirms else size, kind="total" if confirms else "input")
         return
     # Sglang shares its input bound with generation, so its length refusal stays total.
     input_only = any(marker in message.lower() for marker in ("prompt is too long", "maximum input", "input token count"))

@@ -17,6 +17,25 @@ def test_reserve_is_charged_once_only_to_a_total(input_limit, total, expected):
     assert WindowRecord("unknown", reserve=65_536).usable is None
 
 
+@pytest.mark.parametrize("source,refusal,ceiling", [
+    ("metadata", None, 991_808),           # an unconfirmed total: the stated number less the reply floor
+    ("metadata", "total", 934_464),        # the provider refused a request as a total: the whole reserve, for its life
+    ("metadata", "input", 991_808),        # «prompt is too long» at the stated number: the favourable reading stands
+    ("local_health", None, 934_464),       # a local server's one buffer holds the reply too
+])
+def test_the_send_ceiling_reads_a_total_favourably_until_a_refusal_confirms_it(tmp_path, source, refusal, ceiling):
+    evidence = ce.CapabilityEvidence(1_000_000, "confirmed", source, "r")
+    if refusal:  # at the stated number itself: it names no smaller limit, it tells the kind
+        record_observation(tmp_path, "r", refused=1_000_000, kind=refusal)
+    record = resolve_window(evidence, 65_536, root=tmp_path)
+    assert record.usable == 934_464  # every fit keeps the reserve
+    assert record.send_ceiling(8_192) == ceiling
+    assert (record.total.source == "refusal") is (refusal == "total")
+    record_observation(tmp_path, "r", accepted=1_000_001)  # a later larger acceptance disproves the stated total
+    assert resolve_window(evidence, 65_536, root=tmp_path).send_ceiling(8_192) == 1_000_001
+    assert WindowRecord("unknown", reserve=65_536).send_ceiling(8_192) is None
+
+
 def test_refusal_expires_or_is_superseded_only_by_a_later_larger_acceptance(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
@@ -80,6 +99,29 @@ def test_numberless_refusal_bounds_the_window_only_at_a_measured_size(tmp_path, 
     assert resolve_window(replace(evidence, route_fp="other"), 65_536, root=tmp_path).total.tokens == 872_000
 
 
+@pytest.mark.parametrize("size,kind,ceiling", [
+    (240_000, "total", 234_464),  # sent inside the reply reservation and refused: the stated total holds the reply too
+    (230_000, "input", 230_000),  # refused although it left the whole reserve: its size caps the input, as before
+])
+def test_a_numberless_refusal_inside_a_stated_totals_reservation_confirms_the_total(tmp_path, monkeypatch, size, kind, ceiling):
+    """The favourable reading sends a request inside the reply reservation of a stated total. A provider that counts
+    the reply refuses it, and Codex names no number: the refusal still tells the kind, so the pre-send check charges
+    the reserve for that record's life and the route is not refused again at every wall."""
+    from types import SimpleNamespace
+    from ouroboros.context_anchor import record_refused_input
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    evidence = ce.CapabilityEvidence(300_000, "confirmed", "metadata", "r")
+    stated = resolve_window(evidence, 65_536, root=tmp_path)
+    assert stated.send_ceiling(8_192) == 291_808 and stated.total.source == "metadata"
+    plan = SimpleNamespace(route_fp="r", window_witness_bound=True, provider="openai", model="model", window_record=stated)
+    record_refused_input({"_last_llm_provider_message": "Codex reported a failed response."}, plan, size, measured=True)
+    window = resolve_window(evidence, 65_536, root=tmp_path)
+    assert window.total.tokens == 300_000 and (window.total.source == "refusal") is (kind == "total")
+    assert (window.input.tokens if window.input else None) == (None if kind == "total" else size)
+    assert window.send_ceiling(8_192) == ceiling and window.usable == min(ceiling, 234_464)
+
+
 @pytest.mark.parametrize("main", [True, False])
 def test_settlement_binds_main_density_and_acceptance_but_auxiliary_calls_do_not(tmp_path, main):
     from types import SimpleNamespace
@@ -130,11 +172,15 @@ def test_a_plan_releases_its_refusal_ceiling_when_the_observation_expires(tmp_pa
     assert capacity() == (metadata or None)
 
 
-@pytest.mark.parametrize("stated,accepted,usable", [
-    (872_000, 921_227, 921_227), (1_000_000, 200_000, 934_464),
-    (1_000_000, 950_000, 934_464), (0, 921_227, None),
+@pytest.mark.parametrize("stated,accepted,usable,ceiling", [
+    (872_000, 921_227, 921_227, 921_227), (1_000_000, 200_000, 934_464, 991_808),
+    (1_000_000, 950_000, 934_464, 991_808), (0, 921_227, None, None),
 ])
-def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch, stated, accepted, usable):
+def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch, stated, accepted, usable, ceiling):
+    """The start and every fit keep ``usable`` (a stated total less the reply reserve). The admission of a final
+    candidate shares an input bound whole and reads an unconfirmed total most favourably: it refuses only above the
+    stated number less the reply floor (owner, 30 Sep 2026: the host acts before a send only when the request does
+    not fit under the most favourable reading)."""
     from ouroboros import context_fit as cf
     from ouroboros.context_view_facts import window_fact
     from ouroboros.llm_attempt import main_context_fit_refusal
@@ -159,15 +205,19 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
         assert "window unknown" in line and "921,227" in line and "2026-10-19" in line
     elif accepted > stated:
         assert "input: accepted 2026-10-19" in line
-    for size in ([880_000, 921_227, 921_228] if stated == 872_000 else [900_000, 950_000]):
+    for size in ([880_000, 921_227, 921_228] if stated == 872_000 else [900_000, 950_000, 991_808, 991_809]):
         monkeypatch.setattr(cf, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
         disposition = cf.measure_main_fit(plan, [], [], profile="owner_max", rendered_mode="max", round_id="r",
                                           accepted_input_tokens=accepted)
         physical = cf._physical_context_for_fit(disposition)
         refusal = main_context_fit_refusal(AttemptRequest(model="test", provider="test",
             prompt_tokens_bounded_estimate=size, physical_context=physical))
+        assert disposition.measurement.send_ceiling_tokens == physical.send_ceiling_tokens == ceiling
         assert disposition.predicted_capacity_miss is (usable is not None and size > usable)
-        assert (refusal is not None) is (usable is not None and size > usable)
+        assert (refusal is not None) is (ceiling is not None and size > ceiling)
+        if refusal is not None:  # the facts keep the whole reserve: the passes after a refusal restore it
+            assert refusal["predicted_free_tokens"] == refusal["free_tokens"] == usable - size
+            assert refusal["response_reserve_tokens"] == 65_536
 
 
 @pytest.mark.parametrize(("mode", "kind", "account_refusal"), [
@@ -178,8 +228,9 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
 def test_a_rebind_keeps_the_route_window_for_the_final_admission(tmp_path, monkeypatch, mode, kind, account_refusal):
     """3 Nov 2026 witness: a same-route rebind under Nano dropped an input-only 240K route's record and admitted
     297,344 input tokens until a provider refusal; Low kept it only because its reserve equals the ceiling.
-    The record and its own frame survive in every mode: an input bound stays, a total keeps T - R, the account
-    scope's refusal still binds and an unknown window stays unknown."""
+    The record and its own frame survive in every mode: an input bound stays, a total keeps T - R in the fit, the
+    account scope's refusal still binds and an unknown window stays unknown. The admission's edge is the send
+    ceiling: the input bound whole, here the account's own refused 230,000 beside an unconfirmed 240,000 total."""
     from types import SimpleNamespace
     from ouroboros import context, context_fit as cf, loop
     from ouroboros.llm_attempt import main_context_fit_refusal
@@ -221,7 +272,8 @@ def test_a_rebind_keeps_the_route_window_for_the_final_admission(tmp_path, monke
     else:
         assert rebound.window_record is not None and rebound.window_record.route_fp == "account-scope"
         assert fit.capacity_total_tokens - fit.response_reserve_tokens == usable
-        assert (admitted(usable), admitted(usable + 1)) == (True, False)
+        edge = 230_000 if account_refusal else usable
+        assert fit.send_ceiling_tokens == edge and (admitted(edge), admitted(edge + 1)) == (True, False)
 
 
 @pytest.mark.parametrize("model,key", [
