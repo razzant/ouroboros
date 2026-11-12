@@ -25,14 +25,15 @@ def _catalogue(snapshot):
     own = {w["address"]: w for w in room.get("lane1", ())}
     tasks = {t["first"]: t for t in room.get("lane2", ())}
     records = {r["id"]: r for r in [*snapshot.story, *room.get("notes", ())]}
-    progress, finals = {}, {}
+    progress, finals, answered = {}, {}, set()  # answered: the works with replies here, by their own key
     for key, rows in works(room):
         progress["work:" + key + ":progress"] = rows
         finals["work:" + key + ":final"] = rows
+        answered.add(key)
     parents = {w["id"]: g["key"] for g in snapshot.conversations for r in g["rooms"] for w in r["words"]}
     kinds = {ident: kind for data in conversations.source_index(snapshot).values() for ident, kind in data["kinds"].items()}
     return dict(room=room, words=words, own=own, tasks=tasks, records=records, progress=progress,
-                finals=finals, parents=parents, kinds=kinds, answered={w.get("task_id") for w in own.values()},
+                finals=finals, parents=parents, kinds=kinds, answered=answered,
                 standing={r["id"] for r in room.get("under_parts", ()) if r.get("standing")})
 
 

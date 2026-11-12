@@ -390,6 +390,30 @@ def test_sole_task_gist_is_not_an_ordinary_fact():
     assert forms.form_counts(snap, level)["emergency"]["sole task gists"] == {"lines": 1, "sources": 1}
 
 
+@pytest.mark.parametrize("reply_here", [False, True])
+def test_a_task_whose_only_rows_here_are_relay_notes_keeps_its_gist_until_a_counted_emergency(reply_here):
+    """rev_fable REV2 F4: a relay note carries its sender's task id but is its own work (``relay:<address>``), so a
+    task whose only rows here were such notes counted as answered: F1 took its line at the ordinary task-facts stage
+    and its gist, printed nowhere, counted as a host fact. That gist is the task's sole telling here now; a task whose
+    own reply stands here stays an ordinary fact beside its work."""
+    task = syn.task_line(0)
+    task.update(task="sender", gist={"summary": "Only telling.", "room_id": "1", "address": task["last"]})
+    task["line"] += " — summary: «Only telling.»"
+    rows = [dict(syn.spoken(1, "ouroboros", 400), task_id="sender", relay_summary="Passed on a limit.")]
+    rows += [dict(syn.spoken(2, "ouroboros", 400), task_id="sender")] if reply_here else []
+    room = {**syn.room(lane1=rows), "lane2": [task]}
+    work.bind(room, [], {"sender": task["gist"]})
+    snap = syn.snapshot(room_facts=room)
+    assert rows[0]["work_id"] == "relay:" + rows[0]["address"]
+    assert forms.stage_of(snap, "F1", task["first"]) == ("task_facts" if reply_here else "task_only")
+    counts = forms.form_counts(snap, mf.fit_memory_view(snap, frame(0)))
+    if reply_here:
+        assert counts["host"]["task facts"] == {"lines": 1, "sources": 1} and "sole task gists" not in counts["emergency"]
+    else:
+        assert counts["emergency"]["sole task gists"] == {"lines": 1, "sources": 1} and "task facts" not in counts["host"]
+        assert ("F1", task["first"]) not in forms.ordinary_pairs(snap)
+
+
 def test_return_keeps_an_oldest_prefix_of_counted_conversations():
     groups = [syn.conversation(i, words=3, word_chars=n) for i, n in enumerate([40, 8000, 30, 4000, 500])]
     snap = syn.snapshot(conversations=groups)
