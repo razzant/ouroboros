@@ -49,7 +49,7 @@ export function categorizeLogEvent(evt, view = summarizeLogEvent(evt)) {
     // name substrings below only pick the domain family of a non-error row.
     if (ERROR_LOG_PHASES.has(String(view?.phase || ''))) return 'errors';
     if (wake) return 'consciousness';
-    if (t.includes('llm') || t.includes('model')) return 'llm';
+    if (t.includes('llm') || t.includes('model') || t === 'provider_content_refusal') return 'llm';
     if (t.includes('tool') || evt.tool) return 'tools';
     if (t === 'history_retention' || t.includes('task') || t.includes('evolution') || t.includes('review')) return 'tasks';
     if (t.includes('consciousness') || t.includes('bg_')) return 'consciousness';

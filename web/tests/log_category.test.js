@@ -108,6 +108,8 @@ test('a provider content refusal reads as the filter stopping the request, with 
     assert.equal(refusal.body, 'The provider said: "This request was blocked."');
     assert.deepEqual(refusal.meta, ['task=t', 'anthropic/claude-opus-5.5', 'r7', 'Amazon Bedrock']);
     assert.equal(summarizeLogEvent({ type: 'provider_content_refusal', model: 'm' }).body, '');  // no words: none claimed
+    // A model call's own outcome: the LLM filter shows it beside the empty response (before: filed under System).
+    assert.equal(categorizeLogEvent({ type: 'provider_content_refusal', model: 'm', round: 7 }), 'llm');
     const empty = summarizeLogEvent({ type: 'llm_empty_response', model: 'm', round: 2, provider_message: 'x' });
     assert.equal(empty.headline, 'Model returned empty response');
     assert.equal(empty.body, '');
