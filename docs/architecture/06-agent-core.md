@@ -644,11 +644,9 @@ Post-work keeps pooled custody apart from early answer delivery and the solve ce
 
 #### Durable memory and project focus
 
-Memory belongs to the subject, attention to the focus (BIBLE P1, "The subject of continuity"). A line replacing text is my telling of that same source, printed in the same view block beside its address, a host fact, or a recorded emergency of the window or selected mode.
+`memory_view_work.py` replaces a completed work's replies with its gist (`wake_summary`: PERSISTENCE) in the same block: whole here, first sentence elsewhere. `fold_read=true` lets other foci show that room's words through the finish as the gist with a reader, excluding my human's words; it seals nothing.
 
-`memory_view_work.py` replaces a completed work's replies with its gist (`wake_summary`, the whole `finish_task.summary`; carriers and first-sentence projections: PERSISTENCE) in the same block: whole here, first sentence elsewhere. `fold_read=true` lets other foci show that room's words through the finish as the gist with a reader, excluding my human's words; it seals nothing.
-
-`memory_forms.STAGES` orders forms by distance: farther sources yield before nearer ones, older first within each stage. The owner's order A puts `work_final` before `remote_last`. The clean-start guard uses only ordinary forms when they fit the same complete frame with the work room. Unsealed notes yield late; story yields before my human's words, which come last, with human quotes kept beside story pointers until then. Selected accounts lead the story whole, with source changes, no rung. Pointer IDs occur once.
+`memory_forms.STAGES` orders forms by distance, since memory belongs to the subject and attention to the focus (BIBLE P1, "The subject of continuity"): farther sources yield before nearer ones, older first within each stage. The owner's order A puts `work_final` before `remote_last`. The clean-start guard uses only ordinary forms when they fit the same complete frame with the work room. Unsealed notes yield late; story yields before my human's words, which come last, with human quotes kept beside story pointers until then. Selected accounts lead the story whole, with source changes, no rung. Pointer IDs occur once.
 
 In a place, a recorded person who is not a bot or my outward reply makes a conversation; other arrivals stand as event facts. Unconsidered words in rooms without recorded participation by my human or me may share one fact line per conversation, with their readers.
 
