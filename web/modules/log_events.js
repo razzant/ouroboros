@@ -345,13 +345,11 @@ function formatUsageTokens(evt) {
 
 function compactJson(value, maxLen = 220) {
     if (value == null) return '';
-    let txt = '';
     try {
-        txt = JSON.stringify(value);
+        return shortText(JSON.stringify(value), maxLen);
     } catch {
-        txt = String(value);
+        return shortText(String(value), maxLen);
     }
-    return shortText(txt, maxLen);
 }
 
 function extractCommandText(args) {
@@ -822,9 +820,11 @@ export function summarizeLogEvent(evt) {
         });
     }
 
-    if (t === 'llm_round_empty' || t === 'llm_empty_response') {
-        return view('empty', 'Model returned empty response', {
-            meta: taskMeta(evt.model || '', evt.round ? `r${evt.round}` : ''),
+    if (t === 'llm_round_empty' || t === 'llm_empty_response' || t === 'provider_content_refusal') {
+        const refused = t === 'provider_content_refusal';  // no content, the filter's finish; its words are the provider's
+        return view('empty', refused ? "The provider's content filter stopped this request" : 'Model returned empty response', {
+            body: refused && evt.provider_message ? `The provider said: "${shortText(evt.provider_message, 260)}"` : '',
+            meta: taskMeta(evt.model || '', evt.round ? `r${evt.round}` : '', refused ? evt.response_provider || '' : ''),
         });
     }
 
