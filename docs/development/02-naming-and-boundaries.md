@@ -168,7 +168,8 @@ scanned.
 Size is pairwise: a change ends each composed book, entrypoint included,
 `BIBLE.md` and the prompts (`prompts/*.md` as one text) no larger than at its
 event base; what it adds is paid in the same text by a statement that leaves, never by a
-lost fact (03 "Paying down a size cap"). With
+lost fact (03 "Paying down a size cap"). No other document is under this rule, DESIGN and
+PERSISTENCE included. With
 ordinary push/PR CI disabled (ARCHITECTURE §8), manual/tag runs lack a
 per-change base and skip this comparison. Local qualification supplies
 `OURO_SIZE_RATCHET_BASE_REF` explicitly; review checks the actual
@@ -179,7 +180,6 @@ report the balance as a fact. Contribution is measured from the displayed
 merge-base of the cached official development ref; an unknown base stays
 unknown and nothing is fetched. Free diagnostics label book
 bytes as worktree separately from the selected release-metadata source.
-Equivalent historical prose stays review-only under CHECKLISTS item 5.
 
 ### Generality and emergence (P13)
 

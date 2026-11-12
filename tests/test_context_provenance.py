@@ -14,7 +14,6 @@ from types import SimpleNamespace
 from ouroboros.context_budget import (
     HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, OWNER_WORDS_KIND, bound_host_row, host_row_intact,
 )
-from ouroboros.context_compaction import context_units  # noqa: F401  (loads context_source_view in its own order)
 from ouroboros.context_source_view import _obsolete_host_rows
 from ouroboros.loop_messages import CONTEXT_FACTS_NAME, _append_or_merge_user_content, _initialize_owner_directives
 from ouroboros.loop_round_limits import _drain_incoming_messages
