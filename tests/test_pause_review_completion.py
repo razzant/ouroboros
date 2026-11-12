@@ -21,6 +21,7 @@ from ouroboros import usage_accounting as ua
 from ouroboros.task_results import write_task_result
 from tests.test_review_operation_lifetime import TASK, _parent, _request, _slot, env, until  # noqa: F401
 from tests._usage_store_testing import attempt_rows_in_start_order
+from tests._review_change_fixtures import LANDING_DECISION, returned_reference
 
 
 
@@ -537,6 +538,14 @@ def direct_commit(paused_env, monkeypatch):
     return SimpleNamespace(f=f, model=model, git=git, effects=effects, records=records, locks=locks)
 
 
+def _land(d, returned):
+    """The author's explicit continuation on the outcome its earlier call returned before Git; this fixture's
+    stubbed wave binds no subject in its record, so the continuation names the paths it lands."""
+    with _parent(d.f):
+        return d.git._commit_reviewed(d.f.ctx, "candidate", review_reference=returned_reference(returned),
+                                      author_disposition=dict(LANDING_DECISION), paths=["candidate.py"])
+
+
 def test_direct_commit_returns_pending_on_pause_and_rejoins_the_same_review(direct_commit):
     d, outcome = direct_commit, {}
     resumed, resumed_thread = {}, None
@@ -577,9 +586,10 @@ def test_direct_commit_returns_pending_on_pause_and_rejoins_the_same_review(dire
         if resumed_thread is not None:
             resumed_thread.join(10)
     until(lambda: not review_pause.live_detached_operations(TASK))
-    result = resumed["result"]
-    assert result.startswith("committed"), result
+    assert resumed["result"].startswith("Review outcome returned before commit. "), resumed
     assert d.f.ctx._last_triad_raw_results[0]["operation_id"] == pending["operation_id"]
+    result = _land(d, resumed["result"])
+    assert result.startswith("committed"), result
     assert [label for label, _ in d.model.rounds] == ["first", "follow-up"], "unchanged review collected at $0"
     assert sum(row[1:2] == ("commit",) for row in d.effects) == 1
 
@@ -587,26 +597,29 @@ def test_direct_commit_returns_pending_on_pause_and_rejoins_the_same_review(dire
 def test_direct_commit_rechecks_pause_after_review_before_its_final_git_effect(direct_commit, monkeypatch):
     d = direct_commit
     d.model.release_first.set()
+    with _parent(d.f):
+        returned = d.git._commit_reviewed(d.f.ctx, "candidate")
+    assert returned.startswith("Review outcome returned before commit. "), returned
     stage = d.git._run_reviewed_stage_cycle
 
     def pause_after_review(*a, **kw):
         outcome = stage(*a, **kw)
-        assert outcome["status"] == "passed", outcome
+        assert outcome["status"] == "passed", outcome  # the author's continuation passed this call's checks
         owner_pause.install_fence(d.f.root, TASK, request_id="after-review-before-commit")
         return outcome
 
     monkeypatch.setattr(d.git, "_run_reviewed_stage_cycle", pause_after_review)
-    with _parent(d.f):
-        result = d.git._commit_reviewed(d.f.ctx, "candidate")
+    result = _land(d, returned)
     assert "OWNER_PAUSE" in result, result
     assert not any(row[0] in {"tag", "push"} or row[1:2] == ("commit",) for row in d.effects), d.effects
-    assert d.locks == ["lock"]
+    assert d.locks == ["lock", "lock"]  # each call released its Git lock
 
 
 def test_pause_before_the_panel_launches_refuses_it_at_zero_and_never_passes(direct_commit, monkeypatch):
     """Pause after the author's preflight, before the panel's first send: the new panel
-    never starts, its reserved row reads a $0 refusal (not lost custody), and an
-    unreviewed candidate is never treated as reviewed. After Resume the same commit runs."""
+    never starts, its reserved row reads a $0 refusal (not lost custody) returned to the
+    author, and an unreviewed candidate is never committed by it. After Resume the same
+    commit runs its panel, and the author's continuation lands it."""
     d = direct_commit
     d.model.release_first.set()
     gate = d.git._preflight_and_tests_gate
@@ -618,20 +631,23 @@ def test_pause_before_the_panel_launches_refuses_it_at_zero_and_never_passes(dir
     monkeypatch.setattr(d.git, "_preflight_and_tests_gate", paused_after_preflight)
     with _parent(d.f):
         result = d.git._commit_reviewed(d.f.ctx, "candidate")
-    assert result.startswith("⚠️ REVIEW_BLOCKED") and "OWNER_PAUSE_NOT_STARTED" in result, result
+    assert result.startswith("Review outcome returned before commit. ") and "OWNER_PAUSE_NOT_STARTED" in result, result
     assert "CUSTODY_LOST" not in result and d.f.ctx._last_review_verdict["aggregate"] == "NOT_DISPATCHED"
     assert d.model.rounds == [], "no reviewer was sent"
     row = d.f.ctx._last_triad_raw_results[0]
     assert row["operation_state"] == "not_dispatched" and not row["late_result_pending"]
-    assert d.records[-1]["status"] == "blocked" and d.records[-1]["block_reason"] == "review_quorum"
+    assert d.records[-1]["status"] == "reviewed" and d.records[-1]["block_reason"] == "review_quorum"
     assert not any(row[0] in {"tag", "push"} or row[1:2] == ("commit",) for row in d.effects), d.effects
     assert all(row["state"] == "settled" for row in attempt_rows_in_start_order(d.f.root))
     owner_pause.release_fence(d.f.root, TASK, reason="owner_resume")
     monkeypatch.setattr(d.git, "_preflight_and_tests_gate", gate)
     with _parent(d.f):
-        result = d.git._commit_reviewed(d.f.ctx, "candidate")
-    assert result.startswith("committed"), result
+        returned = d.git._commit_reviewed(d.f.ctx, "candidate")
+    assert returned.startswith("Review outcome returned before commit. "), returned
     assert [label for label, _ in d.model.rounds] == ["first", "follow-up"]
+    result = _land(d, returned)
+    assert result.startswith("committed"), result
+    assert [label for label, _ in d.model.rounds] == ["first", "follow-up"], "the landing buys no reviewer"
     assert sum(row[1:2] == ("commit",) for row in d.effects) == 1
 
 
@@ -660,9 +676,12 @@ def test_pause_after_commit_handoff_preserves_that_commit_and_withholds_later_pu
 
         monkeypatch.setattr(d.git, "_auto_tag_on_version_bump", held_tag)
 
+    with _parent(d.f):
+        returned = d.git._commit_reviewed(d.f.ctx, "candidate")
+    assert returned.startswith("Review outcome returned before commit. ") and not entered.is_set(), returned
+
     def commit():
-        with _parent(d.f):
-            outcome["result"] = d.git._commit_reviewed(d.f.ctx, "candidate")
+        outcome["result"] = _land(d, returned)
 
     thread = threading.Thread(target=commit)
     thread.start()
