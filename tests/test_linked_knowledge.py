@@ -609,10 +609,12 @@ def test_history_stores_each_version_once_as_a_change_against_the_row_that_holds
     assert hashlib.sha256(replaced(tmp_path, rows[-1]).encode()).hexdigest() == rows[-1]["old_sha256"]
     # A newest row that holds no text for those bytes (a digest-era row) is no base: the older row that reads back is.
     journal = target.shelf.parent / "knowledge_history.jsonl"
-    digest = {**rows[-1], "new_content": "", "content_digested": True}
-    journal.write_text(journal.read_text(encoding="utf-8") + json.dumps(digest, ensure_ascii=False) + "\n", encoding="utf-8")
+    digest = {key: value for key, value in rows[-1].items() if key not in ("base", "change", "chain_bytes")}
+    for row in (digest, {**rows[-1], "new_content": ""}):  # as the digest compaction spelled it; and on a change row
+        journal.write_text(journal.read_text(encoding="utf-8") + json.dumps({**row, "new_content": "", "content_digested": True},
+                                                                            ensure_ascii=False) + "\n", encoding="utf-8")
     again = store.write_knowledge_note(target, "# Report\n\nSecond, again.", expected_revision=second.current.revision)
-    assert again.ok and history(target)[-1]["base"]["offset"] == offsets(target)[-3]
+    assert again.ok and history(target)[-1]["base"]["offset"] == offsets(target)[-4]
     assert replaced(tmp_path, history(target)[-1]) == second.current.text
     # A version no row recorded (changed outside the writer) stays inline, as does an archive's.
     target.path.write_bytes(b"# Report\n\nEdited by hand.")

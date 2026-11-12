@@ -106,21 +106,19 @@ def encode(old: str, new: str, base: tuple[int, Mapping[str, Any]] | None,
 
 
 def verified_base(journal: Path, rows: Iterable[tuple[int, dict]], revision: str) -> tuple[int, dict] | None:
-    """The newest of a note's ``rows`` (newest first) whose new text is ``revision`` and reads back.
+    """The newest of a note's ``rows`` (newest first) whose new text is ``revision`` and reads back forward.
 
-    The writer passes its tail read, taken under the shelf lock. The live note is no witness here: a
-    base is a version the journal itself holds, so the text a new row replaces stays readable after
-    the note changes. A capture that never landed holds another version than the note: never a base."""
+    The writer passes its tail read, taken under the shelf lock. The text must read through the row's
+    own base links to a stored whole text, verified at every step: the live note is no witness, so the
+    version a new row replaces stays readable after the note changes, and a row whose chain is broken
+    is no base, so a damaged row costs the next write one whole row instead of extending a segment that
+    reads only from its other end. A capture that never landed holds another version than the note:
+    never a base."""
     texts = Texts(journal)
     for offset, row in rows:
         texts.rows.setdefault(offset, row)
-        if row.get("new_sha256") != revision:
-            continue
-        try:
-            texts.text(offset, "new")
-        except TextUnavailable:
-            continue
-        return offset, row
+        if row.get("new_sha256") == revision and texts._new(offset, row, revision, []) is not None:
+            return offset, row
     return None
 
 
@@ -194,6 +192,9 @@ class Texts:
             if want in self._live:
                 text = self._live[want]
                 break
+            if row.get("content_digested"):  # the digest compaction kept no text, whatever else the row holds
+                broken.append(f"the row at byte offset {offset} holds no text (digest-era)")
+                return None
             whole, base = _whole(row), _base(row, offset)
             if whole and sha256_text(row["new_content"]) == want:
                 text = row["new_content"]

@@ -344,6 +344,22 @@ def test_a_capture_that_never_landed_is_nobodys_base_and_lives_only_in_its_own_r
         versions.find_version(target, capture["new_sha256"])
 
 
+def test_a_base_whose_chain_is_broken_is_passed_over_for_an_older_row_that_reads_forward(tmp_path):
+    """A revert put the first version back; then the row between them is damaged. The revert's row names the current
+    version but no longer reads forward, so it is no base: the first row, which holds that version whole, is. Every
+    version still reads, the damaged row's own version included (the revert's change, unapplied from the first)."""
+    target = note(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    b = store.write_knowledge_note(target, "# Река\n\nOne, two.\n", expected_revision=a.revision).current
+    assert store.write_knowledge_note(target, "", "revert", b.revision, version=a.revision).ok
+    (first, _), (second, _), (revert, revert_row) = journal_rows(target)
+    assert revert_row["base"]["offset"] == second and revert_row["new_sha256"] == a.revision
+    damage(target.shelf.parent / "knowledge_history.jsonl", second)
+    c = store.write_knowledge_note(target, "# Река\n\nOne, three.\n", expected_revision=a.revision).current
+    assert journal_rows(target)[-1][1]["base"] == {"offset": first, "sha256": a.revision}
+    every_version_reads(target, [a.text, b.text, c.text])
+
+
 def test_rows_written_before_changes_then_change_rows_read_every_version_and_their_lines_as_stored(tmp_path):
     """A journal of whole rows as an earlier body wrote them (an inline old text, then an ``old_content_ref``),
     followed by change rows this writer adds: every version reads, and the earlier rows' lines, stored values and
