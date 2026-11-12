@@ -122,8 +122,15 @@ def test_history_lists_versions_newest_first_marks_the_current_one_and_names_gap
     assert "reason: not recorded" in rows[3] and "focus unknown" in rows[3]
     assert f"1 journal line(s) naming this note are not JSON and were skipped (the first at byte offset {torn_at})" in listing
     assert f"expected_revision={third.revision!r}" in listing
+    assert listing.endswith(f"expected_revision={third.revision!r}). Each line is the note after its write, so undoing a "
+                            "write means putting back the line below it, unless that line is marked not the base of the "
+                            "next write.\n"), listing
     page = tools._knowledge_read(ctx, TOPIC, view="history", start_char=10, end_char=60)
     assert body(page) == body(listing)[10:60] and '"complete_chars": ' in page
+    # The line below `second` is not marked, so it is the version the write that made `second` replaced.
+    undo = tools._knowledge_write(ctx, TOPIC, mode="revert", version=rows[3].split(" · ")[0][2:],
+                                  expected_revision=third.revision, scope="global")
+    assert undo.startswith("✅") and store.read_knowledge_note(target).text == first.text, undo
 
 
 def test_history_prints_the_headings_each_row_recorded_and_parses_no_earlier_version(tmp_path, monkeypatch):

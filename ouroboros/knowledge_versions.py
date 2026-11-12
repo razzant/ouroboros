@@ -386,7 +386,9 @@ def render_history(note: Any) -> str:
         lines.append("(no rows: this note was written before the journal recorded it, or outside the writer)")
     arguments = f"topic={address.topic!r}, scope={address.scope!r}"
     lines.append(f"Read one: knowledge_read({arguments}, version=<revision>). Put one back: knowledge_write({arguments}, "
-                 f"mode='revert', version=<revision>, expected_revision={note.revision!r}).")
+                 f"mode='revert', version=<revision>, expected_revision={note.revision!r}). Each line is the note after "
+                 "its write, so undoing a write means putting back the line below it, unless that line is marked not "
+                 "the base of the next write.")
     return "\n".join(lines) + "\n"
 
 
