@@ -259,9 +259,6 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         else get_evolution_status_snapshot()
     )
     activity_availability = {"complete": True}
-    from ouroboros.projects_registry import bindings_revision
-
-    revision = bindings_revision(drive_root)  # stamped BEFORE the read: the map is never older than it
     task_bindings = _task_bindings_safe(request, availability=activity_availability)
     bindings_complete = activity_availability["complete"]
     if direct is None:
@@ -275,6 +272,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         decision_owners=decision_owners, work_facts=work_facts,
     )
     from ouroboros.gateway.main_decisions import main_decisions_snapshot
+    from ouroboros.gateway.state_publication import map_revision
     decisions = main_decisions_snapshot(drive_root, decision_owners, task_bindings,
                                        activities_complete=activity_availability["complete"],
                                        bindings_complete=bindings_complete)
@@ -335,7 +333,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "project_chat_ids": project_chat_ids,
         "main_visible_revision": main_visible_revision,
         "task_bindings": task_bindings,
-        "task_bindings_revision": revision if bindings_complete else "",
+        # The map names its own revision (a digest of what a reader receives); a failed read has none.
+        "task_bindings_revision": map_revision(task_bindings) if bindings_complete else "",
         # A carried Presence turn is a census row of its own kind (CLIENT_CONTRACT), never the owner's direct turn.
         "active_direct_turns": [row for row in direct_turns if row.get("kind") != "presence"],
         "active_chat_activities": activities,

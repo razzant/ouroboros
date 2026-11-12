@@ -31,7 +31,8 @@ import { readState } from './api_client.js';
  * Each request names its `path`: once a full `task_bindings` map arrived with its revision, the
  * next read asks `bindings_since=<revision>`, and a body answering `task_bindings_unchanged` is
  * filled with that held map for that exact revision only; any other answer drops the held map,
- * so the read after it asks for the whole map again.
+ * so the read after it asks for the whole map again. The revision is the map's own digest, so the
+ * held map outlives `retire()`: whether it still stands is the server's answer to the next read.
  */
 export function createStateSnapshotSequencer(onApply, now = () => Date.now(), onUnavailable = () => {}) {
     let requestedGeneration = 0;
@@ -74,7 +75,7 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
     return {
         begin,
         retire() {
-            appliedGeneration = begin().generation; latest = null; held = null;
+            appliedGeneration = begin().generation; latest = null;
             const cancel = cancelInflight;
             settle(inflight);
             cancel?.();
