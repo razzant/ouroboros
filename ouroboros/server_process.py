@@ -719,6 +719,15 @@ def previous_fault_sentence(held: int) -> str:
     return f"The server restarted itself after {_fault_cause_words(str(previous['cause']))}.{kept}"
 
 
+def restored_queue_sentence(restored: int, pending: Any, drive_root: Any) -> str:
+    """The startup notice's restored-queue clause: the count taken at restore, then what the queue's rows need now
+    (``work_stop.restored_rows_text``: empty when a row cannot be read, and not bound to sum to that count)."""
+    from ouroboros.work_stop import restored_rows_text
+    from supervisor.queue import BUDGET_ROOT_FENCES as fences
+
+    return f"Restored pending queue: {restored} tasks. {restored_rows_text(drive_root, pending, fences)}".rstrip()
+
+
 def held_saved_work_ids(pending: Any, since: str) -> List[str]:
     """The restored queue rows an application stop holds with their saved work (released by Resume), by id: the
     typed stop policy decides (``work_stop.record_policy``), never a hold's name. Only holds placed at or after

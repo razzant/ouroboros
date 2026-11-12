@@ -1101,7 +1101,7 @@ def _finish_captured_pending(
     try:
         existing = load_task_result(q.DRIVE_ROOT, task_id) or {}
         stored = write_task_result(
-            q.DRIVE_ROOT, task_id, STATUS_CANCELLED, _last_word=closing.get("last_word"),
+            q.DRIVE_ROOT, task_id, STATUS_CANCELLED, _last_word=closing.get("last_word"), _cancel_observed=True,
             **{**closing.get("lineage", {}), **_cancel_result_fields(
                 task, existing=existing, result=closing.get("result") or "Task cancelled by user/agent request.",
                 **closing.get("cancel_fields", {}), **cost_fields, **_intent_outcome_fields(intent or {}),
@@ -1310,7 +1310,7 @@ def _finish_captured_running(
     try:
         existing = load_task_result(q.DRIVE_ROOT, task_id) or {}
         stored = write_task_result(
-            q.DRIVE_ROOT, task_id, STATUS_CANCELLED,
+            q.DRIVE_ROOT, task_id, STATUS_CANCELLED, _cancel_observed=True,
             **_cancel_result_fields(
                 task, existing=existing, artifact_capture=captured, **cost_fields,
                 **_intent_outcome_fields(intent or {}),

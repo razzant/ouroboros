@@ -742,12 +742,14 @@ def command_attribute(args) -> int:
 
 # --- route -----------------------------------------------------------------------------------
 
-def same_run_passes(evidence: Path, ids, *, head: str, system: str, run_id: str = "") -> dict[str, str]:
-    """{id: "passed"} of the test ids this run's selected passes ran whole at `head` on `system` (setup, call and
-    teardown reported, every report passed, wherever it ran): the recheck need not repeat those. A module, class or
-    function id, or a pass of another commit, run or system or without its final export, proves nothing here."""
+def same_run_verdicts(evidence: Path, ids, *, head: str, system: str, run_id: str = "") -> dict[str, str]:
+    """What this run's selected passes settle of `ids`, by their final exports at `head` on `system` in this run: "passed"
+    for a test they ran whole (setup, call and teardown reported, every report passed; a module, class or function id
+    proves nothing), "kept" for an id that is owed no recheck: its own report was no whole pass, or they ran nothing of
+    its module, whose file exists. The recheck gets the rest: an id without a report in a module they ran (a removed or
+    renamed test, one its pass never reached, a module or class id) and a test whose file is gone."""
     selection = _read_json(Path(evidence) / "selection.json")
-    wanted, passed, spoiled = set(ids), set(), set()
+    wanted, passed, spoiled, reported = set(ids), set(), set(), set()
     for label in (selection.get("outcomes") or {}) if isinstance(selection, dict) else ():
         session = read_session(Path(evidence) / label)
         if not (session["final"] and head and session["github"].get("sha") == head and session["system"] == system
@@ -757,7 +759,11 @@ def same_run_passes(evidence: Path, ids, *, head: str, system: str, run_id: str 
         broken = {node.split("::", 1)[0] for node in session["collection"]}
         passed |= whole
         spoiled |= bad | {nodeid for nodeid in wanted if nodeid.split("::", 1)[0] in broken}
-    return dict.fromkeys(sorted(wanted & passed - spoiled), "passed")
+        reported |= {row["nodeid"] for row in session["rows"]}
+    passed, ran = wanted & passed - spoiled, {node.split("::", 1)[0] for node in reported}
+    kept = {nodeid for nodeid in wanted - passed if nodeid in reported or (
+        nodeid.split("::", 1)[0] not in ran and working_source(nodeid.split("::", 1)[0]) is not None)}
+    return {**dict.fromkeys(sorted(passed), "passed"), **dict.fromkeys(sorted(kept), "kept")}
 
 
 def command_route(args, environ=os.environ) -> int:
@@ -767,7 +773,7 @@ def command_route(args, environ=os.environ) -> int:
                    classification=_read_json(evidence / "classification.json") or {},
                    attribution=_read_json(evidence / "attribution.json") or {}, head=head, run_url=args.run_url,
                    recheck=lambda ids: recheck_ids(ids, evidence / "recheck", head=head),
-                   same_run=lambda ids: same_run_passes(evidence, ids, head=head, system=args.os,
+                   same_run=lambda ids: same_run_verdicts(evidence, ids, head=head, system=args.os,
                                                         run_id=environ.get("GITHUB_RUN_ID", "")),
                    # A book that grew is measured strictly here: a later approval covers its own merge only.
                    size_recheck=lambda base, ids: size_status(size_session(
