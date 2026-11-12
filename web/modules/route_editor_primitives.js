@@ -228,6 +228,12 @@ export function unavailableConnectionState(id, connections = []) {
 export const KEY_PROBLEM_WORDS = Object.freeze({ off: 'This key is turned off in Accounts; nothing is sent through it.',
     removed: 'This key was removed in Accounts; nothing is sent through it.', 'no key': 'This source has no key in Accounts.' });
 
+/** The same fact where the key is not beside it (the Models list): the key named, then why it cannot send. */
+export function keyProblemLine(problem, label) {
+    return { off: `${label} is turned off in Accounts; nothing is sent through it.`,
+        removed: `${label} was removed in Accounts; nothing is sent through it.`, 'no key': `${label} has no key in Accounts.` }[problem] || '';
+}
+
 /** Why a saved route's API key cannot send now (`unavailableConnectionState`), or '' when it can or the route is
  *  empty or a subscription's. A local route is the caller's to skip. */
 export function routeKeyProblem(value, settings = {}, providerProfiles = {}) {
@@ -259,7 +265,7 @@ export function connectionReferencesText(references, connections = []) {
         const id = source && !source.startsWith('subscription:') ? source : String(reference.connection || '').trim();
         return [where, id ? `(${apiProviderLabel(id, {}, connections)})` : ''].filter(Boolean).join(' ');
     }).filter(Boolean);
-    return named.length ? `Still naming a removed or disabled key, so they cannot send: ${named.join(', ')}` : '';
+    return named.length ? `Still naming a key that was removed or turned off, so they cannot send: ${named.join(', ')}` : '';
 }
 
 /** Account binding is supported by agent sessions and subscription model routes. */

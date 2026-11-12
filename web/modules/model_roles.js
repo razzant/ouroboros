@@ -15,7 +15,7 @@ import { parseModelSource, composeModelSource, apiConnections, configuredApiProv
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords, KEY_PROBLEM_WORDS,
-    routeKeyProblem } from './route_editor_primitives.js';
+    routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { catalogPrograms } from './model_program.js';
@@ -783,13 +783,14 @@ function mountModels(container, { path, ctx }) {
         if (span && span.textContent !== text) span.textContent = text;
         if (span && follows) span.setAttribute('data-follows', ''); else span?.removeAttribute('data-follows');
     };
-    // A role whose key cannot send says so in its line, in place of its description, until it can again.
+    // A role whose key cannot send says so in its line, in place of its description, until it can again: the door's
+    // own words, so the row painter paints them; the tone is the line's mark.
+    const plainMeta = new Map(doors.map((row) => [row.id, row.meta]));
     const warn = (id, text) => {
-        const meta = container.querySelector(`[data-setting-row="${id}"] [data-setting-meta]`);
-        if (!meta) return;
-        meta.dataset.plain ??= meta.textContent;
-        meta.textContent = text || meta.dataset.plain;
-        if (text) meta.dataset.tone = 'warn'; else delete meta.dataset.tone;
+        const door = doors.find((row) => row.id === id);
+        if (door) door.meta = text || plainMeta.get(id);
+        const meta = container.querySelector(`[data-setting-row="${id}"]`)?.querySelector('[data-setting-meta]');
+        if (text) meta?.setAttribute('data-tone', 'warn'); else meta?.removeAttribute('data-tone');
     };
     const paint = (settings) => {
         const slots = Object.fromEntries(slotsOf(settings).map((slot) => [slot.slot, slot]));
@@ -797,7 +798,10 @@ function mountModels(container, { path, ctx }) {
         const local = (slot) => Boolean(slots[slot]?.settingsToggleId) && truthy(settings[`USE_LOCAL_${slot.toUpperCase()}`]);
         const route = (slot, follows) => routeWords(settings[slots[slot]?.settingKey], { follows, account: accounts[slot], local: local(slot) });
         const profiles = settings._meta?.setup_contract?.providerProfiles || {};
-        const keyWords = (value, onLocal) => (onLocal ? '' : KEY_PROBLEM_WORDS[routeKeyProblem(value, settings, profiles)] || '');
+        const keyWords = (value, onLocal) => {
+            const problem = onLocal ? '' : routeKeyProblem(value, settings, profiles);
+            return problem ? keyProblemLine(problem, apiProviderLabel(parseModelSource(value).source, profiles, apiConnections(settings, profiles))) : '';
+        };
         // Several keys of Main's provider and no built-in one: Main waits for the owner's choice (#2969), said here too.
         const choice = Array.isArray(settings._meta?.main_connection_choice) ? settings._meta.main_connection_choice : [];
         const labels = choice.length > 1 ? choice.map((id) => apiConnections(settings, profiles).find((entry) => entry.id === id)?.label || id) : [];

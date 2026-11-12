@@ -111,7 +111,8 @@ function server(t, { values = {}, status = statusAnswer(), skills = [] } = {}) {
                     state.values[key] = value;
                 }
             }
-            return response({ status: 'saved', saved: true, changes });
+            // The rows that still name a key which cannot send ride on the answer, as the gateway sends them.
+            return response({ status: 'saved', saved: true, changes, ...(state.references ? { connection_references: state.references } : {}) });
         }
         if (path === '/api/extensions') return response({ skills, live: { settings_sections: [] } });
         if (path === '/api/claudexor/status') return response(state.status);
@@ -554,11 +555,39 @@ test('a key saved, turned off or removed names the rows that still point at a ke
         { setting: 'OUROBOROS_MODEL_FALLBACKS', entry: '2', route: 'anthropic::claude-a', connection: 'anthropic' }];
     const saved = { state: 'saved', effect: 'next_call', withheld: 'structure', message: '', code: '', references };
     assert.deepEqual(referencesLine(saved), { tone: 'warn',
-        text: 'Still naming a removed or disabled key, so they cannot send: Light (OpenAI · work), Fallback 2 (Anthropic)' });
-    assert.match(editorLine(saved).text, /^Saved.*Still naming a removed or disabled key, so they cannot send: Light \(OpenAI · work\)/);
+        text: 'Still naming a key that was removed or turned off, so they cannot send: Light (OpenAI · work), Fallback 2 (Anthropic)' });
+    assert.match(editorLine(saved).text, /^Saved.*Still naming a key that was removed or turned off, so they cannot send: Light \(OpenAI · work\)/);
+    // The read's keys give a key its own label.
+    assert.match(referencesLine(saved, [{ id: 'openai@work', label: 'Work account' }]).text, /Light \(Work account\)/);
     assert.equal(editorLine(saved).tone, 'warn');
     const clean = { ...saved, references: [] };
     assert.deepEqual(referencesLine(clean), {});
     assert.doesNotMatch(editorLine(clean).text, /Still naming/);
+});
+
+test('a key removed on its page while a role still names it: back on the list, the line says which roles cannot send', async (t) => {
+    const world = server(t, { values: { OUROBOROS_CONNECTIONS: [{ kind: 'openai', name: 'work', label: 'Work', api_key: 'sk-work' },
+        { kind: 'openrouter', name: 'research-credits', label: 'Research credits', api_key: 'sk-or-second' }] } });
+    const list = await world.mount('accounts');
+    // A key's page opens as its own level above the list, which stays underneath to be told what the page did.
+    const removeOn = async (path) => {
+        const box = new Stub('div');
+        const page = await settingsPageFor(path).mount(box, { path, row: '', ctx: world.ctx });
+        await settle();
+        await box.fire('click', { target: box.querySelector('[data-editor-remove]') });
+        await settle();
+        page.unmount();
+    };
+    const line = () => world.find('[data-entry-result]');
+    world.state.references = [{ setting: 'OUROBOROS_MODEL_LIGHT', route: 'openai@work::gpt-light', connection: 'openai@work' }];
+    await removeOn('accounts/key/openai/work');
+    assert.equal(line().textContent, 'Removed OpenAI · Work. Still naming a key that was removed or turned off, so they cannot send: Light (OpenAI · Work)');
+    assert.equal(line().dataset.tone, 'warn');
+    // Nothing names the next one: the line says only what was removed, in the plain colour.
+    world.state.references = null;
+    await removeOn('accounts/key/openrouter/research-credits');
+    assert.equal(line().textContent, 'Removed OpenRouter · Research credits.');
+    assert.notEqual(line().dataset.tone, 'warn');
+    list.unmount();
 });
 

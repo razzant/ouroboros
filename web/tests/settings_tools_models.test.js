@@ -368,13 +368,24 @@ test('a role whose key cannot send says so on the Models list, and Main waiting 
     const page = await open(t, 'models', { values: { OPENROUTER_API_KEY: '',
         OUROBOROS_CONNECTIONS: [{ kind: 'anthropic', name: 'default', enabled: false }] } });
     const meta = (id) => inside(head(page.container, id), '.ui-row-meta');
-    assert.equal(meta('fallback/1').textContent, 'This key is turned off in Accounts; nothing is sent through it.');
-    assert.equal(meta('fallback/1').dataset.tone, 'warn');
-    assert.equal(meta('fallback/2').textContent, 'This source has no key in Accounts.');
+    assert.equal(meta('fallback/1').textContent, 'Anthropic is turned off in Accounts; nothing is sent through it.');
+    assert.equal(meta('fallback/1').getAttribute('data-tone'), 'warn');
+    assert.equal(meta('fallback/2').textContent, 'OpenRouter has no key in Accounts.');
     assert.equal(meta('fallback/3').textContent, 'OpenAI · by API key', 'a key that sends keeps its plain line');
-    assert.equal(meta('fallback/3').dataset.tone, undefined);
-    const light = inside(page.container.querySelector('[data-setting-row="models:light"]'), '[data-setting-meta]');
-    assert.ok(light.textContent && !light.dataset.tone, 'Light on a working key keeps its description');
+    assert.equal(meta('fallback/3').getAttribute('data-tone'), null);
+    const light = () => inside(page.container.querySelector('[data-setting-row="models:light"]'), '[data-setting-meta]');
+    const described = light().textContent;
+    assert.ok(described && light().getAttribute('data-tone') === null, 'Light on a working key keeps its description');
+    // Its OpenAI key turned off: Light's line says so, also after the rows are painted again, and comes back after.
+    page.server.values.OUROBOROS_CONNECTIONS = [{ kind: 'anthropic', name: 'default', enabled: false }, { kind: 'openai', name: 'default', enabled: false }];
+    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
+    await settle();
+    assert.equal(light().textContent, 'OpenAI is turned off in Accounts; nothing is sent through it.');
+    assert.equal(light().getAttribute('data-tone'), 'warn');
+    page.server.values.OUROBOROS_CONNECTIONS = [];
+    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
+    await settle();
+    assert.deepEqual([light().textContent, light().getAttribute('data-tone')], [described, null]);
     // Main on a Codex subscription has no key to lose; Main waiting for one of two OpenAI keys names both.
     assert.ok(!inside(page.container.querySelector('.models-main'), '.models-main-meta').dataset.tone);
     const waiting = await open(t, 'models', { values: { OUROBOROS_MODEL: 'openai::gpt-main',
