@@ -75,7 +75,7 @@ test('the mark is the server\'s shape; whose move it is stands beside it, said i
     // A working room with a question elsewhere keeps its word and its shape; the owner's dot takes the mark's place.
     const mixed = roomStatusView({ room: room('working', { turn: [{ kind: 'question', task_id: 'x', quiz_id: 'q' }] }) });
     assert.deepEqual([mixed.text, mixed.tone, mixed.mark, mixed.owner, mixed.amber], ['Working', 'live', 'moving', true, 'question']);
-    assert.deepEqual(markView(mixed), { shape: 'dot', hue: 'owner' });
+    assert.deepEqual(markView(mixed), { shape: 'moving', hue: 'owner' });
     assert.deepEqual(markView(view('held_continue')), { shape: 'moving', hue: 'ink' });
     // Every room the server rolls up keeps the server's own mark: nothing on the client chooses another shape.
     for (const [name, { rooms }] of Object.entries(CASES)) {
@@ -353,11 +353,14 @@ test('whatever waits for the owner takes a row\'s mark place beside any word; th
     const question = [{ kind: 'question', task_id: 'w', quiz_id: 'q' }];
     const asking = workRowView({ ...work('working_call'), turn: question });
     assert.deepEqual([asking.word, asking.tone, asking.mark, asking.owner], ['Sending', 'live', 'moving', true]);
-    assert.deepEqual(markView(asking), { shape: 'dot', hue: 'owner' });
-    // The owner's own Stop press says itself and keeps the owner's dot; an outcome yields to it too.
+    assert.deepEqual(markView(asking), { shape: 'moving', hue: 'owner' }, 'moving work keeps its shape in the owner hue');
+    // The owner's own Stop press says itself and keeps the owner's hue; an outcome yields to it too.
     const stopping = workRowView({ ...work('working_call'), turn: question }, { stopping: 'finalize' });
-    assert.deepEqual([stopping.word, stopping.mark, markView(stopping)], ['Finalizing…', 'moving', { shape: 'dot', hue: 'owner' }]);
+    assert.deepEqual([stopping.word, stopping.mark, markView(stopping)], ['Finalizing…', 'moving', { shape: 'moving', hue: 'owner' }]);
     assert.deepEqual(markView(workRowView({ ...work('finalizing_failed'), turn: [{ kind: 'action' }] })),
+        { shape: 'moving', hue: 'owner' });
+    // Where nothing moves, the owner's move stands alone as the amber dot.
+    assert.deepEqual(markView(workRowView({ ...work('paused_by_owner'), turn: [{ kind: 'action' }] })),
         { shape: 'dot', hue: 'owner' });
     // Nothing for the owner: the work's shape in the word's ink.
     assert.deepEqual(markView(workRowView(work('working_call'))), { shape: 'moving', hue: 'ink' });

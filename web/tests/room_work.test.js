@@ -442,9 +442,10 @@ test('the one mark after the word is the room\'s shape, the owner\'s amber dot i
         assert.deepEqual(paint(roomStatusView(inRoom('waiting'))), ['held', 'still', 'ink', '']);
         assert.deepEqual(paint(roomStatusView(inRoom('paused'))), ['held', 'pause', 'ink', ''], 'a Pause is not the owner\'s move');
         assert.deepEqual(paint(roomStatusView(inRoom('unknown'))), ['unknown', 'ring', 'ink', '']);
-        // Something waits for the owner: the amber dot takes the mark's place beside any word, said in words too.
+        // Something waits for the owner: moving work keeps its shape in the owner's hue, anything else is the amber
+        // dot in the mark's place, beside any word, said in words too.
         assert.deepEqual(paint(roomStatusView(inRoom('working', question))),
-            ['live', 'dot', 'owner', 'A question waits for your answer'], 'Working keeps its word and ink');
+            ['live', 'moving', 'owner', 'A question waits for your answer'], 'Working keeps its word and ink');
         assert.deepEqual(paint(roomStatusView(inRoom('queued', question))), ['queued', 'dot', 'owner', 'A question waits for your answer']);
         assert.deepEqual(paint(roomStatusView(inRoom('paused', action))), ['held', 'dot', 'owner', 'Something here waits for you']);
         // The word already says it: the amber dot beside the amber word, and no note repeats it.

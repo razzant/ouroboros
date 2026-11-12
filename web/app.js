@@ -1029,7 +1029,7 @@ function markProjectActivityUnknown() {
 // focus and menus stay.
 function patchProjectActivityMarkers(activityIndex = projectActivityIndex) {
     const aggregate = activityIndex.aggregate;
-    paintStatusMark(navProjectsFacts?.querySelector('.nav-mark'), markView({ mark: aggregate.mark, owner: aggregate.owner }));
+    paintStatusMark(navProjectsFacts?.querySelector('.nav-mark'), markView({ mark: aggregate.owner ? 'none' : aggregate.mark, owner: aggregate.owner }));
     const unread = navProjectsCount?.title;
     setActivityOwnerName(navProjectsToggle, unread ? `Projects · ${unread}` : 'Projects', aggregate.label);
     projectsNav.patch(activityIndex);
