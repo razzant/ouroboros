@@ -422,9 +422,12 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
     status, beside = request(tmp_path)
     assert status == 200 and "main owner" in texts(beside) and not texts(beside) & room_rows
 
-    registry.unlink()  # lost: a registry missing beside its commit witness is never "no Projects"
-    status, lost = request(tmp_path)
-    assert status == 503 and not texts(lost) & room_rows
+    for unknown in ("lost beside its commit witness", "only an invalid row"):  # neither is "no Projects"
+        registry.unlink(missing_ok=True)
+        if unknown == "only an invalid row":
+            registry.write_text(json.dumps({**data, "projects": [{"chat_id": 7}]}), encoding="utf-8")
+        status, refused = request(tmp_path)
+        assert status == 503 and not texts(refused) & room_rows, unknown
 
     registry.write_bytes(intact)
     restored = list(pages(tmp_path))

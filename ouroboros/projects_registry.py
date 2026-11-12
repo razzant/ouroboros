@@ -826,12 +826,13 @@ def reserved_project_chat_ids(drive_root: Any, *, strict: bool = False) -> set:
 
 def readable_rooms(drive_root: Any) -> Optional[set]:
     """The chat ids the registry's readable rows reserve (a healthy row survives an invalid neighbour). ``None``
-    when the registry cannot be read at all, or is missing beside its commit witness (lost): an unknown set, never
-    "no Projects"."""
+    when the registry names no room it can vouch for: it cannot be read, is lost beside its commit witness, or
+    holds rows none of which is readable. That is an unknown set, never "no Projects"."""
     try:
-        if _registry_witness_path(drive_root).exists() and not _registry_path(drive_root).exists():
-            return None
-        return {project["chat_id"] for project in list_reserved_projects(drive_root)} - {0}
+        rooms = {project["chat_id"] for project in list_reserved_projects(drive_root)} - {0}
+        if not rooms:  # empty is "no Projects" only where the strict reader agrees
+            _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)
+        return rooms
     except Exception:
         log.debug("readable_rooms failed", exc_info=True)
         return None
