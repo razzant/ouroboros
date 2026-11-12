@@ -1,8 +1,9 @@
 """A knowledge history row stores a version as its change against a hash-named base, and every version reads back exactly.
 
-The journals here are built the way the writer builds them (``knowledge_rows.encode`` against the previous row,
-the byte rule deciding when a text is stored whole) and then damaged on purpose: a returned text always hashes to
-its version, and a version that cannot be rebuilt is a typed miss that names where the path broke, never a guess.
+The journals here are written by the writer (``knowledge.write_knowledge_note``), or built the way it builds them
+(``knowledge_rows.encode`` against the previous row, the byte rule deciding when a text is stored whole), and then
+damaged on purpose: a returned text always hashes to its version, and a version that cannot be rebuilt is a typed
+miss that names where the path broke, never a guess.
 """
 from __future__ import annotations
 
@@ -12,8 +13,11 @@ import time
 
 import pytest
 
+from ouroboros import knowledge as store
 from ouroboros import knowledge_rows as rows
+from ouroboros import knowledge_versions as versions
 from ouroboros import text_change
+from ouroboros.memory_reader import read_memory
 from tests._knowledge_history_shared import changed_rows
 
 TOPIC = "notes/река"
@@ -244,3 +248,158 @@ def test_the_longest_chain_reads_its_newest_version_forward_and_its_oldest_backw
               f"journal {journal.stat().st_size} bytes: encoded in {built:.2f}s; newest read forward through "
               f"{len(offsets) - 1} changes in {forward:.3f}s; oldest read backward from the live note in {backward:.3f}s")
     assert forward < 60 and backward < 60
+
+
+# --- the writer --------------------------------------------------------------------------------------------------
+
+
+def note(tmp_path, topic=TOPIC):
+    return store.resolve_knowledge_address(tmp_path, topic, "global")
+
+
+def journal_rows(target):
+    """``(offset, row)`` of every JSON line of the note's shelf journal; a line that is not JSON is left out."""
+    raw, out, at = (target.shelf.parent / "knowledge_history.jsonl").read_bytes(), [], 0
+    for line in raw.splitlines(keepends=True):
+        try:
+            out.append((at, json.loads(line)))
+        except ValueError:
+            pass
+        at += len(line)
+    return out
+
+
+def every_version_reads(target, texts):
+    for text in texts:
+        found, _row = versions.find_version(target, sha(text))
+        assert found == text
+
+
+def test_a_torn_last_row_makes_the_next_write_whole_and_every_version_reads_back(tmp_path):
+    """The journal lost the end of the row of the version the note now holds (no fsync): no row reads back as the
+    current version, so the next row keeps both texts whole; that row is one whole row, and no landed version is lost."""
+    target = note(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    b = store.write_knowledge_note(target, "# Река\n\nOne, two.\n", expected_revision=a.revision).current
+    c = store.write_knowledge_note(target, "# Река\n\nOne, two, three.\n", expected_revision=b.revision).current
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    torn_at = journal_rows(target)[-1][0]
+    assert "base" in journal_rows(target)[-1][1]
+    journal.write_bytes(journal.read_bytes()[:torn_at + 40])  # the row of `c` is torn mid-line
+    d = store.write_knowledge_note(target, "# Река\n\nFour.\n", expected_revision=c.revision).current
+    offset, row = journal_rows(target)[-1]
+    assert offset == torn_at + 41 and "base" not in row and "change" not in row  # the boundary byte, then the row
+    assert (row["old_content"], row["new_content"]) == (c.text, d.text)
+    every_version_reads(target, [a.text, b.text, c.text, d.text])
+    with pytest.raises(rows.TextUnavailable, match=f"the line at byte offset {torn_at} is not a JSON row"):
+        read(journal, torn_at, "new")
+    e = store.write_knowledge_note(target, "# Река\n\nFour, five.\n", expected_revision=d.revision).current
+    assert journal_rows(target)[-1][1]["base"]["offset"] == offset  # the whole row is the next base
+    every_version_reads(target, [a.text, b.text, c.text, d.text, e.text])
+
+
+def test_a_note_deleted_or_edited_outside_the_writer_makes_the_next_row_whole_with_the_old_text_inline(tmp_path):
+    target = note(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    b = store.write_knowledge_note(target, "# Река\n\nOne, two.\n", expected_revision=a.revision).current
+    target.path.write_bytes(b"# \xd0\xa0\xd0\xb5\xd0\xba\xd0\xb0\r\n\r\nEdited by hand.")  # CRLF, no final newline
+    outside = store.read_knowledge_note(target)
+    c = store.write_knowledge_note(target, "# Река\n\nThree.\n", expected_revision=outside.revision).current
+    row = journal_rows(target)[-1][1]
+    assert {"base", "change"}.isdisjoint(row) and (row["old_content"], row["new_content"]) == (outside.text, c.text)
+    target.path.unlink()
+    d = store.write_knowledge_note(target, "# Река\n\nAgain.\n").current
+    row = journal_rows(target)[-1][1]
+    assert {"base", "change"}.isdisjoint(row) and (row["old_sha256"], row["old_content"]) == ("", "")
+    every_version_reads(target, [a.text, b.text, outside.text, c.text, d.text])
+
+
+def test_a_capture_that_never_landed_is_nobodys_base_and_lives_only_in_its_own_row(tmp_path, monkeypatch):
+    target = note(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    landed_at = journal_rows(target)[-1][0]
+    real_write = store.write_bytes_atomic
+
+    def no_source(path, data):
+        if path == target.path:
+            raise OSError("disk")
+        return real_write(path, data)
+
+    monkeypatch.setattr(store, "write_bytes_atomic", no_source)
+    lost = store.write_knowledge_note(target, "# Река\n\nNever landed.\n", expected_revision=a.revision)
+    assert not lost.ok and target.path.read_bytes() == a.raw
+    monkeypatch.undo()
+    capture_at, capture = journal_rows(target)[-1]
+    assert capture["base"]["offset"] == landed_at
+    c = store.write_knowledge_note(target, "# Река\n\nOne, then two.\n", expected_revision=a.revision).current
+    row = journal_rows(target)[-1][1]
+    assert row["base"] == {"offset": landed_at, "sha256": a.revision}  # the landed version, not the capture
+    every_version_reads(target, [a.text, c.text])
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    never = read(journal, capture_at, "new")
+    assert sha(never) == capture["new_sha256"] and never.endswith("# Река\n\nNever landed.\n")
+    damage(journal, capture_at)  # its own row was its only home; the landed versions keep theirs
+    every_version_reads(target, [a.text, c.text])
+    with pytest.raises(versions.VersionUnavailable):
+        versions.find_version(target, capture["new_sha256"])
+
+
+def test_rows_written_before_changes_then_change_rows_read_every_version_and_their_lines_as_stored(tmp_path):
+    """A journal of whole rows as an earlier body wrote them (an inline old text, then an ``old_content_ref``),
+    followed by change rows this writer adds: every version reads, and the earlier rows' lines, stored values and
+    references read byte for byte as before."""
+    target = note(tmp_path)
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    first, second = "# Река\n\nOld one.\n", "# Река\n\nOld two.\n"
+    base = {"topic": TOPIC, "address": target.as_dict(), "publication": "source_capture", "mode": "overwrite"}
+    head = json.dumps({**base, "old_sha256": "", "new_sha256": sha(first), "old_content": "", "new_content": first},
+                      ensure_ascii=False) + "\n"
+    ref = {"kind": "entry", "journal": "knowledge:global", "offset": 0, "field": ["new_content"]}
+    named = json.dumps({**base, "old_sha256": sha(first), "new_sha256": sha(second), "old_content_ref": ref,
+                        "new_content": second}, ensure_ascii=False) + "\n"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(head + named, encoding="utf-8")
+    target.path.parent.mkdir(parents=True, exist_ok=True)
+    target.path.write_bytes(second.encode("utf-8"))
+    before = journal.read_bytes()
+    third = store.write_knowledge_note(target, "# Река\n\nNew three.\n", expected_revision=sha(second)).current
+    fourth = store.write_knowledge_note(target, "# Река\n\nNew three, four.\n", expected_revision=third.revision).current
+    assert journal.read_bytes().startswith(before)  # no row is rewritten
+    added = journal_rows(target)[2:]
+    assert added[0][1]["base"] == {"offset": len(head.encode("utf-8")), "sha256": sha(second)}
+    assert added[1][1]["base"]["offset"] == added[0][0] and "new_content" not in added[1][1]
+    every_version_reads(target, [first, second, third.text, fourth.text])
+
+    def entry(offset, field):
+        return read_memory(tmp_path, "document", {"address": {"kind": "entry", "journal": "knowledge:global",
+                                                              "offset": offset, "field": field}})["text"]
+
+    assert entry(0, []) == head.rstrip("\n") and entry(len(head.encode("utf-8")), []) == named.rstrip("\n")
+    assert read_memory(tmp_path, "document", {"address": ref})["text"] == first
+    assert entry(added[1][0], ["new_content"]) == fourth.text and entry(added[1][0], ["old_content"]) == third.text
+    assert entry(added[0][0], ["old_content"]) == second
+
+
+def test_a_full_rewrite_of_a_300_kb_note_with_repeated_lines_writes_and_reads_back(tmp_path, capsys):
+    """Timing, reported and not asserted tightly: the diff's worst case (repeated lines) on a large note, whose change
+    is not smaller than the text, so the row stores the whole text and still carries the change."""
+    target = note(tmp_path, "notes/large")
+    old = "".join(f"- item {index % 7}: the same few lines again\n" for index in range(9000))
+    texts = {"new repeated lines": "".join(f"* entry {index % 5}: another set of repeated lines\n" for index in range(7500)),
+             "the same lines reordered": "".join(f"- item {index * 3 % 7}: the same few lines again\n" for index in range(9100))}
+    first = store.write_knowledge_note(target, old).current
+    previous, seen = first, [first.text]
+    for name, new in texts.items():
+        started = time.perf_counter()
+        rewritten = store.write_knowledge_note(target, new, expected_revision=previous.revision)
+        took = time.perf_counter() - started
+        assert rewritten.ok and len(previous.raw) > 300_000 and len(rewritten.current.raw) > 300_000
+        row = journal_rows(target)[-1][1]
+        assert row["new_content"] == rewritten.current.text and row["change"] and "old_content" not in row
+        previous = rewritten.current
+        seen.append(previous.text)
+        with capsys.disabled():
+            print(f"\n[knowledge_rows timing] full rewrite ({name}) of a {len(first.raw)}-byte note with repeated lines "
+                  f"into {len(previous.raw)} bytes: written in {took:.2f}s; row {len(json.dumps(row, ensure_ascii=False))} bytes")
+        assert took < 120
+    every_version_reads(target, seen)

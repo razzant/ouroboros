@@ -386,3 +386,35 @@ def test_versions_stored_as_changes_read_back_exactly_and_list_as_stored(tmp_pat
     listing = versions.render_history(store.read_knowledge_note(target))
     assert "text not stored" not in listing and [line.split(" · ")[0][2:] for line in listing.splitlines()
                                                  if line.startswith("- ")] == revisions[::-1]
+
+
+def test_writes_reads_and_a_revert_round_trip_over_rows_that_store_changes(tmp_path):
+    """knowledge_write → knowledge_read(version=…) → mode='revert' when every row after the first stores a change:
+    each earlier version reads back exactly, the revert publishes the first version's bytes, and every version,
+    the ones reverted over included, still reads."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target, sha = address(tmp_path), (lambda text: hashlib.sha256(text.encode("utf-8")).hexdigest())
+    note = store.write_knowledge_note(target, RIVER).current
+    texts = [note.text]
+    for old, new in (("Старый мост.", "Новый мост."), ("Две.", "Три."), ("Всё.", "Всё, до встречи.")):
+        reply = registry.execute("knowledge_write", {"topic": TOPIC, "scope": "global", "mode": "edit", "old_str": old,
+                                                     "content": new, "expected_revision": note.revision})
+        assert reply.startswith("✅"), reply
+        note = store.read_knowledge_note(target)
+        texts.append(note.text)
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert all("change" in row and not {"new_content", "old_content"} & set(row) for row in rows[1:])
+    for text in texts[:-1]:
+        read = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "version": sha(text)})
+        assert read.endswith(text) and "Earlier version, not the current note" in read, read[:400]
+    reverted = registry.execute("knowledge_write", {"topic": TOPIC, "scope": "global", "mode": "revert",
+                                                    "version": sha(texts[0]), "expected_revision": note.revision,
+                                                    "reason": "back to the start"})
+    assert reverted.startswith("✅") and target.path.read_bytes() == texts[0].encode("utf-8"), reverted
+    row = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+    assert (row["reverted_from"], row["base"]["sha256"], row["new_sha256"]) == (sha(texts[0]), sha(texts[-1]), sha(texts[0]))
+    for text in texts:
+        assert versions.find_version(target, sha(text))[0] == text
+    assert registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "version": sha(texts[2])}).endswith(texts[2])
