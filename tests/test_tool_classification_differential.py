@@ -88,6 +88,13 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     # producers' cutover.
     "ACCESS_DENIED": Delta(False, "ok", True, "blocked", "A.4", "an access denial recorded as success is the worst under-reporting"),
     "ACTING_SUBAGENT_TOOL_NOT_GRANTED": Delta(False, "ok", True, "blocked", "A.4", "an ungranted tool for the acting subagent is a denial"),
+    # Owner 2026-11-12, audit 08-11.11 item 8 ("п.8: брать" — the undeclared-output reminder stops being a
+    # refusal): the note rides a finished command, so the call is no error. The typed producer and the
+    # retired marker-first text keep the note's own bucket; behind an autocorrect line that retired text
+    # reads as the autocorrected success it was, as every trailing note of a shell result does.
+    "ARTIFACT_OUTPUT_UNDECLARED": Delta(True, "artifact_output_undeclared", False, "artifact_output_undeclared", "A.audit1111-8", "a note on a finished command is no refusal; its bucket stays readable"),
+    "shape:shell_undeclared": Delta(True, "artifact_output_undeclared", False, "artifact_output_undeclared", "A.audit1111-8", "a note on a finished command is no refusal; its bucket stays readable"),
+    "edge:autocorrect_undeclared": Delta(True, "artifact_output_undeclared", False, "ok_autocorrected", "A.audit1111-8", "the autocorrected success carries the note in its text, like its other trailing notes"),
     "CANCEL_INTENT_PROJECTION_CORRUPT": Delta(False, "ok", True, "error", "A.5", "a corrupted cancel projection is an error, not a success"),
     "CAPABILITY_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "CHILD_RESULT_LINEAGE_FORBIDDEN": Delta(False, "ok", True, "blocked", "A.4", "a refused child-result lineage is a denial"),

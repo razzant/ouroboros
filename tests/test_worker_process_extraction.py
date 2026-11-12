@@ -8,8 +8,6 @@ import pickle
 
 from supervisor import worker_process, workers
 
-REPO = pathlib.Path(__file__).parents[1]
-
 _MOVED = (
     "WORKER_LOG_SINK_SUPPRESSED_TYPES",
     "_bind_worker_repo_root",
@@ -59,17 +57,3 @@ def test_the_pool_kept_its_state_and_the_child_module_declares_none_of_it():
     for name in _POOL_STATE:
         assert hasattr(workers, name), name
         assert name not in child, name
-
-
-def test_worker_process_extraction_size_bounds():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (workers, worker_process)
-    }
-    assert counts["supervisor.worker_process"] <= 1000
-    # The pool itself is NOT split by this commit: its remaining size is bound to
-    # the module-global state the spec defers to the QueueState step, so this
-    # bound records the honest current ceiling rather than claiming a win.
-    assert counts["supervisor.workers"] <= 2894

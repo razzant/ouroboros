@@ -39,11 +39,16 @@ def text_source_range_projection(
         projection["range_required"] = True
         return projection, "source_range_required"
     if (type(start_char) is not int or type(end_char) is not int
-            or start_char < 0 or end_char <= start_char or end_char > len(text)):
+            or start_char < 0 or end_char <= start_char or start_char >= len(text)):
         # Still no text, but the caller learns the length it must fit a range into:
         # a bare "invalid" was retried blind (and read as "unavailable").
         projection["requested_range"] = [start_char, end_char]
         return projection, "source_range_invalid"
+    if end_char > len(text):
+        # A piecewise read's last piece overshoots by nature, and a receipt's `size` counts bytes:
+        # the end is lowered to the source's (as read_file and knowledge_read do) and the answer
+        # names both the range asked and the range delivered.
+        projection["requested_range"], end_char = [start_char, end_char], len(text)
     part = text[start_char:end_char]
     projection.update(start_char=start_char, end_char=end_char, text=part,
                       text_chars=len(part), text_sha256=sha256(part.encode("utf-8")).hexdigest())

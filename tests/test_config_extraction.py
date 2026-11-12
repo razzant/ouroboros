@@ -9,6 +9,7 @@ from ouroboros import (
     config,
     model_slots,
     provider_models,
+    review,
     review_model_routes,
     runtime_limits,
     settings_defaults,
@@ -17,7 +18,6 @@ from ouroboros import (
 )
 
 REPO = pathlib.Path(__file__).parents[1]
-PACKAGE = REPO / "ouroboros"
 
 _LEAVES = (settings_defaults, settings_scales, model_slots, review_model_routes, runtime_limits, safety_config)
 
@@ -394,23 +394,11 @@ def test_settings_extraction_owner_inventory_is_exact():
 
 
 def test_settings_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (config, *_LEAVES)
-    }
-    assert counts["ouroboros.config"] <= 1000
-    assert all(count <= 1000 for count in counts.values())
-    # 500 -> 520: the Z.ai direct provider adds its key and plan rows to the leaf (PR #1207).
-    # 520 -> 521: the desktop keep-running consent key's default row (PR #1404; its disk-authored entry adds none).
-    # 521 -> 538: PR-3 (review pool) — the five review-lane keys leave SETTINGS_DEFAULTS
-    # for RETIRED_SETTING_KEYS and gain the REVIEW_POOL_MIGRATED_SETTING_KEYS class
-    # (+ its shared «migrated» line) the read seam, the RC auditor and the boot notice read.
-    # 538 -> 560: the main-interface key (OUROBOROS_UI_DIR) with its export exclusion and the
-    # saved-choice precedence the config read and persist seams share.
-    # +7: independent Consciousness level, Supervisor model, owner rules and disk ownership.
-    # +1: Main's Subagents mode (OUROBOROS_SUBAGENTS_MODE, default auto).
-    # +1: a build's suggested skill sources (OUROBOROS_SKILL_SOURCE_SUGGESTIONS, default none), one commented row.
-    assert counts["ouroboros.settings_defaults"] <= 569
-    assert (PACKAGE / "config.py").is_file()
+    """The settings family meets the repository's line contract as the size lane's tip check reads it: a module in
+    the 1001-1500 band or past the cap has its entry in `ouroboros/size_ratchet_manifest.py` (one at 1501-1600 lines
+    needs none). The `size_ratchet` lane is that contract's blocking home; this test keeps no number of its own."""
+    inventory = review.collect_size_ratchet_inventory(REPO, repo_paths=[
+        pathlib.Path(module.__file__).relative_to(REPO).as_posix() for module in (config, *_LEAVES)])
+    manifest = review.load_size_ratchet_manifest(REPO / review.SIZE_RATCHET_MANIFEST_PATH)
+    assert inventory.band_paths <= set(manifest.band_paths)
+    assert inventory.giant_paths <= manifest.giant_paths

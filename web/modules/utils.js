@@ -116,6 +116,9 @@ const zoneName = (date) => {
 // The instant's own minute: local clock text repeats across a DST fallback hour.
 const minuteOf = value => Math.floor(new Date(value).getTime() / 60000);
 
+/** The host observed this end itself: the executor ending its attempt, or the supervisor recording a cancel. */
+const endObserved = (fact) => fact?.source === 'executor_terminal' || fact?.source === 'supervisor_cancel';
+
 /** A task's host-observed end and the time its notification was added are two
  * facts (#1347); an unknown end says so rather than borrowing the second.
  * `full` states both as absolute local dates (two different minutes that read
@@ -124,7 +127,7 @@ const minuteOf = value => Math.floor(new Date(value).getTime() / 60000);
  * the row's own time alone when its task ended in that minute, both facts only
  * when the minutes differ, a day only off today. */
 export function terminalTimeNote(terminalTime, addedAt, now = new Date()) {
-    const ended = terminalTime?.source === 'executor_terminal' ? readDate(terminalTime.occurred_at) : null;
+    const ended = endObserved(terminalTime) ? readDate(terminalTime.occurred_at) : null;
     const added = readDate(addedAt);
     const zone = Boolean(ended && added) && absoluteTime(ended) === absoluteTime(added) && minuteOf(ended) !== minuteOf(added);
     const endFact = ended ? `Task ended ${absoluteTime(ended, zone)}` : 'Task end time not recorded';
@@ -146,7 +149,7 @@ export function terminalTimeNote(terminalTime, addedAt, now = new Date()) {
 export function savedTerminalRowNote(row) {
     const fact = row?.system_type === 'task_summary' ? row.terminal_time : null;
     if (!fact || typeof fact !== 'object' || !absoluteTime(row.ts)) return '';
-    const known = fact.source === 'executor_terminal' && absoluteTime(fact.occurred_at);
+    const known = endObserved(fact) && absoluteTime(fact.occurred_at);
     return known && minuteOf(fact.occurred_at) === minuteOf(row.ts) ? '' : terminalTimeNote(fact, row.ts).full;
 }
 

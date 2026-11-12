@@ -927,3 +927,19 @@ test('equal times: an accepted arrival is saved where the feed places it', async
     assert.deepEqual(canonical, ['chat:1', 'chat:0', 'chat:500']);
     assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), canonical);
 });
+
+test('a newest read refused while the Project registry cannot be read keeps the feed and says so', async (t) => {
+    // Main answers 503 history_source_unavailable when its rows cannot be told from a Project's (#3067).
+    const f = fixture(t, page([row('chat:10', 'Shown before the refusal')], 'initial', 'older'));
+    await f.refresh();
+    const shown = f.bubbles();
+    f.respond({ httpStatus: 503, body: { messages: [], error: 'history_source_unavailable',
+        reason_code: 'history_source_unavailable', has_more: true, next_cursor: null,
+        window: { complete: false, truncated_by: ['history_source_unavailable'] } } });
+    await f.instance.refreshHistory({ revision: 91 });
+    await settle();
+    assert.deepEqual(f.bubbles(), shown, 'the refused read removes nothing it shows');
+    const notes = [...(f.messages.parentNode.querySelector('.chat-panel-statusbar')?.children || []),
+        ...(f.messages.querySelector('.chat-load-older')?.children || [])].map(node => node.textContent).join(' ');
+    assert.match(notes, /Some saved history could not be loaded/, 'the feed says its source is unavailable');
+});

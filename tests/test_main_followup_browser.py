@@ -3,7 +3,7 @@
 Two ordinary composer sends against an attested candidate server (keyless, a loopback model,
 no transport configured, so nothing leaves the machine): the first starts a Main turn whose model
 round the scenario holds; the second, with a screenshot, lands in that same turn's mailbox and its
-bubble says so ("Message saved for task", by the turn's name once it has one, never a placeholder; never read). Released, the same author reads it at its
+bubble says so ("Message saved for task", never the turn's name or a placeholder; never read). Released, the same author reads it at its
 final drain and answers both in one reply; stopped, one Stop ends the work both messages reached and
 the second message's words and file stay with that work, unread. Screenshots, DOM and the facts read
 go to the managed evidence channel; OUROBOROS_BROWSER_EVIDENCE_OUT overrides the destination.
@@ -75,7 +75,7 @@ def _receipt(page, text):
     return _bubble(page, text).locator(".msg-routing-annotation")
 
 
-SAVED = re.compile(r"^Message saved for task(?: · (?!Task$).+)?$")  # saved, never read, never a placeholder name
+SAVED = re.compile(r"^Message saved for task$")  # saved, never read, never the turn's name (owner 12.11)
 
 
 def _turn_ids(oracle):
@@ -166,8 +166,7 @@ def test_a_clarification_reaches_the_turn_answering_my_human_with_one_reply_or_o
                         trigger = card.locator("[data-cancel-run]")
                         expect(trigger).to_have_text("Stop…", timeout=60_000)
                         title = card.locator("[data-live-title]").inner_text().strip()
-                        expect(_receipt(page, second)).to_have_text(  # the same work, or no name at the time
-                            re.compile(rf"^Message saved for task(?: · {re.escape(title)})?$"))
+                        expect(_receipt(page, second)).to_have_text(SAVED)  # the card keeps its name; the line has none
                         facts["card_title"] = title
                         trigger.click()
                         menu = page.locator("body > .task-control-menu")

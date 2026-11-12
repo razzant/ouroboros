@@ -58,7 +58,14 @@ def validate_result_selectors(selectors: Mapping[str, Any]) -> tuple[str, bool]:
     source_request = (include or other_source or selected or source_only
                       or selectors["source_start_char"] is not None or selectors["source_end_char"] is not None)
     if view not in {"", "full"} and source_request:
-        raise ValueError(f"view={view} is incompatible with authority/source selectors; use view=full or omit view")
+        sent = ", ".join(key for key in (
+            "include_authority", "authority_fields", "authority_projection_sha256", "source_only",
+            "include_work_order_source", "include_completion_source", "include_focus_source", "focus_source_sha256",
+            "review_source_sha256", "delegated_output_sha256", "presence_reentry_sha256", "presence_reentry_offset",
+            "call_id", "manifest_sha256", "source_start_char", "source_end_char",
+        ) if selectors[key] is not None and selectors[key] is not False and selectors[key] != "")
+        raise ValueError(f"view={view} is incompatible with authority/source selectors (sent: {sent}): omit view or "
+                         f"send view=full to read that source, or drop {sent} to get the {view} view")
     return view, other_source
 
 
@@ -97,10 +104,10 @@ def authority_selection(authority: Dict[str, Any], task_id: str, fields: Any, *,
 
     full_text = encode(authority)
     projection_sha = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
-    keys = sorted(authority) if fields is None else fields
-    missing = [key for key in keys if key not in authority]
-    if missing:
-        raise ValueError("unknown authority_fields: " + json.dumps(missing, ensure_ascii=False))
+    # A name this record does not carry is a fact about the record, not a malformed call: the
+    # field set is each record's own, so the answer serves the names it has and lists the rest.
+    absent = [] if fields is None else [key for key in fields if key not in authority]
+    keys = sorted(authority) if fields is None else [key for key in fields if key in authority]
     arguments: Dict[str, Any] = {"task_id": task_id, "source_only": True,
                                  "authority_projection_sha256": projection_sha}
     arguments.update({"include_authority": True} if fields is None else {"authority_fields": list(keys)})
@@ -112,6 +119,9 @@ def authority_selection(authority: Dict[str, Any], task_id: str, fields: Any, *,
     payload: Dict[str, Any] = {"status": "available", "immutable": False,
         "authority_projection_sha256": projection_sha, "selected_fields": list(keys),
         "partial": fields is not None, "source": source}
+    if absent:
+        payload.update(absent_fields=absent, absent_fields_note=(
+            "this view of the record carries no field with these names; selected_fields and omitted_fields together name the fields it has"))
     if digest and digest != projection_sha:
         return {**payload, "status": "unavailable", "reason": "authority_identity_mismatch",
                 "expected_authority_projection_sha256": digest}

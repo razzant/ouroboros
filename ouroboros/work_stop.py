@@ -328,6 +328,43 @@ def queue_control(drive_root: Any, row: dict, fences: dict, *, running: bool = F
     return {"phase": phase, "view": view, "owner_resumed": interrupted is True}
 
 
+def restored_row_class(drive_root: Any, row: dict, fences: dict) -> str:
+    """What a restored queue row needs, read as the work projection reads it (``queue_control``): ``paused`` (an
+    owner, money or authority pause stands), ``resume`` (another stop or a refusal holds it until a Resume),
+    ``continues`` (only admission or a wait stands before it) or ``unknown`` (a fact it needs is unreadable)."""
+    control = queue_control(drive_root, row, fences)
+    if control["phase"] == "unknown":
+        return "unknown"
+    if control["phase"] == "queued" or control["view"].get("waiting"):
+        return "continues"
+    cause = (control["view"].get("stop") or {}).get("cause")
+    return "paused" if cause in {"pause", "money", "authority"} else "resume"
+
+
+def restored_rows_text(drive_root: Any, pending: Any, fences: dict) -> str:
+    """What the rows of a restored queue need now, for the startup notice: ``Continuing by themselves: 2; waiting for
+    Resume: 19; still paused: 5.`` Empty when there is no row, a row is ``unknown`` or the reading fails: the notice
+    then keeps its count alone, never a guessed class. The rows' control facts are read as the work projection reads
+    them, in one short transaction per store (``store_hot_facts.snapshot``): a store that cannot answer leaves its
+    rows unknown without a wait per row, on the thread that starts the supervisor."""
+    from ouroboros.store_hot_facts import snapshot
+
+    try:
+        rows, fences, requests = [row for row in list(pending or ()) if isinstance(row, dict)], dict(fences), []
+        for row in rows:
+            root, task_id = row.get("budget_drive_root") or drive_root, str(row.get("id") or "")
+            root_id = str(row.get("root_task_id") or task_id)
+            requests.extend(((drive_root, task_id), (root, task_id), (root, root_id)))
+        with snapshot(requests):
+            classes = [restored_row_class(drive_root, row, fences) for row in rows]
+    except Exception:
+        log.warning("Restored queue rows were not classified; the startup notice keeps its count alone", exc_info=True)
+        return ""
+    words = {"continues": "continuing by themselves", "resume": "waiting for Resume", "paused": "still paused"}
+    parts = "; ".join(f"{text}: {classes.count(key)}" for key, text in words.items() if key in classes)
+    return f"{parts[0].upper()}{parts[1:]}." if parts and "unknown" not in classes else ""
+
+
 # What makes a stop the same stop: its own records, never an amount, a result or a time read now. A stop declared anew
 # records its occurrence, so two restarts with a release between them are two stops in the same words: a fence or pause
 # its id, a saved or restart hold ``held_at`` (the door matrix keeps a standing hold's, ``declare_stop``), and a member's
