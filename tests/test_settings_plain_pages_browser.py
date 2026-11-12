@@ -312,7 +312,7 @@ def test_a_stored_network_password_is_shown_replaced_and_removed_like_a_stored_k
         route.fulfill(content_type="application/json", body=json.dumps({"value": server.values[body["key"]]}))
 
     page.route("**/api/settings/secret", reveal)
-    level = open_settings(page, "computer")
+    open_settings(page, "computer")
     _settled(page, "computer")
     password = setting_row(page, "OUROBOROS_NETWORK_PASSWORD")
     opener, show, remove = (password.locator(hook) for hook in ("[data-secret-open]", "[data-secret-show]", "[data-secret-remove]"))

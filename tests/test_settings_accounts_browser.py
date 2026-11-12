@@ -4,13 +4,14 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
-from urllib.parse import urlparse
 
 import pytest
 
-from tests.test_subscription_setup_browser import subscription_ui
+from tests import test_subscription_setup_browser as setup_browser
 from tests.test_harness_maintenance_browser import _inventory_row
 from tests.settings_browser_helpers import open_settings, settings_page, open_entry, go_back, commit_row, press_editor_save, search_settings
+
+subscription_ui = setup_browser.subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
 
