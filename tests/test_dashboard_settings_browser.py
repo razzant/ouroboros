@@ -225,7 +225,9 @@ def test_every_n_tasks_shows_its_count_and_saves_both_keys_in_one_body(ui):
 def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(ui):
     page, _ = _open(ui, tab="consciousness")
     row = lambda name: f'#page-dashboard [data-setting-row="{name}"]'
-    page.wait_for_function("(s) => document.querySelector(s)?.textContent.includes('$20 a day')", arg=row("consciousness-allowance"))
+    # The allowance door carries the name its limit has on Costs (a rolling 24 hours, never "a day") and the sum alone.
+    page.wait_for_function("(s) => document.querySelector(s)?.querySelector('[data-row-value]')?.textContent === '$20'", arg=row("consciousness-allowance"))
+    assert page.locator(row("consciousness-allowance") + " .ui-row-title").inner_text() == "Consciousness per 24 hours"
     assert page.locator("#page-dashboard [data-cx-summary] :is([data-cx-act='settings'], [data-cx-act='costs'], [data-cx-act='circles'])").count() == 0
     assert page.locator(row("OUROBOROS_CONSCIOUSNESS_AUTONOMY") + " [data-row-caption]").inner_text().startswith("Also acts on its own")
     assert page.locator(row("OUROBOROS_BG_WAKEUP") + " [data-row-caption]").inner_text() == "It picks a moment between 5 minutes and 2 hours."

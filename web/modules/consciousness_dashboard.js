@@ -59,7 +59,8 @@ export function cardWords(settings) {
     return {
         OUROBOROS_CONSCIOUSNESS_AUTONOMY: { caption: autonomyOf(settings.OUROBOROS_CONSCIOUSNESS_AUTONOMY)?.note || '' },
         OUROBOROS_BG_WAKEUP: { caption: !min || !max ? '' : min === max ? `It wakes every ${min}.` : `It picks a moment between ${min} and ${max}.` },
-        'consciousness-allowance': { value: Number.isFinite(allowance) ? `${Number.isInteger(allowance) ? `$${allowance}` : usdText(allowance)} a day` : '' },
+        // The row names the limit as Costs does (a rolling 24 hours, never a calendar day), so its value is the sum alone.
+        'consciousness-allowance': { value: !Number.isFinite(allowance) ? '' : Number.isInteger(allowance) ? `$${allowance}` : usdText(allowance) },
         'consciousness-model': { value: model ? parseModelSource(model).model || model : 'Main model' },
         'consciousness-safety': { value: safetyLevelOf(settings.OUROBOROS_CONSCIOUSNESS_SAFETY_MODE)?.label || '' },
         'consciousness-evolution': { value: 'OUROBOROS_POST_TASK_EVOLUTION' in settings ? whenName(CODECS.evolutionWhen.read(settings)) : '' },
