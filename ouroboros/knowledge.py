@@ -505,7 +505,10 @@ def knowledge_write_lock(shelf: Path):
 
 
 def rebuild_knowledge_index(address: KnowledgeAddress) -> None:
-    """Caller holds the shelf lock; all producers use the same inventory."""
+    """Caller holds the shelf lock; all producers use the same inventory.
+
+    The file is replaced only when the view's bytes differ from it, so a body-only edit leaves the
+    index file, its bytes and its identity, untouched."""
     path = address.shelf / INDEX_FILE
     old = path.read_bytes() if path.exists() else b""
     text = old.decode("utf-8")
@@ -518,7 +521,9 @@ def rebuild_knowledge_index(address: KnowledgeAddress) -> None:
         "old_sha256": hashlib.sha256(old).hexdigest(),
     }, ensure_record_boundary=True, require_lock=True):
         raise OSError("Previous knowledge index source could not be preserved")
-    write_bytes_atomic(path, knowledge_index_view(address).encode("utf-8"))
+    view = knowledge_index_view(address).encode("utf-8")
+    if view != old:
+        write_bytes_atomic(path, view)
 
 
 def knowledge_links(note: KnowledgeNote) -> tuple[dict[str, Any], ...]:

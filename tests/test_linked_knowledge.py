@@ -128,6 +128,18 @@ def test_noop_does_not_publish_history_or_rewrite_index(tmp_path):
     assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
 
 
+def test_a_body_only_edit_leaves_the_index_file_untouched_and_a_summary_change_rewrites_it(tmp_path):
+    target = address(tmp_path, "people/rowan")
+    first = store.write_knowledge_note(target, "---\ntype: person\nsummary: Rowan runs it.\n---\n# Rowan\n\nOld.\n").current
+    index = target.shelf / store.INDEX_FILE
+    before, stat = index.read_bytes(), index.stat()
+    body = store.write_knowledge_note(target, "New.", "edit", first.revision, old_str="Old.")
+    assert body.ok and body.reason == "saved" and index.read_bytes() == before
+    assert (index.stat().st_ino, index.stat().st_mtime_ns) == (stat.st_ino, stat.st_mtime_ns)  # not replaced
+    summary = store.write_knowledge_note(target, "", "edit", body.current.revision, summary="Rowan hands it over.")
+    assert summary.ok and index.read_bytes() != before and b"Rowan hands it over." in index.read_bytes()
+
+
 def test_exact_edit_preserves_other_knowledge_and_reports_its_delta(tmp_path):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
     target = address(tmp_path, "people/rowan")
