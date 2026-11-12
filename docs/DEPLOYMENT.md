@@ -73,8 +73,7 @@ Subscription sessions join them through Settings or the wizard.
 
 A setting the file does not hold is read from the environment variable of its name,
 for example `TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`,
-`OUROBOROS_REVIEW_ENFORCEMENT`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
-`OUROBOROS_RUNTIME_MODE` (read at a start). The exceptions are the choices only the
+`OUROBOROS_CONSCIOUSNESS_DAILY_USD` and `OUROBOROS_RUNTIME_MODE` (read at a start). The exceptions are the choices only the
 owner's controls author, Safety coverage and the Context mode among them: Settings
 shows their saved or factory value whatever the environment says. Safety coverage is
 not consistent there today: while none is saved, the Safety Supervisor still reads a

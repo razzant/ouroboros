@@ -68,7 +68,7 @@ Named sends keep timestamp/id; unnamed notices keep their producer; `emitted` fa
 
 Stop policy is a durable-intent axis, scope-independent; omission is immediate (CLIENT_CONTRACT §8). `finalize_then_cancel` answers 202, intent open: descendants settle first, no final turn; then root `finalize_now` allows one tool-less turn under the honest owner reason (`supervisor/owner_stop.py`). `owner_stop_receipt.py` keeps child/run material and readers in the custody envelope: the turn's counted view, one card row per Stop, Files' on-read copy of all rows/texts, on any exit; model bytes untouched; no session transfer. `OWNER_STOP_OUTER_CAP_SEC`, deadline, ceiling bound grace. Immediate only hardens graceful; Panic bypasses both.
 
-Owner "hurry" is a typed task-local `kind=hurry` owner-mailbox control (`ouroboros/owner_hurry.py`; `gateway/task_hurry.py`): it makes that task's plan gate advisory; never a chat message, settings mutation or weakening of the P3 commit/review gates; attempt-scoped (`retry_reset` strips it on each same-id requeue).
+Owner "hurry" is a typed task-local `kind=hurry` owner-mailbox control (`ouroboros/owner_hurry.py`; `gateway/task_hurry.py`): it wakes a waiting task, lets delivery skip just-arrived review answers and gives the work one line asking to finish sooner; never a chat message, settings mutation or weakening of the P3 commit/review gates; attempt-scoped (`retry_reset` strips it on each same-id requeue).
 
 ### Event bus, timeouts and worker readiness
 

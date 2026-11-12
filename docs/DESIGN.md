@@ -414,9 +414,7 @@ least a touch target, only the chosen one filled; it wraps and never scrolls sid
 that needs a line per option is a list of choices (Access), and a choice of many or long labels
 is a native select, clipped at its own edge with the full label in the platform's popup: a control
 never widens its column. The composer's capsules are the same control with a sliding thumb. An
-empty inherit choice is as real as any other, and the focused choice wears the one focus ring. A
-choice the running Access suspends (Blocking under Cyber Pro) stays chosen; its row says what
-holds now and after restart.
+empty inherit choice is as real as any other, and the focused choice wears the one focus ring.
 Model selection uses the shared editable chooser: suggestions assist typing
 without becoming an allowlist. A saved unknown model remains editable; a
 catalog refresh preserves the real input, selection and composition. Escape
@@ -833,11 +831,11 @@ card in another chat keeps the excerpt.
   referenced by nothing, so every surface invented its own literal instead. They
   are gone; the vocabulary above is the whole vocabulary.)
 
-Completion and criticism are separate facts. An informed Advisory
+Completion and criticism are separate facts. An informed
 author finish may complete the subject while its original review remains
 FAIL or DEGRADED; the old critic alone must not paint that completion Failed.
 Execution, artifact, verification or publication failures still apply.
-Blocking corrections saved without fresh approval and an explicit unfinished stop
+Corrections the retired Blocking held without fresh approval and an explicit unfinished stop
 remain unaccepted; live `task_completion` / `author_stop` reads `Stopped` absent independent failure, keeping its reason and work, never inventing PASS.
 An older task-acceptance fail that was only an explicit Advisory host declining a
 second panel over an unchanged answer, its verdict short of FAIL, reads `Done with

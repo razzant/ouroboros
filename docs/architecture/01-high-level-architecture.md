@@ -151,7 +151,7 @@ ouroboros/ — agent core and shared runtime (§6)
   process_logging.py — per-process logging bootstrap; the server is the sole `server.log` writer; the launcher copies the server pipe, byte-capped, into `agent_stdout.log`
   model_send_seal.py — the invariant `model-visible ⟺ logged` for `model_send` (docs/MODEL_SEND_OBSERVABILITY.md)
   cancel_intents.py — durable cancel-intent projection with claim-generation fencing; the one ingress `request_cancel`; fail-closed reads (§5; §10 invariants 14–15)
-  owner_hurry.py — owner "hurry": a typed task-local latch, never a chat message, written on its own keys (§5)
+  owner_hurry.py — owner "hurry": a typed task-local latch and one line for the running work, never a chat message (§5)
   question_answers.py, room_reader.py — answer delivery (asker, admitted successor, fresh head) and the room's sole live reader (§5 Bridge intake)
   owner_quiz.py, secret_requests.py — canonical questions: answer/close first-winner, publication address, retained delivery debt, terminal reconcile of paired `owner_wait`; skill secret fields, form outcome (§3, §11.1)
   card_store.py — living cards (`show_card`): `state/cards` records with recorded presses, content-addressed apps, Widgets pins (§4)
@@ -344,7 +344,7 @@ ouroboros/ — agent core and shared runtime (§6)
   skill_owner_attestation.py — Skip review / Turn on anyway: the owner accepts exact bytes without LLM review (§13)
   skill_identity.py, skill_install_record.py, skill_acceptance.py, skill_builtin.py, skill_discovery_reuse.py — Release digest and record conversion; install record; install-basis/owner-edit acceptance; the built-in source; exact discovery reuse (§13)
   skill_publish_snapshot.py, skill_publish_scanner.py, skill_publish_result.py, skill_publish_github.py, skill_publish_client.py, skill_publish_eligibility.py, skill_publish_destination.py — Publication leaves: captured bytes, Betterleaks evidence, attempt/receipt, token HTTPS transport, author authority, destination, hub entry, comparison (§6 Skill publication)
-  skill_review_status.py — The review gate → `executable_review` (§13): verdicts, Advisory author acceptance, install-basis and owner facts
+  skill_review_status.py — The review gate → `executable_review` (§13): verdicts, author acceptance, install-basis and owner facts
   skill_review.py — Skill review, the lifecycle verb: preflight and admission, then one `review_change(subject="skill")` wave projected into `review.json` (§13)
   skill_review_packs.py, skill_review_output.py — the payload a seat reads (binary policy, frozen copy) and the review block
   skill_review_history.py — bounded legacy history and ledger detail reader; task-bound saved skill exports
