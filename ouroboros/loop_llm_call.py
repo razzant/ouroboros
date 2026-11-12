@@ -611,7 +611,8 @@ _RATE_LIMIT_TEXT_MARKERS = (
 )
 # Short markers count only as whole tokens, so "1004290 tokens" or "req_1f429ab0" is not a rate limit.
 _RATE_LIMIT_TEXT_PATTERN = re.compile(r"(?<![a-z0-9])(?:429|tpm|rpm)(?![a-z0-9])")
-_RETRYABLE_PROVIDER_CODES = frozenset({"rate_limit_exceeded"})
+# The second is OpenRouter's 402 for money held by requests still in flight (``error.metadata.limit_source``): a pause.
+_RETRYABLE_PROVIDER_CODES = frozenset({"rate_limit_exceeded", "openrouter_in_flight_budget"})
 
 
 def _is_rate_limit_text(text: str) -> bool:
@@ -682,13 +683,12 @@ def _exception_provider_values(exc: Exception) -> List[str]:
         if text and text not in values:
             values.append(text)
 
-    for attr in ("code", "type"):
-        add(getattr(exc, attr, None))
     body = _exception_body(exc)
-    nested = body.get("error")
-    for source in ((body, nested) if isinstance(nested, dict) else (body,)):
-        for key in ("code", "type"):
-            add(source.get(key))
+    nested = body.get("error") if isinstance(body.get("error"), dict) else {}
+    metadata = nested.get("metadata") if isinstance(nested.get("metadata"), dict) else {}
+    for value in (getattr(exc, "code", None), getattr(exc, "type", None), body.get("code"), body.get("type"),
+                  nested.get("code"), nested.get("type"), metadata.get("limit_source")):  # the provider's typed limit, last
+        add(value)
     capture = getattr(exc, "physical_attempt_capture", None)
     if capture is not None:
         add(getattr(capture, "provider_code", None))
