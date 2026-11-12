@@ -27,6 +27,13 @@ its waiting line (``memory_waiting``: how many, in how many rooms, the oldest) a
 releases it, with a reason (``chronicle_store._rule_mark_release``). Showing it, a tool read or a
 mailbox acknowledgement of a notice is not that release.
 
+A left wave's mark also keeps what its record said when it was published (``review.outcome``, from
+``outcome_facts``: the verdict word, the findings of each kind and how many counted seats answered),
+because its words print a seat's PASS the same with or without notes. The waiting line counts the
+marks whose recorded outcome is a ``clean_pass`` and the marks that carry no such facts; the list
+prints each mark's outcome, reading the review record of an older mark as it stands now
+(``mark_outcome``). These are facts beside the words: nothing is released, hidden or ranked by them.
+
 A result review its author finished before (``pending_review=finish``) whose late verdict is a PASS of exactly
 the delivered subject also resolves that task's missing-conclusion warning (``resolve_pending_result_review``).
 
@@ -120,6 +127,9 @@ def _facts(record: Any) -> Dict[str, Any]:
     subject = facts.get("subject") or {}
     if not isinstance(subject, dict) or any(isinstance(value, (dict, list)) for value in subject.values()):
         raise ValueError("subject maps names to scalar identity values")
+    outcome = facts.get("outcome")
+    if outcome is not None and (not isinstance(outcome, dict) or any(isinstance(v, (dict, list)) for v in outcome.values())):
+        raise ValueError("outcome maps names to scalar facts of the settled record")
     return {**facts, "subject": subject, "settled_at": str(facts.get("settled_at") or "")}
 
 
@@ -137,13 +147,67 @@ def _text(facts: Mapping[str, Any]) -> str:
 def _mark(mark_id: str, room: str, facts: Mapping[str, Any]) -> Dict[str, Any]:
     ref = facts["source_ref"]
     target = {**ref, "task_id": str(ref.get("task_id") or facts["task_id"])}  # readable from any focus
+    outcome = facts.get("outcome")
     return {"id": mark_id, "kind": "mark", "room_id": room, "target_ref": target, "text": _text(facts),
             "author": {"kind": "host", "operation": LATE_REVIEW_OPERATION, "surface": facts["surface"],
                        "task_id": facts["task_id"]},
             "scope": "room", "quote": None, "visibility": "full",
             "review": {"surface": facts["surface"], "task_id": facts["task_id"],
                        "publication_id": facts["publication_id"], "settled_at": facts["settled_at"],
-                       "subject": facts["subject"], "source_read": facts.get("source_read")}}
+                       "subject": facts["subject"], "source_read": facts.get("source_read"),
+                       **({"outcome": outcome} if isinstance(outcome, dict) else {})}}
+
+
+def outcome_facts(record: Any) -> Dict[str, Any]:
+    """What a review record says at this moment, as the scalars a late mark keeps beside its words: the verdict
+    word, how many findings of each kind the record holds and how many of its counted seats answered. A record
+    that is absent or not settled formed no verdict: ``{"verdict": ""}``, never a guessed PASS."""
+    if not isinstance(record, Mapping) or record.get("state") != "settled":
+        return {"verdict": ""}
+    verdict = record.get("verdict") or {}
+    quorum = verdict.get("quorum") or {}
+    return {"verdict": str(verdict.get("aggregate") or ""),
+            **{name: len(verdict.get(f"{name}_findings") or []) for name in ("critical", "advisory", "additional")},
+            "responded": int(quorum.get("responded") or 0), "assigned": int(quorum.get("assigned") or 0)}
+
+
+def clean_pass(outcome: Any) -> bool:
+    """A PASS with nothing left to read: every counted seat answered and the record holds no finding of any kind.
+    A PASS with notes, a PASS some seat never answered, a FAIL and a missing verdict are all something else."""
+    return (isinstance(outcome, Mapping) and outcome.get("verdict") == "PASS"
+            and not any(outcome.get(name) for name in ("critical", "advisory", "additional"))
+            and int(outcome.get("assigned") or 0) > 0 and outcome.get("responded") == outcome.get("assigned"))
+
+
+def outcome_words(outcome: Any) -> str:
+    """One mark's outcome for the list of late reviews: facts in words, never advice on what to do with it."""
+    if not isinstance(outcome, Mapping):
+        return "outcome not recorded"
+    if not outcome.get("verdict"):
+        return "no verdict formed"
+    kinds = [f"{outcome[name]} {name}" for name in ("critical", "advisory", "additional") if outcome.get(name)]
+    silent = int(outcome.get("assigned") or 0) - int(outcome.get("responded") or 0)
+    return (str(outcome["verdict"]) + ", " + (", ".join(kinds) if kinds else "no findings")
+            + (f", {silent} seat{'' if silent == 1 else 's'} without an answer" if silent > 0 else ""))
+
+
+def mark_outcome(mark: Mapping[str, Any], drive_root: Any = None) -> Optional[Dict[str, Any]]:
+    """The outcome of one late-review mark: the facts published with it, else (a mark older than those facts,
+    asked with the data root) its review record as it reads now. ``None`` when neither says: a plan reply or
+    the deleted acceptance panel has no verdict by design, and an unreadable record is not a clean one."""
+    review = mark.get("review") or {}
+    if isinstance(review.get("outcome"), dict):
+        return review["outcome"]
+    record_id = str((review.get("subject") or {}).get("record_id") or "")
+    if drive_root is None or not record_id:
+        return None
+    from ouroboros.review_ledger import load_record  # D15->D06 is lazy-only
+
+    try:
+        record = load_record(drive_root, record_id)
+    except (OSError, ValueError):
+        return None
+    return outcome_facts(record) if record else None
 
 
 def publish_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateReviewMark:

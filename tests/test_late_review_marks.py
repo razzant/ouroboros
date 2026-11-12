@@ -172,7 +172,7 @@ def test_the_next_request_of_the_owning_room_carries_it_and_another_room_never_d
     listing = _memory_read(_ctx(root, "wake1"), room_id="late_reviews")
     assert listing.startswith("late reviews: 3 in 3 rooms")
     for task in ("bound", "pres1"):
-        assert f"result review of task {task}; memory_read(node_id='{marks[task]}')" in listing
+        assert f"result review of task {task}; outcome not recorded; memory_read(node_id='{marks[task]}')" in listing
         assert f"MAIN-DEFECT-{task}" in _memory_read(_ctx(root, "wake1"), node_id=marks[task])
     assert len(_late_marks(root)) == 3  # projection/read never releases any mark
     presence = room_text(root, {"id": "pt1", "chat_id": 555, "metadata": PRESENCE})
@@ -1022,3 +1022,49 @@ def test_a_late_plan_reply_is_told_in_its_own_terms_never_as_a_verdict(harness, 
     assert head.startswith("Plan council reply from m/a (seat s1) to ask a1 on plan revision 1, recorded after its task ended")
     assert "not a verdict; it holds nothing." in head and rest == lines
     assert all(word not in mark["text"] for word in ("PASS", "FAIL", "approved", "rejected"))
+
+
+# --- outcome facts: what the record said, kept beside the mark's words ----------------------------
+
+def _settled(aggregate, *, critical=0, advisory=0, additional=0, responded=2, assigned=2, state="settled"):
+    return {"state": state, "verdict": {"aggregate": aggregate, "quorum": {"responded": responded, "assigned": assigned},
+                                        "critical_findings": [{}] * critical, "advisory_findings": [{}] * advisory,
+                                        "additional_findings": [{}] * additional}}
+
+
+def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else(tmp_path):
+    """A left wave's mark keeps its record's outcome as facts: a PASS reads clean only with every counted seat
+    answered and no finding of any kind; a mark older than these facts answers from its record, never by guess."""
+    from ouroboros.late_review_marks import clean_pass, mark_outcome, outcome_facts, outcome_words
+    from ouroboros.review_ledger import ledger_dir, record_path
+
+    clean = outcome_facts(_settled("PASS"))
+    assert clean == {"verdict": "PASS", "critical": 0, "advisory": 0, "additional": 0, "responded": 2, "assigned": 2}
+    assert clean_pass(clean) and outcome_words(clean) == "PASS, no findings"
+    others = {"PASS, 1 advisory": _settled("PASS", advisory=1), "PASS, 2 additional": _settled("PASS", additional=2),
+              "PASS, no findings, 1 seat without an answer": _settled("PASS", assigned=3),
+              "FAIL, 2 critical, 1 advisory": _settled("FAIL", critical=2, advisory=1),
+              "QUORUM_FAILED, no findings, 2 seats without an answer": _settled("QUORUM_FAILED", responded=0),
+              "no verdict formed": _settled("PASS", state="pending")}
+    for words, record in others.items():
+        assert outcome_words(outcome_facts(record)) == words and not clean_pass(outcome_facts(record)), words
+    assert outcome_facts(None) == {"verdict": ""} and not clean_pass(None)
+    assert outcome_words(None) == "outcome not recorded"
+
+    shared.world(tmp_path)
+    assert publish_late_review(tmp_path, {**_record(tmp_path, "main1", 1, "clean"), "outcome": clean}).status == "saved"
+    [mark] = _late_marks(tmp_path)
+    assert mark["review"]["outcome"] == clean and mark_outcome(mark) == clean
+    record_id = "rl-20261017T000000-aaaaaaaaaaaa"
+    older = {**_record(tmp_path, "bound", 1, "older"), "subject": {"record_id": record_id}}
+    assert publish_late_review(tmp_path, older).status == "saved"
+    [old] = [m for m in _late_marks(tmp_path) if m["review"]["task_id"] == "bound"]
+    assert "outcome" not in old["review"] and mark_outcome(old) is None, "no read without the data root"
+    assert mark_outcome(old, tmp_path) is None, "an absent record is not a clean one"
+    ledger_dir(tmp_path, create=True)
+    record_path(tmp_path, record_id).write_text(json.dumps(_settled("PASS", advisory=1)), encoding="utf-8")
+    assert outcome_words(mark_outcome(old, tmp_path)) == "PASS, 1 advisory"
+    record_path(tmp_path, record_id).write_text("{broken", encoding="utf-8")
+    assert mark_outcome(old, tmp_path) is None, "an unreadable record is not a clean one"
+    bad = publish_late_review(tmp_path, {**_record(tmp_path, "beta1", 1, "x"), "outcome": {"verdict": ["PASS"]}})
+    assert bad.status == "invalid" and "outcome" in bad.detail
