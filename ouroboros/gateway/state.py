@@ -291,18 +291,11 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
 
         listable = list_sidebar_projects(root := request_drive_root(request))  # one read: the feed and its count
         messages_revision = project_revision(root, listable)  # read before the feed: a later move reads the list again
-        recent_rows = 50  # the sidebar's recent slice beside the pins (projects_summary's own default)
-        projects = projects_summary(root, limit=recent_rows, include_pinned=True, sidebar_rows=listable,
-                                    by_message=True)
         # A room that is the owner's turn always has its row: the Projects header's amber stands for a row the
-        # owner can reach, however long ago its work ended. The pins stay first, the rest keep the message order.
-        waiting = {str(chat) for chat, room in (works.get("rooms") or {}).items() if room.get("amber")}
-        if (waiting - {str(row.get("chat_id")) for row in projects}) & {str(row.get("chat_id")) for row in listable}:
-            everything = projects_summary(root, limit=None, sidebar_rows=listable, by_message=True)
-            recent = [row for row in everything if row.get("pinned") is not True]
-            shown = {str(row.get("chat_id")) for row in recent[:recent_rows]} | waiting
-            projects = ([row for row in everything if row.get("pinned") is True]
-                        + [row for row in recent if str(row.get("chat_id")) in shown])
+        # owner can reach, however long ago its work ended (after the recent slice, in the same message order).
+        waiting = {int(chat) for chat, room in (works.get("rooms") or {}).items()
+                   if room.get("amber") and str(chat).isdigit()}
+        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable, by_message=True, keep=waiting)
         project_listable_count = len(listable)
     except Exception:
         projects, messages_revision = [], None

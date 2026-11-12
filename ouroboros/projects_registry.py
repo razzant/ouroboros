@@ -1408,7 +1408,8 @@ def _with_dialogue_facts(project: Dict[str, Any], room: Optional[dict],
 def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any = None,
                      project_id: Any = None, include_pinned: bool = False, closed: Optional[bool] = None,
                      oldest_first: bool = False, start: int = 0,
-                     sidebar_rows: Optional[List[Dict[str, Any]]] = None, by_message: bool = False) -> List[Dict[str, Any]]:
+                     sidebar_rows: Optional[List[Dict[str, Any]]] = None, by_message: bool = False,
+                     keep: Any = ()) -> List[Dict[str, Any]]:
     """Sidebar, its whole list (``limit=None``) or a strict addressed room, with unread/activity from room facts.
 
     ``chat_id`` addresses an active room, ``project_id`` an active or deleting one; registry reads retain lifecycle
@@ -1416,7 +1417,8 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
     interval is never inactivity. ``sidebar_rows``, for the unaddressed list only, is the caller's own
     ``list_sidebar_projects`` read: this list and what the caller counts of it are then one registry observation.
     ``by_message`` (the owner's clients) orders and selects by ``last_message_at`` once the history is dated
-    (``room_messages``); until then the rows carry none and keep the activity order.
+    (``room_messages``); until then the rows carry none and keep the activity order. ``keep`` names chat ids whose
+    rows the pinned-and-recent list holds beyond its recent slice, after it, in the same order.
     """
     from ouroboros import dialogue_store as ds, room_messages
 
@@ -1447,8 +1449,9 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
                                by="last_active_at" if messages is None else "last_message_at")
     if not addressed and limit is not None and include_pinned:
         # Pins remain reachable without starving the ordinary recent-room slice.
-        projects = ([p for p in projects if p.get("pinned") is True]
-                    + [p for p in projects if p.get("pinned") is not True][:max(1, int(limit))])
+        recent, cut = [p for p in projects if p.get("pinned") is not True], max(1, int(limit))
+        projects = ([p for p in projects if p.get("pinned") is True] + recent[:cut]
+                    + [p for p in recent[cut:] if p["chat_id"] in keep])
     elif not addressed and limit is not None:
         start = max(0, int(start))
         projects = projects[start:start + max(1, int(limit))]
