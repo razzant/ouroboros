@@ -418,3 +418,25 @@ def test_writes_reads_and_a_revert_round_trip_over_rows_that_store_changes(tmp_p
     for text in texts:
         assert versions.find_version(target, sha(text))[0] == text
     assert registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "version": sha(texts[2])}).endswith(texts[2])
+
+
+def test_a_row_marked_digested_lists_its_text_as_not_stored_whatever_else_it_carries(tmp_path):
+    """The listing and the reader agree on a digest-era mark: a row marked ``content_digested`` holds no text, even
+    beside a change and a base, so it lists as "text not stored" and its version is a typed miss; a change row with a
+    base lists as stored."""
+    target, sha = address(tmp_path), (lambda text: hashlib.sha256(text.encode("utf-8")).hexdigest())
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    texts = [RIVER, RIVER.replace("Старый мост.", "Новый мост.")]
+    changed_rows(journal, texts, TOPIC)
+    change_row = json.loads(journal.read_bytes().splitlines()[-1])
+    assert "change" in change_row and "new_content" not in change_row
+    digested = {**change_row, "new_sha256": sha("a digested version"), "content_digested": True}
+    with journal.open("ab") as stream:
+        stream.write((json.dumps(digested, ensure_ascii=False) + "\n").encode("utf-8"))
+    target.path.parent.mkdir(parents=True, exist_ok=True)
+    target.path.write_bytes(texts[-1].encode("utf-8"))
+    rows = [line for line in versions.render_history(store.read_knowledge_note(target)).splitlines() if line.startswith("- ")]
+    assert rows[0].startswith(f"- {digested['new_sha256']} · ") and rows[0].endswith("text not stored"), rows[0]
+    assert rows[1].startswith(f"- {sha(texts[1])} · ") and "text not stored" not in rows[1], rows[1]
+    with pytest.raises(versions.VersionUnavailable, match=r"holds no text \(digest-era\)"):
+        versions.find_version(target, digested["new_sha256"])
