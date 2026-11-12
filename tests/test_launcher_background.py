@@ -738,8 +738,24 @@ def test_the_state_line_reads_the_servers_own_activity(monkeypatch, body, line):
             raise body
         return Answer(body if isinstance(body, bytes) else json.dumps(body).encode())
 
+    monkeypatch.setattr(lb, "_bindings_seen", "")
     monkeypatch.setattr(lb.urllib.request, "urlopen", urlopen)
     assert lb.status_line(1) == line
+
+
+def test_the_state_line_asks_for_no_bindings_map_it_never_reads(monkeypatch):
+    """The line reads the works only. Once an answer named the bindings map's revision, each later read names it
+    back, so the server keeps the map home; an answer naming none (a failed read) is asked whole again."""
+    asked, revisions = [], iter(["r1", "r1", "", "r2"])
+
+    def urlopen(url, timeout):
+        asked.append(url.partition("/api/state")[2])
+        return Answer(json.dumps({**projection(work("working")), "task_bindings_revision": next(revisions)}).encode())
+
+    monkeypatch.setattr(lb, "_bindings_seen", "")
+    monkeypatch.setattr(lb.urllib.request, "urlopen", urlopen)
+    assert [lb.status_line(1) for _ in range(4)] == ["Ouroboros: working on 1 task"] * 4
+    assert asked == ["", "?bindings_since=r1", "?bindings_since=r1", ""]
 
 
 def test_windows_form_closing_decides_with_the_close_reason(settings, monkeypatch, make):

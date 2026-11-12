@@ -182,7 +182,7 @@ def _publish_script_source(ctx, before, after, fact):
     return after
 
 
-def wrap_script_result(ctx, result, audit_note, script_path):
+def wrap_script_result(ctx, result, audit_note, script_path, note_meta=None):
     """Close a run_script result with where its script text survives the removed temp file."""
     from ouroboros.tools.tool_result import _wrap_run_script_process_result
 
@@ -191,7 +191,7 @@ def wrap_script_result(ctx, result, audit_note, script_path):
         removed = "temporary file cleanup failed" if pathlib.Path(script_path).exists() else "temporary file removed after the run"
     except OSError:
         removed = "temporary file state unknown"
-    wrapped = _wrap_run_script_process_result(ctx, result, audit_note, f"{script_path} ({removed}; {held})")
+    wrapped = _wrap_run_script_process_result(ctx, result, audit_note, f"{script_path} ({removed}; {held})", note_meta)
     return _publish_script_source(ctx, wrapped, wrapped, fact)
 
 

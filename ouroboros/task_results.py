@@ -15,7 +15,7 @@ from ouroboros.utils import utc_now_iso
 # Projection owner retains read custody; this historical import remains compatible.
 from ouroboros.review_projection import merge_review_projection as merge_review_projection
 from ouroboros.review_records import validate_author_disposition
-from ouroboros.terminal_time import preserve_terminal_attempt, task_attempt_witness, terminal_time_patch
+from ouroboros.terminal_time import SUPERVISOR_CANCEL, preserve_terminal_attempt, task_attempt_witness, terminal_time_patch
 
 log = logging.getLogger(__name__)
 
@@ -418,6 +418,7 @@ def write_task_result(
     strict_existing_dict: bool = False,
     create_only: bool = False,
     _terminal_observed: bool = False,
+    _cancel_observed: bool = False,
     _terminal_time_source: Optional[Dict[str, Any]] = None,
     **fields: Any,
 ) -> Dict[str, Any]:
@@ -559,8 +560,11 @@ def write_task_result(
                 projected_fields.update(wake_summary=None, fold_read=None,
                                         suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
+        # The clock belongs to whoever performs this transition: the executor ending its attempt, or
+        # (``_cancel_observed``) the supervisor carrying out a requested cancel. No field can claim either.
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
-            task_id=task_id, observed_at=now if _terminal_observed else None, replica=_terminal_time_source))
+            task_id=task_id, observed_at=now if (_terminal_observed or _cancel_observed) else None,
+            replica=_terminal_time_source, source="executor_terminal" if _terminal_observed else SUPERVISOR_CANCEL))
         transition["admitted"] = (existing_status in {"", STATUS_REQUESTED}
                                   and projected_status in {STATUS_SCHEDULED, STATUS_RUNNING})
         # ABI-3: shared deep cost normalization handles both rows/nested planes; incoming values win.

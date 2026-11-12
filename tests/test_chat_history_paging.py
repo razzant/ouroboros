@@ -388,3 +388,68 @@ def test_a_closed_bounded_wait_reaches_the_replayed_card(tmp_path):
     [ask] = [message for page in pages(tmp_path) for message in page["messages"] if message.get("msg_type") == "quiz"]
     assert ask["quiz"]["state"] == "open" and ask["quiz"]["wait_ended_at"]
     assert "wait_for_answer" not in ask["quiz"]
+
+
+def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_be_read(tmp_path, monkeypatch):
+    """Main is "every room that is not a Project": decided from an empty set (a registry no row of
+    which can be read) it would take the owner's rows typed in Project rooms (#3067's mechanism). It
+    answers the typed unavailable refusal instead. An invalid row beside readable ones is no such
+    case: the rooms the readable rows name are still Projects, and Main reads on."""
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    rooms = [create_project(tmp_path, slug, name=slug) for slug in ("alpha", "beta")]
+    bind_task_to_project(tmp_path, "bound", rooms[0]["id"], origin={"absent": "system"})
+    write(tmp_path / "logs" / "chat.jsonl", [
+        row(0, text="main owner"),
+        *(row(1, text=f"room owner {room['chat_id']}", chat_id=room["chat_id"]) for room in rooms),
+        row(2, direction="out", text="bound reply", task_id="bound", chat_id=rooms[0]["chat_id"]),
+    ])
+    room_rows = {f"room owner {room['chat_id']}" for room in rooms} | {"bound reply"}
+    texts = lambda payload: {message.get("text") for message in payload["messages"]}  # noqa: E731
+    status, healthy = request(tmp_path)
+    assert status == 200 and "main owner" in texts(healthy) and not texts(healthy) & room_rows
+
+    registry = tmp_path / "state" / "projects.json"
+    intact = registry.read_bytes()
+    registry.write_bytes(intact[: len(intact) // 2])  # no row can be read
+    status, refused = request(tmp_path)
+    assert not texts(refused) & room_rows, "a Project room's row reached Main's window"
+    assert status == 503 and refused["reason_code"] == "history_source_unavailable"
+    assert refused["has_more"] is True and refused["window"]["complete"] is False
+
+    data = json.loads(intact)
+    registry.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
+    status, beside = request(tmp_path)
+    assert status == 200 and "main owner" in texts(beside) and not texts(beside) & room_rows
+
+    for unknown in ("lost beside its commit witness", "only an invalid row"):  # neither is "no Projects"
+        registry.unlink(missing_ok=True)
+        if unknown == "only an invalid row":
+            registry.write_text(json.dumps({**data, "projects": [{"chat_id": 7}]}), encoding="utf-8")
+        status, refused = request(tmp_path)
+        assert status == 503 and not texts(refused) & room_rows, unknown
+
+    registry.write_bytes(intact)
+    restored = list(pages(tmp_path))
+    assert "main owner" in {text for page in restored for text in texts(page)}
+    assert not {text for page in restored for text in texts(page)} & room_rows
+
+    # One lenient read decides the request: the rooms it named stay Projects even when a second read would fail
+    # (an open that fails on and off), never "no Projects" within the same request.
+    from ouroboros import projects_registry
+    from ouroboros.gateway import history as history_module
+
+    named, lenient = projects_registry.readable_rooms(tmp_path), projects_registry.reserved_project_chat_ids
+    answers = iter([named])
+    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", lambda root, *, strict=False: (
+        (_ for _ in ()).throw(OSError("too many open files")) if strict else lenient(root)))
+    monkeypatch.setattr(projects_registry, "readable_rooms", lambda root: next(answers, None))
+    context = history_module._project_history_context(tmp_path, 1)
+    assert named and context[0] == named and context[-1] is False
+
+
+def test_main_reads_on_a_fresh_install_without_a_project_registry(tmp_path):
+    write(tmp_path / "logs" / "chat.jsonl", [row(0, text="main owner")])
+    assert not (tmp_path / "state" / "projects.json").exists()
+    status, payload = request(tmp_path)
+    assert status == 200 and [message["text"] for message in payload["messages"]] == ["main owner"]

@@ -430,8 +430,36 @@ test('a confirmed restart comes from the attempt\'s own receipt, never from a gu
         assert.deepEqual(server.replaced, [], 'a plain tab does not navigate past a pending restart');
         const html = doc.getElementById('root').innerHTML;
         assert.match(html, /Setup saved — restart to apply it/);
-        assert.match(html, /Ouroboros saved <code>pro<\/code> as the runtime mode for the next boot/);
+        assert.match(html, /Pro access applies from the next start/);
     }, { fetch: server.fetch, location: server.location });
+});
+
+test('a framed wizard tells its host the chosen access level by its label as well as its id', async () => {
+    // The browser twin of the restart screen (onboarding_overlay.js) prints the label; without it a person reads a stored id.
+    const server = completionServer();
+    await withWizard(SUMMARY_FIRST, 'save=framed-restart', async ({ doc }) => {
+        const posted = [];
+        window.parent = { postMessage: (message) => posted.push(message) };
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        server.attempts[server.sent[0]] = { saved: true, receipt: receipt('cyber_pro', true) };
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        assert.deepEqual(posted.map((message) => [message.type, message.restart_required, message.runtime_mode, message.runtime_label]),
+            [['ouroboros:onboarding-complete', true, 'cyber_pro', 'Cyber Pro']]);
+    }, { fetch: server.fetch, location: server.location });
+});
+
+test('the API section is badged by what is entered: a key or a local model reads Configured, nothing reads Optional', async () => {
+    const badge = async (query, initialState) => {
+        let html = '';
+        await withWizard({ ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, ...initialState } }, query,
+            ({ doc }) => { html = doc.getElementById('root').innerHTML; });
+        return html.match(/<span class="selection-badge">([^<]*)<\/span>/)?.[1];
+    };
+    assert.equal(await badge('badge=nothing', {}), 'Optional');
+    assert.equal(await badge('badge=key', { openrouterKey: 'sk-or-v1-abcdefghijklmnop' }), 'Configured');
+    assert.equal(await badge('badge=local', { localSource: '/models/local-test.gguf' }), 'Configured');
 });
 
 test('an answer that never arrives is unknown, and a failure recorded for the attempt reads like its reply', async () => {
