@@ -239,11 +239,15 @@ def _provider_unavailable_result(
         # Host presentation is separate from the byte-exact model/salvage result.
         # Use the final usage facts: a forced call can itself end unresolved.
         if str(usage.get("reason_code") or "") not in {"", "deadline_local"}:
-            usage["terminal_provider_notice"] = _provider_terminal_fallback_text(
+            usage["terminal_provider_notice"] = notice = _provider_terminal_fallback_text(
                 usage, round_idx=ctx.round_idx, is_context_overflow=is_context_overflow, is_transport_wait=is_transport_wait,
                 waited_sec=waited_sec, interactive=interactive,
                 is_deadline_exhausted=is_deadline_exhausted, control_reason=control_reason, wait_cause=wait_cause,
             )
+            if not salvaged and text == fallback != notice and usage.get("terminal_origin") == TERMINAL_ORIGIN_HOST_NOTICE:
+                text = notice  # the host's own words, composed before a forced call that itself failed: now its facts too
+                if (published := _publish_model_forced_candidate(ctx, trace, text, str(usage["reason_code"]))) is not None:
+                    trace.get("forced_finalization", {}).update(candidate_sha256=published.content_sha256, candidate_revision=published.revision)
         usage.pop(ROUND_REFUSALS_KEY, None)  # the round ended: its record of content refusals goes with it
         return text, usage, trace
 

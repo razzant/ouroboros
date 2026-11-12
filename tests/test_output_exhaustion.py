@@ -350,6 +350,33 @@ REFUSAL = ({"role": "assistant", "content": "", "refusal": "Blocked here."},
            {"prompt_tokens": 5, "response_finish_reason": "content_filter"})
 
 
+@pytest.mark.parametrize("forced", ["refused", "answers"])
+def test_a_forced_call_stopped_by_the_filter_leaves_the_owner_the_notice_that_names_it(
+        tmp_path, no_sleep, monkeypatch, forced):
+    """The host's words for a round nobody answered are composed before the forced final's own call. When that call
+    meets the content filter, the owner reads the notice recomputed with it, and the published answer is that same
+    text: one text that names the refusal, never the words written before it. A forced call that answers keeps its
+    own words."""
+    import hashlib
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "")
+    summary = ({"role": "assistant", "content": "summary"}, {"prompt_tokens": 1})
+    llm = _ScriptedLLM(BODY_ERROR, REFUSAL if forced == "refused" else summary)
+    result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+
+    model, notice = llm.requests[0]["model"], usage["terminal_provider_notice"]
+    assert llm.calls == 2 and ROUND_REFUSALS_KEY not in usage
+    if forced == "answers":
+        assert result == "summary" and REFUSAL_WORDS not in notice
+        return
+    words = loop_transport._failure_words(next(row["failure_code"] for row in usage["llm_call_refs"]))
+    assert notice.endswith(f" This round's failed asks: {words} on {model} once; {REFUSAL_WORDS} on {model} once.")
+    assert result == notice and usage["terminal_origin"] == "host_notice"  # before: the words without the refusal
+    sha = hashlib.sha256(notice.encode("utf-8")).hexdigest()
+    assert trace["delivery_candidate"]["content_sha256"] == trace["forced_finalization"]["candidate_sha256"] == sha
+
+
 def test_a_later_rounds_end_names_its_own_failures_never_an_earlier_rounds_refusal(tmp_path, no_sleep, monkeypatch):
     """Round 1: the primary's content refusal, and the adopted spare's reply spends its length limit (no answer).
     Round 2: the spare answers with a tool call. Round 3: the spare, the walk's primary and the forced final's call
