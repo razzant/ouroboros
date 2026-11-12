@@ -49,6 +49,7 @@ class DocumentEngine:
     start_run = ClaudexorGateway.start_run
     import_upload = ClaudexorGateway.import_upload
     put_upload_bytes = ClaudexorGateway.put_upload_bytes
+    _upload_request = ClaudexorGateway._upload_request  # the timed control request put_upload_bytes sends through
 
     def __init__(self, store=STORE, *, catalog=True, mimes=("text/plain", "text/markdown", "application/json")):
         self.store_identity = store
