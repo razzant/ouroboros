@@ -758,8 +758,20 @@ def test_a_relay_quoting_my_humans_words_keeps_them_whole_at_every_ordinary_stag
     assert ("owner_quoted" in row, "gist" in row) == (quoted, not quoted)
     if quoted:
         assert not mf.form_counts(snap, ordinary)["emergency"] and row["line"] in text
-        assert {forms.stage_of(snap, "F2", ident) for ident in (row["address"], "bare:" + row["address"])} == {
-            "room_emergency", "physical_rows"}
+        # rev_opus REV3D: past the ordinary stages the relay's opening and address yield with my human's words, last.
+        assert {forms.stage_of(snap, "F2", ident) for ident in (row["address"], "bare:" + row["address"])} == {"owner"}
+        whole = mf.tokens_of(mv.story_chars(snap)) + mf.tokens_of(mv.room_chars(snap))
+        def fit(short):
+            fitted = mf.fit_memory_view(snap, {"margin": whole - short, "physical": 10**9, "budget": None})
+            return dict(fitted.addressed), mv.render_story(snap, fitted) + "\n" + mv.render_room(snap, fitted)
+        # A short gap is paid by forms of earlier stages: my last reply here, the other rooms' lines.
+        taken, shown = fit(150)
+        assert OWNER_LIMIT in shown and row["address"] not in taken.get("F2", ()), taken
+        # The relay yields only once every earlier stage has given what it can: the other rooms' counts and my
+        # last reply's address went first.
+        taken, shown = fit(1200)
+        assert "bare:" + row["address"] in taken.get("F2", ()) and OWNER_LIMIT not in shown, taken
+        assert len(taken.get("F6a", ())) == 3 and any(i != "bare:" + row["address"] for i in taken["F2"]), taken
     else:
         assert mf.form_counts(snap, ordinary)["retold"]["works"]["sources"] == 1 and row["line"] not in text
 

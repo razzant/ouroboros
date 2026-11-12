@@ -43,7 +43,7 @@ def stage_of(snapshot, step, ident):
         cached = _catalogue(snapshot)
         object.__setattr__(snapshot, "_form_catalogue", cached)
     if ident.startswith("bare:") and step in ("F2", "F6w", "F7p"):
-        return "physical_rows"
+        return "owner" if step == "F2" and cached["own"].get(ident[5:], {}).get("owner_quoted") else "physical_rows"
     if step == "F1":
         task = cached["tasks"][ident]
         return "task_facts" if not task.get("gist") or task.get("task") in cached["answered"] else "task_only"
@@ -52,7 +52,10 @@ def stage_of(snapshot, step, ident):
             return "work_progress"
         if ident in cached["finals"]:
             return "protected_replies" if any(w.get("protected_reply") for w in cached["finals"][ident]) else "work_final"
-        return "protected_replies" if cached["own"][ident].get("protected_reply") else "room_emergency"
+        own = cached["own"][ident]
+        if own.get("owner_quoted"):  # a relay of my human's words yields with my human's own words, last
+            return "owner"
+        return "protected_replies" if own.get("protected_reply") else "room_emergency"
     if step == "F6w":
         kind = cached["kinds"][ident]
         return ("remote_told" if kind == "told" else "remote_unread" if kind == "unread"
