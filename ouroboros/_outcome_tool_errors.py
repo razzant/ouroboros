@@ -229,7 +229,10 @@ _ROOT_WRITE_TOOLS = frozenset({"write_file", "edit_text", "apply_patch", "edit_b
 # `untyped` is the ok-status a dynamic provider body carries when nothing typed
 # it; leaving it out would disqualify a successful extension call from crediting
 # a recovery, which is not what "we could not type it" means.
-_OK_TOOL_STATUSES = frozenset({"", "ok", "ok_autocorrected", "untyped"})
+# `artifact_output_undeclared` is a finished command carrying a note about files nobody declared:
+# the command itself succeeded, so it credits a recovery and counts as an effect like any other
+# (a record written while the note was a refusal carries `is_error` and never reaches these reads).
+_OK_TOOL_STATUSES = frozenset({"", "ok", "ok_autocorrected", "untyped", "artifact_output_undeclared"})
 # Typed ok answers that applied nothing and say what they returned instead, for the
 # caller to inspect and decide with a later call (an apply that answered with its
 # fresh capture, #1969): never a failure, never an effect, and never in a partition
