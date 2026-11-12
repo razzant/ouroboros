@@ -38,9 +38,6 @@ JOB = "runtime_retirement"
 STARTUP = "startup_recovery"
 RECOVERY_HOLD = "source_recovery_pending"  # the class ``headless.prune_task_trees`` gives a tree kept for recovery
 BYTECODE_UNLINKS_PER_RUN = 20_000  # removals of one run; the rest is owed to the next (FSEvents pacing)
-# The recovery report's errors that leave the previous generation's workers unconfirmed as ended
-# (``server_maintenance._run_startup_task_recovery``): one of them may still hold a log by inode.
-_WORKERS_UNCONFIRMED = ("prior_worker_ownership_unconfirmed", "startup_ownership_unconfirmed")
 
 
 def record_startup(root, *, gaps, report=None):
@@ -49,13 +46,15 @@ def record_startup(root, *, gaps, report=None):
     the recovery ``report`` left unresolved (its error lines when it names none, one without a
     report) and its first error, cut to a hold example's bound. Every start also publishes
     ``workers_unconfirmed``, which ``record_compression``'s log plane reads beside the generation:
-    whether the report leaves the previous generation's workers unconfirmed as ended (no report is
-    no confirmation). A start reads no history for it: the record costs the same on any install."""
+    true unless the recovery report says the previous generation's workers ended
+    (``prior_workers_ended``, set only once its PID check passed; one of them may still hold a log
+    by inode). No report, a recovery skipped or one that returned before that check confirms
+    nothing. A start reads no history for it: the record costs the same on any install."""
     from ouroboros.plan_collection_job import recover_startup
 
     errors = [str(error) for error in (report or {}).get("errors") or ()]
     fact = {"generation": uuid.uuid4().hex, "gaps": bool(gaps),
-            "workers_unconfirmed": report is None or any(error.startswith(_WORKERS_UNCONFIRMED) for error in errors)}
+            "workers_unconfirmed": (report or {}).get("prior_workers_ended") is not True}
     if gaps:
         unresolved = {item for item in (report or {}).get("unresolved") or () if item != "*"}
         example = errors[0] if errors else "startup recovery report missing" if report is None else ""

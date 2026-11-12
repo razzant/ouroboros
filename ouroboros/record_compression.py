@@ -388,12 +388,18 @@ class _Run:
         judged against the row's witness (module docstring), what is held counted by class, then the segments
         an earlier generation's walk recorded are offered in name order. False once the run must stop. The
         listing it judged is the closed set the pass records when the walk ends. A listing that cannot be
-        read raises: the walk stays owed."""
+        read is counted ``unreadable``: the walk ends with no record and holds, offers nothing, and the next
+        start lists the folder again, while the other two planes keep what this run did."""
         recorded = self.row.get("witness")
         earlier = isinstance(recorded, dict) and recorded.get("generation") != _generation(startup)
         marks = recorded.get("chains") if earlier and isinstance(recorded.get("chains"), dict) else None
         unconfirmed = not isinstance(startup, dict) or startup.get("workers_unconfirmed") is not False
-        held, offered, chains = maintenance_jobs.Holds(), set(), _closed(self.root)
+        try:
+            chains = _closed(self.root)
+        except OSError:  # counted, never taken for empty; the next start lists it again, and nothing is recorded
+            self.counts["unreadable"] += 1
+            return True
+        held, offered = maintenance_jobs.Holds(), set()
         for chain, entries in chains.items():
             newest, count = ("", 0) if marks is None else _mark(marks.get(chain))
             closed = entries if marks is None else [entry for entry in entries if entry.name <= newest]

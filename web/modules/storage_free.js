@@ -155,7 +155,7 @@ export const CAUSES = {
     nothing_unsaved: 'nothing in it is unsaved any more', nested_repository: 'a repository inside it cannot be saved as a patch',
     commits_unprotected: 'its commits are not held by a branch', generation_closed: 'stopped by a restart',
     removal_failed: 'its removal failed', younger_than_retention: 'it is still inside the retention days',
-    source_recovery_pending: 'startup recovery is not confirmed complete: task trees and service logs wait',
+    source_recovery_pending: 'left unresolved by startup recovery: every task tree and service log waits',
     closed_set_unrecorded: 'no earlier run recorded which log segments were closed: they wait for the next start',
     prior_workers_unconfirmed: 'the previous run’s workers are not confirmed stopped: closed log segments wait for the next start',
     closed_set_changed: 'a log’s archive changed since its closed segments were recorded: they wait for the next start',

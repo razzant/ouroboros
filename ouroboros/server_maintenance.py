@@ -1455,6 +1455,7 @@ def _run_startup_task_recovery(
         report["errors"].append("prior_worker_ownership_unconfirmed")
         log.warning("Startup file/task recovery deferred: prior worker ownership is unconfirmed")
         return report
+    report["prior_workers_ended"] = True  # the one positive answer; an early return above leaves it unknown
     try:
         from ouroboros.task_status import _load_queue_snapshot
         snapshot = _load_queue_snapshot(pathlib.Path(drive_root))
@@ -1475,7 +1476,7 @@ def _run_startup_task_recovery(
     except Exception:
         intent_errors.append("promotion_intent_reconcile_failed")
         log.warning("Startup new-work intent reconciliation deferred", exc_info=True)
-    report = _recover_terminal_task_files(drive_root, protected)
+    report = {**_recover_terminal_task_files(drive_root, protected), "prior_workers_ended": True}
     report["unresolved"].extend(preparations["retained"] + preparations["uncertain"])
     report["errors"].extend(f"preparation:{item}" for item in preparations["errors"])
     report["errors"].extend(intent_errors)

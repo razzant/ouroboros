@@ -936,7 +936,7 @@ def test_in_scope_names_by_place_exactly_what_a_pass_offers_whatever_its_task_st
 
 # ---- the log plane: the rotated logs' closed segments, offered once an earlier generation's walk recorded them ---
 
-_CONFIRMED = {"errors": [], "unresolved": []}  # a recovery report that leaves no worker of the last generation in doubt
+_CONFIRMED = {"errors": [], "unresolved": [], "prior_workers_ended": True}  # the report of a recovery whose PID check passed
 
 
 def _segment(data, name, raw: bytes = TEXT * 4096) -> pathlib.Path:
@@ -1012,6 +1012,29 @@ def test_no_witness_or_the_serving_generations_own_offers_nothing_and_holds(data
     assert {path for path, _owned in recorded} == set(closed) and "holds" not in _row(data)
 
 
+def test_an_unreadable_archive_ends_the_log_walk_and_keeps_the_other_planes(data, recorded, monkeypatch):
+    """A folder the walk cannot list is counted, never taken for empty, and never the reason the evidence and seat
+    planes lose what the same run did: their positions are recorded and the plane rests until the next start."""
+    _evidence(data, "done", live_files=False)
+    _segment(data, "events_20261101T000000.jsonl")
+    _start(data)
+    real, refused = os.scandir, data / "archive"
+
+    def scandir(path="."):
+        if pathlib.Path(path) == refused:
+            raise PermissionError(13, "listing refused")
+        return real(path)
+
+    with monkeypatch.context() as unreadable:
+        unreadable.setattr(os, "scandir", scandir)
+        assert _run(data)["state"] == "done"
+    row = _row(data)
+    assert row["totals"]["evidence"]["compressed"] == 3 and row["last"]["skipped"].get("unreadable") == 1
+    assert "witness" not in row and _run(data) is None, "no record, and no new look under this generation"
+    _walk(data)
+    assert "witness" in _row(data), "the next start lists the folder again"
+
+
 def test_a_start_during_the_walk_names_its_record_after_that_start(data, recorded, monkeypatch):
     """A server start while the walk runs may have a reader that holds, by inode, a segment the walk then lists
     closed (live when that start's reader began, rotated after): the record names the generation current at its
@@ -1064,7 +1087,8 @@ def test_a_name_no_newer_than_the_witness_that_appears_later_holds_its_chain(dat
 
 
 @pytest.mark.parametrize("report", [{"errors": ["prior_worker_ownership_unconfirmed"]},
-                                    {"errors": ["startup_ownership_unconfirmed: OSError"]}, None])
+                                    {"errors": ["startup_ownership_unconfirmed: OSError"]}, None,
+                                    {"errors": ["store_not_published"]}, {"errors": [], "unresolved": []}])
 def test_unconfirmed_prior_workers_hold_the_plane_until_a_start_confirms_them(data, recorded, report):
     """A worker of the last generation that may still run can hold a log by inode: under a start that could
     not confirm they ended (or has no report) the plane compresses nothing and says so; a confirmed start offers."""
