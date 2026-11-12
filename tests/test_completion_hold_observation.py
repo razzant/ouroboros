@@ -720,8 +720,10 @@ def test_a_bound_result_review_examines_what_it_was_bound_to_not_a_later_change(
 
 def test_the_notice_shown_before_a_continuation_is_not_shown_again_after_it(tmp_path, monkeypatch):
     """The notice comes once for the task, not once per process: a continuation (an owner wait, a restart, a budget
-    pause) saves the shown notice with the other delivery facts, and the resumed execution shows nothing again."""
+    pause) saves the shown notice and the handed-off child results with the other delivery facts, so the resumed
+    execution shows neither again. A new turn on a reused context starts its own notice."""
     from ouroboros import owner_wait
+    from ouroboros.loop import _reset_turn_state
     from ouroboros.loop_nudges import _claim_pre_delivery_notice
     from tests._budget_pause_exact_helpers import _loop_ctx
 
@@ -729,12 +731,16 @@ def test_the_notice_shown_before_a_continuation_is_not_shown_again_after_it(tmp_
     trace = {"reasoning_notes": [], "tool_calls": [{"tool": "write_file", "status": "ok", "args": {"path": "r.md"}}]}
     ctx, limit = _loop_ctx(tmp_path, "t")
     assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=ctx), tmp_path, "t", trace, []), "the first door shows it"
-    saved = owner_wait.continuation_state(ctx, limit.messages, {}, {}, 3, [], set())
+    ctx._subagent_handoff_shown = ["child-1:abc"]
+    saved = json.loads(json.dumps(owner_wait.continuation_state(ctx, limit.messages, {}, {}, 3, [], set()), default=str))
     unsaved, _ = _loop_ctx(tmp_path, "t")
     assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=unsaved), tmp_path, "t", trace, []), "nothing carried it"
     resumed, _ = _loop_ctx(tmp_path, "t")
     owner_wait.restore_continuation_state(SimpleNamespace(_ctx=resumed), saved, [], {}, {}, set())
     assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, []) == ""
+    assert resumed._subagent_handoff_shown == ["child-1:abc"], "the handed-off results stay handed off"
+    _reset_turn_state(resumed)
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, []), "a new turn's answer"
 
 
 @pytest.mark.parametrize("mode", ["auto", "off", "auto_without_review_tool"])

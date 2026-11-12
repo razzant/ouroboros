@@ -294,7 +294,7 @@ def _forced_delegation_note(tools_ctx: Any, llm_trace: Dict[str, Any]) -> str:
     )
 
 
-_EFFECT_WORDS = {"commit_reviewed": "commit", "vcs_commit_reviewed": "commit",
+_EFFECT_WORDS = {"commit_reviewed": "commit_reviewed call", "vcs_commit_reviewed": "vcs_commit_reviewed call",
                  "integrate_subagent_patch": "integrated patch", "integrate_delegated_patch": "integrated patch"}
 
 

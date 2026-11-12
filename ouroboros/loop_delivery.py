@@ -147,12 +147,12 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
             f"{child.get('task_id') or child.get('id')}:{_child_result_sha256(child)}"
             for child in children
         )
-        shown = getattr(tools._ctx, "_subagent_handoff_shown", frozenset())
+        shown = frozenset(getattr(tools._ctx, "_subagent_handoff_shown", None) or ())  # a list across a continuation
         # P5: shown again ONLY on a structured change — a child result (id:sha) this parent was not handed
         # yet; a decision recorded for some children drops them from the set and re-attaches nothing. Never
         # by parsing final PROSE; finalizing with unhandled children appends a loud orphan note (P1).
         if pairs - shown:
-            tools._ctx._subagent_handoff_shown = shown | pairs
+            tools._ctx._subagent_handoff_shown = sorted(shown | pairs)
             _absorb_budget = 160_000 if str(get_context_mode()).lower() == "max" else 60_000
             return format_subagent_absorption_message(
                 children, parent_task_id=task_id, budget_chars=_absorb_budget,

@@ -446,6 +446,7 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._primary_view = None  # a return resumes only the view this turn left (primary_route_observation.held_primary_view)
     ctx._accepted_model_route = ctx._left_review_wait = None  # a new turn waits on no left review
     ctx._pending_task_wait = None  # nor owes an earlier turn's native task wait (``native_task_wait``)
+    ctx._pre_delivery_noticed = False  # each turn's answer may be told once (a continuation restores its own)
 
 
 def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dict, usage: dict, seen: set,
