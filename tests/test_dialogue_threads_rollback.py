@@ -119,7 +119,7 @@ def test_a_switch_to_a_body_that_reads_no_reference_hands_its_real_readers_every
     assert _version(root) == ds.SHARED_VERSION, "a body that reads no reference refuses this file as it stands"
     repo, older, _current = _trees(tmp_path)
     assert store_switch.switch_needs(repo, older) == {
-        "facts": False, "money": False, "handles": False, "dialogue": False, "threads": True, "wake_transitions": True}
+        "facts": False, "money": False, "handles": False, "dialogue": False, "threads": True}
     ok, _message, deferred = store_switch.switch_or_reset(
         root, repo, target_sha=older, target_ref="older", reason="test", door="ui_rollback",
         reset=lambda: pytest.fail("a body that reads no reference must not take the file now"))
@@ -142,8 +142,8 @@ def test_a_switch_to_a_body_that_reads_references_leaves_the_rows_as_stored(tmp_
     rows = _thread_rows(root)
     stored = _bodies(root)
     repo, _older, current = _trees(tmp_path)
-    assert store_switch.switch_needs(repo, current) == {
-        **dict.fromkeys(("facts", "money", "handles", "dialogue", "threads"), False), "wake_transitions": True}
+    assert store_switch.switch_needs(repo, current) == dict.fromkeys(
+        ("facts", "money", "handles", "dialogue", "threads"), False)
     assert store_switch.switch_or_reset(root, repo, target_sha=current, target_ref="current", reason="test",
                                         door="ui_rollback", reset=lambda: (True, "reset now")) == (True, "reset now", False)
     assert _bodies(root) == stored and ds.meta(root, ds.SHARED_FROM + "chat") is not None

@@ -111,9 +111,9 @@ def test_the_intent_is_write_once_and_typed(tmp_path):
 def test_needs_and_the_engine_pin_come_from_the_target_tree(target_repo):
     repo, old, new = target_repo
     assert store_switch.switch_needs(repo, old) == {"facts": True, "money": True, "handles": True, "dialogue": True,
-                                                    "threads": True, "wake_transitions": True}
+                                                    "threads": True}
     assert store_switch.switch_needs(repo, new) == {"facts": False, "money": False, "handles": True, "dialogue": False,
-                                                    "threads": False, "wake_transitions": True}
+                                                    "threads": False}
     (repo / "ouroboros" / "dialogue_store.py").write_text("# a dialogue store that reads no reference\n", encoding="utf-8")
     git(repo, "commit", "-q", "-am", "older dialogue store")
     assert store_switch.switch_needs(repo, git(repo, "rev-parse", "HEAD"))["threads"] is True
@@ -129,11 +129,13 @@ def test_a_door_writes_the_wake_transitions_back_only_for_a_target_without_their
                                                                                       monkeypatch):
     """A door that resets now to a tree without the reader of the wake transition chain first writes the accepted
     chain back in the form that tree reads; the export's failure is logged and the reset still runs. A tree with the
-    reader gets no export."""
+    reader gets no export. The missing reader is never one of the needs (``switch_needs`` above): the safe-restart
+    fallback refuses a recovery point on any need (``tests/test_recovery_point.py``)."""
     from ouroboros import consciousness_transitions
 
     repo, _old, new = target_repo
     root, calls, resets = tmp_path / "data", [], []
+    assert store_switch.lacks_wake_chain_reader(repo, new) is True
 
     def export(drive):
         calls.append(drive)
@@ -151,7 +153,7 @@ def test_a_door_writes_the_wake_transitions_back_only_for_a_target_without_their
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "chain reader")
     reader = git(repo, "rev-parse", "HEAD")
-    assert store_switch.switch_needs(repo, reader)["wake_transitions"] is False
+    assert store_switch.lacks_wake_chain_reader(repo, reader) is False
     assert store_switch.switch_or_reset(root, repo, target_sha=reader, target_ref="v-reader", reason="test",
                                         door="ui_rollback", reset=reset) == (True, "reset done", False)
     assert calls == [root] and resets == [True, True]
