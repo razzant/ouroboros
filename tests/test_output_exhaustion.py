@@ -27,6 +27,7 @@ import ouroboros.loop_llm_call as call_mod
 import ouroboros.loop_transport as loop_transport
 from ouroboros import loop_output_exhaustion as recovery, usage_accounting as ua
 from ouroboros.loop import _output_exhausted_notice, run_llm_loop
+from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY, refusal_words
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros._usage_response import output_exhaustion_facts, reported_reasoning_tokens, response_finish_reason
 from ouroboros.loop_llm_call import (
@@ -261,6 +262,88 @@ def test_a_provider_content_refusal_is_typed_sent_once_and_carries_its_lineage(t
         "provider_policy_refusal"]
 
 
+REFUSAL_WORDS = "the provider's content filter stopping this request (no content returned)"
+
+
+def test_a_content_refusal_speaks_in_its_own_words_and_its_round_keeps_them(tmp_path, no_sleep, monkeypatch):
+    """The kind's one sentence is about the wire and this request, never a verdict on a model or the work. The
+    recorded wire's ``delta.refusal`` becomes the owner-facing provider sentence, its event's and its round's, and
+    the feed row quotes it; with no usage chunk its money stays unknown. A refusal that carried no sentence stamps
+    none, so no earlier words speak for it."""
+    import ouroboros.pricing as pricing
+    from tests.test_llm_wire_corpus import WIRE, _assemble, _normalized
+
+    assert loop_transport._FAILURE_KIND_WORDS["content_filter"] == REFUSAL_WORDS
+    monkeypatch.setattr(pricing, "estimate_cost_optional", lambda *_a, **_kw: None)  # no price lookup
+    wire = WIRE / "openrouter/claude-fable-5/refusal_stream_v2.sse"
+    body, receipt = _assemble(wire, 0)
+    msg, usage = _normalized(wire, {**body, "_stream_receipt": receipt})
+    sentence, totals = " ".join(msg["refusal"].split()), {}
+    assert sentence.startswith("This request was blocked") and "prompt_tokens" not in usage
+    assert _call(_ScriptedLLM((msg, usage)), tmp_path, totals)[0] is None
+
+    assert totals["_last_llm_provider_message"] == sentence  # before: none, stamped from the blank body error
+    [row] = _events(tmp_path, "provider_content_refusal")
+    assert row["provider_message"] == sentence and "refusal_category" not in row
+    [kept] = totals[ROUND_REFUSALS_KEY]
+    assert (kept["round"], kept["provider_message"], kept["response_provider"], kept["cost"]) == (
+        1, sentence, usage["response_provider"], None)
+    assert loop_transport.fallback_reason_text(totals, "openai/gpt-5.5") == (
+        f' after {REFUSAL_WORDS} on openai/gpt-5.5. The provider said: "{sentence}"')
+    bare = ({"role": "assistant", "content": ""}, {"prompt_tokens": 5, "response_finish_reason": "content_filter"})
+    assert _call(_ScriptedLLM(bare), tmp_path, totals)[0] is None
+    assert "_last_llm_provider_message" not in totals and "provider_message" not in totals[ROUND_REFUSALS_KEY][-1]
+    assert loop_transport.fallback_reason_text(totals, "openai/gpt-5.5") == f" after {REFUSAL_WORDS} on openai/gpt-5.5."
+
+
+def test_a_native_refusal_keeps_its_category_and_explanation(monkeypatch):
+    """The native Messages lane keeps ``stop_details`` as a call fact the refusal's words read; a null category is
+    left out (the row then says it was not given), and a reply without ``stop_details`` carries no words."""
+    from ouroboros.llm import LLMClient
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    client = LLMClient()
+    target = client._resolve_remote_target("anthropic::claude-sonnet-4-6")
+    for category, named in (("cyber", {"refusal_category": "cyber"}), (None, {})):
+        msg, usage = client._normalize_anthropic_response({
+            "content": [], "stop_reason": "refusal", "usage": {"input_tokens": 9, "output_tokens": 0},
+            "stop_details": {"type": "refusal", "category": category, "explanation": "Flagged  as cyber."}}, target)
+        assert _classify_empty_response(usage, msg) == ("provider_content_refusal", False, True)
+        assert refusal_words(usage, msg) == {"provider_message": "Flagged as cyber.", **named}
+    msg, usage = client._normalize_anthropic_response(
+        {"content": [], "stop_reason": "refusal", "usage": {"input_tokens": 9, "output_tokens": 0}}, target)
+    assert "stop_details" not in usage and refusal_words(usage, msg) == {}
+
+
+@pytest.mark.parametrize("refused", [True, False])
+def test_a_round_ending_on_a_content_refusal_names_it_and_never_an_outage(tmp_path, no_sleep, monkeypatch, refused):
+    """No configured route to ask: the refusal's one feed row states it with its provider's words (no "Fallback",
+    nothing "trying"), and the forced final's prompt and the terminal notice name it in the kind's words with its
+    route, adding no act. A round ended by another failure keeps today's outage words and gets no such row."""
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "")
+    failed = (({"role": "assistant", "content": "", "refusal": "Blocked here."},
+               {"prompt_tokens": 5, "response_finish_reason": "content_filter"}) if refused else
+              ({"role": "assistant", "content": ""},
+               {"prompt_tokens": 5, "provider_error": {"kind": "provider_error", "code": 400, "message": "Rejected."}}))
+    llm, notes = _ScriptedLLM(failed, ({"role": "assistant", "content": "summary"}, {"prompt_tokens": 1})), []
+    _result, usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, notes))
+
+    model = llm.requests[0]["model"]
+    [prompt] = [row["content"] for row in llm.requests[-1]["messages"] if "[PROVIDER_UNAVAILABLE]" in str(row.get("content"))]
+    rows = [note for note in notes if "No usable reply" in note]
+    met = f" This round's failed asks: {REFUSAL_WORDS} on {model} (1 ask)."
+    assert llm.calls == 2 and ROUND_REFUSALS_KEY not in usage
+    assert not any("Fallback" in note or "trying" in note for note in notes)
+    if refused:
+        assert f"[PROVIDER_UNAVAILABLE] No route returned a usable response.{met} The task is being INTERRUPTED" in prompt
+        assert "outage" not in prompt and "outage" not in usage["terminal_provider_notice"]
+        assert usage["terminal_provider_notice"].endswith(met)
+        assert rows == [f'⚠️ No usable reply after {REFUSAL_WORDS} on {model}. The provider said: "Blocked here."']
+    else:
+        assert "INTERRUPTED by this outage" in prompt and "failed asks" not in prompt and rows == []
+
+
 # ------------------------------------------------------------------ the next ordinary round (T10)
 
 HOST_FACT = "[SYSTEM NOTICE]\nThe provider ended your previous reply on its length limit"
@@ -394,7 +477,7 @@ def test_an_owner_terminal_names_output_exhaustion_not_a_provider_failure():
     assert "classified the failure as a provider failure." in unknown
 
 
-def _walk_loop(tmp_path, monkeypatch, *script, fallbacks="other/model", reachable=None):
+def _walk_loop(tmp_path, monkeypatch, *script, fallbacks="other/model", reachable=None, notes=None):
     """The real loop with the real configured-route walk (a route switch keeps the captured core)."""
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", fallbacks)
@@ -411,7 +494,7 @@ def _walk_loop(tmp_path, monkeypatch, *script, fallbacks="other/model", reachabl
 
     monkeypatch.setattr(loop_mod, "_rebind_context_fit_plan", rebind)
     llm = _ScriptedLLM(*script)
-    kwargs = _loop_kwargs(tmp_path, llm, [])
+    kwargs = _loop_kwargs(tmp_path, llm, [] if notes is None else notes)
     kwargs["tools"]._ctx.context_fit_plan = _plan(preferred="max", window=1_000_000, known=True)
     return (llm, *run_llm_loop(**kwargs))
 
@@ -457,6 +540,33 @@ def test_an_exhausted_candidate_after_an_unknown_primary_keeps_its_wait_and_its_
     assert llm.requests[-1]["messages"] != llm.requests[-2]["messages"]
     assert "entered" in [row.get("phase") for row in _events(tmp_path, "network_wait")]
     assert "_pending_transport_outcome" not in usage  # the usable reply closed the unknown record
+
+
+@pytest.mark.parametrize("cooling", [True, False])
+def test_a_refusal_whose_configured_routes_all_cool_gets_its_own_row_once(tmp_path, no_sleep, monkeypatch, cooling):
+    """The real walk with its one configured route cooling asks nobody: the refusal's own feed row, once, with no
+    "Fallback" claim. When that route is asked, the walk's own rows name the refusal as before and none is added."""
+    from ouroboros import fallback_cooldown
+    from tests.test_completion_selection import finish
+
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_a: cooling)
+    refusal = ({"role": "assistant", "content": "", "refusal": "Blocked here."},
+               {"prompt_tokens": 5, "response_finish_reason": "content_filter"})
+    tools = ({"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {
+        "name": "chat_history", "arguments": "{}"}}]}, {"prompt_tokens": 1})
+    done = (finish("done"), {"prompt_tokens": 1})
+    notes = []
+    llm, result, _usage, _trace = _walk_loop(tmp_path, monkeypatch, *((refusal, done) if cooling else (refusal, tools, done)),
+                                             notes=notes)
+    primary, rows = llm.requests[0]["model"], [note for note in notes if note.startswith("⚠️ No usable reply")]
+    assert result == "done"
+    if cooling:
+        assert [request["model"] for request in llm.requests] == [primary, primary]  # the forced final, nobody else
+        assert rows == [f'⚠️ No usable reply after {REFUSAL_WORDS} on {primary}. The provider said: "Blocked here."']
+        assert not any("Fallback" in note or "trying" in note for note in notes)
+    else:
+        assert rows == [] and llm.requests[1]["model"] == "other/model"
+        assert any(note.startswith("⚡ Fallback: trying other/model") and "Blocked here." in note for note in notes)
 
 
 # ------------------------------------------------------------------ text a typed finish cut (#1472)

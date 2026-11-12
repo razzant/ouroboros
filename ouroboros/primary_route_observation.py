@@ -16,6 +16,16 @@ OBSERVATION_INTERVAL_SEC = 120.0
 OBSERVATION_TIMEOUT_SEC = 3.0
 #: The primary's own last accepted call (``_last_round_cache_usage`` shape) and the ``binding`` it answered on.
 PRIMARY_CALL_KEY = "_primary_accepted_call"
+#: This round's provider content refusals (``note_content_refusal``) with what their calls' rows lack: the upstream,
+#: the money as reported and the provider's own words. Read once with the round's ``llm_call_refs`` rows by the next
+#: request (``refusal_facts``) or by the round's end (``round_failure_words``); another round's are dropped.
+ROUND_REFUSALS_KEY = "_round_refusals"
+#: A spare's closing: the means open to it, no advice (``route_facts_text``; ``refusal_facts_row`` read by a spare).
+_SPARE_CLOSING = ('Facts, not an instruction: stay on this route, return with switch_model(primary="return") '
+                  '(the next real request tests the primary; a refusal there moves on to configured routes again), '
+                  'or return and wait for it with switch_model(primary="wait"). '
+                  "No timer returns this task; a primary-route observation, when shown, "
+                  "is non-generating metadata and never proves that the primary generates.")
 
 
 def failure_facts(usage: dict) -> dict:
@@ -198,17 +208,121 @@ def route_facts_text(tool_ctx, *, model: str, use_local: bool, role: str, failed
     from ouroboros.lead_fact import chooser_words, primary_basis
 
     chooser = chooser_words(primary_basis(tool_ctx), (getattr(tool_ctx, "task_metadata", None) or {}).get("lead"))
+    refused = refusal_facts(usage) if answered else ""  # the round's content refusals, told once in this one row
     return (f"[ROUTE FACTS] This task's primary route is {label(target, primary['role'])}"
             f"{'; ' + chooser if chooser else ''}; "
             f"{label(acting, role)} "
             f"{'answered this round' if answered else 'is now acting without a usable answer this round'} after "
             f"{failure.get('model') or failed_model} failed with {code}{f' ({detail})' if detail else ''} at {failure.get('ts') or 'an unrecorded time'}"
             f"{f' (its engine dated a reset at {reset})' if reset else ''}.{meaning}{error} {answer} {before} "
-            'Facts, not an instruction: stay on this route, return with switch_model(primary="return") '
-            '(the next real request tests the primary; a refusal there moves on to configured routes again), '
-            'or return and wait for it with switch_model(primary="wait"). '
-            "No timer returns this task; a primary-route observation, when shown, "
-            "is non-generating metadata and never proves that the primary generates.")
+            f"{refused + ' ' if refused else ''}{_SPARE_CLOSING}")
+
+
+def refusal_words(usage: dict, msg: dict) -> dict:
+    """A content refusal's own words as its reply carried them: the OpenAI-compatible message's ``refusal``, else the
+    native ``stop_details`` explanation, and the native category; what the reply did not carry is left out."""
+    from ouroboros.utils import sanitize_tool_result_for_log
+
+    details = usage.get("stop_details") if isinstance(usage.get("stop_details"), dict) else {}
+    words = {"provider_message": next((text for text in ((msg or {}).get("refusal"), details.get("explanation"))
+                                       if isinstance(text, str) and text.strip()), ""),
+             "refusal_category": details.get("category")}
+    return {key: " ".join(sanitize_tool_result_for_log(value).split())[:2000] for key, value in words.items()
+            if isinstance(value, str) and value.strip()}
+
+
+def note_content_refusal(total: dict, usage: dict, msg: dict) -> dict:
+    """Keep this call's provider content refusal in its round's record (``ROUND_REFUSALS_KEY``) with its binding, upstream,
+    time, money as reported (unknown stays unknown) and own words (``refusal_words``), which it returns."""
+    from ouroboros.event_usage import event_token_counts
+
+    meta, words = total.get("_last_llm_call_meta") or {}, refusal_words(usage, msg)
+    # An estimate from input tokens nobody reported (a refusal before any usage chunk) prices nothing: unknown.
+    priced = usage.get("cost_final") is True or event_token_counts(usage)["prompt_tokens"] is not None
+    kept = [entry for entry in total.get(ROUND_REFUSALS_KEY) or () if entry.get("round") == meta.get("round")]
+    total[ROUND_REFUSALS_KEY] = kept + [{
+        **{key: meta.get(key) for key in ("round", "llm_call_id", "ts", "model", "use_local", "requested_profile", "provider")},
+        "response_provider": usage.get("response_provider"), "cost": usage.get("cost") if priced else None,
+        "cost_final": usage.get("cost_final"), "billing": (usage.get("cost_evidence") or {}).get("billing"), **words}]
+    return words
+
+
+def _round_rows(usage: dict) -> list:
+    """The round's calls in ``llm_call_refs`` order, each refusal with its kept facts; [] while none is kept."""
+    kept = {entry.get("llm_call_id"): entry for entry in usage.get(ROUND_REFUSALS_KEY) or ()}
+    round_idx = next(iter(kept.values()), {}).get("round")
+    return [{**row, **kept.get(row.get("llm_call_id"), {})} for row in usage.get("llm_call_refs") or ()
+            if kept and isinstance(row, dict) and row.get("round") == round_idx]
+
+
+def _ask_route(row: dict) -> str:
+    return fallback_route_words(None, "", False, "", None, own_call=row)  # the binding the call's own record names
+
+
+def refusal_facts(usage: dict, *, before_round=None) -> str:
+    """An answered round's asks from its first provider content refusal on, told once (the record is then dropped): each
+    route asked, how many times and how each ask ended, each refusal's time, upstream and money in ``_call_money``'s
+    words, and one refusal's own words quoted as the provider's. "" before an answer, and for ``before_round``'s own."""
+    from ouroboros.loop_transport import _failure_words, _provider_quote
+
+    rows = _round_rows(usage)
+    first = next((index for index, row in enumerate(rows) if row.get("failure_code") == "content_filter"), None)
+    if first is None or all(row.get("failure_code") for row in rows[first:]) or (
+            before_round is not None and rows[first].get("round") >= before_round):
+        return ""
+    usage.pop(ROUND_REFUSALS_KEY, None)
+    routes: dict = {}
+    for row in rows[first:]:
+        code = row.get("failure_code")
+        routes.setdefault(_ask_route(row), []).append("answered" if not code else _failure_words(code) + (
+            f" at {row.get('ts') or 'an unrecorded time'} (upstream {json.dumps(row['response_provider']) if row.get('response_provider') else 'not named'}; "
+            f"{_call_money(row)})" if code == "content_filter" else ""))
+    said = next((row for row in rows[first:] if row.get("provider_message")), rows[first])
+    return ("This round's asks from its first provider content refusal on: " + "; ".join(
+        f"{route}, {len(ends)} ask{'s' * (len(ends) > 1)}: {', '.join(ends)}" for route, ends in routes.items()) + "."
+        + (_provider_quote({"_last_llm_provider_message": said.get("provider_message")})
+           or " The refusal carried no sentence on this connection.")
+        + f" Its category: {said.get('refusal_category') or 'not given on this connection'}.")
+
+
+def refusal_facts_row(ctx) -> str:
+    """At the acting route's first own request after an answered round that met a provider content refusal, with no
+    switch row pending: that round's facts once, closed for their reader (the primary is not told to return to itself)."""
+    usage = ctx.accumulated_usage
+    if not (facts := usage.get(ROUND_REFUSALS_KEY) and refusal_facts(usage, before_round=ctx.round_idx)):
+        return ""  # the common request: no answered round's refusal is kept
+    primary = getattr(ctx.tools._ctx, "primary_route", None)
+    spare = isinstance(primary, dict) and (primary.get("model"), bool(primary.get("use_local"))) != (
+        ctx.active_model, bool(ctx.active_use_local))
+    return f"[ROUTE FACTS] {facts} {_SPARE_CLOSING if spare else 'Facts, not an instruction.'}"
+
+
+def round_failure_words(usage: dict) -> str:
+    """Every failure of a round whose record keeps a provider content refusal, each kind in the host's words with the
+    routes that met it and how often; "" for any other round (the forced final's prompt, the terminal text)."""
+    from ouroboros.loop_transport import _failure_words
+
+    kinds: dict = {}
+    for row in _round_rows(usage):
+        if code := row.get("failure_code"):
+            routes, route = kinds.setdefault(code, {}), _ask_route(row)
+            routes[route] = routes.get(route, 0) + 1
+    return "" if "content_filter" not in kinds else " This round's failed asks: " + "; ".join(
+        f"{_failure_words(code)} on " + ", ".join(f"{route} ({count} ask{'s' * (count > 1)})" for route, count in routes.items())
+        for code, routes in kinds.items()) + "."
+
+
+def unasked_refusal_row(usage: dict, model: str, use_local: bool) -> str:
+    """The feed's row for the acting route's content refusal when no configured route is asked after it (none
+    configured, every one cooling, an exact route, a declared wait): the refusal and its words, no attempt claimed."""
+    from ouroboros.loop_transport import fallback_reason_text
+
+    kept = (usage.get(ROUND_REFUSALS_KEY) or [{}])[-1]
+    if (usage.get("_last_llm_error_kind") != "content_filter" or kept.get("told") or not kept.get("llm_call_id")
+            or kept["llm_call_id"] != (usage.get("_last_llm_failure") or {}).get("llm_call_id")):
+        return ""
+    kept["told"] = True
+    return f"⚠️ No usable reply{fallback_reason_text(usage, *call_route(kept, model, use_local))}"
 
 
 def _settled(facts: dict) -> dict:

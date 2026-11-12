@@ -155,6 +155,30 @@ def test_without_a_provider_sentence_the_host_classifies_and_points_at_logs(tmp_
     assert "AuthenticationError" not in hint and "stale sentence" not in hint
 
 
+def test_a_terminal_names_every_failure_of_a_round_that_met_a_content_refusal():
+    """From the round's own record (its ``llm_call_refs`` rows, its kept refusals): each failure by its kind with its
+    routes and counts, a refusal in its own words and never as an outage, an outage that did happen in its own;
+    another round's rows stay out, and a round with no refusal kept reads exactly as before."""
+    from ouroboros.loop_transport import _FAILURE_KIND_WORDS
+    from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY
+
+    rows = [{"llm_call_id": call_id, "round": 4, "model": model, "use_local": False, "failure_code": code}
+            for call_id, model, code in (("a", "primary/model", "transport_unavailable"), ("b", "spare/opus", "content_filter"),
+                                         ("c", "spare/fable", "quota_exhausted"), ("d", "spare/opus", "content_filter"))]
+    usage = {"llm_call_refs": [{"llm_call_id": "z", "round": 3, "model": "primary/model", "failure_code": "quota_exhausted"},
+                               *rows], ROUND_REFUSALS_KEY: [{"llm_call_id": "b", "round": 4}, {"llm_call_id": "d", "round": 4}],
+             "_last_llm_error_kind": "content_filter", "_last_llm_error": "x"}
+    flags = dict(is_context_overflow=False, waited_sec=300.0, interactive=True, is_deadline_exhausted=False)
+    met = (" This round's failed asks: a request that never reached the provider on primary/model (1 ask); "
+           f"{_FAILURE_KIND_WORDS['content_filter']} on spare/opus (2 asks); a quota or billing refusal on spare/fable (1 ask).")
+    outage = provider_terminal_fallback_text(usage, is_transport_wait=True, wait_cause="transport_unavailable", **flags)
+    assert outage.endswith(met) and "ended as an outage" in outage
+    generic = provider_terminal_fallback_text(usage, is_transport_wait=False, **flags)
+    assert generic.endswith(met) and "outage" not in generic
+    del usage[ROUND_REFUSALS_KEY]
+    assert provider_terminal_fallback_text(usage, is_transport_wait=False, **flags) == generic[:-len(met)]
+
+
 def test_a_body_error_inside_an_empty_response_carries_the_providers_sentence(tmp_path):
     class _Empty:
         calls = 0

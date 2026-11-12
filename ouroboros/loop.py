@@ -58,6 +58,7 @@ from ouroboros.loop_tool_execution import (
 )
 from ouroboros.loop_llm_call import TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY, call_llm_with_retry, emit_llm_usage_event, forced_response_is_incomplete, forced_response_parts, provider_no_call_source  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.loop_llm_call import TRANSPORT_WAIT_REDIAL_KEY
+from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY, round_failure_words
 from ouroboros.preflight_receipts import canonical_data_root
 from ouroboros.transcript_prefix import count_history_change, observe_send as _observe_transcript_send
 from ouroboros.transcript_prefix import retire_main_reasoning as _retire_main_reasoning  # noqa: F401 -- shared send boundary
@@ -243,6 +244,7 @@ def _provider_unavailable_result(
                 waited_sec=waited_sec, interactive=interactive,
                 is_deadline_exhausted=is_deadline_exhausted, control_reason=control_reason, wait_cause=wait_cause,
             )
+        usage.pop(ROUND_REFUSALS_KEY, None)  # the round ended: its record of content refusals goes with it
         return text, usage, trace
 
     candidate = _live_delivery_candidate(ctx)
@@ -301,9 +303,12 @@ def _provider_unavailable_result(
             source=no_call, provider_terminal=wall, host_words=not salvaged,
         )
         return with_terminal_notice(text, usage, llm_trace)
+    met = round_failure_words(ctx.accumulated_usage)  # a provider content refusal is named as itself, never an outage
     prompt = (
         "[DEADLINE] Primary model work reached the owner deadline. Produce the best final answer now from verified work and state what remains undone."
         if is_deadline_exhausted else
+        f"[PROVIDER_UNAVAILABLE] No route returned a usable response.{met} The task is being INTERRUPTED, not "
+        "completed. Summarize the verified work so far and state plainly what remains undone." if met else
         "[PROVIDER_UNAVAILABLE] The model provider failed to return a usable response. "
         "The task is being INTERRUPTED by this outage, not completed. Summarize the "
         "verified work so far and state plainly what remains undone."

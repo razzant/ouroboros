@@ -696,3 +696,90 @@ def test_an_empty_answer_names_its_own_attempt_and_no_earlier_status(data_root, 
     assert (f"after {PRIMARY} failed with {failed[-1]['failure_code']} at {failed[-1]['ts']}. "
             f"Recorded error text: {json.dumps(failed[-1]['error'], ensure_ascii=False)}.") in facts
     assert "503" not in facts and "overloaded" not in facts
+
+
+# -- a provider's content refusal: the round's facts reach whoever acts next, primary included (12.11) --------
+
+REFUSED = "This request was blocked as it seems to violate the provider's terms."
+CONTENT_FILTER = "the provider's content filter stopping this request (no content returned)"
+
+
+def _refusal(upstream: str = "Anthropic") -> tuple:
+    """A provider's empty reply ended by its content filter, its own sentence in ``refusal``; no usage chunk."""
+    return ({"role": "assistant", "content": "", "refusal": REFUSED},
+            {"response_finish_reason": "content_filter", "response_provider": upstream, "provider": "openrouter"})
+
+
+def _refused_ask(model: str) -> str:
+    return rf"{re.escape(model)}, 1 ask: {re.escape(CONTENT_FILTER)} at \S+ \(upstream \"Anthropic\"; cost unknown, billing basis not reported\)"
+
+
+def test_a_spares_row_carries_its_rounds_content_refusal_once(data_root, tmp_path, quiet_primary):
+    """The primary refuses, the walk's spare answers: the spare's next own request carries ONE row, today's facts
+    with the round's asks from the refusal on, the provider's words quoted once with its category not given, the
+    refused ask's unknown money as unknown, and today's closing. The walking request carries none; no later one adds."""
+    llm = _Routes(data_root, **{PRIMARY: [_refusal()],
+                                FALLBACK: [(_tools(), SOL), (_tools(), dict(SOL)), (finish("done"), dict(SOL))]})
+    text, usage, _trace, _registry = _run(tmp_path, llm)
+    assert text == "done" and [model for model, _ in llm.sent] == [PRIMARY] + [FALLBACK] * 3
+    assert _facts(llm.sent[1][1]) == []  # nothing enters a request that is still walking
+    [row] = _facts(llm.sent[2][1])
+    assert _facts(llm.sent[3][1]) == [row]  # one row per round: the next request adds none
+    assert f"answered this round after {PRIMARY} failed with content_filter" in row
+    assert re.search("No accepted primary call is retained[^.]*; tariff unknown. This round's asks from its first "
+                     rf"provider content refusal on: {_refused_ask(PRIMARY)}; {FALLBACK}, 1 ask: answered\. "
+                     rf"The provider said: \"{re.escape(REFUSED)}\" Its category: not given on this connection\. "
+                     r"Facts, not an instruction: stay on this route, return with switch_model\(primary=\"return\"\)",
+                     row), row
+    assert row.count(REFUSED) == 1 and "$0.0000" not in row
+    assert "_round_refusals" not in usage  # told once: the round's record went with its row
+
+
+def test_the_primary_reads_its_rounds_refusal_in_a_short_row_never_told_to_return(data_root, tmp_path, quiet_primary):
+    """An adopted spare refuses and the walk's primary answers: today no row reached the primary. Now its next own
+    request carries one short row with the same facts, closed "Facts, not an instruction." with no return or wait
+    told to the primary; the walking request carries none."""
+    llm = _Routes(data_root, **{PRIMARY: [(_tools(), CODEX), _death, (_tools(), dict(CODEX)), (finish("done"), dict(CODEX))],
+                                FALLBACK: [(_tools(), SOL), _refusal()]})
+    text, _usage, _trace, _registry = _run(tmp_path, llm)
+    assert text == "done" and [model for model, _ in llm.sent] == [PRIMARY, PRIMARY, FALLBACK, FALLBACK, PRIMARY, PRIMARY]
+    before = _facts(llm.sent[4][1])  # the walk's primary ask: only the earlier switch's row, from the transcript
+    assert len(before) == 1 and CONTENT_FILTER not in before[0]
+    [short] = _facts(llm.sent[5][1])[len(before):]
+    assert re.fullmatch(rf"\[ROUTE FACTS\] This round's asks from its first provider content refusal on: "
+                        rf"{_refused_ask(FALLBACK)}; {re.escape(PRIMARY)}, 1 ask: answered\. The provider said: "
+                        rf"\"{re.escape(REFUSED)}\" Its category: not given on this connection\. Facts, not an instruction\.",
+                        short), short
+    assert "switch_model" not in short and "stay on this route" not in short
+
+
+def test_refused_asks_money_reads_as_stated_unknown_never_as_zero():
+    """Each refused ask's money in ``_call_money``'s words: reported, estimated, or unknown when nothing was
+    reported (an estimate from no reported tokens is no estimate, never $0). The facts wait for the round's answer
+    and are told once."""
+    from ouroboros.primary_route_observation import note_content_refusal, refusal_facts
+
+    total = {"llm_call_refs": []}
+
+    def ask(call_id, usage=None):
+        meta = {"llm_call_id": call_id, "round": 3, "ts": f"t-{call_id}", "model": FALLBACK, "use_local": False,
+                "provider": "openrouter"}
+        total["llm_call_refs"].append(meta)
+        total["_last_llm_call_meta"] = meta
+        if usage is not None:
+            note_content_refusal(total, usage, {})
+            meta["failure_code"] = "content_filter"
+
+    ask("a", {"cost": 1.25, "cost_final": True, "prompt_tokens": 800})
+    ask("b", {"cost": 0.5, "cost_final": False, "cost_estimated": True, "prompt_tokens": 800})
+    ask("c", {"cost": 0.0, "cost_final": False, "cost_estimated": True})  # no usage chunk: nothing reported
+    assert refusal_facts(total) == "" and len(total["_round_refusals"]) == 3  # the round has no answer yet
+    ask("d")
+    facts = refusal_facts(total)
+    for money in ("t-a (upstream not named; cost $1.2500 reported, billing basis not reported)",
+                  "t-b (upstream not named; cost $0.5000 estimated, billing basis not reported)",
+                  "t-c (upstream not named; cost unknown, billing basis not reported)"):
+        assert money in facts, money
+    assert "$0.0000" not in facts and f"{FALLBACK}, 4 asks: " in facts and facts.endswith(
+        "The refusal carried no sentence on this connection. Its category: not given on this connection.")
+    assert refusal_facts(total) == "" and "_round_refusals" not in total

@@ -39,6 +39,7 @@ from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dis
 from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, TOOL_CALL_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
 from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture, physical_attempt_capture_from_exception
 from ouroboros.physical_attempt_context import observe_dispatch
+from ouroboros.primary_route_observation import note_content_refusal
 from ouroboros.contracts.record_contract import RECORD_CONTRACT_VERSION
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, event_token_counts
 from ouroboros.utils import (
@@ -312,7 +313,8 @@ def _record_and_emit_empty_response(
     event_type, is_provider_glitch, permanent = _classify_empty_response(usage, msg)
     exhausted = event_type == "llm_empty_response" and permanent  # the classifier's output exhaustion
     refused = event_type == "provider_content_refusal"
-    log_msg = (f"Provider refused the content (finish_reason={finish_reason})" if refused
+    words = note_content_refusal(accumulated_usage, usage, msg) if refused else {}  # its own words, for its round's row
+    log_msg = (f"The provider's content filter stopped this request (finish_reason={finish_reason})" if refused
                else _empty_response_log_msg(usage, is_provider_glitch, exhausted))
     log.warning("%s, attempt %d/%d", log_msg, attempt + 1, transient_budget)
     _emit_empty_response_events(
@@ -325,7 +327,7 @@ def _record_and_emit_empty_response(
               # naming only the MODEL cannot attribute a same-model provider incident.
               "response_provider": usage.get("response_provider"),
               "provider_error_kind": body_error.get("kind"),
-              **context_fit_event_fields},
+              **words, **context_fit_event_fields},
         task_type=task_type,
         details={"content": content, "tool_calls": tool_calls,
                  "request_ref": request_ref, "response_ref": response_ref},
@@ -347,7 +349,7 @@ def _record_and_emit_empty_response(
         sent = capture.max_completion_tokens if capture is not None and capture.state in {"settled", "dispatched"} else None
         accumulated_usage["_last_llm_output_exhausted"] = output_exhaustion_facts(usage, sent)
     from ouroboros.loop_transport import stamp_owner_provider_message
-    stamp_owner_provider_message(accumulated_usage, body_error)  # a body error's own sentence; a blank glitch has none
+    stamp_owner_provider_message(accumulated_usage, {"message": words.get("provider_message")} if refused else body_error)  # its own sentence
     failure = accumulated_usage["_last_llm_failure"] = accumulated_usage.get("_last_llm_call_meta", {})
     failure.update(failure_code=kind, error=accumulated_usage["_last_llm_error"])
     _save_timeout_repeat(accumulated_usage, failed=True)
@@ -478,6 +480,7 @@ class _LlmErrorContext:
     transport_reserve_sec: Optional[float] = None
     stop_retry_check: Optional[Callable[[], bool]] = None
     requested_profile: Optional[str] = None
+    use_local: Optional[bool] = None  # the asked route's locality, for its failure row
     configured_api_child: bool = False  # its parent chose this exact API actor (``TIMEOUT_REPEAT_KEY``)
     prior_attempt_id: Optional[str] = None  # the attempt last captured before this call began (``_own_capture``)
 
@@ -983,8 +986,8 @@ def _record_llm_call_error(
         "operation_id": str(getattr(error, "operation_id", "") or ""),
         "not_dispatched_provider": (getattr(getattr(error, "physical_attempt_capture", None), "provider", "")
                                     if isinstance(error, ClaudexorModelNotDispatched) else ""),
-        **{key: error_event[key] for key in ("ts", "llm_call_id", "model", "requested_profile", "observed_route", "status_code", "provider_code")},
-        "failure_code": classification.kind, "reset_at": classification.reset_at, **{key: value for key, value in custody_fields.items()
+        **{key: error_event[key] for key in ("ts", "llm_call_id", "round", "model", "requested_profile", "observed_route", "status_code", "provider_code")},
+        "use_local": ctx.use_local, "failure_code": classification.kind, "reset_at": classification.reset_at, **{key: value for key, value in custody_fields.items()
             if key in ("physical_attempt_id", "attempt_custody_state", "generation_id", "explicit_timeout", "model_output_received")}}
     if timed_out or ctx.configured_api_child and TIMEOUT_REPEAT_KEY in ctx.accumulated_usage:
         failure["manifest_ref"] = persist_call(ctx.drive_logs.parent, task_id=ctx.task_id,
@@ -1568,7 +1571,7 @@ def call_llm_with_retry(
             if _handle_main_llm_call_exception(e, _LlmErrorContext(
                     task_id=task_id, task_type=task_type, execution_id=execution_id,
                     round_id=round_id, llm_call_id=llm_call_id, round_idx=round_idx,
-                    attempt=attempt, model=model, request_ref=request_ref,
+                    attempt=attempt, model=model, use_local=bool(use_local), request_ref=request_ref,
                     drive_logs=drive_logs, event_queue=event_queue,
                     accumulated_usage=accumulated_usage,
                     context_fit_event_fields=context_fit_event_fields,

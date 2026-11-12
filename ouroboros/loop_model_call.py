@@ -29,6 +29,7 @@ from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
 from ouroboros.observability import new_execution_id
+from ouroboros.primary_route_observation import refusal_facts_row, unasked_refusal_row
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.transcript_prefix import rewrite_epoch, rewrite_view
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
@@ -374,6 +375,8 @@ def _run_cross_model_fallback_chain(
     if tried and not adopted:  # this last attempt's own result, before any wait or re-aim; each earlier one opened the next attempt's row
         emit_progress(f"⚡ Fallback: the last attempt, on {previous_model}{' (local)' if previous_use_local else ''}"
                       f"{fallback_last_attempt_words(accumulated_usage, previous_model, fresh=fresh)}")
+    elif not tried and (unasked := unasked_refusal_row(accumulated_usage, active_model, active_use_local)):
+        emit_progress(unasked)  # every configured route was passed over: the refusal's own row, no attempt claimed
     fenced = msg is None and _walk_fenced(tools._ctx, accumulated_usage)
     if msg is None and tried and not fenced and str(accumulated_usage.get("_last_llm_error_kind") or "") != "llm_output_exhausted":
         accumulated_usage["_acting_route_failure"] = entry_failure  # its own failure decides its salvage; the last row stays the walk's
@@ -485,6 +488,8 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
             usage["_last_llm_error_kind"] = "provider_outcome_unknown" if outstanding else kind
             if outstanding:
                 usage["_pending_transport_outcome"] = outstanding
+    elif msg is None and (unasked := unasked_refusal_row(usage, model, use_local)):  # no configured route is asked
+        emit_progress(unasked)
     return msg, model, use_local, context_fit_plan, active_context_mode, reconcile(episode, after_walk=True)
 
 
@@ -1312,7 +1317,7 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     if observation:
         _loop()._append_or_merge_user_message(ctx.messages, observation)
     facts = getattr(ctx.tools._ctx, "_route_facts_pending", "")
-    if facts and ctx.defer_resource_wait is None:  # the acting route's first own round after a switch
+    if ctx.defer_resource_wait is None and (facts := facts or refusal_facts_row(ctx)):  # first own round after a switch or a refusal
         ctx.tools._ctx._route_facts_pending = ""
         _loop()._append_or_merge_user_message(ctx.messages, facts)
     _fit_route_tool_ceiling(ctx)

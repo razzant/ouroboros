@@ -821,7 +821,15 @@ def _unknown_terminal_recovery_hint(usage: Dict[str, Any]) -> str:
     )
 
 
-def provider_terminal_fallback_text(
+def provider_terminal_fallback_text(accumulated_usage: Dict[str, Any], **facts: Any) -> str:
+    """The terminal text, then every failure of a round whose record keeps a provider content refusal, each by its own
+    kind (``round_failure_words``): such a refusal is never called an outage, and an outage keeps its own words."""
+    from ouroboros.primary_route_observation import round_failure_words
+
+    return _provider_terminal_text(accumulated_usage, **facts) + round_failure_words(accumulated_usage)
+
+
+def _provider_terminal_text(
     accumulated_usage: Dict[str, Any],
     *,
     is_context_overflow: bool,
@@ -953,7 +961,7 @@ _FAILURE_KIND_WORDS = {
     "provider_incomplete_response": "an incomplete response",
     "llm_empty_response": "an empty response",
     "llm_output_exhausted": "a reply that reached its length limit before any visible output",
-    "content_filter": "the provider's refusal of the content",
+    "content_filter": "the provider's content filter stopping this request (no content returned)",
     "provider_body_error": "an error in the provider's response",
     "provider_error": "a provider error",
     "model_substituted": "an answer from a model other than the requested one",
