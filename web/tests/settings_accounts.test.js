@@ -565,27 +565,44 @@ test('a key saved, turned off or removed names the rows that still point at a ke
     assert.doesNotMatch(editorLine(clean).text, /Still naming/);
 });
 
-test('a key removed on its page while a role still names it: back on the list, the line says which roles cannot send', async (t) => {
-    const world = server(t, { values: { OUROBOROS_CONNECTIONS: [{ kind: 'openai', name: 'work', label: 'Work', api_key: 'sk-work' },
+test('a key turned off, added or removed on its page while a role names a key that cannot send: the line names it by its label, and the list says it after the page', async (t) => {
+    const world = server(t, { values: { OUROBOROS_CONNECTIONS: [{ kind: 'openai', name: 'work', label: 'Work account', api_key: 'sk-work' },
         { kind: 'openrouter', name: 'research-credits', label: 'Research credits', api_key: 'sk-or-second' }] } });
     const list = await world.mount('accounts');
     // A key's page opens as its own level above the list, which stays underneath to be told what the page did.
-    const removeOn = async (path) => {
+    const onPage = async (path, act) => {
         const box = new Stub('div');
         const page = await settingsPageFor(path).mount(box, { path, row: '', ctx: world.ctx });
         await settle();
-        await box.fire('click', { target: box.querySelector('[data-editor-remove]') });
+        await act(box);
         await settle();
         page.unmount();
     };
+    const press = (selector) => async (box) => box.fire('click', { target: box.querySelector(selector) });
     const line = () => world.find('[data-entry-result]');
+    const naming = 'Still naming a key that was removed or turned off, so they cannot send: Light (OpenAI · Work account)';
     world.state.references = [{ setting: 'OUROBOROS_MODEL_LIGHT', route: 'openai@work::gpt-light', connection: 'openai@work' }];
-    await removeOn('accounts/key/openai/work');
-    assert.equal(line().textContent, 'Removed OpenAI · Work. Still naming a key that was removed or turned off, so they cannot send: Light (OpenAI · Work)');
+    // Turned off on its page: the page's line names the key by the label the owner gave it, not its stored name.
+    await onPage('accounts/key/openai/work', async (box) => {
+        await press('[data-key-toggle]')(box);
+        await settle();
+        assert.equal(box.querySelector('[data-editor-result]').textContent, naming);
+        assert.equal(box.querySelector('[data-editor-result]').dataset.tone, 'warn');
+    });
+    // A key added meanwhile: the list says what was added and the roles still unable to send.
+    await onPage('accounts/key/new', async (box) => {
+        box.querySelector('[data-connection-label]').value = 'Night batch';
+        box.querySelector('[data-connection-field="api_key"]').value = 'sk-or-third';
+        await press('[data-editor-save]')(box);
+    });
+    assert.equal(line().textContent, `Added OpenRouter · Night batch. ${naming}`);
+    assert.equal(line().dataset.tone, 'warn');
+    await onPage('accounts/key/openai/work', press('[data-editor-remove]'));
+    assert.equal(line().textContent, `Removed OpenAI · Work account. ${naming}`);
     assert.equal(line().dataset.tone, 'warn');
     // Nothing names the next one: the line says only what was removed, in the plain colour.
     world.state.references = null;
-    await removeOn('accounts/key/openrouter/research-credits');
+    await onPage('accounts/key/openrouter/research-credits', press('[data-editor-remove]'));
     assert.equal(line().textContent, 'Removed OpenRouter · Research credits.');
     assert.notEqual(line().dataset.tone, 'warn');
     list.unmount();
