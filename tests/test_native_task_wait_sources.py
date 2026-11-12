@@ -250,14 +250,12 @@ def test_the_lane_and_cold_checks_read_who_answers_for_the_selected_id(tmp_path)
     assert "retains the project lane" in text and armed is None
     assert json.loads(refusal("queued-root", "warm", "another-room")[0])["reason"] == "sleep_armed"
     assert json.loads(refusal("queued-kid", "warm", "room")[0])["reason"] == "sleep_armed", "its own tree holds no lane"
-    text, armed = refusal("queued-kid", "cold")
-    assert "queued_member queued-kid" in text and armed is None, "the root's fence would hold it"
-    text, armed = refusal("started-kid", "cold")
-    assert "running_member started-kid" in text and armed is None
-    # A retry of this tree's member: the successor is what the root's fence would hold.
+    # A cold sleep is this parent's own wait: no fence holds its queued, running or retried children, so
+    # waiting for them never refuses it (the root sleep fence and its running/queued census are gone).
     _retried(tmp_path)
-    text, armed = refusal("kid-a", "cold")
-    assert "queued_member kid-b" in text and armed is None
+    for selected in ("queued-kid", "started-kid", "kid-a"):
+        text, armed = refusal(selected, "cold")
+        assert json.loads(text)["reason"] == "sleep_armed" and armed["mode"] == "cold", selected
     # A foreign retry queued in this Project, by its own row and with no queue evidence for a row without a room.
     _retried(tmp_path, "root-a", "root-b", parent="", project_id="room")
     assert "retains the project lane" in refusal("root-a", "warm", "room")[0]
@@ -288,8 +286,9 @@ def test_a_store_state_during_the_lane_or_cold_check_never_passes_as_no_dependen
     with pytest.raises(StoreBusy):  # readiness read the store; the lane check that follows cannot
         _wait_for_task(ctx, "kid-a", sleep_mode="warm")
     assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
-    blockers = model_sleep.cold_blockers(_ctx(tmp_path), chosen={"tasks": ["kid-a"], "task_wait": {"task_ids": ["kid-a"]}})
-    assert {"kind": "tree_custody_unreadable", "detail": "store busy"} in blockers
+    read = len(calls)  # a cold sleep fences no selected child, so its census never asks who answers for one
+    assert model_sleep.cold_blockers(_ctx(tmp_path), chosen={"tasks": ["kid-a"], "task_wait": {"task_ids": ["kid-a"]}}) == []
+    assert len(calls) == read
 
 
 def test_an_ordinary_sleep_keeps_its_own_selected_status(tmp_path, monkeypatch):

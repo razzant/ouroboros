@@ -604,7 +604,8 @@ def test_a_drop_while_the_owner_speaks_leaves_a_hearing_gap_fact_never_owner_wor
             finally:
                 slow.release.set()
             if held:
-                await live.wait(lambda: any(POINTER in json.dumps(v) for v in live.wire.sent), 60)
+                await live.wait(lambda: any(POINTER in json.dumps(v)
+                                           for wire in live.provider.connections for v in wire.sent), 60)
             await live.quiet()
             assert len(gaps(live.host.messages)) == 1
             assert sum(row.get('_host_context_kind') == 'owner_words' for row in live.host.messages) == owner_rows + int(held)

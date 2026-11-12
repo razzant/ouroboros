@@ -148,8 +148,10 @@ def _bounded_positive_int_setting(key: str, *, default: int, hard_max: int, min_
     return max(min_value, min(parsed, hard_max))
 
 
-def get_max_workers() -> int:
-    return _clamped_number_setting("OUROBOROS_MAX_WORKERS", low=1, cast=int)
+def get_max_workers() -> Optional[int]:
+    """The owner's optional cap on acting project tasks, read live on every pass: None is no number (the machine's
+    memory is the limit); a typo reads finite, never as no cap (``settings_scales.optional_bound_value``)."""
+    return optional_bound_value("OUROBOROS_MAX_WORKERS", runtime_setting("OUROBOROS_MAX_WORKERS"))
 
 
 def get_task_idle_timeout_sec() -> int:
@@ -375,26 +377,6 @@ def get_max_subagent_depth() -> int:
         hard_max=MAX_SUBAGENT_DEPTH_HARD_CAP,
         min_value=0,
     )
-
-
-# One delegate_wait hold with its teardown, above the hard max WINDOW per call (F5) and
-# below the external-wait lease (delegate_progress): 1800 < 2100 < 2400. The call's own
-# outer bound is the task lifetime + 120 s, or none without one: neither widens a window.
-DELEGATE_WAIT_CEILING_SEC = 2100
-DELEGATE_WAIT_WINDOW_MAX_SEC = 1800
-
-
-def get_delegate_wait_max_sec() -> int:
-    """delegate_wait window ceiling: the setting NARROWS, never widens past 1800."""
-    return _clamped_number_setting(
-        "OUROBOROS_DELEGATE_WAIT_MAX_SEC", low=1, high=DELEGATE_WAIT_WINDOW_MAX_SEC, cast=int)
-
-
-def get_delegate_wait_sec() -> int:
-    """Default WINDOW one ``delegate_wait`` call holds — not a quiet cutoff: the
-    wait holds, returns its advances, and bounds the nanny's mailbox absence."""
-    return _clamped_number_setting(
-        "OUROBOROS_DELEGATE_WAIT_SEC", low=1, high=get_delegate_wait_max_sec(), cast=int)
 
 
 # Consciousness wake-ups. The interval between wakes is the MODEL's choice (``set_next_wakeup``),

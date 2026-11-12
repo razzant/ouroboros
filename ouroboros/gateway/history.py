@@ -112,7 +112,7 @@ _PROGRESS_META_FIELDS = (
     # A duplicate lifecycle call is a typed pointer/ack, not a task. Preserve
     # the pointer on reload while its outer task_id stays empty.
     "lifecycle_pointer",
-    "initiator",  # the turn's origin label (a consciousness wake-up)
+    "initiator", "continue_requester",  # the turn's origin label (a consciousness wake-up); who asked for its Continue
     # The frame's voice: a replayed host note (or the model's display reasoning) must
     # stay what it was, or a reload would hand the card title back to a line live refused it.
     "narration", "reasoning", "spoken",
@@ -308,7 +308,7 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
     # converts legacy pairs deprecated-wins, exposing only honest names.
     rec.update(carry_cost_meta(entry))
     # Live-card axes/origin are row fallbacks; persisted task_results override them.
-    rec.update({key: entry[key] for key in ("outcome_phase", "outcome_final", "initiator") if key in entry})
+    rec.update({key: entry[key] for key in ("outcome_phase", "outcome_final", "initiator", "continue_requester") if key in entry})
 
 
 _READS = ("task_reads",)  # the request's batch reader inside its result cache (never a task id)
@@ -878,7 +878,7 @@ def _collect_chat_rows(
             _copy_task_summary_metadata(rec, entry)
             # Lineage, the origin label, the host's card placement (card_row / card_row_id) and a late-review
             # row's evidence pointer (#1369, stored on that type only) replay verbatim; an absent key is omitted.
-            for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "card_row", "card_row_id", "card_row_revision",
+            for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "continue_requester", "card_row", "card_row_id", "card_row_revision",
                           "late_evidence", "narration"):
                 if field in entry:
                     rec[field] = entry[field]

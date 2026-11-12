@@ -14,7 +14,7 @@
    the cards; keyboard reorder through the handle follows the key order. */
 
 import { haptic } from './haptics.js';
-import { isCoarsePointer } from './layout.js';
+import { isCoarsePointer, onLayoutChange } from './layout.js';
 import { widgetKey } from './widget_list.js';
 import { applyMasonry } from './masonry.js';
 import {
@@ -401,7 +401,12 @@ const widthName = (w) => WIDTH_NAMES.get(w) || `${w} columns`;
  * its reply never undoes a size written while it was out. A failed write stays
  * on screen with its notice (no change announced meanwhile replaces it) and
  * rides along with the next change's write until one succeeds; nothing retries
- * on its own.
+ * on its own. Under a finger only the one card being adjusted (`adjust(key)`,
+ * the menu's Resize) wears `data-widget-adjusting`: style.css gives it alone the
+ * foot with Done and the grip. Done, Escape, a tap outside it (in another
+ * card's frame only where the window's blur tells it), leaving Widgets (`cancel`), the
+ * card leaving the board and a change of the primary input put it away, a drag
+ * on it cancelled first; scrolling keeps it, and neither way writes anything.
  */
 export function createWidgetWidths(list, options) {
     const boundHandles = new WeakSet();
@@ -414,6 +419,8 @@ export function createWidgetWidths(list, options) {
     let failed = false;
     let disposeBoard = null;
     let laid = null;
+    // The one card a finger is adjusting: `{key, card, stop}` (stop removes the listeners that end it), or null.
+    let adjusting = null;
     // Each card's width in the last plan.
     const laidWidths = new WeakMap();
     let held = '';
@@ -481,6 +488,8 @@ export function createWidgetWidths(list, options) {
         list.dataset.widgetMoving = 'true';
     };
     const relayout = () => {
+        // The card being adjusted replaced or removed (a new revision, its skill turned off) puts its foot away.
+        if (adjusting && (!adjusting.card.isConnected || adjusting.card.hasAttribute('data-widget-removed'))) endAdjust();
         // A card replaced or removed while one of its edges is dragged (a new revision, its skill turned off) ends that
         // drag: its handle hears nothing more.
         if ((drag || sizing) && !(drag || sizing).card.isConnected) {
@@ -773,6 +782,73 @@ export function createWidgetWidths(list, options) {
     // only one a finger has: it sets the height and, sideways, the width where widths apply, as the corner does.
     const fingerGrip = () => isCoarsePointer({ root: list.ownerDocument?.documentElement ?? null });
 
+    /** Under a finger, `key` alone shows its foot, its grip focused and brought into view; '' ends it (Done). */
+    function adjust(key) {
+        if (!key) {
+            endAdjust({ focus: true });
+            return;
+        }
+        if (!fingerGrip()) return;
+        const card = laid?.items.find((item) => item.dataset.widgetKey === key && item.isConnected
+            && !item.hasAttribute('data-widget-removed'));
+        if (!card) return;
+        if (adjusting?.card !== card) {
+            endAdjust();
+            const doc = list.ownerDocument;
+            const win = doc.defaultView;
+            // This card's own menu, portalled to the body while it is open, is inside it too.
+            const inside = (node) => Boolean(card.contains(node) || (node?.closest?.('[role="menu"]')
+                && card.querySelector('[data-widget-menu-trigger][aria-expanded="true"]')));
+            // A tap, never a press: a finger that scrolls the board ends in no click.
+            const onClick = (event) => {
+                if (!inside(event.target)) endAdjust();
+                else if (event.target.closest?.('[data-widget-adjust-done]')) endAdjust({ focus: true });
+            };
+            // A tap in a frame reaches no click here. Where the browser moves the focus to that frame, the window's blur
+            // says so; not every such tap does (a frame's own text in WebKit, a second frame in Chromium): Done stays.
+            const onBlur = () => {
+                const active = doc.activeElement;
+                if (active?.tagName === 'IFRAME' && !card.contains(active)) endAdjust();
+            };
+            // While the focus is on the board, after a menu's or a drag's own Escape, which take it first.
+            const onKey = (event) => {
+                if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || !list.contains(doc.activeElement)) return;
+                event.preventDefault();
+                endAdjust({ focus: card.contains(doc.activeElement) });
+            };
+            // A mouse or a trackpad has the edges again; a rotation alone changes nothing.
+            const stopLayout = onLayoutChange(() => { if (!fingerGrip()) endAdjust(); }, { w: win });
+            // WebKit sends a tap's click only where something listens for it: the page hears its own empty margins.
+            const page = list.closest?.('.page') || null;
+            page?.addEventListener('click', onClick, true);
+            doc.addEventListener('click', onClick, true);
+            doc.addEventListener('keydown', onKey);
+            win?.addEventListener('blur', onBlur);
+            adjusting = { key, card, stop() {
+                page?.removeEventListener('click', onClick, true);
+                doc.removeEventListener('click', onClick, true);
+                doc.removeEventListener('keydown', onKey);
+                win?.removeEventListener('blur', onBlur);
+                stopLayout();
+            } };
+            card.toggleAttribute('data-widget-adjusting', true);
+        }
+        const grip = card.querySelector('[data-widget-height-handle]');
+        grip?.focus({ preventScroll: true });
+        grip?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+
+    // `focus`: back to the card's menu button (Done, Escape), without scrolling the board.
+    function endAdjust({ focus = false } = {}) {
+        if (!adjusting) return;
+        const { card, stop } = adjusting;
+        if (drag || sizing) cancelDrag();
+        adjusting = null;
+        stop();
+        card.toggleAttribute('data-widget-adjusting', false);
+        if (focus && card.isConnected) card.querySelector('[data-widget-menu-trigger]')?.focus({ preventScroll: true });
+    }
+
     function bindHandle(handle) {
         const card = handle.closest('[data-widget-key]');
         if (!card || boundHandles.has(handle)) return;
@@ -802,10 +878,17 @@ export function createWidgetWidths(list, options) {
         carry,
         announce,
         laid: () => laid,
-        /** An edge being dragged goes back to where it was, saving nothing (the owner left the page). */
-        cancel: cancelDrag,
+        adjust,
+        adjusting: () => adjusting?.key || '',
+        canAdjust: fingerGrip,
+        /** The owner left the page: an edge being dragged goes back to where it was, saving nothing; a foot goes away. */
+        cancel() {
+            cancelDrag();
+            endAdjust();
+        },
         dispose() {
             cancelDrag();
+            endAdjust();
             disposeBoard?.();
         },
     };

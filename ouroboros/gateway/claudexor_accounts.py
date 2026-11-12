@@ -23,9 +23,10 @@ poll/cancel/reconcile; typed 409 passes through only for input and reconcile,
 with stable ``code`` plus ``required_actions`` when the engine names the
 continuation. A create-time daemon 400/409 — or the frozen retryable 503
 terminal-transport probe verdict — passes through with its status, code,
-actions and the engine's own sentence. Transport/discovery failure before
-setup creation, other daemon 5xx, and untyped poll/cancel conflicts collapse
-to this proxy's honest 503.
+actions and the engine's own sentence. Connect maintenance problems also keep
+the engine's status, context and retryability. Outside that maintenance branch,
+transport/discovery failures, other daemon 5xx and untyped poll/cancel conflicts
+collapse to this proxy's honest 503.
 
 Login shapes ("красота-сначала", D30): a structural link/device-code card
 wherever the engine can host the flow itself — codex device-code today, and
@@ -698,6 +699,16 @@ def _login_job_response(job: Dict[str, Any], **metadata: Any) -> Dict[str, Any]:
 
 
 
+def _is_immediate_missing_cli_job(job: Dict[str, Any], harness: str) -> bool:
+    """The engine's synchronous pre-command missing-program result, never prose matching."""
+    return (isinstance(job, dict) and isinstance(job.get("jobId"), str) and bool(job["jobId"])
+            and job.get("harness") == harness and job.get("action") == "login"
+            and job.get("state") == "not_supported" and job.get("phase") == "completed"
+            and isinstance(job.get("outcome"), dict) and job["outcome"].get("reason") == "not_supported"
+            and "command" in job and job["command"] is None
+            and job.get("authorization") is None and job.get("nativeCommand") is None)
+
+
 def _login_create(body: Dict[str, Any]) -> Dict[str, Any]:
     from ouroboros.claudexor_daemon import (
         attach_login_command,
@@ -818,17 +829,16 @@ def _login_create(body: Dict[str, Any]) -> Dict[str, Any]:
                 raise
 
         job = _create()
-        # Connect is the owner's consent. If the exact pinned engine answers
-        # this FIRST create with its structural pre-command missing-binary
-        # terminal job, install that vendor CLI once and create the job once
-        # more; a second refusal is returned, never looped.
-        from ouroboros.claudexor_harness_install import (
-            install_missing_harness_cli,
-            is_immediate_missing_cli_job,
-        )
+        # Only the first structural pre-command refusal can install, once.
+        # A second refusal is returned; Connect never repairs a failed login.
+        from ouroboros.harness_maintenance import install_for_connect
 
-        if is_immediate_missing_cli_job(job, harness, gateway):
-            install_missing_harness_cli(harness)
+        if _is_immediate_missing_cli_job(job, harness):
+            try:
+                install_for_connect(harness)
+            except ClaudexorUnavailable as exc:
+                exc.maintenance_verdict = True
+                raise
             job = _create()
     job_id = str(job.get("id") or job.get("jobId") or "")
     metadata: Dict[str, Any] = {
@@ -855,6 +865,14 @@ async def api_claudexor_login(request: Request) -> JSONResponse:
     except ValueError as exc:
         return json_error(str(exc), 400)
     except ClaudexorUnavailable as exc:
+        if getattr(exc, "maintenance_verdict", False):
+            from ouroboros.harness_maintenance import maintenance_problem
+            status, payload = maintenance_problem(exc)
+            problem = payload["error"]
+            extra = {key: problem[key] for key in ("code", "context", "retryable") if key in problem}
+            if exc.required_actions:
+                extra["required_actions"] = list(exc.required_actions)
+            return json_error(problem.get("message", str(exc)), status, **extra)
         status = int(getattr(exc, "status_code", 0) or 0)
         profile_verdict = bool(getattr(exc, "login_profile_verdict", False))
         create_verdict = bool(getattr(exc, "login_create_verdict", False))

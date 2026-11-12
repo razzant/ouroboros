@@ -137,8 +137,8 @@ def test_the_acting_work_order_forbids_tool_grants_not_the_selector_its_registry
     order = {"mode": "acting_subagent", "surface": "external_workspace", "write_root": str(tmp_path / "workspace")}
     surface = _compose_subagent_text("obj", role="builder", expected_output="out", constraints="", context="",
                                      task_constraint=order).split("[WRITE SURFACE]", 1)[1]
-    forbidden = surface.split("Do NOT ", 1)[1].split(". ", 1)[0]  # the one sentence of prohibitions
-    assert "grant yourself tools" in forbidden and "enable" not in forbidden, forbidden
+    steps = next(s for s in surface.split(". ") if "the parent's steps" in s)  # the sentence naming the parent's steps
+    assert "granting yourself tools" in steps and "enable" not in steps, steps
     registry = _child(tmp_path, monkeypatch, "acting_subagent", "max")
     registry._ctx.task_constraint = normalize_task_constraint(order)
     resident = initial_tool_schemas(registry, context_mode="max")

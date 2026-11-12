@@ -975,3 +975,165 @@ test('a carried card goes on over the cards shown now when another window takes 
         env.restore();
     }
 });
+
+// --- the one card a finger adjusts --------------------------------------------
+// Under a coarse pointer no card has a foot until the menu's Resize picks one (style.css keys the foot and the grip off
+// `data-widget-adjusting`). The board double gains what the lifecycle reads: the cards' grip, menu button and Done,
+// focus, a window, and the primary input theme.js paints.
+function fingerBoard(pointer = 'coarse') {
+    const api = board(['demo:a', 'demo:b'], { width: 500, heightInfo: () => ({ content: 400, natural: 400 }) });
+    const doc = api.list.ownerDocument;
+    doc.documentElement = { dataset: { pointer } };
+    doc.defaultView = listener();
+    doc.body = { tagName: 'BODY' };
+    doc.activeElement = doc.body;
+    const focusable = (name, card) => ({
+        name, card, tagName: 'BUTTON', scrolled: [], focusOptions: null,
+        focus(options) { this.focusOptions = options; doc.activeElement = this; },
+        scrollIntoView(options) { this.scrolled.push(options); },
+        closest(selector) { return selector === '[data-widget-adjust-done]' && name === 'done' ? this : null; },
+    });
+    for (const card of api.cards) {
+        Object.assign(card.heightHandle, focusable('grip', card));
+        card.trigger = focusable('trigger', card);
+        card.done = focusable('done', card);
+        card.inner = focusable('content', card);
+        card.frame = { tagName: 'IFRAME', card };
+        const parts = { '[data-widget-height-handle]': card.heightHandle, '[data-widget-menu-trigger]': card.trigger };
+        card.querySelector = (selector) => parts[selector] || null;
+        card.contains = (node) => node === card || node?.card === card;
+    }
+    api.list.contains = (node) => api.cards.some((card) => card.contains(node));
+    const tap = (target) => doc.fire('click', { target });
+    const escape = (extra = {}) => {
+        const event = { key: 'Escape', defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...extra };
+        doc.fire('keydown', event);
+        return event;
+    };
+    const adjusting = () => api.cards.filter((card) => card.hasAttribute('data-widget-adjusting')).map((card) => card.dataset.widgetKey);
+    const listeners = () => [...doc.handlers.values(), ...doc.defaultView.handlers.values()].reduce((n, fns) => n + fns.length, 0);
+    return { ...api, doc, tap, escape, adjusting, listeners };
+}
+
+test('a mouse never adjusts a card: Resize is not offered and asking for it changes nothing', () => {
+    const mouse = fingerBoard('fine');
+    assert.equal(mouse.widths.canAdjust(), false);
+    mouse.widths.adjust('demo:a');
+    assert.deepEqual(mouse.adjusting(), []);
+    assert.equal(mouse.widths.adjusting(), '');
+    assert.equal(mouse.listeners(), 0);
+});
+
+test('under a finger Resize gives one card its foot, its grip focused and in view; another Resize moves it', async () => {
+    const finger = fingerBoard();
+    assert.equal(finger.widths.canAdjust(), true);
+    assert.deepEqual(finger.adjusting(), [], 'no card has a foot by default');
+    finger.widths.adjust('demo:a');
+    const [a, b] = finger.cards;
+    assert.deepEqual(finger.adjusting(), ['demo:a']);
+    assert.equal(finger.doc.activeElement, a.heightHandle, 'the grip takes the focus');
+    assert.deepEqual(a.heightHandle.focusOptions, { preventScroll: true });
+    assert.deepEqual(a.heightHandle.scrolled, [{ block: 'nearest', inline: 'nearest' }], 'and is brought into view');
+    // Taps inside the card (its content, its Show all, its own menu while open) keep it; a scroll is no tap.
+    finger.tap(a.inner);
+    a.trigger.expanded = true;
+    a.querySelector = ((query) => (selector) => (selector === '[data-widget-menu-trigger][aria-expanded="true"]' ? a.trigger : query(selector)))(a.querySelector);
+    finger.tap({ closest: (selector) => (selector === '[role="menu"]' ? {} : null) });
+    assert.deepEqual(finger.adjusting(), ['demo:a']);
+    finger.widths.adjust('demo:b');
+    assert.deepEqual(finger.adjusting(), ['demo:b'], 'one card at a time');
+    assert.equal(finger.doc.activeElement, b.heightHandle);
+    // Done ends it and gives the focus back to the card's menu button without scrolling the board.
+    finger.tap(b.done);
+    assert.deepEqual(finger.adjusting(), []);
+    assert.equal(finger.doc.activeElement, b.trigger);
+    assert.deepEqual(b.trigger.focusOptions, { preventScroll: true });
+    assert.equal(finger.listeners(), 0, 'nothing listens once no card is adjusted');
+    await settle();
+    assert.equal(finger.saves.length, 0, 'adjusting writes nothing');
+});
+
+test('a tap outside, a tap in another card\'s frame, Escape, leaving and a mouse put the foot away', () => {
+    const finger = fingerBoard();
+    const [a, b] = finger.cards;
+    finger.widths.adjust('demo:a');
+    finger.tap(b.inner);
+    assert.deepEqual(finger.adjusting(), [], 'a tap on another card');
+    assert.notEqual(finger.doc.activeElement, a.trigger, 'a tap outside moves no focus');
+
+    finger.widths.adjust('demo:a');
+    finger.doc.activeElement = a.frame;
+    finger.doc.defaultView.fire('blur', {});
+    assert.deepEqual(finger.adjusting(), ['demo:a'], 'a tap in its own frame keeps it');
+    finger.doc.activeElement = b.frame;
+    finger.doc.defaultView.fire('blur', {});
+    assert.deepEqual(finger.adjusting(), [], 'a tap in another card\'s frame');
+
+    finger.widths.adjust('demo:a');
+    finger.doc.activeElement = finger.doc.body;
+    assert.equal(finger.escape().defaultPrevented, false);
+    assert.deepEqual(finger.adjusting(), ['demo:a'], 'an Escape while the focus is off the board');
+    a.heightHandle.focus();
+    assert.equal(finger.escape({ defaultPrevented: true }).defaultPrevented, true);
+    assert.deepEqual(finger.adjusting(), ['demo:a'], 'an Escape a menu or a drag took first');
+    assert.equal(finger.escape().defaultPrevented, true);
+    assert.deepEqual(finger.adjusting(), []);
+    assert.equal(finger.doc.activeElement, a.trigger, 'Escape from the grip returns to the menu button');
+
+    finger.widths.adjust('demo:a');
+    finger.doc.defaultView.fire('ouro:layout-changed', { detail: { layout: 'stack', pointer: 'coarse' } });
+    assert.deepEqual(finger.adjusting(), ['demo:a'], 'a rotation alone keeps it');
+    finger.doc.documentElement.dataset.pointer = 'fine';
+    finger.doc.defaultView.fire('ouro:layout-changed', { detail: { layout: 'stack', pointer: 'fine' } });
+    assert.deepEqual(finger.adjusting(), [], 'a mouse has the edges again');
+    finger.doc.documentElement.dataset.pointer = 'coarse';
+
+    finger.widths.adjust('demo:a');
+    finger.widths.cancel();
+    assert.deepEqual(finger.adjusting(), [], 'leaving Widgets');
+    finger.widths.adjust('demo:b');
+    finger.widths.dispose();
+    assert.deepEqual(finger.adjusting(), [], 'the page going away');
+    assert.equal(finger.listeners(), 0);
+});
+
+test('Resize selects the live replacement while its previous card retires', async () => {
+    const finger = fingerBoard();
+    const [retiring, live] = finger.cards;
+    retiring.toggleAttribute('data-widget-removed', true);
+    live.dataset.widgetKey = retiring.dataset.widgetKey;
+    finger.widths.relayout();
+    finger.widths.adjust('demo:a');
+    assert.equal(retiring.hasAttribute('data-widget-adjusting'), false);
+    assert.equal(live.hasAttribute('data-widget-adjusting'), true);
+    assert.equal(finger.doc.activeElement, live.heightHandle);
+    live.toggleAttribute('data-widget-removed', true);
+    finger.widths.relayout();
+    finger.widths.adjust('demo:a');
+    assert.deepEqual(finger.adjusting(), [], 'retired nodes alone cannot enter adjustment');
+    await settle();
+    assert.equal(finger.saves.length, 0);
+    finger.widths.dispose();
+});
+
+test('a card adjusted leaves the board: its foot goes; a drag on its grip is cancelled first, saving nothing', async () => {
+    const finger = fingerBoard();
+    const [a] = finger.cards;
+    finger.widths.adjust('demo:a');
+    const grip = a.heightHandle;
+    grip.fire('pointerdown', { button: 0, pointerId: 4, clientX: 0, clientY: 400, currentTarget: grip, preventDefault() {} });
+    grip.fire('pointermove', { pointerId: 4, clientX: 0, clientY: 600 });
+    assert.equal(a.classList.contains('resizing'), true);
+    finger.tap(finger.cards[1].inner);
+    assert.equal(a.classList.contains('resizing'), false, 'the drag ended with the foot');
+    grip.fire('pointerup', { pointerId: 4 });
+    await settle();
+    assert.equal(finger.saves.length, 0);
+
+    finger.widths.adjust('demo:a');
+    a.isConnected = false;
+    finger.widths.relayout();
+    assert.equal(finger.widths.adjusting(), '');
+    assert.equal(a.hasAttribute('data-widget-adjusting'), false);
+    assert.equal(finger.listeners(), 0);
+});

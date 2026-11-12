@@ -188,7 +188,7 @@ def test_main_shows_mcp_schemas_for_the_gateway_and_its_request_tools_keep_their
     created = registry.execute_result("call_mcp_tool", {"name": "mcp_gitlab__create_issue", "arguments": {"title": "T"}})
     assert "issue created" in created.text and sent == checked == [("mcp_gitlab__create_issue", {"title": "T"})]
     refused = registry.execute_result("call_mcp_tool", {"name": "mcp_gitlab__get_merge_request", "arguments": "{}"})
-    assert refused.code == "SAFETY_VIOLATION" and len(sent) == 1
+    assert refused.code == "SAFETY_RETURNED" and len(sent) == 1
     assert registry.execute_result("call_mcp_tool", {"name": "write_file"}).code == "TOOL_ARG_ERROR" and len(sent) == 1
 
 

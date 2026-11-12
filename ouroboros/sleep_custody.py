@@ -42,7 +42,7 @@ def accepted_receipt(task_id: str, row: dict) -> dict:
     return receipt
 
 
-def transferable_pairs(root: Any, task_id: str, *, panel_keeps_reviews: bool = False) -> tuple[list[list[str]], bool]:
+def transferable_pairs(root: Any, task_id: str, *, panel_keeps_reviews: bool = False) -> list[list[str]]:
     """The exact task's bound ordinary runs; unknown starts remain blockers. A sleep refuses
     to leave a panel run behind; an authority park leaves it with its panel's controller."""
     from ouroboros.delegate_custody_current import task_snapshot
@@ -51,26 +51,25 @@ def transferable_pairs(root: Any, task_id: str, *, panel_keeps_reviews: bool = F
     view = task_snapshot(root, task_id)
     if view["pending"]:
         raise ValueError("unbound external invocation cannot transfer to cold custody")
-    pairs, writer = [], False
+    pairs = []
     for run in view["runs"].values():
         if run.settled or (panel_keeps_reviews and review_owned_source(run.source)):
             continue
         if not run.run_id or not run.invocation_id or review_owned_source(run.source):
             raise ValueError("external run has no transferable ordinary owner binding")
         pairs.append([str(run.run_id), str(run.invocation_id)])
-        writer = writer or str(run.access or "") != "readonly"
-    return sorted(pairs), writer
+    return sorted(pairs)
 
 
 def request_fields(ctx: Any, row: dict) -> dict:
+    """Open custody keeps the tree's project lane whatever a run may write (``project_lease.lane_holders``)."""
     from ouroboros.delegate_custody import custody_root
 
-    pairs, writer = transferable_pairs(custody_root(ctx), str(ctx.task_id),
-                                       panel_keeps_reviews=row.get("reason") == "authority")
+    pairs = transferable_pairs(custody_root(ctx), str(ctx.task_id), panel_keeps_reviews=row.get("reason") == "authority")
     if not pairs:
         return {}
     return {"state": "requested", "binding": _binding(str(ctx.task_id), row), "runs": pairs,
-            "retains_project_lane": bool(row.get("project_id") and writer), "requested_at": time.time()}
+            "retains_project_lane": bool(row.get("project_id")), "requested_at": time.time()}
 
 
 def seen_interactions(ctx: Any, pairs: Any = None) -> dict:

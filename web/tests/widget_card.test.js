@@ -139,6 +139,8 @@ test('framed cards carry Start/Stop and the launch policy; every card carries th
         }
         assert.match(markup, /role="menuitem" class="skills-menu-item widgets-menu-item" data-widget-size="reset"><span class="widgets-menu-check" aria-hidden="true"><\/span>Reset size</);
         assert.match(markup, /data-widget-size-note hidden>Widths apply when the list is wide\.</);
+        // Resize picks the one card a finger adjusts; the menu shows it only under a finger (widths.canAdjust()).
+        assert.match(markup, /role="menuitem" class="skills-menu-item widgets-menu-item" data-widget-adjust hidden><span class="widgets-menu-check" aria-hidden="true"><\/span>Resize</);
         assert.doesNotMatch(markup, /aria-checked="true"/);
     }
     assert.match(controls, /<div role="group" aria-label="Launch policy">/);

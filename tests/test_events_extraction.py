@@ -85,7 +85,6 @@ _MOVED_OWNERS = {
     "_handle_llm_usage": events_budget,
     "_set_root_budget_pause_locked": events_budget,
     "_handle_acceptance_fence": events_worker_reports,
-    "_handle_external_wait_lease": events_worker_reports,
     "_handle_log_event": events_worker_reports,
     "_handle_skill_lifecycle": events_worker_reports,
     "_handle_task_dispatch_resolved": events_worker_reports,

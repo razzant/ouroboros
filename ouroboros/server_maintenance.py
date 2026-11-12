@@ -165,10 +165,12 @@ def _run_terminal_duty(drive_root: pathlib.Path, step: str, latch: Any,
         if _stop_requested(stop_event):
             return
         if step == "cancel_intent_sweep":
+            from supervisor.ended_work_helpers import close_abandoned_helpers
             from supervisor.task_lifecycle import sweep_cancel_intents
             outcomes = sweep_cancel_intents()
             if outcomes:
                 log.info("Cancel-intent watchdog settled: %s", outcomes)
+            close_abandoned_helpers()  # discovery only, after the watchdog: the next sweep settles what it requests
         elif step == "terminal_delivery_replay":
             from ouroboros import custody_owed
             from ouroboros.dialogue_retry import drain, _requested
@@ -390,7 +392,7 @@ def _periodic_supervisor_maintenance(
     # waiting for the park event would make release and acceptance wait on each other.
     from supervisor.active_activity import get_direct_activity_registry
     has_actors = bool(queue.RUNNING or queue.PENDING or get_direct_activity_registry().actors())
-    from ouroboros.delegate_supervision import _TICK_SEC
+    from ouroboros.delegate_feed import _TICK_SEC
     if (has_actors and now - _LAST_COLD_CUSTODY_SWEEP[0] >= _TICK_SEC
             and _COLD_CUSTODY_SWEEP_LOCK.acquire(blocking=False)):
         _LAST_COLD_CUSTODY_SWEEP[0] = now

@@ -353,26 +353,40 @@ def _held_twin(item: Mapping[str, Any], held: Mapping[str, Any]) -> Mapping[str,
     return {}
 
 
-def _dated_directives(ctx: Any):
-    """``(item, time, reference, door-stamped)`` for each owner-sourced item of the run's corpus: the door's stamp
-    for its first message, and for its origin row recorded without an identity of its own, under the reference
-    the held origin row keeps when the run holds one (``_held_origin``: a legacy door without a client id keeps
-    its carrier's address); else the item's own room, client id and time (empty here: ``_words_rows`` reads them);
-    an item without a room reads under the chat row this focus holds for it (``_held_twin``), so one message is
-    one row whichever carrier names it, and an answer recorded without its card takes the card its twin answers,
-    so the card renders beside the answer."""
+def _opening(item: Mapping[str, Any], origin_ref: Mapping[str, Any]) -> bool:
+    """The run's first message as the owner door stamped it (``origin_message_ref``): its ``initial_user`` row, or
+    its origin row recorded without an identity of its own."""
+    source = item.get("source")
+    return bool(origin_ref) and (source == "initial_user" or (source == "origin_message" and not row_ref(item)))
+
+
+def _door_ref(ctx: Any) -> str:
+    """The run's first message under the door's stamp (``origin_message_ref``): the reference the held origin row
+    keeps when the run holds one (``_held_origin``: a legacy door without a client id keeps its carrier's address),
+    else its room and client id. The copy a helper inherits carries the same reference."""
     from ouroboros.owner_relay import owner_row_address
 
     origin_ref = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
     held = _mapping(getattr(ctx, "_held_owner_messages", None))
     known = _held_origin(origin_ref, held or _ctx_metadata(ctx).get("held_owner_messages"))
-    reference = _carrier_ref(known, canonical=owner_row_address(known)) if known else _chat_ref(origin_ref)
+    return _carrier_ref(known, canonical=owner_row_address(known)) if known else _chat_ref(origin_ref)
+
+
+def _dated_directives(ctx: Any):
+    """``(item, time, reference, door-stamped)`` for each owner-sourced item of the run's corpus: the door's stamp
+    for its first message, and for its origin row recorded without an identity of its own, under the door's
+    reference (``_door_ref``); else the item's own room, client id and time (empty here: ``_words_rows`` reads them);
+    an item without a room reads under the chat row this focus holds for it (``_held_twin``), so one message is
+    one row whichever carrier names it, and an answer recorded without its card takes the card its twin answers,
+    so the card renders beside the answer."""
+    origin_ref = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+    held = _mapping(getattr(ctx, "_held_owner_messages", None))
+    reference = _door_ref(ctx)
     for item in getattr(ctx, "_owner_directives", None) or []:
         if not isinstance(item, dict) or item.get("source") not in OWNER_SOURCES:
             continue
-        door = item["source"] == "initial_user" and bool(origin_ref)
-        if door or (item["source"] == "origin_message" and origin_ref and not row_ref(item)):
-            yield item, str(origin_ref.get("ts") or ""), reference, door
+        if _opening(item, origin_ref):
+            yield item, str(origin_ref.get("ts") or ""), reference, item["source"] == "initial_user"
             continue
         twin = {} if item.get("chat_id") and item.get("client_message_id") else _held_twin(item, held)
         if twin and not _mapping(item.get("reply_to")).get("address") and (
@@ -850,33 +864,70 @@ def work_words(ctx: Any) -> Tuple[List[Dict[str, Any]], str, List[str]]:
     return rows, "" if rows else _absent(ctx), gaps
 
 
+def source_refs(item: Mapping[str, Any]) -> set:
+    """Every reference a row names its message by: its typed identity (``row_ref``) and the one a carrier printed
+    into its ``msg_id`` (``_chat_ref``'s ``chat N / client``), so one message under two formats is one source. A row
+    that names no message has none: an empty reference never makes two rows one, and coincident words never do."""
+    return {row_ref(item), str(item.get("msg_id") or "")} - {""}
+
+
 def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
-    """The rows addressed to this run's work beside its corpus, shaped as the corpus rows the Safety check reads
-    (``source``, ``content``, ``msg_id`` = the row's reference, ``reply_to`` = the card or message it answers): the
-    field it inherited, a reply target folded into its row and a row the corpus already holds skipped; then the
-    rows it holds that reached this work. Never a room, context or marked row: a permission my human gave another
-    work is not this one's. Reads the context's attributes as they stand and writes nothing."""
+    """The rows the Safety check reads for this run's work, shaped as its corpus rows (``source``, ``content``,
+    ``msg_id`` = the row's reference, ``reply_to`` = the card or message it answers, ``ts`` = its time where one was
+    recorded): the corpus, the field it inherited (a reply target folded into its row), then the rows it holds that
+    reached this work; one row per source (``source_refs``), the first kept with the card and time a later copy
+    adds, and the opening message dated by its door (``_opening``). Never a room, context or marked row: a
+    permission my human gave another work is not this one's. Reads the context's attributes and writes nothing."""
     from ouroboros.owner_relay import owner_text
 
-    corpus = {row_ref(item) for item in getattr(ctx, "_owner_directives", None) or [] if isinstance(item, Mapping)}
     rows: List[Dict[str, Any]] = []
+    kept: Dict[str, Dict[str, Any]] = {}  # reference -> the listed row of that source
+    origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+
+    def add(row: Mapping[str, Any]) -> Dict[str, Any]:  # the listed copy of this source, gaps filled by a later one
+        refs = source_refs(row)
+        listed = next((kept[ref] for ref in refs if ref in kept), None)
+        if listed is None:
+            rows.append(listed := dict(row))
+            kept.update(dict.fromkeys(refs, listed))
+        listed.update({key: row[key] for key in ("reply_to", "ts") if row.get(key) and not listed.get(key)})
+        return listed
+    for item in getattr(ctx, "_owner_directives", None) or []:
+        if isinstance(item, Mapping):
+            listed = add(item)
+            if _opening(item, origin) and origin.get("ts") and not listed.get("ts"):
+                listed["ts"] = str(origin["ts"])
     last: Dict[str, Any] | None = None  # the field row a following reply target belongs to
     for row in task_governing_words(_ctx_metadata(ctx))[0]:
         if row["source"] == REPLY_TARGET:
-            if last is not None:
+            if last is not None and not last.get("reply_to"):
                 last["reply_to"] = {"address": row["ref"], "author": row.get("author") or "", "text": row["text"]}
             last = None
             continue
-        last = None if row["ref"] in corpus - {""} else {"source": row["source"], "content": row["text"], "msg_id": row["ref"]}
-        rows += [last] if last is not None else []
+        last = add({"source": row["source"], "content": row["text"], "msg_id": row["ref"],
+                    **({"ts": row["ts"]} if row["ts"] else {})})
     root = _data_root(ctx)
     for key, row in _mapping(getattr(ctx, "_held_owner_messages", None)).items():
         if isinstance(row, Mapping) and isinstance(row.get("carried"), dict) and not row["carried"].get("went_to"):
             replied = answered_card_reply(*answered_card_source(row)) or reply_target(
                 row.get("_owner_source_root") or root, row.get("reply_to"))
-            rows.append({"source": "owner_mailbox", "content": owner_text(row), "msg_id": str(key),
-                         **({"reply_to": replied} if replied else {})})
+            add({"source": "owner_mailbox", "content": owner_text(row), "msg_id": str(key),
+                 **({"ts": when} if (when := _item_time(row)) else {}), **({"reply_to": replied} if replied else {})})
     return rows
+
+
+def safety_owner_ids(ctx: Any) -> List[set]:
+    """One identity per row of my human's that ``safety_sources`` lists (``OWNER_SOURCES`` and ``PLACE_CONFIRMED``):
+    the references it names its message by (``source_refs``), the opening message's with the door's (``_door_ref``),
+    which its copy in a helper carries too; a row naming no message, its words and time. Two rows are one message
+    when their identities meet. Reads the context's attributes and writes nothing."""
+    from ouroboros.project_dialogue import _text_sha256
+
+    origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+    door = {_door_ref(ctx)} if origin else set()
+    return [source_refs(row) | (door if _opening(row, origin) else set())
+            or {f"words {_text_sha256(row.get('content'))} {row.get('ts') or ''}"}
+            for row in safety_sources(ctx) if row.get("source") in OWNER_SOURCES | {PLACE_CONFIRMED}]
 
 
 def _inbound_rows(drive_root: Any, client_ids: Mapping[str, str], accounts: Any = None) -> List[Dict[str, Any]]:

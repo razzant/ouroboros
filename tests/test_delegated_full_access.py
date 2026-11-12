@@ -154,7 +154,7 @@ def test_full_start_http_contract_and_real_snapshot_capture(full_run):
     assert not custody.replay(custody.custody_root(ctx))['full-run'].settled
     gateway = claudexor_daemon.ensure_owned_gateway()
     try:
-        terminal = json.loads(delegate._delegate_wait(ctx, 'full-run', wait_sec=1, gateway=gateway))
+        terminal = json.loads(delegate._read_run(ctx, 'full-run', gateway=gateway))
     finally:
         gateway.close()
     assert terminal['status'] == 'terminal' and terminal['settlement']['settled']

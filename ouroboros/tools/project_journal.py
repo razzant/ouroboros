@@ -20,16 +20,17 @@ import pathlib
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.dialogue_provenance import PRESENCE_BINDING_AUTHORITY_KEY, is_presence_task, presence_caller_binding
+from ouroboros.focus import normalize_focus
 from ouroboros.project_facts import (
+    explicit_project_id_ok,
     placed_project_id,
     project_journal_path,
     project_reflections_path,
     project_workpad_path,
     sanitize_project_id,
-    explicit_project_id_ok,
 )
-from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
-from ouroboros.focus import normalize_focus
+from ouroboros.project_naming import CONTINUE_TITLE_PREFIX
 from ouroboros.task_carrier import inline_execution
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import completed_local_read
@@ -51,7 +52,8 @@ _MAX_TEXT_CHARS = 4000
 _WORKPAD_MAX_BYTES = 256 * 1024
 
 
-def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
+def _actor_facts(ctx: ToolContext) -> tuple[Dict[str, Any], Dict[str, Any], bool, str, str]:
+    """``(metadata, task view, is a child, delegation_role, root_task_id)`` as the host admitted this actor."""
     metadata = getattr(ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
     contract = getattr(ctx, "task_contract", {})
@@ -63,7 +65,11 @@ def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
     parent_task_id = str(lineage.get("parent_task_id") or metadata.get("parent_task_id") or "").strip()
     delegation_role = str(lineage.get("delegation_role") or metadata.get("delegation_role") or "").strip()
     root_task_id = str(lineage.get("root_task_id") or metadata.get("root_task_id") or "").strip()
-    child = bool(parent_task_id) or delegation_role == "subagent"
+    return metadata, task, bool(parent_task_id) or delegation_role == "subagent", delegation_role, root_task_id
+
+
+def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
+    metadata, task, child, delegation_role, root_task_id = _actor_facts(ctx)
     if is_presence_task(task) or presence_caller_binding(ctx) is not None:  # a speaker, or acting for its binding
         return "presence", metadata
     if child:
@@ -75,11 +81,36 @@ def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
     return ("root" if root else "scoped"), metadata
 
 
+def _admitted_continuation(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """The Continue record the host's admission stamped on this root, naming its work; ``{}`` for any other root."""
+    continuation = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
+    author = metadata.get("objective_author") if isinstance(metadata.get("objective_author"), dict) else {}
+    admitted = (str(continuation.get("work_id") or "").strip() and isinstance(continuation.get("admission"), dict)
+                and author.get("kind") == "continuation"
+                and author.get("predecessor_task_id") == continuation.get("predecessor_task_id"))
+    return continuation if admitted else {}
+
+
+def _focus_root(ctx: ToolContext) -> pathlib.Path:
+    metadata = getattr(ctx, "task_metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return pathlib.Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or getattr(ctx, "drive_root", "")))
+
+
+def _bound_continue_root(ctx: ToolContext) -> bool:
+    """A Continue of a place-bound work, admitted into a Project: it inherits the binding but speaks nowhere and is
+    that Project's own root. Focus-only: its other journal scopes stay those of work acting for a binding."""
+    metadata, task, child, _role, _root = _actor_facts(ctx)
+    return bool(not child and not is_presence_task(task) and isinstance(metadata.get(PRESENCE_BINDING_AUTHORITY_KEY), dict)
+                and _admitted_continuation(metadata) and _bound_project(_focus_root(ctx), str(getattr(ctx, "task_id", "") or "")))
+
+
 def may_publish_focus(ctx: ToolContext) -> bool:
-    """Whether this actor's focus line is its own to publish: an independent root, never a child or a
-    speaker (``_update_focus``'s rule; its one exception, a Project-bound inline speaker, is Presence).
+    """Whether this actor's focus line is its own to publish: an independent root or a bound Continue
+    (``_bound_continue_root``), never a child or a speaker (``_update_focus``'s rule; its one exception, a
+    Project-bound inline speaker, is Presence).
     The round's facts name an absent line only for such an actor in the pool (a live direct turn answers in chat)."""
-    return _scope_authority(ctx)[0] == "root"
+    return _scope_authority(ctx)[0] == "root" or _bound_continue_root(ctx)
 
 
 def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str]:
@@ -632,6 +663,20 @@ def _retain_focus_source(canonical: pathlib.Path, task_id: str, source: Dict[str
     return {key: ref[key] for key in ("kind", "root", "path", "size", "sha256")}
 
 
+def _offered_work_name(metadata: Dict[str, Any], work_name: Any, turn: bool) -> Tuple[str, str, str]:
+    """``(work id, cleaned name, "")``, ``("", "", why it is ignored)``, or all empty when none was offered. The work
+    is the one this root's own admission recorded, so no caller can name another."""
+    if not str(work_name or "").strip():
+        return "", "", ""
+    continuation = {} if turn else _admitted_continuation(metadata)
+    if not continuation:
+        return "", "", "only a Continue of existing work names it"
+    from ouroboros.project_naming import continued_work_name
+
+    name = continued_work_name(work_name)
+    return (str(continuation["work_id"]), name, "") if name else ("", "", "it is empty after cleanup")
+
+
 def _bound_project(root: Any, task_id: str) -> str:
     """This task's own durable Project binding; an unreadable registry binds nothing here."""
     from ouroboros.projects_registry import project_id_for_task
@@ -643,7 +688,7 @@ def _bound_project(root: Any, task_id: str) -> str:
         return ""
 
 
-def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
+def _update_focus(ctx: ToolContext, text: str, source_ref: Any, work_name: Any = "") -> str:
     """Publish one short authored focus onto this live root's existing records."""
     metadata = getattr(ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -654,15 +699,13 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
             "_presence_origin": getattr(ctx, "_presence_origin", None)}
     authority, _ = _scope_authority(ctx)
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
-    import pathlib
-
-    canonical = pathlib.Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or getattr(ctx, "drive_root", "")))
+    canonical = _focus_root(ctx)
     # A live inline Presence speaker a move bound to a Project is that Project's work: its focus is
     # dated context there, never authority, a new principal or speech outside (``presence_turn_is_live``).
     inline = bool(authority == "presence" and is_presence_task(task) and task_id
                   and metadata.get("presence_event_identity") and not metadata.get("parent_task_id")
                   and _bound_project(canonical, task_id))
-    if not inline and (authority != "root" or is_presence_task(task)):
+    if not inline and (authority != "root" or is_presence_task(task)) and not _bound_continue_root(ctx):
         return "⚠️ TOOL_FORBIDDEN (update_focus): only an independent project/root task may publish focus"
     if not task_id:
         return "⚠️ TOOL_ARG_ERROR (update_focus): task_id is required"
@@ -734,6 +777,17 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
                 return None
         return fields
 
+    work_id, offered, naming_refused = _offered_work_name(metadata, work_name, direct or inline)
+    named = ""
+
+    def _claim_name(txn: Any, _current: Dict[str, Any], document: Dict[str, Any]) -> Dict[str, Any]:
+        """The focus write ``_project`` just accepted for the live attempt and the name land in one transaction."""
+        nonlocal named, naming_refused
+        from ouroboros.project_naming import adopt_continued_work_name
+
+        named, naming_refused = adopt_continued_work_name(txn, work_id, offered)
+        return {**document, "suggested_name": f"{CONTINUE_TITLE_PREFIX}{named[:80]}"} if named else document
+
     # A direct turn is owned by the live ingress actor rather than the queue.
     # Hold its existing admission lock across the liveness check and the locked
     # result write, then require the same actor projection to accept the stamp.
@@ -750,7 +804,8 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
             current = load_task_result(canonical, task_id)
             if not isinstance(current, dict) or not _live(current):
                 return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
-            stored = write_task_result(canonical, task_id, STATUS_RUNNING, focus=focus, _field_projector=_project)
+            stored = write_task_result(canonical, task_id, STATUS_RUNNING, focus=focus, _field_projector=_project,
+                                       _last_word=_claim_name if offered else None)
             if not isinstance(stored, dict) or not _live(stored):
                 return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
             if stored.get("focus") != focus:
@@ -773,7 +828,16 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
             # the durable carrier on its next read.
             return ("⚠️ FOCUS_PROJECTION_UNAVAILABLE (update_focus): focus was stored, "
                     "but the live projection notification could not be queued")
-    return f"OK: focus[{task_id}] updated (authored_at={focus['authored_at']})."
+        if named:  # the first record's card and this one's, where either is open; a reload reads the records
+            for target, shown in ((work_id, named), (task_id, str(stored.get("suggested_name") or ""))):
+                try:
+                    event_queue.put_nowait({"type": "task_named", "task_id": target, "suggested_name": shown})
+                except Exception:
+                    log.debug("work name event failed for %s", target, exc_info=True)
+    receipt = f"OK: focus[{task_id}] updated (authored_at={focus['authored_at']})."
+    if named:
+        return f"{receipt} Work name set: {named!r}."
+    return f"{receipt} work_name ignored: {naming_refused}." if naming_refused else receipt
 
 
 def journal_tail_digest(project_id: str, *, limit: int = 40) -> str:
@@ -847,6 +911,9 @@ def get_tools() -> List[ToolEntry]:
                     "type": "object",
                     "properties": {
                         "text": {"type": "string", "description": "Short focus text (<=280 chars)."},
+                        "work_name": {"type": "string", "description": (
+                            "Only when your Continue work order says the work has no name yet: a short name of its "
+                            "subject that stays across Continues, never its status. The answer says if it was taken.")},
                         "source_ref": {
                             "type": "object",
                             "description": "Reference to an existing bounded reader; this carries no content or path.",
@@ -867,7 +934,7 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["text", "source_ref"],
                 },
             },
-            lambda ctx, text, source_ref: _update_focus(ctx, text, source_ref),
+            lambda ctx, text, source_ref, work_name="": _update_focus(ctx, text, source_ref, work_name),
             timeout_sec=15,
         ),
         ToolEntry(

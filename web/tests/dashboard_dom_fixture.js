@@ -61,7 +61,9 @@ export class NodeStub {
             if (!tag) continue;
             const node = new NodeStub(tag);
             for (const attr of token.slice(tag.length + 1, -1).matchAll(/([\w-]+)(?:="([^"]*)")?/g)) {
-                node.setAttribute(attr[1], attr[2] ?? '');
+                const value = (attr[2] ?? '').replace(/&quot;|&#39;|&lt;|&gt;|&amp;/g,
+                    (entity) => ({ '&quot;': '"', '&#39;': "'", '&lt;': '<', '&gt;': '>', '&amp;': '&' })[entity]);
+                node.setAttribute(attr[1], value);
             }
             stack.at(-1).appendChild(node);
             if (!['input', 'br', 'hr', 'img', 'meta', 'link', 'wbr'].includes(tag)) stack.push(node);

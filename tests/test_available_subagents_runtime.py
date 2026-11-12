@@ -414,10 +414,9 @@ def test_real_task_context_bootstraps_before_context_and_any_llm(monkeypatch, tm
         order.append("physical_start")
         or delegate_result({"status": "started", "run_id": "run-pre-start"})
     ))
-    monkeypatch.setattr(
-        supervision, "supervised_wait",
-        lambda *_a, **_kw: pytest.fail("the host must not wait inside bootstrap (owner 1=A)"),
-    )
+    for name in ("run_wait", "_publish"):  # neither a wait nor a wake of one
+        monkeypatch.setattr(supervision, name, lambda *_a, **_kw: pytest.fail(
+            "the host must not wait inside bootstrap (owner 1=A)"))
     def build_context(**_kwargs):
         order.append("context_build")
         return [], {}
@@ -785,10 +784,9 @@ def test_actor_first_bootstrap_adopts_existing_handoff_without_new_start(monkeyp
     monkeypatch.setattr(recovery, "adopt_handoff", lambda _ctx, _task: {
         "status": "adopted", "run_id": "run-recovered",
     })
-    monkeypatch.setattr(
-        "ouroboros.delegate_supervision.supervised_wait",
-        lambda *_a, **_kw: pytest.fail("the host must not wait inside bootstrap (owner 1=A)"),
-    )
+    for name in ("run_wait", "_publish"):  # neither a wait nor a wake of one
+        monkeypatch.setattr("ouroboros.delegate_supervision." + name, lambda *_a, **_kw: pytest.fail(
+            "the host must not wait inside bootstrap (owner 1=A)"))
     dispatch = SimpleNamespace(
         blocked=False,
         executor="harness",
@@ -836,31 +834,36 @@ def test_atomic_start_attempt_does_not_trigger_legacy_no_delegate_nudges(tmp_pat
     assert _forced_delegation_note(ctx, {"tool_calls": []}) == ""
 
 
-def test_quiet_windows_renew_and_terminal_plus_mailbox_coalesce(tmp_path):
-    from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_supervision import supervised_wait
+def test_a_quiet_run_keeps_the_sleep_and_its_terminal_plus_mail_coalesce_into_one_wake(tmp_path):
+    """A quiet run keeps a delegate_wait's sleep (nothing renews it and nothing reads it); its terminal and mail that
+    landed beside it are ONE wake: one read of the run, the mail whole in it."""
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds, model_sleep
     from ouroboros.owner_mailbox import write_task_message
+    from tests._run_wait_shared import held_run, wake_now
 
     ctx = SimpleNamespace(
         task_id="child1",
+        task_attempt=1,
         drive_root=tmp_path,
         budget_drive_root=str(tmp_path),
         task_metadata={"configured_subagent": {"config_fingerprint": "fp"}},
     )
+    held_run(tmp_path, "run-1", "child1")
+    chosen = ds._choice({"runs": ["run-1"]})
+    assert model_sleep.wake_reason(ctx, chosen) == ""
+    write_task_message(
+        tmp_path, "new direction", "child1", source_task_id="parent1",
+        provenance="ancestor_task", msg_id="m1",
+    )
+    held_run(tmp_path, "run-1", "child1", ended="succeeded")
     calls = []
 
     def wait_once(_ctx, run_id, _sec, since):
         calls.append((run_id, since))
-        if len(calls) < 3:
-            return json.dumps({"status": "no_progress", "run_id": run_id, "last_seq": len(calls)})
-        write_task_message(
-            tmp_path, "new direction", "child1", source_task_id="parent1",
-            provenance="ancestor_task", msg_id="m1",
-        )
         return json.dumps({"status": "completed", "run_id": run_id, "last_seq": 3})
 
-    out = json.loads(supervised_wait(ctx, "run-1", wait_once=wait_once).text)
-    assert len(calls) == 3
+    out = json.loads(wake_now(ctx, "run-1", wait_once=wait_once, woke_by=model_sleep.wake_reason(ctx, chosen)).text)
+    assert len(calls) == 1
     assert out["status"] == "completed"
     [message] = out["wake_events"]
     assert message["msg_id"] == "m1"
@@ -872,15 +875,13 @@ def test_quiet_windows_renew_and_terminal_plus_mailbox_coalesce(tmp_path):
         json.loads(line)["type"]
         for line in custody.event_log_path(tmp_path).read_text().splitlines()
     }
-    assert {
-        "delegate_supervision_wait_entered",
-        "delegate_supervision_wait_renewed",
-        "delegate_supervision_wake_pending",
-    } <= event_types
+    assert "delegate_supervision_wake_pending" in event_types
+    assert not {"delegate_supervision_wait_entered", "delegate_supervision_wait_renewed"} & event_types
 
 
 def test_pending_wake_replays_until_post_injection_ack(tmp_path):
-    from ouroboros.delegate_supervision import acknowledge_pending_wake, supervised_wait
+    from ouroboros.delegate_supervision import acknowledge_pending_wake, run_wait
+    from tests._run_wait_shared import wake_now
     from ouroboros.owner_mailbox import (
         acknowledged_task_message_ids, write_task_message,
     )
@@ -892,7 +893,7 @@ def test_pending_wake_replays_until_post_injection_ack(tmp_path):
         tmp_path, "full durable direction", "child1", source_task_id="parent1",
         provenance="ancestor_task", msg_id="m1",
     )
-    first = json.loads(supervised_wait(
+    first = json.loads(wake_now(
         ctx, "run-1",
         wait_once=lambda *_a, **_k: json.dumps({
             "status": "no_progress", "run_id": "run-1", "last_seq": 4,
@@ -900,12 +901,7 @@ def test_pending_wake_replays_until_post_injection_ack(tmp_path):
     ).text)
     assert first["wake_events"][0]["text"] == "full durable direction"
     assert acknowledged_task_message_ids(tmp_path, "child1") == set()
-    replay = json.loads(supervised_wait(
-        ctx, "run-1",
-        wait_once=lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("an unacknowledged wake must replay before another poll")
-        ),
-    ).text)
+    replay = json.loads(run_wait(ctx, "run-1").text)  # replayed before any sleep is armed or the run read
     assert replay.pop("replay_of")["fresh_observation"] is False and replay == first  # marked, else as published
     assert acknowledge_pending_wake(ctx, replay)
     assert acknowledged_task_message_ids(tmp_path, "child1") == {"m1"}
@@ -916,6 +912,7 @@ def test_one_shot_checkpoint_is_reasoned_and_consumed(monkeypatch, tmp_path):
     from ouroboros.contracts.task_contract import build_task_contract
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
     import ouroboros.delegate_supervision as supervision
+    from tests._run_wait_shared import held_run, scripted_reads
 
     now = [100.0]
     monkeypatch.setattr(supervision.time, "time", lambda: now[0])
@@ -938,9 +935,11 @@ def test_one_shot_checkpoint_is_reasoned_and_consumed(monkeypatch, tmp_path):
         now[0] += 2
         return json.dumps({"status": "no_progress", "run_id": run_id, "last_seq": 0})
 
-    out = json.loads(supervision.supervised_wait(
-        ctx, "run-1", checkpoint_after_sec=1,
-        checkpoint_reason="inspect a promised artifact", wait_once=wait_once,
+    held_run(tmp_path, "run-1", "child1", route="")
+    scripted_reads(monkeypatch, wait_once)
+    monkeypatch.setattr(supervision, "_TICK_SEC", 0.05)  # the in-slot wait's beat (no continuation owner here)
+    out = json.loads(supervision.run_wait(
+        ctx, "run-1", checkpoint_after_sec=1, checkpoint_reason="inspect a promised artifact",
     ).text)
     wake_id = out.pop("supervision_wake_id")
     assert wake_id
@@ -953,15 +952,10 @@ def test_one_shot_checkpoint_is_reasoned_and_consumed(monkeypatch, tmp_path):
         "status": "inspection_checkpoint", "run_id": "run-1",
         "reason": "inspect a promised artifact", "last_seq": 0,
     }
-    state = supervision.supervision_checkpoint(ctx)["runs"]["run-1"]
-    assert state["checkpoint"]["consumed"] is True
-    assert state["checkpoint"]["consumed_by"] == "scheduled_checkpoint"
-    event_types = [
-        json.loads(line)["type"]
-        for line in custody.event_log_path(tmp_path).read_text().splitlines()
-    ]
-    assert "delegate_supervision_checkpoint_scheduled" in event_types
-    assert "delegate_supervision_checkpoint_consumed" in event_types
+    events = [json.loads(line) for line in custody.event_log_path(tmp_path).read_text().splitlines()]
+    assert "delegate_supervision_checkpoint_scheduled" in [event["type"] for event in events]
+    [consumed] = [event for event in events if event["type"] == "delegate_supervision_checkpoint_consumed"]
+    assert consumed["consumed_by"] == "scheduled_checkpoint" and consumed["reason"] == "inspect a promised artifact"
 
 
 def test_task_message_provenance_never_spoofs_owner(tmp_path):

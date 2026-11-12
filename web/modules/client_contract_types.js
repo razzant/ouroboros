@@ -316,7 +316,7 @@
  * @property {string[]=} query
  * @property {string[]=} headers  // request headers the handler reads; a trailing "!" marks a required one
  * @property {ContractBody=} request
- * @property {Object.<string,ContractBody>=} responses  // by HTTP status
+ * @property {Object.<string,ContractBody>=} responses  // HTTP status, then 4xx/5xx for unlisted errors
  * @property {string=} note
  */
 

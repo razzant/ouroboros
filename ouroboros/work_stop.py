@@ -18,6 +18,9 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 SELECTION_KEY = "_resume_selection"
+# The accepted selection an application stop interrupted (``declare_stop``), kept in that stop's recovery custody
+# and bound to its source: evidence that the work was resumed, never a dispatch carrier.
+INTERRUPTED_SELECTION = "interrupted_selection"
 SELECTION_BINDING = (
     "root_task_id", "root_resume_basis", "root_grant_id", "root_resume_generation",
     "fence_id", "root_fence_id", "grant_id", "grant_generation",
@@ -530,6 +533,8 @@ def declare_stop(task: dict, record: dict) -> dict:
 
     Explicit Pause releases its authorized prior decision under the queue lock.
     Other producers cannot silently erase it while publishing custody facts.
+    An application stop keeps the selection it replaces in the recovery custody it
+    holds (``interrupted_selection``); every other stop supersedes the one kept there.
     """
     policy = record_policy(record)
     if policy["cause"] == "refusal":
@@ -539,9 +544,27 @@ def declare_stop(task: dict, record: dict) -> dict:
     if door and not door_can_replace(task, record["reason"]) or prior and not door:
         return prior or current_stop(task)
     task.pop("_budget_pause_resume", None)
-    task.pop(SELECTION_KEY, None)
+    selection, recovery = task.pop(SELECTION_KEY, None), task.get("_working_recovery")
+    if isinstance(recovery, dict) and policy["cause"] == "app_stop":
+        if isinstance(selection, dict) and recovery.get("source_task_id") == task.get("id"):
+            task["_working_recovery"] = {**recovery, INTERRUPTED_SELECTION: {
+                **selection, "source_task_id": recovery["source_task_id"], "from_attempt": recovery.get("from_attempt")}}
+    elif isinstance(recovery, dict) and INTERRUPTED_SELECTION in recovery:
+        task["_working_recovery"] = {key: value for key, value in recovery.items() if key != INTERRUPTED_SELECTION}
     task["_budget_pause_hold"] = record
     return record
+
+
+def interrupted_selection(task: dict | None) -> dict:
+    """The selection an application stop interrupted (``declare_stop``) while the row's recovery custody still holds
+    that same source, task and attempt; ``{}`` otherwise. History of a Resume, never a door or a dispatch carrier."""
+    task = task if isinstance(task, dict) else {}
+    recovery = task.get("_working_recovery") if isinstance(task.get("_working_recovery"), dict) else {}
+    kept = recovery.get(INTERRUPTED_SELECTION)
+    if not (isinstance(kept, dict) and kept.get("source_task_id") == recovery.get("source_task_id") == task.get("id")
+            and kept.get("from_attempt") == recovery.get("from_attempt")):
+        return {}
+    return kept
 
 
 def stop_record(reason: str, *, held_at: str, detail: str = "", by: dict | None = None,

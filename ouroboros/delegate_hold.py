@@ -5,14 +5,15 @@ one of its metered rounds dies ``provider_outcome_unknown`` (dispatched request,
 no terminal provider fact — never resent, per custody doctrine) while that leaf
 is alive and healthy, terminalizing the nanny used to cancel the leaf through
 the cause-blind terminal cleanup. Instead, the round gate latches a durable
-hold and the NEXT round top parks the task in the same $0, provider-independent
-``supervised_wait`` the nanny would have chosen — owner mail, controls, and the
-idle-rail lease all stay live there. A meaningful leaf wake resumes the task
-with a NEW round whose transcript carries the wake receipt: materially new
-input, so the unknown request itself is never re-transmitted (owner-ratified
-doctrine revision; see docs/ARCHITECTURE.md). Control wakes (Stop, deadline,
-finalize_now) exit through the existing unknown no-resend terminal with zero
-further provider calls.
+hold and the NEXT round top holds the task on its leaves without a model call:
+a wake already there is published at once, else the host arms the task's own
+warm sleep on those runs (``delegate_supervision.arm_hold_sleep``), which holds
+no slot; owner mail and controls wake it as they wake any sleep. A meaningful
+leaf wake resumes the task with a NEW round whose transcript carries the wake
+receipt: materially new input, so the unknown request itself is never
+re-transmitted (owner-ratified doctrine revision; see docs/ARCHITECTURE.md).
+Control wakes (Stop, deadline, finalize_now) exit through the existing unknown
+no-resend terminal with zero further provider calls.
 
 Eligibility is per run: a configured-session nanny may hold on any owned
 ordinary leaves with a positive non-terminal read and no containment fault.
@@ -32,12 +33,14 @@ from ouroboros import delegate_custody as custody
 from ouroboros.config import NETWORK_WAIT_BACKOFF_START_SEC
 from ouroboros.delegate_shared import delegate_payload
 from ouroboros.delegate_supervision import (
+    _TICK_SEC,
     UnknownHoldUnreadable,
     _control_wakes,
     acknowledge_pending_wake,
+    arm_hold_sleep,
     clear_unknown_hold,
+    hold_wake,
     read_unknown_hold,
-    supervised_wait,
     supervision_checkpoint,
     write_unknown_hold,
 )
@@ -55,7 +58,7 @@ _NON_WAKE_STATUSES = frozenset({"refused", "fault"})
 # Inter-cycle backoff floor: repeated unknown outcomes on resume rounds must not
 # tighten into a paid dispatch loop. Deliberately BELOW the 60s idle-rail floor
 # so this plain bounded sleep can never outlast the silence window (the interruptible
-# owner surface is the supervised_wait right after it).
+# owner surface is the hold's sleep right after it).
 _HOLD_BACKOFF_CAP_SEC = 15.0
 _ACK_ATTEMPTS = 3
 
@@ -269,6 +272,29 @@ def _append_wake_receipt(
     })
 
 
+def round_top(tools: Any, limit_ctx: Any, controls: Dict[str, Any], emit_progress: Any, *, new_input: bool) -> Any:
+    """The loop's round-top hold (``hold_step`` over this round's ``limit_ctx``): ``""`` or ``"resume"`` dispatch
+    the round; ``"park"`` once the hold's host-armed sleep was parked here without a model call (its wake is the
+    next round top's); else the unknown no-resend terminal's ``(text, usage, trace)``, with zero provider calls."""
+    step = hold_step(tools, controls=controls, messages=limit_ctx.messages, drive_logs=limit_ctx.drive_logs,
+                     task_id=limit_ctx.task_id, emit_progress=emit_progress, new_input=new_input)
+    if step == "park":
+        from ouroboros.owner_wait import wait_after_tools
+
+        wait_after_tools(tools._ctx, limit_ctx.messages, limit_ctx.llm_trace, limit_ctx.accumulated_usage,
+                         limit_ctx.round_idx, limit_ctx.tool_schemas, limit_ctx.owner_msg_seen)
+    if step != "terminal":
+        return step
+    from ouroboros.loop_delivery import _merge_finalization_trace
+    from ouroboros.loop_round_limits import _handle_provider_unavailable
+
+    # The no-call decision reads the usage record, not the error_kind argument: stamp first.
+    limit_ctx.accumulated_usage["_last_llm_error_kind"] = "provider_outcome_unknown"
+    text, usage, forced_trace = _handle_provider_unavailable(limit_ctx, error_kind="provider_outcome_unknown")
+    _merge_finalization_trace(limit_ctx.llm_trace, forced_trace)
+    return text, usage, limit_ctx.llm_trace
+
+
 def hold_step(
     tools: Any, *, controls: Dict[str, Any], messages: List[Dict[str, Any]],
     drive_logs: pathlib.Path, task_id: str, emit_progress: Any,
@@ -277,9 +303,11 @@ def hold_step(
     """Round-top step for a latched hold.
 
     Returns "" (no latch — dispatch normally), "resume" (material new input in
-    the transcript; dispatch this round), or "terminal" (control wake, refused
-    wait, or failed acknowledgement — the caller takes the existing unknown
-    no-resend terminal; zero provider calls).
+    the transcript; dispatch this round), "park" (the host armed the hold's own
+    warm sleep: the caller parks it now, without a model call, and its wake is
+    the next round top's), or "terminal" (control wake, refused wait, or failed
+    acknowledgement — the caller takes the existing unknown no-resend terminal;
+    zero provider calls).
     """
     ctx = getattr(tools, "_ctx", None)
     if ctx is None or not _configured_session(ctx):
@@ -328,16 +356,30 @@ def hold_step(
             hold_cycles=cycles, detail="owner_input", attempt_id=attempt_id,
         )
         return "resume"
-    if cycles > 1:
+    woke, ctx._delegate_hold_parked = bool(getattr(ctx, "_delegate_hold_parked", False)), False
+    if cycles > 1 and not woke:  # a park already spaced this cycle's dispatch
         time.sleep(min(
             NETWORK_WAIT_BACKOFF_START_SEC * (2.0 ** min(cycles - 1, 4)),
             _HOLD_BACKOFF_CAP_SEC,
         ))
-    # The supervising wait answers with the family's NATIVE result; its own JSON
-    # payload is what the hold judges. A shape this cannot read leaves the payload
-    # empty, which fails the acknowledgement below into the honest no-resend
-    # terminal — never an escape that would let the cleanup cancel a healthy leaf.
-    wake = supervised_wait(ctx, run_ids if len(run_ids) > 1 else run_id)
+    # The wake answers with the family's NATIVE result; its own JSON payload is
+    # what the hold judges. A shape this cannot read leaves the payload empty,
+    # which fails the acknowledgement below into the honest no-resend terminal —
+    # never an escape that would let the cleanup cancel a healthy leaf.
+    wake = hold_wake(ctx, run_ids, woke=woke)
+    if wake is None and callable(getattr(ctx, "owner_wait_callback", None)):
+        try:
+            armed = str(arm_hold_sleep(ctx, run_ids).get("reason") or "")
+        except (TypeError, ValueError):
+            log.warning("Hold sleep of %s not armed; it holds in place", task_id, exc_info=True)
+            armed = ""
+        if armed == "sleep_armed":
+            ctx._delegate_hold_parked = True  # its wake publishes at the next round top
+            return "park"
+        wake = hold_wake(ctx, run_ids, woke=True) if armed == "ready" else None  # ready while it was armed
+    while wake is None:  # no continuation owner to sleep under: hold in place on the same sources
+        time.sleep(_TICK_SEC)
+        wake = hold_wake(ctx, run_ids)
     try:
         payload = delegate_payload(wake)
     except (AttributeError, TypeError, ValueError):

@@ -50,7 +50,12 @@ test('two different minutes that read alike across a DST fallback carry their zo
     const now = new Date('2026-11-01T12:00:00Z');
     const [end, added] = ['2026-11-01T05:30:10Z', '2026-11-01T06:30:40Z'];
     const note = terminalTimeNote(ended(end), added, now);
-    assert.equal(note.short, 'Ended 01:30 EDT · added 01:30 EST');
+    const zone = value => new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+        .formatToParts(new Date(value)).find(part => part.type === 'timeZoneName')?.value;
+    const [endZone, addedZone] = [end, added].map(zone);
+    assert.ok(endZone && addedZone, 'both instants have a zone label');
+    assert.notEqual(endZone, addedZone, 'the fallback instants must remain distinguishable');
+    assert.equal(note.short, `Ended 01:30 ${endZone} · added 01:30 ${addedZone}`);
     assert.equal(note.full, `Task ended ${at(end, 'short')} · Notification added ${at(added, 'short')}`);
 });
 

@@ -267,8 +267,9 @@ Ouroboros binds Ouroboros as the author, never the subject repository.
   answers are not one) or an internal-only refactor stays advisory. Disclosure
   alone (commit message, changelog) is not acceptance.
 - The `Ouroboros Body Layer` sets the severity of its own items and names the
-  body's addresses for items 5-9. Its editorial calibration of item 5
-  applies only to the body; other core severities remain unchanged.
+  body's addresses for items 4-9. Its replay note for item 4 and its editorial
+  calibration of item 5 apply only to the body; other core severities remain
+  unchanged.
 
 ### Retry convergence for tests_affected
 
@@ -383,6 +384,13 @@ Ownership` section is delivered beside them.
 
 ### Body addresses for core items
 
+- Item 4 (`tests_affected`): a change to what the Safety Supervisor flags (its
+  prompt `prompts/SAFETY.md`, the evidence its check reads, or which calls reach
+  it) is not "only docs changed". Its evidence is a replay of recorded checks
+  through the configured checker in both directions, with the counts in the
+  commit message or the pull request: the wrong flags that clear and the right
+  flags that stay. Its absence is advisory; where no checks are recorded, the
+  change says so.
 - Item 5 (`architecture_doc`): the documents are `docs/ARCHITECTURE.md` /
   `docs/DEVELOPMENT.md` and their owning physical chapters; the rule is P6
   (present-tense map) and P7 (one home per fact) — see DEVELOPMENT.md
@@ -1020,7 +1028,7 @@ stay stable across revisions.
 | 4 | deferrals | Is anything deferred that will be expensive to change once the work has started? |
 | 5 | evidence sufficiency | Is the evidence enough to judge? If not, read what is missing with your own tools when you have them, or name exactly what is missing — a locator, or a question for the mind — instead of inventing a gap. |
 | 6 | direction and health | Is this the right way to the outcome? Does an existing owner, primitive or contract in the subject already give the same owner-chosen result? Would the plan add a second home for a fact, a duplicate mechanism, state or a background loop nothing needs, or a concept a reader must trace across files (why it matters: DEVELOPMENT "Pragmatic SOLID")? Such an objection names all three: the plan element that adds the cost, the existing simpler path to the same owner-chosen outcome, and the concrete cost. Without all three it is advice, and a preference is advice. A method the owner fixed is not objectionable this way. For a new capability or control: is it on the lowest rung that delivers it, and does a new seam ship with its first consumer (DEVELOPMENT "Capability placement")? Offering a lower rung is advice, also where the owner fixed the method. |
-| 7 | governance (body plans only) | Does the intention contradict BIBLE.md or a frozen contract? Name the principle or contract. A plan that narrows what an integrating focus holds — other rooms, time, people's words — to save room or money is a P1 horizon change, not a saving: removing what carries no meaning and the mind's own folding come first, the option that keeps the horizon leads, and the narrowing needs a recorded horizon decision; asking the owner does not make it the recommendation. |
+| 7 | governance (body plans only) | Does the intention contradict BIBLE.md or a frozen contract? Name the principle or contract. A plan that narrows what an integrating focus holds — other rooms, time, people's words — to save room, money or time is a P1 horizon change, not a saving: removing what carries no meaning and the mind's own folding come first, the option that keeps the horizon leads, and the narrowing needs a recorded horizon decision; asking the owner does not make it the recommendation. |
 
 ### Height rule — what is an objection
 
