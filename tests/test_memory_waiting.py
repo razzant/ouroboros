@@ -111,6 +111,47 @@ def test_waiting_readers_page_all_ids_and_render_from_a_frozen_snapshot(tmp_path
     assert line(snapshot) == before
 
 
+def test_the_line_counts_clean_passes_from_published_facts_and_the_list_reads_an_older_marks_record(tmp_path, monkeypatch):
+    """Late reviews in the waiting line: how many are a PASS with nothing to read and how many carry no outcome
+    facts, from the captured marks alone; the list prints every mark's outcome and reads an older mark's record."""
+    from ouroboros import memory_waiting, review_ledger
+    from ouroboros.late_review_marks import outcome_facts
+    from tests.test_late_review_marks import _settled
+
+    rooms = shared.world(tmp_path)
+    ctx = _ctx(tmp_path, "root0001")
+    record_id = "rl-20261017T000000-bbbbbbbbbbbb"
+    for task, chat, extra in (("main1", 1, {"outcome": outcome_facts(_settled("PASS"))}),
+                              ("bound", 1, {"outcome": outcome_facts(_settled("PASS", advisory=1))}),
+                              ("beta1", rooms["beta"], {"subject": {"record_id": record_id}})):
+        assert publish_late_review(tmp_path, {**_record(tmp_path, task, chat, "late words"), **extra}).status == "saved"
+    review_ledger.ledger_dir(tmp_path, create=True)
+    review_ledger.record_path(tmp_path, record_id).write_text(json.dumps(_settled("PASS")), encoding="utf-8")
+
+    with monkeypatch.context() as patch:  # the line is built from the captured marks: no record is read for it
+        patch.setattr(review_ledger, "load_record", lambda *a, **kw: pytest.fail("the line reads no record"))
+        snapshot = view(tmp_path)
+        facts, shown = snapshot.waiting["late_reviews"], line(snapshot)
+    assert (facts["count"], facts["in_rooms"], facts["clean_pass"], facts["unrecorded"]) == (3, 3, 1, 1)
+    assert "late reviews 3 in 3 rooms, oldest " in shown
+    assert (", 1 PASS with no findings, 1 with no outcome kept on the mark (the list reads their records); "
+            "memory_read(room_id='late_reviews'") in shown
+    assert ", 1 PASS with no findings; memory_read(room_id='late_reviews'" in memory_waiting.text({
+        **snapshot.waiting, "late_reviews": {**facts, "unrecorded": 0}}), "every mark keeps its outcome: one fact"
+    older = {**snapshot.waiting, "late_reviews": {k: v for k, v in facts.items() if k not in ("clean_pass", "unrecorded")}}
+    assert "PASS with no findings" not in memory_waiting.text(older), "a view captured before the counts keeps its words"
+    assert "PASS with no findings" not in memory_waiting.text({**snapshot.waiting, "late_reviews": {
+        **facts, "count": 0, "clean_pass": 0, "unrecorded": 0}}), "nothing waits: nothing to count"
+
+    listed = _memory_read(ctx, room_id="late_reviews")
+    assert listed.splitlines()[0] == ("late reviews: 3 in 3 rooms; 2 PASS with no findings; 0 PASS commit reviews with "
+                                      "no commit under that review and no merged receipt of their task")
+    for task, words in (("main1", "PASS, no findings"), ("bound", "PASS, 1 advisory"), ("beta1", "PASS, no findings")):
+        assert f"result review of task {task}; {words}; memory_read(node_id='late-review-" in listed, task
+    review_ledger.record_path(tmp_path, record_id).unlink()
+    assert "result review of task beta1; outcome not recorded; memory_read(" in _memory_read(ctx, room_id="late_reviews")
+
+
 @pytest.mark.parametrize("error", [ValueError, OSError, StoreLost])
 def test_unavailable_project_census_keeps_readable_memory_and_other_waiting_facts(tmp_path, monkeypatch, error):
     shared.world(tmp_path)

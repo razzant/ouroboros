@@ -498,8 +498,6 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     # skill payload; an orphan capture may belong to an unrelated earlier task,
     # so a read-only-children rule alone does not cover this path
     "integrate_delegated_patch", "integrate_subagent_patch",
-    # writes a local task artifact; Observe does not grant general file writes
-    "generate_evolution_stats",
     # the world beyond the repository: forms, skills, project notes, the owner's interface wording
     # and the update description shown to the owner
     "browser_action", "submit_skill_to_hub", "toggle_skill", "skill_owner_action",

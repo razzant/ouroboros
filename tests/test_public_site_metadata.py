@@ -29,6 +29,8 @@ INDEXABLE = {
     "/install/": SITE / "install" / "index.html",
     "/benchmarks/": SITE / "benchmarks" / "index.html",
     "/history/first-48-hours/": SITE / "history" / "first-48-hours" / "index.html",
+    "/llm-rating/": SITE / "public" / "llm-rating" / "index.html",
+    "/llm-rating/editions.html": SITE / "public" / "llm-rating" / "editions.html",
 }
 
 
@@ -142,6 +144,54 @@ def test_install_page_has_version_bound_direct_downloads_before_advanced_setup()
 def test_generated_public_files_match_source():
     for name in ("CNAME", "robots.txt", "sitemap.xml", "llms.txt", "install.json"):
         assert (SITE / "public" / name).read_bytes() == (DOCS / name).read_bytes()
+
+
+def test_readme_and_install_page_name_the_factory_spending_limits():
+    """What a newcomer reads before installing is the factory limits themselves, in one paragraph on every surface."""
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS as defaults
+
+    total, task, daily = (int(defaults[key]) for key in (
+        "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "OUROBOROS_CONSCIOUSNESS_DAILY_USD"))
+    paragraph = (f"out of the box, new paid work stops once known spend reaches ${total} in total, or ${task} for one "
+                 "task and its helpers; charges already in flight can pass a limit. Background consciousness stays off "
+                 f"until you start it, and then has ${daily} for each 24 hours. Settings changes all three.")
+    for path in (REPO / "README.md", SITE / "install" / "index.html", DOCS / "install" / "index.html"):
+        assert paragraph in path.read_text(encoding="utf-8"), path.relative_to(REPO)
+
+
+def test_rating_publication_is_complete_and_source_bound():
+    source = SITE / "public" / "llm-rating"
+    generated = DOCS / "llm-rating"
+    files = {p.relative_to(source) for p in source.rglob("*") if p.is_file()}
+    assert files == {p.relative_to(generated) for p in generated.rglob("*") if p.is_file()}
+    assert files
+    for path in files:
+        assert (source / path).read_bytes() == (generated / path).read_bytes(), path
+    data = json.loads((source / "data/latest.json").read_text(encoding="utf-8"))
+    assert data["status"] == "final"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", data["published"])
+    archived = source / "data/editions" / data["edition"] / "edition.json"
+    assert archived.read_bytes() == (source / "data/latest.json").read_bytes()
+    groups = {group["id"]: group for group in data["groups"]}
+    works = {work["id"]: work for work in data["works"]}
+    models = {model["id"]: model for model in data["models"]}
+    for cell in data["cells"]:
+        if cell["grade"] is None:
+            continue
+        reason = cell.get("note")
+        if not reason:
+            group = groups[works[cell["work"]]["group"]]
+            assert group["main"], (cell["model"], cell["work"])
+            axis = models[cell["model"]]["groups"][group["id"]]
+            assert axis["grade"] == cell["grade"]
+            reason = axis["reason"]
+        assert all(reason.get(language, "").strip() for language in ("en", "ru"))
+    for path in (SITE / "index.html", DOCS / "index.html"):
+        assert 'href="/llm-rating/"' in path.read_text(encoding="utf-8")
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    for theme in ("light", "dark"):
+        image = f"docs/llm-rating/card/latest-en-{theme}.png"
+        assert image in readme and (REPO / image).is_file()
 
 
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():

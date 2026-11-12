@@ -275,6 +275,23 @@ test('the copied client can recover a broken selected setup without its iframe J
 // A separately hosted page reaches the app without the gate's login page, and an
 // open page outlives its session: the gate's 401 hands over to its own sign-in.
 
+test('a completion that needs a restart names the chosen access level by its label, as the wizard screen does', async () => {
+    const dom = installDom({ coreOwned: true });
+    try {
+        globalThis.fetch = async () => ({ status: 200, ok: true });
+        await dom.init();
+        for (const handler of dom.listeners) handler({
+            origin: window.location.origin,
+            data: { type: 'ouroboros:onboarding-complete', restart_required: true, runtime_mode: 'cyber_pro', runtime_label: 'Cyber Pro' },
+        });
+        const card = overlayIn(dom.body).innerHTML;
+        assert.match(card, /Cyber Pro access applies from the next start\. Until you restart Ouroboros, it keeps the access level it started with\./);
+        assert.doesNotMatch(card, /cyber_pro|<code>/, 'the stored id is not what a person chose');
+    } finally {
+        dom.restore();
+    }
+});
+
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 test('a 401 readiness answer opens the gate sign-in returning here, never the dead-end card', async () => {

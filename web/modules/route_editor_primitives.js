@@ -7,6 +7,7 @@ import { accountRows, accountName, accountModelUnsupported } from './claudexor_s
 import { formatRelativeAge } from './ui_helpers.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { fmt, tr } from './i18n.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
 
 export const ROUTE_KIND_API_MODEL = 'api_model';
@@ -291,6 +292,32 @@ function routeCatalogItems(route, items = []) {
         && (!pin || !item?.credential_profile_id || item.credential_profile_id === pin));
 }
 
+// A dollar figure as the catalog states it, to four decimals and in cents at least: $4, $2.50, $0.075.
+function usd(value) {
+    const [whole, fraction = ''] = String(Math.round(value * 1e4) / 1e4).split('.');
+    return `$${whole}${fraction ? `.${fraction.padEnd(2, '0')}` : ''}`;
+}
+
+/**
+ * A catalog's published price (`ModelCatalogItem.price`) in the owner's words, USD per 1M tokens: `$4 in / $20 out`;
+ * where input length changes it, each figure's range (`$2–4 in / $10–15 out`); `free` when every figure is zero;
+ * '' when the catalog states none, or a figure cannot be read or would print a charge as zero. `unit` names the unit.
+ * The words go through the translation seam. Words only: a price never sorts, filters or admits a model.
+ */
+export function priceWords(price, { unit = false } = {}) {
+    const tiers = Array.isArray(price?.tiers) ? price.tiers : [];
+    const figures = [price?.input, price?.output, ...tiers.flatMap((tier) => [tier?.input, tier?.output])];
+    if (!figures.every((figure) => Number.isFinite(figure) && figure >= 0 && !(figure > 0 && usd(figure) === '$0'))) return '';
+    if (figures.every((figure) => figure === 0)) return tr('model.price.free', 'free');
+    const span = (key) => {
+        const own = [price[key], ...tiers.map((tier) => tier[key])];
+        const [low, high] = [usd(Math.min(...own)), usd(Math.max(...own))];
+        return low === high ? low : `${low}–${high.slice(1)}`;
+    };
+    const params = { input: span('input'), output: span('output') };
+    return unit ? fmt('{input} in / {output} out per 1M tokens', params) : fmt('{input} in / {output} out', params);
+}
+
 /**
  * One suggestion per model: the label names the model and makes no account claim
  * (DESIGN.md §7). Availability, the reading account and its observation time are
@@ -298,22 +325,26 @@ function routeCatalogItems(route, items = []) {
  * alias resolves to (`resolved_model`, shown only while every supplying row agrees)
  * and a row known only from the engine's frozen list (`origin: "hint"` on every
  * supplying row; absent origin is live). The value stays the row id either way.
+ * The catalog's price travels apart from the label, as `meta`, while every
+ * supplying row states that same price.
  */
 export function catalogModelOptions(items = []) {
     const values = new Map();
     for (const item of items) {
         const value = String(item?.value || item?.id || item);
         const name = String(item?.name || item?.label || '');
-        if (!values.has(value)) values.set(value, { value, label: value, named: false, live: false, resolved: new Set() });
+        if (!values.has(value)) values.set(value, { value, label: value, named: false, live: false, resolved: new Set(), prices: new Set() });
         const current = values.get(value);
         if (name && !current.named) Object.assign(current, { label: name, named: true });
         if (item?.origin !== 'hint') current.live = true;
         const resolved = item?.resolved_model;
         if (typeof resolved === 'string' && resolved && resolved !== value) current.resolved.add(resolved);
+        current.prices.add(priceWords(item?.price));
     }
-    return [...values.values()].map(({ value, label, live, resolved }) => {
+    return [...values.values()].map(({ value, label, live, resolved, prices }) => {
         const named = resolved.size === 1 ? `${value} → ${[...resolved][0]}` : label;
-        return { value, label: live ? named : `${named} (shipped list)` };
+        const meta = prices.size === 1 ? [...prices][0] : '';
+        return { value, label: live ? named : `${named} (shipped list)`, ...(meta ? { meta } : {}) };
     });
 }
 

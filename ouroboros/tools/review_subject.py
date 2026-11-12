@@ -638,8 +638,8 @@ def build_triad_session_task(*, goal_section: str, scope_section: str,
     elif body_layer:
         governance_fallback = (
             "## Governance context (navigation maps)\n"
-            "Read BIBLE.md and docs/DESIGN.md in full from the repository root "
-            "(DESIGN.md is short). The maps below index "
+            "Read BIBLE.md and docs/DESIGN.md in full from the repository root. "
+            "The maps below index "
             "the other governance docs by line range; the paths are relative to the "
             "repository root — read the sections you need with your own tools.")
     else:

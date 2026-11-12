@@ -83,6 +83,8 @@ brew install --cask razzant/ouroboros/ouroboros
 
 To run tasks, choose a connected Codex account as the Main model source, configure a supported remote provider API key, or use a local GGUF model. Claude Code and Cursor subscriptions can run delegated coding and review; they are not Main model sources. The first-run wizard guides model access, review policy, and budget setup.
 
+Spending limits: out of the box, new paid work stops once known spend reaches $200 in total, or $50 for one task and its helpers; charges already in flight can pass a limit. Background consciousness stays off until you start it, and then has $20 for each 24 hours. Settings changes all three.
+
 <details>
 <summary>Optional CLI included with desktop downloads</summary>
 
@@ -124,6 +126,18 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-osworld.svg" width="375" alt="OSWorld-Verified: Ouroboros against the public leaderboard, including the matched Claude Sonnet-4.6 pair"></a>
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-cl-bench.svg" width="375" alt="CL-Bench: Ouroboros against in-context learning baselines, Claude Code, and Codex on matched models"></a>
 </p>
+
+<!-- LLM rating card, for the README at the repository root. The image paths are relative to that README and stable: every edition overwrites the same files, so this block never needs editing. -->
+<p align="center">
+  <a href="https://ouroboros-agent.ai/llm-rating/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/llm-rating/card/latest-en-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="docs/llm-rating/card/latest-en-light.png">
+      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with, with a letter for each kind of work" src="docs/llm-rating/card/latest-en-light.png" width="880">
+    </picture>
+  </a>
+</p>
+<p align="center"><a href="https://ouroboros-agent.ai/llm-rating/"><b>What Ouroboros thinks of your LLMs</b></a>: my monthly ranking of the models I work with, and who I call for what.</p>
 
 ---
 

@@ -14,6 +14,7 @@ import {
     LADDER_FOOTNOTE,
     MALFORMED_RECEIPT_CODE,
     VALUE_LADDER,
+    agentsOnlyAccess,
     agentsOutcomeText,
     agentsStepHtml,
     completionFailureNotice,
@@ -22,6 +23,7 @@ import {
     familyListHtml,
     familyStatusText,
     ladderHtml,
+    mainSourceReason,
     onboardingSettingsDraft,
     readCompletionAnswer,
     rotationDiagramSvg,
@@ -167,6 +169,32 @@ test('nothing connected: no declaration, and no outcome sentence repeating the r
     assert.equal(agentsOutcomeText([]), '');
 });
 
+test('agent-only subscriptions are told what they run and what Main needs; an unread or serving source is not', () => {
+    const codex = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
+    const blank = mainSourceReason([], codex);
+    assert.match(blank, /^Connect Codex, enter an API key/);
+
+    // The engine named its model sources and none of the connected accounts is one: a fact, with the way forward.
+    for (const [connected, names] of [[['claude'], /^Claude Code can run agents; /], [['claude', 'cursor'], /^Claude Code and Cursor can run agents; /],
+        [['claude', 'cursor', 'agy'], /^Claude Code, Cursor and Antigravity can run agents; /]]) {
+        assert.equal(agentsOnlyAccess(connected, codex), true);
+        const reason = mainSourceReason(connected, codex, { snapshot: snapshotWith(connected) });
+        assert.match(reason, names);
+        assert.match(reason, /Ouroboros itself still needs a model\. Connect Codex, add an API key, or choose a local model\./);
+        assert.doesNotMatch(reason, /Retry|discovery|confirm/i, 'nothing here can be retried');
+    }
+    // The sources in the sentence are the engine's own names for them, and several are alternatives.
+    const two = [{ id: 'managed', label: 'Managed models', credentialHarness: 'claude' }, { id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
+    assert.match(mainSourceReason(['cursor'], two), /Connect Managed models or Codex,/);
+
+    // Unknown sources (an unread list) and a connected account that IS a source keep the retryable reason.
+    for (const [connected, sources] of [[['claude'], []], [['claude'], undefined], [['codex'], codex], [['claude', 'codex'], codex]]) {
+        assert.equal(agentsOnlyAccess(connected, sources), false);
+        assert.match(mainSourceReason(connected, sources), /^Could not confirm that a connected account can run .*Retry model discovery,/);
+    }
+    assert.equal(agentsOnlyAccess([], codex), false, 'nothing connected is not an agents-only install');
+});
+
 test('the limits warning stands under the rows in every state, before any connection', () => {
     const html = agentsStepHtml({ compact: true, showRoster: false });
     const [rows, warning, login] = ['id="agents-family-list"', 'Subscription limits still apply.', 'id="agents-login-host"'].map((part) => html.indexOf(part));
@@ -188,7 +216,8 @@ test('one connected account declares the preset request and promises nothing cer
     assert.match(text, /Available subagents/);
     // Conditional by construction: the compiler may still refuse a seat.
     assert.match(text, /will try to/);
-    assert.match(text, /Main still needs Codex, an API key, or a local model/);
+    // What Main still needs is said once, beside Continue, and only while true: this paragraph cannot know of a key.
+    assert.doesNotMatch(text, /Main still needs|still needs a model/);
     assert.doesNotMatch(text, /guarantee|always/i);
 });
 
