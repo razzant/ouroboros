@@ -331,7 +331,7 @@ def test_unknown_health_disabled_server_and_unknown_server_stay_distinct(world):
     assert "ConnectionError: upstream refused" in down.text and "exists is unknown" in down.text
     off = registry.execute_result("mcp_off__dormant", {})
     assert (off.status, off.code) == ("unavailable", "MCP_UNAVAILABLE")
-    assert off.text.startswith("⚠️ MCP_DISABLED: MCP server 'off' is disabled in Settings → Advanced;")
+    assert off.text.startswith("⚠️ MCP_DISABLED: MCP server 'off' is disabled in Settings → Tools;")
     nowhere = registry.execute_result("mcp_nowhere__op", {})
     assert (nowhere.status, nowhere.code) == ("error", "UNKNOWN_TOOL")
     assert "the tool catalog of any configured MCP server" in nowhere.text

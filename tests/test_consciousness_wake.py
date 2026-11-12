@@ -21,12 +21,13 @@ T0 = 1_800_000_000.0
 clock = clock_tests.clock
 
 
-@pytest.mark.parametrize("summary", ["Проверил состояние системы.", ""])
+@pytest.mark.parametrize("summary", ["Проверил состояние системы.", "Проверил состояние системы. Нашёл 42 строки. Дальше шаг владельца.", ""])
 @pytest.mark.parametrize("callback", ["own_clock", "focus", "other-task"])
-def test_finished_wake_publishes_its_own_title_once(clock, monkeypatch, summary, callback):
+@pytest.mark.parametrize("title", ["", "Authored title. Keep its detail."])
+def test_finished_wake_publishes_its_own_title_once(clock, monkeypatch, summary, callback, title):
     from supervisor import worker_chat_lane
 
-    row = seed_wake(clock.root, **({"wake_summary": summary, "suggested_name": summary} if summary else {}))
+    row = seed_wake(clock.root, title=title, **({"wake_summary": summary, "suggested_name": title or summary} if summary else {}))
     task_id = row["task_id"]
     clock.clock._own_wake = {"task_id": task_id, "wake_cause": "own_clock", "initiator": "consciousness"}
     frames = []
@@ -34,11 +35,11 @@ def test_finished_wake_publishes_its_own_title_once(clock, monkeypatch, summary,
     for _ in range(2):
         clock.clock._wake_finished("other" if callback == "other-task" else task_id, True,
             metadata={"wake_cause": callback, "initiator": "consciousness"})
-    assert frames == ([{"type": "task_named", "task_id": task_id, "suggested_name": summary}]
-                      if summary and callback == "own_clock" else [])
+    assert frames == ([{"type": "task_named", "task_id": task_id, "suggested_name": "Проверил состояние системы."}]
+                      if summary and callback == "own_clock" and not title else [])
 
 
-@pytest.mark.parametrize("summary", ["Проверил состояние системы.", ""])
+@pytest.mark.parametrize("summary", ["Проверил состояние системы.", "Проверил состояние системы.\n\nНашёл 42 строки. Дальше шаг владельца.", ""])
 def test_previous_wake_reads_one_document_and_keeps_the_whole_note(tmp_path, monkeypatch, summary):
     from ouroboros import task_store
 

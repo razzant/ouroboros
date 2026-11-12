@@ -3,7 +3,8 @@
 ``direct_server_with_data`` serves a copy of this checkout. While it is stopped, the test gives that copy the next
 VERSION through the candidate overlay (``CandidateCheckout.rewrite``), so the restarted process reports another
 ``runtime_version`` over the same checkout SHA. The core's own page keeps itself on the equal SHA (ws.js ``decide``),
-with its draft, caret, focus and reading place, and both version labels must follow the restarted core. The
+with its draft, caret, focus and reading place, and both version labels must follow the restarted core: the rail's,
+and Settings › This computer › About opened on the kept page. The
 controlled-transport cases and their helpers: ``tests/test_version_labels_browser.py``.
 """
 from __future__ import annotations
@@ -19,7 +20,7 @@ from tests.candidate_checkout import VERSION_PATH
 from tests.test_reconnect_feed_browser import HISTORY_LANDED
 from tests.test_ui_smoke_playwright import _store_rows
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
-from tests.test_version_labels_browser import CARET, DRAFT, FACTS, HEALTH_READS, MAIN, PIN, settle_labels
+from tests.test_version_labels_browser import CARET, DRAFT, FACTS, HEALTH_READS, MAIN, PIN, about_label, settle_labels
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
 pytestmark = [pytest.mark.ui_browser]
@@ -74,7 +75,7 @@ def test_a_kept_page_follows_the_restarted_core_to_its_new_version(direct_server
             assert pinned["below"] > 200, pinned
             page.wait_for_timeout(300)
             before = page.evaluate(FACTS, MAIN)
-            assert (before["nav"], before["about"]) == (f"v{old}", f"App {old} · Runtime {old}"), before
+            assert before["nav"] == f"v{old}", before
             page.screenshot(path=str(evidence / "restart-before.png"), animations="disabled")
 
             page.evaluate(HISTORY_LANDED)
@@ -88,9 +89,7 @@ def test_a_kept_page_follows_the_restarted_core_to_its_new_version(direct_server
             page.wait_for_timeout(300)
             after = page.evaluate(FACTS, MAIN)
             page.screenshot(path=str(evidence / "restart-after.png"), animations="disabled")
-            page.locator('[data-nav-page="settings"]').click()
-            page.locator('[data-settings-tab="about"]').click()
-            page.locator("#about-version").wait_for(state="visible")
+            about = about_label(page)
             page.screenshot(path=str(evidence / "restart-about.png"), animations="disabled")
             # Control: a page opened after the restart reads the new version at load, with or without the repair.
             fresh = browser.new_page(viewport={"width": 1100, "height": 722})
@@ -105,7 +104,7 @@ def test_a_kept_page_follows_the_restarted_core_to_its_new_version(direct_server
             assert after["keptDocument"] and "_ouro_reason" not in after["url"], after
             assert after["draft"] == DRAFT and after["caret"] == [CARET, CARET] and after["focused"], after
             assert after["sameNodes"] and after["rowKept"] and after["drift"] <= 6, after
-            assert (cold["nav"], cold["about"]) == (f"v{new}", f"App {new} · Runtime {new}"), cold
-            assert (after["nav"], after["about"]) == (f"v{new}", f"App {new} · Runtime {new}"), after
+            assert cold["nav"] == f"v{new}", cold
+            assert (after["nav"], about) == (f"v{new}", f"App {new} · Runtime {new}"), (after, about)
         finally:
             browser.close()

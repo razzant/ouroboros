@@ -1,4 +1,5 @@
-"""The real Settings counter describes its inspected tail, including zero matches."""
+"""The real Settings counter (Permissions and checks, under the two Safety levels) describes its inspected tail,
+including zero matches, and reads it only when that page is shown."""
 from __future__ import annotations
 
 import os
@@ -6,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
+from tests.settings_browser_helpers import open_settings
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 pytestmark = [pytest.mark.ui_browser]
@@ -40,9 +43,9 @@ def test_inspected_safety_event_window_zero_and_nonzero(direct_server_with_data,
                 page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
                 page.wait_for_selector("#page-chat", timeout=30_000)
                 page.click('[data-nav-page="settings"]')
-                expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
-                page.click('[data-settings-tab="behavior"]')
-                counter = page.locator("#s-safety-skip-counter")
+                page.locator("#page-settings [data-settings-home]").wait_for(state="visible", timeout=30_000)
+                assert not requests or count, "the home reads no event tail: the counter's page does, when it is shown"
+                counter = open_settings(page, "permissions", timeout=30_000).locator("[data-safety-skips]")
                 expected = "1 safety check let through" if count else "No safety checks let through"
                 expect(counter).to_have_text(expected + " in the last 24 h.")
                 counter.scroll_into_view_if_needed()

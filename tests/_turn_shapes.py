@@ -208,14 +208,14 @@ def steady_state(root: pathlib.Path, *, refused: Callable[[Any], List[str]],
 def boot_listings(root: pathlib.Path) -> Dict[str, Any]:
     """The boot's archive listing, through production (``server_boot.remember_log_listings``), its thread
     finished, as it has long before an owner's first message: the turns read the tools and events archives
-    from the listing it remembers (``jsonl_tail.remembered_listing``)."""
+    from the listing it remembers (``jsonl_tail.remembered_listing``), which holds ``archives`` of each."""
     from ouroboros import jsonl_tail, server_boot
 
     server_boot.remember_log_listings(root).join()
-    remembered = sorted(prefix for _dev, _ino, prefix in jsonl_tail._LISTINGS)
-    if not {"events", "tools"} <= set(remembered):
-        raise RuntimeError(f"the boot's archive listing did not land: {remembered}")
-    return {"remembered": remembered}
+    archives = {prefix: len(names) for (_dev, _ino, prefix), (_key, names) in jsonl_tail._LISTINGS.items()}
+    if not {"events", "tools"} <= set(archives):
+        raise RuntimeError(f"the boot's archive listing did not land: {sorted(archives)}")
+    return {"remembered": sorted(archives), "archives": archives}
 
 
 def boot_catalogue(window: int = CATALOGUE_WINDOW) -> Dict[str, Any]:

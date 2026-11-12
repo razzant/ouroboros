@@ -45,12 +45,18 @@ CALL_WAIT_ENDED = "tool_call_timeout"
 # a control that ended the call (Pause, Cancel, a deadline), named in the row's ``control_reason``.
 HOST_INTERRUPTED = "interrupted"
 HOST_SETTLED_STATUSES = frozenset({"host_error", HOST_INTERRUPTED})
-_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status")
+_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status", "chronicle_lead_rule")
 _ACTIVE_CALL = ContextVar("active_tool_call", default=None)
 
 
 def current_tool_call_id() -> str:
     return str((_ACTIVE_CALL.get() or {}).get("tool_call_id") or "")
+
+
+def chronicle_lead_metadata() -> Dict[str, Any]:
+    """The producing attempt's lead fact, frozen before this worker was submitted."""
+    rule = (_ACTIVE_CALL.get() or {}).get("chronicle_lead_rule")
+    return {"lead_rule": rule} if rule is not None else {}
 
 
 def current_args_source() -> Dict[str, Any]:
