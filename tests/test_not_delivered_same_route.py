@@ -274,3 +274,24 @@ def test_owner_words_during_a_granted_repeat_ride_the_next_send(tmp_path, monkey
     rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [row["reason_code"] for row in rows if row.get("type") == "llm_not_dispatched"] == (
         ["owner_words_waiting"] if words else [])
+
+
+def test_unread_input_a_yield_already_met_wakes_no_second_repeat(tmp_path, monkeypatch, slept):
+    """A row the round-start drain leaves unread (a host-carried row under a sealed acceptance fence) must not turn
+    every granted repeat into an immediate rebuild; new words still end the wait."""
+    from ouroboros.model_wait import OWNER_WORDS_WAITING, ModelWaitInterrupted
+
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda _sec, wake: wake())
+    llm, usage = _ScriptedLLM(fail_times=99), {}
+
+    def call(unread):
+        return call_llm_with_retry(llm, [{"role": "user", "content": "hi"}], "test-model", None, "low", 3,
+                                   tmp_path, "t-nd", 1, None, usage, owner_input_check=lambda: unread)
+
+    with pytest.raises(ModelWaitInterrupted) as yielded:
+        call(["stuck"])
+    assert yielded.value.control_reason == OWNER_WORDS_WAITING and llm.calls == 1
+    assert call(["stuck"]) == (None, 0.0) and llm.calls == 4  # the same unread row: an ordinary burst
+    with pytest.raises(ModelWaitInterrupted):
+        call(["new", "stuck"])  # new words still end the wait
+    assert llm.calls == 5
