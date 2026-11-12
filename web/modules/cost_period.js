@@ -19,7 +19,7 @@ const WRITE_WORDS = Object.freeze({
     history_rewritten: 'Earlier history was rewritten',
     paused: 'Paused longer than the cache lifetime',
     returned_to_model: 'A task came back to this model',
-    append: 'Next step of the same request',
+    append: 'Next request of the task, only extended',
     not_recorded: 'Not recorded',
 });
 // The fact's own detail beside the words: the model a task came from, the block that changed, the seams that rewrote.
@@ -40,7 +40,7 @@ const percent = (share) => (share > 0 && share < 0.005 ? '<1%' : `${Math.round(s
 /** The card's words for one period view: models by cost, each with its parts, and the cache writes by what they followed. */
 export function costPeriodPresentation(view) {
     if (!view || view.available !== true) {
-        return { state: 'unavailable', models: [], writes: [], note: 'This period could not be read. The totals above are unaffected.' };
+        return { state: 'unavailable', models: [], writes: [], note: 'This period could not be read.' };
     }
     const models = (view.models || []).filter((row) => row.calls || row.cost || row.open_rows).map((row) => {
         const split = row.by_class ? CLASS_WORDS.map(([key, label]) => ({ key, label, usd: Number(row.by_class[key]) || 0 })) : null;
