@@ -613,7 +613,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
             f"Error: {e}\n"
             "Ensure docs/CHECKLISTS.md exists and contains the expected section headers."
         )
-        _handle_review_block_or_warning(ctx, blocked_msg, "Review checklist failed to load; commit proceeding anyway. ")
+        _handle_review_block_or_warning(ctx, blocked_msg, "Review checklist failed to load; nothing was reviewed and the outcome returns before Git. ")
         return None, None, True
 
     review_history_section = _review_history_with_open_obligations(ctx, frozen, review_rebuttal)
