@@ -6457,6 +6457,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .dashboard-settings > .dashboard-card-title { margin-bottom: var(--space-3); }
 .dashboard-settings-lead { margin: calc(-1 * var(--space-2)) 0 var(--space-3); color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .dashboard-settings-fold { margin-top: var(--space-3); }
+.costs-limits .settings-row-field > .ui-control { width: 5.25rem; }  /* money: room for a larger limit than a row's short number */
 /* A card that is one row (data-solo): the row's name is the card's title, its meta the lead, its control the body. */
 .dashboard-settings[data-solo] > .settings-row { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); padding: 0; border: 0; background: none; }
 .dashboard-settings[data-solo] .ui-row-title { font-size: var(--type-section); font-weight: 600; }
