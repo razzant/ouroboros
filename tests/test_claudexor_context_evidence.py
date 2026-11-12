@@ -518,6 +518,39 @@ def test_a_route_changed_during_the_wait_voids_the_early_answer(monkeypatch, fli
     assert asked == (["K1", "K2"] if flip else ["K1"])
 
 
+@pytest.mark.parametrize("used", [True, False])
+def test_the_early_questions_work_stays_its_own_until_the_fit_takes_its_answer(monkeypatch, used):
+    """Fix round 1 (Fable 1): the early question's thread counts in a window of its own, so the build's receipt can be
+    read while it runs (no dictionary changes size under the reader, no count lost to a shared read-modify-write);
+    the build adopts that work, exactly, when the fit takes the answer, and a voided question's work is not counted."""
+    import threading
+    from ouroboros import context_fit as cf, context_timing
+
+    release, counted_all, keys, calls = threading.Event(), threading.Event(), {"key": "K1"}, []
+
+    def resolver(_task, *, allow_fetch):
+        calls.append(1)
+        for n in range(2_000 if len(calls) == 1 else 3):  # the early read inserts keys while the build reads its receipt
+            context_timing.counted("catalog_calls", key=("source", n))
+        counted_all.set()
+        release.wait(5)
+        return {"model": "m"}, object()
+
+    monkeypatch.setattr(cf, "_route_key", lambda _task: keys["key"])
+    with context_timing.measured_sections():
+        question = cf.RouteQuestion({}, resolver)
+        assert counted_all.wait(5)
+        for _read in range(200):
+            assert "catalog_calls" not in context_timing.section_spans()["work"]  # nothing of the thread's yet
+        if not used:
+            keys["key"] = "K2"  # the route changed: the early answer is void
+        release.set()
+        question({}, allow_fetch=True)
+        work = context_timing.section_spans()["work"]
+    assert work.get("catalog_calls") == (2_000 if used else 3)  # adopted exactly, or only the fit's own question
+    assert "catalog_calls_again" not in work
+
+
 def test_a_changed_route_voids_the_early_answer_and_asks_its_own_question(tmp_path, monkeypatch, catalog):
     """One handle per route: the build whose route changed (here the role's pin) after the question started asks its
     own question; the early answer is never applied to it, and the account that just failed is never spent by it."""

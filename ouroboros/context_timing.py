@@ -145,6 +145,28 @@ def span_since(name: str, started: Tuple[float, float, int]) -> None:
     span[1] += time.thread_time() - started[1] if threading.get_ident() == started[2] else 0.0
 
 
+@contextlib.contextmanager
+def apart() -> Iterator[Dict[str, Any]]:
+    """A window of its own for work run beside the measured one, on another thread: what it counts stays in the
+    yielded holder for ``adopt`` and is never written into the window it runs beside while that one is read."""
+    holder: Dict[str, Any] = {}
+    with measured_sections():
+        try:
+            yield holder
+        finally:
+            holder["window"] = _WORK.get()
+
+
+def adopt(holder: Optional[Dict[str, Any]]) -> None:
+    """Add work counted ``apart`` (its counts and seen keys) to the window being measured, on that window's thread."""
+    window, target = (holder or {}).get("window"), _WORK.get()
+    if window is None or target is None:
+        return
+    target[1].update(window[1])
+    for verb, n in window[0].items():
+        target[0][verb] = target[0].get(verb, 0) + n
+
+
 def carry_spans(prefix: str, receipt: Optional[Dict[str, Dict[str, int]]]) -> None:
     """Add the sections of a window measured before this one (its ``section_spans``) to the window being measured, each
     under ``prefix`` (its ``total`` as ``prefix`` itself): work done before a receipt's window opened, named once."""

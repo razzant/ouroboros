@@ -41,7 +41,7 @@ from ouroboros import context_budget
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
-from ouroboros.context_timing import counted, timed, timed_section
+from ouroboros.context_timing import adopt, apart, counted, timed, timed_section
 
 log = logging.getLogger(__name__)
 
@@ -644,9 +644,11 @@ class RouteQuestion:
     """The fit's route question, asked when the build starts and answered beside it (W2 H4, owner 12.11.2026).
 
     The same question through the same resolver (``context._context_fit_route``) and the same evidence, in a thread
-    running in a copy of the starting context: the build's receipt counts its catalog reads, and the account that
-    just failed is only read there. One handle per build: the fit takes its answer only for the route it asked about
-    (``_route_key``), so a changed route asks its own question, and it waits on it as on its own read, with no timer.
+    running in a copy of the starting context, where the account that just failed is only read. It counts its work in
+    a window of its own (``context_timing.apart``), adopted by the build's receipt when the fit takes its answer; a
+    voided question's work is not. One handle per build: the fit takes its answer only for the route it asked about
+    (``_route_key``, compared before and after the wait), so a changed route asks its own question, and it waits on it
+    as on its own read, with no timer.
     ``early`` names an answer taken from it, which ``build_context_fit_plan`` asks ``again`` at the usual point when
     using it would show less memory than the selected view (``narrowed_by_window``).
     """
@@ -654,7 +656,7 @@ class RouteQuestion:
     def __init__(self, task: Dict[str, Any], resolver: Optional[Callable[..., Tuple[Dict[str, Any], Any]]] = None):
         from ouroboros import context
 
-        self.resolver, self.early = resolver or context._context_fit_route, False
+        self.resolver, self.early, self.work = resolver or context._context_fit_route, False, {}
         self.key, self.asked_key, self.answer, self.error = _route_key(task), None, None, None
         self.asked = threading.Event()
         if self.key is None:
@@ -665,8 +667,9 @@ class RouteQuestion:
 
     def _ask(self, task: Dict[str, Any]) -> None:
         try:
-            self.asked_key = _route_key(task)
-            self.answer = self.resolver(task, allow_fetch=True)
+            with apart() as self.work:  # its counts join the build's receipt only when the fit takes this answer
+                self.asked_key = _route_key(task)
+                self.answer = self.resolver(task, allow_fetch=True)
         except Exception as error:  # the fit meets it where it would have met its own failed read
             self.error = error
         finally:
@@ -678,6 +681,7 @@ class RouteQuestion:
             timed("fit.route_wait", self.asked.wait)
             if self.asked_key == key and _route_key(task) == key:  # a route changed during the wait asks its own
                 self.early = True
+                adopt(self.work)
                 if self.error is not None:
                     raise self.error
                 return self.answer
