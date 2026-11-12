@@ -66,14 +66,18 @@ def _range(total: int, start_char: int | None, end_char: int | None,
     return start, end, notes
 
 
+def _argument_notes(notes) -> str:
+    return "".join(f"[Argument note] {item}\n" for item in notes)
+
+
 def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = None,
-                 end_char: int | None = None, earlier: dict | None = None) -> tuple[str, dict]:
+                 end_char: int | None = None, earlier: dict | None = None, notes=()) -> tuple[str, dict]:
     """One exact character range of the note (``_range``), or of an ``earlier`` version of it."""
     ref = note.source_ref()
     ref["state"] = note.state
     text = note.text
     total = len(text)
-    start, end, notes = _range(total, start_char, end_char)
+    start, end, range_notes = _range(total, start_char, end_char)
     if earlier is not None:  # the bytes of a recorded version, read through its own call
         ref["read"] = {"tool": "knowledge_read", "arguments": {
             "topic": note.address.topic, "scope": note.address.scope, "version": note.revision}}
@@ -81,7 +85,7 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
     ref.update(start_char=start, end_char=end, complete_chars=total)
     body = text[start:end]
     header = "[Knowledge source] " + json.dumps(ref, ensure_ascii=False, sort_keys=True) + "\n"
-    header += "".join(f"[Range note] {item}\n" for item in notes)
+    header += "".join(f"[Range note] {item}\n" for item in range_notes) + _argument_notes(notes)
     if earlier is not None:
         written = ("no history row wrote it (an outside edit, or a write before history)"
                    if earlier["ts"] == knowledge_versions.UNKNOWN else
@@ -99,18 +103,19 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
     }
 
 
-def _rendered_view(view: str, text: str, facts: dict, start_char: int | None, end_char: int | None) -> tuple[str, dict]:
+def _rendered_view(view: str, text: str, facts: dict, start_char: int | None, end_char: int | None,
+                   notes=()) -> tuple[str, dict]:
     """An outline or history listing, paged by the same character ranges as a note."""
-    start, end, notes = _range(len(text), start_char, end_char, "view")
+    start, end, range_notes = _range(len(text), start_char, end_char, "view")
     head = {**facts, "view": view, "start_char": start, "end_char": end, "complete_chars": len(text)}
     header = (f"[Knowledge {view}] " + json.dumps(head, ensure_ascii=False, sort_keys=True) + "\n"
-              + "".join(f"[Range note] {item}\n" for item in notes) + "\n")
+              + "".join(f"[Range note] {item}\n" for item in range_notes) + _argument_notes(notes) + "\n")
     return header + text[start:end], {"knowledge_view": head, "knowledge_body_start": len(header),
                                       "knowledge_body_chars": end - start}
 
 
 def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | None,
-               start_char: int | None, end_char: int | None) -> tuple[str, dict]:
+               start_char: int | None, end_char: int | None, notes=()) -> tuple[str, dict]:
     if view not in ("note", "outline", "history"):
         raise ValueError(f"view={view!r}: use note (default), outline or history")
     if version is not None and view == "history":
@@ -121,24 +126,31 @@ def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | No
         shown = knowledge_store._note(note.address, text.encode("utf-8"))
         earlier = {**knowledge_versions.row_facts(row), "revision": version, "current_revision": note.revision}
     if view == "note":
-        return _source_view(shown, start_char, end_char, earlier)
+        return _source_view(shown, start_char, end_char, earlier, notes)
     facts = {"topic": note.address.topic, "scope": note.address.scope, "revision": shown.revision,
              **({"current_revision": note.revision, "earlier_version": earlier} if earlier else {})}
     if view == "history":
-        return _rendered_view(view, knowledge_versions.render_history(note), facts, start_char, end_char)
+        return _rendered_view(view, knowledge_versions.render_history(note), facts, start_char, end_char, notes)
     label = f" — an earlier version, not the current note (current revision {note.revision})" if earlier else ""
-    return _rendered_view(view, knowledge_versions.render_outline(shown, label), facts, start_char, end_char)
+    return _rendered_view(view, knowledge_versions.render_outline(shown, label), facts, start_char, end_char, notes)
 
 
 def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
                     start_char: int | None = None, end_char: int | None = None,
                     view: str = "note", version: str | None = None) -> str:
+    notes = []  # a value that names the default takes it, said in the header (tools/arg_feedback)
+    if view in (None, ""):
+        notes.append(ignored_argument_note("view", view, "the default view, the note itself"))
+        view = "note"
+    if version == "":
+        notes.append(ignored_argument_note("version", version, "no revision named; this is the current note"))
+        version = None
     try:
         sanitized = _sanitize_topic(topic)
         address = _address(ctx, sanitized, scope)
         note = knowledge_store.read_knowledge_note(address)
-        text, meta = (_source_view(note, start_char, end_char) if view == "note" and version is None
-                      else _note_view(note, view, version, start_char, end_char))
+        text, meta = (_source_view(note, start_char, end_char, notes=notes) if view == "note" and version is None
+                      else _note_view(note, view, version, start_char, end_char, notes))
     except knowledge_versions.VersionUnavailable as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: version_unavailable: {exc}",
@@ -258,6 +270,16 @@ def _knowledge_write(
     scope: str = "", expected_revision: str | None = None, old_str: str | None = None,
     summary: str | None = None, reason: str = "", edits: list | None = None, version: str | None = None,
 ) -> str:
+    notes = []  # a value that means what omission means takes the omitted path, said in the result (tools/arg_feedback)
+    if version == "" and mode != "revert":
+        notes.append(ignored_argument_note("version", version, "only mode=revert takes a version"))
+        version = None
+    if isinstance(edits, list) and not edits:
+        notes.append(ignored_argument_note("edits", edits, "an empty list asks for no replacement"))
+        edits = None
+    if old_str == "" and mode != "edit":
+        notes.append(ignored_argument_note("old_str", old_str, "only mode=edit replaces text"))
+        old_str = None
     try:
         sanitized = _sanitize_topic(topic)
         lifecycle = mode in ("archive", "restore")
@@ -276,9 +298,10 @@ def _knowledge_write(
                              else "edits is used only with mode=edit")
         if mode not in ("overwrite", "append", "edit") and summary is not None:
             raise ValueError(f"summary is used only with mode=overwrite, append or edit, not mode={mode}")
-        if (mode == "revert") != (version is not None):
-            raise ValueError("version is used only with mode=revert; knowledge_read(version=...) reads one"
-                             if version is not None else "mode=revert requires version, the revision to put back")
+        if mode == "revert" and version in (None, ""):
+            raise ValueError("mode=revert requires version, the revision to put back")
+        if mode != "revert" and version is not None:
+            raise ValueError("version is used only with mode=revert; knowledge_read(version=...) reads one")
         if mode == "revert" and content:
             raise ValueError("mode=revert takes version, expected_revision and an optional reason; no content")
         if mode not in ("edit", "revert") and not lifecycle and content is None:
@@ -313,12 +336,13 @@ def _knowledge_write(
             edits=edits, version=version,
         )
     except ValueError as exc:
+        said = f" ({'; '.join(notes)})" if notes else ""
         return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR: {exc}"))
+            status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR: {exc}{said}"))
     except (OSError, UnicodeDecodeError) as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: Knowledge write failed: {type(exc).__name__}"))
-    meta = {"knowledge_write_reason": result.reason}
+    meta = {"knowledge_write_reason": result.reason, **({"ignored_arguments": notes} if notes else {})}
     if result.history_ref is not None:
         meta["knowledge_previous_source"] = result.history_ref
     if result.delta is not None:

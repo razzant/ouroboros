@@ -10,7 +10,7 @@ from ouroboros import knowledge_versions as versions
 from ouroboros import markdown_source
 from ouroboros import text_change
 from ouroboros.tools import knowledge as tools
-from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._knowledge_history_shared import applied_blocks
 
 TOPIC = "notes/река"
@@ -130,6 +130,29 @@ def test_a_version_reads_back_exactly_in_ranges_and_as_its_outline(tmp_path):
     assert missing.startswith("⚠️ TOOL_ERROR: version_unavailable: no version") and second.text not in missing
     assert "view=history lists them all" in tools._knowledge_read(ctx, TOPIC, view="history", version=first.revision)
     assert "view='diff'" in tools._knowledge_read(ctx, TOPIC, view="diff")
+
+
+def test_an_empty_or_null_view_or_version_reads_the_current_note_and_says_so(tmp_path):
+    """A value that means what omission means takes the omitted path, said in the header (tools/arg_feedback);
+    a version that names something malformed still refuses, typed."""
+    ctx = context(tmp_path)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ctx)
+    note = store.write_knowledge_note(address(tmp_path), RIVER).current
+    plain = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global"})
+    assert plain.endswith(note.text) and "[Argument note]" not in plain
+    for arguments, said in (({"version": ""}, ["version='' ignored: no revision named; this is the current note"]),
+                            ({"view": ""}, ["view='' ignored: the default view, the note itself"]),
+                            ({"view": None}, ["view=None ignored: the default view, the note itself"]),
+                            ({"view": None, "version": ""}, ["view=None ignored", "version='' ignored"])):
+        read = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", **arguments})
+        assert read.endswith(note.text) and read.split("\n", 1)[0] == plain.split("\n", 1)[0], (arguments, read[:300])
+        assert all(f"[Argument note] {item}" in read for item in said), (arguments, read[:600])
+    history = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "view": "history", "version": ""})
+    assert history.startswith("[Knowledge history]") and "[Argument note] version='' ignored" in history
+    malformed = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "version": "abc"})
+    assert malformed.startswith("⚠️ TOOL_ERROR: version_unavailable: a version is a revision") and note.text not in malformed
+    assert "view='diff'" in registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "view": "diff"})
 
 
 def test_the_backward_scan_finds_every_row_across_block_edges(tmp_path, monkeypatch):

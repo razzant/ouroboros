@@ -616,7 +616,7 @@ def test_item_shapes_and_spellings_that_cannot_mean_one_thing_are_argument_error
             ({"edits": [_item("", new_str="x")]}, "item 1: old_str must be non-empty exact body text"),
             ({"edits": [{"old_str": "Text."}]}, "item 1: new_str must be text"),
             ({"edits": [_item("Text.", new_str=None)]}, "item 1: new_str must be text"),
-            ({"edits": []}, "non-empty array"),
+            ({"edits": []}, "mode=edit requires edits, or a non-empty old_str, or a summary (edits=[] ignored"),
             ({"edits": [_item("Text.", new_str="x")], "old_str": "Text."}, "edits carries its own replacements"),
             ({"edits": [_item("Text.", new_str="x")], "content": "x"}, "edits carries its own replacements")):
         reply = tools._knowledge_write(ctx, "shape", mode="edit", scope="global", expected_revision=original.revision, **kwargs)
@@ -632,6 +632,45 @@ def test_item_shapes_and_spellings_that_cannot_mean_one_thing_are_argument_error
     _meta(tools._knowledge_write(ctx, "shape", mode="edit", scope="global", expected_revision=original.revision,
                                  edits=[_item("Text.", new_str="Prose.")]))
     assert store.read_knowledge_note(original.address).text.endswith("# Shape\n\nProse.\n")
+
+
+def test_empty_optional_write_values_take_the_omitted_path_and_say_so(tmp_path):
+    """A model may fill every optional field with an empty value: version='' outside revert, edits=[] and
+    old_str='' outside edit ask for nothing, so the write goes ahead and its receipt names what was ignored;
+    a value that asks for something (a version, an item, a text to replace) still refuses, typed."""
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="filler")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ctx)
+    note = store.write_knowledge_note(address(tmp_path, "filled"), "# Filled\n\nOne.\n").current
+    empty = {"version": "", "edits": [], "old_str": "", "summary": "", "reason": ""}
+    ignored = ["version='' ignored: only mode=revert takes a version",
+               "edits=[] ignored: an empty list asks for no replacement",
+               "old_str='' ignored: only mode=edit replaces text"]
+
+    def write(**arguments):
+        return registry.execute("knowledge_write", {"topic": "filled", "scope": "global", **arguments})
+
+    overwrite = _meta(write(mode="overwrite", content="# Filled\n\nTwo.\n", expected_revision=note.revision, **empty))
+    assert overwrite["ignored_arguments"] == ignored
+    assert store.read_knowledge_note(note.address).text.endswith("# Filled\n\nTwo.\n")
+    assert _meta(write(mode="append", content="Three.\n", **empty))["ignored_arguments"] == ignored
+    current = store.read_knowledge_note(note.address)
+    edited = _meta(write(mode="edit", old_str="Two.", content="2.", expected_revision=current.revision,
+                         version="", edits=[]))
+    assert edited["ignored_arguments"] == ignored[:2] and store.read_knowledge_note(note.address).text.endswith("2.\nThree.\n")
+    current = store.read_knowledge_note(note.address)
+    assert "ignored_arguments" not in _meta(write(mode="append", content="Four.\n"))
+    current, before = store.read_knowledge_note(note.address), _files(tmp_path)
+    for arguments, refusal in (
+            ({"mode": "overwrite", "content": "x", "version": "abc"}, "version is used only with mode=revert"),
+            ({"mode": "append", "content": "x", "edits": [_item("Four.", "4.")]}, "edits is used only with mode=edit"),
+            ({"mode": "append", "content": "x", "old_str": "Four."}, "old_str is used only with mode=edit"),
+            ({"mode": "revert", "version": "", "expected_revision": current.revision}, "mode=revert requires version"),
+            ({"mode": "edit", "edits": [], "expected_revision": current.revision},
+             "mode=edit requires edits, or a non-empty old_str, or a summary (edits=[] ignored")):
+        reply = write(**arguments)
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR") and refusal in reply, (arguments, reply)
+    assert _files(tmp_path) == before
 
 
 def test_revert_publishes_the_exact_bytes_of_an_earlier_version(tmp_path):
