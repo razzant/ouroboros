@@ -3,8 +3,9 @@
  * `skill` lists the skills that registered a settings form, one door each; search lands on it by the names this
  * list had ("Extension Settings", under Advanced). `skill/<id>` is the form a skill registered (its reviewed,
  * host-rendered settings sections), opened from that list, the skill's card, a place's Connect, Voice and calls,
- * and search. One host element, `#extension-settings-sections`,
- * is re-filled for the opened skill: only that skill's routes are read, and `ouro:extension-settings-mounted` tells
+ * and search. Each opened form has its own host element, `#extension-settings-sections` (one in the page at a time: a
+ * form put aside with unsaved words, settings.js, is out of it). Only that skill's routes are read, and
+ * `ouro:extension-settings-mounted` tells
  * a skill's own page module that its form stands (the bundled Calls skill enhances its form on it). The host draws
  * every field, reads the stored values from the route it posts to and owns the Save outcome.
  *
@@ -222,9 +223,9 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
 
 /* ---- The pages ----------------------------------------------------------------------------------------------- */
 
-const settingsOnScreen = (ctx) => ctx?.state?.activePage === 'settings' && !globalThis.document?.hidden;
+// The page the owner is looking at: Settings is shown, this path is its open level and the window is not hidden.
+const onScreen = (ctx, path) => ctx?.state?.activePage === 'settings' && ctx.state.settingsPath === path && !globalThis.document?.hidden;
 const FORMS = new Map();  // skill id → { skill, name, sections }: what the last read of the installed skills says
-let formsHost = null;     // the one `#extension-settings-sections`, moved into the skill page that is open
 
 /** One read of the installed skills (`GET /api/extensions`, a passive read). It answers the list and remembers which
  *  skills registered a settings form, for the skill page, its title and search. */
@@ -287,8 +288,8 @@ function mountSkillList(container, { path, ctx }) {
     window.addEventListener('ouro:settings-page-shown', onShown);
     // Every way a skill changes ends in the one lifecycle signal (contributions.js): this page's own action, a job
     // that finished, another window, Ouroboros itself. A Settings that is not on screen reads nothing: the shell says
-    // "shown" on the way back and the page reads then.
-    const offLifecycle = getContributions().onLifecycle(() => { if (settingsOnScreen(ctx)) void draw(); });
+    // "shown" on the way back and the page reads then; so does a list under an open form.
+    const offLifecycle = getContributions().onLifecycle(() => { if (onScreen(ctx, path)) void draw(); });
     return draw().then(() => ({
         unmount() {
             alive = false;
@@ -302,19 +303,19 @@ function mountSkillList(container, { path, ctx }) {
 function mountSkillForm(container, { path, ctx }) {
     const skill = skillOf(path);
     if (!skill) return mountSkillList(container, { path, ctx });
-    formsHost ||= Object.assign(document.createElement('div'), { id: 'extension-settings-sections', className: 'settings-extension-sections' });
-    const host = formsHost;
-    host.innerHTML = '';
-    delete host.dataset.typed;
+    const host = Object.assign(document.createElement('div'), { id: 'extension-settings-sections', className: 'settings-extension-sections' });
     container.replaceChildren(host);
     let alive = true;
     let serial = 0;
     let filling = null;
-    // The skills are read, then only this skill's routes. A field the owner is in, or has typed into, is not redrawn.
+    // A field the owner is in, or has typed into, is not redrawn: not by a read that starts now and not by one that
+    // was on its way when the owner began (a skill changed elsewhere starts such a read at any moment).
+    const untouched = () => !host.dataset.typed && !(host.contains(document.activeElement) && host !== document.activeElement);
+    // The skills are read, then only this skill's routes.
     const fill = () => (filling ||= (async () => {
-        if (host.dataset.typed || (host.contains(document.activeElement) && host !== document.activeElement)) return;
+        if (!untouched()) return;
         const run = ++serial;
-        const current = () => alive && run === serial && host.parentElement === container;
+        const current = () => alive && run === serial && host.parentElement === container && untouched();
         try { await readSkills(); } catch (err) {
             if (current() && !host.innerHTML) setResult(host.appendChild(Object.assign(document.createElement('p'), { className: 'ui-result' })), errorWords(err));
             return;
@@ -327,8 +328,9 @@ function mountSkillForm(container, { path, ctx }) {
     host.addEventListener('input', onTyped);
     window.addEventListener('ouro:settings-updated', onSaved);
     window.addEventListener('ouro:settings-page-shown', onShown);
-    const offLifecycle = getContributions().onLifecycle(() => { if (settingsOnScreen(ctx)) void fill(); });  // as the list above
+    const offLifecycle = getContributions().onLifecycle(() => { if (onScreen(ctx, path)) void fill(); });  // as the list above
     return Promise.resolve(fill()).then(() => ({
+        unsaved: () => Boolean(host.dataset.typed),  // the shell puts such a form aside instead of letting it go
         unmount() {
             alive = false;
             host.removeEventListener('input', onTyped);

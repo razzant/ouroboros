@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { extensionRoutePath } from '../modules/api_client.js';
 import { getContributions } from '../modules/contributions.js';
 import '../modules/settings_extension_forms.js';
 import { searchEntries, searchSettings } from '../modules/settings_home.js';
@@ -20,7 +21,7 @@ async function mountList(t, answer) {
     const { env } = world(t);
     env.routes.set('/api/extensions', async () => answer());
     const opened = [];
-    const state = { activePage: 'settings' };
+    const state = { activePage: 'settings', settingsPath: 'skill' };
     const container = new Stub('div');
     const page = settingsPageFor('skill');
     assert.equal(typeof page.title === 'function' ? page.title('skill') : page.title, 'Skill settings');
@@ -82,10 +83,60 @@ test('a skill changed by anyone redraws the list on screen: the server says so o
     await settle();
     assert.equal(reads(), before + 1, 'a hidden Settings reads nothing');
     state.activePage = 'settings';
+    // A skill's form is open over the list: the list under it reads nothing either.
+    state.settingsPath = 'skill/telegram';
+    heard.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'telegram', action: 'updated' });
+    await settle();
+    assert.equal(reads(), before + 1, 'a list under an open form reads nothing');
+    state.settingsPath = 'skill';
     handle.unmount();
     heard.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'telegram', action: 'enabled' });
     await settle();
     assert.equal(reads(), before + 1, 'a page that was let go reads no more');
+});
+
+test('a skill form the owner types into is not redrawn by a read that was on its way; untouched, it follows the server', async (t) => {
+    const { env } = world(t);
+    const component = { type: 'form', id: 'bot', route: 'save', submit_label: 'Save', fields: [{ name: 'chat_id', label: 'Chat ID', type: 'text' }] };
+    const installed = { skills: [{ name: 'demo', title: 'Demo' }], live: { settings_sections: [{ ...section('demo', 'Demo'), render: { components: [component] } }] } };
+    let stored = 'first';
+    let gate = null;  // while set, the read of the form's stored values waits for it
+    env.routes.set('/api/extensions', async () => ok(installed));
+    env.routes.set(extensionRoutePath('demo', 'save'), async () => { await gate; return ok({ chat_id: stored }); });
+    env.routes.set('/api/ui/contributions', async () => ok({}));
+    const heard = new Map();
+    t.after(getContributions().attach({ ws: { on(type, fn) { heard.set(type, fn); return () => heard.delete(type); } }, target: env.window }));
+    const container = new Stub('div');
+    container.replaceChildren = (...nodes) => { container.textContent = ''; container.append(...nodes); };  // the stub lacks it
+    const state = { activePage: 'settings', settingsPath: 'skill/demo' };
+    const handle = await settingsPageFor('skill/demo').mount(container, { path: 'skill/demo', ctx: { openSettings() {}, state } });
+    await settle();
+    const host = container.firstElementChild;
+    const shown = () => host.querySelector('[name="chat_id"]')?.getAttribute('value');
+    assert.deepEqual([shown(), handle.unsaved()], ['first', false]);
+    const changedElsewhere = () => heard.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'other', action: 'updated' });
+
+    // Untouched, the form follows the server: another window or Ouroboros changed a skill, the form is read again.
+    stored = 'second';
+    changedElsewhere();
+    await settle();
+    assert.equal(shown(), 'second');
+
+    // A read is on its way when the owner starts typing: its answer is not drawn over the owner's words.
+    stored = 'third';
+    let release;
+    gate = new Promise((resolve) => { release = resolve; });
+    changedElsewhere();
+    await settle();
+    const field = host.querySelector('[name="chat_id"]');
+    await host.fire('input', { target: field });
+    release();
+    gate = null;
+    await settle();
+    assert.equal(host.querySelector('[name="chat_id"]'), field, 'the field the owner types in stays the same node');
+    assert.equal(shown(), 'second', 'the answer that arrived late was not drawn');
+    assert.equal(handle.unsaved(), true, 'the shell puts such a form aside when it is left');
+    handle.unmount();
 });
 
 test('an empty list says that no installed skill has settings', async (t) => {
