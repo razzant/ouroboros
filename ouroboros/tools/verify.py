@@ -143,6 +143,17 @@ _ZERO_RUN_DECISIONS = ZERO_RUN_WRITE_DECISIONS
 _EXPECTED_MATCH_KINDS = ("substring", "exact", "exact_line", "json_equals", "bytes_equal")
 
 
+def _missing_check_refusal(kind: str, check: Any) -> str:
+    """A run kind sent without a command: what arrived, a ready call, the kinds that need none."""
+    received = "this call sent none" if check is None else f"check={repr(check)[:120]} holds no command"
+    return (
+        f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check`, and {received}. "
+        'Send the command the host should run, e.g. check=["pytest","-q"] or check="pytest -q"; with no '
+        "command to run use contract_kind=artifact_observation (artifact_paths) or "
+        "no_visible_machine_contract. Nothing ran; no receipt was written."
+    )
+
+
 def _expected_matches(out: str, expected: str, mode: str) -> bool:
     """Match `expected` against the check `out` under the declared `mode`. Substring
     (default) preserves legacy behavior; exact/exact_line/json_equals are opt-in
@@ -721,13 +732,7 @@ def _verify_and_record(
     if kind in _RUN_KINDS:
         argv = _normalize_check(check)
         if not argv:
-            received = "this call sent none" if check is None else f"check={repr(check)[:120]} holds no command"
-            return (
-                f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check`, and {received}. "
-                'Send the command the host should run, e.g. check=["pytest","-q"] or check="pytest -q"; with no '
-                "command to run use contract_kind=artifact_observation (artifact_paths) or "
-                "no_visible_machine_contract. Nothing ran; no receipt was written."
-            )
+            return _missing_check_refusal(kind, check)
         if match_mode == "bytes_equal" and len([p for p in (artifact_paths or []) if str(p or "").strip()]) != 2:
             return (
                 "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal requires "
