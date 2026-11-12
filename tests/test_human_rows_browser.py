@@ -242,7 +242,8 @@ def test_reworded_host_rows_live_and_after_reload(engine_ui, tmp_path, monkeypat
     _record_routing_receipt(bridge, sender, chat_id=1, client_message_id=cmid, action="mailbox_delivery",
                             target="t-docs", target_label="Docs task", status="delivered")
     _push(mounted, frames, sent)
-    page.locator(".msg-routing-annotation").filter(has_text="Message saved for task · Docs task").wait_for()
+    # Words that joined Main's running turn say saved, never the turn's name (owner 12.11).
+    page.locator(".msg-routing-annotation").filter(has_text="Message saved for task").wait_for()
 
     def check(phase):
         page.evaluate(FRAMES)
@@ -254,14 +255,14 @@ def test_reworded_host_rows_live_and_after_reload(engine_ui, tmp_path, monkeypat
         page.evaluate(FRAMES)
         body = page.locator("#page-chat").inner_text()
         found = {key: text in body for key, text in texts.items()}
-        found["mailbox"] = "Message saved for task · Docs task" in body
+        found["mailbox"] = "Message saved for task" in body and "Docs task" not in body
         for gone in ("none recorded by the current audit", "Below is the last persisted", "inline yourself",
                      "/restart", "durable cancel intent", "watchdog", "Delivered to task",
                      "Stopping task t-stop", "cancel t-stop did not settle"):
             assert gone not in body, (phase, gone)
         page.screenshot(path=str(out / f"rows-{phase}-{theme}-{width}.png"), full_page=True, animations="disabled")
         # Each reworded row as painted, in its own carrier (a card or a bubble), for human inspection.
-        for key, text in {**texts, "mailbox": "Message saved for task · Docs task"}.items():
+        for key, text in {**texts, "mailbox": "Message saved for task"}.items():
             shown = page.get_by_text(text, exact=False).first
             if shown.count():
                 holder = shown.locator("xpath=ancestor-or-self::*[contains(@class,'chat-live-card') "

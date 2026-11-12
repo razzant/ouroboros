@@ -1,7 +1,7 @@
 """#2107 in the real SPA over a real isolated core: the heads a late quiz answer and a press on a finished
-task's card start are named by what they answer on their cards and in Main's work list, and the receipt under
-each later answer that joins one says that name, live and after a reload, at the owner's desktop and phone
-widths in both themes.
+task's card start are named by what they answer on their cards and in Main's work list, while the receipt under
+each later answer that joins one in Main says only that it was saved, never that name (owner 12.11), live and
+after a reload, at the owner's desktop and phone widths in both themes.
 
 A real ``server.py`` (disposable candidate checkout, isolated data, the mock provider) receives the owner's
 decisions over its own HTTP API and runs each head in its own conversation-lane carrier process. The mock
@@ -181,7 +181,7 @@ def _look(page, out, label, receipts, heads):
     appears, what the page shows instead is kept beside the frames (``<label>-unmet``) before the failure surfaces."""
     try:
         for cmid, name in receipts:
-            page.wait_for_function(f"() => ({LINE})({json.dumps(cmid)})?.text?.includes({json.dumps(name)})",
+            page.wait_for_function(f"() => ({LINE})({json.dumps(cmid)})?.text === {json.dumps(name)}",
                                    timeout=60_000)
         for task_id, name in heads:
             page.wait_for_function(f"() => ({TITLE})({json.dumps(task_id)})?.text === {json.dumps(name)}",
@@ -249,8 +249,8 @@ def test_frames(direct_server_with_data, monkeypatch):
                 card_head = _wait(lambda: [h for h in _heads(page, url) if h != quiz_head], "the press's head")[0]
                 _wait(lambda: calls.count("held") >= 2, "the press's head at work")
                 _decide(page, url, {"request_id": "p2", "decision_id": press, "revision": 1})
-                receipts = [("quiz_late_answer:task-1:q2", f"Message saved for task · {NAME}"),
-                            (f"card_input:{card['card_id']}:p2", f"Message saved for task · {CARD}")]
+                receipts = [("quiz_late_answer:task-1:q2", "Message saved for task"),
+                            (f"card_input:{card['card_id']}:p2", "Message saved for task")]
                 heads = [(quiz_head, NAME), (card_head, CARD)]
                 facts["live-1148x808-light"] = _look(page, out, "live-1148x808-light", receipts, heads)
                 facts["list-1148x808-light"] = _list(page, out, "list-1148x808-light", heads)
@@ -276,8 +276,7 @@ def test_frames(direct_server_with_data, monkeypatch):
     for label, shown in facts.items():
         if isinstance(shown, dict) and "receipts" in shown:
             # The receipt is one line (its words stay in it): at the desktop width whole when the line fits its bubble
-            # at that bubble's widest and ellipsized only when it does not (Linux's DejaVu Sans sets the long name
-            # wider than macOS's font), ellipsized at a phone's.
+            # at that bubble's widest and ellipsized only when it does not.
             lines = shown["receipts"].values()
             assert "-390x" in label or all(row["cut"] != row["fits"] for row in lines), (label, shown)
             assert all(row["visible"] and not row["cut"] for row in shown["titles"].values()), (label, shown)
