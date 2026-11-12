@@ -151,14 +151,15 @@ def _project_history_context(
 
     Preload bindings (the cursor fingerprint's explicit roots) and the room rule
     once per request; no per-row registry reads, no extra event-loop thread hops.
-    ``strict`` (an exact row's destination) raises unreadable authority as StoreError.
+    ``strict`` (an exact row's destination) raises unreadable authority as StoreError; so does
+    Main's every read, whose rows are "not a Project's" and cannot be told from an unknown set.
     """
     from ouroboros.projects_registry import reserved_project_chat_ids, RoomResolver, all_task_bindings
 
     try:
         project_chat_ids, classified = reserved_project_chat_ids(data_dir, strict=True), True
     except Exception:  # the rooms its readable rows name are still Projects; any other is unknown
-        if strict:
+        if strict or thread_id == 1:
             raise StoreError("Project registry unavailable") from None
         project_chat_ids, classified = reserved_project_chat_ids(data_dir), False
     try:
@@ -1464,10 +1465,10 @@ def _assemble_history_response(
     if lifecycle_row is not None:
         combined.append(lifecycle_row)
     result_cache[_READS].prefetch(row.get("task_id") for row in combined)
-    named = thread_id in project_chat_ids or (thread_id == 1 and classified)  # an unreadable registry: Main reads on
+    named = thread_id in project_chat_ids or thread_id == 1  # Main is read only with a readable registry
     arrival = latest_arrival(combined, page, data_dir, row_matches_thread, _stored_chat_id, chat_gaps, lambda task_id: (
         _load_terminal_result(data_dir, task_id, result_cache))) if named else (
-        {} if classified or thread_id == 1 else {"latest_message": None})  # an unclassified room may be a Project
+        {} if classified else {"latest_message": None})  # an unclassified room may be a Project
     if recent:  # arrival is named above, before the tail and the annotation
         (messages, result_cache, human_rows_dropped, lineage_truncated, review_overlays_truncated, floor,
          anchored_children) = _apply_window_quotas(
