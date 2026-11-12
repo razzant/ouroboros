@@ -308,7 +308,7 @@ def delivery_evidence_fingerprint(
         "plan_review_receipts": [
             {"index": index, "result": call.get("result"),
              **{key.removeprefix("plan_"): call.get(key) for key in (
-                 "plan_effect", "plan_revision", "plan_open_objections", "plan_holding", "plan_pending_asks")}}
+                 "plan_effect", "plan_revision", "plan_open_objections", "plan_pending_asks")}}
             for index, call in enumerate(llm_trace.get("tool_calls") or [])
             if isinstance(call, dict) and call.get("plan_effect")
         ],

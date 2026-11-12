@@ -384,11 +384,10 @@ def _strip_attempt_heavy_payload(item: CommitAttemptRecord, *, force: bool = Fal
     the facts the Max-Review-Cycles gates consume: ``paid``/``root_task_id``
     (the ceiling count), status/phase/``block_reason``/``block_class``/
     ``pre_review_fingerprint``/``review_contract_fingerprint``/
-    ``rebuttal_sha256`` (the streak walker), and ``critical_findings`` plus a
-    600-char ``block_details`` excerpt (everything ``_quote_verdict_attempt``
-    renders in an identical-diff refusal). A legacy scope verdict classifies
-    THROUGH ``scope_raw_result``, so ``block_class`` is materialized before
-    that evidence is dropped — the row keeps its refusal-anchor authority.
+    ``rebuttal_sha256`` (the attempt's identity), and ``critical_findings`` plus a
+    600-char ``block_details`` excerpt (what the attempt's history renders). A
+    legacy scope verdict classifies THROUGH ``scope_raw_result``, so
+    ``block_class`` is materialized before that evidence is dropped.
     ``raw_stripped=True`` marks the compaction for audits; full payloads live
     only in the newest-50 window. ``force=True`` re-compacts a row ALREADY
     marked stripped — the terminal-merge path uses it when a merge onto a

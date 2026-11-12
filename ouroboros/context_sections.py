@@ -223,7 +223,7 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
     ]
     if any(isinstance(skill, dict) and skill.get('enabled') and skill.get('executable_review')
            and skill.get('review_gate', {}).get('author_accepted') for skill in summary.get('skills') or []):
-        lines.append("author_accepted=true: Current payload accepted by author under Advisory; "
+        lines.append("author_accepted=true: Current payload accepted by its author; "
                      "reviewer evidence remains at its original hash.")
     operative = list(lines)
     count = 0

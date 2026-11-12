@@ -1154,7 +1154,7 @@ def _review_result_message(outcome: Any) -> str:
     elif gate["executable_review"]:
         prefix = "Review executable with findings" if status in {STATUS_WARNINGS, STATUS_BLOCKERS} else "Review executable"
     elif status == STATUS_WARNINGS:
-        prefix = "Review warnings blocked by current enforcement"
+        prefix = "Review warnings; not executable now (stale or pending)"
     elif status == STATUS_BLOCKERS:
         prefix = "Review blocked: blocker findings"
     else:

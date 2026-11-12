@@ -413,7 +413,7 @@ def _author_checklist(review: Any, snapshot_hash: str = "", effect: str = _PR_ON
                  else "The original critic evidence is preserved; author acceptance does not claim a fresh clean review.")
         return (
             "## Author Checklist\n"
-            f"- Advisory author acceptance: {author['disposition']}. {basis}\n"
+            f"- Author acceptance: {author['disposition']}. {basis}\n"
             f"- Original critic status: {review.status}; reviewed hash: {reviewed_hash or 'unavailable'}.\n"
             f"- Author review basis: {reference.get('basis') or 'reviewed'}; reference hash: {reference.get('content_hash') or reviewed_hash or 'unavailable'}.\n"
             f"- Author-accepted and published snapshot: {snapshot_hash}.\n"

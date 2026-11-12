@@ -265,7 +265,7 @@ def collect_wave(ctx, root, attempt, record, continue_seats=None, *, reissue, re
 
 
 def commit_offer(ctx, record_id):
-    """A commit outcome without the Advisory handback (Blocking's block, a refusal after the wave): the exact
+    """A commit outcome without the handback (an owner's stop, a refusal after the wave): the exact
     reference and offer of its stopped session seats, or ``""``. Choosing one is the same commit tool's own
     collection of that paid gate (``prepare_commit_collection``), never an automatic send."""
     import json
@@ -319,7 +319,7 @@ _PAID_FIELDS = ("review_rebuttal", "goal", "scope", "reviewers", "reason", "pref
 
 
 def prepare_commit_collection(ctx, reference, *, commit_message="", mutations=(), continue_seats=None):
-    """Separate from Advisory author continuation: resume the paid gate itself (``continue_seats``: and its
+    """Separate from the author continuation: resume the paid gate itself (``continue_seats``: and its
     chosen stopped seats, armed only after the staged bytes match, ``bind_commit_collection``). Only this task's
     collection of the exact staged bytes it reviewed resumes the gate; any other collection reads the outcome
     (``settled_read``) or joins the wave read-only (``read_only_collection``), before anything is staged."""
@@ -388,8 +388,7 @@ def _read_only_text(ctx, attempt, record, staged, result, lead):
     text = (f"{lead}: {_read_only_why(ctx, attempt, record, staged)}, so nothing was staged, committed, tagged or "
             f"pushed, {sent}, and the files and index are unchanged. "
             + ("Its reviewers are still running: the same review_reference collects them again at $0. " if running else "")
-            + "To land the current candidate, continue with this review_reference and an author_disposition (Advisory or "
-            "Cyber Pro), " + ("stage the reviewed bytes again to land this review through its own gate, "
+            + "To land the current candidate, continue with this review_reference and an author_disposition, " + ("stage the reviewed bytes again to land this review through its own gate, "
                               if attempt.task_id == str(ctx.task_id) and not attempt.raw_stripped else "")
             + "or ask for a new review.\n" + json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     return publish_delivery(ctx, text, record, rendered_rows=payload["rows"])
@@ -402,7 +401,7 @@ def settled_read(ctx, attempt, record, *, exact, staged):
     its attempt row was compacted out of the recent history (no rows left to rejoin), the collection returns that whole
     recorded outcome before anything is staged, rendered as every review record is (``review_change.review_result``:
     each seat's answer and findings) and published with its delivery receipt, the files and index as they are. Nothing
-    is collected, committed or inherited, and the record keeps its verdict: a Blocking PASS stays the reviewed bytes'
+    is collected, committed or inherited, and the record keeps its verdict: a PASS stays the reviewed bytes'
     own. ``""`` when it does not apply."""
     from ouroboros.review_ledger import ledger_root
     from ouroboros.tools.review_change import review_result
@@ -811,7 +810,7 @@ def require_shown(ctx, reference, source):
     review with no record cannot have gained an outcome. Cyber Pro's judgment stands, with the gap stated."""
     from ouroboros.review_ledger import VERDICT_NOT_DISPATCHED, ledger_root, load_record
     from ouroboros.review_waiting import outcome_states, shown_outcomes
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
+    from ouroboros.tools.review_helpers import cyber_review_authority
 
     ctx._author_commit_unread = False
     record_id = str(reference.get("review_record_id") or getattr(source, "review_record_id", "") or "")
@@ -820,7 +819,7 @@ def require_shown(ctx, reference, source):
             SHOWN_OUTCOMES not in reference and record.get("state") == "settled"
             and (not outcome_states(record) or (record.get("verdict") or {}).get("aggregate") == VERDICT_NOT_DISPATCHED)):
         return source
-    if review_enforcement_blocks("blocking"):
+    if not cyber_review_authority():
         raise ContinuationUnread("its review record now holds an outcome this review_reference did not return")
     ctx._author_commit_unread = True  # the landing check states it beside the decision's evidence
     text = "Cyber Pro: the review record holds an outcome this review_reference did not return; this decision did not read it."
@@ -876,13 +875,7 @@ def commit_landing_refusal(ctx, commit_message, started_at, managed_tx):
 
 def continuation_refusal(exc: Exception, *, effect: str = "Nothing was staged or committed.") -> str:
     """A refused author continuation names the next call its cause leaves (06.11)."""
-    from ouroboros.config import get_review_enforcement
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
-
-    if review_enforcement_blocks(get_review_enforcement()):
-        step = ("under Blocking enforcement a passing review lands the commit: call commit_reviewed without "
-                "author_disposition and review_reference.")
-    elif isinstance(exc, ContinuationWaits):
+    if isinstance(exc, ContinuationWaits):
         step = ("collect that outcome (its review_reference, no author_disposition) once its reviewers answer, "
                 "then decide.")
     elif isinstance(exc, ContinuationUnread):
@@ -904,29 +897,22 @@ def default_commit_continuation(ctx, kwargs) -> str:
             or kwargs.get("continue_seats") is not None):
         return ""
     import json
-    from ouroboros.config import get_review_enforcement
     from ouroboros.review_state import _load_state_unlocked, make_repo_key
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
 
     repo_key, task_id = make_repo_key(pathlib.Path(ctx.repo_dir)), str(getattr(ctx, "task_id", "") or "")
-    blocking = review_enforcement_blocks(get_review_enforcement())
     try:
         state = _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
         returned = [attempt for attempt in state.filter_attempts(repo_key=repo_key, task_id=task_id)
                     if attempt.tool_name in {"commit_reviewed", "vcs_commit_reviewed"}
                     and attempt.phase in {"review_only", "late_wait"} and attempt.pre_review_fingerprint]
     except (OSError, ValueError) as exc:
-        return continuation_refusal(ValueError("author continuation requires Advisory enforcement")) if blocking else (
-            f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: this copy's review state is unreadable ({exc}). Nothing "
-            "was staged or committed. Next: name review_reference, or call without author_disposition.")
+        return (f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: this copy's review state is unreadable ({exc}). Nothing "
+                "was staged or committed. Next: name review_reference, or call without author_disposition.")
     if not returned:
         kwargs["author_disposition"] = None
-        note_commit_call(ctx, "author_disposition was set aside: " + (
-            "under Blocking enforcement this call's review decides, and a passing review lands the commit."
-            if blocking else "no review of this copy was returned yet, so this call asks for it; decide after its outcome."))
+        note_commit_call(ctx, "author_disposition was set aside: no review of this copy was returned yet, so this call "
+                         "asks for it; decide after its outcome.")
         return ""
-    if blocking:
-        return continuation_refusal(ValueError("author continuation requires Advisory enforcement"))
     latest = returned[-1]
     named = {"surface": "commit", "repo_key": repo_key, "task_id": task_id, "tool_name": latest.tool_name,
              "attempt": latest.attempt, "pre_review_fingerprint": latest.pre_review_fingerprint,

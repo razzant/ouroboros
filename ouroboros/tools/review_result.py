@@ -322,13 +322,11 @@ def prepare_result_review(ctx: Any, subject: Any, *, goal: str = "", scope: str 
     result question; a packet seat receives the subject inline, a retrieving seat its own brief naming the
     retained subject and the produced files to read in place."""
     from ouroboros.review_checking import SUBJECT_WORKTREE, wave_checking_source
-    from ouroboros.review_model_routes import get_review_enforcement
     from ouroboros.reviewer_slot_config import commit_triad_delivery, row_plan_retrieves
     from ouroboros.tools.review_admission import seat_vectors
-    from ouroboros.tools.review_helpers import review_drive_root, review_enforcement_blocks
+    from ouroboros.tools.review_helpers import review_drive_root
     from ouroboros.triad_review import REVIEW_JSON_ARRAY_CONTRACT
 
-    blocking_review = review_enforcement_blocks(get_review_enforcement())
     try:
         row_plan = seat_vectors(commit_triad_delivery())
     except ValueError as exc:
@@ -359,7 +357,7 @@ def prepare_result_review(ctx: Any, subject: Any, *, goal: str = "", scope: str 
     return {
         "prompt": prompt, "stable_prefix_len": len(head) if packet else 0,
         "models": row_plan["models"], "routes": routes, "row_plan": row_plan,
-        "session_task": "", "target_repo": str(subject.spec.root), "blocking_review": blocking_review,
+        "session_task": "", "target_repo": str(subject.spec.root),
         "task_evidence": {}, "preflight_execution": {}, "layer": RESULT_LAYER,
         "governance_manifest": [], "governance_packet_slots": packet,
         "checking_source": wave_checking_source(subject.spec.root, seats, data_root=review_drive_root(ctx),
@@ -531,13 +529,8 @@ def _bind_review_run(llm_trace: Dict[str, Any], record: Dict[str, Any], subject_
 
 
 def _blocking_enforcement() -> bool:
-    """Blocking review enforcement as it applies to a result: Cyber Pro never vetoes."""
-    from ouroboros.config import get_runtime_mode
-    from ouroboros.review_model_routes import get_review_enforcement
-    from ouroboros.runtime_mode_policy import runtime_mode_at_least
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
-
-    return review_enforcement_blocks(get_review_enforcement()) and not runtime_mode_at_least(get_runtime_mode(), "cyber_pro")
+    """Blocking left the product (step 4); the branches below are removed with the hold code after 25.11."""
+    return False
 
 
 def pending_review_choice_offered(ctx: Any) -> bool:

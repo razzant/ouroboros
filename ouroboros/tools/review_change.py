@@ -4,12 +4,10 @@
 ``review_change`` is the same review as a capability for any subject I choose — a project copy's
 ``base..head``, a repository's index or worktree, or the system repository itself. It never commits, never
 starts on its own and never runs tests. The rules follow the subject: a subject that is my body is read
-against the body layer, anything else against the universal core. Enforcement is recorded for every root
-and binds only a body subject's record; a verdict on another root locks nothing.
+against the body layer, anything else against the universal core. A verdict on any root locks nothing.
 
-Panel: the shared strictness policy seats the whole pool for Blocking body changes.
-Advisory may narrow with a reason; Cyber Pro composes freely. Enabled unticked rows
-are advisers: heard and shown, never counted. Coupling-only advisers answer that
+Panel: outside Cyber Pro a body change names ticked reviewers, with a reason when narrowed;
+Cyber Pro composes freely. Enabled unticked rows are advisers: heard and shown, never counted. Coupling-only advisers answer that
 question without acquiring quorum or veto authority.
 
 Surfaces (decision 3A): ``change`` is the panel review above. ``preflight`` is the same wave with ONE
@@ -39,7 +37,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ouroboros.config import (
-    adaptive_quorum, get_finalization_grace_sec, get_llm_transport_read_timeout_sec, get_review_enforcement,
+    adaptive_quorum, get_finalization_grace_sec, get_llm_transport_read_timeout_sec,
     get_runtime_mode, get_task_abs_ceiling_sec,
 )
 from ouroboros.preflight_receipts import bind_execution_exhibit
@@ -321,7 +319,7 @@ def compose_panel(request: ReviewChangeRequest, *, body: bool = False, strictnes
 
     ``required_root`` is the host fact that this result wave is a Required root
     (``review_result.required_root_wave``): the surface becomes ``result_required``
-    (Blocking widens, Advisory refuses an unexplained narrowing). Auto, a child and
+    (an unexplained narrowing is refused). Auto, a child and
     Cyber Pro leave it ``result`` and compose the named rows. It is never a model
     argument. ``chosen_by`` is the caller's record of who seated the panel (the host
     floor passes ``host``). A skill wave composes as the skill surface. Every seat of
@@ -335,7 +333,7 @@ def compose_panel(request: ReviewChangeRequest, *, body: bool = False, strictnes
                else "own_body" if body else "change")
     try:
         panel = compose_review_panel(request.reviewers, request.reason, surface=surface,
-            strictness=strictness or review_strictness(get_review_enforcement(), get_runtime_mode()),
+            strictness=strictness or review_strictness(get_runtime_mode()),
             reviewer_effort=request.reviewer_effort, coupling_only=request.coupling_only,
             chosen_by=chosen_by or "ouroboros")
     except ReviewChangeArgumentError:
@@ -457,7 +455,9 @@ def _prepare_wave(ctx: ToolContext, request: ReviewChangeRequest, frozen: Any, p
     else:
         # A change or preflight wave is held to its layer's change brief, as the commit gate is to the body's.
         rules, contract = checklist_fingerprint(layer), functools.partial(commit_review_contract_fingerprint, layer=layer)
-    enforcement = str(get_review_enforcement() or "")
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY
+
+    enforcement = RECORDED_REVIEW_AUTHORITY
     # A rejoin collects under the contract its dispatch recorded. The rules stay the record's
     # provenance (``_finish_record``), never identity (a): governance text buys no new wave.
     contract_fp = str(rejoin.review_contract_fingerprint or "") if rejoin is not None else str(contract() or "")
@@ -557,7 +557,7 @@ def _dispatch(ctx: ToolContext, wave: _Wave) -> Dict[str, Any]:
     outcome = ({"blocked": True, "block_reason": str(block_reason or ""), "attempt": holder} if review_err
                else {"blocked": False, "block_reason": "", "attempt": holder})
     # The producer's own words for a stop the record cannot otherwise state: the block it returned, or the
-    # warnings Advisory and Cyber Pro return instead for a wave no seat decided (strings: the dict items are
+    # warnings returned instead for a wave no seat decided (strings: the dict items are
     # seat findings). Pending, quorum and refusal words stay out: the record already states those causes.
     words = ""
     if str(block_reason or "") not in _RECORD_STATED_BLOCKS:
@@ -637,7 +637,6 @@ def wave_facts(ctx: ToolContext, wave: _Wave, *, outcome: Dict[str, Any], forens
     """The ledger facts of this wave, in the commit gate's vocabulary."""
     from ouroboros.review_records import ReviewRequest, resolve_review_wave
     from ouroboros.tools import git as git_mod
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
 
     task_id = str(getattr(ctx, "task_id", "") or "")
     structured = dict(forensic.get("structured") or {})
@@ -666,7 +665,6 @@ def wave_facts(ctx: ToolContext, wave: _Wave, *, outcome: Dict[str, Any], forens
         "binding_fingerprint": str(wave.frozen.diff_sha), "review_contract_fingerprint": wave.contract_fp,
         "rebuttal_sha256": wave.rebuttal_sha, "enforcement": wave.enforcement, "mode": mode,
         "dispute_input": forensic.get("dispute_input"),
-        "enforcement_blocks": wave.layer == "body" and bool(review_enforcement_blocks(wave.enforcement)),
         "structured": structured, "slot_executions": executions, "triad_raw": triad_raw,
         # The wave's "pending" block counts a lost seat as still owed; once no seat can still answer
         # (``_open_seats``), the record is decided by its answers, never held by that block.
@@ -966,7 +964,7 @@ def run_system_review(ctx: ToolContext, *, reviewer: str = "", effort: str = "",
     from dataclasses import replace
 
     from ouroboros.deep_self_review import SystemReviewAsk, run_deep_self_review
-    from ouroboros.review_records import new_review_wave_id, review_failure_facts
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, new_review_wave_id, review_failure_facts
     from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
 
     row = system_review_row(reviewer, effort)
@@ -1002,7 +1000,7 @@ def run_system_review(ctx: ToolContext, *, reviewer: str = "", effort: str = "",
                     "tree_sha": tree, "diff_sha": "", "checkout": ""},
         "goal": ask.effective_goal, "author_questions": list(ask.author_questions),
         "layer": layer_for(fact), "body_fact": str(fact.body), "body_how": str(fact.how),
-        "enforcement": str(get_review_enforcement() or ""),
+        "enforcement": RECORDED_REVIEW_AUTHORITY,
         "structured": {"started_ts": started, "rows": [system_seat_plan(row)]},
         "triad_raw": [] if refused else [{
             "slot_id": row.slot_id, "status": "error" if failed else "responded", "raw_text": "" if failed else report,
@@ -1321,7 +1319,7 @@ _DESCRIPTION = (
     "(only a synchronous caller reads the body's own staged index live). Mail mid-wave returns a pending outcome; "
     "reviewers continue, a [Review settled] notice follows while this task runs, and review_reference collects the "
     "original subject at $0 even after edits. The body is read against the body layer, anything else against the universal core "
-    "checklist. Panel: Blocking own-body reviews widen to the whole pool; Advisory may narrow with a reason (else a "
+    "checklist. Panel: outside Cyber Pro an own-body review names ticked reviewers, with a reason when narrowed (else a "
     "typed $0 refusal); Cyber Pro and other repositories compose freely. Omitted means the whole pool; an enabled "
     "unticked row is an added critic. surface=preflight seats only the ONE enabled row you name (pool member or "
     "not): an optional early look, never the commit panel. subject=system (surface=system) is /review: one row "
@@ -1329,16 +1327,15 @@ _DESCRIPTION = (
     "reviews THIS task's result instead of a change: the reply (answer, default your latest), the files and "
     "effects the task produced, and what was asked; every seat answers one question, whether the result does what "
     "was asked, judged on the result, and on the method only where the owner's words or explicit choice fixed it. "
-    "On a Required root, Blocking widens a named subset to every ticked reviewer; Advisory names ticked reviewers, "
-    "with a reason when narrowed (else a $0 refusal); delivering unreviewed, the host seats the whole pool. Under "
-    "Blocking any settled review of the delivered result holds it until one passes; under Advisory a result "
-    "revised after a review reached you is reviewed again only if you ask, delivery being your own acceptance. "
-    "Auto composes the named rows in every strictness. Cyber Pro composes freely and never holds. A child's "
+    "On a Required root, name ticked reviewers, with a reason when narrowed (else a $0 refusal); delivering "
+    "unreviewed, the host seats the whole pool. A result revised after a review reached you is reviewed again "
+    "only if you ask, delivery being your own acceptance. "
+    "Auto composes the named rows. Cyber Pro composes freely and never holds. A child's "
     "own result review composes freely. Under Auto ask when another mind's check could change what you deliver or "
     "your human asks for one. Task review Off refuses it; it counts its own paid cycles. The same subject, "
     "surface, panel and ask return the settled verdict free (reused=true), even after a guide changed; after a "
     "settled wave formed no verdict they buy a new wave, while a running or unknown one is collected, never "
-    "resent. Enforcement is recorded and on another root never locks anything. Returns JSON {record_id, "
+    "resent. A verdict never locks anything. Returns JSON {record_id, "
     "aggregate, per_question, panel, rows, subject, checklist, tests, cost, reused, findings} (+ report for "
     "subject=system)."
 )
@@ -1381,7 +1378,7 @@ def get_tools() -> List[ToolEntry]:
         "author_questions": _names("Your own questions to the reviewers, passed verbatim."),
         "reviewers": _names("Pool seats (counted) or enabled catalog rows outside the pool (added critics), by id "
                             "or handle (see the panel rule)."),
-        "reason": _string("Why this panel; required for Advisory narrowing, recorded with it."),
+        "reason": _string("Why this panel; required for a narrowed panel outside Cyber Pro, recorded with it."),
         "coupling_only": _names("Extra critics for the coupling question only; outside the quorum."),
         "reviewer_effort": {"type": "string", "enum": list(EFFORT_SCALE), "description": (
             "Panel strength for THIS wave; outranks each seat's effort (a compound route keeps its own). "

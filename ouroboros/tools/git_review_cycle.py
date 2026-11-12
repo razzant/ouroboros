@@ -17,8 +17,8 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext
-from ouroboros.tools.git_plumbing import WHOLE_INDEX, _sanitize_git_error, _publish_git_error, _publish_review_blocked
-from ouroboros.tools.review_helpers import review_enforcement_blocks
+from ouroboros.tools.git_plumbing import WHOLE_INDEX, _sanitize_git_error, _publish_git_error
+from ouroboros.tools.review_helpers import cyber_review_authority
 
 # Keep the public facade's logger name in server/stdout records.
 log = logging.getLogger("ouroboros.tools.git")
@@ -273,7 +273,7 @@ def _finalize_pending_review(
     post_fingerprint: Dict[str, Any],
 ) -> Optional[str]:
     """Retain non-terminal custody and its exact index; no Git effect follows a pending wave."""
-    if getattr(ctx, "_review_cyber_pending", "") and not review_enforcement_blocks("blocking"):
+    if getattr(ctx, "_review_cyber_pending", "") and cyber_review_authority():
         # The pending row belongs to an earlier invocation, not this free continuation.
         return None
     custody_lost = bool(getattr(ctx, "_review_custody_lost", False))
@@ -694,8 +694,9 @@ def _reviewed_stage_cycle(
             from ouroboros.tools.review import _handle_review_block_or_warning
 
             ctx._last_review_block_reason = "infra_failure" if preflight_evidence_unavailable(preflight) else "preflight"
-            if refusal := _handle_review_block_or_warning(ctx, True, preflight, ""):
-                return {"status": "blocked", "message": refusal, "block_reason": ctx._last_review_block_reason}
+            if not cyber_review_authority():  # outside Cyber Pro the continued candidate passes its deterministic checks
+                return {"status": "blocked", "message": preflight, "block_reason": ctx._last_review_block_reason}
+            _handle_review_block_or_warning(ctx, preflight, "")
         advisory_replay = {"advisory_replay": "Explicit current-author continuation; original reviewer facts retained.", "replay_reason": "author_finish"}
     if gate_outcome is not None:
         if "advisory_replay" in gate_outcome:
@@ -779,7 +780,7 @@ def _reviewed_stage_cycle(
 
     if author_source is not None:
         review_err, scope_result, triad_block_reason, triad_advisory = None, None, "", []
-        ctx._review_advisory.append("Explicit Advisory author continuation; no fresh reviewer approval was created.")
+        ctx._review_advisory.append("Explicit author continuation; no fresh reviewer approval was created.")
     elif advisory_replay is not None:
         review_err, scope_result, triad_block_reason, triad_advisory = None, None, "", []
         from ouroboros.tools.commit_gate import disclose_commit_review_replay
@@ -808,11 +809,10 @@ def _reviewed_stage_cycle(
                                 blocked=blocked, block_reason=block_reason,
                                 combined_findings=combined_findings, author_source=author_source, advisory_replay=advisory_replay)
     post_fingerprint = _git()._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
-    from ouroboros.config import get_review_enforcement
-    # Nonblocking application (ordinary Advisory; Cyber either way) returns every committing outcome, PASS and
-    # pending too, before Git; the review-only cycle keeps Advisory's material handback; Blocking keeps authority.
-    ordinary_advisory = get_review_enforcement() == "advisory" and review_enforcement_blocks("blocking")
-    hand_back_all = not review_only and not review_enforcement_blocks(get_review_enforcement())
+    # Every committing outcome, PASS and pending too, returns before Git; a review-only cycle outside Cyber Pro
+    # returns its material outcome.
+    ordinary_advisory = not cyber_review_authority()
+    hand_back_all = not review_only
     if author_source is None and _git()._review_custody_pending(ctx, counted_only=True) and (pending_message := _git()._finalize_pending_review(
             ctx, commit_message, commit_start,
             pre_fingerprint=pre_fingerprint, post_fingerprint=post_fingerprint)):
@@ -862,9 +862,7 @@ def _reviewed_stage_cycle(
                                        reason=block_reason or triad_block_reason or getattr(ctx, "_last_review_block_reason", "") or "author_decision_required", findings=combined_findings or [
                 *getattr(ctx, "_last_review_critical_findings", []),
                 *(scope_result.critical_findings if scope_result is not None else [])])
-    if blocked:
-        # Verdicts extend the identical-diff refusal streak; infrastructure does
-        # not. Either outcome retains the physical dispatch's paid-cycle fact.
+    if blocked:  # only the owner's stop reaches here; the attempt keeps the dispatch's paid-cycle fact
         block_class = _git().classify_review_block(
             triad_blocked=bool(review_err),
             triad_block_reason=str(triad_block_reason or ""),
@@ -875,13 +873,11 @@ def _reviewed_stage_cycle(
             ctx, commit_message, commit_start, combined_msg=combined_msg,
             block_reason=block_reason, combined_findings=combined_findings,
             pre_fingerprint=pre_fingerprint, post_fingerprint=post_fingerprint,
-            block_class=block_class, phase="owner_control" if block_reason == "owner_stopped" else "blocking_review",
+            block_class=block_class, phase="owner_control",
         )
         if block_reason == "owner_stopped":
             blocked_message = _publish_tool_result(ctx, ToolResult(
                 status="blocked", code="LEGACY_BLOCKED", text=blocked_message))
-        if block_reason == "critical_findings":
-            blocked_message = _publish_review_blocked(ctx, blocked_message)
         return {
             "status": "blocked", "message": blocked_message, "block_reason": block_reason,
             "review_record_id": str(getattr(ctx, "_current_review_record_id", "") or ""),
@@ -986,8 +982,8 @@ def _run_non_committing_review_cycle(
             ctx._coupling_review_history = {}
             outcome["message"] = (
                 "Cyber Pro: review-only operation completed; independent failures and pending work remain recorded. "
-                if not review_enforcement_blocks("blocking") else
-                "Review-only cycle completed under advisory enforcement; failed or missing review remains recorded. "
+                if cyber_review_authority() else
+                "Review-only cycle completed; failed or missing review remains recorded. "
                 if "review_technical_failure_advisory" in (getattr(ctx, "_review_degraded_reasons", []) or [])
                 else "Review-only cycle passed. "
             ) + ("Commit was not created; the index is retained while review custody is pending."
