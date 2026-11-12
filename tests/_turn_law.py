@@ -4,7 +4,8 @@ tests/test_cost_host.py).
 A breach in today's code is a ``TURN_GAPS`` row: its cause with today's numbers and its remover, or why it has
 none, and the counters it excuses, each up to today's growth. The law's test is then a strict xfail (``turn_gap``)
 that flips (XPASS) the moment its cause is gone, and the row is deleted; a counter the row does not name, or growth
-past a ceiling, fails for real, so the marker cannot hide a new regression.
+past a ceiling, fails for real, so the marker cannot hide a new regression. A row whose growth depends on the host the
+stand runs on (``HOST_DEPENDENT_GAPS``) is a non-strict xfail: a host where the law holds passes it.
 """
 
 from __future__ import annotations
@@ -31,6 +32,15 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
         "read again (knowledge._navigation_row). NEVER: both listings are what the turn shows (the shelf's "
         "index; the rescue scan, kept by decision); the row stays so that any other work per item fails.",
         {"dir_entries": 122, "scandir": 4, "listdir": 3}),
+    ("L3", "T:main:broad"): (
+        "40 more live rooms with story and 10 running roots in a 118,000-token window whose tool schemas take "
+        "72,260: the start keeps Low and its reply reserve of 32,000 by moving host sections behind their readers "
+        "(section_floor), as many as this host's own sections need. On a macOS development host it moves four "
+        "(runtime, review pool, drive state, world), each a new request part written once (observability."
+        "_write_parts: 10 new parts for the 7 of the turn before, open +3); on the Ubuntu CI runner (run "
+        "43119287886) the law holds within its allowance. NEVER: the count is the host sections the start could "
+        "not hold whole, not rooms, roots or rows; the row stays so that any other work per item fails.",
+        {"open": 3}),
     ("L7d", "T:main"): (
         "A capture reads every tail row to find the open ones: 6,630 rows for 31 shown or new at k=30 (250 for 31 at "
         "k=1; live 74,963 for 13,834). NEVER in this PR (owner's decision 1A): an exact skip of sealed rows needs its own "
@@ -47,9 +57,14 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
 }
 
 
+# Rows whose excused growth depends on the host's own sections, not on this code: where the law holds, the test passes.
+HOST_DEPENDENT_GAPS = frozenset({("L3", "T:main:broad")})
+
+
 def turn_gap(law: str, tag: str) -> tuple:
     gap = TURN_GAPS.get((law, tag))
-    return (pytest.mark.xfail(strict=True, raises=TurnLawBreach, reason=gap[0]),) if gap else ()
+    return (pytest.mark.xfail(strict=(law, tag) not in HOST_DEPENDENT_GAPS, raises=TurnLawBreach,
+                              reason=gap[0]),) if gap else ()
 
 
 def hold_turn_law(law: str, tag: str, growth: Dict[str, int], allowed: Dict[str, int], readers: Any, *,

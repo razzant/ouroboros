@@ -186,7 +186,7 @@ def test_bound_running_work_holds_an_empty_room_without_reading_history_or_finis
     assert _room(_view(tmp_path, MAIN_TASK)[0], beta) is None
 
 
-def test_a_room_where_neither_my_human_nor_i_spoke_is_one_line_and_a_room_where_i_spoke_once_keeps_its_words(tmp_path):
+def test_a_bot_event_is_one_line_and_a_room_where_i_spoke_once_keeps_its_words(tmp_path):
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_runner import presence_chat_id
 
@@ -200,21 +200,24 @@ def test_a_room_where_neither_my_human_nor_i_spoke_is_one_line_and_a_room_where_
 
     answer = shared.msg(_ts(42), "Looking.", chat_id=rooms["i2"], direction="out", type="presence_delivery", task_id="p2",
                         source="presence:github", transport={**base, "thread_id": "i2", "delivery": {"state": "delivered"}})
-    shared.append(tmp_path / "logs" / "chat.jsonl", said("i1", 40, "a dependabot bump"),
+    bot = said("i1", 40, "a dependabot bump\nDETAIL NOT IN THE EVENT LINE")
+    bot["transport"]["actor"]["is_bot"] = True
+    shared.append(tmp_path / "logs" / "chat.jsonl", bot,
                   said("i2", 41, "can you look?"), answer, said("i2", 43, "thanks"))
     seal(tmp_path, str(rooms["i2"]), answer)
     snapshot, text = _view(tmp_path, MAIN_TASK)
     group = next(g for g in snapshot.conversations if g["key"] == "github:me:repo.1")
     silent, spoke = (_room(snapshot, str(rooms[t])) for t in ("i1", "i2"))
-    assert not silent["engaged"] and not silent["words"] and "a dependabot bump" not in text
-    assert silent["silent"].endswith(f"1 words nobody considered; memory_read(room_id='{rooms['i1']}', rows=true)")
+    assert not silent["engaged"] and not silent["words"] and "a dependabot bump" in text
+    assert "DETAIL NOT IN THE EVENT LINE" not in text
+    assert silent["events"]["count"] == 1 and f"memory_read(room_id='{rooms['i1']}', rows=true)" in text
     assert spoke["engaged"] and "thanks" in text  # my sealed answer there still makes it a room where I spoke
     assert [room["room_id"] for room in group["rooms"]] == [str(rooms["i1"]), str(rooms["i2"])]
 
 
 def test_a_forward_from_my_humans_account_engages_the_room_and_still_waits_as_anothers_words(tmp_path):
     """A forward keeps its sender: a room where my human forwarded is one where they acted, so it keeps its words (a
-    stranger's forward does not engage one); the forwarded words are not my human's, so they rank as unconsidered."""
+    stranger's forward also records a person); the forwarded words are not my human's, so they rank as unconsidered."""
     from ouroboros import places
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_runner import presence_chat_id
@@ -239,7 +242,8 @@ def test_a_forward_from_my_humans_account_engages_the_room_and_still_waits_as_an
     assert engaged["engaged"] and "words anton forwarded" in text, "my human acted in this room"
     assert [word["owner_side"] for word in engaged["words"]] == [False], "the words are another author's"
     assert _rank(snapshot, str(rooms["f1"]), mine) == 2, "they wait unconsidered, as a person's words do"
-    assert not stranger["engaged"] and "1 words nobody considered" in stranger["silent"]
+    assert stranger["engaged"] and "words u7 forwarded" in text
+    assert _rank(snapshot, str(rooms["f2"]), theirs) == 2 and not stranger["words"][0]["owner_side"]
 
 
 @pytest.mark.parametrize("owner", [False, True])
@@ -311,13 +315,39 @@ def test_a_finish_that_folds_what_it_read_stands_for_it_elsewhere_and_leaves_it_
     assert ("beta reply" in beta_section) is not fold  # my reply there: folded into the sentence, or whole
     if fold:
         assert item["folded"]["count"] == 1 and _addr(rows[14]) in item["folded"]["to"]
-        assert ("«Read Beta's thread; nothing owed.» (2026-09-05): 1 words up to it read and folded into that "
-                f"sentence; memory_read(room_id='{beta}', rows=true, from='") in beta_section
+        assert f"[{_addr(rows[14])}] «Read Beta's thread; nothing owed.»: 1 words read and folded" in beta_section
+        assert ("Read row addresses with memory_read(room_id=<room from address>, rows=true, "
+                "from=<first>, to=<last>)") in text  # one reader for this block, the source coordinates in the row
     else:
         assert not item["folded"] and "read and folded" not in text
     assert ChronicleStore(tmp_path).sealed_row_refs(beta) == set()  # a fold seals nothing
     own, own_text = _view(tmp_path, {"id": "turn-beta", "type": "task", "chat_id": int(beta)})
     assert "beta reply" in own_text and "read and folded" not in own_text  # the room itself reads every row
+
+
+@pytest.mark.parametrize("quoted", [True, False], ids=["owner-quoted", "note-only"])
+def test_a_fold_read_finish_leaves_a_relay_row_whole_elsewhere_and_still_folds_my_reply(tmp_path, quoted):
+    """rev_carbon REV3C: a ``fold_read`` finish folded a relay row that quotes my human's words into its sentence, so my
+    other foci lost those words at a full view. A relay row stays out of the fold, like my human's own words; my
+    reply in the same room still folds into the finish's sentence."""
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+    rooms, rows = _install(tmp_path)
+    beta = str(rooms["beta"])
+    said = shared.msg(_ts(26), "Keep the March batch frozen until Friday.", chat_id=1, client_message_id="said-limit")
+    relay = shared.msg(_ts(27), "A limit from my human for this work.", chat_id=int(beta), direction="out",
+                       type="relay_entry", task_id="tb9", client_message_id="relay:limit:tb9",
+                       relay={**relay_envelope("limit", [owner_quote(tmp_path, said)] if quoted else [], chat_id=1,
+                                               summary="Passed on a limit."), "sender": {"task_id": "teller"}})
+    finish = shared.msg(_ts(30), "Done.", chat_id=int(beta), direction="system", type="task_summary", task_id="tb9",
+                        root_task_id="tb9", summary_kind="terminal_root_projection", status="completed",
+                        wake_summary="Read Beta's thread; nothing owed.", fold_read=True)
+    shared.append(tmp_path / "logs" / "chat.jsonl", said, relay, finish)
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    item = _room(snapshot, beta)
+    beta_section = text[text.index(f"### Project Beta [chat_id={beta}]"):]
+    assert any(word["address"] == _addr(relay) for word in item["words"])  # the relay row stands in the block
+    assert ("Keep the March batch frozen until Friday." in beta_section) is quoted
+    assert "beta reply" not in beta_section and item["folded"]["count"] == 1  # my reply there still folds
 
 
 def test_my_accounts_arrival_considers_nothing_and_my_delivery_there_does(tmp_path):
@@ -437,7 +467,8 @@ def test_a_row_with_no_recorded_speaker_is_nobody_and_only_a_persons_word_waits_
     assert "The description, revised." in text  # its text stays whole where it is shown
     assert (spoke["facts"]["people"], spoke["facts"]["unattributed"], spoke["facts"]["reactions"]) == (1, 1, 1)
     assert "people 1, mine 2, reactions 1, author not recorded 1, " in text
-    assert not silent["engaged"] and "; 1 words nobody considered; " in silent["silent"]  # the person alone
+    assert silent["engaged"] and "Another revision." in text and "a question" in text
+    assert [word["rank"] for word in silent["words"]] == [1, 2]  # only the person's words are unread
 
 
 
@@ -446,7 +477,8 @@ def test_one_row_several_rooms_hold_is_whole_once_and_my_humans_copy_keeps_its_f
     (``memory_inventory.rooms_of_row``): whole once, in the room it was written in; the Project keeps its entry as one
     line naming that room and the row's reader, its text never read. The whole copy survives its group's line (F6g)
     and the count (F6a); only F7 addresses it, and it is the copy F7 and an owner-note capsule
-    (``memory_floor.owner_rows``) see; the line folds as a word (F6w). Equal words of another row stay whole."""
+    (``memory_floor.owner_rows``) see; the repeated-delivery fact is not a word to fold (R12).
+    Equal words of another row stay whole."""
     from ouroboros import memory_inventory
     from ouroboros.project_dialogue import build_owner_message_ref
     from ouroboros.projects_registry import bind_task_to_project, list_projects
@@ -482,7 +514,8 @@ def test_one_row_several_rooms_hold_is_whole_once_and_my_humans_copy_keeps_its_f
     steps = {step: [ident for ident, *_ in elements] for step, elements in conversations.floor_steps(
         snapshot.conversations).items()}
     assert f"1:{address}" in steps["F7"] and f"{alpha}:{address}" not in steps["F7"]
-    assert f"{alpha}:{address}" in steps["F6w"] and f"1:{address}" not in steps["F6w"]
+    assert f"{alpha}:{address}" not in steps["F6w"] and f"1:{address}" not in steps["F6w"]
+    assert copies[alpha]["line"] in conversations_text(snapshot.conversations, {"F6w": list(steps["F6w"])})
     assert set(memory_floor.owner_rows(snapshot)) & {f"1:{address}", f"{alpha}:{address}"} == {f"1:{address}"}
     keys = [group["key"] for group in snapshot.conversations]
     for gone in ({"F6g": ["main"]}, {"F6g": keys}, {"F6g": keys, "F6a": ["conversations"]},

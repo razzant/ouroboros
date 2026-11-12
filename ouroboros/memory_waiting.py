@@ -80,7 +80,7 @@ def text(waiting):
         # the mark (the list reads those records). Absent in a view captured before these counts; facts, never a
         # suggestion.
         told = (f", {facts['clean_pass']} PASS with no findings"
-                + (f", {facts['unrecorded']} with no outcome kept on the mark (the list reads their records)"
+                + (f", {facts['unrecorded']} with no outcome kept on the mark (the list reads the record where one exists)"
                    if facts.get("unrecorded") else "")
                 if facts.get("count") and "clean_pass" in facts else "")
         lines.append(f"{cls['subject']} {facts['count']}{where}, oldest {facts['oldest']}{told}"
@@ -108,7 +108,9 @@ def listing(kind, marks, notes, label=None, outcome=mark_outcome, landing=None):
                                                      str((m.get("author") or {}).get("surface") or "review")),
                          "outcome": "; ".join(filter(None, (outcome_words(told), landing_words(became)))),
                          "clean": clean_pass(told),
-                         "idle": became == {} and isinstance(told, dict) and told.get("verdict") == "PASS"})
+                         "idle": isinstance(became, dict) and not (became.get("commit") or became.get("unread"))
+                                 and not (became.get("pr") and (became.get("status") or "merged") == "merged")
+                                 and isinstance(told, dict) and told.get("verdict") == "PASS"})
         rows.sort(key=lambda row: (row["date"], row["id"]))
         rooms = {}
         for row in rows:

@@ -477,7 +477,7 @@ for (const failed of [false, true]) test(`model catalog ${failed ? 'failure keep
     assert.equal(body.querySelector('[data-model-chooser]').getAttribute('role'), 'combobox');
     if (failed) assert.match(body.textContent, /Model suggestions could not be read; your model is kept/);
     else {
-        assert.doesNotMatch(body.textContent, /could not be read/);
+        assert.doesNotMatch(body.textContent, /Model suggestions could not be read/);
         await click(body, '[data-place-act="add-mine"]');
         assert.ok(body.querySelector('[data-model-value="another/model"]'));
     }

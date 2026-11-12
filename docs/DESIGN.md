@@ -482,7 +482,8 @@ above the row like the hint and never move the composer**: Main, the recents, th
 that can lead a work (those Settings offers the Main role, never agent sessions). With one source, its models stand
 under its own name without a source step; when Main has a row above, its model is omitted from this section.
 A recent may also appear under its source. A row is one model through one source, however many accounts list it, never an account: the source, whether
-it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one:
+it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one and
+neither Main's processing tier nor the default one, which every lead pays, is Fast or Economy:
 `OpenRouter · $4 in / $20 out`), its window when known (an unknown window is omitted), `Unavailable` when no
 account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
 and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps
@@ -1627,17 +1628,18 @@ reviews create child tasks or prove execution.
   codes stay in the receipt, the PR body and the merging agent's result.
   A later FAIL of that record appears below with one retained report link when
   available; it creates no Main row.
-- A work the review gate let continue where Blocking enforcement would have
-  stopped it carries one quiet phrase on its card's line, `Review: N× continued
-  where Blocking would have stopped · latest: <reason>`, live as each decision
-  lands and on a page load before Details open, a running work's too (a Project
-  work's portal in Main shows it live and once its Details open), and one
-  Details row, `Review gate did not prohibit
-  continuation`, holding the stored head of the latest reason (300 characters,
-  an ellipsis when cut; `review_gate_card.js`): a count, never a row per
-  decision; no Main row and no Telegram message of its own, its Telegram
-  completion carrying the same phrase. It never says committed, merged or
-  running; a child's decision counts on its root's card, naming the child.
+- A work whose review returned FAIL or no verdict carries one quiet phrase on
+  its card's line, `Review: FAIL or no verdict N× (latest: <reason>) · author
+  continued M× (latest: <disposition> — "<head>") · landed over it: K
+  commits`, a part only when recorded (unknown is not zero; a part with no
+  count before it names what it went over), the first live,
+  all on a page load before Details open, running ones too (a Project work's
+  portal in Main shows it live and once its Details open), and one Details
+  row, `Review returned FAIL or no verdict`, with the stored heads (300
+  characters, an ellipsis when cut; `review_gate_card.js`): counts, never a
+  row per decision, no Main row or Telegram message of its own; the Telegram
+  completion carries it. It never says merged or running; a child's outcome
+  counts on its root's card, naming the child.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow
@@ -2737,7 +2739,8 @@ replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
 confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
-published price per 1M tokens where it states one (`$4 in / $20 out`), which never sorts or filters the list;
+published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
+sorts or filters the list;
 nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned

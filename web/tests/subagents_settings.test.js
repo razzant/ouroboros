@@ -1254,6 +1254,22 @@ test('every card carries the Reviewer box and its Review cost; a marked API row 
         /data-subagent-review-exception>Switched off, so not in the review pool\.</);
 });
 
+test('a helper on Fast or Economy is offered its models without the catalog price; on Standard with it', () => {
+    const opus = { provider_id: 'openrouter', id: 'anthropic/claude-opus-5.5', value: 'anthropic/claude-opus-5.5',
+        name: 'Anthropic: Claude Opus 5.5', price: { input: 4, output: 20 } };
+    const row = (processing) => apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: opus.value },
+        ...(processing ? { processing_preference: processing } : {}) });
+    const markup = (processing, global = '') => availableSubagentRowMarkup(row(processing), { ...QUIET_STATE, apiModels: [opus],
+        processingPreference: global }, 0);
+    assert.match(markup(''), /ui-model-option-meta" data-i18n-skip>\$4 in \/ \$20 out</);
+    assert.match(markup('standard', 'fast'), /ui-model-option-meta/, "the helper's own choice outranks the global one");
+    for (const [processing, global] of [['economy', ''], ['fast', ''], ['', 'fast']]) {
+        const html = markup(processing, global);
+        assert.doesNotMatch(html, /ui-model-option-meta/, `${processing || '-'} / ${global || '-'}`);
+        assert.match(html, /data-model-value="anthropic\/claude-opus-5\.5"/, 'the model is still offered');
+    }
+});
+
 test('a price is what one review measured or plainly unknown, and a seat is spoken as time, never as $0', () => {
     const api = apiRow();
     assert.equal(reviewCostText(sessionRow()), 'uses a session seat and time');
@@ -1271,6 +1287,11 @@ test('a price is what one review measured or plainly unknown, and a seat is spok
         '≈$1.23 per review (median of 7 measured, $0.50–$3.10)');
     assert.equal(reviewCostText(apiRow({ delivery: 'packet' }), { usd_per_review: 0.0042, basis: 'observed_reviews', reviews: 1,
         low: 0.0042, high: 0.0042 }), '≈$0.0042 per review (1 measured)');
+    // A charge below the printed precision is never a proven zero (the words review_price.py prints).
+    assert.equal(reviewCostText(api, { usd_per_review: 0.00003, basis: 'observed_reviews', reviews: 1, low: 0.00003, high: 0.00003 }),
+        '<$0.0001 per review (1 measured)');
+    assert.equal(reviewCostText(api, { usd_per_review: 0.02, basis: 'observed_reviews', reviews: 3, low: 0.00003, high: 0.05 }),
+        '≈$0.02 per review (median of 3 measured, <$0.0001–$0.05)');
 });
 
 test('a minted row names its origin, and a copy keeps the mark but never the origin', () => {

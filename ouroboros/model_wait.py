@@ -49,6 +49,10 @@ from ouroboros.task_store import patch_handoff, put_handoffs
 from ouroboros.utils import utc_now_iso
 
 
+# A granted same-request repeat yielded to unread owner words: the round start drains and rebuilds (``loop_llm_call``).
+OWNER_WORDS_WAITING = "owner_words_waiting"
+
+
 class ModelWaitInterrupted(RuntimeError):
     """A live model wait ended on the task's existing control/deadline rail."""
 
@@ -956,7 +960,9 @@ class TaskModelWait:
         row = {"wait_id": wait_id, "task_attempt": self.attempt, "role": role,
                "_slot_id": slot_id,
                "model": kwargs["model"], "source": source,
-               "credential_profile_id": "" if reason == "auth_quota" else str(route.get("credentialProfileId") or problem_context.get("credentialProfileId") or account_intent or ""),
+               # The tier this call captured before waiting, which its continuation pays (the picker's catalog price).
+               "processing_preference": str(kwargs.get("processing_preference") or ""),
+               "credential_profile_id":"" if reason == "auth_quota" else str(route.get("credentialProfileId") or problem_context.get("credentialProfileId") or account_intent or ""),
                "credential_harness": "", "reason": reason, "reset_at": str(getattr(error, "reset_at", "") or ""),
                "auto_continue": self.auto_continue.get(role, True) if observes_access else False, "state": "waiting",
                **({"availability_observation": "unavailable"} if not observes_access else {}),

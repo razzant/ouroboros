@@ -29,7 +29,7 @@ mailbox acknowledgement of a notice is not that release.
 
 A left wave's mark also keeps what its record said when it was published (``review.outcome``, from
 ``outcome_facts``: the verdict word, the findings of each kind, how many asked answers arrived and how
-many advisers gave none), and its head says the same in words. The waiting line counts the marks whose
+many answers asked of advisers are unreadable, one per adviser and question), and its head says the same in words. The waiting line counts the marks whose
 outcome is a ``clean_pass`` and those of a verdict-bearing review that keep no outcome; the list
 prints each mark's outcome, reading the review record of an older mark as it stands now
 (``mark_outcome``), and what landed of a commit review's change (``mark_landing``). These are facts
@@ -163,7 +163,9 @@ def outcome_facts(record: Any) -> Optional[Dict[str, Any]]:
     """What a review record says at this moment, as the scalars a late mark keeps beside its words: the verdict
     word, how many findings of each kind the record holds, how many of the answers asked of its counted seats
     arrived (one per seat and question; the seat count for a record that keeps no per-question tally) and how
-    many advisers, heard outside the count, gave no readable answer (``unheard``). A
+    many answers asked of advisers, heard outside the count, are unreadable (``unheard``: one per adviser and
+    question, an adviser that answered one question and not the other included; one per adviser whose row keeps
+    no per-question answers). A
     record that is not settled formed no verdict: ``{"verdict": ""}``, never a guessed PASS. A plan council's
     record is asked no verdict question: ``{"advice": True}``, never its missing findings read as none. No record
     at all says nothing (``None``): a mark published without one keeps no outcome, so its list line reads the
@@ -183,8 +185,18 @@ def outcome_facts(record: Any) -> Optional[Dict[str, Any]]:
             **{name: len(verdict.get(f"{name}_findings") or []) for name in ("critical", "advisory", "additional")},
             "asked": sum(int(tally.get("assigned") or 0) for tally in tallies),
             "answered": sum(int(tally.get("responded") or 0) for tally in tallies),
-            "unheard": sum(1 for row in record.get("rows") or [] if isinstance(row, Mapping)
-                           and row.get("additional") and row.get("status") not in ANSWERED_STATUSES)}
+            "unheard": sum(_unheard(row, ANSWERED_STATUSES) for row in record.get("rows") or []
+                           if isinstance(row, Mapping) and row.get("additional"))}
+
+
+def _unheard(row: Mapping[str, Any], answered: Any) -> int:
+    """The unreadable answers of one adviser's row: its asked questions without a responded answer, else one
+    when the seat itself gave no readable answer (a row that keeps no per-question answers)."""
+    parts, answers = row.get("parts") or (), row.get("answers")
+    if parts and isinstance(answers, Mapping):
+        return sum(1 for part in parts
+                   if not (isinstance(answers.get(part), Mapping) and answers[part].get("status") == "responded"))
+    return int(row.get("status") not in answered)
 
 
 def clean_pass(outcome: Any) -> bool:
@@ -239,16 +251,19 @@ def mark_outcome(mark: Mapping[str, Any], drive_root: Any = None) -> Optional[Di
 
 def mark_landing(mark: Mapping[str, Any], drive_root: Any) -> Optional[Dict[str, Any]]:
     """What is recorded, as it reads now, of the change a late commit review read: the commit that landed under
-    this review (``{"commit": sha}``), else the pull request a receipt of its task records as merged, named by its
-    address (``{"pr": url}``: a fact about the task's receipts, not proof of who merged it or that this change is in
-    it), else that neither is recorded (``{}``: no commit under this record and no merged receipt, which a commit
-    under another record of the task or a merge made outside ``pr_merge`` does not show). ``None`` for any other
-    review and whenever the record or the task's result cannot be read: an unread fact is never told as nothing
-    landed. Read on request and never kept on the mark, because a successor of the task may still land the work."""
+    this review (``{"commit": sha, "tree": same|different|unknown}``, the tree's relation to the one reviewed), else
+    the pull request a receipt of its task records as merged, named by its address (``{"pr": url}``: a fact about the
+    task's receipts, not proof of who merged it or that this change is in it), else the latest receipt of its task
+    with its outcome (``{"pr": url, "status": outcome}``: a merge asked for and not recorded as done, ``unknown`` or
+    ``queued`` among them; a queued one whose pull request reads otherwise since carries the owner module's
+    ``note``), else that neither is recorded (``{}``: no commit under this record and no receipt, which a
+    commit under another record of the task or a merge made outside ``pr_merge`` does not show). ``{"unread": True}``
+    when the record or the task's result cannot be read: an unread fact is never told as nothing landed. ``None``
+    for any other review. Read on request and never kept on the mark: a successor of the task may still land it."""
     review = mark.get("review") or {}
     if review.get("surface") != "commit_gate":
         return None
-    from ouroboros.merge_receipts import RECEIPTS_KEY  # the readers below are named lazily only
+    from ouroboros.merge_receipts import RECEIPTS_KEY, queued_earlier_note  # the readers below are named lazily only
     from ouroboros.review_doctrine import public_commit_landings
     from ouroboros.review_ledger import load_record
     from ouroboros.task_results import load_task_result
@@ -256,29 +271,42 @@ def mark_landing(mark: Mapping[str, Any], drive_root: Any) -> Optional[Dict[str,
     try:
         record = load_record(drive_root, str((review.get("subject") or {}).get("record_id") or ""))
         if record is None:
-            return None
+            return {"unread": True}
         commits = public_commit_landings(record)
         if commits:
-            return {"commit": commits[-1]["commit_sha"]}
+            return {"commit": commits[-1]["commit_sha"], "tree": commits[-1]["reviewed_subject"]}
         task = load_task_result(drive_root, str(review.get("task_id") or ""))
         if not isinstance(task, dict):
-            return None
-        merged = [receipt for receipt in task.get(RECEIPTS_KEY) or []
-                  if isinstance(receipt, dict) and (receipt.get("outcome") or {}).get("status") == "merged"]
-        return {"pr": str((merged[-1].get("repo") or {}).get("url") or f"PR #{merged[-1].get('number')}")} if merged else {}
+            return {"unread": True}
+        receipts = [receipt for receipt in task.get(RECEIPTS_KEY) or [] if isinstance(receipt, dict)]
+        merged = [receipt for receipt in receipts if (receipt.get("outcome") or {}).get("status") == "merged"]
+        latest = (merged or receipts or [None])[-1]
+        if latest is None:
+            return {}
+        address = str((latest.get("repo") or {}).get("url") or f"PR #{latest.get('number')}")
+        if merged:
+            return {"pr": address}
+        note = queued_earlier_note(latest)  # a queued request the pull request's later readback no longer shows
+        return {"pr": address, "status": str((latest.get("outcome") or {}).get("status") or "unknown"),
+                **({"note": note} if note else {})}
     except Exception:  # the list the mind asked for keeps its other rows when one work's facts cannot be read
         log.warning("Landing facts unavailable for late review mark %s", mark.get("id"), exc_info=True)
-        return None
+        return {"unread": True}
 
 
 def landing_words(landing: Any) -> str:
     """One late commit review's landing for the list: what is recorded, never a guess about lost work."""
     if not isinstance(landing, Mapping):
         return ""
+    if landing.get("unread"):
+        return "what landed could not be read"
     if landing.get("commit"):
-        return f"committed as {str(landing['commit'])[:12]} under this review"
+        relation = {"same": "", "different": "; its tree differs from the reviewed one"}.get(
+            str(landing.get("tree") or ""), "; its relation to the reviewed tree is unknown")
+        return f"committed as {str(landing['commit'])[:12]} under this review{relation}"
     if landing.get("pr"):
-        return f"a receipt of its task records {landing['pr']} as merged"
+        note = f" ({landing['note']})" if landing.get("note") else ""
+        return f"a receipt of its task records {landing['pr']} as {landing.get('status') or 'merged'}{note}"
     return "no commit under this review, no merged receipt of its task"
 
 

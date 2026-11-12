@@ -211,7 +211,7 @@ export function groupPlaces(circles, places) {
 // The window's one catalog read (model_catalog_store.js) as the Model field's suggestions; a read that failed with
 // nothing listed earlier rejects, so the field says its suggestions could not be read.
 async function readCatalog() {
-    await modelCatalog.read();
+    await Promise.all([modelCatalog.read(), modelCatalog.readConnections()]);  // the tiers say whether a price is paid
     if (modelCatalog.status().failed && !modelCatalog.catalog()?.items?.length) throw new Error('The model catalog could not be read.');
     return modelCatalog.catalog();
 }
@@ -283,10 +283,12 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     function onCatalog(event) {
         if (destroyed) return;
         const data = event.detail;
-        ui.models = modelSuggestions(data);
+        ui.models = modelSuggestions(data, { tierPriced: modelCatalog.tierPriced('lead') });
         ui.catalog = data;
         for (const field of body.querySelectorAll('[data-model-chooser]')) updateModelChooser(field, ui.models, catalogPrograms(data));
     }
+    // The prices beside the suggestions follow the tier Settings saves and the page's language.
+    const resay = () => { if (ui.catalog) onCatalog({ detail: ui.catalog }); };
 
     // The Model field's suggestions, read once when an editor first shows; the field works without them (any id can be
     // typed), and they reach the open field without a repaint, so the caret stays where it is.
@@ -539,6 +541,8 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     window.addEventListener('ouro:open-circles', onOpen);
     document.addEventListener('visibilitychange', onVisibility);
     document.addEventListener('settings-model-catalog:updated', onBroadcast);
+    const offTiers = modelCatalog.subscribe(resay);
+    window.addEventListener('ouro:language-changed', resay);
     paint();
     if (shown()) void refresh();
     return {
@@ -559,6 +563,8 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             window.removeEventListener('ouro:open-circles', onOpen);
             document.removeEventListener('visibilitychange', onVisibility);
             document.removeEventListener('settings-model-catalog:updated', onBroadcast);
+            offTiers();
+            window.removeEventListener('ouro:language-changed', resay);
         },
     };
 }

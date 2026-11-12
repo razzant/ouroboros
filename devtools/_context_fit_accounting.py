@@ -6,11 +6,12 @@ from unittest.mock import patch
 
 
 @contextmanager
-def cold_density():
+def cold_density(ratio=1.0):
+    """A cold estimate of the route's density, provider tokens per estimator token (chars/4): 1.0 or a declared one."""
     from ouroboros import capability_evidence, context_fit
 
-    with patch.object(context_fit, '_route_calibration_ratio', lambda *a, **kw: 1.0), patch.object(
-            capability_evidence, 'resolve_main_token_density', lambda *a, **kw: (1.0, 'cold_estimate')):
+    with patch.object(context_fit, '_route_calibration_ratio', lambda *a, **kw: ratio), patch.object(
+            capability_evidence, 'resolve_main_token_density', lambda *a, **kw: (ratio, 'cold_estimate')):
         yield
 
 

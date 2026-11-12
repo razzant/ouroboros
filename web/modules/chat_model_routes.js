@@ -92,7 +92,7 @@ export function compareNewerFirst(a, b) {
  * `connections` (`apiConnections()` of a settings read, when one was made) names an API source that cannot send.
  * @param {{catalog?: object, connections?: ?Array}} input
  */
-export function buildModelIndex({ catalog = {}, connections = null } = {}) {
+export function buildModelIndex({ catalog = {}, connections = null, tierPriced = false } = {}) {
     const sources = new Map();
     const rows = new Map();
     const descriptors = Array.isArray(catalog.model_sources) ? catalog.model_sources : [];
@@ -129,20 +129,24 @@ export function buildModelIndex({ catalog = {}, connections = null } = {}) {
         if (own.named && item?.provider_label) own.label = String(item.provider_label);  // the connection's own name
         if (!rows.has(key)) {
             rows.set(key, { key, route, id: modelPart(route), name: String(item?.name || '') || modelPart(route),
-                source: own.id, lane: own.lane, window: 0, available: null, states: new Set(), prices: new Set() });
+                source: own.id, lane: own.lane, window: 0, available: null, states: new Set(), prices: new Map() });
             own.count += 1;
         }
         const row = rows.get(key);
         row.window = Math.max(row.window, Number(item?.max_context_window) || Number(item?.context_window) || 0);
         if (typeof item?.availability === 'string') row.states.add(item.availability);
-        row.prices.add(priceWords(item?.price));
+        row.prices.set(JSON.stringify(item?.price ?? null), item?.price ?? null);
     }
+    let priced = false;  // whether the catalog states any price: only then do the processing tiers change a word
     for (const row of rows.values()) {
         // Any account that can serve it makes the row available; unavailable only when every account says so.
         row.available = row.states.has('available') ? true
             : row.states.size === 1 && row.states.has('unavailable') ? false : null;
-        // The catalog's price, while every item of the row states that same one (only OpenRouter's rows state any).
-        row.price = row.prices.size === 1 ? [...row.prices][0] : '';
+        // The catalog's price, while every item of the row states that same one (only OpenRouter's rows state any);
+        // kept as the figures, so its words follow the language of each paint.
+        const price = row.prices.size === 1 ? [...row.prices.values()][0] : null;
+        priced ||= Boolean(price);
+        row.price = tierPriced ? null : price;
         delete row.states;
         delete row.prices;
     }
@@ -181,7 +185,7 @@ export function buildModelIndex({ catalog = {}, connections = null } = {}) {
         firstOfKind.add(kindKey);
     }
     return {
-        problems, connections,
+        problems, connections, priced,
         sources: sorted,
         source: (id) => sources.get(id) || null,
         rows: ordered,
@@ -210,13 +214,14 @@ export function describeRoute(index, raw) {
         ? harnessPresentation(id.slice(SUBSCRIPTION.length)).label : apiProviderLabel(id, {}, index?.connections || []));
     const sourceLabel = cannotSend ? `${base} (${unavailableConnectionState(id, index.connections)})` : base;
     const window = windowWords(listed?.window);
+    const price = priceWords(listed?.price);
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
-        sourceLabel, pay: PAY_WORDS[lane], price: listed?.price || '', window, listed: Boolean(listed),
+        sourceLabel, pay: PAY_WORDS[lane], price, window, listed: Boolean(listed),
         available: listed?.available ?? null,
         harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
         kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),
-        facts: [sourceLabel, PAY_WORDS[lane], window ? `${window} window` : ''].filter(Boolean).join(' · '),
+        facts: [sourceLabel, price || PAY_WORDS[lane], window ? `${window} window` : ''].filter(Boolean).join(' · '),
     };
 }
 
