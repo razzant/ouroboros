@@ -300,7 +300,7 @@ caps with `text-transform`.
 whether it is final, its unresolved upper bound and what is unknown; the
 composition, the hold and technical counts follow, quieter. Budget's three limits are rows; one line under them names
 what they cannot count, roles whose route has no known price (`Not counted: Web search, Agents (price unknown).`,
-`all model roles` when none has one), and is absent when every route has a price; under it the consciousness
+`all model roles` when none has one), and is absent when every route Settings configures has a price; under it the consciousness
 limit shows its 24-hour spend (pending, unpriced) and a full-width row names that limit with
 “If its charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown) and a
 wake held at it with its card's door. Activity names a

@@ -448,7 +448,8 @@ _SPEND_ROLES = (("main", "Main"), ("light", "Light"), ("safety", "Safety Supervi
 
 def _role_routes(settings: Mapping[str, Any], role: str) -> List[Tuple[str, bool]]:
     """The ``(model, local)`` routes a role's calls take by this document (route_choice.model_role_slot_override):
-    an empty slot is Main's model with the slot's own local flag when set; an empty Safety runs on Light's slot."""
+    a slot with its own model takes its own local flag; an empty one runs Main's model, on the slot's own flag only
+    when that is set; an empty Safety runs on Light's slot."""
     from ouroboros.model_slots import MODEL_ROLE_SETTINGS
 
     def flag(key: str) -> Optional[bool]:
@@ -465,7 +466,7 @@ def _role_routes(settings: Mapping[str, Any], role: str) -> List[Tuple[str, bool
     if role == "safety" and not str(settings.get("OUROBOROS_MODEL_SAFETY") or "").strip():
         role = "light"
     own, local = str(settings.get(MODEL_ROLE_SETTINGS[role]) or "").strip(), flag(f"USE_LOCAL_{role.upper()}")
-    return [(own or main[0], main[1] if local is None else local)]
+    return [(own, bool(local))] if own else [(main[0], main[1] if local is None else local)]
 
 
 def _subagent_rows(value: Any) -> List[Mapping[str, Any]]:

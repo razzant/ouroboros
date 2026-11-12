@@ -649,6 +649,9 @@ def test_the_limits_name_what_they_cannot_count_and_nothing_where_every_route_ha
                              "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_FALLBACKS": ""}) == []
     assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["all model roles"]
     assert known_spend_gaps({"OUROBOROS_MODEL": "claudexor::codex=gpt-6"}) == [], "a subscription spends time, not money"
+    # A slot with its own model keeps its own local flag; only an empty one runs on Main's (route_choice).
+    assert known_spend_gaps({"OUROBOROS_MODEL": "qwen3.gguf", "USE_LOCAL_MAIN": "true", "OUROBOROS_MODEL_LIGHT": "openai::gpt-6-mini",
+                             "USE_LOCAL_LIGHT": False, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["Light", "Safety Supervisor"]
     assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "USE_LOCAL_MAIN": "true",
                              "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == [], "a local model costs nothing"
     # Built-in web search by its first leg: a direct key has no catalog, OpenRouter has one, ddgs is free.
