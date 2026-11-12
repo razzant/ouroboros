@@ -407,6 +407,11 @@ def test_a_size_red_is_handed_over_with_the_base_it_was_measured_against():
     assert "(a test of the size check, `pytest -m size_ratchet`)" in github.comments[0][1]
     assert "OURO_SIZE_RATCHET_BASE_REF" not in routing.issue_body(
         {"kind": "unattributed", "base": "a" * 40, "ids": ["tests/t.py::test_a"]}, head=HEAD, run_url="u")
+    # a book's size id says what a later approved growth does to its base; a module's size id does not
+    book = routing.issue_body({"kind": "unattributed", "base": "a" * 40, "ids": [f"size {routing.BOOK_BUDGETS}::test_x"]},
+                              head=HEAD, run_url="u")
+    assert "`book-growth` label approved still counts against that base" in book
+    assert "book-growth" not in github.issues[100]["body"] and "only by passing against that base" in github.issues[100]["body"]
 
 
 def test_a_label_the_other_leg_created_meanwhile_is_no_warning():

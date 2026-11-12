@@ -19,6 +19,7 @@ LABEL = "post-merge-red"
 NODE_LANE = "node-lane"
 LINT_PREFIX = "ruff "  # a lint finding's id: "ruff <code> <path> <name>"
 SIZE_PREFIX = "size "  # a size check test's id: "size <nodeid>"
+BOOK_BUDGETS = "tests/test_reference_book_budgets.py"  # the size check's module that measures the books and prompts
 SYSTEMS = {"linux": "Linux", "windows": "Windows"}
 _BLOCK = re.compile(r"<!-- post-merge-red (\{.*?\}) -->", re.S)
 _AUTHOR = re.compile(r" by `([^`\n]+)` landed\. First bad commit")  # a culprit issue's opening (issue_body)
@@ -114,13 +115,16 @@ def _named(nodeid: str) -> str:
 
 
 def _size_hint(block: dict) -> str:
-    """How to see what a size test found: the release's own lane against the measured base."""
+    """How to see what a size test found, and how it stops being tracked: the release's own lane against the measured base."""
     modules = sorted({nodeid[len(SIZE_PREFIX):].split("::", 1)[0] for nodeid in block["ids"]
                       if nodeid.startswith(SIZE_PREFIX)})
     if not modules:
         return ""
+    later = (" Growth a later merge's `book-growth` label approved still counts against that base: the check stays red "
+             "until the text is no larger than it was there." if BOOK_BUDGETS in modules else "")
     return (f" The size check measures against `{size_base(block)}`: `OURO_SIZE_RATCHET_BASE_REF="
-            f"{size_base(block)} python -m pytest -m size_ratchet {' '.join(modules)}` shows what grew.")
+            f"{size_base(block)} python -m pytest -m size_ratchet {' '.join(modules)}` shows what grew. A size test "
+            f"stops being tracked only by passing against that base; a renamed one is taken off by hand.{later}")
 
 
 def issue_title(block: dict, pr: dict | None) -> str:
