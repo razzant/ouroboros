@@ -233,6 +233,50 @@ def _validated_invocation(drive: Any, retry_token: str, task_id: str,
     return record, None
 
 
+def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any]) -> Optional[ToolResult]:
+    """An explicit retry first reads what its recorded start already holds in the engine (#3138).
+
+    It runs once ownership and the stored body are proven (``_validated_invocation``) and before any
+    present-target, snapshot or route-health requirement: those govern a new POST, not work the engine
+    already accepted. A found command or retained turn run is bound once (``delegate_accepted.recover``,
+    converging with any other writer of this invocation) and answered as the started run, nothing re-sent
+    and nothing inferred about current access, target or model health. A read that forbids any replay
+    (``NO_REPLAY``) is refused typed, the start kept pending and unknown; every other answer is ``None``,
+    leaving the replay path and its unchanged send rule.
+    """
+    from ouroboros.delegate_accepted import NO_REPLAY, recover
+    from ouroboros.delegate_shared import delegate_result
+    from ouroboros.execution_domain import start_engine
+
+    try:
+        _engine, gateway = start_engine(drive, retry_token)  # the engine this invocation recorded
+    except Exception:  # unreachable or refused: the replay path below reaches for it again and answers typed
+        log.debug("Accepted-start read of %s found no engine", retry_token, exc_info=True)
+        return None
+    try:
+        held, read = recover(drive, gateway, {**record, "invocation_id": retry_token})
+    except Exception:  # a read that failed outright is no answer: the replay path keeps its send rule
+        log.warning("Accepted-start read of %s failed", retry_token, exc_info=True)
+        return None
+    finally:
+        gateway.close()
+    if held is None:
+        return None if read["reason"] not in NO_REPLAY else _fail(
+            "delegate_start", read["reason"],
+            "The engine answered for this start, but no run could be bound to it now, so nothing was re-sent: "
+            "its outcome stays unknown and the invocation pending. This is no evidence that it started nothing.",
+            retry_of=retry_token, pending_invocation_id=retry_token, lookup=read)
+    return delegate_result({
+        "status": "started", "run_id": held.run_id, "invocation_id": retry_token, "idempotent_recovery": True,
+        "recovered_without_start": True, "custody_durable": True, "route": held.route_id, "model": held.model,
+        "effort": held.effort or "", "access": held.access, "mode": held.mode, "isolation": held.isolation or "envelope",
+        "root": held.execution_root or str(((record.get("request") or {}).get("scope") or {}).get("root") or ""),
+        "lookup": read,
+        "note": ("The engine had already accepted this invocation's start; its run is now in custody and nothing was "
+                 "re-sent. Poll with delegate_wait; the run's own claims are evidence to check, not a verified result."),
+    })
+
+
 class _RetryBinding(NamedTuple):
     """Every fact of a replayed invocation, read off its ONE durable record."""
 
@@ -264,13 +308,15 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
     """Rebuild a retried start from its stored invocation, or refuse it typed.
 
     The stored invocation is the SINGLE SOURCE of EVERY retry fact (route, shape,
-    root, project, key, cap and its basis, continuation lineage), validated BEFORE
-    any daemon call so a refused token registers nothing. A MUTATING replay
-    additionally re-proves its C1 binding: the row must carry the snapshot/baseline
-    binding (pre-C1 rows refused), the task's PRESENT workspace must still resolve
-    to the recorded authority target, and the recorded snapshot must still exist on
-    disk. Last, the call's own request arguments may not contradict the replay: new
-    geometry refuses, and an explicit ``max_seconds`` must equal the recorded cap.
+    root, project, key, cap and its basis, continuation lineage). Its ownership and
+    the call's own request arguments are validated BEFORE any daemon call, so such a
+    refused token reads and registers nothing: new geometry refuses, and an explicit
+    ``max_seconds`` must equal the recorded cap. Then the start the engine may already
+    hold is read (``_accepted_retry``): accepted work is answered as its run, whatever
+    the present target, snapshot or route health. A MUTATING replay additionally
+    re-proves its C1 binding: the row must carry the snapshot/baseline binding (pre-C1
+    rows refused), the task's PRESENT workspace must still resolve to the recorded
+    authority target, and the recorded snapshot must still exist on disk.
     """
     from ouroboros.delegate_continuation import replayed_custody
     from ouroboros.subagents import DelegatedRunShape, DelegationRoute
@@ -280,6 +326,20 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
     if refusal:
         return None, refusal
     request_body = record["request"]
+    if geometry != (None, None):
+        return None, _fail("delegate_start", "retry_selector_conflict",
+                           "A retry replays its recorded directory strategy and scope; omit new geometry arguments.")
+    seconds = int(request_body.get("maxSeconds") or 0)
+    try:  # read as bounded_max_seconds reads it: zero, negative or malformed means omitted
+        asked = max(0, int(max_seconds)) if max_seconds is not None else 0
+    except (TypeError, ValueError):
+        asked = 0
+    if asked and asked != seconds:
+        return None, _fail("delegate_start", "retry_selector_conflict",
+                           f"A retry replays its recorded max_seconds={seconds}; omit max_seconds to retry.",
+                           retry_of=retry_token, recorded_max_seconds=seconds)
+    if (accepted := _accepted_retry(drive, retry_token, record)) is not None:
+        return None, accepted  # the start the engine already holds: a receipt, never a second POST
     execution = (request_body.get("execution")
                  if isinstance(request_body.get("execution"), dict) else {})
     scope = request_body.get("scope") if isinstance(request_body.get("scope"), dict) else {}
@@ -356,18 +416,6 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
                     "delegate_start(subagent_id=..., prompt=...) (it will take a "
                     "fresh snapshot).",
                     retry_of=retry_token, snapshot_id=snapshot_id)
-    if geometry != (None, None):
-        return None, _fail("delegate_start", "retry_selector_conflict",
-                           "A retry replays its recorded directory strategy and scope; omit new geometry arguments.")
-    seconds = int(request_body.get("maxSeconds") or 0)
-    try:  # read as bounded_max_seconds reads it: zero, negative or malformed means omitted
-        asked = max(0, int(max_seconds)) if max_seconds is not None else 0
-    except (TypeError, ValueError):
-        asked = 0
-    if asked and asked != seconds:
-        return None, _fail("delegate_start", "retry_selector_conflict",
-                           f"A retry replays its recorded max_seconds={seconds}; omit max_seconds to retry.",
-                           retry_of=retry_token, recorded_max_seconds=seconds)
     return _RetryBinding(
         request_body=request_body,
         route=route,

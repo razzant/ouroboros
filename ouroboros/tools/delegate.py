@@ -670,8 +670,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     finally:
         gateway.close()
     # A start whose custody row did not land does not wear the plain name: the run
-    # is live and only THIS process knows it exists (the uncustodied-run leak).
-    durable = record_started_custody(
+    # is live and only THIS process knows it exists (the uncustodied-run leak). A read that bound it first keeps its name.
+    run_id, durable = record_started_custody(
         drive, run_id, ctx, route, authority,
         key=key, access=access, root=root, seconds=seconds,
         invocation_id=invocation_id, project_id=project_id, daemon_store_id=custody.admitted_store_id(handle),

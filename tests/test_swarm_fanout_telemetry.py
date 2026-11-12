@@ -201,7 +201,7 @@ def _real_delegate_start(
     if not actor_first_work_order:
         monkeypatch.setattr(delegate, "prepare_delegate_start_actor", explicit_transport_actor)
     if not custody_durable:
-        monkeypatch.setattr(delegate, "record_started_custody", lambda *a, **k: False)
+        monkeypatch.setattr(delegate, "record_started_custody", lambda _drive, run_id, *a, **k: (run_id, False))
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     ctx = ToolContext(

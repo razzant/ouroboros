@@ -494,6 +494,11 @@ class TestLegacyRetry:
                 "execution": {"isolation": "live", "delegated": True},
                 "primaryHarness": "some-route",
             }, project_id="p", project_owned=False, route="some-route")
+        # #3138: the retry first asks its recorded engine what it accepted; this one declares no such
+        # lookup, so the C1 refusal below still answers, and nothing is sent.
+        from types import SimpleNamespace
+        monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway",
+                            lambda **_kw: SimpleNamespace(operations=lambda: [], close=lambda: None))
         out = _delegate_start(ctx, "do the thing", retry_of="inv-legacy")
         assert "retry_binding_absent" in out.text, out
         custody._CUSTODY.clear()
