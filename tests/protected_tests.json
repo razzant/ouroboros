@@ -17,6 +17,7 @@
   "tests/test_contracts.py": "gate floor: frozen ABI and tool/context protocols",
   "tests/test_credential_shapes.py": "release/security/process-safety gate by name",
   "tests/test_gateway_parity.py": "gate floor: HTTP/WS wire schemas and router parity",
+  "tests/test_generated_inventories.py": "gate floor: docs/inventories/ match their regeneration from books, code, paths and UI",
   "tests/test_hermetic_data_root.py": "gate floor: tests cannot bind the live data roots",
   "tests/test_kill_process_tree_orphans.py": "release/security/process-safety gate by name",
   "tests/test_orphan_apply_authority.py": "release/security/process-safety gate by name",

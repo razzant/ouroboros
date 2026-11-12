@@ -971,6 +971,116 @@ def test_a_conversation_page_seals_every_room_of_its_conversation_each_in_its_ow
     assert single["ok"] and single["rows"] == 1 and "rooms" not in store.get(single["node_id"])["covers"]
     assert "Rooms this page covers" not in _memory_read(ctx, node_id=single["node_id"])  # one room: as before
     assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i1)] == [sha(rows[4])]
+    assert write(ctx, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw the conversation page")["ok"]
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i1)] == [sha(rows[0]), sha(rows[4])]
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i2)] == [sha(rows[1])]
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i3)] == [sha(rows[2])]
+    assert store.sealed_row_refs(other) == {sha(rows[3])}
+
+
+@pytest.mark.parametrize("origin", ["mind", "accepted", "candidate"])
+def test_withdrawing_a_page_restores_exact_open_words_and_discloses_the_account_source(tmp_path, origin):
+    from ouroboros import memory_inventory as mi
+
+    ctx, store = ctx_for(tmp_path), ChronicleStore(tmp_path)
+    rows = chat(tmp_path, [
+        {"chat_id": 1, "direction": "in", "ts": ts(1), "text": "Keep the owner's exact condition: no public release."},
+        {"chat_id": 1, "direction": "out", "ts": ts(2), "text": "I will prepare a local candidate.",
+         "task_id": "root0001", "delegation_role": "root"},
+        {"chat_id": 1, "direction": "in", "ts": ts(3), "text": "The separate conversation stays covered."},
+        {"chat_id": 1, "direction": "in", "ts": ts(4), "text": "This later question is still open."},
+    ])
+    original_rows = _memory_read(ctx, room_id="1", rows=True)
+    text_hashes = {addr(row): hashlib.sha256(row["text"].encode("utf-8")).hexdigest() for row in rows}
+    original_refs = [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, "1")]
+    telling = "The first arc was ready for publication."
+    if origin == "mind":
+        target = write(ctx, kind="page", text=telling, covers={"from": addr(rows[0]), "to": addr(rows[1])})["node_id"]
+    else:
+        draft = store.publish_page(room_id="1", text=telling, author=LIGHT,
+                                   covers={"rows": [sha(row) for row in rows[:2]], "stream_span": [0, 1]},
+                                   metadata={"candidate": True} if origin == "candidate" else {})
+        assert draft.ok
+        target = draft.record["id"]
+        assert write(ctx, kind="decision", target_id=target, accepted=True, reason="I adopt this draft")["ok"]
+    other = write(ctx, kind="page", text="A separate sealed matter.", covers={"from": addr(rows[2]), "to": addr(rows[2])})
+    account = write(ctx, kind="account", text="My unchanged account based on that arc.", sources=[target])
+    selected = write(ctx, kind="selection", target_id=account["node_id"], replaces=[target], reason="My common account")
+    assert other["ok"] and account["ok"] and selected["ok"]
+    account_bytes = store.get(account["node_id"])
+    spec = mv.ViewSpec("integrator", room_id="1")
+    task = {"id": "next-focus", "chat_id": 1}
+    before = mv.capture_memory_view(tmp_path, task, spec)
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, "1")] == [sha(rows[3])]
+    assert rows[0]["text"] not in mv.render_room(before)
+    assert "my later rejection of its source" not in mv.render_story(before)
+    journal = store.log_path.read_bytes()
+
+    reason = "Source withdrawn: this account missed the owner's no-release condition."
+    result = write(ctx, kind="decision", target_id=target, accepted=False, reason=reason)
+    assert result["ok"] and result["kind"] == "decision"
+    assert store.log_path.read_bytes().startswith(journal) and store.get(account["node_id"]) == account_bytes
+    after = mv.capture_memory_view(tmp_path, task, spec)
+    room, story = mv.render_room(after), mv.render_story(after)
+    assert all(row["text"] in room for row in (rows[0], rows[1], rows[3])), room
+    assert telling not in story
+    assert f"my later rejection of its source {target}" in story and reason in story
+    assert account_bytes["text"] in story
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, "1")] == [
+        ref for ref in original_refs if ref != sha(rows[2])]
+    assert _memory_read(ctx, room_id="1", rows=True) == original_rows  # Same addresses and exact text hashes.
+    for address, digest in text_hashes.items():
+        restored, _resolution = chat_chain.resolve_row(tmp_path, address)
+        assert hashlib.sha256(restored["text"].encode("utf-8")).hexdigest() == digest
+    source_read = _memory_read(ctx, node_id=target)
+    assert telling in source_read and "accepted=False" in source_read and reason in source_read
+    account_read = _memory_read(ctx, node_id=account["node_id"])
+    assert "rejected" in account_read and target in account_read
+    store.index_path.unlink()
+    rebuilt = mv.capture_memory_view(tmp_path, task, spec)
+    assert mv.render_room(rebuilt) == room and mv.render_story(rebuilt) == story
+    assert _memory_read(ctx, room_id="1", rows=True) == original_rows
+    assert write(ctx, kind="decision", target_id=target, accepted=False, reason=reason)["reason"] == "invalid"
+
+
+def test_tools_withdraw_the_part_before_its_page_and_keep_both_readable(tmp_path):
+    ctx, store = ctx_for(tmp_path), ChronicleStore(tmp_path)
+    row = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(1), "text": "Keep this source."}])[0]
+    page = write(ctx, kind="page", text="My page.", covers={"to": addr(row)})
+    part = write(ctx, kind="part", text="My part.", member_ids=[page["node_id"]], expected_sequence=store.room_head("1"))
+    assert page["ok"] and part["ok"]
+    account = write(ctx, kind="account", text="My unchanged account of the part.", sources=[part["node_id"]])
+    assert write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="My telling")["ok"]
+    spec, task = mv.ViewSpec("integrator", room_id="1"), {"id": "next", "chat_id": 1}
+    assert "My page." not in mv.render_story(mv.capture_memory_view(tmp_path, task, spec))
+    before = store.log_path.read_bytes()
+    refused = write(ctx, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw the page")
+    assert refused["reason"] == "already_folded" and refused["conflict_ids"] == [part["node_id"]]
+    assert store.log_path.read_bytes() == before
+    assert write(ctx, kind="decision", target_id=part["node_id"], accepted=False, reason="Withdraw the part first")["ok"]
+    assert store.folded_members(part["node_id"]) == [] and store.sealed_row_refs("1") == {sha(row)}
+    story = mv.render_story(mv.capture_memory_view(tmp_path, task, spec))
+    assert "My page." in story and f"my later rejection of its source {part['node_id']}" in story
+    assert write(ctx, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw the page now")["ok"]
+    assert store.sealed_row_refs("1") == set() and store.pages_of_room("1") == []
+    assert "My page." in _memory_read(ctx, node_id=page["node_id"])
+    assert "My part." in _memory_read(ctx, node_id=part["node_id"])
+
+
+@pytest.mark.parametrize("role", ["child", "nanny"])
+def test_delegated_tools_cannot_withdraw_an_integrators_page(tmp_path, role):
+    root = ctx_for(tmp_path)
+    row = chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(1), "text": "Keep my words."}])[0]
+    page = write(root, kind="page", text="My own page.", covers={"to": addr(row)})
+    meta = {"delegation_role": "subagent", "parent_task_id": "root0001", "root_task_id": "root0001"}
+    if role == "nanny":
+        meta["configured_subagent"] = {"route": {"kind": "agent_session"}}
+    delegated = ctx_for(tmp_path, task_id="kid00001", task_metadata=meta)
+    store = ChronicleStore(tmp_path)
+    before = store.log_path.read_bytes()
+    refused = write(delegated, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")
+    assert refused["reason"] == "not_integrator" and store.log_path.read_bytes() == before
+    assert write(root, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")["ok"]
 
 
 def test_writer_receipts_read_no_whole_story_and_survive_a_migrating_store(tmp_path, monkeypatch):

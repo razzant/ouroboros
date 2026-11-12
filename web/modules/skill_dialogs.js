@@ -249,8 +249,8 @@ export async function createMySkillsDestination(create) {
     } catch (error) {
         const code = error?.body?.code;
         throw new Error({
-            no_token: 'Add GITHUB_TOKEN in Settings → Secrets, then try creating My skills again.',
-            cannot_create: 'GitHub couldn’t create or connect My skills; allow repository access for GITHUB_TOKEN in Settings → Secrets, then try again.',
+            no_token: 'Add GITHUB_TOKEN in Settings › Accounts and keys, then try creating My skills again.',
+            cannot_create: 'GitHub couldn’t create or connect My skills; allow repository access for GITHUB_TOKEN in Settings › Accounts and keys, then try again.',
             failed: 'My skills couldn’t be connected; check your GitHub connection and try again.',
         }[code] || 'My skills couldn’t be connected; check your GitHub connection and try again.');
     }

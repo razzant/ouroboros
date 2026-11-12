@@ -403,9 +403,10 @@ export const SAFETY_MODEL_KEYS = Object.freeze([
 ]);
 
 /** One owner transaction for any of SAFETY_MODEL_KEYS; a refusal throws the server's sentence. A roster that
- *  leaves no reviewer saves only with the owner's confirmation, sent beside the settings as the generic save does. */
-export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false, headers } = {}) {
-    const body = allowEmptyReviewPool ? { settings, allow_empty_review_pool: true } : { settings };
+ *  leaves no reviewer saves only with the owner's confirmation, sent beside the settings as the generic save does;
+ *  `ifUnchanged` (`{ KEY: token }`) makes the write refuse when one of those keys changed since it was read. */
+export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false, ifUnchanged = null, headers } = {}) {
+    const body = { settings, ...(allowEmptyReviewPool ? { allow_empty_review_pool: true } : {}), ...(ifUnchanged ? { if_unchanged: ifUnchanged } : {}) };
     return ownerAnswer(await jsonPost('/api/owner/safety-model', body, { headers }), 'The change');
 }
 

@@ -4,9 +4,53 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros import dialogue_import
 from ouroboros.gateway.history import make_chat_history_endpoint
 from tests._store_shared import seed_result
+
+
+@pytest.mark.parametrize("summary", ["Проверка завершена.", "Проверка завершена.\n\n42 строки в /tmp/result.csv. Следующий шаг за владельцем.", ""])
+def test_completion_gist_is_short_on_cards_room_rows_and_live_frames(tmp_path, summary):
+    from ouroboros.gateway.ws import _encode
+    from ouroboros.task_results import load_task_result
+    from tests._wake_summary_shared import seed_wake
+    from tests.test_task_list_selection import client_for
+
+    title = "Authored title. Keep both sentences."
+    stored = seed_wake(tmp_path, title=title, suggested_name=title, wake_summary=summary)
+    task_id = stored["task_id"]
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    terminal = {"direction": "out", "chat_id": 1,
+                "ts": stored["ts"], "task_id": task_id, "text": "Done", "wake_summary": summary,
+                "task_terminal_status": "completed", "suggested_name": title}
+    (logs / "chat.jsonl").write_text(json.dumps(terminal) + "\n", encoding="utf-8")
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
+    room_row = next(row for row in json.loads(response.body)["messages"] if row.get("task_id") == task_id)
+    client = client_for(tmp_path)
+    detail = client.get("/api/tasks/" + task_id)
+    assert detail.status_code == 200
+    listed = client.get("/api/tasks").json()["tasks"]
+    card = next(row for row in listed if row["task_id"] == task_id)
+    chat = json.loads(_encode({**terminal, "type": "chat"}))
+    log = json.loads(_encode({"type": "log", "data": {**terminal, "type": "task_done"}}))["data"]
+    for row in (room_row, detail.json(), card, chat, log):
+        assert row.get("wake_summary", "") == ("Проверка завершена." if summary else "")
+    for row in (detail.json(), card, chat, log):
+        assert row["suggested_name"] == title
+    assert load_task_result(tmp_path, task_id)["wake_summary"] == terminal["wake_summary"] == summary
+
+
+def test_schedule_gists_shorten_listed_rows_and_leave_other_answers_as_they_are():
+    from ouroboros.gateway.completion_gist import short_schedule_gists
+    assert short_schedule_gists({"available": False}) == {"available": False}  # an unavailable reader's answer
+    rows = {"available": True, "tasks": [{"id": "s1", "last_outcome": {"line": "Done. 42 rows in /tmp/r.csv."}},
+                                         {"id": "s2", "last_outcome": {"line": "Host notice. Detail.", "notice": True}}]}
+    shown = short_schedule_gists(rows)
+    assert shown["tasks"][0]["last_outcome"]["line"] == "Done." and shown["tasks"][1] == rows["tasks"][1]
+    assert rows["tasks"][0]["last_outcome"]["line"] == "Done. 42 rows in /tmp/r.csv."  # the cached outcome stays whole
 
 
 def test_chat_history_preserves_subagent_lane_group_metadata(tmp_path):

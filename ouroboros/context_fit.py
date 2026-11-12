@@ -192,7 +192,7 @@ class ContextFitPlan:
             # cut window); equal counts from another level never keep a view's budget provenance.
             old, new = (dict(facts.get("floor") or {}) for facts in (projection.memory_facts or {},
                                                                      contents[projection.mode][1] or {}))
-            return (any(old.get(key) != new.get(key) for key in ("steps", "runs", "by_budget", "target_tokens", "mode_switch"))
+            return (any(old.get(key) != new.get(key) for key in ("forms_version", "steps", "runs", "by_budget", "target_tokens", "mode_switch"))
                     or projection.memory_facts.get("host_sections_addressed")
                     != contents[projection.mode][1].get("host_sections_addressed"))
 
@@ -700,7 +700,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     """
     from dataclasses import replace
     from ouroboros import memory_floor as floor
-    from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars, whole_story_at
+    from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars
     from ouroboros.tool_policy import select_tool_schemas
 
     whole_core, whole_governance = core, governance
@@ -750,7 +750,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         fixed = measure(selected, sent, addressed) if fixed is None else fixed
         return floor.render_view_for_mode(snapshot, mode=selected, owner_mode=preferred, window_tokens=window, **walk,
             known_window=known_window, output_reserve=output_reserve, ratio=ratio, non_memory_tokens=fixed,
-            lowered_from=preferred if selected != preferred else None, max_room=room_fact, start_work=start_work,
+            # The Max room as the receipt settles it (``with_max_room`` decides its cause), so the floor note of a
+            # start memory lowered names what holds the room.
+            lowered_from=preferred if selected != preferred else None, start_work=start_work,
+            max_room=floor.with_max_room({}, room_fact, selected).get("max_room"),
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
             boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed)
 
@@ -795,12 +798,24 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
             snapshot.spec.work_room_levels if snapshot else work_room_levels)
 
-    # Max names whole books. Story is the last rung: change books before taking its pages.
-    whole_story = story_chars(snapshot) if snapshot else 0
+    # Both Max decisions use the clean-start guard's minimum ordinary memory,
+    # priced in this request with its receipt, schemas, reserve and work room.
+    ordinary_measures = {}
+    def ordinary_need():
+        if mode in ordinary_measures:
+            return ordinary_measures[mode]
+        forms = section_views(sections[mode], receipts)
+        minimum = view(mode, sent, forms, window, boundary, level=floor.ordinary_level(snapshot)) if snapshot else floor.NO_VIEW
+        price = measure(mode, sent, forms, minimum.story_chars, minimum.room_chars)
+        ordinary_measures[mode] = minimum, math.ceil(price * ratio) + reserve + work()
+        return ordinary_measures[mode]
+    minimum, need = ordinary_need() if (kept is None or start_work) and mode == "max" else (floor.NO_VIEW, 0)
     room_fact = floor.max_room_fact(snapshot, rendered_texts(core, section_views(sections[mode], receipts)),
-        render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=floor.tokens_of(whole_story),
+        render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=floor.tokens_of(minimum.story_chars),
         fixed=fixed, ratio=ratio, schemas=tool_schema_tokens(list(sent.schemas)), window=window, reserve=reserve,
         work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
+    if room_fact:
+        room_fact.update(need=need, story=floor.tokens_of(minimum.story_chars), room=floor.tokens_of(minimum.room_chars))
     if room_fact and floor.max_room_lost(room_fact):
         mode = "low"
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
@@ -813,15 +828,14 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         memory = floor.tokens_of(fit.story_chars) + floor.tokens_of(fit.room_chars)
         return known_window and math.ceil((fixed + memory) * ratio) + reserve > window
 
-    # Books step down on the frame's own completed view, never on a price of one. Max keeps whole books only beside
-    # the whole story and the work room (a start's rule); the same ordinary Nano is the last physical rescue for every
+    # Books step down on the frame's own completed view. Max keeps whole books beside
+    # ordinary memory and the work room; the same ordinary Nano is the last physical rescue for every
     # Main route, a view already shown included. A frame whose core alone cannot fit steps down unrendered. A frame
     # is judged by its pieces' prices: a frame the fit walks away from is never drawn whole.
     while True:
         shown = floor.NO_VIEW if mode != "nano" and overflows() else render()
-        books_lost = (kept is None or start_work) and mode == "max" and allowances["margin"] is not None and (
-            shown.story_chars != whole_story or (shown.level is not None and not whole_story_at(snapshot, shown.level))
-            or floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars) > allowances["margin"])
+        books_lost = ((kept is None or start_work) and mode == "max" and allowances["margin"] is not None
+                      and ordinary_need()[1] > window)
         if mode == "nano" or not (books_lost or overflows(shown)):
             break
         mode = "low" if mode == "max" else "nano"
