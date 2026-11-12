@@ -48,15 +48,19 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
         assert facts["titleSize"] == "24px", facts
 
     # Accounts' ordinary fields stay paired on a short desktop and stack on a
-    # phone. Compactness comes from hiding help, never from shrinking text.
+    # phone. Compactness drops ornament (the rail's sub-labels), never a
+    # field's note or the size of the text.
     api_access = page.locator('[data-collapse="api-access"]')
     if not api_access.evaluate("el => el.open"):
         api_access.locator("summary").first.click()
     measure_grid("accounts", ".field-grid")
     note = page.locator('.field-grid .field-note').first
-    expect(note).to_be_hidden() if compact else expect(note).to_be_visible()
-    footer = page.locator('.footer-copy')
-    expect(footer).to_be_hidden() if compact else expect(footer).to_be_visible()
+    expect(note).to_be_visible()
+    rail = page.locator('.wizard-step-copy').first
+    expect(rail).to_be_hidden() if compact else expect(rail).to_be_visible()
+    # The footer's aside leaves only a narrow window, where the pinned footer would take the step's own lines.
+    aside = page.locator('.footer-copy')
+    expect(aside).to_be_hidden() if viewport[0] <= 900 else expect(aside).to_be_visible()
     label = page.locator('.field-grid label').first
     expect(label).to_have_css("font-size", "12px")
     page.screenshot(path=str(evidence / f"{viewport[0]}x{viewport[1]}-accounts.png"), animations="disabled")
@@ -78,6 +82,14 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
     # The Review choices are two columns; the separate Access grid deliberately
     # has its own count, so it is not part of this two-column contract.
     measure_grid("review", ".wizard-choice-grid")
+    # What each choice means, and the step's own sentence, are readable at every size: the step scrolls under
+    # the pinned footer instead.
+    expect(page.locator('.step-copy')).to_be_visible()
+    meanings = page.locator('.wizard-choice p')
+    assert meanings.count() == 6, meanings.count()
+    for index in range(meanings.count()):
+        expect(meanings.nth(index)).to_be_visible()
+    expect(page.locator('#next-btn')).to_be_in_viewport()
     page.click("#next-btn")
     budget = page.locator('[data-collapse="api-budget"]')
     if not budget.evaluate("el => el.open"):

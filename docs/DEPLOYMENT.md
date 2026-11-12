@@ -47,6 +47,41 @@ updated `budget_drive_root`, `drive_root`/`child_drive_root` as applicable, and
 cleared `reason_code`/`reason_detail`. Keep sources through adoption.
 Copying the directory alone never rewrites those pointers.
 
+## First Run Without the Wizard
+
+The setup wizard opens while no model access is configured. A server that finds
+access in its environment (a provider key, a subscription Main or a local route)
+starts working at once and does not open it; the wizard stays reachable at
+`/onboarding`. The check is that access is configured, not that it works: a wrong
+key shows at the first request. That is the usual first run of a container or a
+service unit configured by variables alone, and of a Colab notebook, whose launch
+writes the budget and the Access level it was given and no wizard choice. No wizard
+choice is saved then, and what the wizard would have asked keeps its factory value:
+
+| | Factory value | After completing the wizard on fresh data |
+|---|---|---|
+| Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
+| Access level | `advanced` | the level chosen |
+| Review | `advisory` | the mode chosen |
+| Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
+| Consciousness | off; $20 over 24 hours once started | off unless ticked |
+
+Reviewers and helpers are proposed from the reachable Main at each read (none while
+the keys present do not settle which provider serves Main) until they are saved on
+the Models or Agents page or by the wizard; other saves leave them proposed.
+Subscription sessions join them through Settings or the wizard.
+
+A setting the file does not hold is read from the environment variable of its name,
+for example `TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`,
+`OUROBOROS_REVIEW_ENFORCEMENT`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
+`OUROBOROS_RUNTIME_MODE` (read at a start). The exceptions are the choices only the
+owner's controls author, Safety coverage and the Context mode among them: Settings
+shows their saved or factory value whatever the environment says. Safety coverage is
+not consistent there today: while none is saved, the Safety Supervisor still reads a
+forwarded `OUROBOROS_SAFETY_MODE` (#3202), so choose the coverage in Settings to have
+one answer. A deployment policy file (below) can cap the Access level and raise the
+minimum coverage.
+
 ## Unknown model role at startup
 
 An error such as `OUROBOROS_MODEL_CONTEXT_WINDOWS: unknown model role(s)`

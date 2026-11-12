@@ -1,7 +1,7 @@
 // The served wizard shares the SPA's escaping, request, login and status owners.
 import { fetchJson } from './api_client.js';
 import {
-    agentsStepHtml,
+    agentsOnlyAccess, agentsStepHtml, mainSourceReason,
     EARLIER_SAVE_KEPT_TEXT,
     EARLIER_SAVE_OTHER_VALUES_TEXT,
     completionAttemptId,
@@ -38,7 +38,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         installDesktopShellLinkInterceptor();
         const bootstrap = window.__OURO_ONBOARDING_BOOTSTRAP__ || {};
         const SETUP_CONTRACT = bootstrap.contract || {};
-        const HOST_MODE = bootstrap.hostMode || 'desktop';
         const LOCAL_RUNTIME_CONTROLS = Boolean(bootstrap.supportsLocalRuntimeControls);
         const STEP_ORDER = bootstrap.stepOrder || (SETUP_CONTRACT.steps || []).map((step) => step.id);
         const STEP_META = Object.fromEntries((SETUP_CONTRACT.steps || []).map((step) => [step.id, step]));
@@ -315,11 +314,16 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             note.textContent = messages.filter(Boolean).join(' ');
             note.hidden = !note.textContent;
         }
+        const agentsOnly = !hasApiAccess() && !hasLocalModel() && agentsOnlyAccess(state.agentsConnected, modelCatalog.model_sources);
         const retry = document.getElementById('onboarding-access-retry');
         if (retry) {
-            retry.hidden = !state.agentsConnected.length && !agentsStep?.previewError;
+            // A healthy read that names the connected accounts agents only leaves discovery nothing to retry.
+            retry.hidden = (!state.agentsConnected.length || (agentsOnly && catalogReadState(modelCatalog) === 'ok')) && !agentsStep?.previewError;
             retry.disabled = Boolean(catalogRequest || agentsStep?.previewPending);
         }
+        const optional = root.querySelector('[data-collapse="api-access"] > summary .selection-badge');
+        if (optional) optional.hidden = agentsOnly;  // the way forward named beside Continue is not "Optional"
+        if (optional) optional.textContent = hasApiAccess() || hasLocalModel() ? 'Configured' : 'Optional';
         const accessRow = document.getElementById('onboarding-access-row');
         if (accessRow) accessRow.hidden = Boolean(note?.hidden && retry?.hidden);
         const recover = document.getElementById('skip-presets-btn');
@@ -413,9 +417,8 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
             const hasRemote = hasApiAccess();
             if (!hasRemote && !localSource && !hasModelSubscription()) {
-                return state.agentsConnected.length
-                    ? 'A Main model source has not been confirmed. Retry discovery, add an API key, or choose a local model.'
-                    : 'Connect Codex, enter an API key, or choose a local model before continuing.';
+                return mainSourceReason(state.agentsConnected, modelCatalog.model_sources,
+                    { snapshot: agentsStep?.snapshot, catalogKnown: agentsStep?.catalogKnown });
             }
             if (trim(state.minimaxRegion) && !['global_en', 'cn_zh'].includes(trim(state.minimaxRegion).toLowerCase())) {
                 return 'MiniMax Region must be global_en or cn_zh.';
@@ -585,7 +588,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                     .map((source) => source.label || source.id).join(', ') + ' subscription · no API key'
                 : profileLabel(activeProviderProfile())],
             ['Review mode', reviewLabel(state.reviewEnforcement)],
-            ['Runtime mode', runtimeModeLabel(state.runtimeMode)],
+            ['Access level', runtimeModeLabel(state.runtimeMode)],
             ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
                 ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
             ...(MODEL_SLOTS.some((slot) => trim(state[slot.stateKey]).split(',').some((value) => parseModelSource(value.trim()).source.startsWith('subscription:'))) ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),  // a subscription serves a slot
@@ -679,8 +682,8 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                     <label for="${escapeHtml(id)}">${escapeHtml(label)}</label>
                     ${fixed ? '' : `<button class="field-clear" data-clear="${escapeHtml(id)}" type="button" aria-label="Clear ${escapeHtml(label)}">Clear</button>`}
                 </div>
-                <input id="${escapeHtml(id)}" class="ui-control" type="${escapeHtml(type)}" aria-describedby="${escapeHtml(id)}-help" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state[stateKey])}"${fixed ? ' readonly' : ''}>
-                <div id="${escapeHtml(id)}-help" class="${fixed ? 'wizard-inline-note' : 'field-note ui-field-help'}" data-checker-field="${fixed ? '1' : ''}">${escapeHtml(fixed || note)}</div>
+                <input id="${escapeHtml(id)}" class="ui-control" type="${escapeHtml(type)}"${fixed || note ? ` aria-describedby="${escapeHtml(id)}-help"` : ''} placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state[stateKey])}"${fixed ? ' readonly' : ''}>
+                ${fixed || note ? `<div id="${escapeHtml(id)}-help" class="${fixed ? 'wizard-inline-note' : 'field-note ui-field-help'}" data-checker-field="${fixed ? '1' : ''}">${escapeHtml(fixed || note)}</div>` : ''}
             </div>
             `;
         }
@@ -786,7 +789,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         return `
             <div class="step-header"><div>
                 <h2 class="step-title">Accounts</h2>
-                <p class="step-copy">Start with Codex, or connect API access. You can add more accounts any time.</p>
             </div></div>
             ${agentsStepHtml({ compact: true, showRoster: false })}
             <div id="onboarding-access-row" class="wizard-access-row" hidden>
@@ -794,7 +796,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 <button id="onboarding-access-retry" class="btn btn-default" type="button" hidden>Retry model discovery</button>
             </div>
             <details class="wizard-collapse" data-collapse="api-access" ${state.apiAccessOpen || hasApiAccess() ? 'open' : ''}>
-                <summary><span>API keys and local models</span><span class="selection-badge">${hasApiAccess() ? 'Configured' : 'Optional'}</span></summary>
+                <summary><span>API keys and local models</span><span class="selection-badge">${hasApiAccess() || hasLocalModel() ? 'Configured' : 'Optional'}</span></summary>
                 <div class="wizard-collapse-body">${renderProvidersStep()}</div>
             </details>
         `;
@@ -876,9 +878,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
 
     function renderReviewModeStep() {
         const runtimeMode = trim(state.runtimeMode) || 'advanced';
-        const runtimeModeCopy = HOST_MODE === 'desktop'
-            ? 'Separate axis from review enforcement. This first-run choice becomes the boot baseline before Ouroboros starts; later elevation requires native launcher confirmation.'
-            : 'Separate axis from review enforcement. Web/Docker onboarding saves this through the owner endpoint; the selected mode becomes active after restart.';
+        const runtimeModeCopy = 'How far Ouroboros reaches into its own code and this computer.';
         const accessBound = deploymentNote(bootstrap.deployment, 'access');  // a constraint, kept on compact screens too
         return `
             <div class="step-header">
@@ -912,11 +912,10 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                     </div>
                 <div class="field ui-field">
                     <div class="field-label-row">
-                        <label for="skills-repo-path">External skills repo (optional)</label>
-                        <button class="field-clear" data-clear="skills-repo-path" type="button" aria-label="Clear external skills repo">Clear</button>
+                        <label for="skills-repo-path">Folder of your own skills (optional)</label>
+                        <button class="field-clear" data-clear="skills-repo-path" type="button" aria-label="Clear the skills folder">Clear</button>
                     </div>
-                    <input id="skills-repo-path" class="ui-control" type="text" aria-describedby="skills-repo-path-help" placeholder="~/Ouroboros/skills or /absolute/path/to/skills" value="${escapeHtml(state.skillsRepoPath || '')}">
-                    <div id="skills-repo-path-help" class="field-note ui-field-help">Optional. Extra discovery root on top of the in-data-plane <code>data/skills/{native,clawhub,external}/</code> tree. Leave empty if you do not maintain your own skills checkout — Ouroboros never clones/pulls this directory.</div>
+                    <input id="skills-repo-path" class="ui-control" type="text" placeholder="~/Ouroboros/skills or /absolute/path/to/skills" value="${escapeHtml(state.skillsRepoPath || '')}">
                 </div>
             </div>
         `;
@@ -945,7 +944,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                         </div>
                     `).join('')}
                 </div>
-                ${budgetNote ? `<div id="budget-fields-help" class="field-note ui-field-help budget-shared-note">${escapeHtml(budgetNote)}</div>` : ''}
+                ${budgetNote ? `<div id="budget-fields-help" class="field-note ui-field-help">${escapeHtml(budgetNote)}</div>` : ''}
                 </details>
             `;
         }
@@ -990,12 +989,10 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 </div>
             </div>
             <div class="panel-card">
-                <h3>Runtime mode takes effect at the next boot</h3>
-                <div class="wizard-inline-note">Ouroboros saved <code>${escapeHtml(state.completedRestartMode)}</code> as the runtime mode for the next boot, but this
-                process is still running the mode it started with. Restart Ouroboros to run in the mode you chose.
-                Opening the app now works — it simply runs in the previous mode until you do.</div>
+                <h3>${escapeHtml(runtimeModeLabel(state.completedRestartMode))} access applies from the next start</h3>
+                <div class="wizard-inline-note">Until you restart Ouroboros, it keeps the access level it started with.</div>
                 <div class="wizard-runtime-strip">
-                    <button type="button" class="btn btn-primary" id="open-app-btn">Open Ouroboros in the current mode</button>
+                    <button type="button" class="btn btn-primary" id="open-app-btn">Open Ouroboros now</button>
                 </div>
             </div>
         `;
@@ -1363,6 +1360,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 type: 'ouroboros:onboarding-complete',
                 restart_required: restartRequired,
                 runtime_mode: runtimeMode,
+                runtime_label: runtimeModeLabel(runtimeMode),
             }, targetOrigin);
             return;
         }
