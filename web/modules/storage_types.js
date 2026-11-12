@@ -285,7 +285,7 @@
  * @property {(number|null)=} saved_bytes  // record_compression: that plane's allocation saved; null where unreported
  * @property {number=} freed_bytes  // the engine pass
  * @property {number=} released  // a retirer pass: items it released; absent from a job that keeps no such count
- * @property {{class: string, count: number, example: string, since: string}[]=} holds  // a retirer pass or the engine pass: what it keeps, by typed reason, since when
+ * @property {{class: string, count: number, example: string, since: string}[]=} holds  // a retirer pass, a job or the engine pass: what it keeps, by typed reason, since when
  * @property {number=} held  // the engine pass: folders it held (project roots and native homes); a retirer pass: items held
  * @property {string=} held_since  // the earliest of those holds
  * @property {number=} errors  // the engine pass's errors; a retirer pass's pass-level errors

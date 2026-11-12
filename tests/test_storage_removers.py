@@ -355,6 +355,27 @@ def test_a_closed_recovery_gate_is_the_retirement_job_hold_and_an_open_one_leave
     assert storage_fact(data).get("holds") is None
 
 
+def test_archives_names_compression_and_reads_its_log_plane_with_its_hold_and_no_released_count(data):
+    """Closed log segments are compressed in place, so Archives names the job: its line carries the log plane's
+    totals and typed hold; the job's other places carry neither that hold nor a released count nobody keeps."""
+    assert storage_removers.PLACE_REMOVERS["archives"] == ("evidence_packing", "record_compression")
+    hold = {"class": "prior_workers_unconfirmed", "count": 4, "example": "events_20261101T000000.jsonl",
+            "since": "2026-11-12T10:00:00+00:00"}
+    maintenance_jobs.record(data, "record_compression", state="done", holds=[hold], totals={
+        "evidence": {"compressed": 12, "saved_bytes": 4096}, "seats": {"compressed": 3, "saved_bytes": None},
+        "logs": {"compressed": 7, "saved_bytes": 1 << 20}})
+    found = storage_removers.place_removers(data, engine=False)
+    [packing, logs] = found["archives"]
+    assert packing["id"] == "evidence_packing"
+    assert logs == {"id": "record_compression", "state": "done", "at": logs["at"], "compressed": 7,
+                    "saved_bytes": 1 << 20, "holds": [hold], "held": 4, "held_since": hold["since"]}
+    for place, compressed in (("task_results", 12), ("app_state", 3)):
+        fact = next(fact for fact in found[place] if fact["id"] == "record_compression")
+        assert fact["compressed"] == compressed and not {"holds", "held", "released"} & set(fact), place
+    assert storage_fact(data)["holds"] == {"record_compression": {"at": logs["at"], "holds": [hold]}}, \
+        "the mind reads the hold once, without a zero for a count the job does not keep"
+
+
 def test_the_custody_sweep_records_the_engine_pass_once_and_the_runtime_fact_reads_that_row(data, monkeypatch):
     from ouroboros import store_import
 

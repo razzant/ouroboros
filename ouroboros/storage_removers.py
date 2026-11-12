@@ -3,8 +3,9 @@
 Dashboard -> Storage shows one line per place from ``place_removers`` and ``query_data(kind="storage")``
 returns the same facts; both read them on every request, with or without a count. A place names its
 removers (``PLACE_REMOVERS``): the maintenance child's job rows (``maintenance_jobs``: the row's state,
-``last_error`` while its last run threw, ``record_compression``'s totals for the plane in that place; a job
-that counts nothing released carries no ``released``), the server's five retirer passes (drive settlement, private copies, review checkouts, session scratch, engine
+``last_error`` while its last run threw, ``record_compression``'s totals for the plane in that place and,
+beside Archives, its log plane's typed holds; a job that counts nothing released carries no ``released``), the
+server's five retirer passes (drive settlement, private copies, review checkouts, session scratch, engine
 program copies: ``maintenance_jobs.record_pass`` rows with ``released`` and typed ``holds`` since when) and,
 for the engine place, the engine's last retention pass (the read-only ``GET /v2/maintenance/gc``, which
 never starts one; answered within a wall bound, connect and read together, the read itself ended by a
@@ -35,7 +36,7 @@ PLACE_REMOVERS: Dict[str, tuple] = {
     "model_calls": ("evidence_packing",),
     "engine": ("engine",),
     "task_results": ("evidence_packing", "record_compression", "runtime_retirement"),
-    "archives": ("evidence_packing",),
+    "archives": ("evidence_packing", "record_compression"),
     "work_folders": ("drive_settlement", "custody_trash"),
     "working_copies": ("copy_retirement",),
     "session_scratch": ("session_scratch_release", "custody_trash"),
@@ -45,8 +46,10 @@ PLACE_REMOVERS: Dict[str, tuple] = {
 ENGINE_RECORD_JOB = "engine_retention"  # the engine's last pass as the custody sweep recorded it (no engine call)
 # The retirer passes (``maintenance_jobs.record_pass`` rows): released count, typed holds since when.
 PASS_JOBS = ("drive_settlement", "copy_retirement", "review_checkout_prune", "session_scratch_release", "engine_runtime_prune")
-# record_compression's plane in a place: task evidence in Task results, reviewer seat homes in App state.
-_COMPRESSION_PLANES = {"task_results": "evidence", "app_state": "seats"}
+# record_compression's plane in a place: task evidence in Task results, reviewer seat homes in App state, closed
+# log segments in Archives. The job's typed holds are its log plane's (``_COMPRESSION_HOLDS``), read there alone.
+_COMPRESSION_PLANES = {"task_results": "evidence", "app_state": "seats", "archives": "logs"}
+_COMPRESSION_HOLDS = "logs"
 ENGINE_READ_SEC = 2.0  # the answer: connect and read together, in wall time (a later record fills the reuse slot)
 ENGINE_REUSE_SEC = 5.0  # a projection polled every second reuses the record read this recently; no read outlives it
 _ENGINE_OUTCOMES = ("completed", "held", "truncated", "failed")
@@ -65,7 +68,7 @@ class StorageRemover(TypedDict):
     saved_bytes: NotRequired[Optional[int]]  # record_compression: that plane's allocation saved; null where unreported
     freed_bytes: NotRequired[int]  # the engine pass
     released: NotRequired[int]  # a retirer pass: items it released; absent from a job that keeps no such count
-    holds: NotRequired[List[Dict[str, Any]]]  # a retirer pass or the engine pass: typed holds {class, count, example, since}
+    holds: NotRequired[List[Dict[str, Any]]]  # a retirer pass, a job or the engine pass: typed holds {class, count, example, since}
     held: NotRequired[int]  # the engine pass: folders it held (project roots and native homes); a retirer pass: items held
     held_since: NotRequired[str]  # the earliest of those holds
     errors: NotRequired[int]  # the engine pass's errors; a retirer pass's pass-level errors
@@ -101,13 +104,14 @@ def _job(name: str, rows: Optional[Dict[str, Dict[str, Any]]], place: str) -> St
     error = row.get("last_error")
     if isinstance(error, dict):
         fact["last_error"] = {"class": str(error.get("class") or ""), "at": str(error.get("at") or "")}
-    totals = row.get("totals") if name == "record_compression" and isinstance(row.get("totals"), dict) else {}
-    total = totals.get(_COMPRESSION_PLANES.get(place, "")) or {}
+    plane = _COMPRESSION_PLANES.get(place, "") if name == "record_compression" else None
+    totals = row.get("totals") if plane and isinstance(row.get("totals"), dict) else {}
+    total = totals.get(plane) or {}
     if "compressed" in total:  # this place's own plane, never a job-wide sum under two places
         fact["compressed"], fact["saved_bytes"] = int(total.get("compressed") or 0), total.get("saved_bytes")
-    # A retirer pass (maintenance_jobs.record_pass), the trash job or the retirement job's closed gate: what it
-    # holds, since when, and what it released where it counts that.
-    if "holds" in row:
+    # A retirer pass (maintenance_jobs.record_pass), the trash job, the retirement job's closed gate or compression's
+    # log plane (beside its own place alone): what it holds, since when, and what it released where it counts that.
+    if "holds" in row and plane in (None, _COMPRESSION_HOLDS):
         holds = [dict(hold) for hold in row.get("holds") or () if isinstance(hold, dict)]
         fact["holds"], fact["held"] = holds, sum(int(h.get("count") or 0) for h in holds)
         released = row.get("released") if "released" in row else row.get("removed")  # the trash job counts what it removed

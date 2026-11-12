@@ -117,6 +117,7 @@ function jobPhrase(fact, now) {
         // A count only from a pass that keeps one: a job that holds without counting what it released says none, never 0.
         const parts = [fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job,
             isSize(fact.released) ? plural(fact.released, '{n} released', '{count} released') : '',
+            fact.compressed > 0 ? plural(fact.compressed, '{n} file compressed', '{count} files compressed') : '',
             holdsPhrase(fact, now), fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
         return parts.filter(Boolean).join(' · ');
     }

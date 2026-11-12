@@ -38,19 +38,26 @@ JOB = "runtime_retirement"
 STARTUP = "startup_recovery"
 RECOVERY_HOLD = "source_recovery_pending"  # the class ``headless.prune_task_trees`` gives a tree kept for recovery
 BYTECODE_UNLINKS_PER_RUN = 20_000  # removals of one run; the rest is owed to the next (FSEvents pacing)
+# The recovery report's errors that leave the previous generation's workers unconfirmed as ended
+# (``server_maintenance._run_startup_task_recovery``): one of them may still hold a log by inode.
+_WORKERS_UNCONFIRMED = ("prior_worker_ownership_unconfirmed", "startup_ownership_unconfirmed")
 
 
 def record_startup(root, *, gaps, report=None):
     """Publish the recovery gate before a child may retire task sources. Missing means unknown.
     A gap also publishes what the pass reports as its hold (``_startup_hold``): how many records
     the recovery ``report`` left unresolved (its error lines when it names none, one without a
-    report) and its first error, cut to a hold example's bound."""
+    report) and its first error, cut to a hold example's bound. Every start also publishes
+    ``workers_unconfirmed``, which ``record_compression``'s log plane reads beside the generation:
+    whether the report leaves the previous generation's workers unconfirmed as ended (no report is
+    no confirmation). A start reads no history for it: the record costs the same on any install."""
     from ouroboros.plan_collection_job import recover_startup
 
-    fact = {"generation": uuid.uuid4().hex, "gaps": bool(gaps)}
+    errors = [str(error) for error in (report or {}).get("errors") or ()]
+    fact = {"generation": uuid.uuid4().hex, "gaps": bool(gaps),
+            "workers_unconfirmed": report is None or any(error.startswith(_WORKERS_UNCONFIRMED) for error in errors)}
     if gaps:
         unresolved = {item for item in (report or {}).get("unresolved") or () if item != "*"}
-        errors = [str(error) for error in (report or {}).get("errors") or ()]
         example = errors[0] if errors else "startup recovery report missing" if report is None else ""
         fact.update(count=len(unresolved) or len(errors) or 1, example=example[:maintenance_jobs.HOLD_EXAMPLE_CHARS])
     with store.open_store(root, write=True) as txn:
