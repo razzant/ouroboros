@@ -162,24 +162,33 @@ test('an organization\'s Supervisor is said, with what it closes, and offers not
         [false, '', false], 'outside a deployment none of it is said');
 });
 
-test('the let-through counter says 24 h only when the events it read cover a day', async () => {
+test('the let-through counter and the spare-model line say 24 h only when the events they read cover a day', async () => {
     const now = Date.parse('2026-11-06T12:00:00Z');
     const at = (hoursAgo) => new Date(now - hoursAgo * 3600 * 1000).toISOString();
+    const walk = (hoursAgo, model) => ({ type: 'safety_route_fallback', ts: at(hoursAgo), answered: model ? { model, role: 'fallback:0' } : null });
     const reads = [];
     const counter = async (entries) => {
-        const el = { textContent: '' };
-        await refreshSafetySkipCounter({ querySelector: () => el }, { now, logsTail: async (...read) => { reads.push(read); return { entries }; } });
-        return el.textContent;
+        // One node per line, as the page draws them (settings_ui.js): each selector answers with its own.
+        const nodes = { '[data-safety-skips]': { textContent: '' }, '[data-safety-spares]': { textContent: '' } };
+        await refreshSafetySkipCounter({ querySelector: (selector) => nodes[selector] ?? null },
+            { now, logsTail: async (...read) => { reads.push(read); return { entries }; } });
+        return Object.values(nodes).map((node) => node.textContent);
     };
-    // A short log reaches past the day: it is the whole day.
-    assert.equal(await counter([{ type: 'safety_mode_skip', ts: at(2) }, { type: 'task_done', ts: at(30) }]),
-        '1 safety check let through in the last 24 h.');
+    // A short log reaches past the day: it is the whole day, and what is older than the day is not counted.
+    assert.deepEqual(await counter([{ type: 'safety_mode_skip', ts: at(2) }, walk(3, 'openai::gpt-6-luna'), walk(5, null),
+        { type: 'safety_verdict', ts: at(4) }, walk(25, 'openai::gpt-6-luna'), { type: 'safety_verdict', ts: at(26) },
+        { type: 'task_done', ts: at(30) }]), ['1 safety check let through in the last 24 h.',
+        '1 safety check was answered by a spare model in the last 24 h, because the Supervisor\'s own model gave no answer:'
+            + ' gpt-6-luna ×1. 1 check went to the spare models and got no answer. 1 verdict recorded in the same span.']);
     // A full tail of 2,000 events from the last three hours never claims the day it did not read.
-    const busy = Array.from({ length: 2000 }, (_, i) => ({ type: i ? 'llm_round' : 'safety_mode_skip', ts: at(3 - i / 1000) }));
-    const said = await counter(busy);
+    const busy = Array.from({ length: 2000 }, (_, i) => (i === 1 ? walk(3 - i / 1000, 'openai::gpt-6-luna')
+        : { type: i ? 'llm_round' : 'safety_mode_skip', ts: at(3 - i / 1000) }));
+    const [said, spares] = await counter(busy);
     assert.match(said, /^1 safety check let through since \d\d:\d\d \(the latest 2,000 events\)\.$/);
-    assert.doesNotMatch(said, /24 h/);
-    // It reads only each event's type and time: the compact view, never 2,000 whole rows.
+    assert.match(spares, /^1 safety check was answered by a spare model since (\d\d:\d\d) \(the latest 2,000 events\), because the Supervisor's own model gave no answer: gpt-6-luna ×1\. 0 verdicts recorded in the same span\.$/);
+    assert.equal(spares.match(/since (\d\d:\d\d)/)[1], said.match(/since (\d\d:\d\d)/)[1], 'one span for both lines');
+    assert.doesNotMatch(said + spares, /24 h/);
+    // It reads each event's type and time, and a walk's answering model: the compact view, never 2,000 whole rows.
     assert.deepEqual(reads, [['events', 2000, 'compact'], ['events', 2000, 'compact']]);
 });
 
