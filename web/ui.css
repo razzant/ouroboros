@@ -1183,6 +1183,22 @@ textarea.ui-control { resize: vertical; }
     overflow-wrap: anywhere;
 }
 .ui-model-option { cursor: pointer; }
+/* A catalog price sits after its model's name at the row's end; where the line cannot hold both it goes under the
+   name, which keeps its line. */
+.ui-model-option-priced {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    column-gap: var(--space-3);
+}
+.ui-model-option-name { min-width: 0; }
+.ui-model-option-meta {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    font-variant-numeric: tabular-nums;
+}
 .ui-model-option:hover { background: var(--menu-item-hover); }
 .ui-model-option[aria-selected="true"] { color: var(--accent-light); background: var(--accent-12); }
 .ui-model-empty { color: var(--text-meta); }
