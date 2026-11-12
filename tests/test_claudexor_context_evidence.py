@@ -948,3 +948,21 @@ def test_an_early_view_that_only_collapses_task_lines_counts_as_narrowed(early):
     assert set(dict(view.level.steps)) == ({"F1"} if early == "takes-F1" else set()) and not view.facts["floor"]["by_budget"]
     state = SimpleNamespace(known_window=True, output_reserve=8192, window_record=SimpleNamespace(total_equivalent=window))
     assert cf.narrowed_by_window({"max": (None, view.facts)}, "max", "max", state, {}) is (early == "takes-F1")
+
+
+@pytest.mark.parametrize("sized_by", ["refusal", "live-read"])
+def test_the_receipt_names_what_sized_the_window(tmp_path, sized_by):
+    """Fix round 2 (Fable 5.2 finding 4): the memory view's receipt names the evidence that sized the window: ``live``
+    only for a window the read itself stated; a window a refusal sized beside a read that stated none is ``recorded``,
+    with the refusal's date, not the read's."""
+    from ouroboros.context_window import record_observation, resolve_window
+
+    stated = 872_000 if sized_by == "live-read" else 0
+    evidence = ce.CapabilityEvidence(stated, ce.STATUS_CONFIRMED if stated else ce.STATUS_UNPROBEABLE,
+                                     ce.SOURCE_PROVIDER_METADATA, "scope", MODEL, "claudexor", ts=ce.utc_now_iso())
+    evidence.read = "answered"
+    if not stated:
+        record_observation(tmp_path, "scope", refused=90_000, kind="input")
+    record = resolve_window(evidence, 16_384, root=tmp_path, observation_fp="scope")
+    refused = ((ce._read(tmp_path).get("main_windows") or {}).get("scope") or {}).get("observations", [{}])[-1].get("ts")
+    assert ce.window_evidence(evidence, record) == (("live", evidence.ts) if stated else ("recorded", refused))

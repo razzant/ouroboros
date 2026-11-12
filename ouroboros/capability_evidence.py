@@ -1201,16 +1201,16 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
     return evidence
 
 
-def window_evidence(evidence: Any, known: bool) -> Tuple[str, str]:
-    """``(kind, observed_at)`` of the evidence a plan's window rests on, for its receipt: ``live`` (this resolution's
-    own metadata read stated it), ``recorded`` (a stored statement, an owner's assertion or accepted sizes), ``pool``
-    (a failed Auto read's pool bound) or ``unknown`` (no known window)."""
-    if not known:
+def window_evidence(evidence: Any, record: Any) -> Tuple[str, str]:
+    """``(kind, observed_at)`` of what sized a plan's window (the limiting limit of its ``record``), for its receipt:
+    ``live`` (this resolution's own metadata read stated it), ``recorded`` (a stored statement, an owner's assertion,
+    accepted sizes or a refusal), ``pool`` (a failed Auto read's pool bound) or ``unknown`` (no known window)."""
+    limit = getattr(record, "limiting", None)
+    if limit is None:
         return "unknown", ""
-    source = str(getattr(evidence, "source", "") or "")
-    kind = "pool" if source == "pool" else "live" if (
-        getattr(evidence, "read", "") == "answered" and source in {SOURCE_PROVIDER_METADATA, SOURCE_LOCAL_HEALTH}) else "recorded"
-    return kind, str(getattr(evidence, "ts", "") or "")
+    kind = "pool" if limit.source == "pool" else "live" if (getattr(evidence, "read", "") == "answered"
+                                                            and limit.source in {SOURCE_PROVIDER_METADATA, SOURCE_LOCAL_HEALTH}) else "recorded"
+    return kind, str(limit.observed_at or "")
 
 
 # Cache-inclusive prompt totals are measurable; GigaChat's and MiniMax's
