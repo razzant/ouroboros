@@ -294,6 +294,9 @@ def _knowledge_write(
         if new_str is not None:  # the one-pair edit's replacement as other editors spell it: content
             if not isinstance(new_str, str):
                 raise ValueError("new_str must be text, the replacement of old_str (empty text deletes it)")
+            if mode == "edit" and edits is not None and new_str:
+                raise ValueError("each edits item carries its own new_str; a top-level new_str belongs to the "
+                                 "one-pair spelling with old_str")
             if mode == "edit" and isinstance(old_str, str) and old_str:
                 if content and new_str and content != new_str:
                     raise ValueError("new_str and content both give old_str's replacement and differ; pass one")

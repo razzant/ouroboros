@@ -821,9 +821,12 @@ def test_the_one_pair_edit_takes_its_replacement_as_content_or_new_str(tmp_path)
     both = _meta(write(old_str="Newer two.\n", content="", new_str=""))  # both empty: a deletion, nothing ignored
     assert "ignored_arguments" not in both and store.read_knowledge_note(target).text.endswith("# Pair\n\nNewest three.\n")
     before = _files(tmp_path)
+    items = "each edits item carries its own new_str; a top-level new_str belongs to the one-pair spelling with old_str"
     for arguments, message in (
             ({"old_str": "Newest three.", "content": "A", "new_str": "B"}, "new_str and content both give"),
             ({"summary": "The pair.", "new_str": "B"}, "same as content; pass old_str with it"),
+            ({"edits": [_item("Newest three.", new_str="A")], "new_str": "B"}, items),  # not "pass old_str with it"
+            ({"edits": [_item("Newest three.", new_str="A")], "old_str": "Newest three.", "new_str": "B"}, items),
             ({"mode": "append", "content": "x", "new_str": "y"}, "mode=append takes its text as content"),
             ({"mode": "overwrite", "new_str": "# Pair\n"}, "mode=overwrite takes its text as content"),
             ({"mode": "rewrite", "new_str": "B"}, "mode must be overwrite, append, edit, revert, archive, restore")):
