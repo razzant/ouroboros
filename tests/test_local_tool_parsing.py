@@ -351,6 +351,16 @@ class TestCurrentQwenToolCalls(unittest.TestCase):
         self.assertEqual(json.loads(bare["tool_calls"][0]["function"]["arguments"]),
                          {"path": "42", "limit": "5", "follow": "true", "options": {"encoding": "utf-8"}})
 
+    def test_an_xml_value_may_span_lines_as_a_written_file_does(self):
+        from ouroboros.llm import LLMClient
+
+        reply = ("<tool_call>\n<function=write_file>\n<parameter=path>\nnotes.md\n</parameter>\n<parameter=content>\n"
+                 "# Notes\n\nFirst line.\nSecond line.\n\n</parameter>\n</function>\n</tool_call>")
+        parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"write_file"})
+        # The template writes "\nVALUE\n" around a value: exactly one newline goes on each side, the rest is the file.
+        self.assertEqual(json.loads(parsed["tool_calls"][0]["function"]["arguments"]),
+                         {"path": "notes.md", "content": "# Notes\n\nFirst line.\nSecond line.\n"})
+
     def test_reasoning_that_only_closes_does_not_hide_a_json_call(self):
         from ouroboros.llm import LLMClient
 
@@ -424,11 +434,16 @@ def test_the_local_lane_answers_without_its_reasoning_and_calls_tools_the_new_wa
 
     replies = ["I am greeting my human.\n</think>\n\nHello. I am Ouroboros.",
                "Read it.\n</think>\n<tool_call>\n<function=read_file>\n<parameter=path>\nREADME.md\n</parameter>\n"
-               "<parameter=limit>\n3\n</parameter>\n</function>\n</tool_call>"]
+               "<parameter=limit>\n3\n</parameter>\n</function>\n</tool_call>",
+               # An empty reasoning block, written whole (Qwen3 told not to think) or only closed (Qwen3.5 and later).
+               "<think>\n\n</think>\n\nHi.", "\n</think>\n\nHi again.", "\n</think>\n",
+               # Reasoning the server already separated is the server's: the answer is left as it came.
+               {"content": "Qwen closes it so:\n</think>\nThen it answers.", "reasoning_content": "plan"}]
 
     class Response:
         def __init__(self, content):
-            self.body = {"choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            fields = content if isinstance(content, dict) else {"content": content}
+            self.body = {"choices": [{"message": {"role": "assistant", **fields}, "finish_reason": "stop"}],
                          "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
         def model_dump(self):
@@ -445,7 +460,12 @@ def test_the_local_lane_answers_without_its_reasoning_and_calls_tools_the_new_wa
         answer, _ = client.chat(messages=[{"role": "user", "content": "hi"}], model="local", use_local=True, max_tokens=64)
         call, _ = client.chat(messages=[{"role": "user", "content": "read"}], model="local", use_local=True,
                               max_tokens=64, tools=tools)
+        quiet = [client.chat(messages=[{"role": "user", "content": "hi"}], model="local", use_local=True,
+                             max_tokens=64)[0] for _ in range(4)]
     assert answer["content"] == "Hello. I am Ouroboros." and answer["reasoning_content"] == "I am greeting my human."
+    # No bare tag reaches the owner; a reply that was only a closed empty block is empty, so the loop's recovery sees it.
+    assert [m["content"] for m in quiet] == ["Hi.", "Hi again.", "", "Qwen closes it so:\n</think>\nThen it answers."]
+    assert [m.get("reasoning_content") for m in quiet] == [None, None, None, "plan"]
     assert json.loads(call["tool_calls"][0]["function"]["arguments"]) == {"path": "README.md", "limit": 3}
     assert call["content"] == "Read it."
 

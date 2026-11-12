@@ -210,10 +210,12 @@ class _LocalLaneMixin:
             schemas = {str(f.get("name", "")).strip(): f.get("parameters") for f in functions}
             msg = self._parse_tool_calls_from_content(msg, allowed_tool_names, schemas)
         if not msg.get("tool_calls") and msg.get("content") and not msg.get("reasoning_content"):
-            # A plain answer's leading reasoning is the model's own, not the reply: keep it beside the answer.
-            answer, reasoning = _split_leading_reasoning(str(msg["content"]))
-            if reasoning:
-                msg = {**msg, "content": answer, "reasoning_content": reasoning}
+            # A plain answer's leading reasoning is the model's own, not the reply: keep it beside the answer. An empty
+            # reasoning block goes too, so its bare tags never reach the owner.
+            content = str(msg["content"])
+            answer, reasoning = _split_leading_reasoning(content)
+            if answer != content:
+                msg = {**msg, "content": answer, **({"reasoning_content": reasoning} if reasoning else {})}
 
         usage["cost"] = 0.0
         usage["cost_final"] = True
