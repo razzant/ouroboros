@@ -160,6 +160,31 @@ def _chain(tmp_path, count=5):
     return journal, texts, offsets
 
 
+def test_a_base_naming_its_own_row_or_a_later_one_is_never_followed(tmp_path):
+    """A base names an earlier row. One that names the row itself or a row after it is no base: neither the forward
+    path nor the hash search follows it (no loop, no forward link), so that row's version is a typed miss; the same row
+    with its real base reads."""
+    journal, texts, offsets = _chain(tmp_path, count=4)
+    assert read(journal, offsets[2], "new") == texts[2]
+    lines = journal.read_bytes().splitlines(keepends=True)
+    row = json.loads(lines[2])
+    for later in (False, True):
+        at = offsets[2]  # its own row
+        while later:  # the row after it, where that row starts once this one is rewritten
+            row["base"]["offset"] = at
+            after = offsets[2] + len((json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
+            if after == at:
+                break
+            at = after
+        row["base"]["offset"] = at
+        journal.write_bytes(b"".join(lines[:2]) + (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+                            + b"".join(lines[3:]))
+        assert at == offsets[2] or json.loads(journal.read_bytes()[at:].split(b"\n", 1)[0])["new_sha256"] == sha(texts[3])
+        with pytest.raises(rows.TextUnavailable, match=f"the row at byte offset {offsets[2]} holds no text of version "
+                                                      f"{sha(texts[2])} and names no base"):
+            read(journal, offsets[2], "new")
+
+
 def test_one_damaged_middle_row_loses_no_landed_version_and_its_own_read_is_a_typed_gap(tmp_path):
     journal, texts, offsets = _chain(tmp_path)  # A whole, then B, C, D, E as changes; the note is E
     damage(journal, offsets[2])  # the row that wrote C
