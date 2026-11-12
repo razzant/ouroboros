@@ -29,7 +29,7 @@ MAX_CONFIGURED_SUBAGENTS = 26
 REVIEW_DELIVERY_NATIVE = "native"
 REVIEW_DELIVERY_PACKET = "packet"
 REVIEW_DELIVERIES = (REVIEW_DELIVERY_NATIVE, REVIEW_DELIVERY_PACKET)
-# Provenance of a row the runtime minted rather than the owner authored: from
+# Birth marker of a row the runtime minted: from
 # a former review lane (the one-time migration) or from the factory panel.
 MINTED_FROM_REVIEW_LANE = "review_lane"
 MINTED_FROM_FACTORY_DEFAULT = "factory_default"
@@ -460,7 +460,7 @@ def validate_unique_engines(config: ConfiguredSubagents, settings: Mapping[str, 
 
     The handle IS the engine with baselines folded, so an unset row and an
     explicit row with the same effective value are one engine, and no two saved
-    rows the OWNER authored can carry the same name. Two deliberate exceptions,
+    rows without a birth marker can carry the same name. Two deliberate exceptions,
     both about the review pool (THESIS: a reviewer's two seats are the owner's
     honest choice): the twins are BOTH marked review-eligible (the same engine
     judging twice, e.g. once by packet and once natively), or at least one of
