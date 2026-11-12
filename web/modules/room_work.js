@@ -304,19 +304,25 @@ export function createRoomWork({
                 view: { word: tr('room_work.sending', 'Sending…'), secondary: '', tone: 'live', mark: 'moving', owner: false,
                     outcome: '', focus: '' } });
         }
-        // A question of this room that no listed work holds (its work ended) still waits for the owner: its own row
-        // leads to it, as a work's row leads to its question.
+        // Every question of the room's turn is reachable from the list: a work's row leads to its first one, and each
+        // further question of that work, or one no listed work holds (its work ended), has its own row.
+        const linked = new Set(listOf(state.works).map((work) => workQuestion(work))
+            .filter(Boolean).map((ask) => `${ask.taskId}:${ask.quizId}`));
         for (const entry of current ? listOf(state.room?.turn) : []) {
-            if (entry?.kind !== 'open_question' || entry.work_id || !entry.task_id) continue;
+            if (!['question', 'open_question'].includes(entry?.kind) || !entry.task_id) continue;
+            if (entry.work_id ? !entry.quiz_id : entry.kind !== 'open_question') continue;
             const ask = { taskId: String(entry.task_id), quizId: String(entry.quiz_id || '') };
+            const key = `${ask.taskId}:${ask.quizId}`;
+            if (linked.has(key) || items.some((item) => item.id === `question:${key}`)) continue;
             // The question's own row, held with its item (work_status.reconcileWorkState): its card's words say its
             // state here too, never new ones.
-            const said = state.questions?.get?.(`${ask.taskId}:${ask.quizId}`);
-            items.push({ id: `question:${ask.taskId}:${ask.quizId}`, kind: 'question', work: null, record: null,
+            const said = state.questions?.get?.(key);
+            // Without its row, a question its task stands on waits for the answer; any other is plainly unanswered.
+            const fallback = entry.kind === 'question' ? { quiz_state: 'open', wait_for_answer: true } : { quiz_state: 'open' };
+            items.push({ id: `question:${key}`, kind: 'question', work: null, record: null,
                 confirmed: true, online: true, cmid: '', startedAt: 0, episode: ask.taskId, attempt: null,
                 activity: 'waiting', ask, said,
-                // No task stands on it: without its row it is plainly unanswered, never "Waiting for your answer".
-                view: { word: questionPresentation(said || { quiz_state: 'open' }).status, secondary: '', tone: 'held',
+                view: { word: questionPresentation(said || fallback).status, secondary: '', tone: 'held',
                     mark: 'none', owner: true, outcome: '', focus: '' } });
         }
         // A Project with no work listed keeps its way to the latest represented root card, beside any question row.

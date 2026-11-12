@@ -203,6 +203,46 @@ test('View question reaches the asking task of a work, not its first root', asyn
     }
 });
 
+test('two questions of one work have two reachable rows: the work\'s row leads to one, a row of its own to the other', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade = null;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge online', node('div', 'app-page-actions ui-chrome-group', header));
+        const messages = node('div', 'chat-messages', page);
+        const first = { kind: 'question', task_id: 'w', quiz_id: 'q1' };
+        const second = { kind: 'open_question', task_id: 'w', quiz_id: 'q2' };
+        const reveals = [];
+        let turn = [first, second];
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { stick: true, cancel() {}, scroll() {} },
+            works: () => workState([{ ...asking('w', 'q1'), turn }],
+                room('waiting', { turn: turn.map((item) => ({ work_id: 'w', ...item })) })),
+            liveCardRecords: new Map(), pendingSubmissions: new Map(),
+            revealQuestion: async (...args) => { reveals.push(args.slice(0, 2)); return true; } });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        trigger.click();
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        assert.deepEqual(list.children.map((el) => el.dataset.id).sort(), ['question:w:q2', 'w']);
+        for (const id of ['w', 'question:w:q2']) {
+            list.children.find((el) => el.dataset.id === id).children
+                .find((child) => child.classList.contains('rw-verb')).children[0].click();
+            await Promise.resolve();
+        }
+        assert.deepEqual(reveals, [['w', 'q1'], ['w', 'q2']]);
+        // One question only: the work's row alone leads to it.
+        turn = [first];
+        trigger.click();
+        trigger.click();
+        assert.deepEqual(list.children.map((el) => el.dataset.id), ['w']);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
 test('a question row says its own words as long as its turn item makes the row, read or no read', () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
     let shade = null;
