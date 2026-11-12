@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.settings_browser_helpers import open_settings, setting_row
 from tests._shared import producer_evidence_dir
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data  # noqa: F401
 from tests.ui_console_errors import PageErrors
@@ -717,10 +718,10 @@ def test_a_late_outcome_keeps_its_microsecond_order_on_root_and_child_cards(dire
 # Settings › Behavior says the same rules: the answer a task requires checked, Advisory's re-review choice after a
 # review, Blocking's hold, and result review counted per root task (``review_cycles``), plans outside the cap.
 SETTINGS = {
-    "Task Result Review": ["an answer its task requires checked",
+    "OUROBOROS_TASK_REVIEW_MODE": ["an answer its task requires checked",
                            "With Advisory, Ouroboros decides after a review whether a revised result needs another",
-                           "with Blocking, a reviewed result that did not pass is held until a review passes it"],
-    "Max Review Cycles": ["result review and commit review per root task"],
+                           "with Blocking, a result that did not pass is held until a review passes it"],
+    "OUROBOROS_REVIEW_MAX_CYCLES": ["result review and commit review per task"],
 }
 
 
@@ -742,17 +743,16 @@ def test_settings_say_the_result_review_rules_in_both_themes(direct_server_with_
                 page.goto(fixture["url"], wait_until="domcontentloaded")
                 page.locator('[data-nav-page="settings"]').click()
                 page.wait_for_selector(".settings-shell", timeout=30_000)
-                page.locator('[data-settings-tab="behavior"]').click()
-                expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)  # the saved values are read
-                for title, says in SETTINGS.items():
-                    section = page.locator(".form-section", has=page.locator("h3", has_text=title))
-                    section.locator("details.settings-section-details > summary").click()
+                for row_id, says in SETTINGS.items():
+                    open_settings(page, "permissions", row=row_id)
+                    section = setting_row(page, row_id)
+                    section.locator('.settings-row-more > summary').click()
                     for words in says:
                         expect(section).to_contain_text(words)
                     section.evaluate("el => el.scrollIntoView({block: 'center'})")
-                    assert page.evaluate("() => { const s = document.querySelector('.settings-scroll');"
+                    assert page.evaluate("() => { const s = document.querySelector('[data-settings-page=permissions]');"
                                          " return s.scrollWidth - s.clientWidth; }") <= 1
-                    slug = title.lower().replace(" ", "-")
+                    slug = row_id.lower()
                     section.screenshot(path=str(evidence / f"settings-{engine}-{theme}-{slug}.png"), animations="disabled")
                 page.screenshot(path=str(evidence / f"settings-{engine}-{theme}.png"), animations="disabled")
                 assert not errors.unexpected(), errors

@@ -18,8 +18,11 @@ import pathlib
 import pytest
 from tests.test_ui_smoke_agents_panel import _AGENTS_PANEL_ROSTER
 from tests import test_subscription_setup_browser as setup_browser
+from tests import test_subscription_role_routes_browser as roles
+from tests.settings_browser_helpers import open_entry, open_settings
 
 subscription_ui = setup_browser.subscription_ui
+role_ui = roles.role_ui
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
@@ -35,7 +38,7 @@ _CUSTOM_SECRET_KEY = "SLACK_WEBHOOK_URL"
 
 _MEASURE_JS = """
     (selector) => {
-        const scroll = document.querySelector('.settings-scroll');
+        const scroll = document.querySelector('#page-settings [data-settings-page]:not([hidden])');
         const box = scroll.getBoundingClientRect();
         const nodes = [...document.querySelectorAll(selector)];
         const past = nodes.map((node) => ({
@@ -65,114 +68,45 @@ _SHAPE_JS = """
 """
 
 
-def _open_settings(page, url: str, tab: str) -> None:
-    page.goto(url, wait_until="domcontentloaded")
-    page.wait_for_selector("#page-chat", timeout=30_000)
-    page.click('[data-nav-page="settings"]')
-    page.wait_for_selector(".settings-shell", timeout=15_000)
-    page.click(f'[data-settings-tab="{tab}"]')
-
-
 @pytest.mark.ui_browser
-def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_data):
-    """At 780x680 the Agents route grid and a custom secret row stay inside the
-    Settings column: the scroll body does not scroll sideways and no control (a route
-    select, the secret row's Remove) is pushed past its right edge. At 1280x800 the
-    five route controls use Source + Model above Account / Effort / Access.
-    Every measurement is taken before the
-    first assertion, so one failing run reports both grids."""
-    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
-    from playwright.sync_api import Error as PlaywrightError
+def test_custom_secret_grid_tracks_never_scroll_the_body_sideways(direct_server_with_data):
+    """The replacement key field and the new-key form fit the Settings column at both widths."""
     from playwright.sync_api import sync_playwright
 
-    data_dir = direct_server_with_data["data_dir"]
-    settings_path = data_dir / "settings.json"
-    saved = json.loads(settings_path.read_text(encoding="utf-8"))
-    saved["OUROBOROS_SUBAGENTS"] = json.dumps(_AGENTS_PANEL_ROSTER)
-    saved[_CUSTOM_SECRET_KEY] = "seeded-custom-secret-value"
-    settings_path.write_text(json.dumps(saved), encoding="utf-8")
-    direct_server_with_data["restart_server"]()
-    url = direct_server_with_data["url"]
-    evidence_dir = pathlib.Path(
-        os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(data_dir.parent))
-    )
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    seen: dict[str, object] = {}
-
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch()
-            try:
-                page = browser.new_page(viewport=_NARROW)
-                _open_settings(page, url, "agents")
-                page.wait_for_selector(
-                    "#available-subagents-editor .available-subagent-row", timeout=20_000)
-                seen["agents@780"] = page.evaluate(_MEASURE_JS, ".available-subagent-route > *")
-                seen["agents-selects@780"] = page.evaluate(
-                    _MEASURE_JS, ".available-subagent-route select")
-                seen["agents-route@780"] = page.evaluate(_SHAPE_JS, ".available-subagent-route")
-                page.screenshot(path=str(evidence_dir / "settings-agents-780.png"))
-
-                _open_settings(page, url, "secrets")
-                page.wait_for_selector(".settings-custom-secret-row", timeout=20_000)
-                seen["secrets@780"] = page.evaluate(_MEASURE_JS, ".settings-custom-secret-row > *")
-                seen["secrets-remove@780"] = page.evaluate(
-                    _MEASURE_JS, "[data-custom-secret-remove]")
-                seen["secrets-row@780"] = page.evaluate(_SHAPE_JS, ".settings-custom-secret-row")
-                page.screenshot(path=str(evidence_dir / "settings-secrets-780.png"))
-
-                wide = browser.new_page(viewport=_DESKTOP)
-                try:
-                    _open_settings(wide, url, "agents")
-                    wide.wait_for_selector(
-                        "#available-subagents-editor .available-subagent-row", timeout=20_000)
-                    seen["agents-route@1280"] = wide.evaluate(_SHAPE_JS, ".available-subagent-route")
-                    wide.screenshot(path=str(evidence_dir / "settings-agents-1280.png"))
-                    wide.click('[data-settings-tab="secrets"]')
-                    wide.wait_for_selector(".settings-custom-secret-row", timeout=20_000)
-                    seen["secrets-row@1280"] = wide.evaluate(_SHAPE_JS, ".settings-custom-secret-row")
-                finally:
-                    wide.close()
-            finally:
-                browser.close()
-    except PlaywrightError as exc:
-        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
-            pytest.skip(str(exc))
-        raise
-
-    agents, selects = seen["agents@780"], seen["agents-selects@780"]
-    secrets, remove = seen["secrets@780"], seen["secrets-remove@780"]
-    shape = seen["agents-route@1280"]
-    where = json.dumps(seen, indent=2, sort_keys=True)
-    assert agents["measured"] >= 3 and selects["measured"] >= 3, f"nothing measured:\n{where}"
-    assert remove["measured"] == 1, f"the Remove button was not found:\n{where}"
-
-    assert agents["overflow"] <= 1, (
-        f"Settings → Agents scrolls sideways at 780px by {agents['overflow']}px:\n{where}")
-    assert selects["worst"]["over"] <= 1, (
-        f"a route select is pushed past the Settings scroll body:\n{where}")
-    assert agents["worst"]["over"] <= 1, (
-        f"a route control is pushed past the Settings scroll body:\n{where}")
-
-    assert secrets["overflow"] <= 1, (
-        f"Settings → Secrets scrolls sideways at 780px by {secrets['overflow']}px:\n{where}")
-    assert remove["worst"]["over"] <= 1, (
-        f"the custom secret row's Remove button escapes the scroll body:\n{where}")
-    assert secrets["worst"]["over"] <= 1, (
-        f"a custom secret field escapes the scroll body:\n{where}")
-
-    # The narrow fit is not bought with the wide layout: given the room, the open card
-    # keeps Source beside a wide Model, then Account / Effort / Access on one line
-    # (docs/DESIGN.md §6) — three tracks, two rows, never a one-column stack.
-    assert shape["children"] == 5, f"unexpected route controls at 1280px:\n{where}"
-    assert len(shape["template"].split()) == 3, f"the route grid lost its three tracks at 1280px:\n{where}"
-    assert shape["rows"] == 2, f"the route controls no longer form Source+Model / Account+Effort+Access at 1280px:\n{where}"
+    server = direct_server_with_data
+    path = server['data_dir'] / 'settings.json'
+    saved = json.loads(path.read_text(encoding='utf-8'))
+    saved[_CUSTOM_SECRET_KEY] = 'seeded-custom-secret-value'
+    path.write_text(json.dumps(saved), encoding='utf-8')
+    server['restart_server']()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            for viewport in (_NARROW, _DESKTOP):
+                page = browser.new_page(viewport=viewport)
+                page.goto(server['url'], wait_until='domcontentloaded')
+                level = open_settings(page, 'accounts')
+                row = level.locator(f'[data-setting-row="{_CUSTOM_SECRET_KEY}"]')
+                row.locator('[data-secret-open]').click()
+                for selector in (f'[data-setting-row="{_CUSTOM_SECRET_KEY}"] [data-secret-field] > *',
+                                 f'[data-setting-row="{_CUSTOM_SECRET_KEY}"] [data-secret-remove]'):
+                    result = page.evaluate(_MEASURE_JS, selector)
+                    assert result['measured'] and result['overflow'] <= 1 and result['worst']['over'] <= 1, result
+                open_settings(page, 'accounts/key/custom')
+                result = page.evaluate(_MEASURE_JS, '.accounts-key-form > *')
+                assert result['measured'] == 2 and result['overflow'] <= 1 and result['worst']['over'] <= 1, result
+                shape = page.evaluate(_SHAPE_JS, '.accounts-key-form')
+                if viewport == _DESKTOP:
+                    assert len(shape['template'].split()) == 2 and shape['rows'] == 1, shape
+                page.close()
+        finally:
+            browser.close()
 
 
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_action_results_reflow_before_their_text_is_squeezed(subscription_ui, theme):
-    """The real Models row: a container can be narrow in a wide desktop window.
+def test_action_results_reflow_before_their_text_is_squeezed(role_ui, theme):
+    """An agent editor’s real Save row: a container can be narrow in a wide desktop window.
 
     The synthetic translation stresses the existing rendered controls, not a copy
     of their markup. Containment alone passed the old, unreadable two-column row.
@@ -181,23 +115,22 @@ def test_action_results_reflow_before_their_text_is_squeezed(subscription_ui, th
     """
     from playwright.sync_api import expect
 
-    ui, seen = subscription_ui, {}
-    page = ui["page"]
-    page.set_viewport_size({"width": 1100, "height": 750})
+    ui, seen = role_ui, {}
+    roles.configure_mixed(ui)
+    page = ui['page']
+    page.set_viewport_size({'width': 1100, 'height': 750})
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
-    page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="models"]').click()
-    button = page.locator("#btn-refresh-model-catalog")
-    row = button.locator("..")
+    form = roles.open_agent(ui, 'native')
+    form.locator('[data-subagent-field="recommended_use"]').fill('An edited description.')
+    button = page.locator('[data-editor-save]')
+    row = button.locator('..')
     expect(button).to_be_visible()
-    # Use the real refresh/failure transition before stressing its wording.
-    ui["backend"]["catalog_status"] = 503
-    ui["backend"]["catalog_response"] = {"error": "Catalog temporarily unavailable"}
+    def refuse(route):
+        route.fulfill(status=503, json={'error': 'Roster temporarily unavailable'})
+    page.route('**/api/owner/safety-model', refuse)
     button.click()
-    expect(button).to_be_enabled()
-    # The shared action row (ui.css .ui-action-row): the trigger, then its result as the next sibling.
-    status = row.locator(".ui-result")
-    expect(status).not_to_be_empty()
+    status = row.locator('.ui-result')
+    expect(status).to_contain_text('Roster temporarily unavailable')
     status.evaluate("e => e.textContent = 'Der Modellkatalog ist momentan nicht erreichbar. Die gespeicherte Auswahl bleibt erhalten; bitte versuchen Sie die Aktualisierung erneut.'")
     button.evaluate("e => e.textContent = 'Modellkatalog erneut aktualisieren'")
     row.evaluate("e => { window.actionReadingRow = e; window.actionReadingButton = e.firstElementChild; }")
@@ -223,10 +156,41 @@ def test_action_results_reflow_before_their_text_is_squeezed(subscription_ui, th
     # Reflow preserves the actual node, focus and action; no reconstructed lookalike.
     button.focus()
     expect(button).to_be_focused()
-    assert page.evaluate("window.actionReadingButton === document.querySelector('#btn-refresh-model-catalog')")
-    ui["backend"].pop("catalog_status")
-    ui["backend"].pop("catalog_response")
-    before = sum('/api/model-catalog' in url for url in ui["reads"])
-    button.press("Enter")
-    expect(button).to_be_enabled()
-    assert sum('/api/model-catalog' in url for url in ui["reads"]) > before
+    assert page.evaluate("window.actionReadingButton === document.querySelector('[data-editor-save]')")
+    page.unroute('**/api/owner/safety-model', refuse)
+    before = len(roles.roster_writes(ui))
+    button.press('Enter')
+    expect(page.locator('[data-editor-result]')).to_contain_text('Saved')
+    assert len(roles.roster_writes(ui)) == before + 1
+
+
+@pytest.mark.ui_browser
+def test_agent_editor_grid_tracks_fit_the_page_at_both_widths(direct_server_with_data):
+    from playwright.sync_api import sync_playwright
+
+    server = direct_server_with_data
+    path = server['data_dir'] / 'settings.json'
+    saved = json.loads(path.read_text(encoding='utf-8'))
+    saved['OUROBOROS_SUBAGENTS'] = json.dumps(_AGENTS_PANEL_ROSTER)
+    path.write_text(json.dumps(saved), encoding='utf-8')
+    server['restart_server']()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            for viewport in (_NARROW, _DESKTOP):
+                page = browser.new_page(viewport=viewport)
+                page.goto(server['url'], wait_until='domcontentloaded')
+                open_settings(page, 'agents')
+                form = open_entry(page, _AGENTS_PANEL_ROSTER['items'][0]['subagent_id'])
+                form.locator('[data-subagent-field="route"]').wait_for(state='visible')
+                controls = page.evaluate(_MEASURE_JS, '.available-subagent-route > *')
+                selects = page.evaluate(_MEASURE_JS, '.available-subagent-route select')
+                shape = page.evaluate(_SHAPE_JS, '.available-subagent-route')
+                assert controls['measured'] == 5 and selects['measured'] >= 3
+                assert controls['overflow'] <= 1 and controls['worst']['over'] <= 1, controls
+                assert selects['worst']['over'] <= 1, selects
+                if viewport == _DESKTOP:
+                    assert len(shape['template'].split()) == 3 and shape['rows'] == 2, shape
+                page.close()
+        finally:
+            browser.close()
