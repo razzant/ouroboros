@@ -291,6 +291,30 @@ function routeCatalogItems(route, items = []) {
         && (!pin || !item?.credential_profile_id || item.credential_profile_id === pin));
 }
 
+// A dollar figure as the catalogue states it, to four decimals and in cents at least: $4, $2.50, $0.075.
+function usd(value) {
+    const [whole, fraction = ''] = String(Math.round(value * 1e4) / 1e4).split('.');
+    return `$${whole}${fraction ? `.${fraction.padEnd(2, '0')}` : ''}`;
+}
+
+/**
+ * A catalogue's published price (`ModelCatalogItem.price`) in the owner's words, USD per 1M tokens: `$4 in / $20 out`;
+ * where input length changes it, each figure's range (`$2–4 in / $10–15 out`); `free` when every figure is zero;
+ * '' when the catalogue states none. `unit` names the unit. Words only: a price never sorts, filters or admits a model.
+ */
+export function priceWords(price, { unit = false } = {}) {
+    const stated = (figure) => Number.isFinite(figure) && figure >= 0;
+    if (!stated(price?.input) || !stated(price?.output)) return '';
+    const tiers = Array.isArray(price.tiers) ? price.tiers : [];
+    const figures = (key) => [price[key], ...tiers.map((tier) => tier?.[key]).filter(stated)];
+    if ([...figures('input'), ...figures('output')].every((figure) => figure === 0)) return 'free';
+    const span = (key) => {
+        const [low, high] = [usd(Math.min(...figures(key))), usd(Math.max(...figures(key)))];
+        return low === high ? low : `${low}–${high.slice(1)}`;
+    };
+    return `${span('input')} in / ${span('output')} out${unit ? ' per 1M tokens' : ''}`;
+}
+
 /**
  * One suggestion per model: the label names the model and makes no account claim
  * (DESIGN.md §7). Availability, the reading account and its observation time are
@@ -298,22 +322,26 @@ function routeCatalogItems(route, items = []) {
  * alias resolves to (`resolved_model`, shown only while every supplying row agrees)
  * and a row known only from the engine's frozen list (`origin: "hint"` on every
  * supplying row; absent origin is live). The value stays the row id either way.
+ * The catalogue's price travels apart from the label, as `meta`, while every
+ * supplying row states that same price.
  */
 export function catalogModelOptions(items = []) {
     const values = new Map();
     for (const item of items) {
         const value = String(item?.value || item?.id || item);
         const name = String(item?.name || item?.label || '');
-        if (!values.has(value)) values.set(value, { value, label: value, named: false, live: false, resolved: new Set() });
+        if (!values.has(value)) values.set(value, { value, label: value, named: false, live: false, resolved: new Set(), prices: new Set() });
         const current = values.get(value);
         if (name && !current.named) Object.assign(current, { label: name, named: true });
         if (item?.origin !== 'hint') current.live = true;
         const resolved = item?.resolved_model;
         if (typeof resolved === 'string' && resolved && resolved !== value) current.resolved.add(resolved);
+        current.prices.add(priceWords(item?.price));
     }
-    return [...values.values()].map(({ value, label, live, resolved }) => {
+    return [...values.values()].map(({ value, label, live, resolved, prices }) => {
         const named = resolved.size === 1 ? `${value} → ${[...resolved][0]}` : label;
-        return { value, label: live ? named : `${named} (shipped list)` };
+        const meta = prices.size === 1 ? [...prices][0] : '';
+        return { value, label: live ? named : `${named} (shipped list)`, ...(meta ? { meta } : {}) };
     });
 }
 

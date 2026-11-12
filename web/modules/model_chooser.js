@@ -6,10 +6,12 @@ import { bindModelProgramFooter } from './model_program.js';
 
 const choosers = new WeakMap();
 
+/** `meta` is a fact beside the name (a catalogue price): shown apart, never part of the label or the search. */
 export function modelOptions(items = []) {
     const seen = new Set();
     return items.map((item) => typeof item === 'string' ? { value: item, label: item }
-        : { value: String(item.value ?? item.id ?? ''), label: String(item.label || item.name || item.value || item.id || ''), ...(item.custom ? {custom: true} : {}) })
+        : { value: String(item.value ?? item.id ?? ''), label: String(item.label || item.name || item.value || item.id || ''),
+            ...(item.custom ? {custom: true} : {}), ...(item.meta ? {meta: String(item.meta)} : {}) })
         .filter((item) => !seen.has(item.value) && seen.add(item.value));
 }
 
@@ -20,9 +22,11 @@ export function matchingModelOptions(items, query) {
 }
 
 function optionsHtml(items, listId) {
-    return modelOptions(items).map(({ value, label, custom }, index) =>
+    return modelOptions(items).map(({ value, label, custom, meta }, index) =>
         `<div class="ui-model-option" role="option" id="${escapeHtml(listId)}-${index}"
-            data-model-value="${escapeHtml(value)}"${custom ? ' data-model-custom-option' : ''} aria-selected="false">${escapeHtml(label || value)}</div>`).join('');
+            data-model-value="${escapeHtml(value)}"${custom ? ' data-model-custom-option' : ''} aria-selected="false">${meta
+            ? `<span class="ui-model-option-name">${escapeHtml(label || value)}</span> <span class="ui-model-option-meta" data-i18n-skip>${escapeHtml(meta)}</span>`
+            : escapeHtml(label || value)}</div>`).join('');
 }
 
 export function modelChooserHtml(attrs, value, listId, items = [], { placeholder = 'Choose a model', labelUnlisted = true, programs = [] } = {}) {
@@ -36,9 +40,11 @@ export function modelChooserHtml(attrs, value, listId, items = [], { placeholder
         ${popup}${labelUnlisted ? '<span class="ui-field-help" data-model-custom role="status" hidden>Custom ID · Not in this list</span>' : ''}</span>`;
 }
 
+// The name is the name element's text alone: the price beside it never joins the label, the search or a repaint.
 function readOptions(list) {
     return [...list.querySelectorAll('[data-model-value]')].map((node) => ({
-        value: node.dataset.modelValue, label: node.textContent, custom: node.hasAttribute('data-model-custom-option'),
+        value: node.dataset.modelValue, label: (node.querySelector('.ui-model-option-name') || node).textContent,
+        custom: node.hasAttribute('data-model-custom-option'), meta: node.querySelector('.ui-model-option-meta')?.textContent || '',
     }));
 }
 
