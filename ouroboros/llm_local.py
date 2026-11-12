@@ -11,6 +11,7 @@ not at all.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.deadline_utils import physical_dispatch_timeout
@@ -48,6 +49,21 @@ def local_context_limits(max_tokens: int) -> Tuple[int, int]:
     except Exception:
         pass
     return ctx_len, local_max
+
+
+def _split_leading_reasoning(text: str) -> Tuple[str, str]:
+    """``(answer, reasoning)`` of a reply whose reasoning comes first; a reply without one is returned whole.
+
+    Two shapes reach this lane: ``<think>…</think>`` the model writes itself (Qwen3), and reasoning that is only
+    closed, because the chat template already opened ``<think>`` in the prompt (Qwen3.5 and later)."""
+    stripped = text.lstrip()
+    paired = re.match(r"<think>(.*?)</think>", stripped, re.DOTALL | re.IGNORECASE)
+    if paired:
+        return stripped[paired.end():].strip(), paired.group(1).strip()
+    closed = re.search(r"</think>", stripped, re.IGNORECASE)
+    if closed and not re.search(r"<think>", stripped[:closed.start()], re.IGNORECASE):
+        return stripped[closed.end():].strip(), stripped[:closed.start()].strip()
+    return text, ""
 
 
 class _LocalLaneMixin:
@@ -186,12 +202,15 @@ class _LocalLaneMixin:
         msg = (choices[0] if choices else {}).get("message") or {}
 
         if not msg.get("tool_calls") and msg.get("content") and clean_tools:
-            allowed_tool_names = {
-                str(t.get("function", {}).get("name", "")).strip()
-                for t in clean_tools
-                if isinstance(t, dict)
-            }
-            msg = self._parse_tool_calls_from_content(msg, allowed_tool_names)
+            functions = [t.get("function") or {} for t in clean_tools if isinstance(t, dict)]
+            allowed_tool_names = {str(f.get("name", "")).strip() for f in functions}
+            schemas = {str(f.get("name", "")).strip(): f.get("parameters") for f in functions}
+            msg = self._parse_tool_calls_from_content(msg, allowed_tool_names, schemas)
+        if not msg.get("tool_calls") and msg.get("content") and not msg.get("reasoning_content"):
+            # A plain answer's leading reasoning is the model's own, not the reply: keep it beside the answer.
+            answer, reasoning = _split_leading_reasoning(str(msg["content"]))
+            if reasoning:
+                msg = {**msg, "content": answer, "reasoning_content": reasoning}
 
         usage["cost"] = 0.0
         usage["cost_final"] = True

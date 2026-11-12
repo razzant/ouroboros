@@ -313,3 +313,116 @@ class TestParseToolCallsWithThink(unittest.TestCase):
         # Argument value is untouched
         args = _json.loads(parsed["tool_calls"][0]["function"]["arguments"])
         self.assertEqual(args["content"], arg_value)
+
+
+# The reply Qwen3.8-27B-UD-Q4_K_M gave on 12 November 2026 to the product's own tool-calling probe
+# (local_model.test_tool_calling), served by ouroboros.local_model_server on llama-cpp-python 0.3.36: its template
+# opens <think> in the prompt, so the reasoning only closes, and it writes the call in the XML form (#3255).
+QWEN38_REPLY = ("The user is asking for the current time and specifically requesting that I use the get_time tool. "
+                "Let me call it.\n</think>\n\n<tool_call>\n<function=get_time>\n</function>\n</tool_call>")
+READ_SCHEMA = {"read_file": {"type": "object", "properties": {
+    "path": {"type": "string"}, "limit": {"type": "integer"}, "follow": {"type": "boolean"},
+    "options": {"type": "object"}}}}
+
+
+class TestCurrentQwenToolCalls(unittest.TestCase):
+    """Qwen3.5 and later: reasoning that only closes, and <function=…><parameter=…> calls."""
+
+    def test_the_real_qwen38_reply_is_a_tool_call_and_its_reasoning_stays_reasoning(self):
+        from ouroboros.llm import LLMClient
+
+        parsed = LLMClient._parse_tool_calls_from_content({"content": QWEN38_REPLY, "tool_calls": []}, {"get_time"})
+        self.assertEqual([(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in parsed["tool_calls"]],
+                         [("get_time", {})])
+        self.assertTrue(parsed["content"].startswith("The user is asking for the current time"))
+        self.assertNotIn("</think>", parsed["content"])
+
+    def test_xml_values_take_the_types_the_tool_declares(self):
+        from ouroboros.llm import LLMClient
+
+        reply = ("<tool_call>\n<function=read_file>\n<parameter=path>\n42\n</parameter>\n<parameter=limit>\n5\n</parameter>\n"
+                 "<parameter=follow>\ntrue\n</parameter>\n<parameter=options>\n{\"encoding\": \"utf-8\"}\n</parameter>\n"
+                 "</function>\n</tool_call>")
+        parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"read_file"}, READ_SCHEMA)
+        self.assertEqual(json.loads(parsed["tool_calls"][0]["function"]["arguments"]),
+                         {"path": "42", "limit": 5, "follow": True, "options": {"encoding": "utf-8"}})
+        # Undeclared: a bare number or word stays the text the model wrote; only JSON structure is structure.
+        bare = LLMClient._parse_tool_calls_from_content({"content": reply}, {"read_file"})
+        self.assertEqual(json.loads(bare["tool_calls"][0]["function"]["arguments"]),
+                         {"path": "42", "limit": "5", "follow": "true", "options": {"encoding": "utf-8"}})
+
+    def test_reasoning_that_only_closes_does_not_hide_a_json_call(self):
+        from ouroboros.llm import LLMClient
+
+        reply = "I should look first.\n</think>\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\"}}\n</tool_call>"
+        parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"read_file"})
+        self.assertEqual(parsed["tool_calls"][0]["function"]["name"], "read_file")
+        self.assertEqual(parsed["content"], "I should look first.")
+
+    def test_prose_beside_or_between_calls_keeps_the_reply_text(self):
+        from ouroboros.llm import LLMClient
+
+        call = "<tool_call>\n<function=get_time>\n</function>\n</tool_call>"
+        for reply in (f"Sure, here it is.\n{call}", f"{call}\nAnd then:\n{call}", f"{call} done"):
+            msg = {"content": reply, "tool_calls": []}
+            self.assertIs(LLMClient._parse_tool_calls_from_content(msg, {"get_time"}), msg, reply)
+        self.assertEqual(len(LLMClient._parse_tool_calls_from_content(
+            {"content": f"{call}\n{call}"}, {"get_time"})["tool_calls"]), 2)
+
+    def test_an_unknown_tool_or_stray_text_inside_the_function_is_refused(self):
+        from ouroboros.llm import LLMClient
+
+        for reply in ("<tool_call>\n<function=rm_rf>\n</function>\n</tool_call>",
+                      "<tool_call>\n<function=get_time>\nnow please\n</function>\n</tool_call>",
+                      "<tool_call>\n<function=get_time>\n</tool_call>"):
+            msg = {"content": reply, "tool_calls": []}
+            self.assertIs(LLMClient._parse_tool_calls_from_content(msg, {"get_time"}), msg, reply)
+
+
+class TestSplitLeadingReasoning(unittest.TestCase):
+
+    def test_leading_reasoning_in_either_shape_is_split_off_and_other_text_is_left_whole(self):
+        from ouroboros.llm_local import _split_leading_reasoning as split
+
+        self.assertEqual(split("<think>plan</think>\n\nHello."), ("Hello.", "plan"))
+        self.assertEqual(split("plan\n</think>\n\nHello."), ("Hello.", "plan"))
+        self.assertEqual(split("Hello."), ("Hello.", ""))
+        mention = "Tags look like <think>x</think> in Qwen."
+        self.assertEqual(split(mention), (mention, ""))
+
+
+def test_the_local_lane_answers_without_its_reasoning_and_calls_tools_the_new_way(tmp_path, monkeypatch):
+    """Through the lane itself: a plain answer arrives without the model's reasoning (kept as reasoning_content),
+    and a current-Qwen XML call with typed parameters becomes a structured tool call."""
+    import copy
+    from types import SimpleNamespace
+
+    from ouroboros import llm_local, local_model, usage_accounting as ua
+    from ouroboros.llm import LLMClient
+
+    replies = ["I am greeting my human.\n</think>\n\nHello. I am Ouroboros.",
+               "Read it.\n</think>\n<tool_call>\n<function=read_file>\n<parameter=path>\nREADME.md\n</parameter>\n"
+               "<parameter=limit>\n3\n</parameter>\n</function>\n</tool_call>"]
+
+    class Response:
+        def __init__(self, content):
+            self.body = {"choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+                         "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+        def model_dump(self):
+            return copy.deepcopy(self.body)
+
+    client = LLMClient(api_key="unused")
+    monkeypatch.setattr(local_model, "get_manager", lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
+    monkeypatch.setattr(llm_local, "local_context_limits", lambda maximum: (0, maximum))
+    monkeypatch.setattr(client, "_get_local_client", lambda: SimpleNamespace(chat=SimpleNamespace(
+        completions=SimpleNamespace(create=lambda **payload: Response(replies.pop(0))))))
+    tools = [{"type": "function", "function": {"name": "read_file", "description": "Read a file.",
+                                                "parameters": READ_SCHEMA["read_file"]}}]
+    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="local-qwen")):
+        answer, _ = client.chat(messages=[{"role": "user", "content": "hi"}], model="local", use_local=True, max_tokens=64)
+        call, _ = client.chat(messages=[{"role": "user", "content": "read"}], model="local", use_local=True,
+                              max_tokens=64, tools=tools)
+    assert answer["content"] == "Hello. I am Ouroboros." and answer["reasoning_content"] == "I am greeting my human."
+    assert json.loads(call["tool_calls"][0]["function"]["arguments"]) == {"path": "README.md", "limit": 3}
+    assert call["content"] == "Read it."

@@ -141,6 +141,48 @@ log = logging.getLogger(__name__)
 DEFAULT_LIGHT_MODEL = OPENROUTER_DEFAULTS["light"]
 
 
+def _xml_tool_argument(value: str, schema: Any) -> Any:
+    """One ``<parameter>`` value typed as the tool declares it: the template writes strings raw, other values as
+    JSON. An undeclared value stays text unless it is a JSON object or array."""
+    kind = schema.get("type") if isinstance(schema, dict) else None
+    if kind == "string":
+        return value
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return value
+    if kind is None and not isinstance(parsed, (dict, list)):
+        return value
+    return parsed
+
+
+def _parse_tool_call_block(body: str, tool_schemas: Optional[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+    """``(name, arguments)`` of one ``<tool_call>`` body: a JSON object (Qwen3 and earlier) or a
+    ``<function=NAME><parameter=KEY>VALUE</parameter>…</function>`` block (Qwen3.5 and later)."""
+    if body.startswith("{"):
+        try:
+            obj = json.loads(body)
+        except json.JSONDecodeError:
+            if body.startswith("{{") and body.endswith("}}"):
+                obj = json.loads(body[1:-1])
+            else:
+                raise
+        if not isinstance(obj, dict):
+            raise ValueError("tool_call payload must be an object")
+        return str(obj.get("name", "")).strip(), obj.get("arguments", {})
+    function = re.fullmatch(r"<function=([^>\s]+)>(.*?)</function>", body, re.DOTALL)
+    if not function:
+        raise ValueError("tool_call is neither a JSON object nor a <function=...> block")
+    parameter = re.compile(r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
+    if parameter.sub("", function.group(2)).strip():
+        raise ValueError("text outside <parameter> blocks")
+    name = function.group(1).strip()
+    schema = (tool_schemas or {}).get(name)
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    return name, {key: _xml_tool_argument(value, (properties or {}).get(key))
+                  for key, value in parameter.findall(function.group(2))}
+
+
 class LLMClient(
     _PayloadCachePolicyMixin,
     _CapabilityPolicyMixin,
@@ -433,6 +475,12 @@ class LLMClient(
             suffix = ""
 
         reasoning_parts: list = []
+        # Reasoning that a template opened in the prompt arrives closed but never opened (Qwen3.5 and later).
+        closed = re.search(r"</think>", prefix, re.IGNORECASE)
+        if closed and not re.search(r"<think>", prefix[:closed.start()], re.IGNORECASE):
+            if prefix[:closed.start()].strip():
+                reasoning_parts.append(prefix[:closed.start()].strip())
+            prefix = prefix[closed.end():]
 
         def _extract(tag: str, s: str) -> str:
             pattern = re.compile(
@@ -453,8 +501,11 @@ class LLMClient(
     def _parse_tool_calls_from_content(
         msg: Dict[str, Any],
         allowed_tool_names: Optional[Set[str]] = None,
+        tool_schemas: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Parse local <tool_call> XML output after a strict full-match guard."""
+        """Parse local <tool_call> output after a strict full-match guard.
+
+        ``tool_schemas`` (tool name -> its JSON parameters schema) types the values of the XML form."""
         content = str(msg.get("content", "") or "")
         stripped_raw = content.strip()
         if not stripped_raw:
@@ -466,33 +517,16 @@ class LLMClient(
             return msg
 
         # Upgrade only pure tool-call output; mixed prose stays plain text.
-        full_pattern = re.compile(
-            r"^(?:\s*<tool_call>\s*\{.*?\}\s*</tool_call>\s*)+$",
-            re.DOTALL,
-        )
-        if not full_pattern.fullmatch(stripped):
-            return msg
-
-        matches = re.findall(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", stripped, re.DOTALL)
-        if not matches:
+        block = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+        matches = block.findall(stripped)
+        if not matches or block.sub("", stripped).strip():
             return msg
 
         allowed = {name for name in (allowed_tool_names or set()) if name}
         tool_calls = []
         for i, raw in enumerate(matches):
             try:
-                raw_stripped = raw.strip()
-                try:
-                    obj = json.loads(raw_stripped)
-                except json.JSONDecodeError:
-                    if raw_stripped.startswith("{{") and raw_stripped.endswith("}}"):
-                        obj = json.loads(raw_stripped[1:-1])
-                    else:
-                        raise
-                if not isinstance(obj, dict):
-                    raise ValueError("tool_call payload must be an object")
-                name = str(obj.get("name", "")).strip()
-                args = obj.get("arguments", {})
+                name, args = _parse_tool_call_block(raw.strip(), tool_schemas)
                 if not name:
                     raise ValueError("tool_call missing function name")
                 if allowed and name not in allowed:

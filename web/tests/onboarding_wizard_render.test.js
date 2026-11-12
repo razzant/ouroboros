@@ -435,7 +435,7 @@ test('a confirmed restart comes from the attempt\'s own receipt, never from a gu
 });
 
 test('a framed wizard tells its host the chosen access level by its label as well as its id', async () => {
-    // The browser twin of the restart screen (onboarding_overlay.js) prints the label; without it a person reads a stored id.
+    // The browser twin of the restart screen (onboarding_overlay.js) prints the label; without it a person reads only "The chosen access…".
     const server = completionServer();
     await withWizard(SUMMARY_FIRST, 'save=framed-restart', async ({ doc }) => {
         const posted = [];
