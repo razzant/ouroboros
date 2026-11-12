@@ -233,6 +233,8 @@ async function openDashboardTab(tabName, options = {}) {
         dashboardControls.activateTab(tabName, options);
     }
 }
+// A line elsewhere that points at a Dashboard tab (a quiet place's sheet at Consciousness) asks for it by this event.
+window.addEventListener('ouro:open-dashboard', (event) => { void openDashboardTab(String(event.detail?.tab || 'activity')); });
 
 // Main's unread standalone messages, the count a Project's revision gives; unknown counts none.
 function mainUnreadCount() {
@@ -569,8 +571,7 @@ const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generati
         ? projectListableCount : null;
     if (Array.isArray(data.projects)) state.projectMessagesRevision = data.project_messages_revision ?? null;
     const chatIds = heldProjectChatIds(data, state);  // null or absent keeps a complete set the page holds
-    projectActivityIndex = buildProjectActivityIndex(projectRooms, chatIds
-        ?? (data.projects || lastProjectRows).map((project) => project?.chat_id));
+    projectActivityIndex = buildProjectActivityIndex(projectRooms, chatIds, data.projects || lastProjectRows);
     renderProjectsNav(data.projects || lastProjectRows, chatIds, projectActivityIndex,
         Array.isArray(data.projects) ? generation : 0);
     if (data.task_bindings) applyTaskBindings(data.task_bindings);  // null: unchanged, never filled here
@@ -1014,7 +1015,7 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
 // the marker explicitly unknown rather than quietly showing stale liveness.
 function markProjectActivityUnknown() {
     projectRooms = reconcileProjectRooms(projectRooms).rooms;
-    projectActivityIndex = buildProjectActivityIndex(projectRooms, [...state.projectChatIds]);
+    projectActivityIndex = buildProjectActivityIndex(projectRooms, [...state.projectChatIds], lastProjectRows);
     patchProjectActivityMarkers(projectActivityIndex);
 }
 
@@ -1024,7 +1025,7 @@ function markProjectActivityUnknown() {
 // focus and menus stay.
 function patchProjectActivityMarkers(activityIndex = projectActivityIndex) {
     const aggregate = activityIndex.aggregate;
-    paintStatusMark(navProjectsFacts?.querySelector('.nav-mark'), markView({ mark: aggregate.mark, owner: aggregate.owner }));
+    paintStatusMark(navProjectsFacts?.querySelector('.nav-mark'), markView({ mark: aggregate.owner ? 'none' : aggregate.mark, owner: aggregate.owner }));
     const unread = navProjectsCount?.title;
     setActivityOwnerName(navProjectsToggle, unread ? `Projects · ${unread}` : 'Projects', aggregate.label);
     projectsNav.patch(activityIndex);

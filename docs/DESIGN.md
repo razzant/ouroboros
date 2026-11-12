@@ -888,16 +888,16 @@ status sentence's or a composer chip's dot is its tone, §4).
   - *still* — the same dots at 40 %: queued, or a wait that ends by itself;
   - *pause* — two 2 × 8 px bars at 70 %: paused, by the owner or by Ouroboros, until Resume;
   - *ring* — a faint 7 px ring: not confirmed (an incomplete read, a closed socket), never a guess;
-  - *dot* — a 7 px dot: one fact (the owner's move, new messages where nothing works, an outcome);
+  - *dot* — a 7 px dot: one fact (the owner's move where nothing moves, new messages where nothing works, an outcome);
   - *none* — rest draws nothing.
   The ring stands at 55 %; new messages lift the still dots and the ring to 60 % and the bars to
   full strength, so the crimson reads.
 - **The hue says whether there is something for the owner.** *Ink* is the
   surface's own ink (`currentColor`), a chosen row's selection ink included, so a
   mark follows the name it marks and never out-shouts it. *Amber* (`--amber`) is
-  the owner's move: a question to answer or an action only the owner can take; it
-  outranks everything and stands alone, the dot replacing the work's shape while
-  the word keeps saying the work (`Working` with a small amber dot). *Crimson*
+  the owner's move: an unanswered question or an action only the owner can take; it
+  outranks the other hues. It tints the moving dots, so one mark says that the work
+  goes on and that something waits for the owner; where nothing moves it is the lone dot. *Crimson*
   (`--accent`, its light crimson in dark) is new messages: it tints the work's
   shape, or is the dot where nothing works. An *outcome* is a dot beside its word:
   green for Done and Done with warnings (the word says the warnings), neutral for
@@ -905,7 +905,8 @@ status sentence's or a composer chip's dot is its tone, §4).
 - **One mark per place.** A row, a bar, a chip or a head carries one mark; the
   owner's move comes first, then an outcome beside its word, then new messages,
   then the work's shape in ink. A lone dot in a list is only new messages or the
-  owner's move.
+  owner's move where nothing moves; the Projects header and ☰, which stand for many
+  rooms, show the owner's move as the dot.
 - **Words carry the meaning.** A mark is decorative (`aria-hidden`); the word
   beside it or the place's accessible name says the same fact ("Working · new
   messages", "Something here waits for you"), so colour is never the only channel.
@@ -914,9 +915,10 @@ status sentence's or a composer chip's dot is its tone, §4).
   shape on a live chip keeps the moving dots' width, so the word beside it never
   moves. A status sentence's own dot (`.ui-status`, Settings sentences) is drawn by
   its CSS at the same 7 px in the same hues; a room at rest says `Online` beside the
-  shared mark's green dot. Both speak only at rest.
+  shared mark's green dot (the amber dot while the room waits for the owner's move, defined next). Both speak only at rest.
 - **Amber is the owner's attention and nothing else:** (1) the owner's move — a
-  question, or what only the owner can do: sign in, a spending limit, Resume after a
+  question still unanswered (the ones Main's pill counts, whether its task stands on it, goes on under its
+  assumption or has ended, and a Project's answer whose delivery a restart left unknown), or what only the owner can do: sign in, a spending limit, Resume after a
   restart, crash or Panic, grant access, a skill review that must run first, local
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
   or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
@@ -1482,9 +1484,12 @@ server's `mark_of`, and the owner's move only from proved facts (`can_resume`,
 working, then queued, waiting, paused, and its mark is the server's status mark
 (Status marks): moving dots while anything in it runs (a paused work's finishing review too), still dots while it queues or waits on
 something that ends by itself, two bars while paused, a faint ring when
-unconfirmed. While something waits for the owner the amber dot replaces that shape
-beside the room's word; a Pause is not the owner's turn. At rest `Online` keeps its
-green dot, a status sentence's own. Only what the client alone knows lies over the
+unconfirmed. While something waits for the owner the mark is amber (Status marks)
+beside the room's word; a Pause is not the owner's turn. What waits is the server's `turn`: a question
+a task stands on (`question`), one still unanswered while its work goes on or after it ended
+(`open_question`: the set Main's pill counts, kept across a read that does not vouch against it), an owner
+action. At rest `Online` keeps its green dot, a status sentence's own, or shows the amber one. Only what the
+client alone knows lies over the
 server's mark: `Reconnecting…` (a ring; `· server answers` once the core answered and a later
 attempt still failed: an observation, never a cause), `Updating…` (a ring) while a room shown again or
 reconnected still reads what it missed after 300 ms, the owner's own unconfirmed send and the
@@ -1528,7 +1533,9 @@ lands there with the list open. Until then a row claims nothing
 about where its message is; when the room's history holds none (`No message yet.`,
 or `No message saved in this chat.` once ended), belongs to another room, or cannot
 be checked, its details say so. `View question`
-goes to the exact waited question and answers nothing. A row offers exactly the
+goes to the exact question and answers nothing; every question of the room's turn is reachable: a confirmed work's
+row links one, and each further one, one whose work is unconfirmed, or one no listed work holds, has its own row,
+named by the question's first words (`Question` when its row carries none, as Main's own does) under its card's status word; that row's name goes to the question too. A row offers exactly the
 controls the server lists for its work, each at its exact task, on the shared
 task controls: Stop ends the whole work (every episode still running, the newest
 first), `Stop earlier attempt` only what earlier attempts left running, and
@@ -1711,7 +1718,7 @@ Anatomy, top to bottom:
 
 1. **Head** — one 28px row in every room: neutral `Question` chip (`--type-meta`,
    neutral pair), the status beside it as a 7 px status mark + text, amber while
-   the task waits for the answer. The row never wraps (a narrow card's long status
+   Main's pill counts the question (the words say whether its task waits). The row never wraps (a narrow card's long status
    takes two lines in place). The voice line names who asks and a Main copy's
    Project; private Presence questions and reports add the linked place/thread
    source beside the name, outside authored text. The lifecycle family leads with the one
@@ -1824,7 +1831,7 @@ A chat transport shows such a request as the host's note on where to enter it, w
 
 A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence (none where its own control already says it: a plain resume pause beside Resume), its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its helpers within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.
 
-One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
+One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. A room's mark, the Projects header's and ☰'s turn amber for the same questions; the sidebar feed holds the row of a listed Project whose room is the owner's turn for as long as Main's pill keeps its question (the same reads keep and drop both), and the header's amber counts only rows the feed can show. Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
 
 A confirmed answer/closure shows its result for five seconds, then retires only the Main copy through message/media disposal without moving the viewport; the Project card stays. Pending canonical delivery keeps the read-only form and a compact pending fact. The interval starts once, including simultaneous form/result delivery. Focus remains during it, then moves to the next Main question or keyboard owner's composer without summoning a touch keyboard. History, reconnect and stale snapshots cannot resurrect settled forms; a settled pointer never mounts unless its delivery is owed. A newly accepted question closed before first exposure publishes only its closed state; an old answer without explicit delivery debt creates no new owner turn.
 
@@ -2207,7 +2214,7 @@ declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
 While Off the host's `only_hears` replaces what would claim a wake: Active's note says “Consciousness is off: it
-only hears here.”, the wake note (Active or Silent) “While consciousness is off, nothing here wakes it.”, and the
+only hears here.”, the wake note (Active or Silent) “While consciousness is off, nothing here wakes it.” with the door `Consciousness ›` (Dashboard › Consciousness, where Start is; no second Start), and the
 conversation's state card “Active, consciousness off: it only hears here.” (Silent alike). Paused keeps its words.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 

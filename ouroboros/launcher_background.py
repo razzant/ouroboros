@@ -129,7 +129,9 @@ def status_line(port: int) -> str:
         line = f"Ouroboros: {unconfirmed} task{'' if unconfirmed == 1 else 's'} unconfirmed"
     else:
         line = "Ouroboros: waiting"
-    waits = sum(bool(work.get("turn")) for work in works)
+    # What waits for the owner, as the server counts it: each work with a turn, and each unanswered question whose
+    # work has ended (``work_status.roll_up_summary``).
+    waits = int(summary.get("turn") or 0)
     if waits:
         line += f" · {waits} {'waits' if waits == 1 else 'wait'} for you"
     if unconfirmed and known:  # after what waits for the owner, which a cut line must keep

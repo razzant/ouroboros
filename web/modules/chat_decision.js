@@ -36,8 +36,9 @@ function paintStatusText(card, row, paused) {
     return true;
 }
 
-// What one observation of a question carries: its identity, lifecycle, recorded answer and wait facts.
-const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'state', 'answered_index', 'comment', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
+// What one observation of a question carries: its identity (its own Project included: '' for Main's own and a
+// private Presence question, so the head follows the pill's rule), lifecycle, recorded answer and wait facts.
+const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'project_id', 'state', 'answered_index', 'comment', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
     'secret_outcome', 'secret_save', ...WAIT_FIELDS];
 const lifecycleOf = (row) => Object.fromEntries(LIFECYCLE_FIELDS.filter((field) => Object.hasOwn(row, field))
     .map((field) => [field, row[field]]));
@@ -715,8 +716,17 @@ export function createChatDecision({
         const complete = Boolean(quiz.question) && quiz.optionsKnown;
         if (!quiz.quizId || !quiz.taskId || !(complete || mirror)) return null;
         const key = questionKey(quiz.taskId, quiz.quizId);
-        const frame = { task_id: quiz.taskId, quiz_id: quiz.quizId, state: quiz.state,
-            ...quiz.waitRow, ...quiz.answerFields, ...(quiz.closedReason ? { closed_reason: quiz.closedReason } : {}) };
+        // The question's own Project: one a canonical read already recorded stays; a Main copy's is its pointer's; a
+        // private Presence question is Main's ('': its row names its work's Project only as a reference); else its
+        // row's, else the Project room this card is drawn in. A later canonical read replaces a guess.
+        const seen = observations.get(key);
+        const contact = msg.presence_contact || msg.quiz?.presence_contact;
+        const privateContact = Boolean(contact && String(contact.task_id) === quiz.taskId && contact.binding_id
+            && contact.source_event_id);  // presence_owner_contact.private_main_contact
+        const own = seen && Object.hasOwn(seen, 'project_id') ? null : mirror ? String(mirror.row.project_id || '')
+            : privateContact ? '' : String(msg.project_id || projectId || '');
+        const frame = { task_id: quiz.taskId, quiz_id: quiz.quizId, ...(own === null ? {} : { project_id: own }),
+            state: quiz.state, ...quiz.waitRow, ...quiz.answerFields, ...(quiz.closedReason ? { closed_reason: quiz.closedReason } : {}) };
         const current = mirror?.needsValidation && !['answered', 'closed', 'superseded'].includes(quiz.state)
             ? { ...frame, state: 'unknown' } : observe(frame);
         quiz.state = current.state;
