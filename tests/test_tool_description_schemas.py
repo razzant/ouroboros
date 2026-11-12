@@ -16,6 +16,42 @@ import pytest
 from ouroboros.tools.registry import ToolRegistry
 from tests._cases import case_folders
 
+
+@pytest.mark.parametrize("dialect", ["openai_function", "openai_custom", "anthropic", "gigachat", "external"])
+def test_finish_gist_rule_reaches_every_real_tool_projection(tmp_path, dialect):
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_claudexor import _request
+    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
+    from ouroboros.tools.control import GIST_RULE
+
+    expected = (
+        "On a root task or self-started run, `summary` is my gist of the run for my human and my later self, "
+        "in my human's language; in a tight window it stands for this work's replies. "
+        "Its first sentence says what the run did, found or decided: a clean finish shows it on the card, "
+        "room row and portal, and that sentence represents this work in my other conversations. "
+        "Further sentences, when the work needs them, keep what a later reader needs without the rows: "
+        "numbers, paths, decisions, promises, what remains and whose step it is."
+    )
+    assert GIST_RULE == expected  # shrinking the constant cannot weaken this delivery check
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    schema = registry.get_schema_by_name("finish_task")
+    assert schema["function"]["description"].startswith(expected + "\n\n")
+    field = schema["function"]["parameters"]["properties"]["summary"]
+    assert field["description"].startswith("The gist, as this tool's description says; a held cause takes precedence.")
+    if dialect == "openai_function":
+        projected = LLMClient._sanitize_chat_completion_tools([schema])[0]["function"]
+    elif dialect == "openai_custom":
+        projected = project_function_tools_to_openai_custom([schema]).wire_tools()[0]["custom"]
+        assert field["description"] not in projected["description"]  # parameter prose really is stripped
+    elif dialect == "anthropic":
+        projected = LLMClient._build_anthropic_tools([schema])[0]
+    elif dialect == "gigachat":
+        projected = LLMClient._gigachat_functions([schema])[0]
+    else:
+        projected = _request({"source": "codex", "resolved_model": "test-model"}, [], [schema],
+                             {"model_account_override": ""})["tools"][0]["function"]
+    assert projected["description"].startswith(expected)
+
 # Conditions the custom projection clipped, wholly or partly, from the schedule_subagent lead before
 # #502 (full and acting kept 2310 of its 3392 characters, readonly 2552 and so lost fewer), in the
 # wording that now reaches that consumer.

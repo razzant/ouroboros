@@ -35,6 +35,17 @@ def wake(tmp_path, monkeypatch):
     return document
 
 
+@pytest.mark.parametrize("summary", ["Проверка завершена.", "Проверка завершена.\n42 строки в /tmp/result.csv. Следующий шаг за владельцем."])
+def test_consciousness_row_projects_only_the_opening_without_changing_the_record(tmp_path, wake, summary):
+    from ouroboros.task_results import load_task_result
+
+    wake["wake_summary"] = summary
+    seed_result(tmp_path, wake["task_id"], wake)
+    row, = view.recent_wakes(tmp_path, [])
+    assert row["summary"] == "Проверка завершена."
+    assert load_task_result(tmp_path, wake["task_id"])["wake_summary"] == summary
+
+
 def test_places_context_has_every_place_and_room_without_reading_history(monkeypatch, tmp_path):
     configured = [places.connect_place(tmp_path, place_id=pid, connector="bridge", provider="chat",
                                        conversation_id=pid, label=label, state=state)

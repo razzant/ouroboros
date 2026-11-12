@@ -64,6 +64,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import LEGACY_ROOM_ID, row_lineage
 from ouroboros.chronicle_quotes import SPEAKERS
+from ouroboros.chronicle_lead import LEAD_RULE
 from ouroboros.chronicle_store import (DELEGATED_FOCUS_ROLES, STORY_KINDS, ChronicleStore, PublishResult, capture,
                                        draft_signer, source_time_span, verify_quotes)
 from ouroboros.dialogue_provenance import (memory_row_header, quote_words, recorded_finality, render_row_text,
@@ -74,6 +75,7 @@ from ouroboros.memory_view_account import (quote_line, selection_facts, source_c
                                          told_records)
 from ouroboros.store import StoreError
 from ouroboros.tool_capabilities import tool_result_limit
+from ouroboros.tool_call_log import chronicle_lead_metadata
 from ouroboros.tools.registry import ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.utils import sha256_text, utc_now_iso
@@ -403,11 +405,13 @@ def check_quotes(root: Any, quotes: Any) -> Tuple[bool, Optional[int]]:
     return True, None
 
 
+
+
 # --- chronicle_write ------------------------------------------------------------------------------
 
 def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, Any], room: str, text: str,
                          covers_arg: Dict[str, Any], *, quotes: Iterable[Any] = (), expected_sequence: Optional[int] = None,
-                         closes_project: str = "", closure_delivery: str = "",
+                         closes_project: str = "", closure_delivery: str = "", lead_rule: Optional[int] = None,
                          ) -> Tuple[PublishResult, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """Expand a page's covers (``_expand``) and publish it: ``(result, covers, coverage facts, host stamp)``, as
     ``chronicle_write(kind='page')`` and ``close_project`` (its closing note, ``closes_project``: the notice it posts
@@ -429,6 +433,7 @@ def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, An
             f" (whole conversation, {len(covers['rooms'])} rooms)")
     result = store.publish_page(room_id=room, text=text, covers=covers, author=author, quotes=quotes or (), host_stamp=stamp,
                                 metadata={"coverage_facts": facts, "room_label": label,
+                                          **({"lead_rule": lead_rule} if lead_rule is not None else {}),
                                           "terminal_after_pos": max((pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1),
                                           **({"closes_project": closes_project, "closure_delivery": closure_delivery}
                                              if closes_project else {})},
@@ -450,7 +455,8 @@ def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
     try:
         result, covers, facts, stamp = publish_covered_page(root, store, author, _room(ctx, root, a["room_id"]), a["text"],
                                                             covers_arg, quotes=a["quotes"] or (),
-                                                            expected_sequence=a["expected_sequence"])
+                                                            expected_sequence=a["expected_sequence"],
+                                                            **chronicle_lead_metadata())
     except chat_chain.RowAddressError as exc:
         return _refused(ctx, "target_missing", f"a covers bound does not resolve: {exc.resolution.get('status')}")
     if not result.ok:
@@ -505,7 +511,8 @@ def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
         room = first["room_id"] if first else _room(ctx, root, None)
     resolver = _quote_resolver(root, row_lineage(root))
     result = store.publish_part(room_id=room, text=a["text"], member_ids=[str(m) for m in members], author=author,
-                                expected_sequence=a["expected_sequence"], quotes=a["quotes"] or (), quote_resolver=resolver)
+                                expected_sequence=a["expected_sequence"], quotes=a["quotes"] or (), quote_resolver=resolver,
+                                metadata=chronicle_lead_metadata())
     return _published(ctx, result, effect=_fold_effect(store, "folded", members, a["text"], _STORY_MEASURE)
                       if result.ok else None)
 
@@ -513,7 +520,7 @@ def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
 def _write_note(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     task = str(a["task_id"] or author.get("task_id") or "")
     return _published(ctx, store.write_note(room_id=_room(ctx, root, a["room_id"]), task_id=task, text=a["text"],
-                                            author=author))
+                                            author=author, metadata=chronicle_lead_metadata()))
 
 
 def _write_correction(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -526,7 +533,7 @@ def _write_correction(ctx: Any, root: Path, store: ChronicleStore, author: Dict[
 
 def _write_decision(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     if not a["target_id"] or not isinstance(a["accepted"], bool):
-        return _arg_error(ctx, "a decision needs target_id (a helper's draft), accepted true/false and a reason")
+        return _arg_error(ctx, "a decision needs target_id (a page or part), accepted true/false and a reason")
     return _published(ctx, store.decide(str(a["target_id"]), a["accepted"], author, str(a["reason"] or "")))
 
 
@@ -1082,7 +1089,7 @@ def _groups(root: Path, store: ChronicleStore) -> List[Dict[str, Any]]:
 
 def _read_owed(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
     """The conversations whose words no page holds (``memory_waiting``'s class), oldest first, each with the rooms
-    where my human or I spoke and the act that seals them."""
+    with a recorded word of my human or reply of mine; rooms of other people alone carry no page debt."""
     from ouroboros import memory_view as mv, memory_view_conversations as conversations
 
     owed = conversations.owed(_groups(root, store))
@@ -1102,13 +1109,10 @@ def _read_owed(root: Path, store: ChronicleStore, start: int, limit: int) -> str
 
 def _read_rooms(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
     """Every open room, by conversation: the block's own capture (``memory_view_conversations``), one line a room."""
-    from ouroboros import memory_view as mv, memory_view_conversations as conversations
+    from ouroboros.memory_view_events import catalogue_lines
 
     groups = _groups(root, store)
-    lines = [line for group in groups for line in (conversations.identity_line(group), *(
-        f"  - {room['label']}; {'my human or I spoke here' if room['engaged'] else 'neither my human nor I spoke here'}; "
-        f"{mv._facts_text(room['facts'], 'that room')}; memory_read(room_id='{room['room_id']}', rows=true)"
-        for room in group["rooms"]))]
+    lines = [line for group in groups for line in catalogue_lines(group)]
     count = sum(len(group["rooms"]) for group in groups)
     return _window(f"Open rooms: {count} in {len(groups)} conversations", "\n".join(lines), start, limit,
                    lambda n: f"memory_read(room_id='*', start={n})")
@@ -1314,7 +1318,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
         elif str(room_id) == "conversations":
             text = _read_owed(root, store, start, limit)
         elif str(room_id) in {"late_reviews", "notes"}:
-            from ouroboros.late_review_marks import mark_outcome
+            from ouroboros.late_review_marks import mark_landing, mark_outcome
             from ouroboros.memory_view import _notes_by_room, room_labeler
             from ouroboros.memory_waiting import listing
 
@@ -1322,7 +1326,8 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
                 head, body = listing(str(room_id), store.active_marks(None) if room_id == "late_reviews" else (),
                                      _notes_by_room(store) if room_id == "notes" else {},
                                      label=room_labeler(root) if room_id == "late_reviews" else None,
-                                     outcome=lambda mark: mark_outcome(mark, root))
+                                     outcome=lambda mark: mark_outcome(mark, root),
+                                     landing=lambda mark: mark_landing(mark, root))
             text = _window(head, body, start, limit, lambda n: f"memory_read(room_id='{room_id}', start={n})")
         elif node_id:
             text = _read_node(root, str(node_id), start, limit, str(revision or ""))
@@ -1480,7 +1485,7 @@ def chronicle_tools() -> List[ToolEntry]:
                                        "speaker": {"type": "string", "enum": sorted(SPEAKERS)}}}}
     write = {
         "kind": {"type": "string", "enum": ["page", "part", "note", "correction", "decision", "account", "selection"],
-                 "description": "page seals one or more closed arcs of a room; part folds adjacent records of one lower level (pages, legacy sections or parts); note is a separate record for my future self; correction stands under the record's words wherever the record is shown, signed and dated — it adds and never replaces them, so to say a record anew I fold it into a part over it; decision accepts or rejects a helper's draft; account is my own text connecting experience of several rooms, based on the exact versions I read (sources) — it seals no row, folds nothing and leaves every source free to be folded or read anew; selection chooses the common view: show an account (shown) in place of the records it names (replaces), or withdraw it."},
+                 "description": "page seals one or more closed arcs of a room; part folds adjacent records of one lower level (pages, legacy sections or parts); note is a separate record for my future self; correction stands under the record's words wherever the record is shown, signed and dated — it adds and never replaces them, so to say a record anew I fold it into a part over it; decision lets me accept a helper draft or withdraw a draft, my own page or part, or a draft I accepted; account is my own text connecting experience of several rooms, based on the exact versions I read (sources) — it seals no row, folds nothing and leaves every source free to be folded or read anew; selection chooses the common view: show an account (shown) in place of the records it names (replaces), or withdraw it."},
         "room_id": room,
         "text": {"type": "string", "description": "The record in my own words. No length limit; it is read back through memory_read pages."},
         "covers": {"type": "object", "additionalProperties": False,
@@ -1499,7 +1504,7 @@ def chronicle_tools() -> List[ToolEntry]:
         "shown": {"type": "boolean", "description": "selection: true (default) shows the account in the common view, false withdraws it; the latest selection of an account acts."},
         "expected_revision": {"type": "string", "description": "correction: the target's current revision when it already has a correction (memory_read node_id shows it)."},
         "expected_sequence": {"type": "integer", "minimum": 0, "description": "The room head your text is based on (memory_read room's first line). Required for a part; optional for a page or correction. A newer head is refused with the current head and the newer record ids."},
-        "accepted": {"type": "boolean", "description": "decision: accept (true) or reject (false) the draft."},
+        "accepted": {"type": "boolean", "description": "decision: I accept an undecided helper draft (true), or withdraw a draft, my own page or part, or a draft I accepted (false), with my reason. I withdraw its acting part first; the original stays readable, and its rows reopen or its members unfold."},
         "reason": {"type": "string", "description": "decision or selection: why."},
     }
     read = {
@@ -1549,7 +1554,7 @@ def chronicle_tools() -> List[ToolEntry]:
     return [
         ToolEntry("chronicle_write", schema(
             "chronicle_write",
-            "Write my own chronicle record: seal a page over a room's closed arcs (the host expands covers into the exact row set, stamps each covered task with its recorded outcome and checks quotes), fold adjacent records into a part, keep a note for my future self, correct a record (a signed revision under its own words wherever it is shown; to say it anew, fold it into a part), accept/reject a helper's draft, write an account connecting experience of several rooms over the exact source versions I read (sources; nothing sealed or folded), or select an account for the common view in place of the records it names (replaces; the latest selection acts, shown=false withdraws). A delegated child or nanny publishes pages and parts only as drafts signed in its own name for the integrating mind to accept or reject; its part folds only legacy sections and its own drafts (its note, correction, decision, account or selection, or a part over other records, is refused: not_integrator). Records are never rewritten. A refusal returns the current revision or room head and the conflicting ids; read them with memory_read.",
+            LEAD_RULE + "\n\n" + "Write my own chronicle record: seal a page over a room's closed arcs (the host expands covers into the exact row set, stamps each covered task with its recorded outcome and checks quotes), fold adjacent records into a part, keep a note for my future self, correct a record (a signed revision under its own words wherever it is shown; to say it anew, fold it into a part), accept a helper draft or withdraw a draft, my own page or part, or a draft I accepted, write an account connecting experience of several rooms over the exact source versions I read (sources; nothing sealed or folded), or select an account for the common view in place of the records it names (replaces; the latest selection acts, shown=false withdraws). A delegated child or nanny publishes pages and parts only as drafts signed in its own name for the integrating mind to accept or reject; its part folds only legacy sections and its own drafts (its note, correction, decision, account or selection, or a part over other records, is refused: not_integrator). Records are never rewritten. A refusal returns the current revision or room head and the conflicting ids; read them with memory_read.",
             write, ["kind"]), _chronicle_write),
         ToolEntry("memory_read", schema(
             "memory_read",
@@ -1557,6 +1562,6 @@ def chronicle_tools() -> List[ToolEntry]:
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",
-            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. A room mark (the default scope) is in view of every integrating focus and of that room's helpers and session starts, a global one of every focus, helper and session start: each view, mine included, shows the mark's own text, its quote while visibility is full and its target's address; a mark adds nothing to my human's chat. A mark on a chat row of my human's own words also carries that row, verbatim and dated, among my human's words for the work to every helper, session, plan council and reviewer of each work in the mark's room (a Main mark: each work outside the Projects; a global mark: every work). A mark, a change of its visible detail and its release also reach the works already running in its room (a global one: in every room) at their next round of the loop: roots, Main turns, wakes, Presence turns, helpers and nannies; the work that made one has it in its own result. An external session a nanny supervises and the realtime live conversation do not receive them. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
+            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. A room mark (the default scope) is in view of every integrating focus and of that room's helpers and session starts, a global one of every focus, helper and session start: each view, mine included, shows the mark's own text, its quote while visibility is full and its target's address; a mark adds nothing to my human's chat. A mark on a chat row of my human's own words also carries that row, verbatim and dated, among my human's words for the work to every helper, session, plan council and reviewer (never to a Safety check) of each work in the mark's room (a Main mark: each work outside the Projects; a global mark: every work). A mark, a change of its visible detail and its release also reach the works already running in its room (a global one: in every room) at their next round of the loop: roots, Main turns, wakes, Presence turns, helpers and nannies; the work that made one has it in its own result. An external session a nanny supervises and the realtime live conversation do not receive them. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
             mark, []), _memory_mark),
     ]

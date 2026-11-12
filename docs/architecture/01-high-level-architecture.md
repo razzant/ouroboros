@@ -31,7 +31,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     model_wait.js — model waits and owner actions in chat cards (§6 Quota and auth waits)
     task_checkpoints.js, cancel_presentation.js, dashboard.js, logs.js, worker_sha_presentation.js, costs.js, files.js — typed checkpoints and cancellation-cause text shared by Chat and Logs; Dashboard, Logs, worker-SHA presentation, Costs (unknown is not free), Files (§3)
     skills.js, skill_*.js — Skills page: Installed, Browse and Sources, cards, sheet, dialogs, Skill Review cards, publish (§3 Skills and Widgets)
-    settings_ui.js, settings_provider_cards.js, settings_catalog.js, settings_controls.js, settings_policy.js, settings_secrets.js, settings_connections.js, connection_labels.js, settings_local_model.js, settings_autostart.js, mcp_settings.js, mcp_header_fields.js, mcp_import_dialog.js — Settings: catalog, binders, policy, secrets, keys, local models, MCP (§3)
+    settings_ui.js, settings_home.js, settings_rows.js, settings_provider_cards.js, settings_catalog.js, settings_controls.js, settings_policy.js, settings_secrets.js, settings_connections.js, connection_labels.js, settings_local_model.js, settings_autostart.js, mcp_settings.js, mcp_header_fields.js, mcp_import_dialog.js — Settings: catalog, binders, policy, secrets, keys, local models, MCP (§3)
     model_roles.js, model_chooser.js — the Models editor and editable chooser shared by Settings, onboarding and route editors; catalog arrival never assigns a value (§3 Navigation)
     subagents_settings.js, subagent_status_primitives.js, route_editor_primitives.js, harness_accounts.js, account_resources.js, harness_login_cards.js, claudexor_status_store.js — Agents editors; account/resource/login views share one status/action store (§3 Agent accounts)
     onboarding_agents_step.js, onboarding_starter_skills.js, onboarding_overlay.js, project_create.js, utils.js — first-run accounts step and starter skills; the wizard frame's sandbox policy, one security boundary; New Project dialog; shared utilities (§2; §3 Project rooms)
@@ -237,8 +237,15 @@ ouroboros/ — agent core and shared runtime (§6)
   context_measurement.py — sealed-request facts, deficits and reply allowance in route units (§6 Context fitting)
   context_budget.py — budget vocabulary and typed reclaim SSOT; `estimate_message_chars` (§6 Context fitting)
   context_mode_compat.py — reads normalize, boot persists `OUROBOROS_CONTEXT_MODE`/`OUROBOROS_CONTEXT_MODE_AUTO_LOW` together (§7 Default settings)
-  memory_view.py, memory_view_legacy.py, memory_view_account.py, memory_room_activity.py, memory_waiting.py, memory_view_conversations.py — story, rooms, considered points, waiting acts; memory_reader.py — extensions' `read_memory` (§6)
-  memory_floor.py — physical memory-view floor (overflow becomes address lines, my human's words last; §6 Context fitting)
+  memory_view.py, memory_view_legacy.py, memory_view_account.py, memory_room_activity.py, memory_waiting.py — story, rooms, considered points, waiting acts; memory_reader.py — extensions' `read_memory` (§6)
+  memory_view_conversations.py, memory_view_conversation_forms.py — capture other conversations and render their source-local forms (§6 Durable memory and project focus)
+  memory_view_work.py — completion gists, work forms and source readers (§6)
+  text_sentences.py — sentence boundaries for memory and presentation (§6)
+  ouroboros/gateway/completion_gist.py — short UI projections of complete completion gists (§6)
+  memory_view_events.py — place event facts and the room catalogue (§6)
+  memory_floor.py, memory_forms.py — fit one captured view by the distance order (§6)
+  memory_form_facts.py — form receipts and the sources holding the room (§6)
+  chronicle_lead.py — lead instruction and evidence of its delivery in tool descriptions (§6)
   capability_evidence.py, response_limits.py, density_probe.py — sourced capability, token-density and maximum-response evidence (`data/state/capability_evidence.json`; windows size sends and grant no review authority); the bounded cold-start review-density probe, re-exported by capability_evidence (§6 Prompt size, density and windows)
   context_layout.py — doc-layout SSOT; `book_navigation` in Low/Nano, full ARCHITECTURE in Max; reduction relocates, never silently truncates (§6 Context fitting)
   reference_books.py — ordered book reader/validator; free worktree balance vs cached official merge-base, unknown if unavailable, nonblocking (DEVELOPMENT "Documentation contract")
@@ -517,7 +524,6 @@ ouroboros/ — agent core and shared runtime (§6)
     review_response.py — Response-envelope projection for multi-model review rows
     shell_process.py, shell_effects.py, shell_outputs.py — the command-running substrate: execution, working-tree effects, declared outputs and per-path export eligibility
     plan_review_artifacts.py, plan_author_history.py — Earlier-schema waves and author lineage for history views and the importer
-    evolution_stats.py — sampled Git metrics as a local task artifact; no remote commit
     owner_delivery.py — Owner events: live queue or sticky `pending_events`; room-naming receipts
     deliverables_shell.py — cp/mv/ln into deliverables with symlink checks
     shell_audit.py — Post-exec custody audit for process tools
@@ -623,7 +629,7 @@ Ordinary-directory delegated sessions submit `execution.workspaceKind=directory`
 
 ### Runtime topology
 
-Host sign-in startup is an owner opt-in (Behavior, §3) whose only authority is the OS registration. `desktop_autostart.py` picks the adapter (Windows HKCU `Run`; macOS LaunchAgent with `--launch-intent automatic` and no `KeepAlive`; Linux systemd unit for deb/rpm, XDG autostart for AppImage/tar), available only to a packaged host whose launcher exports a new enough `OUROBOROS_APP_VERSION`. States: `unavailable`, `off`, `on`, `other_copy`, `disabled_by_os`; the launcher Panic gate and saved-pause recovery keep authority; `context.py` records `runtime_env.autostart` and the effective `keep_running_after_close` at task start as host facts. Keep running after close is the second control: `OUROBOROS_DESKTOP_KEEP_RUNNING`, an owner choice in settings, offered where the launcher exports `OUROBOROS_DESKTOP_BACKGROUND=1` (Windows and macOS); with both on, a sign-in start begins hidden with an indicator. Close, quit and Panic in that mode: §9.
+Host sign-in startup is an owner opt-in (This computer, §3) whose only authority is the OS registration. `desktop_autostart.py` picks the adapter (Windows HKCU `Run`; macOS LaunchAgent with `--launch-intent automatic` and no `KeepAlive`; Linux systemd unit for deb/rpm, XDG autostart for AppImage/tar), available only to a packaged host whose launcher exports a new enough `OUROBOROS_APP_VERSION`. States: `unavailable`, `off`, `on`, `other_copy`, `disabled_by_os`; the launcher Panic gate and saved-pause recovery keep authority; `context.py` records `runtime_env.autostart` and the effective `keep_running_after_close` at task start as host facts. Keep running after close is the second control: `OUROBOROS_DESKTOP_KEEP_RUNNING`, an owner choice in settings, offered where the launcher exports `OUROBOROS_DESKTOP_BACKGROUND=1` (Windows and macOS); with both on, a sign-in start begins hidden with an indicator. Close, quit and Panic in that mode: §9.
 
 `launcher.py` owns the PID lock, bundle bootstrap, server process, presentation, restart and cleanup outside the managed repo; `server.py` is the self-editable inner runtime. Its readiness wait has no clock (§2 Boot order). The native packages' opt-in systemd unit passes `--launch-intent automatic` so Panic survives, with no restart policy: the launcher owns restarts and the crash fuse ([packaging/systemd/README.md](../../packaging/systemd/README.md)). Spawn custody: POSIX children start in a new session and process group; Windows creates the server suspended, assigns a kill-on-close Job, then resumes, refusing to run without Job custody; only the shared daemon requests breakaway. The launcher records `data/state/server_process.json` with the child's measured birth/command fingerprint and signals only that re-proved identity; an unmeasurable or unconfirmed predecessor keeps its record and blocks the next generation; forced cleanup spares the shared daemon subtree (§9).
 

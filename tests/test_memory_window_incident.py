@@ -22,13 +22,15 @@ def _incident(tmp_path, monkeypatch):
     return plan
 
 
-def test_incident_start_keeps_story_before_old_replies(tmp_path, monkeypatch):
+def test_incident_start_uses_low_and_keeps_memory_whole_when_ordinary_max_does_not_fit(tmp_path, monkeypatch):
     plan = _incident(tmp_path, monkeypatch)
     shown = plan.projection(plan.initial_mode)
     steps = shown.memory_facts["floor"]["steps"]
     print("INCIDENT_START", json.dumps({"floor": steps, "input": shown.calibrated_tokens, "mode": plan.initial_mode}))
-    assert steps.get("F2", 0) > 0 and steps.get("F5", 0) < 103
-    assert steps != {"F1": 359, "F5": 103}
+    # These old replies have no recorded gist. They cannot pay for Max's books
+    # with an ordinary form; Low's frame holds the story and all replies whole.
+    assert plan.initial_mode == 'low' and steps == {}
+    assert shown.memory_facts['max_room']['need'] > 872_000
     # The start leaves the reply reserve and the wake's own work room: one eighth since the owner's 29.10 decision
     # (a wake is one turn, as a direct chat turn is), read from the view so the replay runs on any revision.
     work = -(-872_000 // 8) * shown.memory_facts["spec"]["work_room_levels"]

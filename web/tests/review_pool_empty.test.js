@@ -43,17 +43,17 @@ test('an edited catalog with rows but no Reviewer is refused until the owner sav
     dom.row(1).querySelector('[data-subagent-field="recommended_use"]').emit('input', 'Edited.');
     assert.deepEqual(editor.validate(), [EMPTY_POOL_ERROR]);
     assert.equal(editor.allowEmptyReviewPool, false);
-    assert.equal(ALLOW_EMPTY_REVIEW_POOL in editor.collect(), false);
+    assert.equal(editor.allowEmptyReviewPool, false);
 
     dom.toolbar.allowEmpty.toggle(true);
     assert.deepEqual(editor.validate(), []);
     assert.equal(editor.allowEmptyReviewPool, true);
-    assert.equal(editor.collect()[ALLOW_EMPTY_REVIEW_POOL], true);
+    assert.equal(editor.allowEmptyReviewPool, true);
 
     // A marked row makes the confirmation moot: the flag never rides a non-empty pool.
     dom.row(0).querySelector('[data-subagent-field="review_eligible"]').toggle(true);
-    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].review_eligible, true);
-    assert.equal(ALLOW_EMPTY_REVIEW_POOL in editor.collect(), false);
+    assert.equal(editor.setting.items[0].review_eligible, true);
+    assert.equal(editor.allowEmptyReviewPool, false);
     assert.deepEqual(editor.validate(), []);
     assert.equal(dom.pool.count.textContent, 'Reviewers: 1');
     assert.equal(dom.pool.empty.hidden, true);
@@ -61,9 +61,9 @@ test('an edited catalog with rows but no Reviewer is refused until the owner sav
     assert.deepEqual([dom.pool.stays.textContent, dom.pool.stays.hidden], ['Delegation is off; rows marked Reviewer still review.', false]);
     assert.ok(dom.row(0).querySelector('[data-subagent-field="delivery"]'), 'every API card carries its delivery, shown while marked');
     dom.row(0).querySelector('[data-subagent-field="delivery"]').emit('change', 'packet');
-    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].delivery, 'packet');
+    assert.equal(editor.setting.items[0].delivery, 'packet');
     dom.row(0).querySelector('[data-subagent-field="delivery"]').emit('change', 'native');
-    assert.equal('delivery' in editor.collect().OUROBOROS_SUBAGENTS.items[0], false);
+    assert.equal('delivery' in editor.setting.items[0], false);
 
     // A reload forgets the confirmation: it answered one save.
     editor.load(setting([apiRow(), sessionRow()]));
@@ -78,7 +78,7 @@ test('an edited catalog with rows but no Reviewer is refused until the owner sav
     assert.equal(dom.pool.confirm.hidden, false);
     assert.deepEqual(editor.validate(), ['Every row marked Reviewer is switched off. Switch one on, or tick “Save without reviewers”.']);
     dom.toolbar.allowEmpty.toggle(true);
-    assert.equal(editor.collect()[ALLOW_EMPTY_REVIEW_POOL], true);
+    assert.equal(editor.allowEmptyReviewPool, true);
     editor.destroy();
 });
 
@@ -91,7 +91,7 @@ test('a list without rows needs no tick and says the main model reviews alone; a
     assert.equal(dom.pool['empty-text'].textContent, 'No row is marked Reviewer, so the main model reviews alone: one model, no second opinion.');
     assert.equal(dom.pool.confirm.hidden, true, 'no rows: the server asks for no confirmation');
     assert.deepEqual(editor.validate(), []);
-    assert.equal(ALLOW_EMPTY_REVIEW_POOL in editor.collect(), false);
+    assert.equal(editor.allowEmptyReviewPool, false);
     // A catalog this editor could not read states no pool fact, whatever rows it held before.
     editor.load(setting([apiRow()]));
     editor.load('{broken');

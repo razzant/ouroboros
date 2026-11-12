@@ -1,22 +1,27 @@
 // Dashboard › Consciousness: what Ouroboros does when nobody asked, now and lately. The status with Stop
 // (the same /bg command the Activity row and the chat header send), where its money went by cause (each place's
-// included), the own tasks MAX_TASKS counts and the recent wakes with their cause, where, how fast it answered, what
-// the Safety Supervisor did and what each cost. The places themselves live on the Circles page; this tab reads
-// `/api/places` only to open a wake's captured conversation in its place sheet. Facts come from
-// `GET /api/consciousness`, with `/api/state` as the status fallback. Wakes say when they are not reported; unknown
-// money is never zero.
+// included), the own tasks MAX_TASKS counts, its settings card (rows of settings_rows.js that save themselves) and the
+// recent wakes with their cause, where, how fast it answered, what the Safety Supervisor did and what each cost. The
+// places themselves live on the Circles page; this tab reads `/api/places` only to open a wake's captured conversation
+// in its place sheet. Facts come from `GET /api/consciousness`, with `/api/state` as the status fallback. Wakes say
+// when they are not reported; unknown money is never zero.
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { statusMarkHtml } from './status_mark.js';
 import { controlIcon } from './page_icons.js';
 import { chipHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
 import { failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
-import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
+import { autonomyOf } from './consciousness_autonomy.js';
+import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, safetyLevelOf, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { confirmAndSendRestart, costPresentationDetail } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { openCircles, openPlaceSheet } from './place_sheet.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
+import { CODECS, GUARDED_WRITERS, WRITERS } from './settings_controls.js';
+import { mountTabSettings } from './dashboard.js';
+import { parseModelSource } from './route_editor_primitives.js';
+import { whenName } from './evolution.js';
 
 const SEP = ' · ';
 const REFRESH_MS = 20000;
@@ -26,6 +31,41 @@ const COMMAND_SETTLE_MS = 400;
 const OWN_GLYPH = controlIcon('brain', 14);
 // Work running now: the house status mark's moving dots, in the surface's own ink.
 const dots = () => statusMarkHtml('consciousness-mark', { shape: 'moving', hue: 'ink' });
+
+// The wake range is refused before anything is sent when its shortest wait is above its longest: the server would take
+// it and wake at the shortest (runtime_limits.get_bg_wakeup_max_sec).
+WRITERS.wakeRange = (row, value, options) => (Number(value?.[0]) > Number(value?.[1])
+    ? { state: 'refused', effect: '', withheld: '', message: 'The shortest wait is above the longest.', code: 'invalid_value' }
+    : WRITERS.generic(row, value, options));
+GUARDED_WRITERS.add('wakeRange');  // Undo's token and unset keys go to the generic write with the rest
+
+/** Seconds as the words a person reads: minutes below an hour, hours from there. */
+export function waitWords(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value <= 0) return '';
+    const [amount, unit] = value < 3600 ? [+(value / 60).toFixed(1), 'minute'] : [+(value / 3600).toFixed(1), 'hour'];
+    return `${amount} ${unit}${amount === 1 ? '' : 's'}`;
+}
+
+/** What the settings cards say from the last settings read besides their rows (dashboard.js `words`): the chosen level
+ *  in its own sentence, the wake range in minutes or hours, and the values behind the doors: the allowance, the model,
+ *  the Safety level of its own life in the scale's words (consciousness_words.js SAFETY_LEVELS) and the evolution
+ *  choice by its name. A key the document does not carry is not said. */
+export function cardWords(settings) {
+    const [min, max] = [waitWords(settings.OUROBOROS_BG_WAKEUP_MIN), waitWords(settings.OUROBOROS_BG_WAKEUP_MAX)];
+    const model = String(settings.OUROBOROS_MODEL_CONSCIOUSNESS ?? '').trim();
+    const stored = settings.OUROBOROS_CONSCIOUSNESS_DAILY_USD;
+    const allowance = stored === undefined || stored === null || stored === '' ? NaN : Number(stored);
+    return {
+        OUROBOROS_CONSCIOUSNESS_AUTONOMY: { caption: autonomyOf(settings.OUROBOROS_CONSCIOUSNESS_AUTONOMY)?.note || '' },
+        OUROBOROS_BG_WAKEUP: { caption: !min || !max ? '' : min === max ? `It wakes every ${min}.` : `It picks a moment between ${min} and ${max}.` },
+        // The row names the limit as Costs does (a rolling 24 hours, never a calendar day), so its value is the sum alone.
+        'consciousness-allowance': { value: !Number.isFinite(allowance) ? '' : Number.isInteger(allowance) ? `$${allowance}` : usdText(allowance) },
+        'consciousness-model': { value: model ? parseModelSource(model).model || model : 'Main model' },
+        'consciousness-safety': { value: safetyLevelOf(settings.OUROBOROS_CONSCIOUSNESS_SAFETY_MODE)?.label || '' },
+        'consciousness-evolution': { value: 'OUROBOROS_POST_TASK_EVOLUTION' in settings ? whenName(CODECS.evolutionWhen.read(settings)) : '' },
+    };
+}
 
 /** Active rows are explicitly marked by the producer; their phase may still be waiting. */
 export function liveWake(snapshot) {
@@ -66,10 +106,10 @@ export function countedRootsText(snapshot) {
 }
 
 /** The tab's headline card on the Dashboard tab body: the state in the host's words with its one status mark, the money
- *  of the last 24 hours and the own-task count as its meta, Start/Stop (and Restart when it cannot wake) beside them;
- *  where the money went, the unpriced caveat and the own tasks' names are the card's Details. Its doors: Circles, Costs
- *  (the allowance's one editor, where a hold's reason and when room returns are said) and Settings. `toggling` is the
- *  command just sent (its button says so until the next read). */
+ *  of the last 24 hours and the own-task count as its meta, Start/Stop (and Restart when it cannot wake) beside them,
+ *  and while it is on, that Stop also ends a running wake; where the money went, the unpriced caveat and the own tasks'
+ *  names are the card's Details. Its doors (Costs, Models, Circles) are rows of the settings cards under it.
+ *  `toggling` is the command just sent (its button says so until the next read). */
 export function summaryHtml(snapshot, { hasSocket = true, toggling = '', detailsOpen = false } = {}) {
     const headline = headlineView(snapshot);
     const kicker = snapshot.enabled === null ? 'Consciousness · state unknown' : `Consciousness · ${snapshot.enabled ? 'on' : 'off'}`;
@@ -94,12 +134,10 @@ export function summaryHtml(snapshot, { hasSocket = true, toggling = '', details
             ${headline.note ? `<p class="dashboard-hero-meta consciousness-headline-note">${escapeHtml(headline.note)}</p>` : ''}
             ${money ? `<p class="dashboard-hero-meta">${escapeHtml(money)}</p>` : ''}
             ${roots ? `<p class="dashboard-hero-meta">${escapeHtml(roots.head)}</p>` : ''}
+            ${snapshot.enabled ? '<p class="dashboard-hero-meta">Stop also ends a wake that is running now.</p>' : ''}
             ${toggle || restart ? `<div class="dashboard-hero-actions">${restart}${toggle}</div>` : ''}
         </div>
-        ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}
-        <p class="consciousness-foot consciousness-door-line">${escapeHtml(tr('consciousness.places.circles', 'The places it lives in, their words and their circles:'))} <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="circles">${escapeHtml(tr('circles.link', 'Circles ›'))}</button></p>
-        <p class="consciousness-foot consciousness-door-line">Its spending limit over 24 hours and what it spent: <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="costs">Costs ›</button></p>
-        <p class="consciousness-foot consciousness-door-line">Its own tasks and concurrent conversations: <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="settings">Settings ›</button></p>`;
+        ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}`;
 }
 
 /** One view of the card: authored line, whole note on request, factual phase and cost. */
@@ -203,21 +241,54 @@ export function paintWakeRows(region, wakes, coverage, opened, put, release = de
     keepPosition();
 }
 
+/** The tab's settings (dashboard.js mountTabSettings): the card "On its own" with what it does as rows that save
+ *  themselves and its fold, then the doors of "Around it", so what concerns consciousness is reached from here. The
+ *  allowance door opens its row in Costs and the evolution door its row on the Evolution tab; the model door opens its
+ *  role in Models and the Safety door its row in Permissions and checks, both leading back here; its places are the
+ *  Circles page. */
+function mountSettingsCards(host, { state, openSettings, openDashboardTab }) {
+    if (!host) return { dispose() {} };
+    const back = { label: 'Consciousness', go: () => openDashboardTab?.('consciousness') };
+    const doors = {
+        'consciousness-allowance': () => openDashboardTab?.('costs', { row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' }),
+        'consciousness-model': () => openSettings?.('models/role/consciousness', { back }),
+        'consciousness-safety': () => openSettings?.('permissions', { row: 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', back }),
+        'consciousness-places': () => openCircles(),
+        'consciousness-evolution': () => openDashboardTab?.('evolution', { row: 'OUROBOROS_POST_TASK_EVOLUTION' }),
+    };
+    const cards = mountTabSettings(host, 'consciousness', { state, words: cardWords, openDoor: (row) => doors[row.id]?.(),
+        cards: [{ title: 'On its own', fold: 'More: conversations at once' },
+            { title: 'Around it', rows: ['consciousness-model', 'consciousness-safety', 'consciousness-places', 'consciousness-evolution'] }] });
+    // The range reads "[shortest] to [longest] s".
+    const range = Array.from(host.querySelectorAll('[data-setting-row]')).find((node) => node.dataset.settingRow === 'OUROBOROS_BG_WAKEUP');
+    const longest = range?.querySelectorAll('[data-setting-control]')[1];
+    if (longest) {
+        const to = host.ownerDocument.createElement('span');
+        to.className = 'settings-row-unit';
+        to.textContent = 'to';
+        longest.parentElement.insertBefore(to, longest);
+    }
+    return cards;
+}
+
 /** Mount the tab into its Dashboard panel. */
-export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, openDashboardTab, read = readConsciousness,
+export function initConsciousnessDashboard({ mount, ws, state, openSettings, openDashboardTab, read = readConsciousness,
     readFallback = readConsciousnessFromState, readPlacesFn = readPlaces, openSheet = openPlaceSheet,
     markdown = { mount: mountChatMarkdown, enhance: enhanceChatMarkdown, destroy: destroyChatMarkdown } } = {}) {
     if (!mount) return { refresh: () => {}, destroy() {} };
-    // The tab's one root and scroller (style.css "The Dashboard tab body").
+    // The tab's one root and scroller (style.css "The Dashboard tab body"); the settings cards are drawn once and no
+    // repaint of the tab touches them.
     mount.innerHTML = `<div class="dashboard-body scroll-fade-y consciousness-root">
             <p class="ui-status consciousness-read-status" role="status" data-cx-status></p>
             <section class="ui-card" aria-label="Consciousness" data-cx-summary><p class="consciousness-copy">Reading…</p></section>
+            <div class="dashboard-settings-cards" data-cx-settings></div>
             <section class="ui-card consciousness-card" aria-label="Recent wakes" data-cx-wakes></section>
         </div>`;
     const regions = {
         status: mount.querySelector('[data-cx-status]'), summary: mount.querySelector('[data-cx-summary]'),
         wakes: mount.querySelector('[data-cx-wakes]'),
     };
+    const cards = mountSettingsCards(mount.querySelector('[data-cx-settings]'), { state, openSettings, openDashboardTab });
     // The page binds every `.scroll-fade-y` scroller once, after the panels mount (app.js).
     let snapshot = null;
     let generation = 0;
@@ -332,13 +403,6 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
         const button = event.target.closest('[data-cx-act]');
         if (!button || button.disabled) return;
         const act = button.dataset.cxAct;
-        if (act === 'circles') { openCircles(); return; }
-        if (act === 'costs') { await openDashboardTab?.('costs'); return; }
-        if (act === 'settings') {
-            await openSettingsTab?.('behavior');
-            document.getElementById('settings-consciousness')?.scrollIntoView({ block: 'start' });
-            return;
-        }
         if (act === 'restart') {
             // The house Restart (the chat header's): it confirms first and names the work it would interrupt.
             await confirmAndSendRestart({ openConfirmDialog, ws });
@@ -371,6 +435,7 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
         refresh,
         destroy() {
             destroyed = true;
+            cards.dispose();
             releaseNotes(mount);
             clearTimeout(timer);
             mount.removeEventListener('click', onClick);

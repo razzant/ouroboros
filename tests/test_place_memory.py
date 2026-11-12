@@ -9,6 +9,19 @@ from tests import _memory_inventory_shared as shared
 from tests._memory_presence_seams import wake_cause_seam as wake_cause_seam
 
 
+@pytest.mark.parametrize("is_bot", [None, False, True])
+def test_author_keeps_the_connectors_optional_bot_fact_without_changing_its_lane(is_bot):
+    from ouroboros.dialogue_provenance import row_author, row_class
+    from tests.test_memory_waiting import _event_row
+    row = _event_row("harbor", "one", 1, "Ann")
+    if is_bot is not None:
+        row["transport"]["actor"]["is_bot"] = is_bot
+    author = row_author(row, owner_accounts={})
+    assert author.get("is_bot", False) is (is_bot is True)
+    assert ("is_bot" in author) is (is_bot is True)
+    assert row_class(row, owner_accounts={})["lane"] == 1
+
+
 def _focus(room=444):
     return {"id": "focus1", "chat_id": 1, "metadata": {
         "usage_category": "consciousness", "wake_cause": "focus",
