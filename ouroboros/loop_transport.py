@@ -267,8 +267,8 @@ def fallback_chain_allowed(
     its outcome takes that kind's recovery (lost again or undelivered walks at once; a cut
     reply keeps its ladder), as does another acting route's unknown outcome. A declared
     wait on the primary (``switch_model(primary="wait")``) keeps its refusals and
-    outages on the primary's own wait instead of paid alternatives; after its content
-    filter's stop nothing is there to wait for, so that round ends (owner, 12.11). A context overflow
+    outages on the primary's own wait instead of paid alternatives; after its content filter's
+    stop nothing is there to wait for, so this run ends as interrupted (owner, 12.11). A context overflow
     reaches the configured routes only after the primary's own recovery ladder
     (``loop_model_call._recover_context_overflow``) left the round unanswered: the
     candidates inherit the compacted view (owner decision 7A, rung f).
