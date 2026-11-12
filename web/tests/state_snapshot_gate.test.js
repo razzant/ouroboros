@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createStateSnapshotSequencer } from '../modules/chat_activity.js';
+import { heldProjectChatIds } from '../modules/state_snapshots.js';
 
 // The reader below keeps the page readers' shape (chat.js::refreshHeaderControlState,
 // app.js::refreshProjectsNav): admission through gate(force), then one read,
@@ -255,4 +256,33 @@ test('an older answer can neither fill nor replace the held map', () => {
     assert.equal(sequencer.apply(older, { task_bindings: {}, task_bindings_revision: 'r1' }), false);
     assert.equal(sequencer.begin().path, '/api/state?bindings_since=r2');
     assert.equal(applied.length, 1);
+});
+
+test('a failed bindings read (an empty revision) is unknown: never applied, and the whole map is asked again', () => {
+    const applied = [];
+    const sequencer = createStateSnapshotSequencer((data) => applied.push(data));
+    sequencer.apply(sequencer.begin(), { task_bindings: bound, task_bindings_revision: 'r1' });
+    assert.deepEqual(applied.at(-1).task_bindings, bound);
+    sequencer.apply(sequencer.begin(), { task_bindings: {}, task_bindings_revision: '', task_bindings_unchanged: false });
+    assert.equal(applied.at(-1).task_bindings, null, 'the empty map of a failed read is not handed to the page');
+    assert.equal(sequencer.begin().path, '/api/state', 'the next read asks for the whole map');
+    // An older server sends no revision field: its map applies as before, an empty one included.
+    sequencer.apply(sequencer.begin(), { task_bindings: {} });
+    assert.deepEqual(applied.at(-1).task_bindings, {});
+    sequencer.apply(sequencer.begin(), { task_bindings: bound });
+    assert.deepEqual(applied.at(-1).task_bindings, bound);
+});
+
+// #3067: the page decides which frames are Main's by the Project room set it holds.
+test('a state body that cannot name the Project rooms keeps the complete set the page holds', () => {
+    const page = { projectChatIds: new Set() };
+    const rows = [{ chat_id: 5 }];
+    assert.equal(heldProjectChatIds({ projects: rows }, page), undefined, 'first load: the caller falls back to the rows');
+    assert.deepEqual(heldProjectChatIds({ projects: rows, project_chat_ids: [5, 9] }, page), [5, 9]);
+    page.projectChatIds = new Set([5, 9]);
+    assert.deepEqual(heldProjectChatIds({ projects: rows, project_chat_ids: null }, page), [5, 9],
+        'an unreadable registry (null) keeps the held set, not the capped rows');
+    assert.deepEqual(heldProjectChatIds({ projects: rows }, page), [5, 9], 'an absent field keeps it too');
+    assert.deepEqual(heldProjectChatIds({ projects: rows, project_chat_ids: [] }, page), [], '[] is no Projects: it replaces');
+    assert.deepEqual(heldProjectChatIds({ project_chat_ids: [7] }, page), [7]);
 });

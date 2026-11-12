@@ -2832,10 +2832,12 @@ preserve the edited value, focus, selection and scroll position. Returning to a
 reviewer's previous source restores that source's model/account draft; a new
 source starts without another source's pin.
 
-The five wizard steps are Accounts, Models, Review, Budget, Summary. Codex is the
+The five wizard steps are Accounts, Models, Review and access, Budget, Summary. Codex is the
 recommended start without an API key; other connections name their capability.
 Signed in reports authentication, not execution, independently of model-source and suggestion reads. Accounts names pending, failed or partial reads and offers a
-contextual Retry that keeps the fields. A known model source allows
+contextual Retry that keeps the fields. Connected accounts the engine names as agents only read
+what they can run and what Ouroboros itself still needs beside Continue, and a healthy read then has
+no Retry. A known model source allows
 Continue and manual model entry even when its inventory or automatic suggestions
 cannot be read; an unknown source explains why not. New
 subscription-only installs clear only untouched shipped API suggestions without
@@ -2876,8 +2878,11 @@ stops clear of them.
 
 - Step title `--type-page`; card titles `--type-section`; field labels and
   notes `--type-meta`. No display size above `--type-page`.
-- Short-viewport adaptation hides explanatory copy, never shrinks type: shaving
-  pixels off a title buys nothing and costs the scale.
+- A short or narrow window drops ornament (the slogan, the rail's sub-labels), never
+  the words a choice or a field is made by and never the size of type. The footer's
+  aside leaves only a narrow window, where the pinned footer would take the step's
+  lines. A line that changes no choice is deleted, not hidden; a taller step scrolls
+  under the pinned footer.
 - Field labels are sentence case at meta ink: a step shows a dozen at once to
   get one value typed, not to present a grid of headings.
 

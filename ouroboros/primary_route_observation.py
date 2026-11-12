@@ -39,15 +39,23 @@ def accepted_call(usage: dict, round_idx) -> dict:
     return {**call, **({"llm_call_id": meta["llm_call_id"]} if same else {})}
 
 
+def call_cost_words(call: dict) -> str:
+    """One accepted call's own cost as its producer stated it; empty when it stated none.
+    A positive amount below the printed precision says so: a charge never reads as a proven zero."""
+    cost = call.get("cost")
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+        return ""
+    amount = "<$0.0001" if 0 < cost < 0.00005 else f"${float(cost):.4f}"
+    return f"cost {amount} {'reported' if call.get('cost_final') is True else 'estimated'}"
+
+
 def _call_money(call: dict) -> str:
     """One accepted call's own cost and billing as its producer stated them; unknown never reads as zero."""
-    cost, billing = call.get("cost"), call.get("billing")
+    billing = call.get("billing")
     if call.get("provider") == "local":
         return "local route, no provider charge"
-    known = isinstance(cost, (int, float)) and not isinstance(cost, bool)
-    text = (f"cost ${float(cost):.4f} {'reported' if call.get('cost_final') is True else 'estimated'}"
-            if known else "cost unknown")
-    return text + (f", engine billing {billing}" if isinstance(billing, str) and billing else ", billing basis not reported")
+    return (call_cost_words(call) or "cost unknown") + (
+        f", engine billing {billing}" if isinstance(billing, str) and billing else ", billing basis not reported")
 
 
 def call_account(call: dict) -> str | None:
