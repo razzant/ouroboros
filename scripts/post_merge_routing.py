@@ -146,7 +146,7 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
         opening = f"These tests fail on `ouroboros` on {system}, but the post-merge check could not find the merge that broke them."
     rows = "\n".join(f"- {_named(nodeid)}" for nodeid in block["ids"])
     return (f"{opening}\n\n{rows}\n\n{seen} at `{head}`: {run_url}\n\n{_FORWARD}{_size_hint(block)} The "
-            f"post-merge check takes a test off this list when a check on {system} runs it and it passes, or when it is gone, "
+            f"post-merge check takes a test off this list when a check on {system} runs it and it passes, or finds it gone, "
             f"and closes this issue when none is left.\n\n{machine_block(block)}\n")
 
 

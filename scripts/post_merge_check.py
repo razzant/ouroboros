@@ -742,7 +742,7 @@ def command_attribute(args) -> int:
 
 # --- route -----------------------------------------------------------------------------------
 
-def same_run_passes(evidence: Path, ids, *, head: str, system: str, run_id: str = "") -> dict[str, str]:
+def same_run_verdicts(evidence: Path, ids, *, head: str, system: str, run_id: str = "") -> dict[str, str]:
     """What this run's selected passes settle of `ids`, by their final exports at `head` on `system` in this run: "passed"
     for a test they ran whole (setup, call and teardown reported, every report passed; a module, class or function id
     proves nothing), "kept" for an id that is owed no recheck: its own report was no whole pass, or they ran nothing of
@@ -773,7 +773,7 @@ def command_route(args, environ=os.environ) -> int:
                    classification=_read_json(evidence / "classification.json") or {},
                    attribution=_read_json(evidence / "attribution.json") or {}, head=head, run_url=args.run_url,
                    recheck=lambda ids: recheck_ids(ids, evidence / "recheck", head=head),
-                   same_run=lambda ids: same_run_passes(evidence, ids, head=head, system=args.os,
+                   same_run=lambda ids: same_run_verdicts(evidence, ids, head=head, system=args.os,
                                                         run_id=environ.get("GITHUB_RUN_ID", "")),
                    # A book that grew is measured strictly here: a later approval covers its own merge only.
                    size_recheck=lambda base, ids: size_status(size_session(

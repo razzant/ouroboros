@@ -843,18 +843,18 @@ def test_only_tests_this_run_passed_whole_at_its_head_on_its_system_spare_a_rech
     # module these passes ran nothing of, while its file exists. Left for the recheck: a test, module or function id
     # without a report in a module they ran, and a test whose file is gone.
     kept = dict.fromkeys([ids[1], ids[2], ids[4], ids[6], ids[9], ids[11]], "kept")
-    assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {
+    assert pmc.same_run_verdicts(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {
         ids[0]: "passed", ids[3]: "passed", ids[8]: "passed", **kept}
     for other in ({"sha": "e" * 40}, {"run_id": "78"}, {"platform": "Windows"}):
         _identified(tmp_path / "parallel", _whole(ids[0]), **other)
         _identified(tmp_path / "serial", _whole(ids[3]), **other)
         # a pass of another commit, run or system ran nothing here: only the existing module's test is kept
-        assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {ids[11]: "kept"}, other
+        assert pmc.same_run_verdicts(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {ids[11]: "kept"}, other
     for label in ("parallel", "serial"):  # a pass killed before its export names no commit, run or system
         (tmp_path / label / "results.json").unlink()
         (tmp_path / label / "events.jsonl").write_text(json.dumps(
             {"event": "report", "nodeid": ids[0], "phase": "call", "outcome": "passed"}) + "\n", encoding="utf-8")
-    assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {ids[11]: "kept"}
+    assert pmc.same_run_verdicts(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {ids[11]: "kept"}
 
 
 def test_route_records_its_hand_over_before_the_recheck_and_reuses_this_runs_passes(tmp_path, monkeypatch, capsys):

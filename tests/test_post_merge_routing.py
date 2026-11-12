@@ -187,7 +187,7 @@ def test_an_issue_loses_each_test_that_passes_and_keeps_what_is_not_green():
                                                                                   "tests/t.py::test_gone"]}]
     body = github.issues[5]["body"]
     assert routing.parse_machine_block(body)["ids"] == left and github.issues[5]["state"] == "open"
-    assert f"Still not passing at `{HEAD}`" in body and "takes a test off this list when a check on Windows runs it and it passes" in body
+    assert f"Still not passing at `{HEAD}`" in body and "takes a test off this list when a check on Windows runs it and it passes, or finds it gone" in body
     [(number, text)] = github.comments  # the record of what left the issue
     assert number == 5 and text.startswith(f"Green at `{HEAD}` on Windows (https://example.invalid/run/7)")
     assert "`tests/t.py::test_fixed`" in text and "`tests/t.py::test_gone`" in text and "Still tracked here: 4." in text
