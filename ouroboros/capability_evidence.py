@@ -365,9 +365,9 @@ def _drop_expired_probes(data: Dict[str, Any]) -> None:
 
     Failed/unprobeable records are pure retry throttles: past
     ``_FAILED_TTL_SEC`` the reader ignores them, so the write drops them; an
-    unprobeable record that names an account fingerprint is also the last
-    observation of its profile's account (``_pinned_record``), so it stays as
-    long as the confirmed records it outranks can be used (``_CONFIRMED_TTL_SEC``).
+    unprobeable or failed record that names an account fingerprint is also the
+    last observation of its profile's account (``_pinned_record``), so it stays
+    as long as the confirmed records it outranks can be used (``_CONFIRMED_TTL_SEC``).
     Confirmed records outlive their read TTL as provider-blip evidence
     (``probe`` deliberately keeps a stale prior CONFIRMED across an outage)
     and drop only past the unified GC retention — a route unprobed for that
@@ -395,7 +395,7 @@ def _drop_expired_probes(data: Dict[str, Any]) -> None:
             if age > confirmed_max_age_sec:
                 probes.pop(fp, None)
         elif status in (STATUS_FAILED, STATUS_UNPROBEABLE) and age > (
-                _CONFIRMED_TTL_SEC if status == STATUS_UNPROBEABLE and record.get("account_fingerprint") else _FAILED_TTL_SEC):
+                _CONFIRMED_TTL_SEC if record.get("account_fingerprint") else _FAILED_TTL_SEC):
             probes.pop(fp, None)
 
 
@@ -1065,8 +1065,12 @@ def _probe_window(
             if cached and str(cached.get("status") or "") in _KNOWN_STATUS:
                 return _cached_evidence(cached, fp, model, provider, stale=True,
                                         detail="kept prior account evidence (catalog unavailable)"), "failed"
+            # A route naming its whole account keeps naming it: the failure states no window and binds nothing, but
+            # the profile's newest observed account stays this one (``_pinned_record``).
+            named = {key: str(account_options[key]) for key in ("source_id", "credential_profile_id", "account_fingerprint")
+                     } if account_bound else {}
             ev, read = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider, ts=utc_now_iso(),
-                                          detail=f"model catalog unavailable: {type(exc).__name__}"), "failed"
+                                          detail=f"model catalog unavailable: {type(exc).__name__}", **named), "failed"
         _store_evidence(drive_root, "probes", ev.route_fp, ev.to_json())
         return ev, read
 

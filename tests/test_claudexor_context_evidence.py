@@ -1005,3 +1005,48 @@ def test_a_pins_lent_record_answers_its_output_only_from_that_accounts_records(t
     assert not kept.response_limit["max_output_tokens"]  # expired: unknown, and nothing written under identity-a
     answers(16_384, start + datetime.timedelta(minutes=10))  # the engine answers again
     assert _probe(tmp_path, options=exact).response_limit["max_output_tokens"] == 16_384  # read at once, not held back
+
+
+@pytest.mark.parametrize("case", ["relogin", "relogin-then-11-minutes", "no-relogin"])
+def test_a_failed_read_of_an_observed_account_keeps_it_the_profiles_newest(tmp_path, monkeypatch, case):
+    """Fix round 3 (Grok r2, Opus r2 finding 1): a failed read of a route that names its whole account keeps naming that
+    account (no window, nothing bound), and lives as long as the observation it replaces (24 h), so a silent pin never
+    lends the account the host saw replaced, at once or 11 minutes later. Without a relogin a failed read of the pin's
+    own account keeps its record, which the silent pin still lends."""
+    import datetime
+    from ouroboros import context_fit as cf
+    from ouroboros.llm import LLMClient
+
+    start = ce.utc_now()
+    clock = {"now": start}
+    monkeypatch.setattr(ce, "utc_now", lambda: clock["now"])
+    monkeypatch.setattr(ce, "utc_now_iso", lambda: clock["now"].isoformat())
+
+    def answers(fingerprint, window):
+        value = {**_catalog("account-a", fingerprint, window), "observedAt": clock["now"].isoformat()}
+        value["models"] = [{**value["models"][0], "contextWindow": window}] if window else []
+        monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda *_a, **_kw: copy.deepcopy(value)))
+
+    pinned = {"source_id": "test-source", "credential_profile_id": "account-a"}
+    answers("identity-a", 70_000)
+    _probe(tmp_path, options=pinned)  # the pinned profile holds identity-a: its record, 70K
+    relogin = case != "no-relogin"
+    if relogin:  # identity-b observed behind the profile, no window stated for this model
+        clock["now"] = start + datetime.timedelta(minutes=1)
+        answers("identity-b", 0)
+        _probe(tmp_path, options={**pinned, "account_fingerprint": "identity-b"})
+    clock["now"] = start + datetime.timedelta(minutes=12)  # past the read throttle: the exact route is read again
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+        lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+    named = {**pinned, "account_fingerprint": "identity-b" if relogin else "identity-a"}
+    failed = _probe(tmp_path, options=named, force=not relogin)  # a receipt rebind's read of that account fails
+    assert (failed.window_tokens, failed.status) == ((0, ce.STATUS_FAILED) if relogin else (70_000, ce.STATUS_CONFIRMED))
+    assert failed.account_fingerprint == named["account_fingerprint"]  # the failure names what the route named
+    if case == "relogin-then-11-minutes":
+        clock["now"] = start + datetime.timedelta(minutes=23)
+    plan, _spans = _built(monkeypatch, tmp_path, lambda _task: cf.resolve_context_fit_route,
+                          task={**TASK, "credential_profile_id": "account-a"})
+    if relogin:
+        assert (plan.window_tokens, plan.initial_mode, plan.window_witness_bound) == (0, "max", False)
+    else:
+        assert (plan.window_tokens, plan.model_route.get("accountFingerprint")) == (70_000, "identity-a")
