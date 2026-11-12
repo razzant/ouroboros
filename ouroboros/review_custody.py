@@ -793,7 +793,7 @@ def _rejoin_window(root: Any, token: str, frozen_row: Any, logical_window: Optio
     if root is not None and token:
         try:
             record = invocation_record(root, token) or {}
-            started, cap = run_timing(root, str(record.get("run_id") or ""))
+            started, cap = run_timing(root, str(record.get("run_id") or ""), window=True)
             # A start never bound to a run still began at its durable request row.
             started = started or str(record.get("requested_at") or "")
             max_seconds = float(cap or record.get("max_seconds") or 0)

@@ -555,15 +555,17 @@ def _reconcile_delegated_runs(running_task_ids: Any, *, stop_event: Any = None) 
                      if restore_owner_wait_allowed(DATA_DIR, task)}
 
         # Zero admission wait: a daemon in its recovery-only window waits for the next sweep. Once a
-        # stop, restart or panic is in flight the factory is ATTACH-ONLY and nothing is replayed
-        # (``replay_pending`` is re-asked before each re-POST); the one ensure left here is the latch
-        # retry (ARCHITECTURE §9). This admitted sweep is the ONLY surface replaying an ended task's start.
+        # stop, restart or panic is in flight the factory is ATTACH-ONLY and nothing is replayed or read
+        # (one predicate, re-asked before each re-POST and each accepted-start read); the one ensure left
+        # here is the latch retry (ARCHITECTURE §9). This admitted sweep is the ONLY surface replaying an
+        # ended task's start; it reads every other owner's accepted start, a paused owner's included.
+        running = lambda: not _stop_requested(stop_event)  # noqa: E731
         outcomes = reconcile_orphaned_runs(
             DATA_DIR, running_task_ids=running_task_ids,
             gateway_factory=lambda: (read_owned_gateway() if _stop_requested(stop_event)
                                      else ensure_owned_gateway(admission_wait_sec=0)),
             recoverable_handles=recoverable_handles(DATA_DIR) | continuation_handles(DATA_DIR, continued),
-            replay_pending=lambda: not _stop_requested(stop_event),
+            replay_pending=running, observe_pending=running,
         )
         if outcomes:
             log.info("Delegated-run reconciliation handled %d orphan(s): %s", len(outcomes), outcomes)

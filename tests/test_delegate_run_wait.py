@@ -209,6 +209,44 @@ def test_what_is_already_there_answers_at_once_and_nothing_parks(tmp_path, reads
     assert [iid for row in asked["pending_interactions"] for iid in [row["interaction_id"]]] == ["q1"]
 
 
+@pytest.mark.parametrize("local_first", [False, True])
+def test_a_run_only_this_process_holds_is_read_at_once_unless_a_selected_durable_run_is_ready(tmp_path, reads,
+                                                                                              local_first):
+    """``started_uncustodied``: a start whose STARTED row never landed is still this task's run, held in this process
+    alone (``custody.lookup``). Neither the sleep nor the body reads that custody, so a wait selecting it parks nothing
+    and answers now, in either selection order: with what is already there, a selected durable run's terminal or
+    question, as the ordinary wait would, else with the in-process run's one read. A run nobody holds and a sibling's
+    are refused as before, reading nothing."""
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds
+
+    ctx, _limit = _nanny(tmp_path)
+    held = {rid: custody.RunCustody(run_id=rid, task_id=owner, route_id="route", model="m", project_id="p",
+                                    project_owned=False)
+            for rid, owner in (("run-local", _NANNY), ("run-sibling", "t-b"))}
+    custody._CUSTODY.update(held)
+    try:
+        assert _armed(ds.run_wait(ctx, "run-nobody"))["reason"] == "run_ownership_unknown"
+        assert _armed(ds.run_wait(ctx, "run-sibling"))["reason"] == "run_not_owned" and reads == []
+        for durable, ready, status, woke_by in (("run-quiet", None, "no_progress", None),
+                                                ("run-done", _ended, "terminal", "run:run-done"),
+                                                ("run-asks", _asks, "waiting_on_user", "run_question:run-asks")):
+            _run(tmp_path, durable)
+            if ready is not None:
+                ready(tmp_path, durable)
+            result = ds.run_wait(ctx, ["run-local", durable] if local_first else [durable, "run-local"])
+            answered, read = _armed(result), "run-local" if ready is None else durable
+            sleep = answered.get("sleep") or {}
+            assert (answered.get("run_id"), answered.get("status"), sleep.get("mode"), sleep.get("woke_by")) == (
+                read, status, "answered_at_call", woke_by), answered
+            assert reads[-1][0] == read, reads
+            assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
+            assert ds.acknowledge_pending_wake(ctx, result.text)  # the next selection of run-local reads it afresh
+        assert [run_id for run_id, _seq in reads] == ["run-local", "run-done", "run-asks"]
+    finally:
+        for rid in held:
+            custody._CUSTODY.pop(rid, None)
+
+
 def test_an_unacknowledged_wake_is_replayed_marked_before_any_sleep_is_armed(tmp_path, reads):
     """S2: a wake published but never acknowledged (a refused ACK, a lost process) is the next wait's answer, marked as
     the same wake and not a new observation; only after it is acknowledged does the next wait sleep again."""

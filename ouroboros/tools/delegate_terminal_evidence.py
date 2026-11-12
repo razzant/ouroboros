@@ -557,8 +557,8 @@ def collect_and_deliver_terminal(ctx, rid, detail, authority, entry, gateway):
     root = custody.custody_root(ctx)
     if run(root, rid) is None:
         # This process can hold a physical start whose STARTED publication failed.
-        # Re-publish only that known handle; never post another engine run.
-        custody.record_started(root, entry)
+        # Re-publish only that known handle (never a second row for its invocation); never post another engine run.
+        custody.bind_started(root, entry)
         if run(root, rid) is None:
             full, complete, note = resolved_terminal_payload(rid, detail, authority, entry, gateway)
             text = json.dumps(full, ensure_ascii=False, indent=2)
