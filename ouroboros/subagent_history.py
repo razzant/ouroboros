@@ -12,7 +12,8 @@ from ouroboros.utils import utc_now_iso, write_text_atomic
 
 log = logging.getLogger(__name__)
 LAST_DELEGATION_FILENAME = "subagent_last_delegation.json"
-FIRST_CALLS_KEPT = 20  # a row's kept first-call samples: the bound of a measurement (``review_price.RECENT_REVIEWS``)
+FIRST_CALLS_KEY = "first_call_costs"  # beside the receipts in the projection: row id -> its first-call price samples
+FIRST_CALLS_KEPT = 20  # a row's kept samples: the bound of a measurement (``review_price.RECENT_REVIEWS``)
 
 
 def _timestamp_key(value: Any) -> tuple[int, datetime]:
@@ -73,28 +74,40 @@ def _kept_first_calls(old: Any, rows: Mapping[str, Any], actor: str, sample: Opt
     return {key: ring for key, ring in kept.items() if ring}
 
 
-def first_call_fact(samples: Any, row: Mapping[str, Any]) -> dict[str, str]:
-    """A row's measured first-call price in the review seats' words (``review_price_text``): the median of its
-    kept samples of its current price class. No sample is no fact; samples without a price are "cost unknown"."""
+def first_call_facts(drive_root=None) -> dict[str, dict[str, str]]:
+    """Each kept row's measured first-call price in the review seats' words (``review_price_text``): the median
+    of its kept samples of its current price class. No sample is no fact; samples without a price are "cost unknown"."""
     import statistics
 
     from ouroboros.review_price import ReviewPrice, review_price_text
 
-    own = [item for item in samples or () if isinstance(item, dict) and item.get("of") == _price_class(row.get("identity"))]
-    if not own:
-        return {}
-    usd = [float(item["usd"]) for item in own if isinstance(item.get("usd"), (int, float)) and not isinstance(item.get("usd"), bool)]
-    price = ReviewPrice(usd=statistics.median(usd), reviews=len(usd), low=min(usd), high=max(usd)) if usd else None
-    return {"first_call": review_price_text(price, "first call")}
+    stored = _projection(drive_root)
+    rows, kept = stored.get("latest_by_subagent"), stored.get(FIRST_CALLS_KEY)
+    facts: dict[str, dict[str, str]] = {}
+    for actor, samples in (kept.items() if isinstance(kept, dict) and isinstance(rows, dict) else ()):
+        row = rows.get(actor)
+        of = _price_class(row.get("identity") if isinstance(row, dict) else None)
+        own = [item for item in samples if isinstance(item, dict) and item.get("of") == of] if isinstance(samples, list) else []
+        usd = [float(item["usd"]) for item in own if isinstance(item.get("usd"), (int, float)) and not isinstance(item.get("usd"), bool)]
+        if own:
+            price = ReviewPrice(usd=statistics.median(usd), reviews=len(usd), low=min(usd), high=max(usd)) if usd else None
+            facts[actor] = {"first_call": review_price_text(price, "first call")}
+    return facts
 
 
-def subagent_last_delegation(drive_root=None) -> dict[str, Any]:
-    """Read old single receipts and their additive per-actor history alike."""
+def _projection(drive_root=None) -> dict[str, Any]:
+    """The stored projection whole: the receipts and, beside them, each row's first-call price samples."""
     try:
         data = json.loads(_last_delegation_path(drive_root).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def subagent_last_delegation(drive_root=None) -> dict[str, Any]:
+    """Read old single receipts and their additive per-actor history alike. The price samples are not a
+    receipt: they stay in the file for its exact reader and never ride in the status snapshot."""
+    return {key: value for key, value in _projection(drive_root).items() if key != FIRST_CALLS_KEY}
 
 
 def execution_identity(snapshot: Mapping[str, Any]) -> dict[str, str]:
@@ -162,12 +175,13 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
         if lock is None:
             return
         try:
-            old = subagent_last_delegation(drive_root)
+            stored = _projection(drive_root)
+            old = {key: value for key, value in stored.items() if key != FIRST_CALLS_KEY}
             rows = dict(old.get("latest_by_subagent") or {})
             legacy_actor = str(old.get("selected_subagent_id") or "")
             if legacy_actor and legacy_actor not in rows:
                 rows[legacy_actor] = {key: value for key, value in old.items()
-                                      if key not in ("latest_by_subagent", "first_call_costs")}
+                                      if key != "latest_by_subagent"}
             old_actor = rows.get(selected_subagent_id) or {}
             previous = old_actor if old_actor.get("run_id") == run_id else old if old.get("run_id") == run_id else {}
             if run_id and previous and (not occurred_at or (
@@ -197,10 +211,9 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
             rows = dict(sorted(rows.items(), key=lambda item: _timestamp_key(item[1].get("ts")),
                                reverse=True)[:MAX_CONFIGURED_SUBAGENTS])
             latest = row if not old or (occurred_at and _timestamp_key(row["ts"]) >= _timestamp_key(old.get("ts"))) else old
-            costs = _kept_first_calls(old.get("first_call_costs"), rows, selected_subagent_id, first_call and {
+            costs = _kept_first_calls(stored.get(FIRST_CALLS_KEY), rows, selected_subagent_id, first_call and {
                 "task_id": task_id, "ts": row["ts"], "of": _price_class(identity), **first_call})
-            write_text_atomic(path, json.dumps({**{key: value for key, value in latest.items() if key != "first_call_costs"},
-                                                "latest_by_subagent": rows, **({"first_call_costs": costs} if costs else {})},
+            write_text_atomic(path, json.dumps({**latest, "latest_by_subagent": rows, **({FIRST_CALLS_KEY: costs} if costs else {})},
                                                ensure_ascii=False, indent=1))
         finally:
             release_exclusive_file_lock(lock_path, lock)

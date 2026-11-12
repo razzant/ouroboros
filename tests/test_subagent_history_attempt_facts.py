@@ -283,7 +283,9 @@ def test_received_empty_response_keeps_served_identity(tmp_path, monkeypatch, ca
 
 
 def _first_calls(data_root):
-    return subagent_last_delegation(data_root).get("first_call_costs")
+    """The samples as the projection file keeps them; the receipt every other reader gets carries none."""
+    assert "first_call_costs" not in subagent_last_delegation(data_root)
+    return json.loads((data_root / "state" / "subagent_last_delegation.json").read_text(encoding="utf-8")).get("first_call_costs")
 
 
 def test_a_paid_rows_first_call_price_is_the_ledgers_first_attempt_on_its_model(root, monkeypatch):  # noqa: F811
@@ -340,8 +342,7 @@ def test_no_first_call_sample_without_the_rows_own_paid_first_answer(root, monke
         monkeypatch.setattr(usage_store, "read", unreadable)
     assert _call(root, usage, model=target, provider=provider)
     record_task_execution(_paid_task(target), usage, drive_root=root)
-    row = subagent_last_delegation(root)
-    assert row["outcome"] == "succeeded" and "first_call_costs" not in row
+    assert subagent_last_delegation(root)["outcome"] == "succeeded" and _first_calls(root) is None
     assert "first_call" not in _delegation_capability_fact()["subagents_last_executions"][0]
 
 
@@ -381,9 +382,8 @@ def test_first_call_samples_are_bounded_per_row_and_follow_its_price_class(tmp_p
     assert shown() == "≈$0.50 per first call (1 measured)", "a later record without a sample keeps the measured ones"
     for index in range(MAX_CONFIGURED_SUBAGENTS):  # newer rows fill the projection; the oldest row and its samples leave
         run(30 + index, actor=f"newer-{index}")
-    kept = subagent_last_delegation(tmp_path)
-    assert "worker" not in kept["latest_by_subagent"] and "worker" not in kept["first_call_costs"]
-    assert len(kept["first_call_costs"]) == MAX_CONFIGURED_SUBAGENTS
+    assert "worker" not in subagent_last_delegation(tmp_path)["latest_by_subagent"]
+    assert "worker" not in _first_calls(tmp_path) and len(_first_calls(tmp_path)) == MAX_CONFIGURED_SUBAGENTS
 
 
 def test_a_helpers_measured_first_call_price_changes_no_cached_block(tmp_path, monkeypatch):
@@ -397,16 +397,15 @@ def test_a_helpers_measured_first_call_price_changes_no_cached_block(tmp_path, m
     env, memory = _make_env_and_memory(tmp_path)
     monkeypatch.setattr("ouroboros.config.DATA_DIR", env.drive_root)
     sends = []
-    for index, usd in enumerate((0.0432, 0.9)):
-        record_last_delegation(route="api_model", requested_model=PAID, applied_model="", run_id="run-1",
-            selected_subagent_id="worker", drive_root=env.drive_root, occurred_at="2026-11-12T10:00:00+00:00",
-            outcome="succeeded", task_id=f"task-{index}", first_call={"usd": usd} if index else None,
-            identity={"kind": "api_model", "target_id": PAID, "processing_preference": "standard"})
-        if index:  # the same record with its first measured price: only the price differs between the two starts
-            kept = subagent_last_delegation(env.drive_root)
-            kept["first_call_costs"] = {"worker": [{"task_id": "task-1", "ts": "2026-11-12T10:00:00+00:00",
-                                                    "of": [PAID, "standard"], "usd": usd}]}
-            (env.drive_root / "state" / "subagent_last_delegation.json").write_text(json.dumps(kept), encoding="utf-8")
+    path = env.drive_root / "state" / "subagent_last_delegation.json"
+    record_last_delegation(route="api_model", requested_model=PAID, applied_model="", run_id="run-1",
+        selected_subagent_id="worker", drive_root=env.drive_root, occurred_at="2026-11-12T10:00:00+00:00",
+        outcome="succeeded", task_id="task-1",
+        identity={"kind": "api_model", "target_id": PAID, "processing_preference": "standard"})
+    for measured in (False, True):
+        if measured:  # the same record with its first measured price: only the price differs between the two starts
+            path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")), "first_call_costs": {"worker": [
+                {"task_id": "task-1", "ts": "2026-11-12T10:00:00+00:00", "of": [PAID, "standard"], "usd": 0.9}]}}), encoding="utf-8")
         messages, _ = context.build_llm_messages(env=env, memory=memory, task={"id": "root", "type": "task", "text": "w"})
         marked = [block["text"] for block in messages[0]["content"] if block.get("cache_control")]
         wire, moved = split_leading_system_prefix(messages)
