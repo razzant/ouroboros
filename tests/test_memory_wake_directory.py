@@ -38,8 +38,10 @@ def test_164_conversations_fold_to_their_lines_and_last_to_one_bounded_count_und
     assert whole.count("\n### Project room ") == 164 and whole.count("What this project is.") == 164
     level = mf.fit_memory_view(snap, {"margin": 200, "physical": 200, "budget": None})
     small = mv.render_room(snap, level)
-    assert dict(level.steps)["F6g"] == 164 and dict(level.steps)["F6a"] == 1
-    assert "164 conversations by count (the window's last rung): 164 open rooms;" in small
+    # Each group yields to its emergency line first, then the common count takes conversations one by one (plan
+    # commit 2, step 7): here all 164, which still print as one bounded count line with its catalogue reader.
+    assert dict(level.steps)["F6g"] == 164 and dict(level.steps)["F6a"] == 164 and "unread" not in dict(level.addressed)["F6a"]
+    assert small.count("conversations by count") == 1 and "164 conversations by count: 164 open rooms;" in small
     assert "memory_read(room_id='*', start=0)" in small and len(small) < 1_500 and "What this project is." not in small
     roomy = mf.fit_memory_view(snap, {"margin": 1_000_000, "physical": 1_000_000, "budget": None})
     assert not roomy.addressed and mv.render_room(snap, roomy) == whole

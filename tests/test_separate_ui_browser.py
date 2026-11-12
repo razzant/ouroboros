@@ -42,6 +42,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.settings_browser_helpers import commit_row, open_settings
 from tests.separate_ui_support import (
     CADDY_ENV,
     CERT_SUBJECT,
@@ -691,7 +692,7 @@ def _task_record(core, task_id: str) -> dict:
     return load_task_result(core.data_dir, task_id) or {}
 
 
-def test_settings_save_reports_the_restart_the_core_requires(stack):
+def test_a_settings_row_reports_the_restart_the_core_requires(stack):
     pytest.importorskip("playwright.sync_api")
     from playwright.sync_api import expect, sync_playwright
 
@@ -706,24 +707,26 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
         try:
             session.open_signed_in()
 
-            def open_settings():
-                page.locator('[data-nav-page="settings"]').click()
-                expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
+            restart = page.locator('#page-settings [data-settings-card] [data-needs="restart"]')
 
-            open_settings()
+            def open_home():
+                page.locator('[data-nav-page="settings"]').click()
+                open_settings(page, "", timeout=30_000)
+                page.locator("#page-settings [data-settings-card]").wait_for(state="visible", timeout=30_000)
+
+            open_home()
             wait_until(lambda: "OUROBOROS_SKILLS_REPO_PATH" not in session.api("GET", "/api/settings", None)["json"]
                        ["_meta"]["restart_state"]["unknown_keys"], 30, "skills path never applied")
-            page.locator("#s-skills-repo-path").evaluate(
-                "(node, value) => {node.value=value; node.dispatchEvent(new Event('input', {bubbles: true}));}",
-                str(skills))
+            expect(restart).to_have_count(0)
+            # The row saves itself when its field is left; its line and Ouroboros's card say the restart it waits for.
+            open_settings(page, "skill-sources", timeout=30_000)
             with page.expect_response(lambda r: r.url.endswith("/api/settings") and r.request.method == "POST") as saved:
-                page.locator("#btn-save-settings").click()
-                if page.locator("[data-confirm-ok]").is_visible():
-                    page.locator("[data-confirm-ok]").click()
-            expect(page.locator("#settings-status")).to_contain_text("saved", timeout=30_000)
+                line = commit_row(page, "OUROBOROS_SKILLS_REPO_PATH", str(skills), timeout=30_000)
+            assert line.startswith("Saved · applies after restart"), line
             save_request = saved.value.request.post_data_json  # Playwright objects are read inside the session
-            expect(page.locator("#btn-restart-now")).to_be_visible()
-            expect(page.locator("#settings-restart-status")).to_contain_text("Restart Ouroboros to apply")
+            open_home()
+            expect(restart).to_be_visible(timeout=30_000)
+            expect(restart).to_contain_text("Restart to apply: Skills folder")
             session.shot("1-restart-needed")
             written = json.loads(settings_path.read_text(encoding="utf-8"))
             state = session.api("GET", "/api/settings", None)["json"]["_meta"]["restart_state"]
@@ -738,9 +741,9 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
             page.wait_for_function(CONNECTED, timeout=90_000)
             page.reload()
             page.wait_for_function(CONNECTED, timeout=60_000)
-            open_settings()
+            open_home()
             after = session.api("GET", "/api/settings", None)["json"]["_meta"]["restart_state"]
-            expect(page.locator("#btn-restart-now")).to_be_hidden(timeout=30_000)
+            expect(restart).to_have_count(0, timeout=30_000)
             session.shot("2-applied")
             assert session.unexpected_errors() == []
         finally:
@@ -749,6 +752,7 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
                                "refused": refused, "file_unchanged": unchanged, "after_restart": after}
     assert written["OUROBOROS_SKILLS_REPO_PATH"] == str(skills)
     assert "OUROBOROS_UI_DIR" not in written, "a save never authors the operator's interface choice"
+    assert "OUROBOROS_SKILLS_REPO_PATH" in save_request and "OUROBOROS_UI_DIR" not in save_request, save_request
     assert "OUROBOROS_SKILLS_REPO_PATH" in state["restart_keys"] and state["restart_required"] is True
     assert refused["status"] == 400 and unchanged, refused
     assert after["restart_required"] is False and "OUROBOROS_SKILLS_REPO_PATH" not in after["restart_keys"]

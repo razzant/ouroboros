@@ -315,7 +315,8 @@ WRONG_TYPES = {  # name: (the request, its typed refusal)
     "fold-read-string": ({"action": "finish", "summary": SUMMARY, "fold_read": "true", "answer": ANSWER},
                          "fold_read must be true or false"),
     "fold-read-without-summary": ({"action": "finish", "fold_read": True, "answer": ANSWER},
-                                  "fold_read folds what this run read into its summary: give the sentence"),
+                                  # T3: summary is the run's whole gist, its first sentence only a projection
+                                  "fold_read folds what this run read into its summary: give the gist"),
 }
 
 

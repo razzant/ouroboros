@@ -177,35 +177,27 @@ export function bindHeaderControlPlacement({ headerActions, budgetPill = null, s
     return () => { offLayout(); observer?.disconnect(); };
 }
 
-// SSOT for a segmented single-select control (the settings effort/mode toggles):
-// one generator owns the markup so every group renders identically — the sibling
-// of renderTabStrip/.app-tab, but for in-card segmented choices (.ui-segment).
-// Buttons keep the data-effort-* hooks the controls layer binds on, plus the
-// legacy .settings-effort-* classes that carry the settings layout and accents.
-// The columns come from the choices actually rendered: the generator writes their
-// number once as `--segment-count`, a fact of this rendering rather than a
-// per-control setting, and settings.css derives equal columns from it. `modifier`
-// is a bare boolean data-attribute (e.g. 'data-enforcement-group') for a per-group
-// override such as accent colors.
-export function renderSegmentedField({
-    target,
-    options = [],
-    modifier = '',
-    title = '',
-} = {}) {
+// SSOT for a segmented single-select control, the strip (the settings effort/mode
+// toggles): one generator owns the markup so every group renders identically — the
+// sibling of renderTabStrip/.app-tab, but for in-card choices. The markup is all it
+// writes: ui.css lays out the track (.ui-segment-group) and its options
+// (.ui-segment), each as wide as its word, so nothing is counted, measured or
+// written inline, and no hover title carries a sentence the owner needs. Buttons
+// keep the data-effort-* hooks the controls layer binds on. `modifier` is a bare
+// boolean data-attribute (e.g. 'data-place-state') scripts find the group by.
+export function renderSegmentedField({ target, options = [], modifier = '' } = {}) {
     const tgt = String(target || '').trim();
     if (!tgt) {
         throw new Error('renderSegmentedField requires target');
     }
     const buttons = options.map((opt) => {
         const value = String(opt.value ?? '');
-        return `<button type="button" class="ui-segment settings-effort-btn" data-effort-value="${escapeHtml(value)}">${escapeHtml(opt.label ?? value)}</button>`;
+        return `<button type="button" class="ui-segment" data-effort-value="${escapeHtml(value)}">${escapeHtml(opt.label ?? value)}</button>`;
     }).join('');
     const mod = String(modifier || '').trim();
     const modAttr = mod ? ` ${mod}` : '';
-    const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
     return `
-        <div class="ui-segment-group settings-effort-group" data-effort-group${modAttr} data-effort-target="${escapeHtml(tgt)}" style="--segment-count: ${options.length}"${titleAttr}>
+        <div class="ui-segment-group" data-effort-group${modAttr} data-effort-target="${escapeHtml(tgt)}">
             ${buttons}
         </div>
     `;

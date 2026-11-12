@@ -934,7 +934,7 @@ class LocalModelStartRequest(TypedDict):
     filename: NotRequired[str]  # required for a repo
     port: NotRequired[int]  # default 8766
     n_gpu_layers: NotRequired[int]  # default -1
-    n_ctx: NotRequired[int]  # 0 means 16384
+    n_ctx: NotRequired[int]  # 0 means the factory LOCAL_MODEL_CONTEXT_LENGTH
     chat_format: NotRequired[str]
 
 

@@ -139,11 +139,11 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
             env.drive_root, str(task.get("id") or ""), STATUS_FAILED,
             _field_projector=(lambda current, incoming: None if current.get("status") in _TRULY_TERMINAL_STATUSES
                               else incoming) if keep_terminal else None,
-            _terminal_observed=True, result=text, reason_code="task_exception", loop_outcome=loop_outcome,
+            _terminal_observed=True, result=text, reason_code="task_exception", loop_outcome={k: v for k, v in loop_outcome.items() if k != "trace_refs"},
             outcome_axes=loop_outcome.get("outcome_axes") or infra_failed_axes(
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),
-            trace_refs=loop_outcome.get("trace_refs") or collect_trace_refs(usage, llm_trace),
+            trace_refs=loop_outcome.get("trace_refs") or collect_trace_refs(usage, llm_trace),  # the one stored copy: the saved ``loop_outcome`` carries none
             **effort_result_fields(task), **terminal_result_fields(usage, title=task.get("title"), metadata=task.get("metadata"), task_contract=task.get("task_contract")),
         )
     except Exception:

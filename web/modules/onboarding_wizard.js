@@ -53,8 +53,8 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         const LOCAL_ROUTING_MODES = SETUP_CONTRACT.localRoutingModes || [];
         const BUDGET_FIELDS = SETUP_CONTRACT.budgetFields || [];
         const LOCAL_FIELDS = [
-            ['local-source', 'localSource', 'Model Source', 'Qwen/Qwen2.5-7B-Instruct-GGUF or /absolute/path/model.gguf', 'Use either a HuggingFace repo ID or a local absolute GGUF path.', 'field field-full'],
-            ['local-filename', 'localFilename', 'GGUF Filename', 'qwen2.5-7b-instruct-q3_k_m.gguf', 'Required only for HuggingFace repo IDs. Leave empty when the source is a direct filesystem path.', 'field field-full'],
+            ['local-source', 'localSource', 'Model Source', 'unsloth/Qwen3.5-9B-GGUF or /absolute/path/model.gguf', 'Use either a HuggingFace repo ID or a local absolute GGUF path.', 'field field-full'],
+            ['local-filename', 'localFilename', 'GGUF Filename', 'Qwen3.5-9B-Q4_K_M.gguf', 'Required only for HuggingFace repo IDs. Leave empty when the source is a direct filesystem path.', 'field field-full'],
             ['local-context', 'localContextLength', 'Context Length', '', '', 'field', 'number', '2048', '1024'],
             ['local-gpu-layers', 'localGpuLayers', 'GPU Layers', '', '', 'field', 'number', '', '1'],
             ['local-chat-format', 'localChatFormat', 'Chat Format', 'Leave empty for auto-detect', '', 'field field-full'],
@@ -353,7 +353,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         if (!presetId) {
             state.localSource = '';
             state.localFilename = '';
-            state.localContextLength = 16384;
+            state.localContextLength = 65536;
             state.localGpuLayers = -1;
             state.localChatFormat = '';
             state.localRoutingMode = 'cloud';
@@ -556,7 +556,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             filename: trim(state.localFilename),
             port: 8766,
             n_gpu_layers: parseInt(state.localGpuLayers, 10),
-            n_ctx: parseInt(state.localContextLength, 10) || 16384,
+            n_ctx: parseInt(state.localContextLength, 10) || 65536,
             chat_format: trim(state.localChatFormat),
         };
     }
@@ -1225,8 +1225,8 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                     if (resp.status === 412 && data.error === 'runtime_missing') {
                         setLocalTestResult(
                             'Local runtime (llama-cpp-python) is not installed.\n' +
-                            'Go to Settings → Advanced → Local Model Runtime\n' +
-                            'and click "Install Local Runtime".\n\n' +
+                            'Go to Settings › Models › Local model\n' +
+                            'and press "Install the local runtime".\n\n' +
                             'Manual: ' + (data.hint || 'pip install llama-cpp-python[server]'),
                             'error'
                         );

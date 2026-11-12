@@ -36,10 +36,11 @@ def test_note_labels_and_aggregate_keep_readers_and_do_not_change_other_rooms():
     level = mf.level_with(snap, mv.FULL_VIEW, ['F8:' + note['id'] for note in snap.room['notes']])
     rendered = mv.render_room(snap, level)
     first = snap.room['notes'][0]
-    assert (f"note {first['id']} by root on 2026-09-02: Label 0.; memory_read(node_id='{first['id']}')") in rendered
+    assert (f"note {first['id']} by root on 2026-09-02: Label 0. (record opening, no lead); memory_read(node_id='{first['id']}')") in rendered
     long_line = mv._note_pointer(snap.room['notes'][1])
     label = long_line.split(': ', 1)[1].split('; memory_read')[0]
-    assert len(label) <= 160 and label.endswith('…') and '\n' not in long_line
+    assert label.startswith(snap.room['notes'][1]['text'].split('\n')[0]) and '\n' not in long_line
+    assert 'Second sentence' not in label
     aggregate = mf.level_with(snap, level, ['F8a:1'])
     text = mv.render_room(snap, aggregate)
     assert '6 notes not yet sealed, 2026-09-02 → 2026-09-03, by child, root; ids:' in text
@@ -453,8 +454,8 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     floor = section(built.messages_for("nano")[0]["content"][-1]["text"], "### Physical floor")
     sent = select_tool_schemas(schemas, context_mode="nano").chosen
     assert "memory_read" not in sent and ("enable_tools" in floor) == ("enable_tools" in sent), (sent, floor)
-    # Sealing is offered only to a request that can call chronicle_write (sent, or loaded by enable_tools).
-    assert ("chronicle_write kind=page" in floor) == bool({"chronicle_write", "enable_tools"} & set(sent)), floor
+    # This receipt explains the reader path; it does not invite a sealing act.
+    assert "chronicle_write kind=page" not in floor
     if actor == "child_without_selector":
         assert sent == ("compact_context", "list_available_tools")
         assert floor.rstrip().endswith("list_available_tools shows what this task can call, and my parent task can "

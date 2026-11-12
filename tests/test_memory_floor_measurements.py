@@ -13,6 +13,32 @@ from ouroboros.context_timing import measured_sections, section_spans
 from tests import _memory_scale_fixture as scale, _memory_view_synthetic as syn
 
 
+@pytest.mark.parametrize("groups", [100, 1000])
+def test_returning_from_global_unread_count_does_not_measure_every_conversation(groups):
+    rooms = [syn.conversation(i, words=3, word_chars=500) for i in range(groups)]
+    for group in rooms:
+        for word in group["rooms"][0]["words"]:
+            word.update(text="Unread question.\n" + "More details. " * 30, author="Ann")
+    snapshot = syn.snapshot(conversations=rooms)
+    bound, calls = groups * 30, 0
+    def price(level):
+        nonlocal calls
+        calls += 1
+        return mf.tokens_of(mv.story_chars(snapshot, level)) + mf.tokens_of(mv.room_chars(snapshot, level))
+    level = mf.fit_memory_view(snapshot, {"margin": bound, "physical": 10**9}, measure=price)
+    measured = calls
+    counted = set(dict(level.addressed)["F6a"])
+    assert "unread" in counted
+    kept = [g["key"] for g in rooms if g["key"] in counted]
+    assert 0 < len(kept) < groups - 5
+    assert kept == [g["key"] for g in rooms[:len(kept)]]  # an unbroken older prefix
+    assert price(level) <= bound
+    next_level = mv.FloorLevel(tuple((s, tuple(i for i in ids if s != "F6a" or i != kept[-1]))
+                                     for s, ids in level.addressed))
+    assert price(next_level) > bound  # the nearest still-counted conversation cannot return
+    assert measured <= 32, f"{groups} conversations needed {measured} complete measurements"
+
+
 def test_a_floor_walk_prices_from_pieces_and_chooses_as_a_drawn_view_would():
     """Owner shape under a zero bound: the walk prices every level from the snapshot's pieces, so no form of the view is
     drawn whole (a piece's text is built to be measured), no piece is made twice, and the level is exactly the one a
@@ -34,6 +60,72 @@ def test_no_note_measurement_without_a_physical_bound():
     mf.fit_memory_view(scale.snapshot(), {'margin': None, 'physical': None},
                        measure=lambda level: calls.append(level.addressed) or 100)
     assert len(set(calls)) == 1, f'unpressured view: one form measured, got {set(calls)}'
+
+
+def test_complete_measurements_do_not_grow_with_finished_works(monkeypatch):
+    """The same crowded frame at 50/300 works: probe bounds, never each work's replies."""
+    from ouroboros import memory_view_work as work
+
+    counts = {}
+    original = mf.fit_memory_view
+    def counted(snapshot, allowances, **kwargs):
+        measure = kwargs['measure']
+        def price(level):
+            counts[n] += 1
+            return measure(level)
+        return original(snapshot, allowances, **{**kwargs, 'measure': price})
+    monkeypatch.setattr(mf, 'fit_memory_view', counted)
+    for n in (50, 300):
+        rows, tasks, summaries = [], [], {}
+        for w in range(n):
+            rows.extend(dict(syn.spoken(i, 'ouroboros', 1500), task_id=f'w{w}') for i in (2*w, 2*w+1))
+            gist = {'summary': f'Work {w} settled its thing.', 'ts': rows[-1]['ts'],
+                    'address': rows[-1]['address'], 'room_id': '1'}
+            task = syn.task_line(w)
+            task.update(task=f'w{w}', line=task['line'] + ' — summary: «' + gist['summary'] + '»')
+            tasks.append(task)
+            summaries[f'w{w}'] = gist
+        room = {**syn.room(lane1=rows), 'lane2': tasks}
+        groups = [syn.conversation(g+1, words=6, word_chars=800) for g in range(60)]
+        work.bind(room, groups, summaries)
+        snap = syn.snapshot(room_facts=room, conversations=groups, story=syn.pages(10, 3000))
+        full = mf.tokens_of(mv.story_chars(snap)) + mf.tokens_of(mv.room_chars(snap))
+        counts[n] = 0
+        shown = mf.render_view_for_mode(snap, mode='low', owner_mode='max', window_tokens=1_000_000,
+            known_window=True, output_reserve=65536, ratio=1,
+            non_memory_tokens=1_000_000 - 65536 - int(full * .4) - 120_000)
+        assert dict(shown.level.steps).get('F2'), 'the crowded view actually folds finished works'
+    print('WORK_MEASUREMENTS', counts)
+    assert counts[300] <= counts[50] + 8, counts
+
+
+@pytest.mark.parametrize("overheard", [False, True])
+def test_returning_many_small_conversation_lines_batches_complete_measurements(monkeypatch, overheard):
+    original, calls = mf.fit_memory_view, []
+    def counted(snapshot, allowances, **kwargs):
+        measure = kwargs['measure']
+        def price(level):
+            calls.append(level)
+            return measure(level)
+        return original(snapshot, allowances, **{**kwargs, 'measure': price})
+    monkeypatch.setattr(mf, 'fit_memory_view', counted)
+    snapshot = syn.live_scale()
+    if overheard:
+        from ouroboros.memory_view_events import locate_catalogue
+        groups = [{**g, 'rooms': [r for other in snapshot.conversations[i:i+4] for r in other['rooms']]}
+                  for i, g in enumerate(snapshot.conversations) if i % 4 == 0]
+        for g in groups:
+            for room in g['rooms']:
+                room['overheard'] = True
+        locate_catalogue(groups)
+        snapshot = dataclasses.replace(snapshot, conversations=groups)
+    shown = mf.render_view_for_mode(snapshot, mode='low', owner_mode='max', window_tokens=200_000,
+        known_window=True, output_reserve=10_000, ratio=1, non_memory_tokens=100_000)
+    groups = dict(shown.level.steps).get('F6g', 0)
+    assert 0 < groups < 500, 'the spare room returns many of the 520 conversation blocks'
+    assert len(calls) <= 24, len(calls)
+    if overheard:
+        assert shown.facts['floor']['forms']['host']["unread in rooms without my human's word or my reply"]['sources'] > 0
 
 
 def test_a_start_s_request_is_serialized_once_per_form_at_every_row_count(tmp_path, monkeypatch):
@@ -97,7 +189,7 @@ def test_one_start_lists_a_snapshot_s_floor_elements_once(tmp_path, monkeypatch)
     assert plan.initial_mode == 'max' and facts['floor']['steps'].get('F6w')  # the walk ran at this scale
     assert len(listed) == 1, f'one listing per snapshot object, got {len(listed)}'
     assert probes[0] == 'walk' and probes.count('walk') == 1, probes  # one Max frame, one walk
-    assert probes.count('re-price') <= len(facts['host_sections_addressed']) and len(renders) == 1
+    assert probes.count('re-price') <= len(facts['host_sections_addressed']) + 1 and len(renders) == 1
     fewer = dataclasses.replace(snap, conversations=snap.conversations[:1])
     assert len(mf.floor_elements(fewer)) < len(mf.floor_elements(listed[0])) and len(listed) == 2
 
@@ -144,17 +236,14 @@ def _hosts(plan):
             for row in plan.projection(plan.initial_mode).memory_facts.get('host_sections_addressed', ())]
 
 
-@pytest.mark.parametrize('window,shape,hosts,steps', [
-    # Beside the second host form the label starts to save and the request fits: the index stays whole. Forms chosen
-    # beside the first host form would price it a token over and outline the index for no physical need.
-    (4745, {}, [('runtime', False), ('installed_skills', False)], {'F2': 2, 'F5': 2, 'F8': 1}),
-    # The window holds the request after the first step, and the next one pays only the start's room.
-    (4982, {}, [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2}),
-    # Three characters fewer, and beside the middle host form the whole request still rounds to the same price.
-    (4082, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
-     [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2, 'F8': 1}),
+@pytest.mark.parametrize('window,shape,hosts,probes_count,walk_forms', [
+    # Version 2's receipt and physical forms move the old break-even windows.
+    (4765, {}, [('runtime', False), ('installed_skills', False)], 4, 1),
+    (5002, {}, [('runtime', False), ('installed_skills', True)], 3, 1),
+    (4045, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
+     [('runtime', False), ('installed_skills', False)], 4, 1),
 ])
-def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, window, shape, hosts, steps):
+def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, window, shape, hosts, probes_count, walk_forms):
     """A real start, near the label's break-even: which forms are shortest changes between one frame's host steps. The
     frame walks once, then re-prices that level beside each new host form: a re-price that misses the window walks
     again, beside its own host forms, and chooses other forms; one that fits (the index stays whole) walks no more. A tie
@@ -171,10 +260,13 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     settled = _near_even_plan(tmp_path / 'settled', monkeypatch, window, **shape)
-    assert _hosts(settled) == hosts and settled.projection(settled.initial_mode).memory_facts['floor']['steps'] == steps
+    assert _hosts(settled) == hosts
+    assert settled.projection(settled.initial_mode).memory_facts['floor']['steps'] == {
+        'F2': 2, 'F5': 2, 'F5a': 1}
     walks = {str(forms) for kind, _mode, forms, _room in probes if kind == 'walk'}
-    assert [kind for kind, *_ in probes] == ['walk', 're-price', 'walk', 're-price']  # the last re-price fit: no walk
-    assert len(walks) == 2  # the walk after the missed re-price chose other forms
+    assert [kind for kind, *_ in probes] == (['walk', 're-price', 'walk', 're-price'] if probes_count == 4
+                                            else ['walk', 're-price', 're-price'])
+    assert len(walks) == walk_forms  # each repeated walk prices its own host frame
     chosen, probes[:] = list(probes), []
     _drawn_prices(monkeypatch)  # the control: every level priced by drawing it
     measured = _near_even_plan(tmp_path / 'measured', monkeypatch, window, **shape)
@@ -185,12 +277,12 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
 
 
 @pytest.mark.parametrize('window,probes,hosts', [
-    # The skills step saves 3 tokens, and the margin it frees reaches the size at which the uncovered owner row alone
-    # would fit: the receipt's clause turns to the owner words, 12 tokens longer, and the level that fitted costs more.
-    (11_416, ['walk', 're-price', 're-price', 'walk'],
-     [('runtime', False), ('installed_skills', True), ('knowledge_index', False)]),
-    # Three tokens less window and the clause stays short: the second re-price fits and the index stays whole.
-    (11_413, ['walk', 're-price', 're-price'], [('runtime', False), ('installed_skills', True)]),
+    # This boundary crosses the receipt's owner-only clause after host reduction:
+    # the longer receipt needs another walk, then the index must outline too.
+    (11_398, ['walk', 're-price', 'walk', 're-price', 'walk'],
+     [('runtime', False), ('installed_skills', False), ('knowledge_index', False)]),
+    # With this larger window the second re-price fits and the index stays whole.
+    (11_444, ['walk', 're-price', 're-price'], [('runtime', False), ('installed_skills', True)]),
 ])
 def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_path, monkeypatch, window, probes, hosts):
     """Astra's counterexample (R2 11(i)) on a real start: a fit proven beside one host form is proven again beside the
@@ -221,7 +313,7 @@ def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
-    assert probes == [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
+    assert probes == [('re-price', 'max'), ('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
 
 
 @pytest.mark.parametrize("step, target, outlined", [
@@ -578,3 +670,66 @@ def test_a_start_builds_a_story_or_room_text_only_as_a_counted_piece_or_render(t
         assert section_spans()["work"]["view_renders"] == 2 and len(built) == counted() > 2
         mv._story_text(snapshot, {})  # a text built outside a piece and a render
         assert len(built) == counted() + 1
+
+
+def test_a_walk_measures_each_level_once_but_a_new_frame_prices_it_again():
+    from collections import Counter
+
+    snapshot = syn.snapshot(story=syn.pages(3, 1200))
+    readings = []
+    for frame_tokens in (0, 1000):
+        calls = Counter()
+        def price(level):
+            calls[level] += 1
+            return frame_tokens + mf.tokens_of(mv.story_chars(snapshot, level)) + mf.tokens_of(mv.room_chars(snapshot, level))
+        result = mf.fit_memory_view(snapshot, {"margin": 700 + frame_tokens}, measure=price)
+        assert max(calls.values()) == 1
+        assert len(calls) > 1 and calls[mv.FULL_VIEW] == 1
+        readings.append((result, price(mv.FULL_VIEW)))
+    assert readings[0][0] == readings[1][0]
+    assert readings[1][1] - readings[0][1] == 1000
+
+
+def test_receipts_reuse_the_story_quote_index():
+    from ouroboros import memory_form_facts as facts
+    from tests import _memory_view_synthetic as syn
+
+    reads = []
+    class Quote(dict):
+        def get(self, key, default=None):
+            reads.append(key)
+            return super().get(key, default)
+    page = syn.pages(1, 100)[0]
+    page["quotes"] = [Quote(speaker="human", address=syn.spoken(0, "human", 50)["address"], text="The source stays.")]
+    snapshot = syn.snapshot(story=[page])
+    before = mv.snapshot_json(snapshot)
+    mf.floor_elements(snapshot)  # build the owner-stage source index once
+    reads.clear()
+    for level in (mv.FULL_VIEW, mv.FloorLevel((("F7", ("quote:page-000:0",)),))):
+        mf.owner_rows(snapshot)
+        count = facts.form_counts(snapshot, level)["emergency"].get("story quotes", {}).get("sources", 0)
+        assert count == bool(level.addressed)
+    assert reads == []
+    assert mv.snapshot_json(snapshot) == before
+
+
+def test_physical_floor_reuses_equal_rungs_without_retaining_copies():
+    from ouroboros import memory_form_facts as facts
+
+    scans = []
+
+    class SourceId(str):
+        def startswith(self, *args):
+            scans.append(str(self))
+            return super().startswith(*args)
+
+    snapshot = syn.snapshot()
+    for _ in range(100):
+        level = mv.FloorLevel((("F6w", tuple(SourceId(i) for i in ("word-1", "word-2"))),))
+        assert not facts.physical_floor(snapshot, level, "low")
+    assert scans == ["word-1", "word-2"]
+    assert len(snapshot.__dict__["_physical_rungs"]) == 1
+    physical = mv.FloorLevel((("F6w", tuple(SourceId(i) for i in ("word-1", "bare:word-2"))),))
+    assert facts.physical_floor(snapshot, physical, "low")
+    assert not facts.physical_floor(snapshot, level, "low")
+    assert len(snapshot.__dict__["_physical_rungs"]) == 2

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import errno
 import hashlib
 import io
 import json
@@ -320,6 +321,29 @@ def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = Fals
             os.close(fd)
 
     _atomic_overwrite(path, _write)
+
+
+# What fsync of a folder's descriptor may answer where the filesystem cannot sync a folder at all (some
+# network and FUSE mounts); EROFS stays a failure: ext4 and btrfs answer it after a disk error.
+_FOLDER_SYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP})
+
+
+def fsync_folder(path: pathlib.Path) -> None:
+    """Sync a folder's entries for a caller about to remove the only other copy of what they name.
+
+    Any other failure raises, so that caller keeps its original; ``store.fsync_directory`` is the
+    best-effort sync that never raises. Where a folder cannot be synced at all (Windows, or a filesystem
+    answering as above), file-level durability is the limit and nothing raises."""
+    if os.name == "nt":
+        return
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in _FOLDER_SYNC_UNSUPPORTED:
+            raise
+    finally:
+        os.close(fd)
 
 
 def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) -> None:

@@ -303,6 +303,122 @@ def test_rejected_light_draft_stops_acting_and_reopens_its_rows(tmp_path):
 
 # --- new: coverage, folds, heads, quotes, marks, rebuild -------------------------------------------
 
+@pytest.mark.parametrize("origin", ["mind", "accepted", "candidate"])
+def test_withdrawal_reopens_only_its_rows_and_replays_without_changing_sources(tmp_path, origin):
+    store = ChronicleStore(tmp_path)
+    target = page(store, "owner-request", "my-answer", author=MIND if origin == "mind" else LIGHT,
+                  text="I recorded the wrong outcome.", metadata={"candidate": True} if origin == "candidate" else {}).record
+    if origin != "mind":
+        assert store.decide(target["id"], True, MIND, "I accept this telling").ok
+    other = page(store, "other-owner-request", at=2, metadata={"lead_rule": 1}).record
+    account = store.publish_account(text="My account keeps the earlier source.", sources=[target["id"]],
+                                    author=MIND, room_id="r").record
+    assert store.select_account(account["id"], replaces=[target["id"]], author=MIND, reason="my account").ok
+    originals = store.records()
+    before = store.log_path.read_bytes()
+    assert store.sealed_row_refs("r") == {"owner-request", "my-answer", "other-owner-request"}
+    assert store.decide(target["id"], True, MIND, "accept again").reason == "invalid"
+    assert store.log_path.read_bytes() == before
+
+    # Another integrating focus is still the installation's one mind.
+    author = {"kind": "mind", "task_id": "later", "focus": {"role": "consciousness"}}
+    withdrawn = store.decide(target["id"], False, author, "The source is withdrawn: I missed the owner's condition.")
+    assert withdrawn.ok and withdrawn.record["author"] == author
+    assert store.room_head("r") == withdrawn.record["sequence"]
+    assert store.log_path.read_bytes().startswith(before)
+    assert store.sealed_row_refs("r") == {"other-owner-request"}
+    assert [r["id"] for r in store.pages_of_room("r")] == [other["id"]]
+    assert store.interpret([target])[0]["status"] == "rejected"
+    source = store.accounts()[0]["sources"][0]
+    assert source["status"] == ("final" if origin == "mind" else "accepted")
+    assert source["status_now"] == "rejected" and source["sha256"]
+    assert store.accounts()[0]["selection"]["shown"] is True
+    assert [store.get(r["id"]) for r in originals] == originals
+
+    interpreted = store.interpreted()
+    store.index_path.unlink()
+    assert store.interpreted() == interpreted
+    assert store.sealed_row_refs("r") == {"other-owner-request"}
+    assert [store.get(r["id"]) for r in originals] == originals  # bytes, sequences and lead metadata
+    after = store.log_path.read_bytes()
+    for accepted in (False, True):
+        refused = store.decide(target["id"], accepted, MIND, "try the same record again")
+        assert refused.reason == "invalid" and refused.conflict_ids == (withdrawn.record["id"],)
+    assert store.log_path.read_bytes() == after
+    assert page(store, "owner-request", "my-answer", text="A new telling of the same sources.").ok
+
+
+@pytest.mark.parametrize("origin", ["mind", "accepted"])
+@pytest.mark.parametrize("kind", ["page", "part"])
+def test_withdrawal_requires_the_acting_part_first_and_unfolds_exact_members(tmp_path, origin, kind):
+    store = ChronicleStore(tmp_path)
+    first = page(store, "first-row").record
+    if kind == "page":
+        target = page(store, "target-row", at=1, author=MIND if origin == "mind" else LIGHT).record
+    else:
+        target = store.publish_part(room_id="r", text="The inner part.", member_ids=[first["id"]],
+                                    author=MIND if origin == "mind" else LIGHT,
+                                    expected_sequence=store.room_head("r")).record
+    if origin == "accepted":
+        assert store.decide(target["id"], True, MIND, "I adopt it").ok
+    outer = store.publish_part(room_id="r", text="The outer part.", member_ids=[target["id"]],
+                               author=MIND, expected_sequence=store.room_head("r")).record
+    sealed = store.sealed_row_refs("r")
+    before = store.log_path.read_bytes()
+    blocked = store.decide(target["id"], False, MIND, "Withdraw the inner telling")
+    assert (blocked.reason, blocked.conflict_ids) == ("already_folded", (outer["id"],))
+    assert "withdraw that part first" in blocked.detail
+    assert store.log_path.read_bytes() == before and store.sealed_row_refs("r") == sealed
+    assert target["id"] in store.folded_members(outer["id"])
+    assert store.decide(outer["id"], False, MIND, "Withdraw the outer part first").ok
+    assert store.folded_members(outer["id"]) == []
+    assert store.sealed_row_refs("r") == sealed  # Unfolding never unseals a member page.
+    assert store.decide(target["id"], False, MIND, "Now withdraw the inner telling").ok
+    assert store.folded_members(target["id"]) == []
+    assert store.sealed_row_refs("r") == {"first-row"}
+    assert store.interpret([first])[0]["folded_into"] is None
+    refused = store.publish_part(room_id="r", text="Cannot fold a withdrawn record.", member_ids=[target["id"]],
+                                 author=MIND, expected_sequence=store.room_head("r"))
+    assert refused.reason == "invalid"
+    view = store.interpreted()
+    store.index_path.unlink()
+    assert store.interpreted() == view
+    assert store.folded_members(outer["id"]) == [] and store.acting_parts() == 0
+    assert store.sealed_row_refs("r") == {"first-row"}
+    assert store.publish_part(room_id="r", text="A new part can fold the surviving page.", member_ids=[first["id"]],
+                              author=MIND, expected_sequence=store.room_head("r")).ok
+
+
+@pytest.mark.parametrize("role", ["child", "nanny"])
+@pytest.mark.parametrize("author_kind", ["mind", "helper"])
+def test_delegated_focus_cannot_withdraw_through_either_store_entry(tmp_path, role, author_kind):
+    store = ChronicleStore(tmp_path)
+    target = page(store, "kept").record
+    author = {"kind": author_kind, "task_id": "delegated", "focus": {"role": role}}
+    before = store.log_path.read_bytes()
+    assert store.decide(target["id"], False, author, "withdraw").reason == "not_integrator"
+    assert store.publish([{"kind": "decision", "target_id": target["id"], "room_id": "r", "accepted": False,
+                           "author": author, "reason": "withdraw"}]).reason == "not_integrator"
+    assert store.log_path.read_bytes() == before and store.sealed_row_refs("r") == {"kept"}
+    assert store.decide(target["id"], False, MIND, "The integrating mind withdraws").ok
+
+
+def test_withdrawal_does_not_extend_to_other_record_kinds_or_rooms(tmp_path):
+    store = ChronicleStore(tmp_path)
+    target = page(store, "kept").record
+    old = legacy(store, 0)
+    saved_note = note(store)
+    account = store.publish_account(text="My account.", sources=[target["id"]], author=MIND, room_id="r").record
+    before = store.log_path.read_bytes()
+    for record in (old, saved_note, account):
+        assert store.decide(record["id"], False, MIND, "wrong kind").reason == "invalid"
+    assert store.decide("absent", False, MIND, "not here").reason == "target_missing"
+    assert store.publish([{"kind": "decision", "target_id": target["id"], "room_id": "elsewhere", "accepted": False,
+                           "author": MIND, "reason": "wrong room"}]).reason == "invalid"
+    assert store.log_path.read_bytes() == before
+    assert store.decide(target["id"], False, MIND, "the right page").ok
+
+
 def test_corrections_need_the_current_revision_and_refusals_carry_no_text(tmp_path):
     store = ChronicleStore(tmp_path)
     base = note(store, "original")

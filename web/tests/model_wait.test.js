@@ -231,3 +231,29 @@ test('each wait reason has the one label its row shows, and a route whose access
     assert.equal(modelWaitReasonLabel('quota', false), 'Waiting for provider access');
     assert.equal(modelWaitReasonLabel('connection_unavailable', false), 'Key unavailable', 'a key that is off is off, watched or not');
 });
+
+test('Sign in again opens the provider page that holds the sign-in card; Settings opens Accounts', async (t) => {
+    const env = installDom();
+    t.after(() => restoreDom(env.prior));
+    const root = document.createElement('div');
+    const timelineEl = document.createElement('div');
+    root.append(timelineEl);
+    const opened = [];
+    const logins = [];
+    const controller = createModelWaitController({ getRecord: () => ({ root, timelineEl, finished: false }),
+        openSettings: async (path) => { opened.push(path); return true; },
+        login: async (harness, profile) => { logins.push([harness, profile]); } });
+    t.after(() => controller.destroy());
+    controller.observe('task', { model_waits: { 'wait-light': row({ reason: 'auth', worker_slot_held: false }) } });
+    root.querySelector('[data-wait-login]').click();
+    await new Promise((done) => setTimeout(done, 0));
+    assert.deepEqual(opened, ['accounts/codex']);
+    assert.deepEqual(logins, [['codex', 'personal']]);
+    root.querySelector('[data-wait-settings]').click();
+    assert.deepEqual(opened, ['accounts/codex', 'accounts'], 'Settings opens the list, not a provider');
+    controller.observe('task', { model_waits: { 'wait-light': row({ reason: 'auth', revision: 2, credential_profile_id: '' }) } });
+    root.querySelector('[data-wait-login]').click();
+    await new Promise((done) => setTimeout(done, 0));
+    assert.equal(opened.at(-1), 'accounts', 'without an exact account there is no provider page to sign in on');
+    assert.equal(logins.length, 1);
+});

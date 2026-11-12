@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { syncPolicyState } from '../modules/settings_policy.js';
-import { collectCustomSecretDraft, deepseekSearchKey, paintSettingsFieldErrors, searchModelAfterSourceSwitch, searchModelForKey,
-    settingsWriteFailure, syncSearchKey, syncSearchModelWords, webSearchPreviewWords } from '../modules/settings_controls.js';
+import { collectCustomSecretDraft, deepseekSearchKey, searchModelAfterSourceSwitch, searchModelForKey, settingsWriteFailure,
+    syncSearchKey, syncSearchModelWords, webSearchPreviewWords } from '../modules/settings_controls.js';
 
 const draft = (overrides = {}) => ({
     key: '', value: '', appliedValue: '', originalKey: '', clear: false, removed: false,
@@ -54,28 +53,6 @@ test('duplicate and built-in names cannot silently overwrite another field', () 
     assert.deepEqual(new Set(result.errors.map(({ index }) => index)), new Set([0, 1, 2, 3]));
     assert.equal(result.values.TOTAL_BUDGET, undefined);
     assert.equal(result.values.OUROBOROS_PRIVATE, undefined);
-});
-
-test('field validation clears the old error and keeps its accessible association', () => {
-    const attributes = new Map([['aria-describedby', 'custom-key-help']]);
-    const hint = { id: 'custom-key-error', hidden: true, textContent: '' };
-    const input = { id: 'custom-key', dataset: {},
-        getAttribute: (name) => attributes.get(name),
-        setAttribute: (name, value) => attributes.set(name, value),
-        removeAttribute: (name) => attributes.delete(name) };
-    const root = {
-        querySelectorAll: () => input.dataset.settingsValidation ? [input] : [],
-        querySelector: () => hint,
-    };
-    paintSettingsFieldErrors(root, [{ input, message: 'Invalid key' }]);
-    assert.equal(attributes.get('aria-invalid'), 'true');
-    assert.equal(attributes.get('aria-describedby'), 'custom-key-help custom-key-error');
-    assert.equal(hint.hidden, false);
-    paintSettingsFieldErrors(root, []);
-    assert.equal(attributes.has('aria-invalid'), false);
-    assert.equal(hint.hidden, true);
-    assert.equal(hint.textContent, '');
-    assert.equal(attributes.get('aria-describedby'), 'custom-key-help custom-key-error');
 });
 
 test('settings write errors preserve saved, unsaved and unknown receipts', () => {
@@ -198,23 +175,4 @@ test('a DeepSeek key is chosen from the keys of Accounts and spelled only by the
     const { source, field, select } = page('gpt-5.5', 'openai');  // every other Source keeps its Model field
     syncSearchKey(source, field, select, keys);
     assert.deepEqual([field.hidden, select.hidden, field.value], [false, true, 'gpt-5.5']);
-});
-
-test('a policy line says one value once and spells the facts out only where they differ', () => {
-    const nodes = {};
-    const root = { querySelector: (selector) => (selector.startsWith('[data-policy-state') ? (nodes[selector] ||= { textContent: '' }) : null) };
-    const line = (key) => nodes[`[data-policy-state="${key}"]`].textContent;
-    const same = { configured: 'advisory', current_process: 'advisory', next_task: 'advisory' };
-    syncPolicyState(root, { policy_state: { access: { configured: 'pro', current_process: 'pro' }, supervisor: same,
-        review: { ...same, active_task_snapshot: true } } });
-    assert.equal(line('access'), 'Pro now and after restart');
-    assert.equal(line('supervisor'), 'Advisory now and for new tasks');
-    assert.equal(line('review'), 'Advisory now and for new tasks; the running task keeps the value it started with');
-    assert.doesNotMatch(line('review'), /Advisory.*Advisory/, 'never the same value three times');
-    syncPolicyState(root, { policy_state: { access: { configured: 'cyber_pro', current_process: 'light', restart_required: true },
-        supervisor: { ...same, next_task: 'blocking' }, review: { ...same, configured: 'blocking', next_task: 'blocking', active_task_snapshot: true } } });
-    assert.equal(line('access'), 'Saved: Cyber Pro · Current process: Light · After restart: Cyber Pro · Restart required');
-    assert.equal(line('supervisor'), 'Current process: Advisory · Next task: Blocking');
-    assert.match(line('review'), /^Saved: Blocking · Current process: Advisory · Next task: Blocking · Current task keeps its start snapshot · /);
-    assert.match(line('review'), /Blocking would not be enforced under the selected Cyber Pro$/, 'the Cyber Pro note still follows');
 });

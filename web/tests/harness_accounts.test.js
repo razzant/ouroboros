@@ -1259,7 +1259,7 @@ test('a harness with no row only says "no account connected" once the store was 
     // NOT READ says nobody asked. It may not name a CAUSE the row cannot
     // see: a runtime awaiting repair and a foreign daemon on the stale port
     // arrive here as the same unread facet, and the tab's banner owns the why.
-    assert.match(bareRowStatusText('not_read'), /daemon was never asked/);
+    assert.equal(bareRowStatusText('not_read'), 'Not checked yet', 'only that it has not happened yet');
     assert.doesNotMatch(bareRowStatusText('not_read'), /is not running/);
     assert.match(bareRowStatusText('failed'), /did not answer/);
     assert.match(bareRowStatusText('transport'), /request did not complete/);

@@ -270,7 +270,7 @@ def test_settings_save_persists_ints_and_the_canonical_unlimited(monkeypatch):
     saved: dict = {}
 
     def _fake_write(payload, *, allow_elevation=False, allow_context_lowering=False,
-                    authored_keys=(), boundary=None):
+                    authored_keys=(), boundary=None, expected_digest="", if_unchanged=None, unset=()):
         saved.clear()
         saved.update(payload)
         if boundary is not None:

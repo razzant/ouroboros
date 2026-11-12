@@ -4,8 +4,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { allowedOptions, checkerFieldsNote, checkerReads, checkerUses, deploymentNote, deploymentOf, fixCheckerField,
-    offerAllowedChoices, safetyExitsNote, syncPolicyState } from '../modules/settings_policy.js';
+import { allowedOptions, applyPolicyToRows, checkerFieldsNote, checkerReads, checkerUses, deploymentNote, deploymentOf,
+    policyValueLabel, safetyExitsNote } from '../modules/settings_policy.js';
+import { rowById } from '../modules/settings_rows.js';
 import { connectionRowFacts } from '../modules/settings_connections.js';
 import { createModelRolesEditor } from '../modules/model_roles.js';
 
@@ -23,8 +24,12 @@ test('a ceiling and a floor leave only the choices the policy file allows; unman
     assert.equal(allowedOptions(ACCESS, null, 'access'), ACCESS);
     assert.equal(allowedOptions(LEVELS, { access_max: 'pro' }, 'coverage'), LEVELS, 'a field constrains only what it names');
     assert.equal(deploymentNote(DEPLOYMENT, 'access'), 'Your organization allows up to Pro');
-    assert.equal(deploymentNote(DEPLOYMENT, 'coverage'), 'Set by your organization: Full');
+    assert.equal(deploymentNote(DEPLOYMENT, 'coverage'), 'Set by your organization: + Commands');
+    assert.equal(deploymentNote({ min_coverage: 'light' }, 'coverage'), 'Your organization requires at least Outgoing');
     assert.equal(deploymentNote({ access_max: 'light' }, 'access'), 'Set by your organization: Light');
+    // `light` is a word of two scales: Access's unless the Safety scale is asked for.
+    assert.deepEqual([policyValueLabel('light'), policyValueLabel('light', 'coverage'), policyValueLabel('full'), policyValueLabel('cyber_pro')],
+        ['Light', 'Outgoing', '+ Commands', 'Cyber Pro']);
     assert.equal(deploymentNote(null, 'access'), '');
     assert.equal(deploymentOf({ policy_state: { deployment: DEPLOYMENT } }), DEPLOYMENT);
     assert.equal(deploymentOf({ policy_state: {} }), null);
@@ -63,66 +68,40 @@ test('a built-in checker fixes only the flat fields it reads, and says so beside
     assert.equal(checkerFieldsNote(['Base URL', 'API key']),
         'Base URL and API key: set by your organization, its Safety Supervisor uses them.');
     assert.equal(checkerFieldsNote([]), '');
-    const input = { readOnly: false };
-    const note = { hidden: true, textContent: '' };
-    fixCheckerField(input, note, legacy, 'OPENAI_BASE_URL', 'Legacy OpenAI Base URL');
-    assert.deepEqual([input.readOnly, note.hidden], [true, false]);
-    assert.match(note.textContent, /^Legacy OpenAI Base URL: set by your organization/);
-    fixCheckerField(input, note, null, 'OPENAI_BASE_URL', 'Legacy OpenAI Base URL');
-    assert.deepEqual([input.readOnly, note.hidden, note.textContent], [false, true, ''], 'unmanaged: as it was');
     const shared = { enabled: true, configured: true, usedBy: ['Main'], legacyAddress: 'https://organization.invalid/v1' };
-    assert.match(connectionRowFacts(shared).meta, /change the address in Settings → Accounts/);
+    assert.match(connectionRowFacts(shared).meta, /change the address in Settings → Accounts and keys/);
     assert.doesNotMatch(connectionRowFacts({ ...shared, fixed: true }).meta, /change the address/,
         'a fixed row never points at a change its fields refuse');
 });
 
-test('the policy lines say a bound beside the facts and a fixed value alone', () => {
-    const nodes = {};
-    const root = { querySelector: (selector) => (selector.startsWith('[data-policy-state') ? (nodes[selector] ||= { textContent: '' }) : null) };
-    const line = (key) => nodes[`[data-policy-state="${key}"]`].textContent;
-    const same = { configured: 'full', current_process: 'full', next_task: 'full' };
-    syncPolicyState(root, { policy_state: { access: { configured: 'pro', current_process: 'pro' }, supervisor: same,
-        review: { configured: 'advisory', current_process: 'advisory' }, deployment: DEPLOYMENT } });
-    assert.equal(line('access'), 'Pro now and after restart · Your organization allows up to Pro');
-    assert.equal(line('supervisor'), 'Set by your organization: Full');
-    assert.equal(line('supervisor_consciousness'), 'Set by your organization: Full');
-    syncPolicyState(root, { policy_state: { access: { configured: 'pro', current_process: 'pro' }, supervisor: same,
-        review: { configured: 'advisory', current_process: 'advisory' } } });
-    assert.equal(line('access'), 'Pro now and after restart', 'unmanaged lines are unchanged');
-    assert.equal(line('supervisor'), 'Full now and for new tasks');
-});
+const POLICY_ROWS = ['OUROBOROS_RUNTIME_MODE', 'OUROBOROS_SAFETY_MODE', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'OUROBOROS_REVIEW_ENFORCEMENT'];
+const policyRows = (policy_state) => {
+    const rows = applyPolicyToRows(POLICY_ROWS.map((id) => structuredClone(rowById(id))), policy_state ? { _meta: { policy_state } } : null, rowById);
+    return Object.fromEntries(rows.map((row) => [row.id, row]));
+};
+const offered = (row) => row.control.options.map((option) => option.value);
 
-function segmented(values, holder) {
-    return { hidden: false, title: 'Lowering asks first', parentElement: holder, values,
-        querySelectorAll() { return this.values.map((value) => ({ dataset: { effortValue: value } })); },
-        set outerHTML(html) { holder.child = segmented(JSON.parse(html).map(({ value }) => value), holder); } };
-}
-
-test('a bounded segmented choice is drawn again by the one renderer; one left is no choice', () => {
-    const holder = { child: null, querySelector() { return this.child; } };
-    holder.child = segmented(LEVELS.map(({ value }) => value), holder);
-    const root = { querySelector: () => holder.child };
-    const renders = [];
-    const binds = [];
-    const render = ({ options, title }) => { renders.push({ options, title }); return JSON.stringify(options); };
-    const fixed = offerAllowedChoices(root, { target: 's-safety-mode', options: LEVELS, axis: 'coverage' }, DEPLOYMENT,
-        { render, bind: (node) => binds.push(node) });
-    assert.equal(fixed, true);
-    assert.deepEqual(renders.map(({ options }) => options.map(({ value }) => value)), [['full']]);
-    assert.equal(renders[0].title, 'Lowering asks first', 'the drawn group keeps its own title');
-    assert.deepEqual(binds, [holder], 'bound like the original, on its own holder');
-    assert.equal(holder.child.hidden, true, 'a fixed level is said by its policy line, not offered');
-    assert.equal(offerAllowedChoices(root, { target: 's-safety-mode', options: LEVELS, axis: 'coverage' }, DEPLOYMENT,
-        { render, bind: (node) => binds.push(node) }), true);
-    assert.equal(renders.length, 1, 'a reload draws nothing again');
-    // Unmanaged: the drawn group already holds every option; nothing is drawn again or hidden.
-    const plainHolder = { child: null, querySelector() { return this.child; } };
-    plainHolder.child = segmented(LEVELS.map(({ value }) => value), plainHolder);
-    const again = [];
-    assert.equal(offerAllowedChoices({ querySelector: () => plainHolder.child }, { target: 's-safety-mode', options: LEVELS,
-        axis: 'coverage' }, null, { render: (args) => again.push(args), bind: () => again.push('bind') }), false);
-    assert.deepEqual(again, []);
-    assert.equal(plainHolder.child.hidden, false);
+test('a row a deployment bounds offers only what is allowed and says whose limit it is; a fixed one says its value', () => {
+    const managed = policyRows({ deployment: DEPLOYMENT });
+    assert.deepEqual(offered(managed.OUROBOROS_RUNTIME_MODE), ['light', 'advanced', 'pro']);
+    assert.equal(managed.OUROBOROS_RUNTIME_MODE.meta, 'Your organization allows up to Pro');
+    for (const id of ['OUROBOROS_SAFETY_MODE', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE']) {
+        assert.deepEqual(offered(managed[id]), ['full'], 'a fixed level stays on the page as its one option, never hidden');
+        assert.equal(managed[id].meta, 'Set by your organization: + Commands');
+        // The chosen option's line is what the row shows: it carries the organization's sentence too.
+        assert.equal(managed[id].control.options[0].note,
+            'Shell commands and scripts are read first too. File edits are not. Set by your organization: + Commands.');
+    }
+    const floor = policyRows({ deployment: { min_coverage: 'light' } });
+    assert.deepEqual(offered(floor.OUROBOROS_SAFETY_MODE), ['light', 'full']);
+    assert.match(floor.OUROBOROS_SAFETY_MODE.control.options[0].note, / Your organization requires at least Outgoing\.$/);
+    assert.deepEqual(offered(floor.OUROBOROS_RUNTIME_MODE), ['light', 'advanced', 'pro', 'cyber_pro'], 'a field constrains only what it names');
+    // Unmanaged, or before any read: the rows as they are described.
+    for (const plain of [policyRows({}), policyRows(null)]) {
+        for (const id of POLICY_ROWS) assert.deepEqual([plain[id].meta, plain[id].control], [rowById(id).meta, rowById(id).control], id);
+    }
+    // The page's copies change; the descriptors never do.
+    assert.equal(rowById('OUROBOROS_SAFETY_MODE').control.options.length, 3);
 });
 
 test('a managed Supervisor slot is shown, never collected: the raw choice stays the server’s to keep', () => {

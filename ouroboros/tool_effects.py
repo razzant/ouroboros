@@ -21,7 +21,7 @@ may be dotted (``body.channel``) to name a nested argument.
 
 Consumers: ``place_guard``'s Advises and targeted Silent/Paused refusals,
 routeless-note coverage (``place_reply``), and ``safety`` (declared reads skip
-Light/Full checks; ``message`` gets speech semantics).
+the Outgoing and + Commands checks; ``message`` gets speech semantics).
 Built-in tools are governed by their own policy tables and answer ``""``.
 """
 

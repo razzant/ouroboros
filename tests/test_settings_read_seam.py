@@ -692,11 +692,12 @@ def test_a_retired_key_is_absent_from_every_surface_that_would_react_to_it():
     retired keys carry exactly such a row today. What may not survive is the DEFAULT
     column offering a value, because that is the table saying the key is still a knob."""
     from ouroboros import config as cfg
+    from ouroboros import settings_scales
     from ouroboros.gateway import settings as settings_mod
 
     documented = architecture_text().splitlines()
     for key in cfg.RETIRED_SETTING_KEYS:
-        assert key not in settings_mod._IMMEDIATE_KEYS, key
+        assert key not in settings_scales.IMMEDIATE_SETTINGS, key
         assert key not in settings_mod._RESTART_REQUIRED_KEYS, key
         for row in [line for line in documented if line.startswith(f"| {key} |")]:
             default = row.split("|")[2].strip()

@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from tests.settings_browser_helpers import open_settings
 from tests.test_subscription_setup_browser import capture
 from tests.test_subscription_setup_browser import subscription_ui as _subscription_ui
 
@@ -12,12 +13,8 @@ pytestmark = [pytest.mark.ui_browser]
 
 
 def open_appearance(page):
-    """Reach the only Appearance control the main document has: Settings."""
-    page.locator('[data-nav-page="settings"]').click()
-    page.wait_for_selector('#page-settings.active')
-    page.locator('[data-settings-tab="appearance"]').click()
-    page.wait_for_selector('[data-settings-panel="appearance"].active')
-    return page.locator('[data-settings-panel="appearance"] [data-theme-control]')
+    """Reach the only Appearance control the main document has: Settings › Appearance."""
+    return open_settings(page, 'appearance').locator('[data-theme-control]')
 
 
 def test_theme_choice_reload_and_main_surfaces(subscription_ui):

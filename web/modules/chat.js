@@ -176,7 +176,7 @@ export function initChat(ctx) {
 const taskKey = (value) => String(value || '').trim();
 
 export function createChatInstance({
-    ws, state, openSettingsTab, openDashboardTab,
+    ws, state, openSettings, openDashboardTab,
     stateSnapshots,
     chatId = 1, projectId = '', idPrefix = 'chat', mountEl = null,
     asPanel = false, title = pageLabel('chat'),
@@ -266,7 +266,7 @@ export function createChatInstance({
     const drawTextBubble = createTextBubbles({ chatMedia, replies, feed: messagesDiv, isMain, ownProjectId: projectId,
         onDomWrite: withStableViewport });
     const mainWaiting = isMain ? createMainWaiting({ page, messagesDiv, insertMessageNode, stampNodeTimestamp,
-        openSettings: openSettingsTab, refresh: refreshHeaderControlState, mutate: withStableViewport,
+        openSettings, refresh: refreshHeaderControlState, mutate: withStableViewport,
         decision: () => chatDecision, revealQuestion: (...a) => revealQuestion(...a), reading: () => reading }) : null;
     const chatDecision = createChatDecision({
         apiFetch,
@@ -343,7 +343,7 @@ export function createChatInstance({
     // with the controls (the record and its no-reopen wait ledger stay).
     const modelWaits = createModelWaitController({
         getRecord: (id, create = true) => (create ? getLiveCardRecord(id) : liveCardRecords.get(id)),
-        openSettings: openSettingsTab, onDomWrite: withStableViewport, notify: showToast,
+        openSettings, onDomWrite: withStableViewport, notify: showToast,
         onChange: (id) => { ensureLiveCardVisible(liveCardRecords.get(id)); syncChatStatus(); },
     });
     // A card let go for good: its node and per-card facts beside it (a reusable slot keeps them: disposeLiveCard).
@@ -2631,7 +2631,7 @@ export function createChatInstance({
 
     // The composer (composer.js): its field, the room's capsules, attachments and the send path.
     composer = createComposer({ page, byId, ws, replies, chatSessionId, isMain, chatId, projectId, storeKey,
-        refreshState: refreshHeaderControlState, openSettings: openSettingsTab, onLayout: () => updateMessagesPadding(),
+        refreshState: refreshHeaderControlState, openSettings, onLayout: () => updateMessagesPadding(),
         onSent: showSent, readingBack: () => !reading.stick && reading.ownMove });
 
     // A send the composer made, shown in the feed: the bubble, its doubt until the host's saved echo, `Sending...`.
