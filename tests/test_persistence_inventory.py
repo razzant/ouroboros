@@ -992,7 +992,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 466 -> 468: the measurement fold a held store refused is a mark any process sees,
 # ``state/subagent_metrics.owed``, and the job's captured ``state/subagent_metrics.taken``
 # (``ouroboros/subagent_metrics.py``); their own row.
-EXPECTED_SCAN_PATHS = 468
+# 468 -> 470: the accepted wake transition chain, ``state/consciousness_transitions`` and its
+# ``<sha256>.json`` links (``ouroboros/consciousness_transitions.py``); its own row.
+EXPECTED_SCAN_PATHS = 470
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
