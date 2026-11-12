@@ -222,6 +222,75 @@ def test_a_failed_auto_catalog_read_plans_by_the_pools_smallest_fresh_statement(
     assert _probe(fresh, allow_fetch=False).window_tokens == 0  # not probed: unknown, no pool
 
 
+def _resolve(monkeypatch, root, *, model_route=None, pin=None):
+    """The fit's and every rebind's route question, through the production route builder."""
+    from ouroboros import config, context_fit as cf, server_runtime
+
+    monkeypatch.setattr(config, "runtime_settings", lambda: {"OUROBOROS_MODEL": MODEL})
+    monkeypatch.setattr(config, "DATA_DIR", root)
+    monkeypatch.setattr(server_runtime, "apply_runtime_provider_defaults", lambda s: (s, False, []))
+    return cf.resolve_context_fit_route({"model": MODEL, "model_role": "main", "task_metadata": {},
+                                         "model_route": model_route or {}, "credential_profile_id": pin}, allow_fetch=True)
+
+
+def _answered(route):
+    """Restored messages whose last answer of this model names ``route`` (the conversation's account)."""
+    return [{"role": "user", "content": "go"}, {"role": "assistant", "content": "", "nativeContinuation": {"route": route}}]
+
+
+@pytest.mark.parametrize("pin", [None, "account-a"])
+def test_a_resumed_turn_reads_the_conversations_fresh_record_and_asks_only_its_own_question(tmp_path, monkeypatch,
+                                                                                         catalog, pin):
+    """H2 (W2, 12.11.2026): a resumed turn binds the account its conversation names (``owner_wait._conversation_account``).
+    That account's fresh record answers with zero questions; a missing or expired record, or an identity the record does
+    not match, asks exactly one: the route's own question (Auto stays Auto, a pin the pin), never the preference as a pin."""
+    import datetime
+    from types import SimpleNamespace
+    from ouroboros.owner_wait import _conversation_account
+
+    seeded = _resolve(monkeypatch, tmp_path, pin=pin)[1]  # the build's own question recorded account-a
+    assert len(catalog["calls"]) == 1 and seeded.account_fingerprint == "identity-a"
+    ctx = SimpleNamespace(active_model=MODEL, active_use_local=False, context_fit_plan=None)
+
+    def resumed(route):
+        identity = _conversation_account(ctx, _answered(route), "main", pin)
+        return _resolve(monkeypatch, tmp_path, model_route=identity, pin=pin)[1]
+
+    same = resumed({**_binding(seeded), "credentialProfileId": "account-a"})
+    assert len(catalog["calls"]) == 1 and same.to_json() == seeded.to_json()  # fresh record: no question
+    relogged = resumed({**_binding(seeded), "accountFingerprint": "identity-new"})
+    assert catalog["calls"][1:] == [("test-source", pin, "exact-model")]  # changed identity: one, the route's own
+    assert relogged.account_fingerprint == "identity-a"  # the engine's answer, not a name matched to a record
+    later = ce.utc_now() + datetime.timedelta(hours=25)
+    monkeypatch.setattr(ce, "utc_now", lambda: later)
+    catalog["value"]["observedAt"] = later.isoformat()
+    expired = resumed(_binding(seeded))
+    assert catalog["calls"][2:] == [("test-source", pin, "exact-model")] and not expired.stale  # expired: exactly one
+
+
+def test_the_rebind_after_tool_reconciliation_reuses_the_first_answer(tmp_path, monkeypatch, catalog):
+    """A restore rebinds twice when its tools changed; the second rebind binds the first one's answer, so it reads that
+    record instead of asking again."""
+    from types import SimpleNamespace
+    from ouroboros import continuation_tools, loop, owner_wait
+
+    calls = []
+
+    def rebind(plan, _tools, _messages, **route):
+        calls.append(route["model_route"])
+        evidence = _resolve(monkeypatch, tmp_path, model_route=route["model_route"])[1]
+        return SimpleNamespace(model_route=_binding(evidence) if evidence.account_fingerprint else {}), "max"
+
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", rebind)
+    monkeypatch.setattr(continuation_tools, "reconcile_restored_tools", lambda *_a: True)
+    monkeypatch.setattr(owner_wait, "sanction_rewrite", lambda *_a, **_kw: None)
+    ctx = SimpleNamespace(context_fit_plan=None, active_model=MODEL, active_use_local=False, task_metadata={},
+                          model_wait_context=None, active_context_mode="max")
+    owner_wait.rebind_restored_route(SimpleNamespace(_ctx=ctx), {"tool_schemas": []}, [{"role": "user", "content": "go"}])
+    assert calls[0] == {} and calls[1]["accountFingerprint"] == "identity-a"  # no answer yet: the route's own question
+    assert len(catalog["calls"]) == 1  # once, not twice
+
+
 def test_exact_observed_binding_reuses_only_its_cache(tmp_path, catalog):
     first = _probe(tmp_path)
     options = ce.model_account_options(MODEL, model_route=_binding(first))

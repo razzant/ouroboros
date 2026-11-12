@@ -598,6 +598,9 @@ def resolve_context_fit_route(
     from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY, model_role_option
 
     route, settings = _context_route(task)
+    # A carried account (the conversation's, or an observed receipt) is looked up, never asked as a pin: when its
+    # fresh record is missing the question stays the route's own (Auto, or the role's pin).
+    carried = route["provider"] == "claudexor" and bool(route["options"].get("account_fingerprint"))
     evidence = probe(
         DATA_DIR,
         provider=route["provider"],
@@ -606,6 +609,8 @@ def resolve_context_fit_route(
         use_local=route["use_local"],
         allow_fetch=allow_fetch,
         options=route["options"] or None,
+        **({"ask": {"source_id": route["options"]["source_id"], "credential_profile_id": route["account_pin"]}}
+           if carried else {}),
     )
     if route["provider"] == "claudexor" and getattr(evidence, "account_fingerprint", ""):  # the account receipts name
         route["options"] = {**route["options"], **{key: getattr(evidence, key) for key in (

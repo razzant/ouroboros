@@ -1116,18 +1116,26 @@ def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, 
                                   f"{newest.replace('T', ' ')[:16]} (catalog unavailable)"))
 
 
-def probe(drive_root: Any, **route) -> CapabilityEvidence:
+def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
 
     One catalog read serves both: a read that answered also states the output limit, and a read that failed (live, its
     ten-minute record, or a live failure that kept an exact prior record stale) is named by it, so neither is
     repeated. After a failed read a fetching probe of an unpinned
     Auto route plans by the pool's smallest fresh statement (``_pool_bound``); a reader that may not fetch keeps it unknown.
+
+    ``ask``: the route's own question (Auto, or the pin) when ``options`` name the exact account a send will prefer
+    (its identity). That account's fresh record answers without a question; otherwise ``ask`` is asked, so a
+    preference never becomes a pin, and the pool bound follows that question.
     """
     from dataclasses import asdict, replace
     from ouroboros.response_limits import probe_response_limit
 
-    evidence, read = _probe_window(drive_root, **route)
+    identity = str((route.get("options") or {}).get("account_fingerprint") or "") if ask is not None else ""
+    evidence, read = _probe_window(drive_root, **{**route, "allow_fetch": False}) if identity else (None, "")
+    if evidence is None or evidence.stale or evidence.source == SOURCE_NONE:  # no usable record of the identity
+        route = {**route, "options": ask} if identity else route
+        evidence, read = _probe_window(drive_root, **route)
     read_failed, stated = read == "failed" or evidence.status == STATUS_FAILED, dict(evidence.response_limit or {})
     if is_known(evidence, require_fresh=True):
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
