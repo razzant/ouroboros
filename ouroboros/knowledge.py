@@ -709,8 +709,8 @@ def write_knowledge_note(
     ``mode=revert`` publishes the stored bytes of an earlier ``version`` of this
     note exactly (``knowledge_versions.find_version``: verified by sha256), so the
     new revision is that version; a version with other archive metadata is
-    ``revert_changes_archive_state``, which names both states (a refused revert
-    never resends the note). ``summary`` (overwrite, append or edit)
+    ``revert_changes_archive_state``, which names both states (a revert refused
+    for its version never resends the note). ``summary`` (overwrite, append or edit)
     revises that one field in the same locked write through the ordinary metadata
     merge, after an overwrite's or append's own text, beside an edit or alone;
     replacing an existing note's summary needs its current revision, as every
