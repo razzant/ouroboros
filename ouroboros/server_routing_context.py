@@ -256,8 +256,13 @@ def _ended_work_facts(row: Dict[str, Any], task_id: str) -> Dict[str, Any]:
         origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
         if row.get("status") == "cancelled" and origin:
             # A cancel ended this work. Its row keeps the reason code of the stop that preceded the cancel
-            # (a pause, a spent budget): that is the earlier stop, never the cause of the end.
-            earlier = facts["cause"] if facts["cause"] not in ("", "cancelled") else None
+            # (a pause, a spent budget): that is the earlier stop, never the cause of the end. The owner-stop
+            # rail's own code (Stop now ending an inline turn, or the provider wait it ended) is that same
+            # stop, read as one command by the rail's reader, never an earlier one.
+            from supervisor.owner_stop import owner_stop_ending
+
+            same_stop = any(owner_stop_ending(row))
+            earlier = facts["cause"] if facts["cause"] not in ("", "cancelled") and not same_stop else None
             facts.update(cause="cancelled", **({"cancelled_by": str(origin["source"])} if origin.get("source") else {}),
                          **({"earlier_stop": earlier} if earlier else {}))
         offer = offer_view(row, task_id)

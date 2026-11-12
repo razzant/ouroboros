@@ -340,7 +340,8 @@ def _tool_call_steps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             calls[invocation_id] = {}
             order.append(invocation_id)
         held = calls[invocation_id].get(kind)
-        # A duplicate settlement never replaces a real result with a row the host settled.
+        # A duplicate settlement never replaces a real result with a row the host settled. The pair mirrors
+        # ouroboros.tool_call_log.HOST_SETTLED_STATUSES (this module stays stdlib-only); the shared test pins both.
         if held is None or (kind == "tool_call" and held.get("status") in ("host_error", "interrupted")
                             and row.get("status") not in ("host_error", "interrupted")):
             calls[invocation_id][kind] = row

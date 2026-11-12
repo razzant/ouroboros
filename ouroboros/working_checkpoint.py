@@ -86,7 +86,7 @@ RESUMED = "resumed"
 _MODEL_CALL = contextvars.ContextVar("working_model_call", default=None)
 HOLD_UNWRITABLE = "working_checkpoint_unwritable"
 _TRANSIENT_USAGE = ("execution_status", "reason_code", "_best_effort_extracted", "budget_pause_hold",
-                    "_llm_round_started", "working_checkpoint")
+                    "_llm_round_started", "working_checkpoint", "_round_refusals")  # the last: ``ROUND_REFUSALS_KEY``
 
 
 def _working_dir(root: Any, task_id: str, *, create: bool = False) -> pathlib.Path:

@@ -452,6 +452,8 @@ class _AnthropicLaneMixin:
         stop_reason = resp_dict.get("stop_reason")
         if stop_reason:
             message["stop_reason"] = str(stop_reason)
+        if isinstance(details := resp_dict.get("stop_details"), dict):  # a refusal's category and explanation: a call fact
+            usage["stop_details"] = {key: details.get(key) for key in ("category", "explanation")}
         message = retain_native_assistant_content(message, content_blocks, target)
         if tool_calls or str(message.get("content") or "").strip():
             message = mark_replayed_receipts_consumed(message)

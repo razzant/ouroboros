@@ -63,6 +63,15 @@ from ouroboros.utils import append_jsonl, atomic_write_json, truncate_review_art
 
 log = logging.getLogger(__name__)
 
+GIST_RULE = (
+    "On a root task or self-started run, `summary` is my gist of the run for my human and my later self, "
+    "in my human's language; in a tight window it stands for this work's replies. "
+    "Its first sentence says what the run did, found or decided: a clean finish shows it on the card, "
+    "room row and portal, and that sentence represents this work in my other conversations. "
+    "Further sentences, when the work needs them, keep what a later reader needs without the rows: "
+    "numbers, paths, decisions, promises, what remains and whose step it is."
+)
+
 
 # Guards parent-side shared ctx state mutated during (possibly parallel)
 # schedule_subagent emission within one tool-call round. Process-local: a parent
@@ -246,7 +255,7 @@ def get_tools() -> List[ToolEntry]:
             }, "required": ["subagent_id"], "additionalProperties": False},
         }, inspect_subagent_tool),
         ToolEntry("finish_task", {"name": "finish_task",
-            "description": "Select the complete answer after considering the work. Use finish when nothing of this work is left for you. If you end while a step of it is still yours (a deadline, a budget or a round limit can end a turn first), use stop, with a rationale naming what remains and why you end. "
+            "description": GIST_RULE + "\n\n" + "Select the complete answer after considering the work. Use finish when nothing of this work is left for you. If you end while a step of it is still yours (a deadline, a budget or a round limit can end a turn first), use stop, with a rationale naming what remains and why you end. "
                 "A full window is not such a limit: after a real size refusal the host can renew this same task's view from its exact record, keeping its custody and budget; an irreducible or non-shrinking view, or an excess a directly required handbook alone causes, can still refuse. "
                 "A root's stop records unfinished work for explicit Continue under the same limits (a reached deadline or money limit refuses it): your human's Continue or a later focus's continue_task starts a new root that reads this one, with a root's work room, also when this is a chat turn; continue_in_background keeps this same turn and its work room. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
                 "Ending closes this task's browser, task-session connections and services not kept alive, and any link they serve; when your work can go on only after your human's act or choice, a live root asks with escalate (wait_for_answer=true) before ending. "
@@ -260,8 +269,8 @@ def get_tools() -> List[ToolEntry]:
                 "pending_review": {"type": "string", "enum": ["wait", "finish"], "description": "For a finish while your result's review still runs: wait (the default) for its verdict, or, where offered, finish now with a rationale saying why; the result then shows Done with warnings and the reviewers' late verdict is kept for you. A stop waits for nothing and this has no effect on it: to wait for a review of yours that still runs, do not end; collect it with its review_reference, a $0 call that waits for seats still running in this process; after a restart it returns what is recorded, possibly still pending."},
                 "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
                 "silent": {"type": "boolean", "default": False, "description": "Finish without a message where allowed above and no human reply is owed; any answer stays internal (wake_silent)."},
-                "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. A child's sentence is dropped and named in its result (ignored: summary)."},
-                "fold_read": {"type": "boolean", "default": False, "description": "With summary, when this run read words here and owes nothing: my other conversations read this room's words up to this finish as this sentence with their address, until a page seals them. My human's words stay whole; nothing is sealed."},
+                "summary": {"type": "string", "default": "", "description": "The gist, as this tool's description says; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take its first sentence as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. A child's sentence is dropped and named in its result (ignored: summary)."},
+                "fold_read": {"type": "boolean", "default": False, "description": "With summary, when this run read words here and owes nothing: my other conversations read this room's words up to this finish as this gist with their address, until a page seals them. My human's words stay whole; nothing is sealed."},
             }, "required": ["action"]}}, _finish_task),
         ToolEntry("set_tool_timeout", {
             "name": "set_tool_timeout",
@@ -494,7 +503,8 @@ def get_tools() -> List[ToolEntry]:
                                             "(Auto stays Auto) plus the owner's wait-card choice; effort stays. 'return': "
                                             "if the primary refuses, configured routes are tried again. 'wait': if it "
                                             "refuses or is unreachable, wait for it where this turn may wait instead of "
-                                            "paid alternatives. The next real request tests it; no timer or probe does. "
+                                            "paid alternatives; after its content filter's stop nothing is there to wait for, "
+                                            "so this run ends as interrupted, without them. The next real request tests it; no timer or probe does. "
                                             "Not with model.")},
             }, "required": []},
         }, _switch_model),

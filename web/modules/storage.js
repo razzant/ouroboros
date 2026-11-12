@@ -109,24 +109,33 @@ function engineLine(fact, now) {
     return parts.join(' · ');
 }
 
+/** This place's own compression plane (task evidence, reviewer seat homes, closed log segments), never one total
+ *  under two places: what it compressed, what that saved where reported, and an unfinished pass said as such. */
+function compressionLine(fact, job) {
+    const files = plural(fact.compressed, '{n} file compressed', '{count} files compressed');
+    const line = isSize(fact.saved_bytes) ? fmt('{job}: {files}, {size} saved', { job, files, size: formatBytes(fact.saved_bytes) })
+        : fmt('{job}: {files}', { job, files });
+    return fact.state === 'pending' ? fmt('{line}, in progress', { line }) : line;
+}
+
 function jobPhrase(fact, now) {
     const job = fmt(JOB_WORDS[fact.id] || String(fact.id));
     if (fact.last_error) {
         return fmt('{job}: stopped by an error ({error}, {when})', { job, error: fact.last_error.class, when: whenLabel(fact.last_error.at, now) });
     }
-    if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a retirer pass: what it released, what it holds and why
-        const parts = [fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job,
-            plural(fact.released || 0, '{n} released', '{count} released'), holdsPhrase(fact, now),
-            fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
+    const compressing = fact.id === 'record_compression' && fact.state !== 'unsupported' && fact.compressed > 0;
+    if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a pass's report: what it released, what it holds and why
+        // A count only from a pass that keeps one: a job that holds without counting what it released says none, never 0.
+        // An unfinished compression pass that has compressed nothing in this place yet is still said as in progress.
+        const head = compressing ? compressionLine(fact, job)
+            : fact.id === 'record_compression' && fact.state === 'pending' ? fmt(JOB_STATES.pending, { job })
+                : fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job;
+        const parts = [head,
+            isSize(fact.released) ? plural(fact.released, '{n} released', '{count} released') : '',
+            holdsPhrase(fact, now), fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
         return parts.filter(Boolean).join(' · ');
     }
-    if (fact.id === 'record_compression' && fact.state !== 'unsupported' && fact.compressed > 0) {
-        // This place's own plane (task evidence, or reviewer seat homes), never one total under two places.
-        const files = plural(fact.compressed, '{n} file compressed', '{count} files compressed');
-        const line = isSize(fact.saved_bytes) ? fmt('{job}: {files}, {size} saved', { job, files, size: formatBytes(fact.saved_bytes) })
-            : fmt('{job}: {files}', { job, files });
-        return fact.state === 'pending' ? fmt('{line}, in progress', { line }) : line;
-    }
+    if (compressing) return compressionLine(fact, job);
     return fmt(JOB_STATES[fact.state] || '{job}: {state}', { job, state: String(fact.state || '') });
 }
 

@@ -635,7 +635,7 @@ def test_skill_author_finish_branch_outcomes_preserve_review_state(invoke, monke
     assert review_state.reviewed_content_hash == "reviewed"
 
 
-@pytest.mark.parametrize("case", ["identical", "advisory", "stopped"])
+@pytest.mark.parametrize("case", ["identical", "advisory", "stopped", "stopped_refused"])
 def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case):
     from ouroboros.tools import git, git_review_cycle
     monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory" if case == "advisory" else "blocking")
@@ -663,7 +663,8 @@ def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case
     invoke.ctx._pending_review_attempt = custody
     invoke.ctx._review_resume_pending = case == "overlap"
     invoke.ctx._review_advisory = []
-    if case in {"stopped", "advisory"}:
+    finalized = {}
+    if case in {"stopped", "stopped_refused", "advisory"}:
         monkeypatch.setattr(git, "_review_binding_precondition_error", lambda *a, **k: "")
         monkeypatch.setattr(git, "_preflight_and_tests_gate", lambda *a, **k: None)
         monkeypatch.setattr("ouroboros.review_state.compute_snapshot_hash", lambda *a, **k: "same")
@@ -675,13 +676,16 @@ def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case
         monkeypatch.setattr(git, "_install_paid_dispatch_stamp", lambda *a, **k: None)
         monkeypatch.setattr(git, "_run_parallel_review", lambda *a, **k: (None, None, "", []))
         monkeypatch.setattr(git, "_reconcile_and_clear_review_roster", lambda *a: None)
-        monkeypatch.setattr(git, "_aggregate_review_verdict", lambda *a: (False, "", "", [], []))
+        refusal = [{"item": "x", "reason": "r", "severity": "critical", "verdict": "FAIL"}]
+        monkeypatch.setattr(git, "_aggregate_review_verdict", lambda *a: (
+            (True, "REVIEW-FAIL-WORDS", "critical_findings", refusal, []) if case == "stopped_refused"
+            else (False, "", "", [], [])))
         monkeypatch.setattr(git, "_review_custody_pending", lambda *a, counted_only=False: False)
         monkeypatch.setattr(git, "_subject_binding_mismatch_outcome", lambda *a: None)
-        monkeypatch.setattr("ouroboros.review_custody.review_retry_cancelled", lambda *a: case == "stopped")
+        monkeypatch.setattr("ouroboros.review_custody.review_stop_cause", lambda *a: "stopped" if "stopped" in case else "")
         monkeypatch.setattr("ouroboros.deadline_utils.owner_deadline_exhausted_for_context", lambda *a: False)
         monkeypatch.setattr(git, "classify_review_block", lambda **k: "infra")
-        monkeypatch.setattr(git, "_finalize_blocked_review", lambda *a, **k: k["combined_msg"])
+        monkeypatch.setattr(git, "_finalize_blocked_review", lambda *a, **k: finalized.update(k) or k["combined_msg"])
     else:
         monkeypatch.setattr(git, "_run_parallel_review", lambda *a, **k: pytest.fail("refusal dispatched paid review"))
     def handler(ctx):
@@ -695,8 +699,12 @@ def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case
     result = invoke(handler)
     _assert_consumers(result, "LEGACY_WARNING" if case == "advisory" else "LEGACY_BLOCKED")
     assert invoke.ctx._pending_review_attempt is custody
-    if case == "stopped":
-        assert result.text.startswith("⚠️ REVIEW_STOPPED:")
+    if "stopped" in case:  # the stop's words, its own phase, and what the review returned kept, never replaced
+        assert result.text.startswith("⚠️ REVIEW_STOPPED: this work was stopped; this commit was not made.")
+        assert "review record" not in result.text, "no record id: no record is promised"
+        assert finalized["phase"] == "owner_control" and finalized["block_reason"] == "owner_stopped"
+        assert ("What the review returned:\nREVIEW-FAIL-WORDS" in result.text) is (case == "stopped_refused")
+        assert finalized["combined_findings"] == (refusal if case == "stopped_refused" else [])
 
 
 @pytest.mark.parametrize("refused", [False, True])
