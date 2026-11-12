@@ -340,17 +340,21 @@ test('a retirer pass says what it released and what it holds, by typed reason si
     assert.equal(removerLine(withErrors, NOW), `Engine program copies: last change ${whenLabel(at, NOW)} · 0 released · 2 errors`);
     // A job that holds without counting what it released (the retirement job's closed gate, compression's log plane):
     // the count is said only where the fact carries it, never as a zero.
-    const gate = [{ id: 'runtime_retirement', state: 'done', at, held: 1, held_since: at,
-        holds: [{ class: 'source_recovery_pending', count: 1, example: 'startup recovery report missing', since: at }] }];
+    // The gate keeps every task tree and service log unlisted: how many is unknown (`count: null`), said by its reason alone.
+    const gate = [{ id: 'runtime_retirement', state: 'done', at, held: 0, held_since: at,
+        holds: [{ class: 'source_recovery_pending', count: null, example: 'startup recovery report missing', since: at }] }];
     assert.equal(removerLine(gate, NOW), `Retirement: last change ${whenLabel(at, NOW)} · `
-        + `holding 1 since ${whenLabel(at, NOW)}: 1 left unresolved by startup recovery: every task tree and service log waits`);
+        + `held since ${whenLabel(at, NOW)}: startup recovery is not confirmed complete: task trees and service logs wait`);
+    assert.doesNotMatch(removerLine(gate, NOW), /holding \d/, 'an unknown count is never said as a number');
     const logs = [{ id: 'record_compression', state: 'done', at, compressed: 1204, saved_bytes: 2.1e9, held: 37, held_since: at,
         holds: [{ class: 'prior_workers_unconfirmed', count: 37, example: 'events_20261101T000000.jsonl', since: at }] }];
-    const held = `holding 37 since ${whenLabel(at, NOW)}: 37 the previous run’s workers are not confirmed stopped: closed log segments wait for the next start`;
+    const held = `holding 37 since ${whenLabel(at, NOW)}: 37 closed log files waiting for the next app restart (the previous run’s background processes are not confirmed stopped)`;
     assert.equal(removerLine(logs, NOW), `Compression: 1,204 files compressed, 2.1 GB saved · ${held}`,
         'the log plane: its hold beside what it compressed and saved, with no released count');
     assert.equal(removerLine([{ ...logs[0], state: 'pending' }], NOW), `Compression: 1,204 files compressed, 2.1 GB saved, in progress · ${held}`,
         'an unfinished pass with a hold is said as such');
+    assert.equal(removerLine([{ ...logs[0], state: 'pending', compressed: 0, saved_bytes: 0 }], NOW), `Compression: in progress · ${held}`,
+        'an unfinished pass that compressed nothing here yet is in progress too, never just a date');
     for (const facts of [gate, logs]) assert.doesNotMatch(removerLine(facts, NOW), /released/);
     const rows = placeRows(count({ places: [{ id: 'session_scratch', group: 'temporary', roots: ['/var/tmp/obs-1'], present: true, same_volume: true,
         bytes: 5e8, logical_bytes: 5e8, files: 10, unreadable: 0, parts: [], rest: { count: 0, bytes: 0 } }] }), 7, { session_scratch: quiet }, NOW);

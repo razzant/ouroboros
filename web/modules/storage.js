@@ -125,7 +125,11 @@ function jobPhrase(fact, now) {
     const compressing = fact.id === 'record_compression' && fact.state !== 'unsupported' && fact.compressed > 0;
     if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a pass's report: what it released, what it holds and why
         // A count only from a pass that keeps one: a job that holds without counting what it released says none, never 0.
-        const parts = [compressing ? compressionLine(fact, job) : fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job,
+        // An unfinished compression pass that has compressed nothing in this place yet is still said as in progress.
+        const head = compressing ? compressionLine(fact, job)
+            : fact.id === 'record_compression' && fact.state === 'pending' ? fmt(JOB_STATES.pending, { job })
+                : fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job;
+        const parts = [head,
             isSize(fact.released) ? plural(fact.released, '{n} released', '{count} released') : '',
             holdsPhrase(fact, now), fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
         return parts.filter(Boolean).join(' · ');

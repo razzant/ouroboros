@@ -73,29 +73,29 @@ def test_child_requires_recorded_startup_success_and_keeps_unknown_recovery_link
         assert row["state"] == "done"
         return row
 
-    def held(count, example, since):
-        return [{"class": "source_recovery_pending", "count": count, "example": example, "since": since}]
+    def held(example, since):  # the gate keeps every tree and service log unlisted: how many is unknown, never a number
+        return [{"class": "source_recovery_pending", "count": None, "example": example, "since": since}]
 
-    assert passed(T1)["holds"] == held(1, "no startup recovery record", T1)
+    assert passed(T1)["holds"] == held("no startup recovery record", T1)
     assert tree.exists(), "missing startup result is unknown, not success"
     unread = "a: ValueError: task result authority is unreadable or invalid: task:a " + "x" * 200
     maintenance_retirement.record_startup(tmp_path, gaps=True, report={"unresolved": ["a", "b", "*"], "errors": [unread, "b: OSError"]})
-    assert passed(T2)["holds"] == held(2, unread[:maintenance_jobs.HOLD_EXAMPLE_CHARS], T1), \
-        "the gap's own count and first error; since stays while the class stays held"
+    assert passed(T2)["holds"] == held(unread[:maintenance_jobs.HOLD_EXAMPLE_CHARS], T1), \
+        "the gap's first error; since stays while the class stays held"
     maintenance_retirement.record_startup(tmp_path, gaps=True, report={"unresolved": [], "errors": ["ownership unknown"]})
-    assert passed(T3)["holds"] == held(1, "ownership unknown", T1), "no unresolved record: the error lines are counted"
+    assert passed(T3)["holds"] == held("ownership unknown", T1), "no unresolved record: its first error line"
     maintenance_retirement.record_startup(tmp_path, gaps=True)
-    assert passed(T4)["holds"] == held(1, "startup recovery report missing", T1)
+    assert passed(T4)["holds"] == held("startup recovery report missing", T1)
     obligations.add(tmp_path, "pending_drives", "ghost")
     maintenance_retirement.record_startup(tmp_path, gaps=False)
-    assert passed(T5)["holds"] == held(1, "recovery links unreadable", T1), "no gap, but a recovery link has no record"
+    assert passed(T5)["holds"] == held("recovery links unreadable", T1), "no gap, but a recovery link has no record"
     assert tree.exists()
     obligations.remove(tmp_path, "pending_drives", "ghost")
     maintenance_retirement.record_startup(tmp_path, gaps=False)
     assert "holds" not in passed(T6), "an open gate: the field is gone, never an empty list"
     assert not tree.exists()
     maintenance_retirement.record_startup(tmp_path, gaps=True)
-    assert passed(T7)["holds"] == held(1, "startup recovery report missing", T7), "a released class is held anew"
+    assert passed(T7)["holds"] == held("startup recovery report missing", T7), "a released class is held anew"
 
 
 def test_malformed_retention_date_does_not_abort_a_task_write_or_schedule_retirement(tmp_path):

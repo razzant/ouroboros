@@ -42,9 +42,9 @@ BYTECODE_UNLINKS_PER_RUN = 20_000  # removals of one run; the rest is owed to th
 
 def record_startup(root, *, gaps, report=None):
     """Publish the recovery gate before a child may retire task sources. Missing means unknown.
-    A gap also publishes what the pass reports as its hold (``_startup_hold``): how many records
-    the recovery ``report`` left unresolved (its error lines when it names none, one without a
-    report) and its first error, cut to a hold example's bound. Every start also publishes
+    A gap also publishes how many records the recovery ``report`` left unresolved (its error lines
+    when it names none, one without a report) and its first error, cut to a hold example's bound:
+    the example of the pass's hold (``_startup_hold``). Every start also publishes
     ``workers_unconfirmed``, which ``record_compression``'s log plane reads beside the generation:
     true unless the recovery report says the previous generation's workers ended
     (``prior_workers_ended``, set only once its PID check passed; one of them may still hold a log
@@ -66,14 +66,14 @@ def record_startup(root, *, gaps, report=None):
 
 def _startup_hold(startup):
     """The hold a pass reports while the recorded startup keeps the recovery gate closed, ``None``
-    once a startup recorded no gap. No record is unknown, held like a gap."""
+    once a startup recorded no gap. No record is unknown, held like a gap. Its ``count`` is ``None``:
+    the gate keeps every task tree and service log without listing them, so how many it holds is
+    not known, and the recovery's own count is of records, not of what is held."""
     if not isinstance(startup, dict):
-        return {"class": RECOVERY_HOLD, "count": 1, "example": "no startup recovery record"}
+        return {"class": RECOVERY_HOLD, "count": None, "example": "no startup recovery record"}
     if startup.get("gaps") is False:
         return None
-    count = startup.get("count")
-    return {"class": RECOVERY_HOLD, "count": count if type(count) is int and count > 0 else 1,
-            "example": str(startup.get("example") or "")}
+    return {"class": RECOVERY_HOLD, "count": None, "example": str(startup.get("example") or "")}
 
 
 def _inputs(root):
@@ -225,7 +225,7 @@ def run(root, should_stop):
                 steps[:0] = [("task_trees", lambda root: prune_task_trees(root, exclude_root_ids=exclusions)),
                              ("services", prune_service_logs)]
             elif hold is None:
-                hold = {"class": RECOVERY_HOLD, "count": 1, "example": "recovery links unreadable"}
+                hold = {"class": RECOVERY_HOLD, "count": None, "example": "recovery links unreadable"}
     for name, retire in steps:
         if should_stop():
             break

@@ -50,6 +50,8 @@ PASS_JOBS = ("drive_settlement", "copy_retirement", "review_checkout_prune", "se
 # log segments in Archives. The job's typed holds are its log plane's (``_COMPRESSION_HOLDS``), read there alone.
 _COMPRESSION_PLANES = {"task_results": "evidence", "app_state": "seats", "archives": "logs"}
 _COMPRESSION_HOLDS = "logs"
+# The retirement job's closed recovery gate keeps task_trees/ and services/, both in the data root's other place.
+_RETIREMENT_JOB, _RETIREMENT_HOLDS = "runtime_retirement", "data_other"
 ENGINE_READ_SEC = 2.0  # the answer: connect and read together, in wall time (a later record fills the reuse slot)
 ENGINE_REUSE_SEC = 5.0  # a projection polled every second reuses the record read this recently; no read outlives it
 _ENGINE_OUTCOMES = ("completed", "held", "truncated", "failed")
@@ -109,9 +111,10 @@ def _job(name: str, rows: Optional[Dict[str, Dict[str, Any]]], place: str) -> St
     total = totals.get(plane) or {}
     if "compressed" in total:  # this place's own plane, never a job-wide sum under two places
         fact["compressed"], fact["saved_bytes"] = int(total.get("compressed") or 0), total.get("saved_bytes")
-    # A retirer pass (maintenance_jobs.record_pass), the trash job, the retirement job's closed gate or compression's
-    # log plane (beside its own place alone): what it holds, since when, and what it released where it counts that.
-    if "holds" in row and plane in (None, _COMPRESSION_HOLDS):
+    # A retirer pass (maintenance_jobs.record_pass), the trash job, the retirement job's closed gate (beside the place
+    # whose task trees and service logs it keeps alone) or compression's log plane (beside Archives alone): what it
+    # holds, since when, and what it released where it counts that.
+    if "holds" in row and plane in (None, _COMPRESSION_HOLDS) and (name != _RETIREMENT_JOB or place == _RETIREMENT_HOLDS):
         holds = [dict(hold) for hold in row.get("holds") or () if isinstance(hold, dict)]
         fact["holds"], fact["held"] = holds, sum(int(h.get("count") or 0) for h in holds)
         released = row.get("released") if "released" in row else row.get("removed")  # the trash job counts what it removed
