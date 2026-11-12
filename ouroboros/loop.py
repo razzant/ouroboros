@@ -244,8 +244,9 @@ def _provider_unavailable_result(
                 waited_sec=waited_sec, interactive=interactive,
                 is_deadline_exhausted=is_deadline_exhausted, control_reason=control_reason, wait_cause=wait_cause,
             )
-            if not salvaged and text == fallback != notice and usage.get("terminal_origin") == TERMINAL_ORIGIN_HOST_NOTICE:
-                text = notice  # the host's own words, composed before a forced call that itself failed: now its facts too
+            if (not salvaged and text == fallback != notice and usage.get("terminal_origin") == TERMINAL_ORIGIN_HOST_NOTICE
+                    and round_failure_words(usage, ctx.round_idx)):  # any other round keeps the words of its own failure
+                text = notice  # a refusal round's host words, composed before a forced call that itself failed: now its facts too
                 if (published := _publish_model_forced_candidate(ctx, trace, text, str(usage["reason_code"]))) is not None:
                     trace.get("forced_finalization", {}).update(candidate_sha256=published.content_sha256, candidate_revision=published.revision)
         usage.pop(ROUND_REFUSALS_KEY, None)  # the round ended: its record of content refusals goes with it

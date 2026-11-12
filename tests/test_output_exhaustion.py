@@ -348,27 +348,35 @@ BODY_ERROR = ({"role": "assistant", "content": ""},
               {"prompt_tokens": 5, "provider_error": {"kind": "provider_error", "code": 400, "message": "Rejected."}})
 REFUSAL = ({"role": "assistant", "content": "", "refusal": "Blocked here."},
            {"prompt_tokens": 5, "response_finish_reason": "content_filter"})
+FORCED_ERROR = ({"role": "assistant", "content": ""},
+                {"prompt_tokens": 5, "provider_error": {"kind": "provider_error", "code": 400, "message": "Forced call failed."}})
 
 
-@pytest.mark.parametrize("forced", ["refused", "answers"])
+@pytest.mark.parametrize("forced", ["refused", "answers", "fails"])
 def test_a_forced_call_stopped_by_the_filter_leaves_the_owner_the_notice_that_names_it(
         tmp_path, no_sleep, monkeypatch, forced):
     """The host's words for a round nobody answered are composed before the forced final's own call. When that call
     meets the content filter, the owner reads the notice recomputed with it, and the published answer is that same
     text: one text that names the refusal, never the words written before it. A forced call that answers keeps its
-    own words."""
+    own words; one that fails in a round with no content refusal leaves the owner the words that named the round's
+    own failure, as before."""
     import hashlib
 
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "")
     summary = ({"role": "assistant", "content": "summary"}, {"prompt_tokens": 1})
-    llm = _ScriptedLLM(BODY_ERROR, REFUSAL if forced == "refused" else summary)
+    llm = _ScriptedLLM(BODY_ERROR, {"refused": REFUSAL, "answers": summary, "fails": FORCED_ERROR}[forced])
     result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
 
     model, notice = llm.requests[0]["model"], usage["terminal_provider_notice"]
     assert llm.calls == 2 and ROUND_REFUSALS_KEY not in usage
     if forced == "answers":
         assert result == "summary" and REFUSAL_WORDS not in notice
+        return
+    if forced == "fails":  # before: the owner's text was replaced by the notice quoting only the forced call
+        assert '"Rejected."' in result and "Forced call failed." not in result and "Forced call failed." in notice
+        assert usage["terminal_origin"] == "host_notice" and REFUSAL_WORDS not in result + notice
+        assert trace["delivery_candidate"]["content_sha256"] == hashlib.sha256(result.encode("utf-8")).hexdigest()
         return
     words = loop_transport._failure_words(next(row["failure_code"] for row in usage["llm_call_refs"]))
     assert notice.endswith(f" This round's failed asks: {words} on {model} once; {REFUSAL_WORDS} on {model} once.")
