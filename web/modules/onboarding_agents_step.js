@@ -139,7 +139,6 @@ export function agentsOnlyAccess(connected = [], sources = []) {
  */
 export function accessRowState({ connected = [], sources = [], read = 'ok', checking = false, readErrors = '',
     previewError = '', configured = false, continueBlocked = false } = {}) {
-    const serves = connected.some((harness) => (sources || []).some((source) => source?.credentialHarness === harness));
     const agentsOnly = !configured && agentsOnlyAccess(connected, sources);
     const note = [checking ? 'Checking model sources…' : '',
         !checking && read !== 'ok' && connected.length
@@ -150,9 +149,9 @@ export function accessRowState({ connected = [], sources = [], read = 'ok', chec
         note: note.filter(Boolean).join(' '),
         // A healthy read that names the connected accounts agents only leaves discovery nothing to retry.
         retryHidden: (!connected.length || (agentsOnly && read === 'ok')) && !previewError,
-        // A section named beside Continue as a way forward is not "Optional": while no connected account is known to
-        // serve a model (agents only, or not read yet), the badge stays off.
-        badge: configured ? 'Configured' : connected.length && !serves ? '' : 'Optional',
+        // Accounts the engine names agents only leave this section the way forward, not "Optional"; while the list is
+        // unread it stays one of the ways the reason beside Continue names, as with nothing connected.
+        badge: configured ? 'Configured' : agentsOnly ? '' : 'Optional',
     };
 }
 

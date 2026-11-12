@@ -202,12 +202,12 @@ test('the access row never offers what Continue refuses, and calls the API secti
     // A preview that failed while Continue is blocked asks for a Retry alone; with Continue open it offers both.
     assert.match(row({ connected: ['claude'], previewError: 'Down.', continueBlocked: true }).note, /prepared: Down\. Retry\.$/);
     assert.match(row({ connected: ['codex'], previewError: 'Down.' }).note, /Retry, or Continue to choose models yourself\.$/);
-    // Nothing connected: one of the ways forward, so Optional; connected and not yet known to serve a model
-    // (agents only, an unread or a failed list): no badge; a known model account: Optional; entered access: Configured.
+    // Agents-only accounts: no badge; nothing connected, an unread or a failed list: one of the ways forward the
+    // reason names, so Optional; a known model account: Optional; entered access: Configured.
     assert.equal(row({ connected: [] }).badge, 'Optional');
     assert.equal(row({ connected: ['claude'] }).badge, '');
-    assert.equal(row({ connected: ['claude'], sources: [], read: 'not_read' }).badge, '');
-    assert.equal(row({ connected: ['codex'], sources: [], read: 'failed' }).badge, '');
+    assert.equal(row({ connected: ['claude'], sources: [], read: 'not_read' }).badge, 'Optional');
+    assert.equal(row({ connected: ['codex'], sources: [], read: 'failed' }).badge, 'Optional');
     assert.equal(row({ connected: ['codex'] }).badge, 'Optional');
     assert.equal(row({ connected: ['claude'], configured: true }).badge, 'Configured');
     // Retry: hidden with nothing connected and after a healthy agents-only read; a failed preview brings it back.

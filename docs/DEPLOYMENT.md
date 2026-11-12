@@ -74,8 +74,8 @@ leave them proposed. A Colab launch saves the ones it proposes from the key it w
 given. Subscription sessions join them through Settings or the wizard.
 
 A setting the file does not hold is read from the environment variable of its name
-(a Colab launch writes every setting into the file, so there none is read from the
-environment), for example `TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`,
+(a Colab launch writes the ones named here into its file, so there the file's values
+count), for example `TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`,
 `OUROBOROS_REVIEW_ENFORCEMENT`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
 `OUROBOROS_RUNTIME_MODE` (read at a start). The exceptions are the choices only the
 owner's controls author, Safety coverage and the Context mode among them: Settings
