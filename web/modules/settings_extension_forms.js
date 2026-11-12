@@ -12,6 +12,7 @@
  * that save themselves (settings_rows.js). It is opened from the Skills page's sources view and from search. */
 
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
+import { getContributions } from './contributions.js';
 import { extensionActionStatus } from './extension_status_text.js';
 import { bindSettingRows, settingsRow } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
@@ -283,12 +284,14 @@ function mountSkillList(container, { path, ctx }) {
     };
     const onShown = (event) => { if (event.detail?.path === path) void draw(); };
     window.addEventListener('ouro:settings-page-shown', onShown);
-    window.addEventListener('ouro:skill-lifecycle', draw);
+    // Every way a skill changes ends in the one lifecycle signal (contributions.js): this page's own action, a job
+    // that finished, another window, Ouroboros itself.
+    const offLifecycle = getContributions().onLifecycle(draw);
     return draw().then(() => ({
         unmount() {
             alive = false;
             window.removeEventListener('ouro:settings-page-shown', onShown);
-            window.removeEventListener('ouro:skill-lifecycle', draw);
+            offLifecycle();
             rows?.dispose();
         },
     }));
@@ -322,14 +325,14 @@ function mountSkillForm(container, { path, ctx }) {
     host.addEventListener('input', onTyped);
     window.addEventListener('ouro:settings-updated', onSaved);
     window.addEventListener('ouro:settings-page-shown', onShown);
-    window.addEventListener('ouro:skill-lifecycle', fill);
+    const offLifecycle = getContributions().onLifecycle(fill);  // the same one signal as the list above
     return Promise.resolve(fill()).then(() => ({
         unmount() {
             alive = false;
             host.removeEventListener('input', onTyped);
             window.removeEventListener('ouro:settings-updated', onSaved);
             window.removeEventListener('ouro:settings-page-shown', onShown);
-            window.removeEventListener('ouro:skill-lifecycle', fill);
+            offLifecycle();
             if (host.parentElement === container) host.remove();
         },
     }));

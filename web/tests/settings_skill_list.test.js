@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { getContributions } from '../modules/contributions.js';
 import '../modules/settings_extension_forms.js';
 import { searchEntries, searchSettings } from '../modules/settings_home.js';
 import { settingsPageFor } from '../modules/settings_pages.js';
@@ -51,6 +52,33 @@ test('one door per skill that registered a form, named by its title, opening tha
     env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'skill' } }));
     await settle();
     assert.equal(reads(), before + 1);
+});
+
+test('a skill changed by anyone redraws the list: the server says so or this page did it; let go, nothing is read', async (t) => {
+    const installed = structuredClone(INSTALLED);
+    const { env, handle, doors } = await mountList(t, () => ok(installed));
+    env.routes.set('/api/ui/contributions', async () => ok({}));
+    const heard = new Map();
+    t.after(getContributions().attach({ ws: { on(type, fn) { heard.set(type, fn); return () => heard.delete(type); } }, target: env.window }));
+    await settle();
+    const reads = () => env.calls.filter((url) => url === '/api/extensions').length;
+    assert.deepEqual(doors().map((door) => door.dataset.settingRow), ['skill:live_conversation', 'skill:telegram']);
+    // Ouroboros or another window took a skill's form away: the server says so and this page did nothing.
+    installed.live.settings_sections = installed.live.settings_sections.filter((entry) => entry.skill !== 'live_conversation');
+    let before = reads();
+    heard.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'live_conversation', action: 'disabled' });
+    await settle();
+    assert.equal(reads(), before + 1);
+    assert.deepEqual(doors().map((door) => door.dataset.settingRow), ['skill:telegram']);
+    // An action on this page reaches the list through the same signal.
+    before = reads();
+    env.window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', { detail: { action: 'review', name: 'telegram' } }));
+    await settle();
+    assert.equal(reads(), before + 1);
+    handle.unmount();
+    heard.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'telegram', action: 'enabled' });
+    await settle();
+    assert.equal(reads(), before + 1, 'a page that was let go reads no more');
 });
 
 test('an empty list says that no installed skill has settings', async (t) => {
