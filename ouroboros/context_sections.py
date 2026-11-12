@@ -55,7 +55,9 @@ def build_knowledge_sections(
             reader = f"knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global')"
             from ouroboros.knowledge import overview_residency
 
-            heading = f"## Shared understanding\n\n{overview_residency(overview)}\nSource: {reader}.\n\n"
+            # Its revision rides with it (it moves only when this text does), so a write needs no read for its token.
+            heading = (f"## Shared understanding\n\n{overview_residency(overview)}\n"
+                       f"Source: {reader}; revision {overview.revision}.\n\n")
             # The whole authored orientation rides whole in every request: the window never
             # shortens the overview (TIER0_ALWAYS_FULL); its headings are no substitute for it.
             sections.append(HostSection("shared_understanding", heading + overview_text, reader=reader))
