@@ -23,7 +23,7 @@ import { createHistoryReveal } from './chat_history_reveal.js';
 import { fmt, tr } from './i18n.js';
 import { questionPresentation } from './question_presentation.js';
 import { taskCancelPending } from './log_events.js';
-import { chipWord, desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js';
+import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
 import { closeTaskControlMenu, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
 import {
@@ -315,11 +315,12 @@ export function createRoomWork({
             items.push({ id: `question:${ask.taskId}:${ask.quizId}`, kind: 'question', work: null, record: null,
                 confirmed: true, online: true, cmid: '', startedAt: 0, episode: ask.taskId, attempt: null,
                 activity: 'waiting', ask, said,
-                view: { word: said ? questionPresentation(said).status : chipWord('ownerWait'), secondary: '', tone: 'held',
+                // No task stands on it: without its row it is plainly unanswered, never "Waiting for your answer".
+                view: { word: questionPresentation(said || { quiz_state: 'open' }).status, secondary: '', tone: 'held',
                     mark: 'none', owner: true, outcome: '', focus: '' } });
         }
-        // A Project with nothing else keeps its way to the latest represented root card.
-        if (asPanel && !items.length) {
+        // A Project with no work listed keeps its way to the latest represented root card, beside any question row.
+        if (asPanel && !items.some((item) => item.kind !== 'question')) {
             const latest = latestRepresentedRoot([...records.values()]);
             if (latest) items.push({ id: latest.groupId, kind: 'task', work: null, record: latest, latest: true,
                 view: cardRowView(desiredLiveCardPhase(latest, replayTerminalPhase(latest)), { settled: latest.finished, closing: closingLine(latest) }),
