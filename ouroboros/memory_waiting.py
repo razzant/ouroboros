@@ -109,7 +109,7 @@ def listing(kind, marks, notes, label=None, outcome=mark_outcome, landing=None):
                          "outcome": "; ".join(filter(None, (outcome_words(told), landing_words(became)))),
                          "clean": clean_pass(told),
                          "idle": isinstance(became, dict) and not (became.get("commit") or became.get("unread"))
-                                 and not (became.get("pr") and not became.get("status"))
+                                 and not (became.get("pr") and (became.get("status") or "merged") == "merged")
                                  and isinstance(told, dict) and told.get("verdict") == "PASS"})
         rows.sort(key=lambda row: (row["date"], row["id"]))
         rooms = {}
