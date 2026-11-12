@@ -10,6 +10,7 @@ const VIEW = {
     models: [
         { model: 'anthropic/claude-opus-5.5', calls: 10741, cost: 6055.13, open_rows: 14, unpriced_rows: 165, unshared_cost: 0,
             tokens: { cache_write: 538_000_000, cache_read: 5_500_000_000, output: 26_400_000, uncached_input: 29_800_000 },
+            tokens_shared: { cache_write: 538_000_000, cache_read: 5_500_000_000, output: 26_400_000, uncached_input: 29_800_000 },
             by_class: { cache_write: 4306.97, cache_read: 1101.77, output: 527.36, uncached_input: 119.03 }, write_price_in_reads: 40,
             write_price_lifetime: '1h' },
         // A subscription reports no write count: its unread input is counted apart, as `period_models` answers it.
@@ -19,14 +20,16 @@ const VIEW = {
         { model: 'vendor/unlisted', calls: 3, cost: 0.4, open_rows: 0, unpriced_rows: 0, unshared_cost: 0.4,
             tokens: { cache_write: 50, cache_read: 100, output: 7, uncached_input: 350 }, by_class: null, write_price_in_reads: null,
             uncounted_calls: 1, uncounted_input_tokens: 2_400 },
-        { model: 'vendor/cheap', calls: 2, cost: 0.008, open_rows: 0, unpriced_rows: 0, unshared_cost: 0.004,
-            tokens: { cache_write: 0, cache_read: 0, output: 10, uncached_input: 90 }, by_class: { cache_write: 0, cache_read: 0, output: 0.002, uncached_input: 0.002 } },
+        { model: 'vendor/cheap', calls: 2, cost: 0.008, open_rows: 0, unpriced_rows: 0, unshared_cost: 0.004, unshared_calls: 1,
+            tokens: { cache_write: 0, cache_read: 0, output: 10, uncached_input: 90 }, tokens_shared: { cache_write: 0, cache_read: 0, output: 4, uncached_input: 40 },
+            by_class: { cache_write: 0, cache_read: 0, output: 0.002, uncached_input: 0.002 } },
         { model: 'vendor/never-called', calls: 0, cost: 0, open_rows: 0, unpriced_rows: 0, unshared_cost: 0, tokens: {}, by_class: null },
     ],
     cache_writes: [
         { class: 'entered_model', detail: 'gpt-6-astra', calls: 204, write_tokens: 149_000_000, write_cost: 1250.93, unshared_calls: 0 },
         { class: 'history_rewritten', detail: 'compaction, low_retry', calls: 444, write_tokens: 146_000_000, write_cost: 1189.29, unshared_calls: 0 },
-        { class: 'system_changed', detail: 'my story and identity', calls: 9, write_tokens: 1_200_000, write_cost: 9.6, unshared_calls: 2 },
+        { class: 'system_changed', detail: 'my story and identity', calls: 9, write_tokens: 1_200_000, write_cost: 9.6, unshared_calls: 2,
+            shared_write_tokens: 900_000 },
         { class: 'not_recorded', detail: '', calls: 5, write_tokens: 700, write_cost: 0, unshared_calls: 5 },
     ],
 };
@@ -59,6 +62,10 @@ test('a period shows each model\'s recorded cost by class, and tokens alone wher
         '1 call reported no complete cache counts: 2k input tokens are in no class.', 'The bar is by tokens: the recorded cost could not be split.']);
     // Every positive amount left out is said, however small: the parts and it add up to the sum shown.
     assert.deepEqual(cheap.notes, ['$0.0040 is not split (no price list, token counts or named cache lifetime for those calls).']);
+    // By money every figure of a part is of the same calls, and what was not split is a part of the head's sum.
+    assert.deepEqual(cheap.parts.map((part) => part.text), ['$0.00 · 0% · 0 tokens', '$0.00 · 0% · 0 tokens',
+        '$0.0020 · 25% · 4 tokens', '$0.0020 · 25% · 40 tokens', '$0.0040 · 50% · 1 call']);
+    assert.ok(Math.abs(cheap.parts.reduce((sum, part) => sum + part.share, 0) - 1) < 1e-9);
     assert.match(shown.note, /share of the recorded cost, not the provider’s invoice lines/);
     assert.match(shown.note, /as recorded on 2026-11-12/);
     assert.match(shown.note, /delegated subscription sessions are not listed here/);
@@ -73,7 +80,7 @@ test('cache writes read by what they followed, in the fact\'s own words', () => 
         'Not recorded',
     ]);
     assert.deepEqual(writes.map((row) => [row.calls, row.tokens, row.cost]), [
-        ['204', '149M', '$1,250.93'], ['444', '146M', '$1,189.29'], ['9', '1.2M', '$9.60 · 2 not split'], ['5', '700', '—']]);
+        ['204', '149M', '$1,250.93'], ['444', '146M', '$1,189.29'], ['9', '1.2M', '$9.60 for 900k · 2 not split'], ['5', '700', '—']]);
 });
 
 test('an unavailable or empty period says so and invents nothing', () => {

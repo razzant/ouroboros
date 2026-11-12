@@ -361,3 +361,16 @@ def test_released_reservations_start_no_call_and_a_z_stamp_reads(root):
     assert [model["model"] for model in cost_period.cost_period(root, "24h")["models"]] == [OPUS]
     assert cost_period._epoch("2026-11-12T10:00:00Z") == cost_period._epoch("2026-11-12T10:00:00+00:00") \
         == cost_period._epoch("2026-11-12T10:00:00")
+
+
+def test_a_money_line_shows_the_tokens_its_shared_dollars_are_of(root):
+    """A call whose cost cannot be shared adds its tokens to the period's totals, never to the shared dollars' tokens."""
+    _call(root, prompt=1_000, read=600, write=200, output=10, cost=1.0)
+    unshared = _call(root, prompt=200, cost=None, settle=False)
+    ua.settle_attempt(unshared, {"prompt_tokens": 200, "completion_tokens": 0, "cached_tokens": None, "cache_write_tokens": 200,
+                                 "prompt_cache_ttl": "1h"}, cost_usd=100.0, cost_final=True)
+    model, = cost_period.cost_period(root, "24h")["models"]
+    assert model["tokens"]["cache_write"] == 400 and model["tokens_shared"]["cache_write"] == 200
+    assert (model["unshared_calls"], model["unshared_cost"]) == (1, pytest.approx(100.0))
+    cause, = cost_period.cost_period(root, "24h")["cache_writes"]
+    assert (cause["write_tokens"], cause["shared_write_tokens"], cause["unshared_calls"]) == (400, 200, 1)

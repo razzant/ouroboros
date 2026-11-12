@@ -31,6 +31,13 @@ def _tokens_by_class(row: Dict[str, Any]) -> Dict[str, int]:
             "output": max(0, int(row.get("completion_tokens") or 0)), "uncached_input": max(0, int(row.get("uncached_tokens") or 0))}
 
 
+def _call_tokens(row: Dict[str, Any]) -> Dict[str, int]:
+    """One shared call's tokens by class (a shared call reported all four counts): the tokens its shared dollars are of."""
+    prompt, read, write = (max(0, int(row.get(key) or 0)) for key in ("prompt_tokens", "cached_tokens", "cache_write_tokens"))
+    return {"cache_write": write, "cache_read": read, "output": max(0, int(row.get("completion_tokens") or 0)),
+            "uncached_input": max(0, prompt - read - write)}
+
+
 def _epoch(stamp: Any) -> Optional[float]:
     try:  # a "Z" stamp (an imported row) reads on Python 3.10 too; a stamp without a zone is UTC
         moment = _dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")) if stamp else None
@@ -118,8 +125,9 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
     def entry(model: str) -> Dict[str, Any]:
         return models.setdefault(model or "unattributed", {
             "calls": 0, "cost": 0.0, "priced_rows": 0, "open_rows": 0, "unpriced_rows": 0, "shared_cost": 0.0,
-            "uncounted_calls": 0, "uncounted_input_tokens": 0,
-            "tokens": dict.fromkeys(_CLASSES, 0), "by_class": dict.fromkeys(_CLASSES, 0.0), "_written": {}})
+            "uncounted_calls": 0, "uncounted_input_tokens": 0, "unshared_calls": 0,
+            "tokens": dict.fromkeys(_CLASSES, 0), "tokens_shared": dict.fromkeys(_CLASSES, 0),
+            "by_class": dict.fromkeys(_CLASSES, 0.0), "_written": {}})
 
     for start in range(first, end, _CHUNK_ROWS):
         stop = min(end, start + _CHUNK_ROWS)
@@ -145,6 +153,10 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
                 model["shared_cost"] += float(row["usd"])
                 for name, share in shares.items():
                     model["by_class"][name] += float(row["usd"]) * share
+                for name, count in _call_tokens(row).items():  # beside the shared dollars, the tokens they are of
+                    model["tokens_shared"][name] += count
+            elif row.get("usd") is not None:
+                model["unshared_calls"] += 1
             written = int(row.get("cache_write_tokens") or 0)
             if written <= 0:
                 continue
@@ -158,13 +170,14 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
                 fact = None
             name, detail = prefix_class(fact, row["prompt_cache_ttl"], _epoch(row.get("ts_dispatched")))
             cause = causes.setdefault((name, detail), {"class": name, "detail": detail, "calls": 0, "write_tokens": 0,
-                                                       "write_cost": 0.0, "unshared_calls": 0})
+                                                       "write_cost": 0.0, "unshared_calls": 0, "shared_write_tokens": 0})
             cause["calls"] += 1
             cause["write_tokens"] += written
             if shares is None:
                 cause["unshared_calls"] += 1
             else:
                 cause["write_cost"] += float(row["usd"]) * shares["cache_write"]
+                cause["shared_write_tokens"] += written
     rows: List[Dict[str, Any]] = []
     for name, model in models.items():
         if not (model["calls"] or model["open_rows"]):

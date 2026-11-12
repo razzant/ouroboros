@@ -67,11 +67,22 @@ export function costPeriodPresentation(view) {
                 : Number(row.cost) > 0 ? 'The bar is by tokens: the recorded cost could not be split.'
                     : `The bar is by tokens: the recorded cost is ${formatUsd(0)}.`);
         }
+        // By money, a part's dollars, percent and tokens are of one population: the percent is of the sum in the head
+        // and the tokens are the shared calls' own (the calls whose cost could not be shared are the "Not split" part).
+        const unsplit = byMoney ? Math.max(0, Number(row.unshared_cost) || 0) : 0;  // the server's rounded remainder
+        const total = shared + unsplit;
+        const sharedTokens = CLASS_WORDS.map(([key]) => Math.max(0, Number(row.tokens_shared?.[key]) || 0));
         const parts = CLASS_WORDS.map(([key, label], index) => {
-            const share = byMoney ? split[index].usd / shared : counted > 0 ? counts[index] / counted : 0;
-            const tokens = `${compactTokens(counts[index])} tokens`;
+            const share = byMoney ? split[index].usd / total : counted > 0 ? counts[index] / counted : 0;
+            const tokens = `${compactTokens(byMoney ? sharedTokens[index] : counts[index])} tokens`;
             return { key, label, share, text: byMoney ? `${formatUsd(split[index].usd)} · ${percent(share)} · ${tokens}` : `${tokens} · ${percent(share)}` };
         });
+        if (unsplit > 0) {
+            const share = unsplit / total;
+            const calls = Number(row.unshared_calls) || 0;
+            parts.push({ key: 'unsplit', label: 'Not split', share,
+                text: `${formatUsd(unsplit)} · ${percent(share)}${calls ? ` · ${number(calls)} ${calls === 1 ? 'call' : 'calls'}` : ''}` });
+        }
         if (!byMoney && unclassified > 0) {
             const share = unclassified / counted;
             parts.push({ key: 'unclassified', label: 'Unclassified input', share, text: `${compactTokens(unclassified)} tokens · ${percent(share)}` });
@@ -91,8 +102,10 @@ export function costPeriodPresentation(view) {
         calls: number(row.calls),
         tokens: compactTokens(row.write_tokens),
         // A row only partly split says how many of its calls the amount leaves out.
+        // Its dollars are of the split calls' writes; when some calls are not split, the cell names those tokens.
         cost: row.unshared_calls >= row.calls ? '—'
-            : `${formatUsd(row.write_cost)}${row.unshared_calls > 0 ? ` · ${number(row.unshared_calls)} not split` : ''}`,
+            : `${formatUsd(row.write_cost)}${row.unshared_calls > 0
+                ? ` for ${compactTokens(row.shared_write_tokens)} · ${number(row.unshared_calls)} not split` : ''}`,
     }));
     const observed = String(view.tariff_observed_at || '').slice(0, 10);
     return {
