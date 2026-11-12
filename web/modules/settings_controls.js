@@ -173,10 +173,14 @@ function currentValue(row, settings = lastSettings) {
     return row.keys.length > 1 ? row.keys.map((key) => settings[key]) : settings[row.keys[0]];
 }
 
-function bodyOf(row, value) {
+/** The keys a row's value writes. `only` (Undo) keeps those of them: a key the receipt did not name is left to
+ *  whoever changed it since. */
+function bodyOf(row, value, only = null) {
     const codec = CODECS[row.codec];
-    if (codec?.body) return codec.body(value, row);
-    return row.keys.length > 1 ? Object.fromEntries(row.keys.map((key, i) => [key, value?.[i]])) : { [row.keys[0]]: value };
+    const body = codec?.body ? codec.body(value, row)
+        : row.keys.length > 1 ? Object.fromEntries(row.keys.map((key, i) => [key, value?.[i]])) : { [row.keys[0]]: value };
+    (only ? row.keys.filter((key) => !only.includes(key)) : []).forEach((key) => { delete body[key]; });
+    return body;
 }
 
 function sameValue(a, b) {
@@ -215,7 +219,9 @@ function savedOutcome(row, value, data = {}) {
     const outcome = { ...base, state: 'saved', withheld: entries.find((entry) => entry?.withheld)?.withheld || '' };
     if (data?.no_changes === true || (changes && !receipt && data.receipt !== 'unavailable')) outcome.state = 'unchanged';
     if (receipt && !outcome.withheld) {
-        const side = (name) => entries.map((entry, i) => (entry ? entry[name] : value?.[i]));
+        // A key the receipt does not name did not change: it was what the last read showed, and nothing of it landed.
+        const now = currentValue(row);
+        const side = (name) => entries.map((entry, i) => (entry ? entry[name] : name === 'old' ? now?.[i] ?? value?.[i] : undefined));
         [outcome.old, outcome.new] = row.keys.length > 1 ? [side('old'), side('new')] : [entries[0].old, entries[0].new];
         const absent = entries.map((entry) => entry?.old_absent === true);
         outcome.oldAbsent = row.keys.length > 1 ? absent : absent[0];
@@ -312,9 +318,9 @@ const preconditionOf = (row, token) => (!token ? null : typeof token === 'string
 
 /** Every way a row is written. Each answers an Outcome and never throws. */
 export const WRITERS = {
-    generic(row, value, { ifUnchanged = '', unset = [] } = {}) {
+    generic(row, value, { ifUnchanged = '', unset = [], only = null } = {}) {
         const precondition = preconditionOf(row, ifUnchanged);
-        const body = { ...bodyOf(row, value), ...(precondition ? { if_unchanged: precondition } : {}) };
+        const body = { ...bodyOf(row, value, only), ...(precondition ? { if_unchanged: precondition } : {}) };
         if (unset.length) {
             unset.forEach((key) => { delete body[key]; });
             body.unset = unset;
@@ -323,8 +329,8 @@ export const WRITERS = {
     },
     // Every key of SAFETY_MODEL_KEYS: the owner's checker transaction. A change that leaves no reviewer asks first,
     // then the same settings go again with the owner's confirmation.
-    async checker(row, value, { ifUnchanged = '', ask = openConfirmDialog } = {}) {
-        const send = (allowEmptyReviewPool) => attempt(row, value, () => saveCheckerSettings(bodyOf(row, value),
+    async checker(row, value, { ifUnchanged = '', only = null, ask = openConfirmDialog } = {}) {
+        const send = (allowEmptyReviewPool) => attempt(row, value, () => saveCheckerSettings(bodyOf(row, value, only),
             { allowEmptyReviewPool, ifUnchanged: preconditionOf(row, ifUnchanged), headers: APP_SETTINGS_ORIGIN }));
         const outcome = await send(false);
         if (outcome.code !== 'empty_review_pool') return outcome;
@@ -411,7 +417,10 @@ function patchSettings(row, value, outcome) {
     settingsEpoch += 1;
     if (!lastSettings || !row.keys.length || CODECS[row.codec]?.host || row.control?.kind === 'secret' || outcome.withheld === 'secret') return;
     const landed = outcome.new !== undefined ? outcome.new : value;
-    row.keys.forEach((key, i) => { lastSettings[key] = row.keys.length > 1 ? landed?.[i] : landed; });
+    row.keys.forEach((key, i) => {
+        if (row.keys.length === 1) lastSettings[key] = landed;
+        else if (landed?.[i] !== undefined) lastSettings[key] = landed[i];  // a key the receipt did not name stays as read
+    });
     const tokens = lastSettings._meta?.tokens;
     if (tokens && outcome.token) Object.assign(tokens, typeof outcome.token === 'string' ? { [row.keys[0]]: outcome.token } : outcome.token);
 }
@@ -481,16 +490,16 @@ function enqueue(row, job) {
 /**
  * Write one row and answer its Outcome. While a write of the row is in flight a newer value waits and is sent after
  * it, alone. `confirmed` skips the row's question (Undo); `ifUnchanged` is the token Undo sends as its precondition;
- * `ask` stands in for the shared confirm dialog.
+ * `only` names the keys Undo writes; `ask` stands in for the shared confirm dialog.
  */
-export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', unset = [], ask = openConfirmDialog } = {}) {
+export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', unset = [], only = null, ask = openConfirmDialog } = {}) {
     if (!lastSettings) await ensureRead();  // effects, tokens and a contract field's bounds
     const confirm = CONFIRMS[row.confirm];
     if (confirm && !confirmed && !(await confirm(row, value, currentValue(row), ask))) {
         repaintRow(row.id);
         return unchanged(row);
     }
-    return enqueue(row, { value, options: { ifUnchanged, unset, ask } });
+    return enqueue(row, { value, options: { ifUnchanged, unset, only, ask } });
 }
 
 function entryList(document) {
@@ -823,10 +832,12 @@ export function bindSettingRows(container, ctx = {}) {
         const state = rowState(row);
         const hit = (selector) => event.target.closest?.(selector);
         if (hit('[data-setting-undo]')) {
+            // The inverse of what the receipt changed: its keys alone, each on the token it installed.
             const { old, oldAbsent, token } = state.outcome || {};
-            const unset = row.keys.filter((key, i) => (Array.isArray(oldAbsent) ? oldAbsent[i] : oldAbsent));
+            const only = typeof token === 'string' ? row.keys : Object.keys(token || {});
+            const unset = row.keys.filter((key, i) => only.includes(key) && (Array.isArray(oldAbsent) ? oldAbsent[i] : oldAbsent));
             state.typed = null;
-            if (old !== undefined && token) void commitSetting(row, old, { confirmed: true, ifUnchanged: token, unset, ask: ctx.ask });
+            if (old !== undefined && token) void commitSetting(row, old, { confirmed: true, ifUnchanged: token, unset, only, ask: ctx.ask });
         } else if (hit('[data-setting-no-limit]')) {
             state.typed = null;
             node.querySelectorAll('[data-setting-control]').forEach((input) => { delete input.dataset.settingDirty; });
