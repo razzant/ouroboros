@@ -415,6 +415,8 @@ def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
 def review_status_host_section(state: Any, repo_dir: pathlib.Path, drive_root: pathlib.Path) -> str:
     from ouroboros.review_state import format_status_section, make_repo_key, stale_marker_status
 
-    return HostSection('review_continuity', format_status_section(state, repo_dir),
-                       '\n'.join(continuity_status_lines(state, repo_dir, stale_marker_status(state, drive_root, make_repo_key(repo_dir)))
+    repo_key = make_repo_key(repo_dir)
+    return HostSection('review_continuity',
+                       '\n'.join([format_status_section(state, repo_dir), *earlier_obligation_lines(state, repo_key, 120)]),
+                       '\n'.join(continuity_status_lines(state, repo_dir, stale_marker_status(state, drive_root, repo_key))
                                  + ['Historical review ledger: review_status().']))

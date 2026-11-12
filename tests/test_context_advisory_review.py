@@ -173,18 +173,23 @@ class TestAdvisoryReviewStatusInContext:
 
     def test_review_continuity_shows_earlier_obligations_until_a_commit_lands_never_as_current(self, tmp_path):
         """An open obligation this checkout recorded before obligations retired shows once in each
-        Review Continuity view, a foreign checkout's never, beside the continuation's record address; no obligation
-        count, debt or retry anchor is projected; a commit that lands here after it ends the block."""
+        Review Continuity view (the fallback section's too), a foreign checkout's never, beside the continuation's
+        record address; no obligation count, debt or retry anchor is projected; a commit that lands here after it
+        ends the block."""
         import json
 
         from ouroboros.agent_task_pipeline import build_review_context
-        from ouroboros.review_state import CommitAttemptRecord, make_repo_key, update_state
+        from ouroboros.context_sections import review_status_host_section
+        from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, update_state
         from ouroboros.task_continuation import ReviewContinuation, save_review_continuation
 
         env = self._make_env(tmp_path)
         (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
         repo_key = make_repo_key(tmp_path / "repo")
         recorded = "2026-04-07T10:00:00+00:00"
+
+        def fallback():  # the section a context shows when the builder above yields nothing
+            return review_status_host_section(load_state(tmp_path), tmp_path / "repo", tmp_path)
         mine = {"obligation_id": "obl-0003", "item": "tests_affected", "severity": "critical",
                 "reason": "Coverage still missing", "source_attempt_ts": recorded, "source_attempt_msg": "blocked",
                 "status": "still_open", "resolved_by": "", "repo_key": repo_key,
@@ -209,6 +214,8 @@ class TestAdvisoryReviewStatusInContext:
             for gone in ("obl-0004", "foreign_issue", "crd-0001", "commit_readiness_debt", "retry_anchor"):
                 assert gone not in view, gone
             assert "open_obligations=" not in view.replace("earlier_open_obligations=", "")
+        for view in (fallback().full_text, fallback().operative_view):
+            assert view.count("[obl-0003] tests_affected: Coverage still missing") == 1 and "obl-0004" not in view
 
         update_state(tmp_path, lambda state: state.record_attempt(CommitAttemptRecord(
             ts="2026-04-08T10:00:00+00:00", commit_message="landed", status="succeeded", repo_key=repo_key,
@@ -217,3 +224,5 @@ class TestAdvisoryReviewStatusInContext:
         for view in (landed.full_text, landed.operative_view):
             assert "earlier_open_obligations" not in view and "obl-0003" not in view
             assert "review_record_id=rv-0001" in view  # the continuation follows its own rule
+        for view in (fallback().full_text, fallback().operative_view):
+            assert "obl-0003" not in view
