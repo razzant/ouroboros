@@ -22,7 +22,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 - `web/ui.css` ← tokens, the locked control box, material, shared parts (`.ui-action-row`, `.ui-result`, `.ui-disclosure`, `.ui-row`, `.ui-list-more`, `[data-primary]`); `style.css` composes pages (Dashboard tab body, shell/card geometry, System's edge-free shadow).
 - `theme_palette.js` ← `--chart-*` tokens into mounted Chart options, a host chart's series too; updates keep data and caller-authored option groups.
-- `page_header.js` / `page_icons.js` ← headers (`bindPageHeader` places tabs/path/actions), `bindTabStrip`, `renderSegmentedField` (the strip), icons; `settings_controls.bindEffortSegments` keeps empty inheritance.
+- `page_header.js` / `page_icons.js` ← headers (`bindPageHeader` places tabs/path/actions), `bindTabStrip`, `renderSegmentedField` (the strip), icons.
 - `ui_interactions.js` ← `bindDialogFocus`, `bindMenu`, `bindPopoverPosition`, `bindEnterSubmit`; every binding returns teardown.
 - `ui_hint.js` ← the one hint: a control's words over the page (DESIGN "Hints").
 - `status_mark.js` ← every status mark; `row_menu_gesture.js` ← a Project row menu's long press (DESIGN §10).

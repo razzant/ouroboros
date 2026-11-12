@@ -18,14 +18,6 @@ import { secretRowHtml, storedKeyRow } from '../modules/settings_secrets.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 import { Stub } from './helpers/settings_dom.js';
 
-// What a browser's element has and the fixture's lacks: a node put right after another (the revealed value takes the
-// masked field's place), and the labels of a field.
-NodeStub.prototype.after ??= function after(node) {
-    const siblings = this.parentElement.children;
-    node.remove();
-    node.parentElement = this.parentElement;
-    siblings.splice(siblings.indexOf(this) + 1, 0, node);
-};
 // A field's value starts as its `value` attribute, as a browser's does.
 Object.defineProperty(NodeStub.prototype, 'value', { configurable: true,
     get() { return this.typed ?? this.attrs.value ?? ''; }, set(text) { this.typed = String(text); } });
@@ -376,6 +368,63 @@ test('a key\'s page: Save sends only what changed, Test says what the provider s
     assert.match(world.find('[data-editor-result]').textContent, /^Not saved\. OUROBOROS_CONNECTIONS: a key needs its API key\./);
     assert.equal(world.find('[data-connection-label]').value, 'Typed');
     page.unmount();
+});
+
+const TIMED_OUT = [{ saved: null, error: 'The save did not answer in time.' }, 504];
+/** The next settings write lands, then its answer is lost: the server holds the new value and answers 504. */
+function landsThenTimesOut() {
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init = {}) => {
+        if ((init.method || 'GET') !== 'POST' || String(url) !== '/api/settings') return real(url, init);
+        globalThis.fetch = real;
+        await real(url, init);
+        return response(...TIMED_OUT);
+    };
+}
+
+test('a key\'s write whose outcome is unknown is judged by what a read shows, field by field; the typed draft stays until then', async (t) => {
+    const LAB = { kind: 'openai-compatible', name: 'lab', label: 'Lab', base_url: 'https://old.example/v1', api_key: 'sk-lab' };
+    const world = server(t, { values: { OUROBOROS_CONNECTIONS: [LAB] } });
+    const page = await world.mount(keyPath('openai-compatible', 'lab'));
+    const field = (name) => world.find(`[data-connection-field="${name}"]`);
+    const said = () => world.find('[data-editor-result]').textContent;
+    const save = async () => { await world.container.fire('click', { target: world.find('[data-editor-save]') }); await settle(); };
+    assert.equal(field('base_url').value, 'https://old.example/v1');
+    field('base_url').value = 'https://new.example/v1';
+    await world.container.fire('input', { target: field('base_url') });
+    // Not landed: the read shows the old entry. The typed address stays and nothing says Saved.
+    world.state.refuse = TIMED_OUT;
+    await save();
+    assert.equal(world.posts().length, 1);
+    assert.equal(said(), 'Not confirmed yet');
+    assert.equal(field('base_url').value, 'https://new.example/v1', 'the typed address stays');
+    assert.equal(world.state.values.OUROBOROS_CONNECTIONS[0].base_url, 'https://old.example/v1');
+    // Landed: the read shows the new entry, with the kept secret's mask as sent, so it is saved.
+    landsThenTimesOut();
+    await save();
+    assert.equal(world.posts().length, 2);
+    assert.equal(said(), 'Saved · applies from the next model call');
+    assert.equal(field('base_url').value, 'https://new.example/v1');
+    // A new secret in the entry: the read can only show its mask, so a lost answer stays unknown and the draft stays.
+    field('api_key').value = 'sk-lab-2';
+    await world.container.fire('input', { target: field('api_key') });
+    landsThenTimesOut();
+    await save();
+    assert.equal(said(), 'Not confirmed yet');
+    assert.equal(field('api_key').value, 'sk-lab-2');
+    page.unmount();
+});
+
+test('a key\'s switch whose outcome is unknown is not called saved until a read shows it', async (t) => {
+    const world = server(t);
+    world.state.refuse = TIMED_OUT;
+    const lost = await setKeyEnabled({ kind: 'openrouter', name: 'research-credits' }, false);
+    assert.equal(lost.state, 'unknown');
+    assert.equal(editorLine(lost).text, 'Not confirmed yet');
+    assert.equal(world.state.values.OUROBOROS_CONNECTIONS[0].enabled, undefined);
+    landsThenTimesOut();
+    assert.equal((await setKeyEnabled({ kind: 'openrouter', name: 'research-credits' }, false)).state, 'saved');
+    assert.equal(world.state.values.OUROBOROS_CONNECTIONS[0].enabled, false);
 });
 
 test('a new key needs its name; saved, it takes a stored name from it and the list says so', async (t) => {

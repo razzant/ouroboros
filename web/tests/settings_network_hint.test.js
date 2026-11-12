@@ -75,7 +75,7 @@ test('the network rows say whether a password is set and when the way it was sta
         ['Only this computer.', 'Any device on your network, with the password.']);
     const open = tuned({ OUROBOROS_SERVER_HOST: '0.0.0.0', OUROBOROS_NETWORK_PASSWORD: '***set***',
         _meta: { bind_host: '0.0.0.0', reachability: 'lan_reachable', recommended_url: 'http://192.0.2.44:8765', warning: '' } });
-    assert.match(open.OUROBOROS_NETWORK_PASSWORD.meta, /^Set\. /);
+    assert.equal(open.OUROBOROS_NETWORK_PASSWORD.meta, rowById('OUROBOROS_NETWORK_PASSWORD').meta, 'a set one says Saved in its own place');
     assert.equal(open['computer:address'].meta, 'Type it in a browser on the same network.');
     // A saved choice that waits for a restart is the row helper's "Running … after restart" line: no note here competes with it.
     const waiting = tuned({ OUROBOROS_SERVER_HOST: '0.0.0.0', OUROBOROS_NETWORK_PASSWORD: '***set***',

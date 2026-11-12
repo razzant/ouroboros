@@ -1,9 +1,10 @@
 // The row that saves itself (settings_controls.js) and its data (settings_rows.js), against a fake settings server
-// that answers like the server with its receipt (`changes`: old, new and the installed value's token).
+// that answers like the server (gateway/owner_settings.py): a receipt (`changes`: old, new and the installed value's
+// token) for each key the write changed and for no other, and a 409 when a key's `if_unchanged` token is stale.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { bindSettingRows, commitSetting, forgetSettingRows, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
+import { bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
 import { HAND_WRITTEN, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
@@ -20,31 +21,36 @@ const SECRET = testRow('T_SECRET', { kind: 'secret' });
 const ACCESS = testRow('T_ACCESS', { kind: 'strip', options: [option('light', 'Light'), option('pro', 'Pro'), option('cyber_pro', 'Cyber Pro')] },
     { writer: 'runtimeMode', confirm: 'raiseAccess' });
 const CHECKER = testRow('OUROBOROS_MODEL_SAFETY', { kind: 'text' }, { writer: 'checker' });
+const [WAKE_MIN, WAKE_MAX] = ['OUROBOROS_BG_WAKEUP_MIN', 'OUROBOROS_BG_WAKEUP_MAX'];
+const WAKE = testRow('T_WAKE', { kind: 'pair', unit: 's', min: 60, labels: ['Shortest wait', 'Longest wait'] }, { keys: [WAKE_MIN, WAKE_MAX] });
 // Options that each carry a line of meaning: drawn one under another (`choices`), or a strip that says the chosen one's.
 const noted = (value, label, note) => ({ value, label, note });
 const LADDER = testRow('T_ACCESS', { kind: 'choices', options: [noted('light', 'Light', 'Its own code is closed.'),
     noted('pro', 'Pro', 'Its core is open, through review.'), noted('cyber_pro', 'Cyber Pro', 'It decides.')] }, { writer: 'runtimeMode' });
 const NOTED = testRow('T_REVIEW', { kind: 'strip', options: [noted('advisory', 'Advisory', 'It decides.'), noted('blocking', 'Blocking', 'It waits.')] });
-const TEST_ROWS = [SWITCH, STRIP, SECRET, ACCESS, CHECKER];
+const TEST_ROWS = [SWITCH, STRIP, SECRET, ACCESS, CHECKER, WAKE];
 const [TOTAL, PER_TASK, ALLOWANCE, ROUNDS] = ['TOTAL_BUDGET', 'OUROBOROS_PER_TASK_COST_USD', 'OUROBOROS_CONSCIOUSNESS_DAILY_USD',
     'OUROBOROS_MAX_ROUNDS'].map(rowById);
 
 const EFFECTS = { TOTAL_BUDGET: 'now', OUROBOROS_PER_TASK_COST_USD: 'next_task', OUROBOROS_CONSCIOUSNESS_DAILY_USD: 'next_wake',
     OUROBOROS_MAX_ROUNDS: 'next_task', OUROBOROS_TASK_ABS_CEILING_SEC: 'next_task', T_SWITCH: 'now', T_REVIEW: 'next_task',
-    T_SECRET: 'next_task', T_ACCESS: 'restart', OUROBOROS_MODEL_SAFETY: 'next_call' };
+    T_SECRET: 'next_task', T_ACCESS: 'restart', OUROBOROS_MODEL_SAFETY: 'next_call', [WAKE_MIN]: 'next_wake', [WAKE_MAX]: 'next_wake' };
 
 function fakeServer(routes, values = {}) {
     const server = { log: [], posts: [], answers: [], version: 0, values: { TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50,
         OUROBOROS_CONSCIOUSNESS_DAILY_USD: 10, OUROBOROS_MAX_ROUNDS: 'unlimited', OUROBOROS_TASK_ABS_CEILING_SEC: 600, T_SWITCH: false,
-        T_REVIEW: 'advisory', T_SECRET: '', T_ACCESS: 'light', OUROBOROS_MODEL_SAFETY: 'model-a', ...values } };
+        T_REVIEW: 'advisory', T_SECRET: '', T_ACCESS: 'light', OUROBOROS_MODEL_SAFETY: 'model-a', [WAKE_MIN]: 1800, [WAKE_MAX]: 3600, ...values } };
     server.tokens = Object.fromEntries(Object.keys(server.values).map((key) => [key, `${key}@0`]));
     server.document = () => ({ ...structuredClone(server.values), _meta: { effects: EFFECTS, tokens: { ...server.tokens },
         setup_contract: { budgetFields: [{ stateKey: 'totalBudget', settingKey: 'TOTAL_BUDGET', min: '0.01' },
             { stateKey: 'perTaskCostUsd', settingKey: 'OUROBOROS_PER_TASK_COST_USD', min: '0.01' }] } } });
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b) || (typeof a !== 'object' && typeof b !== 'object' && String(a) === String(b));
     server.save = (body) => {
+        const stale = Object.keys(body.if_unchanged || {}).filter((key) => body.if_unchanged[key] !== server.tokens[key]);
+        if (stale.length) return response({ error: `${stale[0]} changed since it was read.`, saved: false, code: 'settings_changed_elsewhere' }, 409);
         const changes = {};
         for (const [key, value] of Object.entries(body)) {
-            if (key === 'if_unchanged' || key === 'allow_empty_review_pool') continue;
+            if (['if_unchanged', 'allow_empty_review_pool', 'unset'].includes(key) || same(server.values[key], value)) continue;
             server.version += 1;
             changes[key] = { old: server.values[key], new: value, token: `${key}@${server.version}` };
             server.values[key] = value;
@@ -150,6 +156,39 @@ test('Undo of a value changed on another device says so, shows the current value
     assert.equal(server.log.at(-1), 'GET', 'the row read the current value after the refusal');
 });
 
+test('Undo of a pair writes only the bounds its receipt changed, each on its own token', async (t) => {
+    const { server, view } = await start(t, [WAKE]);
+    const [shortest, longest] = view.container.querySelectorAll('[data-setting-control]');
+    const type = async (pair) => {
+        for (const [i, input] of [shortest, longest].entries()) {
+            if (input.value === pair[i]) continue;
+            input.value = pair[i];
+            await view.container.fire('input', { target: input });
+        }
+        await view.container.fire('change', { target: shortest });
+        await settle();
+    };
+    assert.deepEqual([shortest.value, longest.value], ['1800', '3600']);
+    // One bound changed: the write sends the pair as shown, and the receipt names that bound alone.
+    await type(['2400', '3600']);
+    assert.deepEqual(server.posts[0], { [WAKE_MIN]: 2400, [WAKE_MAX]: 3600 });
+    assert.equal(view.line(WAKE), 'Saved · applies from the next wake · was 1800 to 3600 · Undo');
+    // Another device sets the longest wait before Undo is pressed.
+    Object.assign(server.values, { [WAKE_MAX]: 7200 });
+    server.tokens[WAKE_MAX] = 'elsewhere';
+    await view.press(view.undo());
+    assert.deepEqual(server.posts[1], { [WAKE_MIN]: 1800, if_unchanged: { [WAKE_MIN]: `${WAKE_MIN}@1` } },
+        'Undo writes the bound it undoes and nothing else');
+    assert.deepEqual([server.values[WAKE_MIN], server.values[WAKE_MAX]], [1800, 7200], 'the other device\'s bound stands');
+    // Both bounds changed: Undo writes both, each on the token its own change installed.
+    await type(['600', '900']);
+    assert.deepEqual(server.posts[2], { [WAKE_MIN]: 600, [WAKE_MAX]: 900 });
+    await view.press(view.undo());
+    assert.deepEqual(server.posts[3], { [WAKE_MIN]: 1800, [WAKE_MAX]: 7200, if_unchanged: { [WAKE_MIN]: `${WAKE_MIN}@3`, [WAKE_MAX]: `${WAKE_MAX}@4` } });
+    assert.deepEqual([server.values[WAKE_MIN], server.values[WAKE_MAX]], [1800, 7200]);
+    assert.equal(server.posts.length, 4);
+});
+
 test('one row is one queue: a value given during a write waits, the newest replaces it, and it goes after alone', async (t) => {
     const { server, view, document } = await start(t, [PER_TASK]);
     const gate = deferred();
@@ -240,6 +279,29 @@ test('an unknown outcome says "Not confirmed yet", reads again before anything e
     server.values.OUROBOROS_CONSCIOUSNESS_DAILY_USD = 14;  // the timed-out save did land
     await readSettings();
     assert.equal(view.line(ALLOWANCE), 'Saved', 'a later read that shows the value says it saved, without a receipt');
+});
+
+test('an unknown outcome of a list or a map is judged field by field: an entry that did not land is never called saved', async (t) => {
+    const LIST = testRow('T_LIST', { kind: 'custom' });
+    const MAP = testRow('T_MAP', { kind: 'custom' });
+    const timedOut = () => response({ error: 'The save did not answer in time.', saved: null }, 504);
+    const { server } = await start(t, [], { values: { T_LIST: [{ name: 'a', url: 'https://old.example' }], T_MAP: { items: [{ id: 'a', on: true }] } } });
+    // The write did not land: the read shows the old entry, so the outcome stays unknown and nothing is sent again.
+    server.answers.push(timedOut);
+    const next = [{ name: 'a', url: 'https://new.example' }];
+    const lost = await commitSetting(LIST, next);
+    assert.equal(lost.state, 'unknown');
+    assert.equal(outcomeLine(LIST, lost).text, 'Not confirmed yet');
+    assert.deepEqual(server.log, ['GET', 'POST', 'GET']);
+    await readSettings();
+    server.answers.push(timedOut);
+    assert.equal((await commitSetting(MAP, { items: [{ id: 'a', on: false }] })).state, 'unknown', 'a map is no different');
+    // The same answer for a write that did land: the read shows every field as sent.
+    server.answers.push((body) => { server.save(body); return timedOut(); });
+    const landed = await commitSetting(LIST, next);
+    assert.equal(landed.state, 'saved');
+    assert.deepEqual(server.values.T_LIST, next);
+    assert.equal(server.posts.filter((body) => 'T_LIST' in body).length, 2, 'one write each time');
 });
 
 test('saved, then a later step failed: the line says both', async (t) => {

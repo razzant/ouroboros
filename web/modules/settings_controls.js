@@ -5,53 +5,6 @@ import { isDoorId } from './settings_pages.js';
 import { rowById } from './settings_rows.js';
 import { errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
 
-export function bindEffortSegments(root) {
-    root.querySelectorAll('[data-effort-group]').forEach((group) => {
-        const targetId = group.dataset.effortTarget;
-        const input = root.querySelector(`#${targetId}`);
-        if (!input) return;
-        const buttons = Array.from(group.querySelectorAll('[data-effort-value]'));
-        // A group names itself by its own label, else by the title of the section it is the one control of.
-        const label = input.previousElementSibling;
-        const heading = label?.tagName === 'LABEL' ? label : group.closest('.form-section')?.querySelector('h3');
-        if (heading) {
-            heading.id ||= `${targetId}-label`;
-            group.setAttribute('role', 'group');
-            group.setAttribute('aria-labelledby', heading.id);
-        }
-
-        function sync() {
-            buttons.forEach((button) => {
-                button.classList.toggle('active', button.dataset.effortValue === input.value);
-                button.setAttribute('aria-pressed', String(button.dataset.effortValue === input.value));
-            });
-        }
-
-        buttons.forEach((button) => {
-            button.addEventListener('click', () => {
-                // Presence, not truthiness: '' is a real choice (inherit the Task / Chat effort).
-                input.value = button.dataset.effortValue ?? input.value;
-                input.dataset.effortTouched = '1';
-                sync();
-            });
-        });
-
-        sync();
-    });
-}
-
-export function syncEffortSegments(root) {
-    root.querySelectorAll('[data-effort-group]').forEach((group) => {
-        const targetId = group.dataset.effortTarget;
-        const input = root.querySelector(`#${targetId}`);
-        if (!input) return;
-        group.querySelectorAll('[data-effort-value]').forEach((button) => {
-            button.classList.toggle('active', button.dataset.effortValue === input.value);
-            button.setAttribute('aria-pressed', String(button.dataset.effortValue === input.value));
-        });
-    });
-}
-
 /** Read the complete custom-key draft, including blank and removed rows. No paint. */
 export function readCustomSecretDraft(root) {
     return Array.from(root.querySelectorAll('[data-custom-secret-row]'), (row) => {
@@ -94,35 +47,6 @@ export function collectCustomSecretDraft(rows, knownKeys = []) {
         if (key) seen.set(key, index);
     });
     return { values, errors };
-}
-
-/** Paint only errors owned by the Settings save gate; dirty reads never call this. */
-export function paintSettingsFieldErrors(root, errors) {
-    root.querySelectorAll('[data-settings-validation]').forEach((input) => {
-        input.removeAttribute('aria-invalid');
-        const hint = root.querySelector(`#${input.id}-error`);
-        if (hint) { hint.hidden = true; hint.textContent = ''; }
-        delete input.dataset.settingsValidation;
-    });
-    errors.forEach(({ input, message }) => {
-        if (!input?.id) return;
-        let hint = root.querySelector(`#${input.id}-error`);
-        if (!hint) {
-            hint = input.ownerDocument.createElement('div');
-            hint.id = `${input.id}-error`;
-            hint.className = 'settings-inline-note ui-field-help';
-            hint.dataset.tone = 'error';
-            hint.setAttribute('role', 'status');
-            (input.closest('.form-field') || input.parentElement).appendChild(hint);
-        }
-        input.dataset.settingsValidation = '1';
-        input.setAttribute('aria-invalid', 'true');
-        const described = new Set((input.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean));
-        described.add(hint.id);
-        input.setAttribute('aria-describedby', [...described].join(' '));
-        hint.textContent = message;
-        hint.hidden = false;
-    });
 }
 
 /** A Settings action in flight: disabled and announced busy, the same for Save and a key's Test. */
@@ -249,17 +173,27 @@ function currentValue(row, settings = lastSettings) {
     return row.keys.length > 1 ? row.keys.map((key) => settings[key]) : settings[row.keys[0]];
 }
 
-function bodyOf(row, value) {
+/** The keys a row's value writes. `only` (Undo) keeps those of them: a key the receipt did not name is left to
+ *  whoever changed it since. */
+function bodyOf(row, value, only = null) {
     const codec = CODECS[row.codec];
-    if (codec?.body) return codec.body(value, row);
-    return row.keys.length > 1 ? Object.fromEntries(row.keys.map((key, i) => [key, value?.[i]])) : { [row.keys[0]]: value };
+    const body = codec?.body ? codec.body(value, row)
+        : row.keys.length > 1 ? Object.fromEntries(row.keys.map((key, i) => [key, value?.[i]])) : { [row.keys[0]]: value };
+    (only ? row.keys.filter((key) => !only.includes(key)) : []).forEach((key) => { delete body[key]; });
+    return body;
 }
 
+/** Whether a read shows the value a write sent. An entry of a list or a map is the same when every field is: a field a
+ *  read masks (a key's secret) never equals the value typed, so such a write stays unconfirmed. */
 function sameValue(a, b) {
     if (Array.isArray(a) || Array.isArray(b)) {
         return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, i) => sameValue(value, b[i]));
     }
     if (a === undefined || a === null || b === undefined || b === null) return a === b;
+    if (typeof a === 'object' || typeof b === 'object') {
+        return typeof a === 'object' && typeof b === 'object'
+            && [...new Set([...Object.keys(a), ...Object.keys(b)])].every((key) => sameValue(a[key], b[key]));
+    }
     const [x, y] = [String(a).trim(), String(b).trim()];
     return x === y || (x !== '' && y !== '' && Number(x) === Number(y));
 }
@@ -291,7 +225,9 @@ function savedOutcome(row, value, data = {}) {
     const outcome = { ...base, state: 'saved', withheld: entries.find((entry) => entry?.withheld)?.withheld || '' };
     if (data?.no_changes === true || (changes && !receipt && data.receipt !== 'unavailable')) outcome.state = 'unchanged';
     if (receipt && !outcome.withheld) {
-        const side = (name) => entries.map((entry, i) => (entry ? entry[name] : value?.[i]));
+        // A key the receipt does not name did not change: it was what the last read showed, and nothing of it landed.
+        const now = currentValue(row);
+        const side = (name) => entries.map((entry, i) => (entry ? entry[name] : name === 'old' ? now?.[i] ?? value?.[i] : undefined));
         [outcome.old, outcome.new] = row.keys.length > 1 ? [side('old'), side('new')] : [entries[0].old, entries[0].new];
         const absent = entries.map((entry) => entry?.old_absent === true);
         outcome.oldAbsent = row.keys.length > 1 ? absent : absent[0];
@@ -388,9 +324,9 @@ const preconditionOf = (row, token) => (!token ? null : typeof token === 'string
 
 /** Every way a row is written. Each answers an Outcome and never throws. */
 export const WRITERS = {
-    generic(row, value, { ifUnchanged = '', unset = [] } = {}) {
+    generic(row, value, { ifUnchanged = '', unset = [], only = null } = {}) {
         const precondition = preconditionOf(row, ifUnchanged);
-        const body = { ...bodyOf(row, value), ...(precondition ? { if_unchanged: precondition } : {}) };
+        const body = { ...bodyOf(row, value, only), ...(precondition ? { if_unchanged: precondition } : {}) };
         if (unset.length) {
             unset.forEach((key) => { delete body[key]; });
             body.unset = unset;
@@ -399,8 +335,8 @@ export const WRITERS = {
     },
     // Every key of SAFETY_MODEL_KEYS: the owner's checker transaction. A change that leaves no reviewer asks first,
     // then the same settings go again with the owner's confirmation.
-    async checker(row, value, { ifUnchanged = '', ask = openConfirmDialog } = {}) {
-        const send = (allowEmptyReviewPool) => attempt(row, value, () => saveCheckerSettings(bodyOf(row, value),
+    async checker(row, value, { ifUnchanged = '', only = null, ask = openConfirmDialog } = {}) {
+        const send = (allowEmptyReviewPool) => attempt(row, value, () => saveCheckerSettings(bodyOf(row, value, only),
             { allowEmptyReviewPool, ifUnchanged: preconditionOf(row, ifUnchanged), headers: APP_SETTINGS_ORIGIN }));
         const outcome = await send(false);
         if (outcome.code !== 'empty_review_pool') return outcome;
@@ -487,7 +423,10 @@ function patchSettings(row, value, outcome) {
     settingsEpoch += 1;
     if (!lastSettings || !row.keys.length || CODECS[row.codec]?.host || row.control?.kind === 'secret' || outcome.withheld === 'secret') return;
     const landed = outcome.new !== undefined ? outcome.new : value;
-    row.keys.forEach((key, i) => { lastSettings[key] = row.keys.length > 1 ? landed?.[i] : landed; });
+    row.keys.forEach((key, i) => {
+        if (row.keys.length === 1) lastSettings[key] = landed;
+        else if (landed?.[i] !== undefined) lastSettings[key] = landed[i];  // a key the receipt did not name stays as read
+    });
     const tokens = lastSettings._meta?.tokens;
     if (tokens && outcome.token) Object.assign(tokens, typeof outcome.token === 'string' ? { [row.keys[0]]: outcome.token } : outcome.token);
 }
@@ -557,16 +496,16 @@ function enqueue(row, job) {
 /**
  * Write one row and answer its Outcome. While a write of the row is in flight a newer value waits and is sent after
  * it, alone. `confirmed` skips the row's question (Undo); `ifUnchanged` is the token Undo sends as its precondition;
- * `ask` stands in for the shared confirm dialog.
+ * `only` names the keys Undo writes; `ask` stands in for the shared confirm dialog.
  */
-export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', unset = [], ask = openConfirmDialog } = {}) {
+export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', unset = [], only = null, ask = openConfirmDialog } = {}) {
     if (!lastSettings) await ensureRead();  // effects, tokens and a contract field's bounds
     const confirm = CONFIRMS[row.confirm];
     if (confirm && !confirmed && !(await confirm(row, value, currentValue(row), ask))) {
         repaintRow(row.id);
         return unchanged(row);
     }
-    return enqueue(row, { value, options: { ifUnchanged, unset, ask } });
+    return enqueue(row, { value, options: { ifUnchanged, unset, only, ask } });
 }
 
 function entryList(document) {
@@ -899,10 +838,12 @@ export function bindSettingRows(container, ctx = {}) {
         const state = rowState(row);
         const hit = (selector) => event.target.closest?.(selector);
         if (hit('[data-setting-undo]')) {
+            // The inverse of what the receipt changed: its keys alone, each on the token it installed.
             const { old, oldAbsent, token } = state.outcome || {};
-            const unset = row.keys.filter((key, i) => (Array.isArray(oldAbsent) ? oldAbsent[i] : oldAbsent));
+            const only = typeof token === 'string' ? row.keys : Object.keys(token || {});
+            const unset = row.keys.filter((key, i) => only.includes(key) && (Array.isArray(oldAbsent) ? oldAbsent[i] : oldAbsent));
             state.typed = null;
-            if (old !== undefined && token) void commitSetting(row, old, { confirmed: true, ifUnchanged: token, unset, ask: ctx.ask });
+            if (old !== undefined && token) void commitSetting(row, old, { confirmed: true, ifUnchanged: token, unset, only, ask: ctx.ask });
         } else if (hit('[data-setting-no-limit]')) {
             state.typed = null;
             node.querySelectorAll('[data-setting-control]').forEach((input) => { delete input.dataset.settingDirty; });

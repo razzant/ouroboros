@@ -429,9 +429,16 @@ test('a declared secret that is not set is a neutral tray with Open Accounts and
     assert.match(traysOf(missing), /TELEGRAM_BOT_TOKEN is not set\.<div class="skills-tray-note">Save it in Settings › Accounts and keys\.<\/div>/);
     assert.doesNotMatch(traysOf(missing), /next read|some skills|Disable and Enable/, 'when it applies is the skill’s own status');
     assert.match(traysOf(missing), /data-skill-action="open_secrets"[^>]*>Open Accounts and keys</);
+    // The button names the keys it is about, so Accounts and keys opens at that key's row (skills.js `row`).
+    const keysOf = (html) => /data-skill-action="open_secrets" data-keys="([^"]*)"/.exec(traysOf(html))?.[1];
+    assert.equal(keysOf(missing), 'TELEGRAM_BOT_TOKEN');
     const two = renderInstalledSkillCard(skill({ enabled: true, secret_config: { fields: [
         { id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state: 'missing' }, { id: 'proxy', key: 'TELEGRAM_PROXY', state: 'missing' }] } }));
     assert.match(traysOf(two), /TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY are not set\.<div class="skills-tray-note">Save them in Settings › Accounts and keys\.<\/div>/);
+    assert.equal(keysOf(two), 'TELEGRAM_BOT_TOKEN,TELEGRAM_PROXY');
+    const mixed = renderInstalledSkillCard(skill({ enabled: true, secret_config: { fields: [
+        { id: 'proxy', key: 'TELEGRAM_PROXY', state: 'unknown' }, { id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state: 'missing' }] } }));
+    assert.equal(keysOf(mixed), 'TELEGRAM_BOT_TOKEN', 'a key that is not set leads; one that cannot be read waits');
     assert.doesNotMatch(traysOf(missing), /data-tone="(warn|danger)"/, 'a fact, not the owner’s amber move');
     assert.equal(chipOf(missing), null);
     // Saving it is the owner's move, so the card is under Needs you; the tray stays neutral and adds no chip.
@@ -440,7 +447,7 @@ test('a declared secret that is not set is a neutral tray with Open Accounts and
     const unknown = traysOf(renderInstalledSkillCard(skill({ enabled: true, ...fields('unknown') })));
     assert.match(unknown, /Saved settings can’t be read now, so whether TELEGRAM_BOT_TOKEN is set is unknown\./);
     assert.doesNotMatch(unknown, /skills-tray-note|Save it/, 'an unreadable value is not a reason to save it again');
-    assert.match(unknown, /data-skill-action="open_secrets"/);
+    assert.match(unknown, /data-skill-action="open_secrets" data-keys="TELEGRAM_BOT_TOKEN"/);
     // Configured, an off skill, or a grant still missing: nothing here (the grant tray speaks for itself).
     assert.doesNotMatch(renderInstalledSkillCard(skill({ enabled: true, ...fields('configured') })), /open_secrets/);
     assert.doesNotMatch(renderInstalledSkillCard(skill({ ...fields('missing') })), /open_secrets/);

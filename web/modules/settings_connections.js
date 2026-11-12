@@ -109,36 +109,6 @@ export function cacheHintsNote(entry) {
         ? ` since ${when.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : ''}`;
 }
 
-/** The save receipt's roles and rows that still name a removed or disabled key; '' when none.
- * A role is named in the owner's words ("Main", "Fallback 2", "Agents · reviewer-1"), the key by its picker label. */
-const REFERENCE_ROLE_LABELS = Object.freeze({
-    OUROBOROS_MODEL: 'Main', OUROBOROS_MODEL_LIGHT: 'Light', OUROBOROS_MODEL_SAFETY: 'Safety Supervisor',
-    OUROBOROS_MODEL_VISION: 'Vision', OUROBOROS_MODEL_CONSCIOUSNESS: 'Consciousness',
-    OUROBOROS_MODEL_FALLBACKS: 'Fallback', OUROBOROS_MODEL_FALLBACK: 'Fallback', OUROBOROS_WEBSEARCH_MODEL: 'Web search',
-    OUROBOROS_MODEL_DEEP_SELF_REVIEW: 'Deep review', OUROBOROS_SUBAGENTS: 'Agents',
-});
-
-export function connectionReferencesText(references, connections = []) {
-    const named = (Array.isArray(references) ? references : []).map((reference) => {
-        if (typeof reference === 'string') return reference.trim();
-        if (!reference || typeof reference !== 'object') return '';
-        const setting = String(reference.setting || '').trim();
-        const role = String(reference.label || REFERENCE_ROLE_LABELS[setting] || setting).trim();
-        const entry = String(reference.entry || '').trim();
-        const where = !entry ? role : setting === 'OUROBOROS_SUBAGENTS' ? `${role} · ${entry}` : `${role} ${entry}`;
-        const route = String(reference.route || '').trim();
-        const { source } = route ? parseModelSource(route) : { source: '' };
-        const id = source && !source.startsWith('subscription:') ? source : String(reference.connection || '').trim();
-        return [where, id ? `(${apiProviderLabel(id, {}, connections)})` : ''].filter(Boolean).join(' ');
-    }).filter(Boolean);
-    return named.length ? `Still naming a removed or disabled key, so they cannot send: ${named.join(', ')}` : '';
-}
-
-/** The "More providers" fold opens by itself only for a key set up inside it: a stored credential or an added key. */
-export function moreProvidersOpen(connections = [], kinds = []) {
-    return (connections || []).some((entry) => kinds.includes(entry.kind) && (entry.configured || !entry.builtin));
-}
-
 export function providerTestStatusText(result = {}) {
     if (result?.ok === true) return 'Works';
     const reason = String(result?.error || '').trim();
@@ -179,13 +149,11 @@ export function reachesAnotherPair(facts = {}, draft = {}) {
     return JSON.stringify(compatibleEndpoint(draft)) !== JSON.stringify(compatibleEndpoint(facts));
 }
 
-/** The Accounts API-key rows of one Settings page: load, draft edits, collect, validate, Test.
- * `pageDraft`: flat values the page edits outside these rows and outside `refresh` (Settings' legacy address). */
-export function createConnectionsEditor({ root, onChange = () => {}, test = (body) => apiClient.providerTest(body), pageDraft = () => ({}) } = {}) {
+/** The Accounts API-key rows of one Settings page: load, draft edits, collect, validate, Test. */
+export function createConnectionsEditor({ root, onChange = () => {}, test = (body) => apiClient.providerTest(body) } = {}) {
     const cards = new Map(PROVIDER_CARDS.filter((card) => root.querySelector(`[data-connection-rows="${card.kind}"]`))
         .map((card) => [card.kind, card]));
     const kinds = API_PROVIDER_ORDER.filter((kind) => cards.has(kind));
-    const advanced = PROVIDER_CARDS.filter((card) => card.advanced).map((card) => card.kind);
     const panel = root.querySelector('[data-settings-panel="providers"]');
     let entries = [];
     let listed = [];            // the document's own `_meta.connections` entries (facts the picker does not read)
@@ -360,8 +328,6 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         root.querySelectorAll('[data-connection-row]').forEach(expire);
         rowBaselines = new WeakMap([...root.querySelectorAll('[data-connection-row]')].map((row) => [row, rowFingerprint(row)]));
         paintAll();
-        const fold = root.querySelector('#settings-more-providers');
-        if (fold && moreProvidersOpen(entries, advanced)) fold.open = true;
         baseline = JSON.stringify(collectRows());
     }
 
@@ -414,7 +380,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     // The page's flat draft: the settings last loaded or refreshed under the built-in rows' current fields,
     // so a pair edited partly outside its row (the OpenAI key of a legacy compatible pair) reads as typed.
     function flatDraft() {
-        const values = { ...pageSettings, ...pageDraft() };
+        const values = { ...pageSettings };
         root.querySelectorAll('[data-connection-row][data-builtin="1"]').forEach((row) => {
             for (const field of cards.get(row.dataset.kind).fields) {
                 const input = fieldInput(row, field);

@@ -91,7 +91,9 @@ function secretConfigTray(skill) {
         : `Saved settings can’t be read now, so whether ${escapeHtml(unknown.join(', '))} ${unknown.length > 1 ? 'are' : 'is'} set is unknown.`;
     // An unknown value is not a reason to save again.
     const note = missing.length ? `Save ${missing.length > 1 ? 'them' : 'it'} in Settings › Accounts and keys.` : '';
-    const tray = trayHtml({ sentence, note, actions: smallButton('Open Accounts and keys', String(skill.name || ''), 'open_secrets') });
+    // The button names the keys it is about: Accounts and keys opens at the first one's row.
+    const tray = trayHtml({ sentence, note, actions: smallButton('Open Accounts and keys', String(skill.name || ''), 'open_secrets',
+        `data-keys="${escapeHtml((missing.length ? missing : unknown).join(','))}"`) });
     return { tray, needs: missing.length > 0 };
 }
 

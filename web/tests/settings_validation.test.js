@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { collectCustomSecretDraft, paintSettingsFieldErrors, settingsWriteFailure, webSearchPreviewWords } from '../modules/settings_controls.js';
+import { collectCustomSecretDraft, settingsWriteFailure, webSearchPreviewWords } from '../modules/settings_controls.js';
 
 const draft = (overrides = {}) => ({
     key: '', value: '', appliedValue: '', originalKey: '', clear: false, removed: false,
@@ -52,28 +52,6 @@ test('duplicate and built-in names cannot silently overwrite another field', () 
     assert.deepEqual(new Set(result.errors.map(({ index }) => index)), new Set([0, 1, 2, 3]));
     assert.equal(result.values.TOTAL_BUDGET, undefined);
     assert.equal(result.values.OUROBOROS_PRIVATE, undefined);
-});
-
-test('field validation clears the old error and keeps its accessible association', () => {
-    const attributes = new Map([['aria-describedby', 'custom-key-help']]);
-    const hint = { id: 'custom-key-error', hidden: true, textContent: '' };
-    const input = { id: 'custom-key', dataset: {},
-        getAttribute: (name) => attributes.get(name),
-        setAttribute: (name, value) => attributes.set(name, value),
-        removeAttribute: (name) => attributes.delete(name) };
-    const root = {
-        querySelectorAll: () => input.dataset.settingsValidation ? [input] : [],
-        querySelector: () => hint,
-    };
-    paintSettingsFieldErrors(root, [{ input, message: 'Invalid key' }]);
-    assert.equal(attributes.get('aria-invalid'), 'true');
-    assert.equal(attributes.get('aria-describedby'), 'custom-key-help custom-key-error');
-    assert.equal(hint.hidden, false);
-    paintSettingsFieldErrors(root, []);
-    assert.equal(attributes.has('aria-invalid'), false);
-    assert.equal(hint.hidden, true);
-    assert.equal(hint.textContent, '');
-    assert.equal(attributes.get('aria-describedby'), 'custom-key-help custom-key-error');
 });
 
 test('settings write errors preserve saved, unsaved and unknown receipts', () => {
