@@ -266,10 +266,11 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
                  f"predicted free ~{free:,}", f"target room {room:,} (reply floor 65,536)",
                  "largest unit:2:3:", "own cost unknown",
                  "shared wallet $12.50 known headroom (unreserved; shared with other tasks)",
-                 "quota 3 of 10 this hour", "tariff unknown", "elapsed unknown (no recorded start)",
+                 "quota 3 of 10 this hour", "elapsed unknown (no recorded start)",
                  "no execution limit", "observed tool results 0 (0 errored)"):
         assert part in line, part
     assert "should" not in line and "compact" not in line.lower()  # facts, no advice
+    assert "tariff" not in line  # no rate is cached for this route: the slot says nothing, never a standing "unknown"
     assert append_context_facts(context) is False and len(context.messages) == len(before) + 1  # identical round/route/body/schema
     context.round_idx, context.accumulated_usage["cost"] = 2, 1.2345
     context.accumulated_usage["cost_final"] = False
