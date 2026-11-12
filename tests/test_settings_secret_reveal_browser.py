@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
-from tests.settings_browser_helpers import open_settings, settings_page, commit_row, press_editor_save
+from tests.settings_browser_helpers import open_settings, commit_row, press_editor_save
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 

@@ -12,8 +12,6 @@ below keeps the narrow fit from being bought with the wide layout.
 from __future__ import annotations
 
 import json
-import os
-import pathlib
 
 import pytest
 from tests.test_ui_smoke_agents_panel import _AGENTS_PANEL_ROSTER

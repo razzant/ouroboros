@@ -23,7 +23,7 @@ from ouroboros.config import (
 )
 from ouroboros.config import ENDPOINT_AUTHORED_SETTINGS as _ENDPOINT_AUTHORED_SETTINGS
 from ouroboros.config import ENDPOINT_WRITTEN_SETTINGS as _ENDPOINT_WRITTEN_SETTINGS, ENDPOINT_WRITERS as _ENDPOINT_WRITERS
-from ouroboros.deployment_policy import DeploymentPolicyRefusal, choice_refusal
+from ouroboros.deployment_policy import choice_refusal
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or
 from ouroboros.gateway.owner_settings import (
     MANAGED_BY_DEPLOYMENT,
@@ -246,7 +246,6 @@ def _build_restart_state(settings: Dict[str, Any]) -> dict:
 
 
 from ouroboros.settings_scales import (
-    IMMEDIATE_SETTINGS as _IMMEDIATE_KEYS,
     RESTART_REQUIRED_SETTINGS as _RESTART_REQUIRED_KEYS, setting_effect,
 )
 

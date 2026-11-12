@@ -15,7 +15,6 @@ import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
-from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.settings_browser_helpers import open_settings
 from tests.ui_console_errors import PageErrors, record_console_errors, record_failed_loads, unexpected_console_errors
 

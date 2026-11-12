@@ -357,7 +357,7 @@ def test_no_tab_scrolls_sideways_at_the_floor_and_a_three_way_choice_keeps_one_l
         page.wait_for_timeout(200)
         assert _sideways(page) == [], tab
     page.click('[data-dashboard-tab="consciousness"]')
-    tops = page.locator(f'#page-dashboard [data-setting-row="OUROBOROS_CONSCIOUSNESS_AUTONOMY"] [data-setting-value]').evaluate_all(
+    tops = page.locator('#page-dashboard [data-setting-row="OUROBOROS_CONSCIOUSNESS_AUTONOMY"] [data-setting-value]').evaluate_all(
         "(buttons) => buttons.map((button) => Math.round(button.getBoundingClientRect().top))")
     assert len(tops) == 3 and len(set(tops)) == 1, f"Advises, Acts and Evolves stand on one line at 320 px: {tops}"
     # A number and a door keep their place at the row's end; a range goes under its words. "At the row's end" is

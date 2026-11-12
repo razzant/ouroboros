@@ -303,7 +303,7 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers):  #
     Cover both a draft-only row and an edited previously saved map: the latter
     must not be resurrected from header row state after Remove unsupported.
     """
-    from playwright.sync_api import expect, sync_playwright
+    from playwright.sync_api import sync_playwright
 
     url, data_dir = direct_server_with_data['url'], direct_server_with_data['data_dir']
     with sync_playwright() as pw:
@@ -593,7 +593,6 @@ BETA = "synthetic-browser-beta-0005"
 
 def _seed(page, url, servers):
     """Write through the real Settings writer, then load the page from it and let its loads settle."""
-    from playwright.sync_api import expect
 
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     status = page.evaluate("""async (servers) => {
