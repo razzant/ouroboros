@@ -88,6 +88,9 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
         cached_tokens=cached_tokens,
         cache_write_tokens=cache_write_tokens,
         prompt_cache_ttl=str(normalized.get("prompt_cache_ttl") or ""),
-        **{key: copy.deepcopy(normalized[key]) for key in ("effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis", "cost_coverage", "price_source", "cost_invalid")
-           if key in normalized},
+        # ``response_provider``: the upstream that served the call, as the response named it (a cache is one
+        # upstream's); ``cache_write_tokens_by_ttl``: the provider's own split of the writes by lifetime.
+        **{key: copy.deepcopy(normalized[key]) for key in (
+            "effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis", "cost_coverage",
+            "price_source", "cost_invalid", "response_provider", "cache_write_tokens_by_ttl") if key in normalized},
     )

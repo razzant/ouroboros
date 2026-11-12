@@ -1272,6 +1272,9 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
 .settings-row,
 .settings-head { box-sizing: border-box; min-height: 52px; }
 .settings-row > .ui-row-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); }
+/* Main, a fallback or a role whose key cannot send: its line says so in the warning colour (these rows have no tinted
+   body, so the light theme's unset warning word would leave it unmarked). */
+#page-settings :is(.ui-row-meta, .models-main-meta, [data-setting-meta])[data-tone="warn"] { color: var(--status-warn-fg); }
 .settings-row-result { min-height: 0; }
 .settings-row [data-setting-meta]:empty,
 .settings-row-result:empty,

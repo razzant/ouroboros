@@ -146,7 +146,7 @@ const mountPermissions = rowsPage('permissions', {
             + card({ title: 'What it may change', rows: rows('OUROBOROS_RUNTIME_MODE') })
             + card({ title: 'Who watches its actions', lead: 'The Safety Supervisor is a second model that reads a step before it runs.',
                 rows: rows('OUROBOROS_SAFETY_MODE', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'permissions:rules', 'permissions:supervisor', 'permissions:second-check'),
-                after: note('data-safety-skips role="status"') + note('data-safety-exits hidden')
+                after: note('data-safety-skips role="status"') + note('data-safety-spares role="status" hidden') + note('data-safety-exits hidden')
                     + note('data-safety-organization-rules hidden', 'Your organization’s rules apply too; its administrator sets them.') })
             + card({ title: 'Who checks its results', lead: 'Reviewers are other models that read finished work.',
                 rows: rows('OUROBOROS_TASK_REVIEW_MODE', 'permissions:reviewers') })
@@ -158,6 +158,8 @@ const mountPermissions = rowsPage('permissions', {
         const exits = container.querySelector('[data-safety-exits]');
         exits.textContent = facts.exits;
         exits.hidden = !facts.exits;
+        // An organization's checker records a walk whenever a route of its own lacks a credential, its own answer included.
+        container.querySelector('[data-safety-spares]').hidden = facts.fixed;
         container.querySelector('[data-safety-organization-rules]').hidden = !facts.organizationRules;
     },
     shown: (container) => { void refreshSafetySkipCounter(container); },

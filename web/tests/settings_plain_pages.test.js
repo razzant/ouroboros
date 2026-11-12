@@ -11,7 +11,7 @@ import { forgetSettingRows, readSettings, settingsRow } from '../modules/setting
 import { settingsPageFor } from '../modules/settings_pages.js';
 import { policyValueLabel } from '../modules/settings_policy.js';
 import { HOME_ROWS, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
-import { forgetUnsavedRules, rulesSaveWords } from '../modules/settings_safety.js';
+import { forgetUnsavedRules, rulesSaveWords, spareWords } from '../modules/settings_safety.js';
 import { tunePermissionRows, voiceFacts } from '../modules/settings_ui.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
@@ -249,6 +249,9 @@ test('Permissions and checks: three questions and what it is trusted with, doors
     assert.equal(page.meta('permissions:second-check'), 'Off');
     assert.equal(page.container.querySelector('[data-safety-skips]').textContent, 'No safety checks let through in the last 24 h.',
         'the counter is read when the page is shown');
+    assert.equal(page.container.querySelector('[data-safety-spares]').textContent,
+        'No safety check went to a spare model in the last 24 h. 0 checks with a recorded verdict in the same span.',
+        'the spare-model line is read from the same tail');
     for (const [id, to] of [['permissions:rules', 'rules'], ['permissions:supervisor', 'models/role/safety'], ['permissions:second-check', 'agents'],
         ['permissions:reviewers', 'agents']]) {
         await page.press(page.row(id));
@@ -288,6 +291,26 @@ test('what a managed deployment locks is said in its row, and an unmanaged one l
     const plain = tunePermissionRows(rows(), { _meta: { policy_state: { access: { configured: 'pro', current_process: 'pro' } } } });
     assert.deepEqual(row(plain, 'OUROBOROS_TASK_REVIEW_MODE').control, rowById('OUROBOROS_TASK_REVIEW_MODE').control);
     assert.deepEqual(row(plain, 'OUROBOROS_RUNTIME_MODE').control, rowById('OUROBOROS_RUNTIME_MODE').control);
+});
+
+test('Permissions and checks: under an organization\'s Supervisor the spare-model line is hidden; the ordinary page shows it', async (t) => {
+    const page = await open(t, 'permissions');
+    const spares = () => page.container.querySelector('[data-safety-spares]');
+    assert.equal(spares().hidden, false);
+    assert.match(spares().textContent, /^No safety check went to a spare model in the last 24 h\. /);
+    // Its checker lists a route of its own without a credential before any ask, and its own answer is then a walk's.
+    const ordinary = page.server.document;
+    page.server.document = () => {
+        const document = ordinary();
+        document._meta.policy_state.deployment = { access_max: 'pro', min_coverage: 'full', checker: { model: 'anthropic@safety::checker' } };
+        return document;
+    };
+    await page.shown();
+    assert.equal(page.meta('permissions:supervisor'), 'checker · Set by your organization');
+    assert.equal(spares().hidden, true, 'no count of the checker\'s own answers as a spare\'s');
+    page.server.document = ordinary;
+    await page.shown();
+    assert.equal(spares().hidden, false);
 });
 
 test('Your rules: its own Save, the server\'s refusal on the page with the text kept, and what a saved text applies to', async (t) => {
@@ -542,4 +565,17 @@ test('a switch a page draws by hand is stamped as a switch, so a narrow row keep
     for (const id of ['computer:autostart', 'OUROBOROS_DESKTOP_KEEP_RUNNING']) assert.equal(computer.row(id).dataset.kind, 'switch', id);
     const css = fs.readFileSync(new URL('../settings.css', import.meta.url), 'utf8');
     assert.match(css, /@container \(max-width: 28rem\) \{\s*\.settings-row:is\(\[data-kind="door"\], \[data-kind="switch"\]/);
+});
+
+test('Permissions and checks: the checks a spare model answered are counted by model, beside the misses and the checks with a verdict', () => {
+    const walk = (model) => ({ type: 'safety_route_fallback', answered: model ? { model, role: 'fallback:0' } : null });
+    assert.equal(spareWords([], 7, 'in the last 24 h'),
+        'No safety check went to a spare model in the last 24 h. 7 checks with a recorded verdict in the same span.');
+    assert.equal(spareWords([walk('openrouter@openrouter-anthropic::anthropic/claude-opus-5.5'), walk('anthropic/claude-opus-5.5'),
+        walk('anthropic/claude-fable-5.2'), walk(null)], 412, 'since 09:12 (the latest 2,000 events)'),
+    '3 safety checks were answered by a spare model since 09:12 (the latest 2,000 events), because the Supervisor\'s own'
+        + ' model gave no answer: anthropic/claude-opus-5.5 ×2, anthropic/claude-fable-5.2 ×1. 1 check went to the spare'
+        + ' models and got no answer. 412 checks with a recorded verdict in the same span.');
+    assert.equal(spareWords([walk(null)], 1, 'in the last 24 h'),
+        '1 check went to the spare models in the last 24 h and got no answer. 1 check with a recorded verdict in the same span.');
 });

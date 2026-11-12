@@ -124,7 +124,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
 | The chosen place's left mark | `#c93545` | white, the fill's ink |
 | A warning or failure on a row whose body cannot show it | the row's tint, its words in their own ink | a neutral row, its words in the hue's ink |
 | Green, red, amber fills (hover) | the hue at 14/22, 10/16, 18/26 % | white 16/20 % (green), 9/13.5 % (red, amber), each with its hue's ink (red `#fe9498`, a step lighter than the crimson word) |
-| Success word · its dot, track and switch | `#176b49` · `#22c55e` | leaf `#83e499` · `#2fd359` |
+| Success word · its dot, track and switch (thumb: opaque white) | `#176b49` · `#22c55e` | leaf `#83e499` · `#2fd359` |
 | Inside the Ouroboros voice: ink · secondary · meta · disabled | the room's inks (its prose `#35272c`) | `#fcf9f9` · `#ebd9da` · `#f2e4e5` · `#e1cbcc` |
 | Inside the Ouroboros voice: capsule (hover) · tray, also the bodies of its tones, status chips and Project capsules | the room's | opaque `#8f263a` (`#9e3044`) · `#832336` |
 | Inside the Ouroboros voice: crimson and failure word, link and focus · live word · Project ink · information ink | the room's | `#ffc2c6` · `#ffb3b7` · `#f6c4fc` · `#b6d4ff` |
@@ -480,7 +480,8 @@ above the row like the hint and never move the composer**: Main, the recents, th
 that can lead a work (those Settings offers the Main role, never agent sessions). With one source, its models stand
 under its own name without a source step; when Main has a row above, its model is omitted from this section.
 A recent may also appear under its source. A row is one model through one source, however many accounts list it, never an account: the source, whether
-it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one:
+it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one and
+neither Main's processing tier nor the default one, which every lead pays, is Fast or Economy:
 `OpenRouter · $4 in / $20 out`), its window when known (an unknown window is omitted), `Unavailable` when no
 account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
 and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps
@@ -885,16 +886,16 @@ status sentence's or a composer chip's dot is its tone, §4).
   - *still* — the same dots at 40 %: queued, or a wait that ends by itself;
   - *pause* — two 2 × 8 px bars at 70 %: paused, by the owner or by Ouroboros, until Resume;
   - *ring* — a faint 7 px ring: not confirmed (an incomplete read, a closed socket), never a guess;
-  - *dot* — a 7 px dot: one fact (the owner's move, new messages where nothing works, an outcome);
+  - *dot* — a 7 px dot: one fact (the owner's move where nothing moves, new messages where nothing works, an outcome);
   - *none* — rest draws nothing.
   The ring stands at 55 %; new messages lift the still dots and the ring to 60 % and the bars to
   full strength, so the crimson reads.
 - **The hue says whether there is something for the owner.** *Ink* is the
   surface's own ink (`currentColor`), a chosen row's selection ink included, so a
   mark follows the name it marks and never out-shouts it. *Amber* (`--amber`) is
-  the owner's move: a question to answer or an action only the owner can take; it
-  outranks everything and stands alone, the dot replacing the work's shape while
-  the word keeps saying the work (`Working` with a small amber dot). *Crimson*
+  the owner's move: an unanswered question or an action only the owner can take; it
+  outranks the other hues. It tints the moving dots, so one mark says that the work
+  goes on and that something waits for the owner; where nothing moves it is the lone dot. *Crimson*
   (`--accent`, its light crimson in dark) is new messages: it tints the work's
   shape, or is the dot where nothing works. An *outcome* is a dot beside its word:
   green for Done and Done with warnings (the word says the warnings), neutral for
@@ -902,7 +903,8 @@ status sentence's or a composer chip's dot is its tone, §4).
 - **One mark per place.** A row, a bar, a chip or a head carries one mark; the
   owner's move comes first, then an outcome beside its word, then new messages,
   then the work's shape in ink. A lone dot in a list is only new messages or the
-  owner's move.
+  owner's move where nothing moves; the Projects header and ☰, which stand for many
+  rooms, show the owner's move as the dot.
 - **Words carry the meaning.** A mark is decorative (`aria-hidden`); the word
   beside it or the place's accessible name says the same fact ("Working · new
   messages", "Something here waits for you"), so colour is never the only channel.
@@ -911,9 +913,10 @@ status sentence's or a composer chip's dot is its tone, §4).
   shape on a live chip keeps the moving dots' width, so the word beside it never
   moves. A status sentence's own dot (`.ui-status`, Settings sentences) is drawn by
   its CSS at the same 7 px in the same hues; a room at rest says `Online` beside the
-  shared mark's green dot. Both speak only at rest.
+  shared mark's green dot (the amber dot while the room waits for the owner's move, defined next). Both speak only at rest.
 - **Amber is the owner's attention and nothing else:** (1) the owner's move — a
-  question, or what only the owner can do: sign in, a spending limit, Resume after a
+  question still unanswered (the ones Main's pill counts, whether its task stands on it, goes on under its
+  assumption or has ended, and a Project's answer whose delivery a restart left unknown), or what only the owner can do: sign in, a spending limit, Resume after a
   restart, crash or Panic, grant access, a skill review that must run first, local
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
   or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
@@ -1479,9 +1482,12 @@ server's `mark_of`, and the owner's move only from proved facts (`can_resume`,
 working, then queued, waiting, paused, and its mark is the server's status mark
 (Status marks): moving dots while anything in it runs (a paused work's finishing review too), still dots while it queues or waits on
 something that ends by itself, two bars while paused, a faint ring when
-unconfirmed. While something waits for the owner the amber dot replaces that shape
-beside the room's word; a Pause is not the owner's turn. At rest `Online` keeps its
-green dot, a status sentence's own. Only what the client alone knows lies over the
+unconfirmed. While something waits for the owner the mark is amber (Status marks)
+beside the room's word; a Pause is not the owner's turn. What waits is the server's `turn`: a question
+a task stands on (`question`), one still unanswered while its work goes on or after it ended
+(`open_question`: the set Main's pill counts, kept across a read that does not vouch against it), an owner
+action. At rest `Online` keeps its green dot, a status sentence's own, or shows the amber one. Only what the
+client alone knows lies over the
 server's mark: `Reconnecting…` (a ring; `· server answers` once the core answered and a later
 attempt still failed: an observation, never a cause), `Updating…` (a ring) while a room shown again or
 reconnected still reads what it missed after 300 ms, the owner's own unconfirmed send and the
@@ -1525,7 +1531,9 @@ lands there with the list open. Until then a row claims nothing
 about where its message is; when the room's history holds none (`No message yet.`,
 or `No message saved in this chat.` once ended), belongs to another room, or cannot
 be checked, its details say so. `View question`
-goes to the exact waited question and answers nothing. A row offers exactly the
+goes to the exact question and answers nothing; every question of the room's turn is reachable: a confirmed work's
+row links one, and each further one, one whose work is unconfirmed, or one no listed work holds, has its own row,
+named by the question's first words (`Question` when its row carries none, as Main's own does) under its card's status word; that row's name goes to the question too. A row offers exactly the
 controls the server lists for its work, each at its exact task, on the shared
 task controls: Stop ends the whole work (every episode still running, the newest
 first), `Stop earlier attempt` only what earlier attempts left running, and
@@ -1708,7 +1716,7 @@ Anatomy, top to bottom:
 
 1. **Head** — one 28px row in every room: neutral `Question` chip (`--type-meta`,
    neutral pair), the status beside it as a 7 px status mark + text, amber while
-   the task waits for the answer. The row never wraps (a narrow card's long status
+   Main's pill counts the question (the words say whether its task waits). The row never wraps (a narrow card's long status
    takes two lines in place). The voice line names who asks and a Main copy's
    Project; private Presence questions and reports add the linked place/thread
    source beside the name, outside authored text. The lifecycle family leads with the one
@@ -1821,7 +1829,7 @@ A chat transport shows such a request as the host's note on where to enter it, w
 
 A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence (none where its own control already says it: a plain resume pause beside Resume), its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its helpers within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.
 
-One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
+One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. A room's mark, the Projects header's and ☰'s turn amber for the same questions; the sidebar feed holds the row of a listed Project whose room is the owner's turn for as long as Main's pill keeps its question (the same reads keep and drop both), and the header's amber counts only rows the feed can show. Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
 
 A confirmed answer/closure shows its result for five seconds, then retires only the Main copy through message/media disposal without moving the viewport; the Project card stays. Pending canonical delivery keeps the read-only form and a compact pending fact. The interval starts once, including simultaneous form/result delivery. Focus remains during it, then moves to the next Main question or keyboard owner's composer without summoning a touch keyboard. History, reconnect and stale snapshots cannot resurrect settled forms; a settled pointer never mounts unless its delivery is owed. A newly accepted question closed before first exposure publishes only its closed state; an old answer without explicit delivery debt creates no new owner turn.
 
@@ -2204,7 +2212,7 @@ declared labels/settings.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
 While Off the host's `only_hears` replaces what would claim a wake: Active's note says “Consciousness is off: it
-only hears here.”, the wake note (Active or Silent) “While consciousness is off, nothing here wakes it.”, and the
+only hears here.”, the wake note (Active or Silent) “While consciousness is off, nothing here wakes it.” with the door `Consciousness ›` (Dashboard › Consciousness, where Start is; no second Start), and the
 conversation's state card “Active, consciousness off: it only hears here.” (Silent alike). Paused keeps its words.
 Conflicts: “Changed elsewhere; your text is kept”. Resave uses fresh facts.
 
@@ -2729,7 +2737,8 @@ replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
 confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
-published price per 1M tokens where it states one (`$4 in / $20 out`), which never sorts or filters the list;
+published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
+sorts or filters the list;
 nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
@@ -2857,7 +2866,7 @@ stops clear of them.
 - A short or narrow window drops ornament (the slogan, the rail's sub-labels), never
   the words a choice or a field is made by and never the size of type. The footer's
   aside leaves only a narrow window, where the pinned footer would take the step's
-  lines. A line that changes no choice is deleted, not hidden; a taller step scrolls
+  lines; a warning it carries (a save whose answer was lost) stays. A line that changes no choice is deleted, not hidden; a taller step scrolls
   under the pinned footer.
 - Field labels are sentence case at meta ink: a step shows a dozen at once to
   get one value typed, not to present a grid of headings.

@@ -165,7 +165,9 @@ def persist_physical_candidate(
     """
     from ouroboros.anthropic_native_custody import physical_custody_projection
     from ouroboros.observability import persist_call
+    from ouroboros.chronicle_lead import delivered_lead_rule
 
+    lead_rule = delivered_lead_rule(candidate)
     projected = physical_custody_projection(candidate)
     custody_projected = projected != candidate
     persisted = persist_call(
@@ -177,6 +179,7 @@ def persist_physical_candidate(
         keep_raw=False,
         manifest={
             "candidate_manifest_kind": "physical_llm_candidate",
+            "chronicle_lead_rule": lead_rule,
             "candidate_raw_digest_basis": "canonical_json_v1_pre_redaction",
             "redacted_projection_digest_basis": "observability_json_v1_post_default_redaction_cas",
             "anthropic_native_custody_projected": custody_projected,
@@ -196,6 +199,7 @@ def persist_physical_candidate(
     )
     persisted["manifest_ref"] = {
         **persisted["manifest_ref"], "model_send_seal_version": SEAL_VERSION,
+        "chronicle_lead_rule": lead_rule,
     }
     return persisted
 

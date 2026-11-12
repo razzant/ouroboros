@@ -821,13 +821,13 @@ def _forced_physical_context(ctx: _RoundLimitContext, messages: List[Dict[str, A
     """
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     plan = getattr(tools_ctx, "context_fit_plan", None)
+    from ouroboros.transcript_prefix import forget_attempt_prefix, rewrite_epoch, with_attempt_prefix
     if plan is None or str(ctx.active_model or "") != str(getattr(plan, "model", "") or ""):
-        return None
+        return forget_attempt_prefix(ctx)
     from ouroboros.context_anchor import main_input_anchor
     from ouroboros.context_fit import measure_main_fit
     from ouroboros.loop_model_call import _main_context_profile, _physical_context_for_fit, _remember_main_fit
     from ouroboros.observability import new_execution_id
-    from ouroboros.transcript_prefix import rewrite_epoch
 
     mode = str(getattr(tools_ctx, "active_context_mode", "") or "")
     mode = mode if mode in {"max", "low", "nano"} else "max"
@@ -838,7 +838,7 @@ def _forced_physical_context(ctx: _RoundLimitContext, messages: List[Dict[str, A
         rendered_mode=mode, round_id=round_id, reasoning_effort=ctx.active_effort,
         anchor=anchor, accepted_input_tokens=accepted)
     _remember_main_fit(ctx, disposition)
-    return _physical_context_for_fit(disposition)
+    return with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage, ctx, messages)
 
 
 @receiver_abandonable()

@@ -398,7 +398,7 @@ export const ROWS = [
         aliases: ['GGUF Filename (for HF repos)', 'GGUF Filename'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'LOCAL_MODEL_CONTEXT_LENGTH', keys: ['LOCAL_MODEL_CONTEXT_LENGTH'], page: 'models/local', fold: false,
-        name: 'Context length', meta: 'Tokens the model is started with. 0 starts it with 16384.', more: '',
+        name: 'Context length', meta: 'Tokens the model is started with. 0 starts it with 65536.', more: '',
         control: { kind: 'number', min: 0 },
         aliases: ['Context Length'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },

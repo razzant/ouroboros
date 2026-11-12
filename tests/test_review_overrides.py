@@ -235,6 +235,11 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
         ("pass", "PASS", "pass"), ("fail", "FAIL", "critical_findings"),
         ("open", "NOT_PERFORMED", "review_late_result_pending"),
         ("gate", "NOT_PERFORMED", "gate_block:tests_preflight_blocked"))} | {"bare": {}}
+    records["open_fail"] = {"rows": [{"seat_id": "s1"}, {"seat_id": "s2"}, {"seat_id": "adv", "additional": True}],
+                            "verdict": {"aggregate": "NOT_PERFORMED", "reason": "review_late_result_pending",
+                                        "per_row": {"s1": "FAIL", "s2": "pending", "adv": "PASS"}}}
+    records["open_adviser_fail"] = {**records["open_fail"], "verdict": {**records["open_fail"]["verdict"],
+                                                                        "per_row": {"s1": "PASS", "adv": "FAIL"}}}
 
     def load(_root, record_id):
         if record_id == "corrupt":
@@ -252,7 +257,10 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
             (open_wave, "gate", "tests_preflight_blocked"), (open_wave, "missing", open_wave),
             (open_wave, "corrupt", open_wave), (open_wave, "bare", open_wave), (open_wave, "", open_wave),
             ("critical_findings", "pass", "critical_findings"), ("preflight", "pass", "preflight"),
-            ("review_quorum", "", "review_quorum"), ("", "fail", ""), ("", "", "")):
+            ("review_quorum", "", "review_quorum"), ("", "fail", ""), ("", "", ""),
+            (open_wave, "open_fail", "critical_findings"), (open_wave, "open_adviser_fail", open_wave),
+            ("preflight", "fail", "critical_findings"), ("preflight", "open_fail", "critical_findings"),
+            ("tests_preflight_blocked", "open", "tests_preflight_blocked"), ("preflight", "corrupt", "preflight")):
         assert _went_on_over(ctx, source(kept, record_id)) == over, (kept, record_id)
     assert _went_on_over(ctx, None) == ""
     ctx._author_commit_source = source("review_late_result_pending", "pass")
@@ -266,6 +274,49 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     fact = _fact(ctx.drive_root, "root-1")
     assert fact["continued"]["latest"]["reason"] == "critical_findings" and fact["landed"]["count"] == 1
     assert [row["reason"] for row in read_json_dict(ctx.drive_root / COUNTER_REL)["landed"]] == ["critical_findings"]
+    # Handed back open, that outcome was never counted: the author's decision counts it, once per review record.
+    assert (fact["count"], fact["latest"]["reason"], fact["latest"]["record_id"]) == (1, "critical_findings", "fail")
+    assert len(_events(ctx)) == 1 and read_json_dict(ctx.drive_root / COUNTER_REL)["count"] == 1
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})  # the same attempt continued again
+    fact = _fact(ctx.drive_root, "root-1")
+    assert fact["count"] == 1 and fact["continued"]["count"] == 2 and len(_events(ctx)) == 1
+    ctx._author_commit_source = source("critical_findings", "fail")  # counted when it was handed back
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    assert _fact(ctx.drive_root, "root-1")["count"] == 1 and len(_events(ctx)) == 1
+    records["fail2"] = records["fail"]
+    ctx._author_commit_source = source("preflight", "fail2")  # a panel FAIL behind a failed check, never counted
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    fact = _fact(ctx.drive_root, "root-1")
+    assert (fact["count"], fact["latest"]["reason"], fact["latest"]["record_id"]) == (2, "critical_findings", "fail2")
+    ctx._author_commit_source = source("preflight", "pass")  # the panel passed: the counted check stands alone
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    fact = _fact(ctx.drive_root, "root-1")
+    assert fact["count"] == 2 and fact["continued"]["latest"]["reason"] == "preflight"
+
+
+def test_an_open_wave_never_overwrites_a_reason_its_attempt_keeps(tmp_path, monkeypatch):
+    """A failed free check stays named on its attempt when the panel's wave then waits open; a settled outcome
+    replaces it (REV6C A2)."""
+    from ouroboros.review_state import load_state
+    from ouroboros.tools.commit_gate import _record_commit_attempt
+    from ouroboros.tools.git_review_cycle import _reset_commit_review_state
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    ctx = _make_ctx(tmp_path)
+    ctx.task_id = "t1"
+    _reset_commit_review_state(ctx)
+    _record_commit_attempt(ctx, "change", "reviewing", phase="review")
+
+    def kept():
+        return load_state(ctx.drive_root).latest_attempt_for(attempt=ctx._current_review_attempt_number).review_override_reason
+
+    _decide(ctx, "review_late_result_pending")
+    assert kept() == "review_late_result_pending", "an attempt with no reason keeps the open wave's"
+    _decide(ctx, "preflight")
+    _decide(ctx, "review_late_result_pending")
+    assert kept() == "preflight"
+    _decide(ctx, "critical_findings")
+    assert kept() == "critical_findings", "a settled outcome replaces it"
 
 
 @pytest.mark.parametrize("case", ["warm", "restarted", "successor", "clean", "fixed", "refused"])

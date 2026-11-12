@@ -279,7 +279,15 @@ test('the common DOM writer neither rewrites nor re-announces an unchanged statu
 test('the owner\'s move a chip shows is in its accessible name, once', () => {
     const chip = element();
     paintTaskPhase(chip, taskActivityPresentation({ phase: 'working', work: { mark: 'moving', owner: true } }));
-    assert.equal(markOf(chip), 'dot/owner');
+    assert.equal(markOf(chip), 'moving/owner');
+    assert.equal(chip.getAttribute('aria-label'), 'Task status: Working · Something here waits for you');
+    // A work's turn says what it holds, in the room's own words (work_status.turnAmber): an open question is no action.
+    paintTaskPhase(chip, taskActivityPresentation({ phase: 'working',
+        work: { mark: 'moving', owner: true, note: 'An unanswered question is here' } }));
+    assert.equal(chip.getAttribute('aria-label'), 'Task status: Working · An unanswered question is here');
+    // Another proved owner's move beside it (the owner's System message) keeps the general words.
+    paintTaskPhase(chip, taskActivityPresentation({ phase: 'working', ownerMove: true,
+        work: { mark: 'moving', owner: true, note: 'An unanswered question is here' } }));
     assert.equal(chip.getAttribute('aria-label'), 'Task status: Working · Something here waits for you');
     paintTaskPhase(chip, taskActivityPresentation({ phase: 'working', ownerWait: 'owner_wait' }));
     assert.equal(chip.getAttribute('aria-label'), 'Task status: Waiting for your answer');

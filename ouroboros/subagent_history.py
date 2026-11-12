@@ -41,11 +41,11 @@ def _price_class(identity: Any) -> list[str]:
 
 
 def _first_call_cost(drive_root, task_id: str, first: Mapping[str, Any], target: str) -> Optional[dict]:
-    """What the task's first call on the row's own route cost, as the usage ledger settled it: the task's
-    first attempt on the provider and model of its first usable answer (``first``) that came back with input
-    counted. Another route's attempt under the same model name is never it. The ledger names a model as its
-    route sends it, so the row's ``target`` and the name the answer was recorded under meet the ledger's
-    spelling in ``normalize_model_identity``. ``usd`` is None when that attempt carries no price; an
+    """What the task's first usable answer (``first``) cost, as the usage ledger settled it: the ledger
+    attempt that carried it (``physical_attempt_id``). A record from before that id existed falls back to the
+    task's first attempt on that answer's provider and model that came back with input counted; the ledger
+    names a model as its route sends it, so the row's ``target`` and the answer's recorded name meet the
+    ledger's spelling in ``normalize_model_identity``. ``usd`` is None when that attempt carries no price; an
     unreadable ledger (the display wait, never longer) or no such attempt is no sample."""
     from ouroboros import usage_store
     from ouroboros.provider_models import normalize_model_identity
@@ -53,6 +53,10 @@ def _first_call_cost(drive_root, task_id: str, first: Mapping[str, Any], target:
     own = {normalize_model_identity(str(name)) for name in (target, first.get("resolved_model")) if name}
     try:
         with usage_store.read(drive_root, allow_stale=True) as txn:
+            if first.get("physical_attempt_id"):
+                row = txn.conn.execute("SELECT cost_usd FROM attempts WHERE attempt_id=? AND task_id=?",
+                                       (str(first["physical_attempt_id"]), task_id)).fetchone()
+                return None if row is None else {"usd": None if row["cost_usd"] is None else float(row["cost_usd"])}
             row = next((row for row in txn.conn.execute(
                 "SELECT model, cost_usd FROM attempts INDEXED BY attempts_task WHERE task_id=? AND provider=? "
                 "AND source='agent.task' AND COALESCE(prompt_tokens, 0) > 0 ORDER BY seq_first",

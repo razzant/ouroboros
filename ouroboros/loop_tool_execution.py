@@ -996,6 +996,9 @@ def _execute_with_timeout(
     correlation = _tool_correlation(tools)
     tool_ctx = getattr(tools, "_ctx", None)
     invocation = new_invocation(tool_call_id, correlation, getattr(tool_ctx, "task_attempt", None))
+    issued = getattr(tool_ctx, "_issued_views", None) or {}
+    view = issued[tool_call_id] if tool_call_id in issued else getattr(tool_ctx, "_last_context_observation", None)
+    invocation["chronicle_lead_rule"] = (view or {}).get("chronicle_lead_rule")
     try:
         arguments = json.loads(tc.get("function", {}).get("arguments") or "{}")
     except (ValueError, TypeError):

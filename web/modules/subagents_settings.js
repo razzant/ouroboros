@@ -16,7 +16,7 @@ import {
     encodeRouteChoice, indexProfilesByHarness, mintStableId, profileOptionsFor,
     routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, subagentHandle, updateRouteControlOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
-} from './route_editor_primitives.js';
+    tierPriced } from './route_editor_primitives.js';
 import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
 import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
@@ -32,6 +32,7 @@ import { revealNewRow } from './ui_helpers.js';
 import { setResult } from './ui_primitives.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { currentLanguage } from './i18n.js';
 
 export const MAX_AVAILABLE_SUBAGENTS = 26;
 const KEY = 'OUROBOROS_SUBAGENTS';
@@ -564,7 +565,8 @@ function subagentFormParts(row, state, index) {
                 ${field('Source', selectHtml(`data-subagent-field="route" aria-label="Source for Subagent ${ordinal}"`, routeGroups, encodeRouteChoice(row)))}
                 <div class="ui-field available-subagent-field available-subagent-field-model">Model ${session
                     ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
-                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
+                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, tierPriced(row.processing_preference || state.processingPreference)
+                        ? state.apiModels.map((item) => ({ ...item, price: null })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
@@ -639,6 +641,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
         state.filter, state.tickCaption, state.unsavedId,
+        currentLanguage(),  // the suggestions' prices are composed words: another language is another paint
     ]);
 }
 
@@ -983,6 +986,7 @@ export function createAvailableSubagentsEditor({
                     if (value && value !== 'native') row[field] = value;
                     else delete row[field];
                     markDirty();
+                    if (field === 'processing_preference') paint();  // its suggestions' prices follow the tier
                 });
             }
             bindEffortFacet(rowElement, row);
@@ -1287,7 +1291,11 @@ export function createAvailableSubagentsEditor({
         paint({discoveryOnly: true});
     }
 
+    // The suggestions' prices are composed words the overlay leaves alone: a language change paints them again.
+    const onLanguageChanged = () => { if (!state.destroyed) paint(); };
+
     function mount({ bindStatus = true } = {}) {
+        getWin()?.addEventListener?.('ouro:language-changed', onLanguageChanged);
         adoptStatus();
         if (bindStatus && !state.statusDisposer) {
             state.statusDisposer = bindStatusSurface(store, { elementId: hostId, includeModels: true, doc: getDoc, win: getWin,
@@ -1311,6 +1319,7 @@ export function createAvailableSubagentsEditor({
         // An agent page that is left keeps its unsaved form for the next opening; a clean one keeps nothing.
         if (page?.entry) { if (state.dirty && current()) DRAFTS.set(page.entry, current()); else DRAFTS.delete(page.entry); }
         Object.assign(state, { destroyed: true, previewGeneration: state.previewGeneration + 1 });
+        getWin()?.removeEventListener?.('ouro:language-changed', onLanguageChanged);
         disposeChoosers();
         for (const disposer of ['statusDisposer', 'catalogDisposer']) { state[disposer]?.(); state[disposer] = null; }
     }

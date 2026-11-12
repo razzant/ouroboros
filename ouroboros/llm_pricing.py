@@ -118,6 +118,13 @@ def openrouter_price_row(model: Dict[str, Any]) -> Optional[Tuple[Optional[float
     return PricingSchedule(row, tuple(tiers)) if tiers else row
 
 
+def _number(value: Any) -> bool:
+    try:
+        return isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def openrouter_catalog_price(model: Any) -> Optional[Dict[str, Any]]:
     """The price a model picker shows for one OpenRouter catalog record, USD per 1M tokens.
 
@@ -125,7 +132,8 @@ def openrouter_catalog_price(model: Any) -> Optional[Dict[str, Any]]:
     "output"}]``) when the price changes with input length: the row accounting
     reads (``openrouter_price_row``). None, so a picker shows no price rather than
     a partial or false one, when the record states no complete token price, adds a
-    per-request fee, varies its price by anything but input length (a time window),
+    per-request fee or bills reasoning at another rate, is free by tokens yet charges for
+    something else, varies its price by anything but input length (a time window),
     holds an unreadable, negative or non-finite figure or a tier accounting skips,
     or charges less than four decimals per 1M print (it would read as free).
     """
@@ -138,8 +146,15 @@ def openrouter_catalog_price(model: Any) -> Optional[Dict[str, Any]]:
         if pricing.get("request") is not None and float(pricing["request"]) != 0:
             return None
         if not isinstance(overrides, list) or not all(
-                isinstance(tier, dict) and int(tier.get("min_prompt_tokens") or 0) > 0 for tier in overrides):
+                isinstance(tier, dict) and int(tier.get("min_prompt_tokens") or 0) > 0 and float(tier.get("request") or 0) == 0
+                and not any(str(key).startswith("utc_") for key in tier) for tier in overrides):
             return None
+        stated = (pricing.get("prompt"), pricing.get("completion"), *(tier.get(key) for tier in overrides for key in ("prompt", "completion")))
+        if any(isinstance(value, bool) for value in stated):
+            return None  # a flag is no price, though float() would read it as 0 or 1
+        reasoning = pricing.get("internal_reasoning")
+        if reasoning is not None and float(reasoning) not in (0, float(pricing.get("completion"))):
+            return None  # reasoning tokens billed at their own rate: the output figure is not the output price
         figures = [float(value) for value in (pricing.get("prompt"), pricing.get("completion"), *(
             tier[key] for tier in overrides for key in ("prompt", "completion") if tier.get(key) is not None))]
         row = openrouter_price_row(model)
@@ -149,8 +164,43 @@ def openrouter_catalog_price(model: Any) -> Optional[Dict[str, Any]]:
     if row is None or len(tiers) != len(overrides) or not all(
             isfinite(figure) and figure >= 0 and not (figure > 0 and round(figure * 1_000_000, 4) == 0) for figure in figures):
         return None
+    others = [float(value) for key, value in pricing.items() if key not in ("prompt", "completion", "overrides")
+              and isinstance(value, (int, float, str)) and not isinstance(value, bool) and _number(value)]
+    if not any(figures) and any(value > 0 for value in others):
+        return None  # free by tokens, yet another part of the call is charged: "free" would be false
     return {"input": row[0], "output": row[3], **({"tiers": [
         {"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]} for minimum, tier in tiers]} if tiers else {})}
+
+
+def openrouter_pricing_rows(models: Any) -> Dict[str, Tuple[Optional[float], ...]]:
+    """OpenRouter ``/models`` records as model_id -> per-1M prices (``openrouter_price_row``), under the id and its
+    normalized form: one parser for a fetched answer and for the catalogue the install recorded
+    (``recorded_openrouter_pricing``)."""
+    pricing_dict = {}
+    for model in models:
+        row = openrouter_price_row(model)
+        if row is None:
+            continue
+        model_id = str(model.get("id") or "").strip()
+        pricing_dict[model_id] = row
+        normalized_model_id = normalize_model_identity(model_id)
+        if normalized_model_id != model_id:
+            pricing_dict[normalized_model_id] = row
+    return pricing_dict
+
+
+def recorded_openrouter_pricing() -> Tuple[Dict[str, Tuple[Optional[float], ...]], str]:
+    """Tariffs of the install's dated catalogue record (``llm_capability_policy.recorded_openrouter_catalog``) and
+    its date: no fetch and no freshness claim, for a price DISPLAY in a process that has priced no call itself."""
+    from ouroboros.llm_capability_policy import recorded_openrouter_catalog
+
+    models, observed = recorded_openrouter_catalog()
+    try:
+        rows = openrouter_pricing_rows([{"id": mid, "pricing": row["pricing"]} for mid, row in models.items()
+                                        if isinstance(row.get("pricing"), dict)])
+    except (TypeError, ValueError, KeyError):  # an unreadable record prices nothing
+        return {}, ""
+    return rows, (observed if rows else "")
 
 
 def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Optional[float], ...]]:
@@ -176,17 +226,7 @@ def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Opt
         data = resp.json()
         models = data.get("data", [])
 
-        pricing_dict = {}
-        for model in models:
-            row = openrouter_price_row(model)
-            if row is None:
-                continue
-            model_id = str(model.get("id") or "").strip()
-            pricing_dict[model_id] = row
-            normalized_model_id = normalize_model_identity(model_id)
-            if normalized_model_id != model_id:
-                pricing_dict[normalized_model_id] = row
-
+        pricing_dict = openrouter_pricing_rows(models)
         log.info(f"Fetched pricing for {len(pricing_dict)} models from OpenRouter")
         return pricing_dict
 

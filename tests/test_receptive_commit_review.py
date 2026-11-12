@@ -1391,3 +1391,145 @@ def test_a_new_failing_review_after_a_collected_fail_counts_on_its_own(author, m
     assert _payload(out["result"]).get("aggregate") == "FAIL", out["result"][:300]
     assert _trace(a)["count"] == 2 and len(_trace_events(a)) == 2, _trace(a)
     assert read_json_dict(a.data / COUNTER_REL)["count"] == 2
+
+
+def _left_open(a, verdict_seat_first=False):
+    """A commit call the owner's message ends while the wave is open; returns that call's result text. With
+    ``verdict_seat_first`` the counted seat m1's answer has landed in the attempt (its custody closed) first."""
+    from ouroboros import review_custody
+
+    first = {}
+    thread = _commit(a, first)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
+    if verdict_seat_first:  # as _open_uncertain_wave(feedback=True): m2 is still preparing
+        with review_custody._ACTIVE_LOCK:
+            entry = next(e for e in review_custody._ACTIVE.values() if e.recovery_binding.get("slot_id") == "first")
+        a.reviewer.gates["m1"].set()
+        assert entry.event.wait(60)
+        until(lambda: entry.key not in review_custody._ACTIVE)
+    write_owner_message(a.data, "Status?", TASK)
+    _join(thread)
+    _read_mail(a)
+    return first["result"]
+
+
+def test_a_fail_read_back_after_its_wave_settled_counts_once_when_the_author_goes_on_over_it(author):
+    """A wave handed back open settles FAIL; the author restages other bytes, reads it back by its reference (a
+    read-only collection, no new count) and goes on over it: that decision counts the FAIL once, loudly (REV6C C1a)."""
+    from ouroboros.review_overrides import COUNTER_REL, card_line, landed_line
+    from ouroboros.utils import read_json_dict
+
+    a = author
+    _failing_seats(a)
+    head = _git(a.repo, "rev-parse", "HEAD")
+    first_ref = _payload(_left_open(a))["review_reference"]
+    a.reviewer.release()
+    until(lambda: len(a.reviewer.read) == 2)
+    until(lambda: _notices(a))
+    _read_mail(a)
+    (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")
+    _git(a.repo, "add", "change.py")
+    read = {}
+    _join(_commit(a, read, paths=(), message="", review_reference=first_ref))
+    assert read["result"].startswith("Review outcome already settled, returned read-only:"), read["result"][:200]
+    assert _trace(a) == {} and _trace_events(a) == [], "reading an outcome back is no decision"
+    final = {}
+    _join(_commit(a, final, message="Change value v3", paths=("change.py",),
+                  review_reference=_payload(read["result"])["review_reference"],
+                  author_disposition={"disposition": "accepted", "rationale": _WHY}))
+    sha = _git(a.repo, "rev-parse", "HEAD")
+    assert sha != head, final["result"]
+    assert card_line(_trace(a)) == ('Review: FAIL or no verdict 1× (latest: critical findings) · author continued 1× '
+                                    f'(latest: accepted — "{_WHY}") · landed over it: 1 commit'), _trace(a)
+    assert len(_trace_events(a)) == 1 and read_json_dict(a.data / COUNTER_REL)["count"] == 1
+    assert "(review FAIL: critical findings; " in landed_line(a.repo, a.data, base=head, target=sha, running=False)
+
+
+def test_going_on_over_an_open_wave_with_a_counted_fail_names_that_fail_and_counts_it_once(author):
+    """One counted seat answered FAIL while the other still prepares; the owner's message ends the wait and the author
+    continues at once: the record is still open, yet the decision goes over that FAIL and counts it (REV6C C1b)."""
+    from ouroboros.review_overrides import COUNTER_REL, landed_line
+    from ouroboros.utils import read_json_dict
+
+    a = author
+    _failing_seats(a)
+    head = _git(a.repo, "rev-parse", "HEAD")
+    result = _left_open(a, verdict_seat_first=True)
+    assert "explicitly continue now with review_reference and author_disposition" in result, result[:300]
+    final = {}
+    _join(_commit(a, final, review_reference=_payload(result)["review_reference"],
+                  author_disposition={"disposition": "accepted", "rationale": _WHY}))
+    sha = _git(a.repo, "rev-parse", "HEAD")
+    assert sha != head, final["result"]
+    work = _trace(a)
+    assert (work["count"], work["latest"]["reason"], work["continued"]["latest"]["reason"]) == (
+        1, "critical_findings", "critical_findings"), work
+    assert len(_trace_events(a)) == 1 and read_json_dict(a.data / COUNTER_REL)["count"] == 1
+    assert "(review FAIL: critical findings; " in landed_line(a.repo, a.data, base=head, target=sha, running=False)
+
+
+def test_a_settled_fail_collected_under_a_new_attempt_is_not_counted_again_by_its_first_reference(author):
+    """The same unchanged call collects a settled FAIL as a new attempt and counts it; collecting it again by the
+    first reference, whose attempt was handed back open, counts nothing new (REV6C A1)."""
+    from ouroboros.review_overrides import COUNTER_REL
+    from ouroboros.utils import read_json_dict
+
+    a = author
+    _failing_seats(a)
+    first_ref = _payload(_left_open(a))["review_reference"]
+    a.reviewer.release()
+    until(lambda: len(a.reviewer.read) == 2)
+    until(lambda: _notices(a))
+    _read_mail(a)
+    _join(_commit(a, {}))
+    assert _trace(a)["count"] == 1 and len(_trace_events(a)) == 1
+    _git(a.repo, "add", "change.py")
+    again = {}
+    _join(_commit(a, again, review_reference=first_ref))
+    assert _trace(a)["count"] == 1 and len(_trace_events(a)) == 1, again["result"][:300]
+    assert read_json_dict(a.data / COUNTER_REL)["count"] == 1
+
+
+def test_a_panel_fail_behind_a_failed_check_is_named_and_counted_when_the_author_goes_on_over_it(author, monkeypatch):
+    """A free check fails ahead of the panel (counted then); the panel's wave is handed back open and settles FAIL;
+    the author fixes the bytes, reads it back and goes on: that panel FAIL is named and counted once, not hidden behind
+    the check's reason (REV6K3 K3-1)."""
+    from ouroboros.review_overrides import COUNTER_REL, landed_line
+    from ouroboros.tools import review
+    from ouroboros.utils import read_json_dict
+
+    a = author
+    _failing_seats(a)
+    prepare, calls = review._prepare_unified_review, []
+
+    def with_failed_check(ctx, *args, **kwargs):
+        if not calls:  # as _prepare_unified_review does when the preflight finds something under Advisory
+            calls.append(True)
+            ctx._last_review_block_reason = "preflight"
+            assert review._handle_review_block_or_warning(ctx, False, "PREFLIGHT: the version carriers disagree", "") is None
+        return prepare(ctx, *args, **kwargs)
+
+    monkeypatch.setattr(review, "_prepare_unified_review", with_failed_check)
+    head = _git(a.repo, "rev-parse", "HEAD")
+    first_ref = _payload(_left_open(a))["review_reference"]
+    assert (_trace(a)["count"], _trace(a)["latest"]["reason"]) == (1, "preflight")
+    a.reviewer.release()
+    until(lambda: len(a.reviewer.read) == 2)
+    until(lambda: _notices(a))
+    _read_mail(a)
+    (a.repo / "change.py").write_text("value = 3\n", encoding="utf-8")
+    _git(a.repo, "add", "change.py")
+    read = {}
+    _join(_commit(a, read, paths=(), message="", review_reference=first_ref))
+    final = {}
+    _join(_commit(a, final, message="Change value v3", paths=("change.py",),
+                  review_reference=_payload(read["result"])["review_reference"],
+                  author_disposition={"disposition": "accepted", "rationale": _WHY}))
+    sha = _git(a.repo, "rev-parse", "HEAD")
+    assert sha != head, final["result"]
+    work = _trace(a)
+    assert (work["count"], work["latest"]["reason"], work["continued"]["latest"]["reason"]) == (
+        2, "critical_findings", "critical_findings"), work
+    assert len(_trace_events(a)) == 2 and read_json_dict(a.data / COUNTER_REL)["count"] == 2
+    assert "(review FAIL: critical findings; " in landed_line(a.repo, a.data, base=head, target=sha, running=False)
+

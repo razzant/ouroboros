@@ -600,12 +600,16 @@ def test_a_fallback_and_its_return_resend_the_shown_history_byte_for_byte_on_the
 
 
 def _addressed(plan, mode):
-    """The (step, element) pairs a projection's view shows only by address, read from its floor fact."""
+    """Sources reduced in a projection, independent of opening/address subforms (R11).
+
+    Physical address forms supersede openings without restoring the source's text.
+    Compare source identities across hops, while _unfolded checks the actual words.
+    """
     from ouroboros import memory_floor as mf
     from ouroboros.memory_view import snapshot_from_json
 
     level = mf.kept_level(snapshot_from_json(plan.core.memory_view_json), plan.projection(mode).memory_facts)
-    return {(step, ident) for step, ids in level.addressed for ident in ids}
+    return {(step, ident.removeprefix("bare:")) for step, ids in level.addressed for ident in ids}
 
 
 def _unfolded(plan, addressed, message):
@@ -736,7 +740,7 @@ def test_a_second_narrowing_in_nano_still_names_what_the_low_budget_took(main_ca
     assert addressed < _addressed(after, "nano") and not _unfolded(after, addressed, ctx.messages[0])
     assert floor["by_budget"] == by_budget and floor["target_tokens"] == OWNER_LOW_TARGET_TOKENS
     sent = json.dumps(ctx.messages[0], ensure_ascii=False)
-    assert (f"This Nano view retains memory cuts for the window ({window} tokens) and the Low mode budget (250000 tokens)."
+    assert (f"Nano cuts for the window ({window} tokens) and the Low mode budget (250000 tokens)."
             in sent) and "Nano mode budget" not in sent
     assert "cannot hold Low with even the shortest view of my memory; this task runs in Nano." in sent
     assert ctx.tools._ctx.memory_view_facts == mf.trace_facts(after.projection("nano").memory_facts)  # the view sent
@@ -960,7 +964,10 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
         return json.dumps(whole, ensure_ascii=False)[1:-1] in json.dumps(sent, ensure_ascii=False)
 
     elements = mf.floor_elements(snapshot_from_json(built.core.memory_view_json))
-    narrowed = {(step, ident) for step, ident, whole, _short in elements if shows(first, whole) and not shows(low, whole)}
+    # List forms reuse the source group's text for pricing. Its disappearance
+    # does not assert that this particular list form (rather than a row) was used.
+    narrowed = {(step, ident) for step, ident, whole, _short in elements
+                if step not in (*mf._LIST_FORMS, "F6a") and shows(first, whole) and not shows(low, whole)}
     # The deficit took more than one rung: beside the task lines here the room records (F4); this room's replies,
     # folded before them, came back in the walk's give-back, which the coarser F4 cuts left room for (both pinned in
     # test_memory_view_floor).
@@ -971,7 +978,7 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     from ouroboros.transcript_prefix import message_digest
     assert {message_digest(first[1]), message_digest(owner)} <= {message_digest(row) for row in low}
     note = low[2]["content"]
-    assert f"This Low view retains memory cuts for the window ({window} tokens)." in note
+    assert f"Low cuts for the window ({window} tokens)." in note
     assert "does not hold all of my memory" not in note and "cannot hold" not in note
     # The task's trace keeps the fact of the Low view sent, not the whole Max view of its start: a writer reads
     # what the request actually showed only by address.

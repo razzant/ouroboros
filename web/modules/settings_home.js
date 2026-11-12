@@ -29,6 +29,7 @@ import { isDoorId, settingsPageFor } from './settings_pages.js';
 import { policyValueLabel } from './settings_policy.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from './settings_rows.js';
 import { getSpeech } from './speech_providers.js';
+import { routeKeyProblem } from './route_editor_primitives.js';
 import { readStateSnapshot } from './state_snapshots.js';
 import { paintStatusMark, statusMarkHtml } from './status_mark.js';
 import { formatBytes } from './storage_format.js';
@@ -171,6 +172,16 @@ function computerWords(autostart, settings) {
  * is the owner's (a stop by the spending limit, a held consciousness, an update that waits, a sign-in). A row whose fact is not
  * read yet has no entry and keeps what it shows; one whose read failed says "Not checked".
  */
+// Main's answer on the home: its model, or what keeps it from sending (a key choice it waits for, a key that cannot
+// send), in the owner's colour.
+function modelsAnswer(s) {
+    const profiles = s._meta?.setup_contract?.providerProfiles || {};
+    if (Array.isArray(s._meta?.main_connection_choice) && s._meta.main_connection_choice.length > 1) return { text: fmt('Choose its key'), owner: true };
+    const problem = truthy(s.USE_LOCAL_MAIN) ? '' : routeKeyProblem(s.OUROBOROS_MODEL, s, profiles);
+    if (problem) return { text: fmt({ off: 'Its key is off', removed: 'Its key was removed', 'no key': 'No key for it' }[problem]), owner: true };
+    return shortName({ model: String(s.OUROBOROS_MODEL || ''), use_local: truthy(s.USE_LOCAL_MAIN) }) || fmt('Not chosen');
+}
+
 export function homeAnswers(facts = {}) {
     const { settings, state, accounts, tools, skills, places, update, storage, autostart, device = {} } = facts;
     const out = {};
@@ -179,7 +190,7 @@ export function homeAnswers(facts = {}) {
         const answer = fact === null ? fmt(NOT_CHECKED) : words(fact);
         if (answer !== undefined) out[to] = typeof answer === 'string' ? { text: answer, owner: false } : answer;
     };
-    say('models', settings, (s) => shortName({ model: String(s.OUROBOROS_MODEL || ''), use_local: truthy(s.USE_LOCAL_MAIN) }) || fmt('Not chosen'));
+    say('models', settings, modelsAnswer);
     say('agents', settings, agentsWords);
     say('dashboard:consciousness', state, (s) => {
         const snapshot = normalizeConsciousness(s.bg_consciousness_state || {}, { enabled: s.bg_consciousness_enabled });

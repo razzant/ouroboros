@@ -8,9 +8,11 @@ import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
 import { allowanceHold, allowanceText } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
+import { mountCostPeriod } from './cost_period.js';
 import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon } from './page_icons.js';
+import { parseModelSource } from './route_editor_primitives.js';
 
 // The limits card is rows of settings_rows.js (their home is this tab), drawn and written by settings_controls.js: each
 // saves itself and says what happened. The consciousness allowance has its one editor here (owner, 10 Nov 2026: moved
@@ -144,10 +146,11 @@ const NEW_STARTS = 'new wake-ups, replies in places and its own tasks';
 
 /** The consciousness allowance under its field, from the consciousness snapshot (consciousness_api.js): the spend line
  *  is the clock's own window (`allowanceText`, the Shade's and the Dashboard's words), never a sum of the tables;
- *  `detail` what it leaves out (pending calls, calls without a price); `lines` at most two: the window (its limit
- *  reached, with a conditional time when room returns) and a held wake (its proven cause, with its card's door), each
- *  its fact (`text`, in the line's tone) and what follows from it (`note`, quieter). Off, a $0 limit and an
- *  unreadable ledger say so instead. No time is guessed: a withheld or stale forecast says so. */
+ *  `detail` what it leaves out (pending calls, calls without a price); `lines` at most three: the window (its limit
+ *  reached, with a conditional time when room returns), a held wake (its proven cause, with its card's door) and the
+ *  model its wake-ups think with when the host could read it, each its fact (`text`, in the line's tone) and what
+ *  follows from it (`note`, quieter). Off, a $0 limit and an unreadable ledger say so instead. No time is guessed: a
+ *  withheld or stale forecast says so. */
 export function allowancePresentation(snapshot, { now = Date.now(), timeZone } = {}) {
     if (!snapshot) return { spend: 'What it spent in the last 24 hours could not be read.', detail: '', lines: [] };
     const spend = allowanceText(snapshot) || 'What it spent in the last 24 hours is unknown.';
@@ -182,6 +185,11 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is paused at the spending limit it started with; its card shows why.' });
     } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'owner') {
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is on an explicit pause; its card shows who paused it and how to continue.' });
+    }
+    const route = snapshot.modelRoute;
+    if (route) {  // the words of the Consciousness tab's row and the Models page: "Main model", "Local model"
+        const name = route.local ? 'Local model' : parseModelSource(route.value).model || route.value;
+        lines.push({ tone: 'muted', text: `Thinks with ${name}${route.layer === 'main' ? ' (Main model)' : ''}.` });
     }
     return { spend, detail, lines };
 }
@@ -290,9 +298,11 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             <p class="dashboard-settings-lead">Quotas of your accounts. They are not dollars, and no limit above counts them.</p>
             <div data-costs-subscriptions><p class="dashboard-settings-lead">Reading…</p></div>
         </section>
+        <div id="costs-period"></div>
         <div class="costs-tables">${TABLES.map(tableCardHtml).join('')}</div>
     `;
     mount.appendChild(page);
+    const periodCard = mountCostPeriod(page.querySelector('#costs-period'));  // its own read: the period governs that card alone
     const budgetCard = page.querySelector('.costs-budget');
     // The rows are drawn once and never redrawn: a refresh of the tab repaints the spend, the tables and the allowance's
     // facts around them, and `limits.paint()` only writes a fresh value into a field the owner is not in.
@@ -432,7 +442,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         limits.paint();
     }
 
-    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); loadSubscriptions(); });
+    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); loadSubscriptions(); periodCard.reload(); });
     // Each door opens its Settings page, which leads back here.
     page.querySelector('.costs-subscriptions').addEventListener('click', (event) => {
         const path = event.target.closest?.('[data-costs-account]')?.dataset.costsAccount;
@@ -461,7 +471,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     // A result the owner saw ends when the tab or the Dashboard is left.
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab !== 'costs') limits.leave();
-        else if (state.activePage === 'dashboard') { refreshCostsPanel(); loadSubscriptions(); }
+        else if (state.activePage === 'dashboard') { refreshCostsPanel(); loadSubscriptions(); periodCard.reload(); }  // the period is read when the tab is looked at
     });
     window.addEventListener('ouro:page-shown', (event) => { if (event.detail?.page !== 'dashboard') limits.leave(); });
     window.addEventListener('ouro:settings-updated', (event) => {

@@ -457,7 +457,7 @@
     "legacyCompatibleBaseUrl": "",
     "lightModel": "openai/gpt-6-luna",
     "localChatFormat": "",
-    "localContextLength": 16384,
+    "localContextLength": 65536,
     "localFilename": "",
     "localGpuLayers": -1,
     "localPreset": "",
@@ -483,26 +483,26 @@
     "zaiPlan": ""
   },
   "localPresets": {
-    "qwen25-7b": {
+    "qwen35-9b": {
       "chatFormat": "",
-      "contextLength": 16384,
-      "filename": "qwen2.5-7b-instruct-q3_k_m.gguf",
-      "label": "Qwen2.5-7B Instruct Q3_K_M",
-      "source": "Qwen/Qwen2.5-7B-Instruct-GGUF"
+      "contextLength": 65536,
+      "filename": "Qwen3.5-9B-Q4_K_M.gguf",
+      "label": "Qwen3.5-9B Q4_K_M (5.7 GB file)",
+      "source": "unsloth/Qwen3.5-9B-GGUF"
     },
-    "qwen3-14b": {
+    "qwen36-35b-a3b": {
       "chatFormat": "",
-      "contextLength": 16384,
-      "filename": "Qwen3-14B-Q4_K_M.gguf",
-      "label": "Qwen3-14B Instruct Q4_K_M",
-      "source": "Qwen/Qwen3-14B-GGUF"
+      "contextLength": 65536,
+      "filename": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "label": "Qwen3.6-35B-A3B Q4_K_M (22 GB file)",
+      "source": "unsloth/Qwen3.6-35B-A3B-GGUF"
     },
-    "qwen3-32b": {
+    "qwen38-27b": {
       "chatFormat": "",
-      "contextLength": 32768,
-      "filename": "Qwen3-32B-Q4_K_M.gguf",
-      "label": "Qwen3-32B Instruct Q4_K_M",
-      "source": "Qwen/Qwen3-32B-GGUF"
+      "contextLength": 65536,
+      "filename": "Qwen3.8-27B-UD-Q4_K_M.gguf",
+      "label": "Qwen3.8-27B Q4_K_M (16.6 GB file)",
+      "source": "unsloth/Qwen3.8-27B-GGUF"
     }
   },
   "modelDefaults": {

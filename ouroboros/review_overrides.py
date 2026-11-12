@@ -5,7 +5,8 @@ commits that landed over it (BIBLE P3).
 answer, a failed check, a quorum or infrastructure failure, every other reason ``tools/review.py`` names), once per
 outcome: the ``review_advisory_override`` event, the counter ``state/advisory_overrides.json`` (read by
 ``review_status``) and the work's card fact ``review_overrides`` on its root task's document, a count and the latest,
-never a row per decision. A wave still open is no outcome yet; the call that collects it counts how it ended.
+never a row per decision. A wave still open is no outcome yet: the call that collects it counts how it ended, and
+an author who goes on over it unread or unsettled counts it then, once per review record.
 ``note_author_continuation`` adds its ``continued`` part and ``note_override_landing`` its ``landed`` part. The card
 shows each part only when recorded (absent is unknown, not zero), in the app (``web/modules/review_gate_card.js``,
 live from the event) and in its Telegram completion message (``card_line``).
@@ -23,7 +24,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import subprocess
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, read_json_dict, update_json_locked, utc_now_iso
 
@@ -50,21 +51,24 @@ def _more(part: Any, latest: Dict[str, Any]) -> Dict[str, Any]:
     return {"count": int((part if isinstance(part, dict) else {}).get("count") or 0) + 1, "latest": latest}
 
 
-def _keep_on_attempt(ctx: Any, reason: str) -> None:
-    """The reason on this call's durable review attempt, the record a later continuation's validated reference resolves
-    to (``commit_gate.resolve_commit_review_reference``), a Continue successor's or a restarted worker's alike."""
+def _keep_on_attempt(ctx: Any, reason: str, row: Any = None) -> None:
+    """The reason on a durable review attempt, this call's or ``row``, the record a later continuation's validated
+    reference resolves to (``commit_gate.resolve_commit_review_reference``), a Continue successor's or a restarted
+    worker's alike. A wave still open never overwrites a reason the attempt already keeps (a failed free check)."""
     from ouroboros.review_state import make_repo_key, update_state
     from ouroboros.tools.commit_gate import _current_review_tool_name
 
-    attempt = getattr(ctx, "_current_review_attempt_number", None)
-    if type(attempt) is not int or attempt < 1:
+    if row is None:
+        key = {"repo_key": make_repo_key(pathlib.Path(ctx.repo_dir)), "task_id": str(getattr(ctx, "task_id", "") or ""),
+               "tool_name": _current_review_tool_name(ctx), "attempt": getattr(ctx, "_current_review_attempt_number", None)}
+    else:
+        key = {name: getattr(row, name, None) for name in ("repo_key", "task_id", "tool_name", "attempt")}
+    if type(key["attempt"]) is not int or key["attempt"] < 1:
         return  # no reviewed attempt yet: only a commit of this call goes over it
-    key = {"repo_key": make_repo_key(pathlib.Path(ctx.repo_dir)), "task_id": str(getattr(ctx, "task_id", "") or ""),
-           "tool_name": _current_review_tool_name(ctx), "attempt": attempt}
 
     def stamp(state: Any) -> None:
-        if (row := state.latest_attempt_for(**key)) is not None:
-            row.review_override_reason = reason
+        if (found := state.latest_attempt_for(**key)) is not None and not (reason == _OPEN and found.review_override_reason):
+            found.review_override_reason = reason
 
     update_state(pathlib.Path(ctx.drive_root), stamp)
 
@@ -95,26 +99,45 @@ def _keep_on_work(ctx: Any, change: Callable[[Dict[str, Any]], Dict[str, Any]]) 
 
 
 def record_override(ctx: Any, blocked_msg: str) -> None:
-    """One review outcome, FAIL or no verdict, the gate let the work go on past. A wave still open counts nothing yet,
-    and the earlier attempt this call collects counted its outcome when it met it; a commit this call lands goes over
-    either all the same. Each record is best effort and independent: an unwritable store loses that copy, never the
+    """One review outcome, FAIL or no verdict, the gate let the work go on past. A wave still open counts nothing yet
+    (``note_author_continuation`` counts it if the author goes on over it before a collecting call does), and the earlier
+    attempt this call collects counted its outcome when it met it; a commit this call lands goes over either all the
+    same. Each record is best effort and independent: an unwritable store loses that copy, never the
     others or the decision."""
-    from ouroboros.tools.review_helpers import cyber_review_authority
-
     reason, message = str(getattr(ctx, "_last_review_block_reason", "") or "unknown"), str(blocked_msg or "")
-    task_id, at = str(getattr(ctx, "task_id", "") or ""), utc_now_iso()
     # Only while this call collects that attempt: the field outlives the call, a later wave of the task is its own.
     held = getattr(ctx, "_pending_review_attempt", None) if getattr(ctx, "_review_reconcile_only", False) else None
     collected = str(getattr(held, "review_override_reason", "") or "")
     try:
         ctx._review_override_this_call = reason  # a commit this same call lands goes over it
         _keep_on_attempt(ctx, reason)  # the reason a later continuation's attempt keeps, when its record cannot say
+        if held is not None:
+            _keep_on_attempt(ctx, reason, row=held)  # the attempt collected keeps the outcome counted for it
     except Exception:
         log.warning("A later landing over this decision cannot be joined to it", exc_info=True)
-    if reason in (_OPEN, collected):
+    if reason not in (_OPEN, collected):
+        _count(ctx, reason, message)
+
+
+def _count(ctx: Any, reason: str, message: str, record_id: str = "") -> None:
+    """Count one outcome: the event, the install counter and the work's fact. ``record_id`` names the review record
+    of an outcome counted when the author goes on over it; the same record and reason as the work's latest count once."""
+    from ouroboros.tools.review_helpers import cyber_review_authority
+
+    task_id, at, repeat = str(getattr(ctx, "task_id", "") or ""), utc_now_iso(), []
+    latest = {"at": at, "reason": reason, "task_id": task_id, "text": _head(message),  # a cut head says it is one
+              **({"record_id": record_id} if record_id else {})}
+
+    def change(prior: Dict[str, Any]) -> Dict[str, Any]:
+        last = prior.get("latest") if isinstance(prior.get("latest"), dict) else {}
+        if record_id and (last.get("record_id"), last.get("reason")) == (record_id, reason):
+            repeat.append(True)
+            return prior
+        return {**prior, **_more(prior, latest)}
+
+    work, fact = _keep_on_work(ctx, change)
+    if repeat:
         return
-    latest = {"at": at, "reason": reason, "task_id": task_id, "text": _head(message)}  # a cut head says it is one
-    work, fact = _keep_on_work(ctx, lambda prior: {**prior, **_more(prior, latest)})
     try:
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
             "ts": at, "type": "review_advisory_override",
@@ -136,23 +159,35 @@ def record_override(ctx: Any, blocked_msg: str) -> None:
 
 def _went_on_over(ctx: Any, source: Any) -> str:
     """What the reviewed attempt ``source`` stands at as its author goes on over it, as a reason ("" when it met no
-    FAIL or no verdict): the reason the gate kept on it, except that a wave the gate handed back still open stands at
-    what its review record holds now, nothing once it passed (the kept reason while no record answers)."""
+    FAIL or no verdict): the reason the gate kept on it, except where that reason was kept before the panel's outcome
+    was known (a wave handed back still open, or a failed free check ahead of the panel): then its review record says
+    what it holds now. A panel FAIL on the record, or a counted seat's FAIL on a record still open, is gone over as
+    that FAIL; otherwise a failed check stands, and an open wave stands at its record's outcome (nothing once passed)."""
     kept, record_id = (str(getattr(source, name, "") or "") for name in ("review_override_reason", "review_record_id"))
-    if kept != _OPEN or not record_id:
+    if not record_id or (kept != _OPEN and kept not in _CHECK_REASONS):
         return kept
     try:
         from ouroboros.review_ledger import ledger_root, load_record
 
-        verdict = (load_record(ledger_root(ctx), record_id) or {}).get("verdict")
-    except Exception:  # unreadable: the wave is as open as the gate last saw it
+        record = load_record(ledger_root(ctx), record_id) or {}
+    except Exception:  # unreadable: the attempt stands where the gate last saw it
         log.debug("The review record %s cannot be read", record_id, exc_info=True)
         return kept
+    verdict = record.get("verdict")
     if not (isinstance(verdict, dict) and verdict.get("aggregate")):
         return kept
+    reason = str(verdict.get("reason") or "")
+    counted = {str(row.get("seat_id") or "") for row in record.get("rows") or []
+               if isinstance(row, Mapping) and not row.get("additional")}
+    if reason == _OPEN and any(seat in counted and value == "FAIL"
+                               for seat, value in (verdict.get("per_row") or {}).items()):
+        return "critical_findings"  # still open, yet a counted seat's FAIL is already on the record
+    if verdict["aggregate"] == "FAIL":
+        return reason or "critical_findings"
+    if kept in _CHECK_REASONS:
+        return kept  # the panel passed, gave no verdict or is still open: the failed check is what stands
     if verdict["aggregate"] == "PASS":
         return ""
-    reason = str(verdict.get("reason") or "")
     return reason.partition("gate_block:")[2] or reason or kept
 
 
@@ -163,10 +198,20 @@ def note_author_continuation(ctx: Any, decision: Any) -> None:
     source = getattr(ctx, "_author_commit_source", None)
     reason = _went_on_over(ctx, source)
     if reason:
+        record_id = str(getattr(source, "review_record_id", "") or "")
+        kept = str(getattr(source, "review_override_reason", "") or "")
+        if kept == _OPEN or reason != kept:
+            # An outcome no call counted (handed back open and read back later or gone on over before it settled, or
+            # a panel FAIL behind a failed check): the decision to go on over it counts it, once per review record.
+            _count(ctx, reason, f"The author went on over a review standing at {reason.replace('_', ' ')}.", record_id)
+            try:
+                _keep_on_attempt(ctx, reason, row=source)
+            except Exception:
+                log.warning("The counted outcome was not kept on its attempt", exc_info=True)
         decision = decision if isinstance(decision, dict) else {}
         latest = {"at": utc_now_iso(), "disposition": str(decision.get("disposition") or ""),
                   "rationale": _head(decision.get("rationale")), "reason": reason,
-                  "record_id": str(getattr(source, "review_record_id", "") or "")}
+                  "record_id": record_id}
         _keep_on_work(ctx, lambda fact: {**fact, "continued": _more(fact.get("continued"), latest)})
 
 

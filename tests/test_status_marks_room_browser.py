@@ -102,11 +102,11 @@ def test_the_room_bar_draws_one_mark_for_every_state(room_ui, theme):
     assert seen["live"]["ink"] == tokens["--accent-light"], seen["live"]
     assert seen["paused"]["ink"] == seen["queued"]["ink"] == tokens["--text-meta"], (seen["paused"], seen["queued"])
     assert seen["live"]["motion"] == ["status-mark-bounce"] * 3 and seen["queued"]["motion"] == ["none"] * 3, seen
-    # Whatever waits for the owner is the amber dot in the mark's place, beside the owner's own amber word and beside
-    # Working alike; Working keeps its crimson word.
-    for name in ("answer", "live+answer"):
+    # Whatever waits for the owner takes the owner's hue: the amber dot in the mark's place beside the owner's own
+    # amber word, and Working's moving dots in amber; Working keeps its crimson word.
+    for name, shape, sizes in (("answer", "dot", ONE), ("live+answer", "moving", DOTS)):
         state = seen[name]
-        assert (state["shape"], state["hue"], state["sizes"], state["color"]) == ("dot", "owner", ONE, tokens["--mark-owner"]), state
+        assert (state["shape"], state["hue"], state["sizes"], state["color"]) == (shape, "owner", sizes, tokens["--mark-owner"]), state
     assert seen["answer"]["ink"] == tokens["--status-warn-fg"], seen["answer"]
     assert seen["live+answer"]["ink"] == tokens["--accent-light"] != tokens["--mark-owner"], seen["live+answer"]
     # The bar's mark keeps the moving dots' width in every shape it draws, so the caret beside it never moves when
@@ -198,7 +198,7 @@ def test_typing_bubble_moves_only_while_the_room_works_and_reduced_motion_stops_
     assert bubble["color"] == bubble["tokens"]["--text-secondary"] and bubble["motion"] == ["status-mark-bounce"] * 3, bubble
     assert page.locator("#typing-indicator .typing-dots").count() == 0
     rw.capture(page, "status-marks-typing-moving")
-    # The owner's question elsewhere puts the amber dot in the bar; the work still moves, and so does the bubble.
+    # The owner's question elsewhere tints the bar's moving mark amber; the work still moves, and so does the bubble.
     transport.activities = [rw.activity("t-live"), rw.activity("t-ask", kind="direct_chat", client_message_id="cm-ask",
                                                                  **rw.waited("q-typing"))]
     transport.refresh()

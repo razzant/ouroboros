@@ -834,3 +834,23 @@ test('a wake held at the allowance it started with is said apart from room retur
         assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause, ceiling_usd: null } }), { now }).lines, [], cause);
     }
 });
+
+test('the model its wake-ups think with: its own slot, or Main\'s said as Main, a local one as Local model; unknown says nothing', () => {
+    const now = Date.UTC(2026, 10, 10, 19, 0);
+    const base = { status: 'sleeping', spent_24h_usd: 1, daily_usd: 20, allowance_status: 'available' };
+    const lines = (route) => allowancePresentation(state({ ...base, model_route: route }), { now }).lines;
+    assert.deepEqual(lines({ value: 'anthropic/claude-opus-5-5', layer: 'consciousness', local: false }),
+        [{ tone: 'muted', text: 'Thinks with anthropic/claude-opus-5-5.' }]);
+    assert.deepEqual(lines({ value: 'claudexor::codex=gpt-6-astra', layer: 'main', local: false }),
+        [{ tone: 'muted', text: 'Thinks with gpt-6-astra (Main model).' }]);
+    assert.deepEqual(lines({ value: 'qwen/qwen3-32b', layer: 'main', local: true }),
+        [{ tone: 'muted', text: 'Thinks with Local model (Main model).' }]);
+    assert.deepEqual(state({ model_route: { value: 'm', layer: 'consciousness', local: 'yes' } }).modelRoute,
+        { value: 'm', layer: 'consciousness', local: false }, 'only a true local flag is local');
+    for (const unknown of [null, undefined, {}, { value: '', layer: 'main' }, { value: 'm', layer: 'place' }]) {
+        assert.equal(state({ ...base, model_route: unknown }).modelRoute, null);
+        assert.deepEqual(lines(unknown), [], 'an unknown route says nothing');
+    }
+    assert.deepEqual(allowancePresentation(state({ ...base, enabled: false, model_route: { value: 'm', layer: 'main' } }), { now }).lines,
+        [{ text: 'Consciousness is off: it starts nothing that counts here until it is started again.', tone: 'muted' }]);
+});
