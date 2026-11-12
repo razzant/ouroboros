@@ -19,7 +19,7 @@ import {
 } from './route_editor_primitives.js';
 import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
-import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog } from './settings_catalog.js';
+import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
 import {
     harnessMap, lastReviewRunText, reviewCostText, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun,
     sessionRouteVerdict,
@@ -1441,7 +1441,7 @@ function mountAgents(container, { path, ctx }) {
         fold?.paint();
         if (delegation) Object.assign(delegation, { checked: editor.setting.enabled, disabled: !editor.loaded }).setAttribute('aria-checked', String(editor.setting.enabled));
         void readReviewPool().then((payload) => editor.setReviewPool(payload));
-        void editor.reloadStatus();
+        void editor.reloadStatus().then(() => accountCatalog?.arm());
     };
     // One read at a time: opening a page and the shell's "shown" for it are one read.
     const reload = () => (reading ||= read().finally(() => { reading = null; }));
@@ -1457,10 +1457,14 @@ function mountAgents(container, { path, ctx }) {
     const onShown = (event) => { if (event.detail?.path === path) void reload(); };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     editor.mount();
+    // A sign-in that settles while an agent's form is open renews its model list, as on a role's page. The watch is
+    // armed by the form's first account read, so the answer the form opened with is not a change.
+    const accountCatalog = entry ? watchAccountModelCatalog() : null;
     void reload();
     if (entry) void refreshModelCatalog();  // the model chooser of this agent's form
     return { unmount() {
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
+        accountCatalog?.dispose();
         unbindRechecks(); fold?.dispose(); editor.destroy();
     } };
 }

@@ -7,7 +7,7 @@ import json
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
-from tests.settings_browser_helpers import open_settings, commit_row
+from tests.settings_browser_helpers import open_entry, open_settings, commit_row
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
@@ -62,8 +62,49 @@ def test_confirmed_accounts_refresh_models_without_replacing_draft(subscription_
     capture(page, f"settings-account-{transition}")
 
 
-def test_legacy_30_second_cadence_loads_as_valid_settings_form(subscription_ui, tmp_path, monkeypatch):
+def test_an_agents_form_renews_its_model_list_when_a_sign_in_settles(subscription_ui):
+    """An agent's form arms the watch a role's page arms: a changed account answer reads the
+    catalogue once, the same answer again reads nothing, and the form's unsaved words stay."""
     from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    connected = copy.deepcopy(ui["fixture"]["status"])
+    ui["fixture"]["status"]["profiles"]["profiles"] = []
+    page.goto(ui["url"] + "/#settings")
+    open_settings(page, "agents").locator("[data-entry-id]").first.wait_for(state="visible")
+    form = open_entry(page, "codex").locator("[data-subagent-row]")
+    words = form.locator('[data-subagent-field="recommended_use"]')
+    expect(words).to_be_visible()
+
+    def refresh_accounts():
+        # The same store refresh used when a sign-in card settles.
+        page.evaluate("""async () => {
+            const {claudexorStatus} = await import('/static/modules/claudexor_status_store.js');
+            await claudexorStatus.refresh();
+        }""")
+
+    def catalogue_reads():
+        return sum("/api/model-catalog" in url for url in ui["reads"])
+
+    refresh_accounts()  # the answer the form opened with is confirmed and is not a change
+    words.fill("An unsaved description.")
+    words.evaluate("e => { window.ownerDraftNode = e; }")
+    settings_reads = sum(url.endswith("/api/settings") for url in ui["reads"])
+    quiet = catalogue_reads()
+    refresh_accounts()
+    assert catalogue_reads() == quiet, "the same account answer reads no catalogue"
+    ui["fixture"]["status"] = connected
+    with page.expect_response(lambda response: "/api/model-catalog" in response.url, timeout=5000):
+        refresh_accounts()
+    assert words.evaluate("e => e === window.ownerDraftNode && e.value") == "An unsaved description."
+    assert sum(url.endswith("/api/settings") for url in ui["reads"]) == settings_reads
+    after = catalogue_reads()
+    refresh_accounts()
+    assert catalogue_reads() == after
+    assert not ui["posts"], "discovery cannot save or replace the owner's draft"
+
+
+def test_legacy_30_second_cadence_loads_as_valid_settings_form(subscription_ui, tmp_path, monkeypatch):
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
