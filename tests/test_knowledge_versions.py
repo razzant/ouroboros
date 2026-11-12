@@ -147,8 +147,9 @@ def test_a_digest_era_row_says_its_text_is_not_stored(tmp_path):
     note = store.write_knowledge_note(target, "# Река\n").current
     journal = target.shelf.parent / "knowledge_history.jsonl"
     old = hashlib.sha256(b"digested").hexdigest()
-    journal.write_text(json.dumps({"topic": TOPIC, "mode": "edit", "new_sha256": old, "new_content": "",
-                                   "content_digested": True}) + "\n" + journal.read_text(encoding="utf-8"), encoding="utf-8")
+    journal.write_text(json.dumps({"topic": TOPIC, "mode": "edit", "new_sha256": old, "new_content": "",  # as the writer
+                                   "content_digested": True}, ensure_ascii=False)  # and the digest compaction spell it
+                       + "\n" + journal.read_text(encoding="utf-8"), encoding="utf-8")
     listing = versions.render_history(note)
     assert re.search(rf"^- {old} · .*text not stored", listing, re.M)
 
@@ -267,6 +268,34 @@ def test_the_backward_scan_finds_every_row_across_block_edges(tmp_path, monkeypa
     for revision in revisions:
         text, _row = versions.find_version(target, revision)
         assert hashlib.sha256(text.encode("utf-8")).hexdigest() == revision
+
+
+def test_a_topic_that_is_not_ascii_is_found_by_one_pass_over_the_journal(tmp_path, monkeypatch):
+    """Rows are found by the topic as the one writer spells it (JSON with ensure_ascii=False), each search starting
+    below the line last found: a non-ASCII topic costs about one pass over the journal, however many rows it has.
+    A spelling no row carries would rescan the whole block for every row found."""
+    target = address(tmp_path)
+    note = store.write_knowledge_note(target, "# Река\n\nv0\n").current
+    for index in range(1, 30):
+        store.write_knowledge_note(address(tmp_path, f"notes/other-{index}"), f"# Other {index}\n")
+        note = store.write_knowledge_note(target, f"v{index}", "edit", note.revision, old_str=f"v{index - 1}").current
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    looked_at, real = [0], versions._matching_lines
+
+    class Counted(bytes):  # the bytes each backward search covers, from its end down to its hit (or its start)
+        def rfind(self, sub, start=0, end=None):
+            end = len(self) if end is None else end
+            hit = bytes.rfind(self, sub, start, end)
+            looked_at[0] += end - (start if hit < 0 else hit)
+            return hit
+
+    monkeypatch.setattr(versions, "_matching_lines", lambda region, base, *needles: real(Counted(region), base, *needles))
+    rows = list(versions.NoteHistory(target))
+    assert len(rows) == 30 and rows[0][1]["new_sha256"] == note.revision and all(row["topic"] == TOPIC for _, row in rows)
+    assert looked_at[0] <= 2 * journal.stat().st_size, (looked_at[0], journal.stat().st_size)
+    looked_at[0] = 0  # the stale-revision lookup the writer makes under the shelf lock reads the tail the same way
+    assert len(list(versions.tail_rows(journal, target, 1 << 23))) == 30
+    assert looked_at[0] <= 2 * journal.stat().st_size, (looked_at[0], journal.stat().st_size)
 
 
 def test_the_changes_since_a_held_version_show_every_block_whole(tmp_path):

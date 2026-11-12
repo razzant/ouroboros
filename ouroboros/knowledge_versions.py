@@ -2,11 +2,12 @@
 
 The journal is ``address.shelf.parent / "knowledge_history.jsonl"``, the append-only record the one
 writer (``knowledge.write_knowledge_note``) keeps for a shelf. A row belongs to a note by its
-``topic`` and the scope its ``address`` names. Lines are pre-filtered by the note's JSON-encoded
-topic before anything is parsed and are read newest first, in blocks from the journal's end, so a
-large journal is never parsed whole; a line naming the note that is not JSON is counted as a gap,
-never fatal. A version is named by its revision (the sha256 of its exact bytes) and its text is
-returned only after it hashes to that revision. Nothing here writes: no index, no cache, no sidecar.
+``topic`` and the scope its ``address`` names. Lines are pre-filtered by the note's topic as the
+writer encodes it in JSON before anything is parsed and are read newest first, in blocks from the
+journal's end, so a large journal is never parsed whole; a line naming the note that is not JSON is
+counted as a gap, never fatal. A version is named by its revision (the sha256 of its exact bytes)
+and its text is returned only after it hashes to that revision. Nothing here writes: no index, no
+cache, no sidecar.
 
 The outline is the one renderer the read, the receipt and the refusal share. It prints each heading
 line as the note spells it; its character ranges are the ``start_char``/``end_char`` of
@@ -39,9 +40,11 @@ def journal_path(address: Any) -> Path:
     return address.shelf.parent / JOURNAL_NAME
 
 
-def _needles(address: Any) -> tuple[bytes, ...]:
-    """The topic as a JSON string: the writer's own spelling, and the escaped one another serializer writes."""
-    return tuple(dict.fromkeys(json.dumps(address.topic, ensure_ascii=ascii).encode("utf-8") for ascii in (False, True)))
+def _needle(address: Any) -> bytes:
+    """The topic as a JSON string, spelled as every writer of this journal writes it (``ensure_ascii=False``).
+
+    One spelling: a second one that no row carries would rescan the whole block for every line found."""
+    return json.dumps(address.topic, ensure_ascii=False).encode("utf-8")
 
 
 def _belongs(row: Any, address: Any) -> bool:
@@ -54,11 +57,13 @@ def _belongs(row: Any, address: Any) -> bool:
     return not isinstance(where, dict) or where.get("scope", address.scope) == address.scope
 
 
-def _matching_lines(region: bytes, base: int, needles: tuple[bytes, ...]) -> Iterator[tuple[int, bytes]]:
-    """``(offset, line)`` of each line of ``region`` (whole lines from ``base``) holding a needle, newest first."""
+def _matching_lines(region: bytes, base: int, needle: bytes) -> Iterator[tuple[int, bytes]]:
+    """``(offset, line)`` of each line of ``region`` (whole lines from ``base``) holding ``needle``, newest first.
+
+    Each search starts below the line last found, so the region is scanned once."""
     end = len(region)
     while end > 0:
-        hit = max(region.rfind(needle, 0, end) for needle in needles)
+        hit = region.rfind(needle, 0, end)
         if hit < 0:
             return
         start = region.rfind(b"\n", 0, hit) + 1
@@ -67,8 +72,8 @@ def _matching_lines(region: bytes, base: int, needles: tuple[bytes, ...]) -> Ite
         end = start
 
 
-def _journal_lines(journal: Path, needles: tuple[bytes, ...]) -> Iterator[tuple[int, bytes]]:
-    """Every line of the journal holding a needle, newest first, read in blocks from its end."""
+def _journal_lines(journal: Path, needle: bytes) -> Iterator[tuple[int, bytes]]:
+    """Every line of the journal holding ``needle``, newest first, read in blocks from its end."""
     with journal.open("rb") as handle:
         end, carry = os.fstat(handle.fileno()).st_size, b""
         while end > 0:
@@ -79,7 +84,7 @@ def _journal_lines(journal: Path, needles: tuple[bytes, ...]) -> Iterator[tuple[
             if start and not cut:  # one line longer than everything read so far
                 carry, end = data, start
                 continue
-            yield from _matching_lines(data[cut:], start + cut, needles)
+            yield from _matching_lines(data[cut:], start + cut, needle)
             carry, end = data[:cut], start
 
 
@@ -102,7 +107,7 @@ def tail_rows(journal: Path, address: Any, tail_bytes: int) -> Iterator[tuple[in
             tail = jsonl_window(handle, size, tail_bytes)
     except OSError:
         return
-    for offset, line in _matching_lines(tail, size - len(tail), _needles(address)):
+    for offset, line in _matching_lines(tail, size - len(tail), _needle(address)):
         row = _parse(line)
         if _belongs(row, address):
             yield offset, row
@@ -117,7 +122,7 @@ class NoteHistory:
 
     def __iter__(self) -> Iterator[tuple[int, dict]]:
         try:
-            for offset, line in _journal_lines(journal_path(self.address), _needles(self.address)):
+            for offset, line in _journal_lines(journal_path(self.address), _needle(self.address)):
                 if self.extra and self.extra not in line:
                     continue
                 row = _parse(line)
