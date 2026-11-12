@@ -239,6 +239,16 @@ _SELF_FILES = (("identity.md", "identity_journal.jsonl", "update_identity", True
 _SELF_JOURNAL_TAIL_BYTES = 1024 * 1024
 
 
+def _age_in_hours(seconds: float) -> str:
+    """An age in whole hours. These lines open the dynamic part of the request, where a text that moves
+    every minute ends the prefix a provider can reuse between two turns of one conversation; an age in
+    hours moves once an hour and still says what the fact is for."""
+    hours = max(0, int(seconds)) // 3600
+    if hours >= 24:
+        return f"{hours // 24} d {hours % 24} h ago"
+    return f"{hours} h ago" if hours else "less than an hour ago"
+
+
 def _focus_role(row: Mapping[str, Any]) -> str:
     focus = row.get("focus")
     return str(focus.get("role") or "") if isinstance(focus, dict) else ""
@@ -253,7 +263,7 @@ def _last_self_update(journal: pathlib.Path, tool: str, compared: Optional[pathl
     ``compared`` is the file the journal belongs to: when the dated record carries the hash it published
     (``new_sha256``) and the file's bytes hash otherwise, the line says so, as a fact without a cause or an
     author. A record without that hash, or bytes that cannot be read, add nothing."""
-    from ouroboros.deadline_utils import ago_text, parse_deadline_ts, utc_now
+    from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 
     try:
         size = journal.stat().st_size
@@ -270,7 +280,7 @@ def _last_self_update(journal: pathlib.Path, tool: str, compared: Optional[pathl
     if written is None:
         return f"last {tool} record unreadable"
     who, recorded = _focus_role(mine[-1]), mine[-1].get("new_sha256")
-    line = f"last {tool} {ago_text((utc_now() - written).total_seconds())}" + (f" ({who})" if who else "")
+    line = f"last {tool} {_age_in_hours((utc_now() - written).total_seconds())}" + (f" ({who})" if who else "")
     if compared is not None and recorded and isinstance(recorded, str):
         try:
             if hashlib.sha256(compared.read_bytes()).hexdigest() != recorded:

@@ -32,7 +32,7 @@ def test_a_quiet_install_renders_facts_without_ok_lines_or_cost_verdicts(tmp_pat
     ahead = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
     append_jsonl(tmp_path / "memory" / "identity_journal.jsonl", {"ts": ahead, "focus": {"role": "main"}})
     text = context_health.build_health_invariants(env)
-    assert "- identity.md: last update_identity less than a minute ago (main)" in text.splitlines()
+    assert "- identity.md: last update_identity less than an hour ago (main)" in text.splitlines()
     for gone in ("OK:", "HIGH-COST", "high-cost", "STALE IDENTITY", "THIN IDENTITY", "SCRATCHPAD", "version sync",
                  "budget drift within", "COST ACCOUNTING UNAVAILABLE"):
         assert gone not in text, gone
@@ -90,20 +90,20 @@ def test_the_self_lines_state_each_file_s_last_update_record_and_never_its_mtime
     append_jsonl(memory / "world_journal.jsonl", host)
     assert said()[1] == "WORLD.md: no update_world record", "the host's first fencing is no update of the mind's"
     publish("WORLD.md", "world_journal.jsonl", "main", timedelta(hours=5, minutes=12))
-    assert said()[1] == "WORLD.md: last update_world 5 h 12 min ago (main)"
+    assert said()[1] == "WORLD.md: last update_world 5 h ago (main)"
     (memory / "WORLD.md").write_text("my map, its measured block refreshed by the host", encoding="utf-8")
-    assert said()[1] == "WORLD.md: last update_world 5 h 12 min ago (main)", "the map is never compared with its record"
+    assert said()[1] == "WORLD.md: last update_world 5 h ago (main)", "the map is never compared with its record"
     append_jsonl(memory / "world_journal.jsonl", host)
-    assert said()[1] == "WORLD.md: last update_world 5 h 12 min ago (main)", "a later host row hides no record of the mind's"
+    assert said()[1] == "WORLD.md: last update_world 5 h ago (main)", "a later host row hides no record of the mind's"
 
     journal = memory / "identity_journal.jsonl"
     append_jsonl(journal, {"ts": (now - timedelta(minutes=7)).isoformat(), "new_content": "no role"})
-    assert said()[0] == "identity.md: last update_identity 7 min ago", \
+    assert said()[0] == "identity.md: last update_identity less than an hour ago", \
         "no role on the record: no parentheses; no hash on it: nothing to compare the changed file with"
     append_jsonl(journal, {"focus": {"role": "main"}, "new_content": "no date"})
     assert said()[0] == "identity.md: last update_identity record unreadable", "the newest record has no date"
     append_jsonl(journal, {"ts": (now - timedelta(minutes=3)).isoformat(), "focus": {"role": "main"}})
-    assert said()[0] == "identity.md: last update_identity 3 min ago (main)"
+    assert said()[0] == "identity.md: last update_identity less than an hour ago (main)"
     monkeypatch.setattr(context_health, "_SELF_JOURNAL_TAIL_BYTES", 16)
     assert said() == ["identity.md: last update_identity record unreadable", "WORLD.md: last update_world record unreadable"], \
         "a record longer than the tail is unknown, never no record"
