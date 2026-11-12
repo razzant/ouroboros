@@ -8,7 +8,6 @@ import {
     providerTestStatusText,
     reachesAnotherPair,
 } from '../modules/settings_connections.js';
-import { cyberReviewNote } from '../modules/settings_policy.js';
 import { PROVIDER_CARDS, providerSettingsCard } from '../modules/settings_provider_cards.js';
 
 // Setup retains the shared provider cards, each with its keys and forms.
@@ -116,27 +115,3 @@ test('each key row docks Test beside its other actions and reports in its own li
     assert.doesNotMatch(html, /settings-claude-code/);
     assert.doesNotMatch(html, /settings-ghost-btn/);
 });
-
-test('the Cyber Pro note says what a saved Blocking means now and after the restart, and nothing when it is simply enforced', () => {
-    // The shape gateway/settings._build_policy_state returns: the Access in force and the one saved for the next start.
-    const policy = ({ now, saved = now, review = 'advisory', next = review }) => ({
-        access: { current_process: now, effective: now, configured: saved, next_task: saved },
-        review: { current_process: review, effective: review, configured: next, next_task: next } });
-    // Enforced, or Blocking is not the saved choice: no clause.
-    assert.equal(cyberReviewNote(policy({ now: 'pro', review: 'blocking' })), '');
-    assert.equal(cyberReviewNote(policy({ now: 'cyber_pro' })), '');
-    assert.equal(cyberReviewNote(policy({ now: 'cyber_pro', review: 'blocking', next: 'advisory' })), '');
-    assert.equal(cyberReviewNote(null), '');
-    // Cyber Pro now and after the restart.
-    assert.equal(cyberReviewNote(policy({ now: 'cyber_pro', review: 'blocking' })), 'Not enforced under Cyber Pro: reviews advise, it decides.');
-    // Cyber Pro is only saved: enforced until the restart applies it. Never a claim that it is not enforced now.
-    const later = cyberReviewNote(policy({ now: 'pro', saved: 'cyber_pro', review: 'blocking' }));
-    assert.equal(later, 'Enforced now. Not enforced after the restart that applies Cyber Pro.');
-    // An unknown current Access states nothing about now beyond what the saved one will do.
-    assert.equal(cyberReviewNote(policy({ now: undefined, saved: 'cyber_pro', review: 'blocking' })), later);
-    assert.equal(cyberReviewNote(policy({ now: 'unknown', saved: 'pro', review: 'blocking' })), '');
-    // Cyber Pro in force, a lower Access saved.
-    assert.equal(cyberReviewNote(policy({ now: 'cyber_pro', saved: 'pro', review: 'blocking' })),
-        'Not enforced now, under Cyber Pro. Enforced after the restart that applies Pro.');
-});
-

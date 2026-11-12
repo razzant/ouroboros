@@ -19,7 +19,7 @@ const MY_PAGES = ['permissions', 'rules', 'appearance', 'notifications', 'voice'
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
 const settle = async (rounds = 10) => { for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 const EFFECTS = { OUROBOROS_RUNTIME_MODE: 'restart', OUROBOROS_SERVER_HOST: 'restart', OUROBOROS_SAFETY_MODE: 'next_task',
-    OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'next_task', OUROBOROS_REVIEW_ENFORCEMENT: 'next_task', OUROBOROS_NETWORK_PASSWORD: 'now',
+    OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'next_task', OUROBOROS_TASK_REVIEW_MODE: 'next_task', OUROBOROS_NETWORK_PASSWORD: 'now',
     OUROBOROS_SAFETY_OWNER_RULES: 'next_task', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'now', OUROBOROS_UI_DIR: 'restart',
     OUROBOROS_MAX_WORKERS: 'now', OUROBOROS_EXTRA_CA_BUNDLE: 'next_task' };
 
@@ -28,7 +28,7 @@ const EFFECTS = { OUROBOROS_RUNTIME_MODE: 'restart', OUROBOROS_SERVER_HOST: 'res
 function fakeServer(routes, values = {}) {
     const server = { posts: [], refuse: new Map(), running: { OUROBOROS_RUNTIME_MODE: 'pro', OUROBOROS_SERVER_HOST: '127.0.0.1', OUROBOROS_UI_DIR: '' },
         values: { OUROBOROS_RUNTIME_MODE: 'pro', OUROBOROS_SAFETY_MODE: 'full', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'light',
-            OUROBOROS_SAFETY_OWNER_RULES: 'Ask before paying.', OUROBOROS_REVIEW_ENFORCEMENT: 'advisory', OUROBOROS_TASK_REVIEW_MODE: 'auto',
+            OUROBOROS_SAFETY_OWNER_RULES: 'Ask before paying.', OUROBOROS_TASK_REVIEW_MODE: 'auto',
             OUROBOROS_REVIEW_MAX_CYCLES: '2', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'false', OUROBOROS_SERVER_HOST: '127.0.0.1',
             OUROBOROS_NETWORK_PASSWORD: '', OUROBOROS_MAX_WORKERS: '', OUROBOROS_UI_DIR: '', OUROBOROS_EXTRA_CA_BUNDLE: '', ...values } };
     server.document = () => {
@@ -37,8 +37,7 @@ function fakeServer(routes, values = {}) {
         return { ...structuredClone(now), OUROBOROS_NETWORK_PASSWORD: now.OUROBOROS_NETWORK_PASSWORD ? '***set***' : '',
             _meta: { effects: EFFECTS, bind_host: running.OUROBOROS_SERVER_HOST, reachability: 'loopback_only',
             policy_state: { access: { configured: now.OUROBOROS_RUNTIME_MODE, current_process: running.OUROBOROS_RUNTIME_MODE,
-                effective: running.OUROBOROS_RUNTIME_MODE, restart_required: now.OUROBOROS_RUNTIME_MODE !== running.OUROBOROS_RUNTIME_MODE },
-            review: { configured: now.OUROBOROS_REVIEW_ENFORCEMENT, next_task: now.OUROBOROS_REVIEW_ENFORCEMENT } },
+                effective: running.OUROBOROS_RUNTIME_MODE, restart_required: now.OUROBOROS_RUNTIME_MODE !== running.OUROBOROS_RUNTIME_MODE } },
             restart_state: { restart_keys: pending, running: Object.fromEntries(pending.map((key) => [key, running[key]])) } } };
     };
     const write = (changed) => Object.fromEntries(Object.entries(changed).filter(([key, value]) => String(server.values[key]) !== String(value))
@@ -101,7 +100,7 @@ test('every key of the plain pages has exactly one row, on a page that is regist
     const keys = mine.flatMap((row) => row.keys);
     assert.deepEqual(keys.filter((key, i) => keys.indexOf(key) !== i), [], 'no key is written by two rows');
     for (const key of ['OUROBOROS_RUNTIME_MODE', 'OUROBOROS_SAFETY_MODE', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'OUROBOROS_SAFETY_OWNER_RULES',
-        'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS', 'OUROBOROS_REVIEW_ENFORCEMENT', 'OUROBOROS_TASK_REVIEW_MODE', 'OUROBOROS_REVIEW_MAX_CYCLES',
+        'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS', 'OUROBOROS_TASK_REVIEW_MODE', 'OUROBOROS_REVIEW_MAX_CYCLES',
         'OUROBOROS_UI_LANGUAGE', 'OUROBOROS_DESKTOP_KEEP_RUNNING', 'OUROBOROS_SERVER_HOST', 'OUROBOROS_NETWORK_PASSWORD', 'OUROBOROS_MAX_WORKERS',
         'OUROBOROS_UI_DIR', 'OUROBOROS_EXTRA_CA_BUNDLE']) {
         assert.equal(ROWS.filter((row) => row.keys.includes(key)).length, 1, `${key} has one row in the whole module`);
@@ -154,7 +153,7 @@ test('Access is four choices, each with its line; its meta says both values whil
     assert.equal(access.dataset.kind, 'choices');
     const options = access.querySelectorAll('[role="radio"]');
     assert.deepEqual(options.map((button) => button.querySelector('.settings-choice-name').textContent), ['Light', 'Advanced', 'Pro', 'Cyber Pro']);
-    assert.equal(options[3].querySelector('.settings-choice-note').textContent, 'Full say over itself and this computer. Reviews advise, it decides.');
+    assert.equal(options[3].querySelector('.settings-choice-note').textContent, 'Full say over itself and this computer. Asks for reviews when it judges.');
     assert.equal(access.querySelector('[role="radiogroup"]').getAttribute('aria-labelledby'), 'setting-OUROBOROS_RUNTIME_MODE-name');
     assert.deepEqual(options.map((button) => button.getAttribute('aria-checked')), ['false', 'false', 'true', 'false']);
     assert.deepEqual(options.map((button) => button.tabIndex), [-1, -1, 0, -1], 'one tab stop: the chosen level');
@@ -240,7 +239,7 @@ test('Permissions and checks: three questions and what it is trusted with, doors
         ['What it may change', 'Who watches its actions', 'Who checks its results', 'Trust it without asking']);
     assert.deepEqual(page.container.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow), [
         'OUROBOROS_RUNTIME_MODE', 'OUROBOROS_SAFETY_MODE', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'permissions:rules', 'permissions:supervisor',
-        'permissions:second-check', 'OUROBOROS_TASK_REVIEW_MODE', 'OUROBOROS_REVIEW_ENFORCEMENT', 'permissions:reviewers',
+        'permissions:second-check', 'OUROBOROS_TASK_REVIEW_MODE', 'permissions:reviewers',
         'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS', 'OUROBOROS_REVIEW_MAX_CYCLES']);
     const folds = page.container.querySelectorAll('details[data-settings-fold]');
     assert.equal(folds.length, 1);
@@ -269,11 +268,11 @@ test('Permissions and checks: three questions and what it is trusted with, doors
 const settingsPageSource = () => fs.readFileSync(new URL('../modules/settings_ui.js', import.meta.url), 'utf8')
     + fs.readFileSync(new URL('../modules/settings_safety.js', import.meta.url), 'utf8');
 
-test('what a managed deployment locks is said in its row and what Cyber Pro does to Blocking in the row it changes', () => {
+test('what a managed deployment locks is said in its row, and an unmanaged one leaves the rows as described', () => {
     const rows = () => rowsOf('permissions').map((row) => structuredClone(row));
     const row = (list, id) => list.find((each) => each.id === id);
     const managed = tunePermissionRows(rows(), { OUROBOROS_MODEL_SAFETY: '', _meta: { policy_state: {
-        access: { configured: 'pro', current_process: 'pro' }, review: { configured: 'blocking', next_task: 'blocking' },
+        access: { configured: 'pro', current_process: 'pro' },
         deployment: { access_max: 'pro', min_coverage: 'full', checker: { model: 'anthropic@safety::checker' } } } } });
     assert.equal(row(managed, 'OUROBOROS_RUNTIME_MODE').meta, 'Your organization allows up to Pro');
     assert.deepEqual(row(managed, 'OUROBOROS_RUNTIME_MODE').control.options.map((option) => option.value), ['light', 'advanced', 'pro']);
@@ -281,15 +280,14 @@ test('what a managed deployment locks is said in its row and what Cyber Pro does
     assert.equal(row(managed, 'permissions:supervisor').meta, 'checker · Set by your organization');
     assert.deepEqual([row(managed, 'permissions:supervisor').control.kind, row(managed, 'permissions:second-check').control.kind], ['custom', 'custom'],
         'an organization\'s Supervisor is said, never offered for change');
-    // Cyber Pro in force and saved: a saved Blocking says it is not enforced, in the option it would be read with.
-    const cyber = tunePermissionRows(rows(), { _meta: { policy_state: { access: { configured: 'cyber_pro', current_process: 'cyber_pro' },
-        review: { configured: 'blocking', next_task: 'blocking' } } } });
-    assert.deepEqual(row(cyber, 'OUROBOROS_REVIEW_ENFORCEMENT').control.options.map((option) => option.note),
-        ['It reads the finding and decides.', 'Not enforced under Cyber Pro: reviews advise, it decides.']);
+    // Cyber Pro in force and saved, unmanaged: the Supervisor stays a door and no review row is drawn.
+    const cyber = tunePermissionRows(rows(), { _meta: { policy_state: { access: { configured: 'cyber_pro', current_process: 'cyber_pro' } } } });
     assert.equal(row(cyber, 'permissions:supervisor').control.kind, 'door');
+    assert.equal(row(cyber, 'OUROBOROS_REVIEW_ENFORCEMENT'), undefined);
     // Unmanaged and not Cyber Pro: the rows as described.
-    const plain = tunePermissionRows(rows(), { _meta: { policy_state: { access: { configured: 'pro', current_process: 'pro' }, review: { configured: 'blocking' } } } });
-    assert.deepEqual(row(plain, 'OUROBOROS_REVIEW_ENFORCEMENT').control, rowById('OUROBOROS_REVIEW_ENFORCEMENT').control);
+    const plain = tunePermissionRows(rows(), { _meta: { policy_state: { access: { configured: 'pro', current_process: 'pro' } } } });
+    assert.deepEqual(row(plain, 'OUROBOROS_TASK_REVIEW_MODE').control, rowById('OUROBOROS_TASK_REVIEW_MODE').control);
+    assert.deepEqual(row(plain, 'OUROBOROS_RUNTIME_MODE').control, rowById('OUROBOROS_RUNTIME_MODE').control);
 });
 
 test('Your rules: its own Save, the server\'s refusal on the page with the text kept, and what a saved text applies to', async (t) => {
