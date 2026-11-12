@@ -111,10 +111,11 @@ def test_an_owner_stop_is_named_by_its_cause_never_as_a_review_refusal(tmp_path,
     ctx = types.SimpleNamespace(drive_root=tmp_path, task_id="t1")
     assert review_custody.review_stop_cause(ctx) == "" and not review_custody.review_retry_cancelled(ctx)
     monkeypatch.setattr(intents, "cancel_pending", lambda root, task, **k: task == "t1")
-    assert review_custody.review_stop_cause(ctx) == "owner_stop" and review_custody.review_retry_cancelled(ctx)
+    assert review_custody.review_stop_cause(ctx) == "stopped" and review_custody.review_retry_cancelled(ctx)
     monkeypatch.setattr(intents, "cancel_pending", lambda *a, **k: (_ for _ in ()).throw(OSError("unreadable")))
     assert review_custody.review_stop_cause(ctx) == "stop_unreadable" and review_custody.review_retry_cancelled(ctx)
-    assert set(review_custody.REVIEW_STOP_WORDS) == {"owner_stop", "owner_deadline", "stop_unreadable"}
+    assert set(review_custody.REVIEW_STOP_WORDS) == {"stopped", "owner_deadline", "stop_unreadable"}
+    assert "owner" not in review_custody.REVIEW_STOP_WORDS["stopped"], "a stop is not always the owner's"
 
     monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **k: "")
     calls = []

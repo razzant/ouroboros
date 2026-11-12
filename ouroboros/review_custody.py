@@ -648,14 +648,14 @@ def review_retry_cancelled(usage_ctx: Any) -> bool:
     return bool(review_stop_cause(usage_ctx))
 
 
-REVIEW_STOP_WORDS = {"owner_stop": "the owner stopped this work",
+REVIEW_STOP_WORDS = {"stopped": "this work was stopped",  # by the owner, an agent, a restart or a shutdown alike
                      "owner_deadline": "the owner's deadline for this work has passed",
-                     "stop_unreadable": "the owner's stop record could not be read, which stops the work"}
+                     "stop_unreadable": "whether this work was stopped could not be read, so it is treated as stopped"}
 
 
 def review_stop_cause(usage_ctx: Any) -> str:
-    """What durably stops this work's review now: ``owner_stop`` (a cancel of the task or its retry root),
-    ``stop_unreadable`` (the cancel projection could not be read, never a licence to go on) or ``""``."""
+    """What durably stops this work's review now: ``stopped`` (a cancel of the task or its retry root, whoever
+    recorded it), ``stop_unreadable`` (the cancel state could not be read, never a licence to go on) or ``""``."""
     if usage_ctx is not None:
         task_id = str(getattr(usage_ctx, "task_id", "") or "")
         drive_root = getattr(usage_ctx, "drive_root", None)
@@ -667,10 +667,10 @@ def review_stop_cause(usage_ctx: Any) -> str:
                 )
 
                 if cancel_pending(drive_root, task_id, strict=True):
-                    return "owner_stop"
+                    return "stopped"
                 retry_root = _validated_retry_root_cancel_key(drive_root, task_id)
                 if retry_root and cancel_pending(drive_root, retry_root, strict=True):
-                    return "owner_stop"
+                    return "stopped"
             except Exception:
                 # An unreadable cancel projection must not authorize another
                 # paid/retryable physical attempt.

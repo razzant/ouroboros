@@ -849,12 +849,13 @@ def _reviewed_stage_cycle(
             and (owed := _owed_before_git(ctx, commit_message, commit_start, post_fingerprint, skip_tests))):
         return owed  # the owner-control decision below follows these owed tests, so it gates Git (#2410)
     stop = review_stop_cause(ctx) or ("owner_deadline" if owner_deadline_exhausted_for_context(ctx) else "")
-    if stop:  # the owner's control, not a review refusal: say what stopped it and keep what the review said
+    if stop:  # a stop of the work, not a review refusal: say what stopped it and keep what the review returned
+        # No record id in the words: ``commit_gate.name_review_record`` appends it, and the stopped seats' offer, after.
         record = str(getattr(ctx, "_current_review_record_id", "") or "")
         blocked, block_reason, combined_msg = True, "owner_stopped", (
             f"⚠️ REVIEW_STOPPED: {REVIEW_STOP_WORDS[stop]}; this commit was not made."
-            + (f" The review's own outcome stays in its record ({record})." if record else "")
-            + (f"\n\nThe review said before the stop:\n{combined_msg}" if combined_msg else ""))
+            + (" The review's outcome is kept in its review record." if record else "")
+            + (f"\n\nWhat the review returned:\n{combined_msg}" if combined_msg else ""))
     if (author_source is None and (hand_back_all or (ordinary_advisory and material))
             and block_reason != "owner_stopped"):
         return _return_commit_feedback(ctx, commit_message, commit_start, pre_fingerprint, post_fingerprint,

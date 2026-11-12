@@ -219,9 +219,15 @@ def test_the_owner_window_is_decided_after_the_owed_landing_tests(author, monkey
         assert _commit_count(a) == commits + 1, landed
     else:
         assert "REVIEW_STOPPED" in landed and _commit_count(a) == commits, landed
-        cause = "the owner stopped this work" if control == "stop" else "the owner's deadline for this work has passed"
+        cause = "this work was stopped" if control == "stop" else "the owner's deadline for this work has passed"
         assert cause in landed and "this commit was not made" in landed, landed
-        assert "The review's own outcome stays in its record (rl-" in landed, landed
+        assert "The review's outcome is kept in its review record." in landed and "\nreview_record_id: rl-" in landed, landed
+        from ouroboros.review_state import load_state
+        from ouroboros.task_continuation import load_review_continuation
+        row = load_state(a.ctx.drive_root).attempts[-1]
+        assert (row.phase, row.block_reason) == ("owner_control", "owner_stopped"), (row.phase, row.block_reason)
+        continuation = load_review_continuation(a.ctx.drive_root, TASK)
+        assert (continuation.source, continuation.stage) == ("owner_stopped", "owner_control")
     assert [selection["full_tests"] for selection in tests.selections] == [False, True]
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "one physical send per seat"
 
