@@ -397,6 +397,14 @@ def _fixes(store: ChronicleStore, record: Mapping[str, Any], fixes: Mapping[str,
             for member in members for fix in fixes.get(str(member), ())]
 
 
+def _record_words(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """A page's, part's or note's ``text`` as it acts: its own words, then each signed correction under them
+    (``chronicle_store._interpret``). A corrected record also keeps ``own_chars``, the length of its own words in it,
+    so a shorter form of those words keeps the corrections beside them (``_own_words``)."""
+    text = str(record.get("current_text") or "")
+    return {"text": text, **({"own_chars": len(str(record.get("text") or ""))} if record.get("corrections") else {})}
+
+
 def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mapping[str, memory_inventory.LegacyUnit],
                  room_id: Optional[str] = None, terminal: Optional[Callable[..., Any]] = None) -> List[Dict[str, Any]]:
     """Every acting page and part not folded into a part (``room_id``'s alone, when named), and every account my
@@ -425,7 +433,7 @@ def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mappin
             "label": str(_mapping(record.get("metadata")).get("room_label") or label(room)),
             **({"lead_rule": record["metadata"]["lead_rule"]} if "lead_rule" in _mapping(record.get("metadata")) else {}),
             "source_period": period.span, "period_basis": period.source,
-            "period": _period(period.span, period.note()), "text": str(record.get("current_text") or ""),
+            "period": _period(period.span, period.note()), **_record_words(record),
             "status": str(record.get("status") or ""), "signer": draft_signer(record.get("author")),
             "stamp": stamp_summary(record.get("host_stamp")), "fixes": _fixes(store, record, fixes),
             "terminal_links": terminal_links(store.data_root, record, terminal_cache), "quotes": record.get("quotes") or []}))
@@ -722,8 +730,7 @@ def _notes_by_room(store: ChronicleStore) -> Dict[str, List[Dict[str, Any]]]:
                  "author_kind": str(_mapping(record.get("author")).get("kind") or ""),
                  "task_id": str(record.get("author", {}).get("task_id") or ""),
                  "role": str(_mapping(_mapping(record.get("author")).get("focus")).get("role") or "mind"),
-                 "origin": dict(_mapping(_mapping(record.get("author")).get("focus"))),
-                 "text": str(record.get("current_text") or "")}
+                 "origin": dict(_mapping(_mapping(record.get("author")).get("focus"))), **_record_words(record)}
                 for record in by_room[room] if f"note:{record['id']}" not in sealed]
         if kept:
             notes[room] = kept
@@ -1040,13 +1047,28 @@ def _page_pointer(entry: Mapping[str, Any]) -> str:
     return f"- {entry['label']}; {entry['period']}; {entry['kind']}; memory_read(node_id='{entry['id']}'){selection}"
 
 
+def _own_words(entry: Mapping[str, Any]) -> Tuple[str, str]:
+    """``(own words, signed corrections)`` of a captured page, part or note (``_record_words``). Every form that prints
+    its own words, whole or shorter, keeps the corrections beside them; a view saved before the split keeps none apart."""
+    text, own = str(entry.get("text") or ""), entry.get("own_chars")
+    return (text, "") if own is None else (text[:own], text[own:].removeprefix("\n\n"))
+
+
+def _fix_lines(entry: Mapping[str, Any]) -> List[str]:
+    """A part's signed corrections and rejections of its members, beside every form of the part's words."""
+    return [f"- {'correction by me of' if fix['kind'] == 'correction' else 'my rejection of the draft'} {fix['target']}:\n"
+            f"{_indented(fix['text'])}" for fix in entry.get("fixes") or ()]
+
+
 def _page_label(entry: Mapping[str, Any]) -> str:
-    """The page's first sentence, without a length cut or an invented summary, and its reader."""
-    sentence = first_sentence(entry['text'])
+    """The page's first sentence, without a length cut or an invented summary, its signed corrections beside it
+    (``_own_words``, ``_fix_lines``), and its reader."""
+    words, corrections = _own_words(entry)
+    said = "\n\n".join(text for text in (first_sentence(words), corrections) if text)
     attribution = (f" (draft by {entry.get('signer') or 'Light'}, not yet accepted)"
                    if entry.get('status') == 'draft' else '')
     missing = " (record opening, no lead)" if "lead_rule" not in entry else ""
-    return _page_pointer(entry) + attribution + missing + "\n" + _indented(sentence)
+    return "\n".join([_page_pointer(entry) + attribution + missing, _indented(said), *_fix_lines(entry)])
 
 
 def _page_short(entry, gone=(), *, lead=False):
@@ -1084,10 +1106,7 @@ def _page_lines(entry: Mapping[str, Any], gone=()) -> List[str]:
     if entry.get("stamp"):
         lines.append(f"({entry['stamp']})")
     lines.extend(entry.get("terminal_links") or ())
-    for fix in entry.get("fixes") or ():  # a record's own corrections stand inside its text (chronicle_store._interpret)
-        verb = "correction by me of" if fix["kind"] == "correction" else "my rejection of the draft"
-        lines.append(f"- {verb} {fix['target']}:\n{_indented(fix['text'])}")
-    return lines
+    return lines + _fix_lines(entry)  # a record's own corrections stand inside its text (chronicle_store._interpret)
 
 
 def _retold(item: Mapping[str, Any], short: bool = False) -> str:
@@ -1299,11 +1318,12 @@ def _note_lines(notes: List[Dict[str, Any]]) -> List[str]:
 
 
 def _note_pointer(note: Mapping[str, Any]) -> str:
-    """A source-derived label, never a summary or a function of the start allowance."""
-    sentence = first_sentence(' '.join(note['text'].split()))
+    """A source-derived label, never a summary or a function of the start allowance; its signed corrections beside it."""
+    words, corrections = _own_words(note)
+    sentence = first_sentence(' '.join(words.split()))
     label = sentence + (" (record opening, no lead)" if "lead_rule" not in note else "")
     return (f"note {note['id']} by {note['role']} on {note['date']}: {label}; "
-            f"memory_read(node_id='{note['id']}')")
+            f"memory_read(node_id='{note['id']}')") + ("\n" + _indented(corrections) if corrections else "")
 
 
 def _notes_line(notes: List[Dict[str, Any]]) -> str:
