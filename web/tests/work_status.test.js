@@ -667,7 +667,8 @@ test('a work card keeps its work\'s look beside its own words: the owner\'s dot 
     const state = reconcileWorkState(emptyWorkState(), body, 42);
     const record = { groupId: parent.episode.task_id };
     assert.equal(applyCardWorkViews(new Map([['w', record]]), state), true);
-    assert.deepEqual([record.workView, record.workLook], [null, { mark: 'moving', owner: true }]);
+    assert.deepEqual([record.workView, record.workLook],
+        [null, { mark: 'moving', owner: true, note: 'A question waits for your answer' }]);
     const view = desiredLiveCardPhase(record);
     assert.deepEqual([view.text, view.tone, view.owner, view.mark], ['Working', 'live', true, 'moving']);
     // The outcome owns the chip while its work finalizes; the owner's move stays its dot.
@@ -682,13 +683,34 @@ test('a work card keeps its work\'s look beside its own words: the owner\'s dot 
     const partial = { ...parent, confirmed: false };
     const read = reconcileWorkState(emptyWorkState(), { ...body, works_complete: false, works: [partial] }, 42);
     applyCardWorkViews(new Map([['w', record]]), read);
-    assert.deepEqual([record.workView, record.workLook], [null, { mark: 'moving', owner: true }]);
+    assert.deepEqual([record.workView, record.workLook],
+        [null, { mark: 'moving', owner: true, note: 'A question waits for your answer' }]);
     assert.deepEqual([desiredLiveCardPhase(record).text, desiredLiveCardPhase(record).owner], ['Working', true]);
     // A work an incomplete body omitted proves nothing: no look, so the card's own words and shape stand.
     const kept = reconcileWorkState(state, { supervisor_ready: true, works_complete: false, works: [], rooms: {} }, 42);
     applyCardWorkViews(new Map([['w', record]]), kept);
     assert.deepEqual([record.workView, record.workLook], [null, null]);
     assert.equal(desiredLiveCardPhase(record).owner, false);
+});
+
+test('a card chip names what its work\'s turn holds as the room\'s note does, by one rule', () => {
+    const open = { kind: 'open_question', task_id: 'w', quiz_id: 'q' };
+    const turns = { unanswered: [open], delivery: [{ ...open, code: 'delivery_unknown' }],
+        action: [open, { kind: 'action', task_id: 'w' }], question: [{ kind: 'question', task_id: 'w', quiz_id: 'q' }] };
+    for (const [kind, turn] of Object.entries(turns)) {
+        const parent = { ...structuredClone(CASES.working_call.works[0]), turn };
+        const record = { groupId: parent.episode.task_id };
+        applyCardWorkViews(new Map([['w', record]]), reconcileWorkState(emptyWorkState(),
+            { supervisor_ready: true, works_complete: true, works: [parent], rooms: {} }, 42));
+        // The chip's name and the room's note say the same thing for the same turn.
+        assert.equal(record.workLook.note, amberNote(roomAmber(room('working', { turn }))), kind);
+        assert.equal(desiredLiveCardPhase(record).ownerNote, record.workLook.note, kind);
+    }
+    assert.equal(amberNote(roomAmber(room('working', { turn: turns.unanswered }))), 'An unanswered question is here');
+    // Nothing waits: no note.
+    const quiet = { groupId: CASES.working_call.works[0].episode.task_id };
+    applyCardWorkViews(new Map([['w', quiet]]), reconcileWorkState(emptyWorkState(), body('working_call'), 42));
+    assert.equal(quiet.workLook?.note, undefined);
 });
 
 test('a census pause says its word alone; only the reviews a settled Pause lets finish stand beside it', () => {

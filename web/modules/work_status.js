@@ -247,16 +247,22 @@ export function roomSpeaker(room, works = [], word = activityWord(room)) {
     return list(room?.works).map((id) => byId.get(id)).find((work) => work && activityWord(work) === word) || null;
 }
 
-/** What waits for the owner in a room ('question' | 'action' | 'unanswered' | 'delivery'), '' when nothing does or
- *  its own word says so: a question a task waits on, else an action only the owner takes, else a question still
- *  unanswered while its work goes on or after it ended, or only answers whose delivery is unknown. */
-export const roomAmber = (room) => {
-    if (!room?.amber || (room.activity === 'waiting' && asked(room))) return '';
-    if (asked(room)) return 'question';
-    const open = list(room.turn).filter((item) => item?.kind === 'open_question');
-    if (list(room.turn).some((item) => item?.kind === 'action') || !open.length) return 'action';
+/** What a `turn` holds for the owner ('question' | 'action' | 'unanswered' | 'delivery'), '' when nothing: a
+ *  question a task waits on, else an action only the owner takes, else a question still unanswered while its work
+ *  goes on or after it ended, or only answers whose delivery is unknown. A room's note and a card chip's name both
+ *  say it by this one rule. */
+export const turnAmber = (turn) => {
+    const items = list(turn);
+    if (!items.length) return '';
+    if (items.some((item) => item?.kind === 'question')) return 'question';
+    const open = items.filter((item) => item?.kind === 'open_question');
+    if (items.some((item) => item?.kind === 'action') || !open.length) return 'action';
     return open.every((item) => item.code === 'delivery_unknown') ? 'delivery' : 'unanswered';
 };
+
+/** What waits for the owner in a room (turnAmber), '' when nothing does or its own word says so. */
+export const roomAmber = (room) => (!room?.amber || (room.activity === 'waiting' && asked(room)) ? ''
+    : turnAmber(room.turn) || 'action');
 
 /** The amber mark said in words, for the room's accessible name: the colour is never the only way it is told. An
  *  unanswered question nobody waits on is never said as a wait. */
@@ -406,7 +412,10 @@ export function applyCardWorkViews(records, state) {
         } else if (record.cardModel && !portal && !state?.complete) paintCardModel(record, { ...record.cardModel.view, target: '' });
         else paintCardModel(record, null);
         const view = cardWorkView(work);
-        const look = work?.episode?.live ? { mark: String(work.mark || 'none'), owner: list(work.turn).length > 0 } : null;
+        // What waits in the work, said as the room says it: the chip's name names that, never only "something".
+        const note = amberNote(turnAmber(work?.turn));
+        const look = work?.episode?.live ? { mark: String(work.mark || 'none'), owner: list(work.turn).length > 0,
+            ...(note ? { note } : {}) } : null;
         if (JSON.stringify([view, look]) !== JSON.stringify([record.workView || null, record.workLook || null])) changed = true;
         record.workView = view;
         record.workLook = look;
