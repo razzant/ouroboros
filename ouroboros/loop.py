@@ -18,7 +18,7 @@ from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage  # no
 from ouroboros import task_pacing  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.config import adaptive_quorum, get_context_mode, get_light_model, get_review_enforcement, get_task_review_mode, resolve_effort  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
-from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, reviewable_effect_projection, should_nudge_verification, turn_has_reviewable_effects  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
+from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_unreconciled_failed_verification, reviewable_effect_projection, turn_has_reviewable_effects  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import new_execution_id  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import task_timing_scope, timed_phase
 from ouroboros.context_timing import measured_sections, section_spans
@@ -457,6 +457,7 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._primary_view = None  # a return resumes only the view this turn left (primary_route_observation.held_primary_view)
     ctx._accepted_model_route = ctx._left_review_wait = None  # a new turn waits on no left review
     ctx._pending_task_wait = None  # nor owes an earlier turn's native task wait (``native_task_wait``)
+    ctx._pre_delivery_noticed = False  # each turn's answer may be told once (a continuation restores its own)
 
 
 def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dict, usage: dict, seen: set,
@@ -893,8 +894,9 @@ from ouroboros.loop_nudges import (  # noqa: E402, F401 -- intentional public re
     _maybe_inject_cost_budget_milestone,
     _inject_round_checkpoints,
     _forced_delegation_note,
-    _nanny_finalization_message,
     _maybe_inject_finalization_nudges,
+    _claim_pre_delivery_notice,
+    _pre_delivery_notice,
     _answer_protocol_active,
 )
 from ouroboros.loop_model_call import (  # noqa: E402, F401 -- intentional public re-exports
@@ -963,7 +965,6 @@ from ouroboros.loop_delivery import (  # noqa: E402, F401 -- intentional public 
     _classify_parsed_delivery_control,
     _resolve_forced_delivery_control_body,
     _resolve_delivery_control,
-    _CHILD_ABSORPTION_HOLD_CONTROL,
     _DELIVERY_HOLD_CONTROLS,
     _SKILL_ACTION_HOLD_CONTROL,
     _compose_delivery_suffix,
@@ -979,7 +980,6 @@ from ouroboros.loop_forced_finalization import (  # noqa: E402, F401 -- intentio
     _claimed_child_dispositions,
     _undispositioned_children,
     _undecided_children_listing,
-    _maybe_enforce_child_absorption_gate,
     _enforce_plan_gate,
     _finalize_forced_services,
     _disclose_service_finalization,

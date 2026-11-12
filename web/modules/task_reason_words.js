@@ -86,7 +86,9 @@ export const TASK_CAUSE_PHRASES = {
     terminal_plan_review_open: "The plan review was still open when this answer was delivered",
     child_results_deferred: "Some sub-task results were deferred instead of being folded into this answer",
     tool_failure: "A tool this task used failed and nothing recovered it",
-    receipt_absent: "No host verification receipt was recorded; this does not establish whether other checks ran.",
+    receipt_absent: "No recorded check or result review examined this result after its last change; this does not establish whether other checks ran.",
+    verification_red_unreconciled: "A check of this result failed and no later run of the same check passed.",
+    children_undecided: "Some finished sub-task results carry no recorded decision on how this answer used them.",
     expected_output_ungrounded: "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
     residual_tool_errors_without_review: "Tool errors remain in the record.",
     artifacts_unavailable: "Some result files are missing or could not be preserved.",
@@ -116,6 +118,9 @@ export const TASK_CAUSE_PHRASES = {
 
 // The codes above of a helper the host could not start: its only result is the host's notice to its parent (codes,
 // alternatives), so its card's collapsed line states the cause and the notice stays in Details.
+// Warnings that are details for the owner and never raise the headline (9 Nov 2026): nothing checked the result,
+// a red check no later run passed, finished children without a decision. Twin: outcomes.DETAIL_ONLY_WARNINGS.
+export const DETAIL_ONLY_WARNINGS = ['receipt_absent', 'verification_red_unreconciled', 'children_undecided'];
 export const UNSTARTED_REASONS = new Set(['subagent_executor_unavailable', 'delegate_tools_invisible', 'delegate_visibility_unverified']);
 
 export function taskReasonPhrase(code) {

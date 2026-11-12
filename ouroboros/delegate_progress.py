@@ -460,6 +460,14 @@ def message_journal_receipt(ctx: Any, result: Any) -> Any:
     return delegate_result(payload, meta=result.meta)
 
 
+# What this task's own ending does to an open run (``delegate_custody_reconcile._owner_terminal_is_deliberate`` and
+# the maintenance sweep's spared handles), said where the run's state is read, before its owner chooses to end
+# (audit 11.11, item 18: a fact at its birth, not a return at the finish door).
+OWNER_END = ("If this task ends while this run is open (finish, stop, a failure it declares, a cancel, or a wrap-up at "
+             "a deadline, budget or round limit), the next custody pass cancels the run (owner_task_gone); a provider "
+             "or worker death of this task, or a task kept waiting for its human's answer, spares it.")
+
+
 def present_payload(
     *,
     run_id: str,
@@ -496,6 +504,7 @@ def present_payload(
         "elapsed_seconds": elapsed_seconds,
         "max_seconds": max_seconds,
         "waiting_on_user": waiting_on_user,
+        "owner_end": OWNER_END,
     }
     if async_questions_only is None:
         from ouroboros.gateways.claudexor_observation import question_attention

@@ -93,9 +93,13 @@ def _project_child_result_dispositions(
     try:
         from ouroboros.tools.join_ledger import _child_result_sha256
 
-        current = []
+        from ouroboros.task_status import FINAL_STATUSES
+
+        current, undecided = [], []
         for child in _loop()._direct_child_results(ctx):
             disposition = _loop()._child_disposition_state(child)
+            if not disposition and str(child.get("status") or "").strip().lower() in FINAL_STATUSES:
+                undecided.append(str(child.get("task_id") or child.get("id") or ""))  # finished, no decision: a detail
             if disposition not in {"integrated", "irrelevant", "deferred"}:
                 continue
             current.append({
@@ -106,6 +110,7 @@ def _project_child_result_dispositions(
         llm_trace["child_result_dispositions"] = {
             "current": current,
             "deferred_count": sum(row["disposition"] == "deferred" for row in current),
+            "undecided": undecided[:20],
         }
     except Exception:
         llm_trace["child_result_dispositions"] = {"current": [], "deferred_count": 0}
@@ -384,29 +389,6 @@ def _undecided_children_listing(undecided: list[Dict[str, Any]]) -> str:
         f"sha256={_child_result_sha256(c)}"
         for c in undecided[:10]
     )
-
-
-def _maybe_enforce_child_absorption_gate(
-    tools: ToolRegistry,
-    limit_ctx: _RoundLimitContext,
-    content: Any,
-    messages: List[Dict[str, Any]],
-    emit_progress: Callable[[str], None],
-    llm_trace: Dict[str, Any],
-) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]] | str]:
-    undecided = _undispositioned_children(limit_ctx)
-    if not undecided:
-        return None
-    reminder = ("[CHILD_ABSORPTION_REQUIRED]\nCurrent children without an exact disposition: "
-                + _undecided_children_listing(undecided) + ". Inspect/wait for results and record "
-                "tree_note(kind='decision', payload={'type':'child_result_disposition', 'children': "
-                "[{'child_task_id': ..., 'disposition': 'integrated|irrelevant|deferred', 'child_result_sha256': ...}]}). "
-                "You may discard or cancel with their existing tools, defer honestly, or explicitly "
-                "finish_task(action='stop', rationale=..., answer=...) with unfinished work. No reminder count ends the task.")
-    if not messages or messages[-1].get("content") != reminder:
-        _loop()._append_or_merge_user_message(messages, reminder)
-    emit_progress("Child results still require an author disposition or an explicit unfinished stop.")
-    return "continue"
 
 
 def _plan_gate_identity(decision: Dict[str, Any]) -> str:

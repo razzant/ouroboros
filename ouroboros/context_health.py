@@ -42,7 +42,11 @@ def safe_read(path: pathlib.Path, fallback: str = "") -> str:
         return fallback
 
 
-def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
+# The tail of each log these checks read; a health line names it as its source.
+_RECENT_LOG_BYTES = 256_000
+
+
+def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = _RECENT_LOG_BYTES):
     """The log's bounded tail, read once per file identity and shared with the Runtime section's body fact."""
     yield from cached_tail_objects(path, max_bytes)
 
@@ -125,15 +129,16 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
         host_work = _host_work_line(view_receipts)
         if host_work:
             checks.append(host_work)
+        source = f"source: logs/events.jsonl, last {_RECENT_LOG_BYTES // 1000} KB"
         if llm_error_models:
             top = ", ".join(f"{model} x{count}" for model, count in llm_error_models.most_common(3))
-            checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}). Reliability or failover may need attention.")
+            checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}); {source}.")
         if local_overflow_models:
             top = ", ".join(f"{model} x{count}" for model, count in local_overflow_models.most_common(3))
-            checks.append(f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) ({top}). Local context may need more compaction or a larger window.")
+            checks.append(f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) ({top}); {source}.")
         if remote_overflow_models:
             top = ", ".join(f"{model} x{count}" for model, count in remote_overflow_models.most_common(3))
-            checks.append(f"WARNING: REMOTE CONTEXT OVERFLOW — {sum(remote_overflow_models.values())} recent provider context-window rejection(s) ({top}). Switch to low context mode or reduce the prompt footprint before retrying the same request.")
+            checks.append(f"WARNING: REMOTE CONTEXT OVERFLOW — {sum(remote_overflow_models.values())} recent provider context-window rejection(s) ({top}); {source}.")
     except Exception:
         pass
 
@@ -155,9 +160,9 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
             if recent:
                 checks.append(
                     f"WARNING: RESCUE SNAPSHOT AVAILABLE — {', '.join(recent)}. "
-                    "Uncommitted changes were saved before last restart. "
-                    "Use read_file(root='runtime_data', path='archive/rescue/<dirname>/rescue_meta.json') "
-                    "and changes.diff to decide if recovery is needed."
+                    "Uncommitted changes were saved before last restart in "
+                    "read_file(root='runtime_data', path='archive/rescue/<dirname>/rescue_meta.json') "
+                    "and changes.diff beside it."
                 )
     except Exception:
         pass

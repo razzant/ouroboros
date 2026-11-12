@@ -723,7 +723,7 @@ class _RoundLimitContext:
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds}). Consider decomposing into subtasks via schedule_subagent."
+    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds})."
     prompt = (
         f"[ROUND_LIMIT] {finish_reason} Produce your best final answer now from the "
         "verified work so far; clearly mark anything unverified or incomplete. An honest "

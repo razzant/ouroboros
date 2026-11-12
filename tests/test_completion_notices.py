@@ -80,9 +80,10 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
     else:
         assert summary["completion_notice"]["neutral"] is False
         assert fragment in summary["reason_detail"]
+    unexamined = dialogue.TASK_CAUSE_PHRASES["receipt_absent"].rstrip(".")
     if case == "receipt":
-        assert summary["outcome_phase"] == "warn"  # notification calm is not a green verdict
-        assert "No host verification receipt" in summary["reason_detail"]
+        assert summary["outcome_phase"] == "done"  # nothing examined the result is a detail (9 Nov 2026)
+        assert unexamined in summary["reason_detail"]
     if case == "mixed":
         assert "receipt_absent" in summary["outcome_axes"]["objective"]["warnings"]
     _write_rows(data, [summary])
@@ -97,7 +98,7 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
     message = _Rec.sent[0][1]
     assert fragment in message
     assert "earlier version" not in message
-    assert "No host verification receipt" not in message
+    assert unexamined not in message
     if case in {"clean", "receipt"}:
         assert "⚠" not in message and "✅" not in message and "done" not in message
 

@@ -1,6 +1,6 @@
 """P2: the one-shot final-answer-marker nudge. The agent did real work and has prose but no
 FINAL ANSWER marker -> state the protocol's capture rule (no extractor change). Ordered AFTER
-the skill/red/FR3-verify notices. The A3 "expected output but nothing attempted" re-loop is
+the skill notice and the one pre-delivery notice. The A3 "expected output but nothing attempted" re-loop is
 gone (#1748): prose can itself be the deliverable.
 v6.60.0: the marker nudge is PROTOCOL-GATED — it fires only for tasks whose contract
 declares answer_protocol="final_answer_line" (the fixtures declare it)."""
@@ -22,7 +22,7 @@ def _ctx_tools(monkeypatch, expected_output="The answer is 42", answer_protocol=
     drive_root = Path(tempfile.mkdtemp())
     ctx = _t.SimpleNamespace(
         task_contract=contract, task_metadata={}, drive_root=drive_root,
-        _skill_finalization_injected=True, _verify_red_nudged=True, _verify_nudged=True,
+        _skill_finalization_injected=True, _pre_delivery_noticed=True,
     )
     return drive_root, ctx, _t.SimpleNamespace(_ctx=ctx)
 

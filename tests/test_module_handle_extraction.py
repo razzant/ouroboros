@@ -328,7 +328,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # here, so the budget leaf now reads the forced-finalization prompt tail,
     # its preparer and the server-web predicate through the handle too.
     "ouroboros/loop_budget.py": ("ouroboros/loop.py", "_loop", frozenset({
-        "DeliveryCandidate", "_CHILD_ABSORPTION_HOLD_CONTROL",
+        "DeliveryCandidate",
         "_DELIVERY_HOLD_CONTROLS", "_FORCED_BEST_EFFORT_TAIL",
         "_SKILL_ACTION_HOLD_CONTROL",
         "_TREE_ACCOUNTING_MAX_STALE_SEC", "_append_or_merge_user_message",
@@ -338,24 +338,24 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_finalize_forced_services", "_finalize_task_services",
         "_plan_gate_disclosure", "_forced_fallback_result",
         "_forced_final_answer",
-        "_hold_delivery_for_skill_action", "_live_delivery_candidate",
+        "_live_delivery_candidate",
         "_loop_tree_accounting", "_merge_finalization_trace",
         "_prepare_forced_prompt", "_prepare_post_tool_budget_context",
         "_publish_delivery_candidate",
         "_record_forced_finalization", "_server_web_allowed_by_task",
-        "_undispositioned_children",
     })),
     "ouroboros/loop_delivery.py": ("ouroboros/loop.py", "_loop", frozenset({
         'DeliveryCandidate', 'TERMINAL_ORIGIN_MODEL_FINAL', '_LoopExitContext',
         '_append_or_merge_user_message', '_arm_delivery_control', '_begin_task_acceptance_fence',
-        '_child_disposition_state', '_compute_subagent_handoff', '_current_delivery_candidate',
+        '_child_disposition_state', '_claim_pre_delivery_notice', '_compute_subagent_handoff',
+        '_current_delivery_candidate',
         '_delivery_evidence_state', '_disclose_service_finalization',
         '_drain_incoming_messages', '_emit_checkpoint_event',  # a held completion's diagnostic row
         '_end_task_acceptance_fence', '_enforce_plan_gate', '_extract_plain_text_from_content',
         '_finalize_forced_services', '_finalize_task_services', '_plan_gate_disclosure',
         '_forced_fallback_result', '_forced_orphan_note', '_handle_text_response',
         '_latch_final_answer_marker', '_live_delivery_candidate', '_load_direct_child_results',
-        '_maybe_early_finalize', '_maybe_enforce_child_absorption_gate', '_maybe_inject_finalization_nudges',
+        '_maybe_early_finalize', '_maybe_inject_finalization_nudges',
         '_merge_finalization_trace', '_no_tool_final_answer', '_project_child_result_dispositions',
         '_publish_delivery_candidate', '_replace_delivery_candidate', '_resolve_delivery_control',
         '_service_finalization_evidence',
@@ -402,6 +402,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     "ouroboros/loop_nudges.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_TREE_ACCOUNTING_MAX_STALE_SEC", "_append_or_merge_user_message",
         "_emit_checkpoint_event",
+        # The pre-delivery notice names direct children still running (its one child listing).
+        "_load_direct_child_results", "_child_disposition_state",
         "_plan_gate_decision", "_loop_tree_accounting", "_skill_finalization_message",
         "_skill_names_touched_by_trace", "get_review_enforcement",
     })),

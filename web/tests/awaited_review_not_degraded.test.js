@@ -106,8 +106,9 @@ test('every real review outcome keeps the chip it had', () => {
 
 // A late review that resolved its ended task (late_review_marks.announce_current_outcome) carries the task's CURRENT
 // outcome on the existing review_late_result event: the open card repaints exactly what its reload reads.
+// The warnings passed here are detail-only (receipt_absent): the host's phase stays Done (9 Nov 2026).
 const lateOutcome = (warnings = []) => ({
-    status: 'completed', reason_code: 'final_message', outcome_phase: warnings.length ? 'warn' : 'done',
+    status: 'completed', reason_code: 'final_message', outcome_phase: 'done',
     outcome_axes: {
         lifecycle: { status: 'completed' }, execution: { status: 'ok', reason_code: 'final_message' },
         objective: { status: 'pass', source: 'result_review', review_status: 'pass',
@@ -130,10 +131,12 @@ test('a late PASS repaints the finished card with the current outcome its reload
     assert.deepEqual(summarizeChatLiveEvent(event), live, 'a replayed event paints the same outcome again');
 });
 
-test('an independent receipt_absent stays through a late PASS: Done with warnings and its own cause', () => {
-    const live = summarizeChatLiveEvent(lateEvent(lateOutcome(['receipt_absent'])));
+test('an independent receipt_absent stays through a late PASS as a detail: Done and its own cause', () => {
+    const outcome = lateOutcome(['receipt_absent']);
+    const live = summarizeChatLiveEvent(lateEvent(outcome));
     assert.deepEqual([live.phase, live.headline, live.body, live.activityPreview],
-        ['warn', 'Done with warnings', TASK_CAUSE_PHRASES.receipt_absent, TASK_CAUSE_PHRASES.receipt_absent]);
+        ['done', 'Done', TASK_CAUSE_PHRASES.receipt_absent, TASK_CAUSE_PHRASES.receipt_absent]);
+    assert.equal(taskPresentation(taskTerminalPhase(outcome)).phase, outcome.outcome_phase, 'host phase twin');
 });
 
 test('a late seat result without a current outcome never reaches the card, so a late FAIL clears nothing', () => {
