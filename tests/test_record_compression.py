@@ -680,6 +680,22 @@ def test_unsupported_platforms_record_it_once_and_walk_nothing(data, monkeypatch
     assert job.JOB not in maintenance.due(data) and _run(data) is None
 
 
+def test_an_unsupported_run_drops_another_platforms_log_holds(data, recorded, monkeypatch):
+    """Data moved from a host that held log segments to one that compresses nothing: the held segments wait for
+    no start there, so the Archives line says the verdict, never the earlier hold."""
+    from ouroboros import storage_removers
+
+    _segment(data, "events_20261101T000000.jsonl")
+    _walk(data)
+    assert _held(data) == [("closed_set_unrecorded", 1)], "the supported host's first walk holds the segment"
+    monkeypatch.setattr(artifact_storage, "compression_supported", lambda: False)
+    assert _run(data) == {"state": "done", "items": 0}
+    row = _row(data)
+    assert row["unsupported"] == sys.platform and "holds" not in row
+    [fact] = [fact for fact in storage_removers.place_removers(data, engine=False)["archives"] if fact["id"] == job.JOB]
+    assert fact["state"] == "unsupported" and "holds" not in fact
+
+
 @darwin
 def test_real_compression_of_terminal_evidence_and_a_finished_seat_home(data, monkeypatch):
     monkeypatch.setattr(job, "_queue_live", lambda root: (lambda task_id: False))
@@ -994,6 +1010,29 @@ def test_no_witness_or_the_serving_generations_own_offers_nothing_and_holds(data
     assert _held(data) == [("closed_set_unrecorded", 2)] and _row(data)["generation"] == serving
     _walk(data)
     assert {path for path, _owned in recorded} == set(closed) and "holds" not in _row(data)
+
+
+def test_a_start_during_the_walk_names_its_record_after_that_start(data, recorded, monkeypatch):
+    """A server start while the walk runs may have a reader that holds, by inode, a segment the walk then lists
+    closed (live when that start's reader began, rotated after): the record names the generation current at its
+    write, so that start's generation offers none of it, and the next start's walk does."""
+    _start(data)
+    seats, started = job._Run.seats, {}
+
+    def a_start_before_the_logs(run):
+        owed = seats(run)
+        started["generation"] = _start(data)
+        started["segment"] = _segment(data, "events_20261112T000000.jsonl")  # that start's live log, rotated
+        return owed
+
+    with monkeypatch.context() as race:
+        race.setattr(job._Run, "seats", a_start_before_the_logs)
+        assert _run(data)["state"] == "done"
+    row = _row(data)
+    assert row["witness"]["generation"] == row["generation"] == started["generation"]
+    assert _run(data) is None and not recorded, "the start the walk ended under offers nothing it listed"
+    _walk(data)
+    assert [path for path, _owned in recorded] == [started["segment"]], "the next start's walk offers it"
 
 
 def test_a_name_no_newer_than_the_witness_that_appears_later_holds_its_chain(data, recorded):

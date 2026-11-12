@@ -434,7 +434,10 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
     root = pathlib.Path(root)
     row = maintenance_jobs.job(root, JOB) or {}
     if not artifact_storage.compression_supported():
-        maintenance_jobs.record(root, JOB, state="done", unsupported=sys.platform)
+        with store.open_store(root, write=True) as txn:
+            maintenance_jobs.record_in(txn, JOB, state="done", unsupported=sys.platform)
+            if "holds" in row:  # another platform's holds wait for a start that compresses nothing here
+                maintenance_jobs.forget_in(txn, JOB, "holds")
         return {"state": "done", "items": 0}
     restore = utility_io(thread=True)
     try:
@@ -448,7 +451,8 @@ def _pass(root: pathlib.Path, row: Dict[str, Any], should_stop: Callable[[], boo
     """The run's planes in order; its position, cursor, waits, holds and totals go to the job row. A position
     earned under another ``COVERAGE`` is dropped here, and durably only by a run that ends: one that throws
     leaves the old row, still due. A seat pass it interrupts keeps what it owes by name; the log plane walks
-    only once the other two owe nothing, and its ``generation`` and ``witness`` move only when its walk ends."""
+    only once the other two owe nothing, and its ``generation`` and ``witness`` move only when its walk ends, to
+    the server generation current at the write that records them."""
     from ouroboros.utils import utc_now_iso
 
     if row.get("coverage") != COVERAGE:
@@ -488,6 +492,13 @@ def _pass(root: pathlib.Path, row: Dict[str, Any], should_stop: Callable[[], boo
     # (Storage reads any, an empty list too, as a pass's report).
     ended = [field for field, over in (("unsupported", True), ("holds", job.holds == [])) if over and field in row]
     with store.open_store(root, write=True) as txn:
+        if "witness" in facts:
+            # The generation current at this write, never the one the pass began under: a start during the pass
+            # may have a reader holding, by inode, a segment the walk listed closed. Its record then names that
+            # start's generation, under which nothing it lists is offered.
+            from ouroboros.maintenance_retirement import STARTUP
+
+            facts["generation"] = facts["witness"]["generation"] = _generation(txn.meta(STARTUP))
         maintenance_jobs.record_in(txn, JOB, **facts)
         if ended:
             maintenance_jobs.forget_in(txn, JOB, *ended)
