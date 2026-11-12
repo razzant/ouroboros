@@ -804,7 +804,7 @@ def _outcome_payload(
     job_data: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     status = normalize_skill_review_status(outcome.status)
-    gate = skill_review_gate(status, findings=outcome.findings, acceptance=_source_policy(outcome))
+    gate = getattr(outcome, "review_gate", None) or skill_review_gate(status, findings=outcome.findings)
     payload: Dict[str, Any] = {
         "skill": outcome.skill_name,
         "status": status,
@@ -1142,15 +1142,11 @@ def _review_finding_summary(outcome: Any) -> str:
     return ""
 
 
-def _source_policy(outcome: Any) -> Dict[str, Any] | None:
-    """The persisted source policy the executable gate reads: a source that reviews each skill keeps blockers off."""
-    return {"strict_review": True} if getattr(outcome, "strict_review", False) else None
-
-
 def _review_result_message(outcome: Any) -> str:
     status = normalize_skill_review_status(str(getattr(outcome, "status", "") or STATUS_PENDING))
     summary = _review_finding_summary(outcome)
-    gate = skill_review_gate(status, acceptance=_source_policy(outcome))
+    # The persisted gate when the review settled (source policy, owner edit, staleness), else the status alone.
+    gate = getattr(outcome, "review_gate", None) or skill_review_gate(status)
     cyber = gate.get("blocking_reason") == "cyber_authority"
     if cyber:
         # Cyber Pro's permission to run is not the critic's outcome: name the outcome.
@@ -1302,9 +1298,10 @@ def run_skill_review_lifecycle_blocking(
                 drive_root, skill_name, repo_path=repo_path,
             )
             # Current persisted acceptance is authoritative, including staleness and author finish.
-            executable_review = bool(reviewed is not None and reviewed.review.gate_for(reviewed.content_hash)["executable_review"])
-            if reviewed is not None:  # the payload and the result line say what this gate says of blockers
-                setattr(outcome, "strict_review", bool((getattr(reviewed.review, "acceptance", None) or {}).get("strict_review")))
+            persisted_gate = reviewed.review.gate_for(reviewed.content_hash) if reviewed is not None else None
+            executable_review = bool(persisted_gate and persisted_gate["executable_review"])
+            if persisted_gate is not None:  # the payload and the result line say what this gate decided
+                setattr(outcome, "review_gate", persisted_gate)
             if executable_review:
                 from ouroboros.skill_dependencies import ensure_skill_dependencies
 

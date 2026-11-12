@@ -235,22 +235,46 @@ def test_review_result_message_prefers_non_pass_findings_and_marks_omissions(mon
     assert "full findings in Skills page" in message
 
 
-@pytest.mark.parametrize("strict", [False, True], ids=["any_source", "source_that_reviews_each_skill"])
-def test_the_review_payload_and_its_line_say_what_the_gate_says_of_blockers(strict):
-    """Blockers keep a skill off only when its source reviews each skill (until the owner skips the review): the
-    review payload and its result line read that same policy instead of calling the skill executable (REV8 F4)."""
-    from ouroboros.skill_review_runner import _outcome_payload
+@pytest.mark.parametrize("facts, executable", [
+    ({}, True), ({"strict_review": True}, False), ({"strict_review": True, "owner_edit_digest": "CURRENT"}, True),
+], ids=["any_source", "source_that_reviews_each_skill", "owner_edit_of_these_bytes"])
+def test_the_review_payload_and_its_line_say_what_the_persisted_gate_says_of_blockers(tmp_path, monkeypatch, facts,
+                                                                                      executable):
+    """Blockers keep a skill off only when its source reviews each skill and no basis admits these bytes (an owner
+    edit of them does): the review's payload and its result line say what the persisted gate decided (REV8 F4,
+    REV8D N1)."""
+    _reset_queue()
+    sent = []
+    drive_root, repo_dir, skills_root = tmp_path / "drive", tmp_path / "repo", tmp_path / "skills"
+    for path in (drive_root, repo_dir, skills_root):
+        path.mkdir()
+    skill_dir = _build_extension(skills_root, "alpha")
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+    ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
+    findings = [{"item": "bug_hunting", "verdict": "FAIL", "severity": "critical", "reason": "unsafe path"}]
 
-    outcome = SkillReviewOutcome(skill_name="alpha", status="blockers",
-                                 findings=[{"item": "bug_hunting", "verdict": "FAIL", "reason": "unsafe path"}])
-    outcome.strict_review = strict
-    payload = _outcome_payload(outcome, deps_status="not_required", deps_error="", extension_action=None,
-                               extension_reason=None)
-    assert payload["executable_review"] is not strict, payload["review_gate"]
-    assert payload["review_gate"]["blocking_reason"] == (
-        "blocker_findings_need_owner" if strict else "blockers_allowed_by_advisory_enforcement")
-    assert _review_result_message(outcome).startswith(
-        "Review blocked: blocker findings (blockers)" if strict else "Review executable with findings (blockers)")
+    def fake_review(_ctx, skill_name):
+        save_review_state(drive_root, skill_name,
+                          SkillReviewState(status="blockers", content_hash=content_hash, findings=findings))
+        return SkillReviewOutcome(skill_name=skill_name, status="blockers", content_hash=content_hash,
+                                  reviewer_models=["fake/reviewer"], findings=findings, error="")
+
+    acceptance = {key: content_hash if value == "CURRENT" else value for key, value in facts.items()}
+    monkeypatch.setattr("ouroboros.skill_acceptance.load_acceptance_facts", lambda *_a, **_k: dict(acceptance))
+    # This fixture extension is not admitted by PluginAPI; admission is not what this test is about.
+    monkeypatch.setattr("ouroboros.skill_acceptance.admitted_acceptance", lambda facts, _manifest: facts)
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **kw: sent.append((a, kw)))
+    monkeypatch.setattr("ouroboros.skill_dependencies.ensure_skill_dependencies", lambda *_a, **_k: ("installed", ""))
+    monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_extension_payload",
+                        lambda *_a, **_k: reconcile_receipt())
+
+    payload = run_skill_review_lifecycle_blocking(ctx, "alpha", source="test", review_impl=fake_review,
+                                                  repo_path=str(skills_root))
+
+    assert payload["status"] == "blockers" and payload["executable_review"] is executable, payload["review_gate"]
+    line = ("Review executable with findings (blockers)" if executable else "Review blocked: blocker findings (blockers)")
+    completed = [str(args[1]) for args, kwargs in sent if kwargs.get("is_progress") and "completed" in str(args[1])]
+    assert any(line in text for text in completed), completed
 
 
 def test_review_result_message_allows_warnings_status(monkeypatch):

@@ -1320,7 +1320,7 @@ def settle_commit_review_ledger(ctx: ToolContext, commit_message: str, *, goal: 
 
     A dispatched wave is a ``settled`` record, or ``pending`` while custody is still
     open; settling that same attempt later raises the record's ``revision``. A free
-    replay (identical diff, exhausted cycles, pending custody) and a wave the budget
+    replay (exhausted cycles, pending custody) and a wave the budget
     fence declined are ``NOT_DISPATCHED`` records naming their cause. An explicit author
     continuation buys no record: it notes the author's decision on the record it answered.
     Ledger failure never changes the gate's decision; it is logged and the id stays ""."""
