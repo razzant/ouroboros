@@ -817,7 +817,7 @@ class FreeSpace:
                     continue
                 owner = _copy_owner(entry.name)
                 item = _Candidate(GROUP_LOST_COPIES, f"lost:{_record_name(entry)}", entry, "lost", owner=owner)
-                if read.unlistable or _record_file(entry, root).name in read.unreadable:
+                if read.unlistable or read.import_pending or _record_file(entry, root).name in read.unreadable:
                     named_unreadable.add(_record_file(entry, root).name)
                     _sorted_into(root, group, "unreadable", item)  # a record may name it: unread is not unregistered
                     continue

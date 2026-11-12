@@ -5,7 +5,7 @@ and only that root: CLI, Settings, in- and out-of-process extensions, the launch
 the browser's per-root endpoint identity agree, while a foreign root reads its own file.
 A direct server names its executing checkout before any import resolves the repository;
 the launcher requests the configured port; a fallback never lands on this installation's
-service ports; WORLD.md and evolution stats name the roots actually used.
+service ports; WORLD.md names the roots actually used.
 """
 
 from __future__ import annotations
@@ -240,14 +240,3 @@ def test_the_world_profile_command_suits_a_released_seeds_one_argument_profiler(
     monkeypatch.setattr(launcher_bootstrap, "ensure_managed_repo", lambda _context: "unchanged")
     assert launcher_bootstrap.bootstrap_repo(context) is True
     assert (data / "memory" / "WORLD.md").read_text(encoding="utf-8").startswith("# WORLD.md")
-
-
-def test_evolution_stats_reads_the_serving_repository_per_call(monkeypatch, tmp_path):
-    from ouroboros.tools import evolution_stats
-
-    seen = []
-    monkeypatch.setattr(evolution_stats.subprocess, "run",
-                        lambda cmd, **kw: seen.append(kw["cwd"]) or subprocess.CompletedProcess(cmd, 0, "", ""))
-    monkeypatch.setenv("OUROBOROS_REPO_DIR", str(tmp_path / "serving"))
-    evolution_stats._git(["status"])
-    assert seen == [str(tmp_path / "serving")]

@@ -1248,7 +1248,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     pass (``refusal_policy``) frees a shown chosen read only after a provider's refusal (an estimate
     never cuts a chosen read)."""
     from ouroboros.context_budget import ContextReclaimRequest
-    from ouroboros.context_compaction import context_reclaim_transcript_sha256, emergency_address_view
+    from ouroboros.context_compaction import context_reclaim_transcript_sha256
+    from ouroboros.context_source_view import emergency_address_view
 
     measurement = disposition.measurement
     tool_ctx = ctx.tools._ctx
