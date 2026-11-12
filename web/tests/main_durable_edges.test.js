@@ -107,7 +107,7 @@ test('Main child wait uses child revision for auto-off and the existing sign-in 
         const message = find(feed, node => node.dataset.ownerAction === 'child');
         assert.ok(message?.classList.contains('owner-action'), 'the child task, not its root, owns the message');
         const login = find(message, node => Object.hasOwn(node.dataset, 'waitLogin'));
-        assert.ok(login); login.click(); await turn(); assert.deepEqual(settings, ['accounts']);
+        assert.ok(login); login.click(); await turn(); assert.deepEqual(settings, ['accounts/codex'], 'the provider page holds the sign-in card');
         const auto = find(message, node => Object.hasOwn(node.dataset, 'waitAuto'));
         auto.checked = false;
         for (const handler of auto.listeners.get('change')) await handler({ target: auto });

@@ -400,8 +400,10 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         node.querySelector('[data-wait-repeat]').addEventListener('click', () => { void submit(taskId, view, '', {}, true); });
         node.querySelector('[data-wait-settings]').addEventListener('click', () => { void openSettings('accounts'); });
         node.querySelector('[data-wait-login]').addEventListener('click', async () => {
-            if (await openSettings('accounts') === false) return;
-            if (view.row.credential_harness && view.row.credential_profile_id) {
+            // The sign-in card lives on the provider's own page, so that page is the one opened.
+            const harness = view.row.credential_harness && view.row.credential_profile_id ? view.row.credential_harness : '';
+            if (await openSettings(harness ? `accounts/${encodeURIComponent(harness)}` : 'accounts') === false) return;
+            if (harness) {
                 await login(view.row.credential_harness, view.row.credential_profile_id);
             }
         });

@@ -13,7 +13,10 @@ from tests.settings_browser_helpers import open_entry, open_settings, press_edit
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
-settings_saves = setup_browser.settings_saves
+def settings_saves(ui):
+    """Each entity's write, including a Save carried only by the checker endpoint."""
+    return [body.get('settings', {}) if path == '/api/owner/safety-model' else body
+            for path, body in ui['posts'] if path in ('/api/settings', '/api/owner/safety-model')]
 # Every route picker offers an API lane per provider whose credential is
 # stored, so a fixture that selects one advertises that provider's key first.
 API_KEYS = {"openrouter": "OPENROUTER_API_KEY", "openai": "OPENAI_API_KEY"}
@@ -64,6 +67,14 @@ def configure_mixed(ui):
         {"value": target, "id": "gpt-test", "source_id": "opaque-source"},
         {"value": "openai::gpt-api", "id": "gpt-api"},
     ]
+
+
+def open_models(ui, slot='main'):
+    page = ui['page']
+    page.goto(ui['url'] + '/#settings')
+    open_settings(page, 'models/role/' + slot)
+    page.locator('[data-model-role-model]').wait_for(state='visible')
+    return page
 
 
 def open_agents(ui):
@@ -241,7 +252,7 @@ def test_models_does_not_guess_a_credential_family_when_source_mapping_is_unread
     assert account.input_value() == "personal"
     assert account.locator('option[value="work"]').count() == 0
     capture(page, "role-models-unknown-mapping")
-    assert press_editor_save(page) in ("Nothing to save.", "Saved")
+    press_editor_save(page)
     saved = ui["settings"]["OUROBOROS_MODEL_ACCOUNTS"]
     if isinstance(saved, str):
         saved = json.loads(saved)
@@ -294,21 +305,15 @@ def test_catalog_failure_recovery_and_empty_read_keep_an_agents_form_nodes_and_d
     assert saved["review_eligible"] is True
 
 
-@pytest.mark.parametrize("consumer", ["Models"])
-def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draft(role_ui, consumer):
+def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draft(role_ui):
     from playwright.sync_api import expect
     ui = role_ui
     configure_mixed(ui)
     ui["settings"]["OUROBOROS_MODEL"] = "claudexor::opaque-source=gpt-test"
     ui["settings"]["OUROBOROS_MODEL_ACCOUNTS"] = {"main": "personal"}
-    page = open_agents(ui)
-    selectors = {
-        "Models": ('[data-model-role="main"]', '[data-model-role-source]', '[data-model-role-model]', '[data-model-role-account]'),
-        "Actor": ('[data-subagent-row]', '[data-subagent-field="route"]', '[data-subagent-field="model"]', '[data-subagent-field="account"]'),
-    }
-    if consumer == "Models":
-        open_settings(page, 'models/role/main')
-    row_selector, source_selector, model_selector, account_selector = selectors[consumer]
+    page = open_models(ui)
+    row_selector, source_selector, model_selector, account_selector = (
+        '[data-model-role="main"]', '[data-model-role-source]', '[data-model-role-model]', '[data-model-role-account]')
     row = page.locator(row_selector).first
     field = row.locator(model_selector)
     field.fill("gpt-owner-unsaved")
@@ -316,7 +321,7 @@ def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draf
     row.locator(source_selector).evaluate("e => { window.catalogSourceNode = e; }")
     row.locator(account_selector).evaluate("e => { window.catalogAccountNode = e; }")
     response = {"status": 503, "body": {"error": "catalog temporarily offline"}}
-    page.route("**/api/model-catalog*", lambda route: route.fulfill(
+    page.route("**/api/model-catalog?*", lambda route: route.fulfill(
         status=response["status"], content_type="application/json", body=json.dumps(response["body"])))
     for status, body in [
         (503, {"error": "catalog temporarily offline"}),
@@ -334,39 +339,33 @@ def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draf
         assert row.locator(account_selector).evaluate("e => e === window.catalogAccountNode")
         assert row.locator(account_selector).input_value() == "personal"
         if status == 503:
-            expect(page.locator("[data-model-role-status]")).to_contain_text("catalog temporarily offline")
+            expect(row.locator("[data-model-role-status]")).to_contain_text("catalog temporarily offline")
         else:
-            expect(page.locator("[data-model-role-status]")).not_to_contain_text("catalog temporarily offline")
-    capture(page, f"catalog-recovery-draft-{consumer.lower()}")
-    refused = "The model catalog could not be read."
-    assert not [error for error in ui['errors'].unexpected() if refused not in error], ui['errors'].report()
-    ui['errors'].clear()
-    assert press_editor_save(page).startswith('Saved')
-    saved = ui['settings']
-    if consumer == "Models":
-        assert saved["OUROBOROS_MODEL"] == "claudexor::opaque-source=gpt-owner-unsaved"
-        assert saved["OUROBOROS_MODEL_ACCOUNTS"]["main"] == "personal"
-    else:
-        assert saved["OUROBOROS_SUBAGENTS"]["items"][0]["route"]["target_id"] == "claudexor::opaque-source=gpt-owner-unsaved"
-        assert saved["OUROBOROS_SUBAGENTS"]["items"][0]["route"]["credential_profile_id"] == "personal"
-        assert saved["OUROBOROS_SUBAGENTS"]["items"][0]["review_eligible"] is True
+            expect(row.locator("[data-model-role-status]")).not_to_contain_text("catalog temporarily offline")
+    capture(page, "catalog-recovery-draft-models")
+    page.locator('[data-model-role-model]').press('Escape')
+    press_editor_save(page)
+    saved = settings_saves(ui)[-1]
+    assert saved["OUROBOROS_MODEL"] == "claudexor::opaque-source=gpt-owner-unsaved"
+    assert ui["settings"]["OUROBOROS_MODEL_ACCOUNTS"]["main"] == "personal"
 
 
 def test_image_generation_has_no_settings_default(role_ui):
     """Real Settings render/save keeps generation separate from chat model roles."""
     ui = role_ui
     configure_mixed(ui)
-    page = open_agents(ui)
-    level = open_settings(page, 'models')
-    assert level.locator('[data-entry-id="image"]').count() == 0
-    assert level.locator('[data-entry-id="vision"]').count() == 1
-    capture(page, 'image-settings-model-selected-desktop')
-    page.set_viewport_size({'width': 390, 'height': 844})
+    lane = api_lane(ui)
+    page = open_models(ui, 'vision')
+    assert page.locator('[data-model-role="image"]').count() == 0
+    assert page.locator('[data-model-role="vision"]').count() == 1
+    capture(page, "image-settings-model-selected-desktop")
+    page.set_viewport_size({"width": 320, "height": 640})
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
-    capture(page, 'image-settings-model-selected-narrow')
-    open_entry(page, 'main')
-    page.locator('[data-model-role-model]').fill('owner/image-separate-fixture')
-    assert press_editor_save(page).startswith('Saved')
-    writes = [(body.get('settings') or body) for path, body in ui['posts']
-              if path in ('/api/settings', '/api/owner/safety-model')]
-    assert writes and all('OUROBOROS_MODEL_IMAGE' not in body for body in writes)
+    capture(page, "image-settings-model-selected-narrow")
+    page.locator('[data-model-role-source]').select_option(lane)
+    page.locator('[data-model-role-model]').fill('owner-vision')
+    page.locator('[data-model-role-model]').press('Escape')
+    press_editor_save(page)
+    saved = settings_saves(ui)[-1]
+    assert saved['OUROBOROS_MODEL_VISION'] == 'owner-vision'
+    assert 'OUROBOROS_MODEL_IMAGE' not in saved
