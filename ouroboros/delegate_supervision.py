@@ -1302,8 +1302,12 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
              checkpoint_after_sec: Optional[int] = None, checkpoint_reason: str = "") -> ToolResult:
     """``delegate_wait`` as a sleep on runs: what is already there answers through this result; otherwise
     the task's ordinary sleep is armed (``model_sleep.request_default_sleep``: its process is released once
-    nothing live keeps it) and this wait's result is owed to the first model request after the wake."""
+    nothing live keeps it) and this wait's result is owed to the first model request after the wake. A run
+    this task holds only in this process (``started_uncustodied``: its STARTED row never landed) is one no
+    durable source can wake a sleep on, so a wait selecting it answers now: with what is already there, else
+    with that run's one addressed read."""
     from ouroboros import model_sleep
+    from ouroboros.delegate_custody_current import run as current_run
 
     reason_text = str(checkpoint_reason or "").strip()
     ignored_note = ""
@@ -1324,12 +1328,15 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
             "(0 with an empty reason also means none).",
         )
     run_ids = list(dict.fromkeys(run_id if isinstance(run_id, list) else [str(run_id)]))
+    root, in_process = custody.custody_root(ctx), []
     for selected in run_ids:
-        ownership, _entry = custody.lookup(custody.custody_root(ctx), str(ctx.task_id), selected)
+        ownership, _entry = custody.lookup(root, str(ctx.task_id), selected)
         if ownership == custody.FOREIGN:
             from ouroboros.tools.delegate_terminal_evidence import retry_terminal_result
 
             return retry_terminal_result(ctx, selected)
+        if ownership == custody.OWNED and current_run(root, selected) is None:
+            in_process.append(selected)  # owned through this process's memo alone (``custody.lookup``)
     from ouroboros.delegate_recovery import restore_bound_handoff
 
     try:
@@ -1352,8 +1359,9 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
         **({"checkpoint": {"reason": reason_text, "after_sec": delay}} if delay is not None else {}),
         **({"ignored_arguments": [ignored_note]} if ignored_note else {}),
     }
-    try:
-        chosen = model_sleep.selectors(ctx, runs=run_ids, wake_after_sec=delay)
+    try:  # the sleep's selection is durable custody; an unknown run is still refused here
+        chosen = model_sleep.selectors(ctx, runs=[rid for rid in run_ids if rid not in in_process],
+                                       wake_after_sec=delay)
     except ValueError as exc:
         return _fail("delegate_wait", "run_ownership_unknown", str(exc))
     descriptor["wake_at"] = chosen["wake_at"]
@@ -1365,6 +1373,18 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
     def entered(**facts: Any) -> None:  # the durable trail of each wait that answers or sleeps (not a replay)
         _emit(ctx, "delegate_supervision_wait_entered", {"run_id": run_ids[0], "runs": run_ids, **facts})
 
+    if in_process:
+        # Neither the sleep nor the body reads its custody, and a cold sleep would end its one holder. What the sleep
+        # would wake on answers first (``_target_run``: a selected run's terminal or question in custody); listed
+        # first, the in-process run is the read otherwise. Its terminal read re-publishes the start's own row or adopts
+        # the row its invocation was bound under; the money stays on that one row (``collect_and_deliver_terminal``).
+        try:
+            woke_by = model_sleep.wake_reason(ctx, chosen)
+        except Exception:
+            woke_by = ""  # an unreadable source hides neither the selected runs nor this read
+        entered(mode="answered_at_call", held_in_process=in_process)
+        return _publish(ctx, {**descriptor, "runs": in_process + [rid for rid in run_ids if rid not in in_process]},
+                        woke_by)
     if not callable(getattr(ctx, "owner_wait_callback", None)):
         entered(mode="in_slot")
         return _wait_in_slot(ctx, descriptor)

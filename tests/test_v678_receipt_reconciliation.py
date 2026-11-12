@@ -93,12 +93,14 @@ def test_receipt_check_text_round_trips_so_two_argvs_are_two_verifications(tmp_p
 
     # The property, independent of any filesystem: join is the lexer's inverse.
     for argv in (["echo", "a b"], ["echo", "a", "b"], ["sh", "-c", "pytest -q | tail"],
-                 ["python", "-c", "assert v == 'a  b'"]):
+                 ["python", "-c", "assert v == 'a  b'"], ["pytest", "-m", ""]):
         assert shell_tokens(shlex.join(argv)) == argv
 
     # ...so the two argv spellings are two DIFFERENT verifications.
     assert R.receipt_identity({"check": shlex.join(["echo", "a b"])}) != \
         R.receipt_identity({"check": shlex.join(["echo", "a", "b"])})
+    assert R.receipt_identity({"check": shlex.join(["pytest", "-m", ""])}) != \
+        R.receipt_identity({"check": shlex.join(["pytest", "-m"])})
 
     if sys.platform == "win32" or not shutil.which("echo"):
         pytest.skip("the end-to-end half needs a POSIX `echo` binary")
@@ -135,6 +137,23 @@ def test_receipt_check_text_round_trips_so_two_argvs_are_two_verifications(tmp_p
     assert shell_tokens(receipts[1]["check"]) == ["echo", "a", "b"]
     # Which is the point: a green on one no longer reconciles a red on the other.
     assert R.receipt_identity(receipts[0]) != R.receipt_identity(receipts[1])
+
+    # #2919: `pytest -m ""` (no marker filter) reaches pytest through the guard and the
+    # execution. Dropping the empty value made `-m` swallow the file name, deselecting both
+    # tests; that argv stays a different, still-red verification.
+    (repo / "test_marks.py").write_text(
+        "import pytest\n\n@pytest.mark.slow\ndef test_marked():\n    pass\n\n"
+        "def test_plain():\n    pass\n", encoding="utf-8")
+    run = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-m"]
+    for check in ([*run, "test_marks.py"], [*run, "", "test_marks.py"]):
+        registry.execute("verify_and_record", {
+            "contract_kind": "explicit_command", "check": check,
+            "expected": "2 passed", "cwd": str(repo),
+        })
+    red, green = read_verification_receipts(data, "task1")[-2:]
+    assert [red["status"], green["status"]] == ["fail", "pass"]
+    assert shell_tokens(green["check"]) == [*run, "", "test_marks.py"]
+    assert R.unreconciled_failed([red, green]) == [red]
 
 
 # --------------------------------------------------------------------------------------

@@ -117,7 +117,7 @@ def _copy_run_state(data_root: Any, task_id: str, area: pathlib.Path, created_at
     own = [entry for entry in runs if _started_after(entry.started_ts, created_at)]
     ends = []
     for entry in own:
-        start, cap = parse_deadline_ts(entry.started_ts), int(getattr(entry, "max_seconds", 0) or 0)
+        start, cap = parse_deadline_ts(entry.window_origin), int(getattr(entry, "max_seconds", 0) or 0)
         if start is not None and cap > 0:
             ends.append(start + timedelta(seconds=cap))
     return (True if own else None), (not ends or min(ends) > utc_now())
