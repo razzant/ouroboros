@@ -1098,3 +1098,27 @@ def test_a_link_that_cannot_be_written_or_read_back_is_a_source_error_and_accept
     assert refused is None and "source" not in facts
     assert facts["source_error"] == ("OSError: disk full" if fault == "write"
                                      else "ValueError: transition link readback mismatch")
+
+
+def test_reading_the_accepted_chain_removes_every_other_file_and_an_unreadable_chain_removes_nothing(tmp_path):
+    """Once a wake has read its accepted chain it removes what no boundary will name: a link of a wake whose boundary
+    was never accepted, the lineage before the newest base, a leftover temporary file; the chain's own links stay. A
+    chain that cannot be read removes nothing."""
+    from ouroboros import consciousness_transitions as ct
+
+    directory = tmp_path / ct.CHAIN_REL
+    _write(tmp_path, "kid", status="running", ts=_iso(T0 - 600), updated_at=_iso(T0 - 600))
+    accepted, _task = _bind(tmp_path, _wake(tmp_path, None, T0), "wake-a")
+    _write(tmp_path, "kid", status="completed", updated_at=_iso(T0 + 100))
+    unaccepted, _task = _bind(tmp_path, _wake(tmp_path, accepted, T0 + 600), "wake-b")  # its terminal never came
+    (directory / ".leftover.json.tmp").write_bytes(b"partial")
+    kept = {f"{accepted['transition_chain']['link']}.json"}
+    stray = {f"{unaccepted['transition_chain']['link']}.json", ".leftover.json.tmp"}
+    assert {path.name for path in directory.iterdir()} == kept | stray
+    blind = _wake(tmp_path, {**accepted, "transition_chain": {"version": 3, "link": "f" * 64}}, T0 + 600)
+    assert blind.boundary is None and {path.name for path in directory.iterdir()} == kept | stray
+    again = _wake(tmp_path, accepted, T0 + 600)
+    assert not again.gaps and again.boundary is not None and {path.name for path in directory.iterdir()} == kept
+    base = ct.bind_link(tmp_path, None, again.boundary["transitions"])  # a newer base, as after a previous-form boundary
+    _wake(tmp_path, {**accepted, "transition_chain": base}, T0 + 1200)
+    assert {path.name for path in directory.iterdir()} == {f"{base['link']}.json"}

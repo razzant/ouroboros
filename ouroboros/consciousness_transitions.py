@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import pathlib
 import re
 from dataclasses import dataclass
@@ -27,6 +29,8 @@ from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 from ouroboros.store import fsync_directory
 from ouroboros.utils import write_bytes_atomic
+
+log = logging.getLogger(__name__)
 
 CHAIN_REL = pathlib.Path("state") / "consciousness_transitions"
 CHAIN_VERSION = 3  # the files' format and the boundary's ``transition_chain`` reference
@@ -108,11 +112,31 @@ def read_source_transitions(drive_root: Any, accepted: Dict[str, Any]) -> Dict[s
     return state
 
 
+def prune(drive_root: Any, chain: TransitionChain) -> None:
+    """Remove every file of the chain directory outside ``chain``: links no boundary accepted, links before its base,
+    a leftover temporary file. No one reads them again: the clock starts one own wake at a time (``live_wake``) and
+    accepts a wake's boundary only while that wake is its current one (``consciousness._settle_wake``), so the chain a
+    wake reads is the newest any boundary will name until its own link. A failure is logged and leaves the wake alone."""
+    try:
+        with os.scandir(pathlib.Path(drive_root) / CHAIN_REL) as entries:
+            stray = [entry.path for entry in entries if entry.name not in chain.names]
+    except OSError:
+        log.debug("consciousness: transition files not listed", exc_info=True)
+        return
+    for path in stray:
+        try:
+            os.unlink(path)
+        except OSError:
+            log.debug("consciousness: transition file %s not removed", path, exc_info=True)
+
+
 def accepted_transitions(drive_root: Any, accepted: Dict[str, Any]) -> Tuple[Any, Optional[TransitionChain]]:
-    """``(state, chain)`` an accepted boundary carries: the chain it names, the wake source a previous-form boundary
-    names (no chain), else its inline state. A named state that cannot be read raises."""
+    """``(state, chain)`` an accepted boundary carries: the chain it names (then every other file of its directory is
+    removed: ``prune``), the wake source a previous-form boundary names (no chain), else its inline state. A named
+    state that cannot be read raises, and nothing is removed."""
     if "transition_chain" in accepted:
         chain = read_chain(drive_root, accepted["transition_chain"])
+        prune(drive_root, chain)
         return chain.state, chain
     prior = accepted.get("transitions")
     if isinstance(prior, dict) and "source_ref" in prior:
