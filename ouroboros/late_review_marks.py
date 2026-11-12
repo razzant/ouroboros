@@ -239,12 +239,14 @@ def mark_outcome(mark: Mapping[str, Any], drive_root: Any = None) -> Optional[Di
 
 def mark_landing(mark: Mapping[str, Any], drive_root: Any) -> Optional[Dict[str, Any]]:
     """What is recorded, as it reads now, of the change a late commit review read: the commit that landed under
-    this review (``{"commit": sha}``), else the pull request a receipt of its task records as merged, named by its
-    address (``{"pr": url}``: a fact about the task's receipts, not proof of who merged it or that this change is in
-    it), else that neither is recorded (``{}``: no commit under this record and no merged receipt, which a commit
-    under another record of the task or a merge made outside ``pr_merge`` does not show). ``None`` for any other
-    review and whenever the record or the task's result cannot be read: an unread fact is never told as nothing
-    landed. Read on request and never kept on the mark, because a successor of the task may still land the work."""
+    this review (``{"commit": sha, "tree": same|different|unknown}``, the tree's relation to the one reviewed), else
+    the pull request a receipt of its task records as merged, named by its address (``{"pr": url}``: a fact about the
+    task's receipts, not proof of who merged it or that this change is in it), else the latest receipt of its task
+    with its outcome (``{"pr": url, "status": outcome}``: a merge asked for and not recorded as done, ``unknown`` or
+    ``queued`` among them), else that neither is recorded (``{}``: no commit under this record and no receipt, which a
+    commit under another record of the task or a merge made outside ``pr_merge`` does not show). ``{"unread": True}``
+    when the record or the task's result cannot be read: an unread fact is never told as nothing landed. ``None``
+    for any other review. Read on request and never kept on the mark: a successor of the task may still land it."""
     review = mark.get("review") or {}
     if review.get("surface") != "commit_gate":
         return None
@@ -256,29 +258,37 @@ def mark_landing(mark: Mapping[str, Any], drive_root: Any) -> Optional[Dict[str,
     try:
         record = load_record(drive_root, str((review.get("subject") or {}).get("record_id") or ""))
         if record is None:
-            return None
+            return {"unread": True}
         commits = public_commit_landings(record)
         if commits:
-            return {"commit": commits[-1]["commit_sha"]}
+            return {"commit": commits[-1]["commit_sha"], "tree": commits[-1]["reviewed_subject"]}
         task = load_task_result(drive_root, str(review.get("task_id") or ""))
         if not isinstance(task, dict):
-            return None
-        merged = [receipt for receipt in task.get(RECEIPTS_KEY) or []
-                  if isinstance(receipt, dict) and (receipt.get("outcome") or {}).get("status") == "merged"]
-        return {"pr": str((merged[-1].get("repo") or {}).get("url") or f"PR #{merged[-1].get('number')}")} if merged else {}
+            return {"unread": True}
+        receipts = [receipt for receipt in task.get(RECEIPTS_KEY) or [] if isinstance(receipt, dict)]
+        merged = [receipt for receipt in receipts if (receipt.get("outcome") or {}).get("status") == "merged"]
+        latest = (merged or receipts or [None])[-1]
+        if latest is None:
+            return {}
+        address = str((latest.get("repo") or {}).get("url") or f"PR #{latest.get('number')}")
+        return {"pr": address} if merged else {"pr": address, "status": str((latest.get("outcome") or {}).get("status") or "unknown")}
     except Exception:  # the list the mind asked for keeps its other rows when one work's facts cannot be read
         log.warning("Landing facts unavailable for late review mark %s", mark.get("id"), exc_info=True)
-        return None
+        return {"unread": True}
 
 
 def landing_words(landing: Any) -> str:
     """One late commit review's landing for the list: what is recorded, never a guess about lost work."""
     if not isinstance(landing, Mapping):
         return ""
+    if landing.get("unread"):
+        return "what landed could not be read"
     if landing.get("commit"):
-        return f"committed as {str(landing['commit'])[:12]} under this review"
+        relation = {"different": "; its tree differs from the reviewed one",
+                    "unknown": "; its relation to the reviewed tree is unknown"}.get(str(landing.get("tree") or ""), "")
+        return f"committed as {str(landing['commit'])[:12]} under this review{relation}"
     if landing.get("pr"):
-        return f"a receipt of its task records {landing['pr']} as merged"
+        return f"a receipt of its task records {landing['pr']} as {landing.get('status') or 'merged'}"
     return "no commit under this review, no merged receipt of its task"
 
 
