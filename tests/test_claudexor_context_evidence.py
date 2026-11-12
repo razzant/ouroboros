@@ -1041,7 +1041,11 @@ def test_a_failed_read_of_an_observed_account_keeps_it_the_profiles_newest(tmp_p
     named = {**pinned, "account_fingerprint": "identity-b" if relogin else "identity-a"}
     failed = _probe(tmp_path, options=named, force=not relogin)  # a receipt rebind's read of that account fails
     assert (failed.window_tokens, failed.status) == ((0, ce.STATUS_FAILED) if relogin else (70_000, ce.STATUS_CONFIRMED))
-    assert failed.account_fingerprint == named["account_fingerprint"]  # the failure names what the route named
+    if relogin:  # the failure names no account to its caller; its row keeps identity-b's observation, with its date
+        assert failed.account_fingerprint == ""
+        kept = ce._read(tmp_path)["probes"][ce.route_fingerprint(provider="claudexor", model=MODEL, options=named)]
+        assert kept["kept_observation"]["account_fingerprint"] == "identity-b" and kept["kept_observation"][
+            "observed_at"] == (start + datetime.timedelta(minutes=1)).isoformat()
     if case == "relogin-then-11-minutes":
         clock["now"] = start + datetime.timedelta(minutes=23)
     plan, _spans = _built(monkeypatch, tmp_path, lambda _task: cf.resolve_context_fit_route,
@@ -1050,3 +1054,80 @@ def test_a_failed_read_of_an_observed_account_keeps_it_the_profiles_newest(tmp_p
         assert (plan.window_tokens, plan.initial_mode, plan.window_witness_bound) == (0, "max", False)
     else:
         assert (plan.window_tokens, plan.model_route.get("accountFingerprint")) == (70_000, "identity-a")
+
+
+@pytest.mark.parametrize("b_window", [0, 872_000])
+@pytest.mark.parametrize("failure", ["binding-mismatch", "timeout", "timeout-over-its-old-observation"])
+def test_a_failed_read_of_a_replaced_account_creates_no_observation(tmp_path, monkeypatch, b_window, failure):
+    """Fix round 4 (Fable 5.2 r3 finding 1, the reviewer's four cases): a route that still names the replaced account
+    (a receipt from before the relogin), read on a model with no record of it, fails (it times out, or the catalog
+    answers that the profile is now another account). A failure neither erases, creates nor re-dates an observation,
+    so identity-b stays the profile's newest: a silent pin plans b's own window or an unknown one, never identity-a's.
+    Over a row that already observed identity-a on that model, the failure keeps that observation with its old date."""
+    import datetime
+    from ouroboros import context_fit as cf
+    from ouroboros.llm import LLMClient
+
+    start = ce.utc_now()
+    clock = {"now": start}
+    monkeypatch.setattr(ce, "utc_now", lambda: clock["now"])
+    monkeypatch.setattr(ce, "utc_now_iso", lambda: clock["now"].isoformat())
+
+    def answers(fingerprint, window):
+        value = {**_catalog("account-a", fingerprint, window), "observedAt": clock["now"].isoformat()}
+        value["models"] = [{**value["models"][0], "contextWindow": window, "maxContextWindow": window}] if window else []
+        monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda *_a, **_kw: copy.deepcopy(value)))
+
+    def silent():
+        monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+            lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+
+    pinned = {"source_id": "test-source", "credential_profile_id": "account-a"}
+    answers("identity-a", 70_000)
+    _probe(tmp_path, options=pinned)  # identity-a: 70K
+    other = "claudexor::test-source=other-model"
+    if failure == "timeout-over-its-old-observation":  # identity-a seen on the other model too, with no window there
+        answers("identity-a", 0)
+        ce.probe(tmp_path, provider="claudexor", model=other, options={**pinned, "account_fingerprint": "identity-a"})
+    clock["now"] = start + datetime.timedelta(minutes=1)
+    answers("identity-b", b_window)
+    _probe(tmp_path, options={**pinned, "account_fingerprint": "identity-b"})  # the relogin, observed
+    clock["now"] = start + datetime.timedelta(minutes=12)  # past the read throttle of identity-a's row there
+    if failure != "binding-mismatch":
+        silent()  # else the catalog answers identity-b to a question naming identity-a: a binding mismatch
+    stale = ce.probe(tmp_path, provider="claudexor", model=other,
+                     options={**pinned, "account_fingerprint": "identity-a"})
+    assert (stale.status, stale.account_fingerprint) == (ce.STATUS_FAILED, "")  # names no account, as on the target
+    clock["now"] = start + datetime.timedelta(minutes=13)
+    silent()
+    plan, _spans = _built(monkeypatch, tmp_path, lambda _task: cf.resolve_context_fit_route,
+                          task={**TASK, "credential_profile_id": "account-a"})
+    assert (plan.window_tokens, plan.model_route.get("accountFingerprint") or "") == (
+        (872_000, "identity-b") if b_window else (0, ""))
+
+
+@pytest.mark.parametrize("engine", ["silent", "answers-after-the-throttle"])
+def test_a_failed_read_of_the_served_account_keeps_the_receipt_rebinding(tmp_path, monkeypatch, engine):
+    """Fix round 4 (Opus r3 finding 1): a receipt rebind whose read of the served account (no record) fails names no
+    account, so the plan does not settle on an unknown window: the next round rebinds again, and once the 10-minute
+    throttle is past the account's read answers and the plan settles on it, as on the target."""
+    import datetime
+    from ouroboros.llm import LLMClient
+
+    served = {"source": "test-source", "model": "exact-model", "credentialProfileId": "account-a",
+              "accountFingerprint": "identity-a"}
+    up = {"now": False}
+
+    def fetch(source, credential_profile_id=None, *, requested_model=None):
+        if not up["now"]:
+            raise TimeoutError("controlled daemon timeout")
+        return _catalog("account-a", "identity-a", 872_000)
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(fetch))
+    _route, evidence = _resolve(monkeypatch, tmp_path, model_route=served)
+    assert evidence.window_tokens == 0 and ce.evidence_model_route(evidence, MODEL) != served  # rebinds again
+    if engine == "answers-after-the-throttle":
+        later = ce.utc_now() + datetime.timedelta(minutes=11)
+        monkeypatch.setattr(ce, "utc_now", lambda: later)
+        up["now"] = True
+        _route, evidence = _resolve(monkeypatch, tmp_path, model_route=served)
+        assert evidence.window_tokens == 872_000 and ce.evidence_model_route(evidence, MODEL) == served  # settled

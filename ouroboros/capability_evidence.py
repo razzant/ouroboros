@@ -364,10 +364,12 @@ def _drop_expired_probes(data: Dict[str, Any]) -> None:
     """Write-side expiry for the ``probes`` namespace (CPL4-C8).
 
     Failed/unprobeable records are pure retry throttles: past
-    ``_FAILED_TTL_SEC`` the reader ignores them, so the write drops them; an
-    unprobeable or failed record that names an account fingerprint is also the
-    last observation of its profile's account (``_pinned_record``), so it stays
-    as long as the confirmed records it outranks can be used (``_CONFIRMED_TTL_SEC``).
+    ``_FAILED_TTL_SEC`` the reader ignores them, so the write drops them; one
+    that carries an observation of an account (``_observation``: an unprobeable
+    answer's own, or the one a failed read kept) is also the last observation of
+    its profile's account (``_pinned_record``), so it stays until both its throttle
+    (``ts``) and that observation (its own date) are past: the confirmed records
+    it outranks are usable for ``_CONFIRMED_TTL_SEC`` from their dates.
     Confirmed records outlive their read TTL as provider-blip evidence
     (``probe`` deliberately keeps a stale prior CONFIRMED across an outage)
     and drop only past the unified GC retention — a route unprobed for that
@@ -394,8 +396,8 @@ def _drop_expired_probes(data: Dict[str, Any]) -> None:
         if status == STATUS_CONFIRMED:
             if age > confirmed_max_age_sec:
                 probes.pop(fp, None)
-        elif status in (STATUS_FAILED, STATUS_UNPROBEABLE) and age > (
-                _CONFIRMED_TTL_SEC if record.get("account_fingerprint") else _FAILED_TTL_SEC):
+        elif status in (STATUS_FAILED, STATUS_UNPROBEABLE) and age > _FAILED_TTL_SEC and _age_seconds(
+                str((_observation(record) or {}).get("observed_at") or "")) > _CONFIRMED_TTL_SEC:
             probes.pop(fp, None)
 
 
@@ -1065,12 +1067,13 @@ def _probe_window(
             if cached and str(cached.get("status") or "") in _KNOWN_STATUS:
                 return _cached_evidence(cached, fp, model, provider, stale=True,
                                         detail="kept prior account evidence (catalog unavailable)"), "failed"
-            # A route naming its whole account keeps naming it: the failure states no window and binds nothing, but
-            # the profile's newest observed account stays this one (``_pinned_record``).
-            named = {key: str(account_options[key]) for key in ("source_id", "credential_profile_id", "account_fingerprint")
-                     } if account_bound else {}
             ev, read = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider, ts=utc_now_iso(),
-                                          detail=f"model catalog unavailable: {type(exc).__name__}", **named), "failed"
+                                          detail=f"model catalog unavailable: {type(exc).__name__}"), "failed"
+            # A failure names no account to its caller and neither erases, creates nor re-dates an observation: the
+            # row keeps the account the row it replaces observed, with that observation's date (``_pinned_record``).
+            kept = _observation(cached) if cached and cached.get("status") != STATUS_CONFIRMED else None
+            _store_evidence(drive_root, "probes", fp, {**ev.to_json(), **({"kept_observation": kept} if kept else {})})
+            return ev, read
         _store_evidence(drive_root, "probes", ev.route_fp, ev.to_json())
         return ev, read
 
@@ -1131,26 +1134,45 @@ def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, 
                                   f"{newest.replace('T', ' ')[:16]} (catalog unavailable)"))
 
 
+def _observation(row: Any) -> Optional[Dict[str, str]]:
+    """The account a probe row observed and when: an answer's own fields and date, or what a failed read kept of the
+    row it replaced (``kept_observation``); a failure's own route and date are never an observation."""
+    if not isinstance(row, dict):
+        return None
+    kept = row.get("kept_observation") if row.get("status") == STATUS_FAILED else {
+        **{key: row.get(key) for key in ("source_id", "credential_profile_id", "account_fingerprint")},
+        "observed_at": row.get("ts")}
+    return {key: str((kept or {}).get(key) or "") for key in (
+        "source_id", "credential_profile_id", "account_fingerprint", "observed_at")} if (kept or {}).get(
+        "account_fingerprint") else None
+
+
 def _pinned_record(drive_root: Any, route: Dict[str, Any], fingerprint: str = "") -> Optional[CapabilityEvidence]:
     """A route bound to a profile whose catalog read failed (a pin, or an Auto receipt rebind carrying the account that
     served): the fresh statement of the same profile AND the same account fingerprint for this model, as that account's
     own record (its own date; nothing stored). The fingerprint is the route's identity when it carries one, else the
-    newest one observed behind that profile on any model of its source: a profile name alone proves no account, so a
-    statement of another fingerprint, a stale one, or Auto leave the window unknown."""
+    newest one observed behind that profile on any model of its source, each by its observation's date
+    (``_observation``): a profile name alone proves no account, so a statement of another fingerprint, a stale one,
+    or Auto leave the window unknown."""
     options = route.get("options") or {}
     profile = options.get("credential_profile_id")
     if route.get("provider") != "claudexor" or not profile:
         return None
-    rows = [(fp, row) for fp, row in (_read(drive_root).get("probes") or {}).items() if isinstance(row, dict)
+    probes = (_read(drive_root).get("probes") or {}).items()
+    rows = [(fp, row) for fp, row in probes if isinstance(row, dict)
             and row.get("provider") == "claudexor"
             and row.get("source_id") == options.get("source_id") and row.get("credential_profile_id") == profile
             and row.get("account_fingerprint") and _age_seconds(str(row.get("ts") or "")) <= _CONFIRMED_TTL_SEC]
+    seen = [seen for seen in (_observation(row) for _fp, row in probes if isinstance(row, dict)
+                              and row.get("provider") == "claudexor") if seen
+            and (seen["source_id"], seen["credential_profile_id"]) == (options.get("source_id"), profile)
+            and _age_seconds(seen["observed_at"]) <= _CONFIRMED_TTL_SEC]
 
     def age(pair):
         return _age_seconds(str(pair[1].get("ts") or ""))
 
-    fingerprint = fingerprint or options.get("account_fingerprint") or (min(rows, key=age)[1]["account_fingerprint"]
-                                                                         if rows else "")
+    fingerprint = fingerprint or options.get("account_fingerprint") or (min(
+        seen, key=lambda item: _age_seconds(item["observed_at"]))["account_fingerprint"] if seen else "")
     stated = [pair for pair in rows if pair[1]["account_fingerprint"] == fingerprint and pair[1].get("model") == route.get("model")
               and pair[1].get("status") == STATUS_CONFIRMED and int(pair[1].get("window_tokens") or 0) > 0]
     if not stated:
