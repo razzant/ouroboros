@@ -398,8 +398,9 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 spend_says("What it spent in the last 24 hours is unknown. · Consciousness ›")(page),
                 expect(page.locator(".costs-allowance-line")).to_have_text(
                     ["The usage ledger could not be read, so whether consciousness has room is unknown.", model])))
-            # 4b. A long model id with no space (its own slot names it) wraps inside the card, a phone's included.
-            long_id = "accounts/fireworks/models/" + "qwen3-coder-480b-a35b-instruct-" * 2 + "fp8"
+            # 4b. A long model id with no break point of its own (no space, hyphen or slash: only the line's overflow-wrap
+            # breaks it) stays inside the card, a phone's included.
+            long_id = "qwen3_coder_480b_a35b_instruct_" * 3 + "fp8"
             for page in pages.values():
                 _overlay(page, lambda bg: {**bg, "model_route": {"value": long_id, "layer": "consciousness", "local": False}})
             each("long-model", lambda page: expect(page.locator(".costs-allowance-line").last).to_have_text(
