@@ -891,6 +891,7 @@ function mountRole(container, { path, ctx }, slot, index) {
     // A typed form keeps its fields while the page around them follows the read (a key added in Accounts, a new Main);
     // the fallback list a Save checks stays the one the typing began from. Nothing is drawn while the owner is in it.
     const typing = () => dirty && container.contains(globalThis.document?.activeElement);
+    let asRead = null;  // the role as read when the typing began: a Save writes only what the owner changed from it
     const read = async () => {
         if (typing()) return;
         let settings;
@@ -899,6 +900,7 @@ function mountRole(container, { path, ctx }, slot, index) {
         if (!dirty) readFallbacks = fallbackEntries(settings).map((entry) => entry.value).join(',');
         editor.load(settings, { ...settings._meta?.setup_contract, modelSlots: slotsOf(settings).map((each) => ({ ...each, inputId: each.settingsInputId })) }, { keep: dirty });
         if (dirty) container.querySelector('[data-editor-discard]')?.removeAttribute('hidden');  // drawn again, still unsaved
+        else asRead = editor.entry();
     };
     const save = async (button) => {
         editor.noteSaveAttempt();
@@ -908,7 +910,10 @@ function mountRole(container, { path, ctx }, slot, index) {
         let outcome = { state: 'changed_elsewhere', effect: 'now', withheld: '', message: '', code: '' };
         try {
             const fresh = await ctx.readSettings();
-            const body = roleBody(fresh, entry, index, readFallbacks);
+            // A key the typing left as it was read keeps what is stored now: a Main chosen in the composer meanwhile stays.
+            const mine = roleBody(fresh, entry, index, readFallbacks);
+            const before = mine && asRead ? roleBody(fresh, asRead, index, readFallbacks) : null;
+            const body = mine && Object.fromEntries(Object.entries(mine).filter(([key, value]) => !before || canon(key, value) !== canon(key, before[key])));
             if (body) outcome = await writeModelKeys(`models:${slot}`, body, fresh, { ask: ctx.ask });
         } catch (error) { outcome = { state: 'refused', effect: 'now', withheld: '', message: error?.message || String(error), code: '' }; }
         if (landed(outcome) || outcome.state === 'changed_elsewhere' || outcome.state === 'unchanged') { dirty = false; await read(); }
@@ -967,12 +972,14 @@ function mountWebSearch(container, { path, ctx }) {
             preview.innerHTML = `${escapeHtml(main)}${details ? ` <details class="ui-disclosure"><summary>Details</summary>${escapeHtml(details)}</details>` : ''}`;
         } catch { if (mine === previews) preview.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     };
+    let asRead = {};  // the choice as read when the typing began: a Save writes only what the owner changed from it
     const read = async () => {
         if (dirty) { void showPreview(); return; }  // a typed choice stays; the routes it would take are read again
         let settings;
         try { settings = await ctx.readSettings(); } catch { return; }
         source.value = settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto';
         model.value = String(settings.OUROBOROS_WEBSEARCH_MODEL || '');
+        asRead = { OUROBOROS_WEBSEARCH_BACKEND: source.value, OUROBOROS_WEBSEARCH_MODEL: model.value };
         void showPreview();
     };
     const say = (words) => setResult(container.querySelector('[data-editor-result]'), words);
@@ -985,7 +992,9 @@ function mountWebSearch(container, { path, ctx }) {
         let outcome;
         try {
             const fresh = await ctx.readSettings();
-            outcome = await writeModelKeys('models:websearch', { OUROBOROS_WEBSEARCH_BACKEND: selection().backend, OUROBOROS_WEBSEARCH_MODEL: selection().model }, fresh, { ask: ctx.ask });
+            const wanted = { OUROBOROS_WEBSEARCH_BACKEND: selection().backend, OUROBOROS_WEBSEARCH_MODEL: selection().model };
+            const body = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => value !== asRead[key]));
+            outcome = await writeModelKeys('models:websearch', body, fresh, { ask: ctx.ask });
         } catch (error) { outcome = { state: 'refused', effect: 'now', withheld: '', message: error?.message || String(error), code: '' }; }
         setButtonBusy(button, false);
         if (landed(outcome) || outcome.state === 'unchanged') { dirty = false; container.querySelector('[data-editor-discard]').hidden = true; await read(); }
