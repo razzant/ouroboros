@@ -12,6 +12,7 @@ import { mountCostPeriod } from './cost_period.js';
 import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon } from './page_icons.js';
+import { parseModelSource } from './route_editor_primitives.js';
 
 // The limits card is rows of settings_rows.js (their home is this tab), drawn and written by settings_controls.js: each
 // saves itself and says what happened. The consciousness allowance has its one editor here (owner, 10 Nov 2026: moved
@@ -145,10 +146,11 @@ const NEW_STARTS = 'new wake-ups, replies in places and its own tasks';
 
 /** The consciousness allowance under its field, from the consciousness snapshot (consciousness_api.js): the spend line
  *  is the clock's own window (`allowanceText`, the Shade's and the Dashboard's words), never a sum of the tables;
- *  `detail` what it leaves out (pending calls, calls without a price); `lines` at most two: the window (its limit
- *  reached, with a conditional time when room returns) and a held wake (its proven cause, with its card's door), each
- *  its fact (`text`, in the line's tone) and what follows from it (`note`, quieter). Off, a $0 limit and an
- *  unreadable ledger say so instead. No time is guessed: a withheld or stale forecast says so. */
+ *  `detail` what it leaves out (pending calls, calls without a price); `lines` at most three: the window (its limit
+ *  reached, with a conditional time when room returns), a held wake (its proven cause, with its card's door) and the
+ *  model its wake-ups think with when the host could read it, each its fact (`text`, in the line's tone) and what
+ *  follows from it (`note`, quieter). Off, a $0 limit and an unreadable ledger say so instead. No time is guessed: a
+ *  withheld or stale forecast says so. */
 export function allowancePresentation(snapshot, { now = Date.now(), timeZone } = {}) {
     if (!snapshot) return { spend: 'What it spent in the last 24 hours could not be read.', detail: '', lines: [] };
     const spend = allowanceText(snapshot) || 'What it spent in the last 24 hours is unknown.';
@@ -183,6 +185,11 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is paused at the spending limit it started with; its card shows why.' });
     } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'owner') {
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is on an explicit pause; its card shows who paused it and how to continue.' });
+    }
+    const route = snapshot.modelRoute;
+    if (route) {  // the words of the Consciousness tab's row and the Models page: "Main model", "Local model"
+        const name = route.local ? 'Local model' : parseModelSource(route.value).model || route.value;
+        lines.push({ tone: 'muted', text: `Thinks with ${name}${route.layer === 'main' ? ' (Main model)' : ''}.` });
     }
     return { spend, detail, lines };
 }

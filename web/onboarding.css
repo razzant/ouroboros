@@ -622,6 +622,12 @@ textarea::placeholder {
   display: none;
 }
 
+/* An unconfirmed save's warning is no ornament: the compact rules that drop the aside keep it, and only a reason
+   beside Continue still takes its slot. */
+.footer-copy.footer-warning {
+  display: block;
+}
+
 /* ---------------------------------------------------------------------------
    Agents step (phase 3C). Semantics in docs/DESIGN.md §7 (onboarding density)
    and §6 (row anatomy): one primary thing per row, meta ink for everything
@@ -1337,11 +1343,6 @@ textarea::placeholder {
   .wizard-choice,
   .wizard-runtime-strip {
     padding: 10px 12px;
-  }
-
-
-  .wizard-footer {
-    justify-content: flex-end;
   }
 }
 

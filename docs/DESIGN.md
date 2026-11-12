@@ -124,7 +124,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
 | The chosen place's left mark | `#c93545` | white, the fill's ink |
 | A warning or failure on a row whose body cannot show it | the row's tint, its words in their own ink | a neutral row, its words in the hue's ink |
 | Green, red, amber fills (hover) | the hue at 14/22, 10/16, 18/26 % | white 16/20 % (green), 9/13.5 % (red, amber), each with its hue's ink (red `#fe9498`, a step lighter than the crimson word) |
-| Success word · its dot, track and switch | `#176b49` · `#22c55e` | leaf `#83e499` · `#2fd359` |
+| Success word · its dot, track and switch (thumb: opaque white) | `#176b49` · `#22c55e` | leaf `#83e499` · `#2fd359` |
 | Inside the Ouroboros voice: ink · secondary · meta · disabled | the room's inks (its prose `#35272c`) | `#fcf9f9` · `#ebd9da` · `#f2e4e5` · `#e1cbcc` |
 | Inside the Ouroboros voice: capsule (hover) · tray, also the bodies of its tones, status chips and Project capsules | the room's | opaque `#8f263a` (`#9e3044`) · `#832336` |
 | Inside the Ouroboros voice: crimson and failure word, link and focus · live word · Project ink · information ink | the room's | `#ffc2c6` · `#ffb3b7` · `#f6c4fc` · `#b6d4ff` |
@@ -2868,7 +2868,7 @@ stops clear of them.
 - A short or narrow window drops ornament (the slogan, the rail's sub-labels), never
   the words a choice or a field is made by and never the size of type. The footer's
   aside leaves only a narrow window, where the pinned footer would take the step's
-  lines. A line that changes no choice is deleted, not hidden; a taller step scrolls
+  lines; a warning it carries (a save whose answer was lost) stays. A line that changes no choice is deleted, not hidden; a taller step scrolls
   under the pinned footer.
 - Field labels are sentence case at meta ink: a step shows a dozen at once to
   get one value typed, not to present a grid of headings.

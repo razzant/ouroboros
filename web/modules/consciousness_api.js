@@ -219,6 +219,10 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         allowanceStatus: text(bg.allowance_status),
         allowanceOpenRows: count(bg.allowance_open_rows),
         allowanceRoomAfter: text(bg.allowance_room_after),
+        // The model its next wake thinks with, read from the settings (consciousness.model_route): its own slot's or
+        // Main's (`layer`), with the route's local flag; null when unknown.
+        modelRoute: object(bg.model_route) && text(bg.model_route.value) && ['consciousness', 'main'].includes(bg.model_route.layer)
+            ? { value: text(bg.model_route.value), layer: bg.model_route.layer, local: bg.model_route.local === true } : null,
         tasksRunning: count(bg.tasks_running),
         maxTasks: count(bg.max_tasks),
         spendByCause: list(bg.spend_by_cause).map((row) => ({
