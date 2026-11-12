@@ -20,10 +20,6 @@ def _unread(word):
     return word.get("rank") == 2 and word.get("kind") == "human" and not word.get("again") and not _whole_owner(word)
 
 
-def _told(word):
-    return bool(word.get("gist") or word.get("again") or word.get("kind") == "place_fact")
-
-
 def _gist_records(group):
     found = {}
     folded = {(room.get("folded") or {}).get("task") for room in group["rooms"]}
@@ -111,12 +107,6 @@ def _has_compact_rows(group, data, state, aggregate_unread):
     folded = any(room.get("folded") for room in group["rooms"])
     return (folded or bool(data["gists"]) or unread) if form else (
         folded or any(data["kinds"].get(ident) == "unread" for ident in gone) or bool(_visible_gists(group, data, gone)))
-
-
-def ordinary_group(group):
-    return all((_whole_owner(word) or _unread(word) or _told(word))
-               for room in group["rooms"] for word in room["words"]) and all(
-               "lead_rule" in note for room in group["rooms"] for note in room["notes"])
 
 
 def group_form(group, gone):

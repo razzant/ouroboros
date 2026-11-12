@@ -345,11 +345,9 @@ def _running_focus(root: Any, tasks: Set[str]) -> Dict[str, str]:
 from ouroboros.memory_view_conversation_forms import (  # noqa: F401 -- compatibility exports for existing readers
     source_index as source_index,
     _unread as _unread,
-    _told as _told,
     _gist_lines as _gist_lines,
     _unread_line as _unread_line,
     _fold_line as _fold_line,
-    ordinary_group as ordinary_group,
     group_form as group_form,
     floor_steps as floor_steps,
     identity_line as identity_line,
