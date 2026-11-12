@@ -242,9 +242,10 @@ _SELF_LAST_LINES: Dict[str, tuple] = {}
 
 
 def _last_line_parses(journal: pathlib.Path, info: Any) -> bool:
-    """Whether the journal's last non-empty line is a JSON object. ``publish_memory_file`` appends with no
-    record-boundary repair, so an interrupted append leaves a torn last line, and the next append joins it
-    into one line that does not parse: either way the newest record is unknown, never the one before it.
+    """Whether the journal's last non-empty line is a JSON object. An interrupted append leaves a torn last
+    line: the newest record is unknown, never the one before it. ``publish_memory_file`` starts its next row
+    on a line of its own (``ensure_record_boundary``), so the torn line stays behind that row; a writer
+    without the repair (the profiler's first fencing of the map) joins it into one line that does not parse.
     Read back from the end within the journal's tail, once per file identity: a last line longer than the
     tail holds no record the tail could show either."""
     identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
