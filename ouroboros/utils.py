@@ -325,7 +325,7 @@ def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = Fals
 
 # What fsync of a folder's descriptor may answer where the filesystem cannot sync a folder at all (some
 # network and FUSE mounts); EROFS stays a failure: ext4 and btrfs answer it after a disk error.
-_FOLDER_SYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP})
+_FOLDER_SYNC_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP})
 
 
 def fsync_folder(path: pathlib.Path) -> None:
