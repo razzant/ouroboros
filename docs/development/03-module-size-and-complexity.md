@@ -83,9 +83,7 @@ review-only, coupling `implicit_contracts`.
 ### Invariant: Projection over replay (hot readers of growing stores)
 
 Apply ARCHITECTURE §10 invariant 10 to current-state readers. A new fact belongs in its
-transition's transaction; legacy derivation is a named durable job under sequence/source CAS, a
-process-local flag never proves an installation migration, and passive control readers fall
-back only for underived rows. The census snapshots controls/phases in one short transaction per
+transition's transaction. The census snapshots controls/phases in one short transaction per
 addressed store, outside queue locks, released before display consumers; unavailable stays
 unknown for that request (`tests/test_hot_facts*.py` fix Stop/custody results while settled
 history grows 20→2,000 rows). Main batches question display views and warms lineage by
@@ -93,6 +91,20 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
 `tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows,
 `tests/test_cost_live_set.py` as the live set grows, one axis at a time (flat, at rest).
 
+- **One stored format:** a format changes by one import, which alone parses the old shape;
+  working code knows only the current one, and records kept as written are history. It runs at
+  the startup door and keeps the original bytes; done is a durable installation fact a restored
+  snapshot or an older body's write reopens, never a process-local flag. History-sized work
+  stays a named durable maintenance-child job under sequence/source CAS. A display read never
+  imports: unknown while one is owed; passive control readers fall back only for underived
+  rows. An import leaves by owner acceptance, never by age; double readers convert on touch,
+  proven both ways on old-install data.
+- **Store transactions** lease the shared core's per-thread connection, capture rows
+  (`store_capture.py`) and end before decoding or external work; fork only outside them;
+  lifecycle code quiesces users and calls `store.prepare_handoff` before renaming a database
+  or handing it to an older runtime, name-tier callers holding their name lock
+  (`tests/test_store_connections.py`, `tests/test_store.py`; the WAL gate both ways, FULL
+  unchanged: `tests/test_store_journal.py`).
 - **Measure growth:** history, object count, nesting, cold caches and contention, by
   receipts (`work`, L7) and real-reader spies. Telemetry adds no
   steady-state writes/history reads. Remove repetition or reuse a validated view before
@@ -100,8 +112,7 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
 - **Passive GET:** rendering/stored display adds no steady-state writes. Already-performed
   external discovery may store typed provider facts through their existing evidence owner;
   this permits no new network or control-state writes. `usage_store.py::read` may initialize
-  an empty store without pending import; otherwise display reports unavailable data and
-  leaves import to startup (`tests/test_usage_store.py`).
+  an empty store without pending import (`tests/test_usage_store.py`).
 - **Reuse precedents:** a writer seam whose transaction also writes the facts readers
   address (`dialogue_store.py::append`) or reduces current rows (`delegate_custody_current.py`);
   bounded filtered tail (`jsonl_tail.py`); transactional summaries (`usage_store.py`, `store.py`);
