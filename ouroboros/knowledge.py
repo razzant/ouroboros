@@ -666,7 +666,7 @@ class KnowledgeWriteResult:
     history_ref: dict[str, Any] | None = None
     previous: dict[str, Any] | None = None  # who wrote the replaced version: knowledge_versions.row_facts
     held: dict[str, Any] | None = None  # a stale revision this note's tail holds: knowledge_versions.held_version
-    show_source: bool = True  # an edit item's refusal names the item instead of resending the note
+    show_source: bool = True  # a refused edit item or revert says why instead of resending the note
 
 
 def body_chars(note: KnowledgeNote | None) -> int:
@@ -709,7 +709,8 @@ def write_knowledge_note(
     ``mode=revert`` publishes the stored bytes of an earlier ``version`` of this
     note exactly (``knowledge_versions.find_version``: verified by sha256), so the
     new revision is that version; a version with other archive metadata is
-    ``revert_changes_archive_state``. ``summary`` (overwrite, append or edit)
+    ``revert_changes_archive_state``, which names both states (a refused revert
+    never resends the note). ``summary`` (overwrite, append or edit)
     revises that one field in the same locked write through the ordinary metadata
     merge, after an overwrite's or append's own text, beside an edit or alone;
     replacing an existing note's summary needs its current revision, as every
@@ -779,8 +780,9 @@ def write_knowledge_note(
         if expected_revision is not None and expected_revision != revision:
             return KnowledgeWriteResult(False, "revision_conflict", current, revision, held=None if not expected_revision
                                         else knowledge_versions.held_version(journal, address, expected_revision, _JOURNAL_TAIL_BYTES))
+        # A refused revert says why; its caller holds the current revision (checked above), so no note is resent.
         if mode == "revert" and version != revision and isinstance(target, Exception):
-            return KnowledgeWriteResult(False, f"version_unavailable: {target}", current, revision)
+            return KnowledgeWriteResult(False, f"version_unavailable: {target}", current, revision, show_source=False)
         try:
             raw = (current.raw if mode == "revert" and version == revision
                    else target[0].encode("utf-8") if mode == "revert"
@@ -797,8 +799,14 @@ def write_knowledge_note(
         old_archive = {"archive": current.metadata["archive"]} if current and "archive" in current.metadata else {}
         new_archive = {"archive": updated.metadata["archive"]} if "archive" in updated.metadata else {}
         if not lifecycle and _yaml_form(old_archive) != _yaml_form(new_archive):
-            return KnowledgeWriteResult(False, "revert_changes_archive_state" if mode == "revert"
-                                        else "invalid_note: archive is owned by archive/restore modes", current, revision)
+            if mode != "revert":
+                return KnowledgeWriteResult(False, "invalid_note: archive is owned by archive/restore modes", current, revision)
+            states = (f"is {updated.state}, the current note is {current.state}; archive and restore change that state"
+                      if updated.state != current.state else
+                      f"and the current note are both {current.state}, with different archive fields; "
+                      "archive and restore own that field")
+            return KnowledgeWriteResult(False, f"revert_changes_archive_state: version {version} {states}", current,
+                                        revision, show_source=False)
         if current is not None and raw == current.raw:
             if lifecycle:
                 # Equal note bytes are no proof a prior index publication landed.

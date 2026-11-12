@@ -404,7 +404,7 @@ def _knowledge_write(
     if changes is not None:
         text = changes
         meta["knowledge_changes_since"] = result.held["facts"]["revision"]
-    elif not result.show_source:  # a refused edit item is named; the note it was looked for in is not resent
+    elif not result.show_source:  # a refused edit item or revert says why; the note the caller holds is not resent
         text += " Nothing was written."
     else:
         if result.reason in ("revision_required", "revision_conflict"):

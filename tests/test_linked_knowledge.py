@@ -850,11 +850,15 @@ def test_a_version_without_verified_text_is_a_typed_refusal(tmp_path):
     with journal.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({**base, "new_sha256": claimed, "new_content": "other text"}) + "\n")
         stream.write(json.dumps({**base, "new_sha256": digested, "new_content": "", "content_digested": True}) + "\n")
-    before = _files(tmp_path)
+    before, ctx = _files(tmp_path), ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="typed")
     for version, why in (("0" * 64, "no version " + "0" * 64), (claimed, "the stored text does not hash to the version"),
                          (digested, "holds no text (digest-era)"), ("not-a-revision", "64 lowercase hex")):
         result = store.write_knowledge_note(target, "", "revert", note.revision, version=version)
         assert not result.ok and result.reason.startswith("version_unavailable: ") and why in result.reason, result.reason
+        # The caller holds the current revision (it passed the check): the refusal says why, without the note.
+        reply = tools._knowledge_write(ctx, "typed", mode="revert", scope="global", version=version,
+                                       expected_revision=note.revision)
+        assert reply == f"⚠️ TOOL_ERROR: Knowledge write not completed: {result.reason}. Nothing was written.", reply
     assert _files(tmp_path) == before
 
 

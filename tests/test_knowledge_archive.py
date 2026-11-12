@@ -562,6 +562,8 @@ def test_tool_metadata_closure_retains_only_named_previous_note_source(tmp_path)
 
 
 def test_a_revert_never_crosses_archive_states_while_restore_still_unarchives(tmp_path):
+    """A revert that would change the archive field refuses, writes nothing and names both sides' states; the
+    caller holds the current revision, so the note is not resent. Inside one archive state a revert is exact."""
     _, registry, address, original = setup(tmp_path)
     receipt(transition(registry, original))  # archived: the row keeps the active version inline
     archived = store.read_knowledge_note(address)
@@ -569,17 +571,27 @@ def test_a_revert_never_crosses_archive_states_while_restore_still_unarchives(tm
     def files():
         return {p: p.read_bytes() for p in address.shelf.parent.rglob("*") if p.is_file() and not p.name.endswith(".lock")}
 
-    before = files()
-    refused = registry.execute("knowledge_write", {"topic": TOPIC, "mode": "revert", "version": original.revision,
-                                                   "expected_revision": archived.revision})
-    assert "revert_changes_archive_state" in refused and files() == before
+    def refused(version, current, states):
+        before = files()
+        reply = registry.execute("knowledge_write", {"topic": TOPIC, "mode": "revert", "version": version,
+                                                     "expected_revision": current.revision})
+        assert reply == (f"⚠️ TOOL_ERROR: Knowledge write not completed: revert_changes_archive_state: version {version} "
+                         f"{states}. Nothing was written."), reply  # no note: neither its body nor its summary
+        assert files() == before
+
+    change = "archive and restore change that state"
+    refused(original.revision, archived, f"is active, the current note is archived; {change}")
     receipt(transition(registry, archived, "restore"))
     restored = store.read_knowledge_note(address)
     assert restored.state == "active" and body(restored) == body(original)
+    refused(archived.revision, restored, f"is archived, the current note is active; {change}")
     receipt(registry.execute("knowledge_write", {"topic": TOPIC, "mode": "revert", "version": original.revision,
                                                  "expected_revision": restored.revision, "reason": "the exact bytes"}))
     assert address.path.read_bytes() == RAW  # inside one archive state the stored bytes come back exactly
     assert history(address)[-1]["reverted_from"] == original.revision
+    receipt(transition(registry, store.read_knowledge_note(address), reason="Archived again, for another reason."))
+    refused(archived.revision, store.read_knowledge_note(address),
+            "and the current note are both archived, with different archive fields; archive and restore own that field")
 
 
 def test_lifecycle_receipts_offer_the_read_of_what_they_replaced_and_no_revert(tmp_path):
