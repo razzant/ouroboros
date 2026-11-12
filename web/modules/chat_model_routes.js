@@ -4,7 +4,7 @@
 // lists stays a route of its own source, never dropped or rewritten. A route's identity is its whole string, source
 // included, so one model through two sources is two rows.
 import {
-    API_PROVIDER_ORDER, apiProviderLabel, composeModelSource, connectionParts, parseModelSource,
+    API_PROVIDER_ORDER, apiProviderLabel, composeModelSource, connectionParts, parseModelSource, priceWords,
     unavailableConnectionState,
 } from './route_editor_primitives.js';
 import { harnessPresentation } from './harness_presentation.js';
@@ -129,18 +129,22 @@ export function buildModelIndex({ catalog = {}, connections = null } = {}) {
         if (own.named && item?.provider_label) own.label = String(item.provider_label);  // the connection's own name
         if (!rows.has(key)) {
             rows.set(key, { key, route, id: modelPart(route), name: String(item?.name || '') || modelPart(route),
-                source: own.id, lane: own.lane, window: 0, available: null, states: new Set() });
+                source: own.id, lane: own.lane, window: 0, available: null, states: new Set(), prices: new Set() });
             own.count += 1;
         }
         const row = rows.get(key);
         row.window = Math.max(row.window, Number(item?.max_context_window) || Number(item?.context_window) || 0);
         if (typeof item?.availability === 'string') row.states.add(item.availability);
+        row.prices.add(priceWords(item?.price));
     }
     for (const row of rows.values()) {
         // Any account that can serve it makes the row available; unavailable only when every account says so.
         row.available = row.states.has('available') ? true
             : row.states.size === 1 && row.states.has('unavailable') ? false : null;
+        // The catalogue's price, while every item of the row states that same one (only OpenRouter's rows state any).
+        row.price = row.prices.size === 1 ? [...row.prices][0] : '';
         delete row.states;
+        delete row.prices;
     }
     for (const error of errors) {
         const id = error?.source_id ? `${SUBSCRIPTION}${error.source_id}`
@@ -188,7 +192,8 @@ export function buildModelIndex({ catalog = {}, connections = null } = {}) {
 
 /**
  * What a route is called wherever the capsule names it: its short name, its source by its own label and how that
- * source is paid, its window when the catalog knows one. A source that leads nothing keeps Settings' own words:
+ * source is paid, the catalog's price in words when it states one (`price`), its window when the catalog knows one.
+ * A source that leads nothing keeps Settings' own words:
  * "(no key)", "(off)" or "(removed)" for an API key that cannot send.
  */
 export function describeRoute(index, raw) {
@@ -207,7 +212,8 @@ export function describeRoute(index, raw) {
     const window = windowWords(listed?.window);
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
-        sourceLabel, pay: PAY_WORDS[lane], window, listed: Boolean(listed), available: listed?.available ?? null,
+        sourceLabel, pay: PAY_WORDS[lane], price: listed?.price || '', window, listed: Boolean(listed),
+        available: listed?.available ?? null,
         harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
         kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),
         facts: [sourceLabel, PAY_WORDS[lane], window ? `${window} window` : ''].filter(Boolean).join(' · '),

@@ -1,14 +1,17 @@
 // The catalog's published price beside the model wherever the owner chooses one, as one short fact (owner, 12.11:
 // compact, no disclaimers). The server keeps OpenRouter's price on its rows (ouroboros/gateway/models.py `price`);
 // route_editor_primitives.js says it in words, the Settings chooser shows it beside the name (model_chooser.js
-// `meta`) and the line under a role says it per 1M tokens (model_roles.js). A row without a price reads as before;
-// a price never filters a model.
+// `meta`), the line under a role says it per 1M tokens (model_roles.js) and the composer's list says it where
+// "paid by key" stood (model_list.js). A row without a price reads as before; a price never filters a model.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { buildModelIndex, describeRoute } from '../modules/chat_model_routes.js';
 import { bindModelChooser, matchingModelOptions, modelChooserHtml, modelOptions, updateModelChooserOptions } from '../modules/model_chooser.js';
+import { createModelList } from '../modules/model_list.js';
 import { createModelRolesEditor } from '../modules/model_roles.js';
 import { catalogModelOptions, priceWords } from '../modules/route_editor_primitives.js';
+import { ElementStub } from './chat_dom_fixture.js';
 import { appendHtml, domDouble } from './dom_double.js';
 
 const OPUS = { provider_id: 'openrouter', id: 'anthropic/claude-opus-5.5', value: 'anthropic/claude-opus-5.5',
@@ -111,4 +114,38 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     assert.match(gone, /Accounts/, 'a key that cannot send says so first');
     assert.doesNotMatch(gone, /\$/);
     editor.destroy();
+});
+
+test('in the composer list a priced model says its price where "paid by key" stood; other rows read as before', () => {
+    const index = buildModelIndex({ catalog: { items: [OPUS,
+        { provider_id: 'openrouter', id: 'openai/gpt-6', value: 'openai/gpt-6', price: { input: 1.25, output: 10 } },
+        { provider_id: 'openrouter', id: 'z-ai/glm-5.3', value: 'z-ai/glm-5.3' },
+        { provider_id: 'openai', id: 'gpt-6', value: 'openai::gpt-6' }] } });
+    assert.equal(describeRoute(index, { model: OPUS.value }).price, '$4 in / $20 out');
+    assert.equal(describeRoute(index, { model: 'openai::gpt-6' }).price, '', 'a direct key states no price');
+    assert.equal(describeRoute(index, { model: 'z-ai/glm-5.3' }).facts, 'OpenRouter · paid by key');
+    const markup = (query) => {
+        const [el, input] = [new ElementStub('div'), new ElementStub('input')];
+        const list = createModelList({ el, input, id: 'models', store: { index: () => index, status: () => ({ read: true }) },
+            main: () => ({ model: OPUS.value, use_local: false }), current: () => null, recents: () => [], onRoute() {} });
+        list.paint();
+        input.value = query;
+        for (const listener of input.listeners.get('input') || []) listener();
+        list.destroy();
+        // Each row's facts; the "use as typed" row a query adds names its source only.
+        return Object.fromEntries([...el.innerHTML.matchAll(/data-row="([^"]+)"[^>]*>[\s\S]*?<span class="chat-model-row-facts" data-i18n-skip>([^<]*)</g)]
+            .map(([, row, facts]) => [row, facts]).filter(([row]) => !row.startsWith('typed:')));
+    };
+    assert.deepEqual(markup('p'), {
+        [`route|${OPUS.value}`]: 'OpenRouter · $4 in / $20 out',
+        'route|openai/gpt-6': 'OpenRouter · $1.25 in / $10 out',
+        'route|z-ai/glm-5.3': 'OpenRouter · paid by key',
+        'route|openai::gpt-6': 'OpenAI · paid by key',
+    });
+    // Main's own row and the source rows: the price stands with a model, a source still says how it is paid.
+    assert.deepEqual(markup(''), {
+        [`route|${OPUS.value}`]: 'OpenRouter · $4 in / $20 out',
+        'source:openrouter': '3 models · paid by key',
+        'source:openai': '1 model · paid by key',
+    });
 });
