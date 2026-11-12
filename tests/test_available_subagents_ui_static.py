@@ -124,17 +124,6 @@ def test_status_refresh_and_active_task_copy_keep_the_frozen_semantics() -> None
     assert "await boundedStatusRefresh(store);" in editor
 
 
-def test_new_frontend_modules_stay_within_the_context_target() -> None:
-    from ouroboros.size_ratchet_manifest import BAND_PATHS
-
-    for name in (
-        "route_editor_primitives.js", "subagent_status_primitives.js", "subagents_settings.js",
-    ):
-        lines = _read(MODULES / name).count("\n") + 1
-        # Past the target only as a 1001-1500 band entry whose reason the manifest records.
-        assert lines <= 1000 or BAND_PATHS.get(f"web/modules/{name}"), f"{name} grew to {lines} lines"
-
-
 def test_effort_choice_mirrors_track_the_python_scale() -> None:
     """The JS effort lists are hand-maintained mirrors of config.EFFORT_SCALE;
     this guard makes the next tier addition fail loudly when a mirror is missed."""

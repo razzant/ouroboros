@@ -886,6 +886,25 @@ def test_t4_cosmetic_partition_guards():
     assert recovered["outcome_axes"]["execution"]["recoveries"]
     assert "warning" not in recovered["outcome_axes"]["objective"]
 
+    # The rerun that finished with a note about undeclared files is the same recovery: the note is
+    # no failure. A record from when that note was a refusal, and a failed registration, are not.
+    def rerun(**later):
+        return derive_loop_outcome("Built it.", {"rounds": 2}, {"tool_calls": [
+            {"tool": "run_command", "args": {"cmd": "make build"}, "is_error": True,
+             "status": "non_zero_exit", "result": "⚠️ SHELL_EXIT_ERROR: exit_code=1."},
+            {"tool": "run_command", "args": {"cmd": "make build"}, "result": "exit_code=0", **later},
+        ]})["outcome_axes"]
+
+    noted = rerun(is_error=False, status="artifact_output_undeclared")
+    assert noted["execution"]["recoveries"] and "warning" not in noted["objective"]
+    assert not rerun(is_error=True, status="artifact_output_undeclared")["execution"]["recoveries"]
+    assert not rerun(is_error=True, status="artifact_output_error")["execution"]["recoveries"]
+    # The mind's own digest of its calls marks that run as a success, and still names a typed ok
+    # answer that applied nothing.
+    from ouroboros.memory import _ok_answer_mark
+
+    assert _ok_answer_mark("artifact_output_undeclared") == "✓" and _ok_answer_mark("inspection_required") != "✓"
+
     # When an acceptance review DID run, the residual warning is suppressed
     # (the review axis already judged "did it actually work?").
     reviewed = derive_loop_outcome(

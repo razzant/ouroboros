@@ -340,9 +340,9 @@ def _tool_call_steps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             calls[invocation_id] = {}
             order.append(invocation_id)
         held = calls[invocation_id].get(kind)
-        # A duplicate settlement never replaces a real result with a host_error row.
-        if held is None or (kind == "tool_call" and held.get("status") == "host_error"
-                            and row.get("status") != "host_error"):
+        # A duplicate settlement never replaces a real result with a row the host settled.
+        if held is None or (kind == "tool_call" and held.get("status") in ("host_error", "interrupted")
+                            and row.get("status") not in ("host_error", "interrupted")):
             calls[invocation_id][kind] = row
     out: list[dict[str, Any]] = []
     for item in order:

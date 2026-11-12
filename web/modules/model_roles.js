@@ -14,7 +14,7 @@ import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_sta
 import { parseModelSource, composeModelSource, apiConnections, configuredApiProviders, indexProfilesByHarness,
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
-    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions } from './route_editor_primitives.js';
+    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords } from './route_editor_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { catalogPrograms } from './model_program.js';
@@ -373,17 +373,21 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const status = node.querySelector('[data-model-role-status]');
             const rowCatalog = catalogs.get(catalogKey(row));
             // A subscription row reports its own account read in full; an API row
-            // sits under the section banner, so it keeps to the compact form.
+            // sits under the section banner, so it keeps to the compact form. An
+            // API row whose own catalog (OpenRouter's) states a price says it.
             const own = Boolean(sourceId(row) && rowCatalog);
             const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !own });
             const choosing = !row.local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
             status.classList.toggle('ui-status', choosing);
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
+            const price = row.local || keyNote(row) || note || !row.model || sourceId(row) ? '' : priceWords(currentItem(row)?.price, { unit: true });
             status.textContent = row.local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
                         ? 'No models were listed for this source. Your selection is kept.'
-                        : 'Uses your subscription. No API key required.') : '');
+                        : 'Uses your subscription. No API key required.') : price);
+            // The price is already composed through the translation seam: the overlay leaves it alone and reads the rest.
+            if (price) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];
             const message = node.querySelector('[data-model-role-error]');
             Object.assign(message, { textContent: errors.map((error) => error.message).join(' '), hidden: !errors.length });

@@ -6,7 +6,7 @@ import { forgetProjectPreviews, previewsRefused } from './modules/chat_preview.j
 import { loadVersion } from './modules/utils.js';
 import { bindScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
-import { createStateSnapshotSequencer, readStateSnapshot } from './modules/state_snapshots.js';
+import { createStateSnapshotSequencer, heldProjectChatIds, readStateSnapshot } from './modules/state_snapshots.js';
 import { IDLE_SUMMARY, buildProjectActivityIndex, markWords, reconcileProjectRooms } from './modules/project_activity.js';
 import { markView, paintStatusMark, syncMarkPhases } from './modules/status_mark.js';
 import { createProjectsNav, setActivityOwnerName } from './modules/projects_nav.js';
@@ -568,10 +568,10 @@ const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generati
     state.projectListableCount = Number.isSafeInteger(projectListableCount) && projectListableCount >= 0
         ? projectListableCount : null;
     if (Array.isArray(data.projects)) state.projectMessagesRevision = data.project_messages_revision ?? null;
-    projectActivityIndex = buildProjectActivityIndex(projectRooms, data.project_chat_ids
+    const chatIds = heldProjectChatIds(data, state);  // null or absent keeps a complete set the page holds
+    projectActivityIndex = buildProjectActivityIndex(projectRooms, chatIds
         ?? (data.projects || lastProjectRows).map((project) => project?.chat_id));
-    renderProjectsNav(data.projects || lastProjectRows,
-        data.project_chat_ids ?? (data.projects ? undefined : Array.from(state.projectChatIds)), projectActivityIndex,
+    renderProjectsNav(data.projects || lastProjectRows, chatIds, projectActivityIndex,
         Array.isArray(data.projects) ? generation : 0);
     if (data.task_bindings) applyTaskBindings(data.task_bindings);  // null: unchanged, never filled here
     hydrateOpenChatsFromState(data, requestedAt, generation);
@@ -961,7 +961,7 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
     // backend reserved_project_chat_ids, so chat.js::isMyThread never treats a
     // project frame as a main-thread frame on the live WS path. Prefer the
     // COMPLETE /api/state `project_chat_ids` (uncapped); fall back to the (capped)
-    // projects array only if that field is absent. Sidebar visibility is a
+    // projects array only before one was held (heldProjectChatIds). Sidebar visibility is a
     // SEPARATE concern (the filtered `rows` below).
     const completeChatIds = Array.isArray(projectChatIds)
         ? projectChatIds

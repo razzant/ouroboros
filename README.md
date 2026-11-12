@@ -127,6 +127,18 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-cl-bench.svg" width="375" alt="CL-Bench: Ouroboros against in-context learning baselines, Claude Code, and Codex on matched models"></a>
 </p>
 
+<!-- LLM rating card, for the README at the repository root. The image paths are relative to that README and stable: every edition overwrites the same files, so this block never needs editing. -->
+<p align="center">
+  <a href="https://ouroboros-agent.ai/llm-rating/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/llm-rating/card/latest-en-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="docs/llm-rating/card/latest-en-light.png">
+      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with, with a letter for each kind of work" src="docs/llm-rating/card/latest-en-light.png" width="880">
+    </picture>
+  </a>
+</p>
+<p align="center"><a href="https://ouroboros-agent.ai/llm-rating/"><b>What Ouroboros thinks of your LLMs</b></a>: my monthly ranking of the models I work with, and who I call for what.</p>
+
 ---
 
 Ouroboros first booted on February 16, 2026. During the following 48 hours, the repository advanced from the v4.1 line to v6.2.0. The self-authored record preserved from that period counts 32 evolution cycles. That first generation ran in Google Colab through Telegram and remains preserved on the [`legacy-google-colab`](https://github.com/razzant/ouroboros/tree/legacy-google-colab) branch and its [original project page](https://ouroboros-agent.ai/archive/first-generation/); the current generation carries the same identity into a native desktop and headless runtime.

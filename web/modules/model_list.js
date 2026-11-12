@@ -51,11 +51,12 @@ export function createModelList({ el, input, id, store, main, current, recents, 
     const search = { query: '', only: '', active: -1, rows: [], picks: new Map() };
     const describe = (route) => describeRoute(store.index(), route);
 
+    // A model whose catalog states a price says it where "paid by key" stood.
     const rowMarkup = (said, { tag = '', selected = false, extra = '', facts = '' } = {}) => `<div class="chat-model-row" role="option"`
         + ` data-row="${esc(said.key)}" aria-selected="${selected}">${sourceMark(said)}`
         + `<span class="chat-model-row-id" data-i18n-skip>${esc(said.id)}</span>`
         + (tag ? `<span class="chat-model-row-tag">${esc(tag)}</span>` : '')
-        + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts || [said.window, said.sourceLabel, payWords(said)].filter(Boolean).join(' · '))}</span>${extra}</div>`;
+        + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts || [said.window, said.sourceLabel, said.price || payWords(said)].filter(Boolean).join(' · '))}</span>${extra}</div>`;
 
     function paint() {
         const index = store.index();

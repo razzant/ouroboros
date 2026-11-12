@@ -317,11 +317,13 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "stay within the admitted repair surface",
         ),
+        # A completed command's observation, never a refusal: the call is no error, and
+        # its own bucket keeps the note readable in the journal and the trace.
         "ARTIFACT_OUTPUT_UNDECLARED": _code_spec(
-            "blocked",
+            "ok",
             "artifact_output_undeclared",
             "warning",
-            "declare the produced artifact",
+            "register a named file if it is a result for the human; otherwise none",
         ),
         # Family parents. Each carries the legacy status of the family the loop
         # chain matched by text prefix, so the whole family keeps landing in the
@@ -873,28 +875,25 @@ def _wrap_run_script_process_result(
     result: str,
     audit_note: str,
     script_path: Any,
+    note_meta: Mapping[str, Any] | None = None,
 ) -> str:
     """Republish an inner shell result after the exact run-script text wrapper."""
 
     if str(result).lstrip().startswith("⚠️"):
         # The result already owns line 1 with its own typed marker, which is what
-        # the failure classifier reads — the nudge appends after it.
+        # the failure classifier reads — the note appends after it.
         tail = f"\n{audit_note}" if audit_note else ""
         wrapped = f"{result}{tail}\n# script_path={script_path}"
-    elif audit_note:
-        # The nudge used to REPLACE the whole _run_shell payload (a successful
-        # script's answer was gone; re-running was the sole recovery). Marker
-        # first — ARTIFACT_OUTPUT_UNDECLARED is a typed policy-denial surface the
-        # classifier reads off line 1 — payload appended, as in run_command.
-        wrapped = f"{audit_note}\n\n# script_path={script_path}\n{result}"
     else:
-        wrapped = f"# script_path={script_path}\n{result}"
+        # The script's own answer leads; the undeclared-output note trails it, as
+        # in run_command: a first-line `⚠️ IDENTIFIER` reads as a refusal.
+        wrapped = f"# script_path={script_path}\n{result}" + (f"\n\n{audit_note}" if audit_note else "")
     base = _published_tool_result(ctx, None)
     if isinstance(base, ToolResult) and base.text == result:
         code = "ARTIFACT_OUTPUT_UNDECLARED" if audit_note and base.status == "ok" else base.code
         return _publish_tool_result(
             ctx,
-            _replace_tool_result(base, text=wrapped, code=code),
+            _replace_tool_result(base, text=wrapped, code=code, meta_updates=note_meta),
         )
     return wrapped
 

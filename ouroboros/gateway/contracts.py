@@ -817,7 +817,7 @@ class StateResponse(WorkStateFields):
     projects: list
     project_messages_revision: Optional[str]  # moves with any Project's last_message_at; null until history is dated
     project_listable_count: Optional[int]  # active/deleting Projects the sidebar can list; null when unavailable
-    project_chat_ids: list  # COMPLETE (uncapped) registered chat_ids; the live WS fan-out isolation SSOT
+    project_chat_ids: Optional[list]  # COMPLETE (uncapped) registered chat_ids, the live WS fan-out isolation SSOT; null: unknown
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.
     main_visible_revision: NotRequired[Optional[int]]
     # Task->project bindings ({task_id: {project_id, chat_id, project_name}}): a bound card hides the stray
