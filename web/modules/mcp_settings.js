@@ -718,7 +718,7 @@ function drawEditor() {
     const at = doc && view.host.contains?.(doc.activeElement) ? doc.activeElement : null;
     const mark = !at ? '' : at.dataset?.mcpField ? `[data-mcp-field="${at.dataset.mcpField}"]`
         : at.hasAttribute('data-mcp-header-remove') ? `[data-mcp-header-row="${at.closest('[data-mcp-header-row]').dataset.mcpHeaderRow}"] [data-mcp-header-remove]`
-        : ['data-entry-switch', 'data-editor-save', 'data-mcp-test', 'data-mcp-refresh', 'data-mcp-header-add'].map((name) => (at.hasAttribute(name) ? `[${name}]` : '')).find(Boolean) || '';
+        : ['data-entry-switch', 'data-editor-save', 'data-editor-remove', 'data-mcp-test', 'data-mcp-refresh', 'data-mcp-header-add'].map((name) => (at.hasAttribute(name) ? `[${name}]` : '')).find(Boolean) || '';
     resetSecretReveals(view.host);
     if (!view.server) {
         view.host.innerHTML = loaded ? '<p class="settings-page-lead">This server is no longer on the list.</p>' : '';
