@@ -637,11 +637,14 @@ def _adopt_view_facts(tool_ctx: Any, plan: Any, mode: str) -> None:
 
 
 def _emit_physical_mode(event_queue: Any, task_id: str, drive_logs: Any, plan: Any, mode: str) -> None:
-    """The known window lowered this plan's starting mode (no shorter view fit): one owner-visible checkpoint.
+    """The known window lowered this plan's starting mode (no shorter view fit): one owner-visible checkpoint, with
+    the recorded reason the Context capsule reads (``cause``: ``context_measurement.mode_cause``, never recomputed).
 
     The sent projection's own fact says so (``mode_switch``); a lower mode a task kept from before
     (task-local Low after an overflow, an earlier route's choice) is not this window's doing.
     """
+    from ouroboros.context_measurement import mode_cause
+
     projection = plan.projection(mode) if hasattr(plan, "projection") else None
     switch = ((getattr(projection, "memory_facts", None) or {}).get("floor") or {}).get("mode_switch")
     if not switch or mode != str(getattr(plan, "initial_mode", "") or ""):
@@ -651,6 +654,7 @@ def _emit_physical_mode(event_queue: Any, task_id: str, drive_logs: Any, plan: A
         "route_fp": str(getattr(plan, "route_fp", "") or ""),
         "preferred_mode": str(switch.get("from") or ""),
         "effective_mode": mode,
+        "cause": mode_cause(plan, mode),
         "window_tokens": int(getattr(plan, "window_tokens", 0) or 0),
         "owner_visible": True,
     })

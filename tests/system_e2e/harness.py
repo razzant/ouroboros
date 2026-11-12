@@ -548,6 +548,7 @@ class LoopbackModelServer:
     def __init__(self, *, latency_sec: float = 0.0, gate: "ModelGate | None" = None) -> None:
         self.latency_sec = latency_sec
         self.gate = gate
+        self.window_tokens = 2_000_000  # what /models advertises (below); a test may set its own before the first probe
         self.calls: list = []          # (kind, body) in arrival order
         self._lock = threading.Lock()
         outer = self
@@ -555,7 +556,7 @@ class LoopbackModelServer:
         class _Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 - stdlib callback name
                 if self.path.rstrip("/").endswith("/models"):
-                    # >=1M ON PURPOSE, and it is load-bearing twice: the capability-
+                    # The default is >=1M ON PURPOSE, and it is load-bearing twice: the capability-
                     # evidence /models probe stores this as a CONFIRMED window, which
                     # (a) sizes the triad fit budget (a 400K window under the cold
                     # 1.65 density floor caps input at ~202K — BELOW the ~226K
@@ -563,7 +564,7 @@ class LoopbackModelServer:
                     # dispatch), and (b) satisfies the BIBLE P3 >=1M floor that
                     # scope review's BLOCKING authority requires.
                     return self._send({"data": [
-                        {"id": model_id, "max_model_len": 2_000_000}
+                        {"id": model_id, "max_model_len": outer.window_tokens}
                         for model_id in outer._model_ids()
                     ]})
                 self.send_error(404)
