@@ -213,7 +213,20 @@
 /**
  * `GET /api/settings`: every effective setting with its (masked) value, plus `_meta`.
  * @typedef {Object} SettingsReadResponse
- * @property {import('./api_types.js').SettingsMeta=} _meta
+ * @property {SettingsMeta=} _meta
+ */
+/** `_meta` of `GET /api/settings`.
+ * @typedef {Object} SettingsMeta
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
+ * @property {string[]=} custom_secret_keys
+ * @property {Object=} setup_contract
+ * @property {import('./api_types.js').AvailableSubagentsSettingsMeta=} available_subagents
+ * @property {SettingsPolicyState=} policy_state
+ * @property {SettingsRestartState=} restart_state Component application and source uncertainty.
+ * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
+ * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
+ * @property {string[]=} known_spend_gaps What spends money the limits cannot count: roles whose route has no known price.
  */
 
 /**

@@ -406,6 +406,31 @@ def test_a_role_left_with_unsaved_words_comes_back_as_it_was_left_and_a_saved_on
     page.close()
 
 
+def test_a_kept_role_saves_only_what_was_changed_and_a_model_chosen_elsewhere_meanwhile_stays(subscription_ui):
+    """A role's page kept with one changed field writes that field and nothing it left as read: a model saved
+    elsewhere while the page waited (Main from the composer, another device) stays."""
+    from playwright.sync_api import expect
+
+    page, server = _page(subscription_ui, 1087, 740, OUROBOROS_MODEL_VISION="openai::gpt-vision-old")
+    open_settings(page, "models/role/vision")
+    editor = _settled(page, "models/role/vision")
+    expect(editor.locator("[data-model-role-model]")).to_have_value("gpt-vision-old")
+    editor.locator(".model-role-details > summary").click()  # processing and window wait behind More
+    editor.locator("[data-model-role-processing]").select_option("fast")
+    go_back(page)
+    server.values["OUROBOROS_MODEL_VISION"] = "openai::gpt-vision-new"  # chosen elsewhere while the page waited aside
+    open_settings(page, "models/role/vision")
+    editor = _settled(page, "models/role/vision")
+    editor.locator(".model-role-details").evaluate("node => { node.open = true; }")
+    assert editor.locator("[data-model-role-processing]").input_value() == "fast", "the typed field stays"
+    assert press_editor_save(page).startswith("Saved")
+    path, written, _held = server.posts[-1]
+    assert "OUROBOROS_MODEL_VISION" not in written, written
+    assert written.get("OUROBOROS_MODEL_PROCESSING_PREFERENCES", {}).get("vision") == "fast", written
+    assert server.values["OUROBOROS_MODEL_VISION"] == "openai::gpt-vision-new"
+    page.close()
+
+
 def test_the_local_model_page_saves_a_row_for_its_own_restart_and_never_offers_a_restart_of_ouroboros(subscription_ui):
     page, server = _page(subscription_ui)
     open_settings(page, "models")

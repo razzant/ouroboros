@@ -161,17 +161,6 @@
  * @property {Object|null=} candidate
  * @property {boolean=} automatic The read's own unsaved catalog, following Main and access.
  */
-/** @typedef {Object} SettingsMeta
- * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
- * @property {Object<string, string>} tokens
- * @property {string[]=} custom_secret_keys
- * @property {Object=} setup_contract
- * @property {AvailableSubagentsSettingsMeta=} available_subagents
- * @property {import('./client_contract_types.js').SettingsPolicyState=} policy_state
- * @property {import('./client_contract_types.js').SettingsRestartState=} restart_state Component application and source uncertainty.
- * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
- * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
- */
 /**
  * The wizard payload plus two DECLARATIONS about the onboarding run. Settings
  * keys ride through unchanged (open shape); neither flag is authority — the

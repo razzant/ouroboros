@@ -124,7 +124,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
 | The chosen place's left mark | `#c93545` | white, the fill's ink |
 | A warning or failure on a row whose body cannot show it | the row's tint, its words in their own ink | a neutral row, its words in the hue's ink |
 | Green, red, amber fills (hover) | the hue at 14/22, 10/16, 18/26 % | white 16/20 % (green), 9/13.5 % (red, amber), each with its hue's ink (red `#fe9498`, a step lighter than the crimson word) |
-| Success word · its dot, track and switch | `#176b49` · `#22c55e` | leaf `#83e499` · `#2fd359` |
+| Success word · its dot, track and switch (thumb: opaque white) | `#176b49` · `#22c55e` | leaf `#83e499` · `#2fd359` |
 | Inside the Ouroboros voice: ink · secondary · meta · disabled | the room's inks (its prose `#35272c`) | `#fcf9f9` · `#ebd9da` · `#f2e4e5` · `#e1cbcc` |
 | Inside the Ouroboros voice: capsule (hover) · tray, also the bodies of its tones, status chips and Project capsules | the room's | opaque `#8f263a` (`#9e3044`) · `#832336` |
 | Inside the Ouroboros voice: crimson and failure word, link and focus · live word · Project ink · information ink | the room's | `#ffc2c6` · `#ffb3b7` · `#f6c4fc` · `#b6d4ff` |
@@ -298,7 +298,9 @@ caps with `text-transform`.
 **A secondary page orders by meaning, not paint** (audit №9, owner
 2026-10-28T22:09Z). Costs leads with the known spend and, in the same card,
 whether it is final, its unresolved upper bound and what is unknown; the
-composition, the hold and technical counts follow, quieter. Budget's three limits are rows; under them the consciousness
+composition, the hold and technical counts follow, quieter. Budget's three limits are rows; one line under them names
+what they cannot count, roles whose route has no known price (`Not counted: Web search, Agents (price unknown).`,
+`all model roles` when none has one), and is absent when every route Settings configures has a price; under it the consciousness
 limit shows its 24-hour spend (pending, unpriced) and a full-width row names that limit with
 “If its charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown) and a
 wake held at it with its card's door. Activity names a
@@ -2740,7 +2742,7 @@ Source / Model / Account row. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
 confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
 published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
-sorts or filters the list;
+sorts or filters the list; the line under an API role whose price is not that says `Price unknown`;
 nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
@@ -2868,7 +2870,7 @@ stops clear of them.
 - A short or narrow window drops ornament (the slogan, the rail's sub-labels), never
   the words a choice or a field is made by and never the size of type. The footer's
   aside leaves only a narrow window, where the pinned footer would take the step's
-  lines. A line that changes no choice is deleted, not hidden; a taller step scrolls
+  lines; a warning it carries (a save whose answer was lost) stays. A line that changes no choice is deleted, not hidden; a taller step scrolls
   under the pinned footer.
 - Field labels are sentence case at meta ink: a step shows a dozen at once to
   get one value typed, not to present a grid of headings.

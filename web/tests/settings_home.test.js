@@ -78,7 +78,7 @@ test('a row answers its fact, says when it was not read, and marks the owner\'s 
     const settings = { OUROBOROS_MODEL: 'openrouter::z-ai/glm-5.3', OUROBOROS_SAFETY_OWNER_RULES: ' never email clients ',
         OUROBOROS_SUBAGENTS: { enabled: true, items: [{ subagent_id: 'a' }, { subagent_id: 'b', enabled: false }, { subagent_id: 'c' }] },
         _meta: { policy_state: { access: { configured: 'cyber_pro', current_process: 'pro', restart_required: true } },
-            connections: [{ configured: true }, { configured: false }, { configured: true }] } };
+            connections: [{ id: 'openrouter', configured: true }, { id: 'openai', configured: false }, { id: 'anthropic', configured: true }] } };
     const state = { spent_usd: 500, budget_limit: 500, accounting: { available: true }, main_attention: [{ attention_reason: 'budget' }],
         evolution_enabled: null, bg_consciousness_enabled: true, bg_consciousness_state: { status: 'allowance_exhausted', detail: 'Stopped by its spending limit' } };
     const answers = homeAnswers({ settings, state, accounts: accounts([account('codex', 'a', 'passed')]),
@@ -110,6 +110,13 @@ test('a row answers its fact, says when it was not read, and marks the owner\'s 
         state: { ...state, main_attention: [], bg_consciousness_state: { status: 'idle', detail: 'Awake' } }, update: { managed: true, check_ok: true, current_version: '7.10.2' } });
     assert.deepEqual(['dashboard:costs', 'dashboard:consciousness', 'dashboard:updates'].map((to) => calm[to].owner), [false, false, false]);
     assert.equal(calm.rules.text, 'Empty');
+    // Main whose key cannot send, or that waits for the owner to choose one of two keys, says so in the owner's colour.
+    const main = (patch) => homeAnswers({ settings: { ...settings, ...patch, _meta: { ...settings._meta, ...patch._meta } } }).models;
+    assert.deepEqual(main({ _meta: { connections: [{ id: 'openrouter', configured: true, enabled: false }] } }), { text: 'Its key is off', owner: true });
+    assert.deepEqual(main({ _meta: { connections: [] } }), { text: 'No key for it', owner: true });
+    assert.deepEqual(main({ OUROBOROS_MODEL: 'openai::gpt-x', _meta: { main_connection_choice: ['openai@work', 'openai@home'] } }),
+        { text: 'Choose its key', owner: true });
+    assert.deepEqual(main({ USE_LOCAL_MAIN: true, _meta: { connections: [] } }).owner, false, 'a local Main needs no key');
     // Not read yet: no answer is claimed. A read that failed says so, and an unread accounts facet never prints a count.
     assert.deepEqual(homeAnswers({}), {});
     const failed = homeAnswers({ settings: null, state: null, tools: null, storage: null, update: null, skills: null, places: null });
