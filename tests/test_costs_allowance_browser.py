@@ -324,10 +324,12 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             def spend_says(text):
                 return lambda page: expect(page.locator("#costs-allowance-spend")).to_have_text(text)
 
-            # 1. Room left: the server's own window, the unpriced call said, no condition line.
+            # 1. Room left: the server's own window, the unpriced call said, no condition line; last, the model its
+            # wake-ups think with (this server's Main, the slot left empty), in every state but Off.
             normal = "≥ $12.40 of $20.00 in the last 24 hours · 1 without a price · Consciousness ›"
+            model = "Thinks with mock-model (Main model)."
             each("normal", lambda page: (spend_says(normal)(page),
-                                         expect(page.locator("#costs-allowance-state")).to_be_empty()))
+                                         expect(page.locator(".costs-allowance-line")).to_have_text([model])))
             # 2. The limit reached: what waits, and when room returns if nothing more is charged, in the viewer's zone.
             page = pages[COMBOS[0]]
             with _saving(page):
@@ -341,14 +343,14 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                        f"as they are, there is room again by {_room_words(leaves, now)}.")
             each("reached", lambda page: (spend_says("≥ $12.40 of $10.00 in the last 24 hours · 1 without a price · "
                                                      "Consciousness ›")(page),
-                                          expect(page.locator(".costs-allowance-line")).to_have_text([reached])))
+                                          expect(page.locator(".costs-allowance-line")).to_have_text([reached, model])))
             # 3. Its wake held at the allowance it started with: two facts, the window and the wake, with its card's door.
             for page in pages.values():
                 _overlay(page, _held)
             held = ("The consciousness wake-up is paused at the allowance it had left when it started ($2.99). Resume keeps "
                     "that limit, so it pauses again while its known spend is at it; room returning or a higher limit does "
                     "not raise it. Stop now on its card ends it and frees the clock for its next check. Open in Main ↗")
-            each("held", lambda page: expect(page.locator(".costs-allowance-line")).to_have_text([reached, held]))
+            each("held", lambda page: expect(page.locator(".costs-allowance-line")).to_have_text([reached, held, model]))
             page = pages[COMBOS[0]]
             opened = page.evaluate_handle("""() => { const seen = [];
                 window.addEventListener('ouro:open-task', (event) => seen.push(event.detail)); return seen; }""")
@@ -395,7 +397,14 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             each("unknown", lambda page: (
                 spend_says("What it spent in the last 24 hours is unknown. · Consciousness ›")(page),
                 expect(page.locator(".costs-allowance-line")).to_have_text(
-                    ["The usage ledger could not be read, so whether consciousness has room is unknown."])))
+                    ["The usage ledger could not be read, so whether consciousness has room is unknown.", model])))
+            # 4b. A long model id with no break point of its own (no space, hyphen or slash: only the line's overflow-wrap
+            # breaks it) stays inside the card, a phone's included.
+            long_id = "qwen3_coder_480b_a35b_instruct_" * 3 + "fp8"
+            for page in pages.values():
+                _overlay(page, lambda bg: {**bg, "model_route": {"value": long_id, "layer": "consciousness", "local": False}})
+            each("long-model", lambda page: expect(page.locator(".costs-allowance-line").last).to_have_text(
+                f"Thinks with {long_id}."))
             # 5. Off, through the tab's own switch: nothing counts here until it is started again.
             for page in pages.values():
                 _overlay(page, None)

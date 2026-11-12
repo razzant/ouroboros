@@ -382,16 +382,18 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             // API row whose own catalog (OpenRouter's) states a price says it.
             const own = Boolean(sourceId(row) && rowCatalog);
             const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !own });
-            const choosing = !row.local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
+            // A model stored with its ` (local)` label runs on the local lane, as the runtime reads it (slot_lane_label).
+            const local = row.local || / \(local\)$/.test(String(row.model || ''));
+            const choosing = !local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
             status.classList.toggle('ui-status', choosing);
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
-            const price = row.local || keyNote(row) || note || !row.model || sourceId(row) || tieredProcessing(row) ? ''
+            const price = local || keyNote(row) || note || !row.model || sourceId(row) || tieredProcessing(row) ? ''
                 : priceWords(currentItem(row)?.price, { unit: true });
-            status.textContent = row.local ? 'Uses the local runtime.'
+            status.textContent = local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
                         ? 'No models were listed for this source. Your selection is kept.'
-                        : 'Uses your subscription. No API key required.') : price);
+                        : 'Uses your subscription. No API key required.') : price || 'Price unknown');
             // The price is already composed through the translation seam: the overlay leaves it alone and reads the rest.
             if (price) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];
