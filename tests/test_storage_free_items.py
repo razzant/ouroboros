@@ -833,7 +833,7 @@ def test_passive_and_owning_readers_refuse_the_same_records(copies, raw):  # noq
     assert file.name in read_records(copies[0]).unreadable and checkout_registration(handle.path, copies[0]) == "unknown"
 
 
-def test_the_passive_reader_follows_the_owners_rule_for_a_record_and_a_legacy_file(copies, monkeypatch):  # noqa: F811
+def test_the_passive_reader_follows_the_owners_rule_for_a_record_and_never_parses_a_legacy_file(copies, monkeypatch):  # noqa: F811
     from ouroboros.private_copy_read import read_records
 
     handle = _copy(copies)

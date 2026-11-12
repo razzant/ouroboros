@@ -91,15 +91,14 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
 `tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows,
 `tests/test_cost_live_set.py` as the live set grows, one axis at a time (flat, at rest).
 
-- **One stored format:** only imports and history readers decode an old shape; working code
-  knows the current one. An import runs at the startup door, before dependent work, and keeps
-  the original bytes; done is a durable installation fact a restored snapshot or an older
-  body's write reopens, never a process flag. History-sized work stays a named durable
-  maintenance-child job under sequence/source CAS. A display read never imports: unknown while
-  one is owed; passive control readers fall back only for underived rows. Input the body cannot
-  rewrite is translated at one ingress seam. An import leaves by owner acceptance naming the
-  lost upgrade, never by age; double readers convert on touch, proven both ways on old-install
-  data.
+- **One stored format:** only imports and history readers decode an old shape; working code knows
+  the current one. An import runs at the startup door, before dependent work, keeping the original
+  bytes; done is a durable fact a restored snapshot or an older body's write reopens, never a
+  process flag. Older imports keep their recorded contracts. History-sized work is a named durable
+  maintenance-child job under sequence/source CAS; passive control readers fall back only for its
+  underived rows. A display read never imports: unknown while owed. Unrewritable input adapts at
+  one ingress seam. An import leaves by owner acceptance naming the lost upgrade, never by age;
+  double readers convert when changed, proven both ways on old-install data.
 - **Store transactions** lease the shared core's per-thread connection, capture rows
   (`store_capture.py`) and end before decoding or external work; fork only outside them;
   lifecycle code quiesces users and calls `store.prepare_handoff` before renaming a database

@@ -216,8 +216,9 @@ def _prepare_startup_state(root, *, rebuild, repo_dir=None, initialize_journal=F
     try:  # first, so no other job's failure skips it; on a failure here the registry stays for the next boot
         from ouroboros.subagent_worktrees import import_legacy_registry
         copies = import_legacy_registry(root)
-    except Exception:
+    except Exception as exc:
         log.warning("Legacy private-copy registry not imported; the next start repeats it", exc_info=True)
+        copies = {"error": type(exc).__name__}
     try:
         watermarks(root)
     except ValueError:

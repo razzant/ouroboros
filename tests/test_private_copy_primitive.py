@@ -369,7 +369,7 @@ def test_an_unreadable_legacy_registry_is_kept_reported_and_blocks_no_new_copy(t
     assert [(row["op"], row["record"]) for row in reported] == [("legacy_import", str(legacy))]
 
 
-def test_startup_imports_the_registry_a_7_8_0_body_wrote_before_any_worker(tmp_path, monkeypatch):
+def test_the_startup_door_imports_the_registry_a_7_8_0_body_wrote(tmp_path, monkeypatch):
     """The fixture is the registry the v7.8.0 body wrote for an acting child's copy and a delegated
     writer's snapshot, with the recording machine's root replaced."""
     from ouroboros.startup_migrations import prepare_startup_state
@@ -399,7 +399,7 @@ def test_startup_imports_the_registry_a_7_8_0_body_wrote_before_any_worker(tmp_p
     lock = data / "state" / "private_copies" / ".legacy-import.lock"
     held, began = sw.acquire_exclusive_file_lock(lock, timeout_sec=0.0, owner_aware_stale=True), time.monotonic()
     try:
-        assert "private_copies" not in prepare_startup_state(data) and legacy.read_bytes() == raw
+        assert prepare_startup_state(data)["private_copies"] == {"busy": True} and legacy.read_bytes() == raw
     finally:
         sw.release_exclusive_file_lock(lock, held)
     assert time.monotonic() - began < 60, "a start never waits out a busy import lock"
@@ -407,7 +407,7 @@ def test_startup_imports_the_registry_a_7_8_0_body_wrote_before_any_worker(tmp_p
 
     legacy.write_bytes(raw)  # ... and once more, and this start cannot write its receipt
     monkeypatch.setattr(sw, "atomic_write_json", lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")))
-    assert "private_copies" not in prepare_startup_state(data), "a failed import never fails the start"
+    assert prepare_startup_state(data)["private_copies"] == {"error": "OSError"}, "recorded, and the start goes on"
     assert legacy.read_bytes() == raw, "and the file waits at its place for the next one"
 
 

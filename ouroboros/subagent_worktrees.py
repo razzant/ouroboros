@@ -243,7 +243,7 @@ def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str,
     digest, where the bytes are kept) are synced. Its absence is what "imported" means, so a restored
     snapshot or an older body's write is imported at the next start. Unreadable bytes are reported and
     kept the same way (``rows: None``): their copies have no record and show as unregistered in the
-    owner's Free action. Returns the receipt; ``None`` with no file or while another process imports."""
+    owner's Free action. Returns the receipt, ``{"busy": True}`` while another process imports, ``None`` with no file."""
     legacy, root = _legacy_registry_path(data_dir), _data_dir(data_dir)
     if not legacy.is_file():
         return None
@@ -251,7 +251,7 @@ def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str,
     fd = acquire_exclusive_file_lock(lock, timeout_sec=0.0, stale_sec=_LOCK_STALE_SEC,  # a start never waits here
                                      metadata=f"pid={os.getpid()} op=legacy_import", owner_aware_stale=True)
     if fd is None:
-        return None
+        return {"busy": True}
     try:
         if not legacy.is_file():
             return None
