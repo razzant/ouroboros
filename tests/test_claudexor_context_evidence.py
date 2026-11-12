@@ -329,6 +329,30 @@ def test_the_rebind_after_tool_reconciliation_reuses_the_first_answer(tmp_path, 
     assert catalog["calls"] == [("test-source", None, "exact-model")]  # once (Auto, no hidden pin), not twice
 
 
+@pytest.mark.parametrize("preference", [True, False])
+def test_only_a_restores_rebind_marks_its_account_as_the_one_a_send_prefers(monkeypatch, preference):
+    """Fix round 1 (Opus B1): the rebind hands the fit its account as the one a send will prefer only for a restore
+    (``route_is_preference``); a receipt's rebind hands it the account observed serving, unmarked."""
+    from types import SimpleNamespace
+    from ouroboros import context, loop_model_call
+
+    class Asked(BaseException):
+        """Stops the rebind at its route question, holding the task it was asked with."""
+
+    def resolver(task, *, allow_fetch):
+        raise Asked(task)
+
+    monkeypatch.setattr(context, "_context_fit_route", resolver)
+    plan = SimpleNamespace(max_projection=None, low_projection=None, core_sha256="", model_role="main")
+    with pytest.raises(Asked) as asked:
+        loop_model_call._rebind_context_fit_plan(plan, SimpleNamespace(_ctx=SimpleNamespace()), [], model=MODEL,
+                                                 use_local=False, tool_schemas=[], route_is_preference=preference,
+                                                 model_route={"credentialProfileId": "account-a"})
+    task = asked.value.args[0]
+    assert task["model_route"] == {"credentialProfileId": "account-a"}
+    assert task.get("model_route_preferred", False) is preference
+
+
 def test_a_pinned_route_with_a_silent_engine_keeps_its_window_only_with_the_same_fingerprint(tmp_path, monkeypatch,
                                                                                              catalog):
     """H6 (W2, 12.11.2026): a pinned route whose catalog read failed plans by the fresh record of the same profile AND
