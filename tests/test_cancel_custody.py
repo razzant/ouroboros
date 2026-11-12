@@ -16,6 +16,7 @@ import json
 import types
 import pytest
 from ouroboros import cancel_intents as ci
+from ouroboros.terminal_time import terminal_time_fact
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -383,7 +384,9 @@ def test_custody_takes_over_a_slot_stranded_by_an_abandoned_claim(qenv):
     finally:
         proc.terminate()
     assert outcome == qenv.tl.CANCEL_CANCELLED
-    assert load_task_result(qenv.drive, task_id)["status"] == STATUS_CANCELLED
+    stored = load_task_result(qenv.drive, task_id)
+    assert stored["status"] == STATUS_CANCELLED
+    assert terminal_time_fact(stored)["source"] == "supervisor_cancel"  # it killed the work it held and saw the end
     assert ci.active_intent(qenv.drive, task_id) is None
 
 def test_settled_branch_recovers_a_slot_stranded_by_a_dead_custody(qenv):
@@ -481,7 +484,9 @@ def test_two_concurrent_custodies_on_a_pending_task_settle_exactly_once(qenv, mo
 
     assert outcomes.count(qenv.tl.CANCEL_CANCELLED) == 1, outcomes
     assert done_events == ["race-2t"], "exactly ONE task_done"
-    assert load_task_result(qenv.drive, "race-2t")["status"] == STATUS_CANCELLED
+    stored = load_task_result(qenv.drive, "race-2t")
+    assert stored["status"] == STATUS_CANCELLED
+    assert terminal_time_fact(stored)["source"] == "supervisor_cancel"  # it cancelled the work it held
     assert ci.active_intent(qenv.drive, "race-2t") is None
     assert qenv.q.PENDING == [], "the loser must not re-insert the captured row"
 

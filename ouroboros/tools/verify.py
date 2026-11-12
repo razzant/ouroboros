@@ -143,6 +143,17 @@ _ZERO_RUN_DECISIONS = ZERO_RUN_WRITE_DECISIONS
 _EXPECTED_MATCH_KINDS = ("substring", "exact", "exact_line", "json_equals", "bytes_equal")
 
 
+def _missing_check_refusal(kind: str, check: Any) -> str:
+    """A run kind sent without a command: what arrived, a ready call, the kinds that need none."""
+    received = "this call sent none" if check is None else f"check={repr(check)[:120]} holds no command"
+    return (
+        f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check`, and {received}. "
+        'Send the command the host should run, e.g. check=["pytest","-q"] or check="pytest -q"; with no '
+        "command to run use contract_kind=artifact_observation (artifact_paths) or "
+        "no_visible_machine_contract. Nothing ran; no receipt was written."
+    )
+
+
 def _expected_matches(out: str, expected: str, mode: str) -> bool:
     """Match `expected` against the check `out` under the declared `mode`. Substring
     (default) preserves legacy behavior; exact/exact_line/json_equals are opt-in
@@ -534,7 +545,7 @@ def _record_delegation_zero_run(
     ).strip().lower()
     if decision not in _ZERO_RUN_DECISIONS:
         return (
-            "⚠️ TOOL_ARG_ERROR (verify_and_record): zero_run_decision must be one of "
+            f"⚠️ TOOL_ARG_ERROR (verify_and_record): zero_run_decision={decision!r} must be one of "
             f"{', '.join(_ZERO_RUN_DECISIONS)}."
         )
     basis = " ".join(str(
@@ -645,7 +656,7 @@ def _verify_and_record(
     skill_name = str(kwargs.get("skill_name") or "")
     kind = str(contract_kind or "").strip()
     if kind not in _CONTRACT_KINDS:
-        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind must be one of {', '.join(_CONTRACT_KINDS)}."
+        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind!r} must be one of {', '.join(_CONTRACT_KINDS)}."
     if active_tool_profile(ctx) == "local_readonly_subagent":
         # Read-only actor-first sessions need a host-owned zero-run disclosure,
         # not the general command/artifact verification surface.  Keep the
@@ -663,7 +674,7 @@ def _verify_and_record(
             )
     match_mode = str(expected_match or "substring").strip().lower() or "substring"
     if match_mode not in _EXPECTED_MATCH_KINDS:
-        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match must be one of {', '.join(_EXPECTED_MATCH_KINDS)}."
+        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match={match_mode!r} must be one of {', '.join(_EXPECTED_MATCH_KINDS)}."
     if match_mode == "bytes_equal" and kind not in _RUN_KINDS:
         # Silently accepting-and-ignoring the comparison would fake a stronger
         # verification than actually ran (adversarial r1 soft finding).
@@ -721,10 +732,7 @@ def _verify_and_record(
     if kind in _RUN_KINDS:
         argv = _normalize_check(check)
         if not argv:
-            return (
-                f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check` "
-                "(the verification command as argv list or a shell one-liner string)."
-            )
+            return _missing_check_refusal(kind, check)
         if match_mode == "bytes_equal" and len([p for p in (artifact_paths or []) if str(p or "").strip()]) != 2:
             return (
                 "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal requires "

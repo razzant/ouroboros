@@ -1,0 +1,380 @@
+/* Colour tokens, letter chips and tile tones shared by the page and the cards.
+   The page file (site.css) and the card file (card.css) both start with this text, so the two cannot drift apart. */
+:root {
+  --bg: #ffffff; --bg-2: #f5f6f8;
+  --fg: #20232b; --fg-2: #626977; --fg-meta: #555d69; --fg-dis: #6b7280;
+  --obj: #ffffff; --obj-solid: #ffffff; --tray: rgba(28, 33, 51, 0.05); --hair: rgba(28, 33, 51, 0.1); --hover: rgba(28, 33, 51, 0.04);
+  --elev: 0 1px 2px rgba(28, 33, 51, 0.05), 0 6px 18px rgba(28, 33, 51, 0.06);
+  --float: 0 2px 6px rgba(28, 33, 51, 0.08), 0 18px 44px rgba(28, 33, 51, 0.16);
+  --accent: #c93545; --accent-word: #bf2f40; --glow: transparent;
+  --tone-crimson: rgba(201, 53, 69, 0.1); --tone-crimson-ink: #b52b3b;
+  --tone-green: rgba(34, 197, 94, 0.14); --tone-green-ink: #176b49;
+  --tone-blue: #e9eef9; --tone-blue-ink: #24558d;
+  --tone-amber: rgba(245, 158, 11, 0.18); --tone-amber-ink: #805300;
+  --tone-violet: rgba(232, 121, 249, 0.12); --tone-violet-ink: #8f2499;
+  --tS-bg: #15803d; --tS-fg: #ffffff;
+  --tA-bg: #a9e4ba; --tA-fg: #0d4f2f;
+  --tB-bg: #f6d95f; --tB-fg: #5c3b00;
+  --tC-bg: #f5b086; --tC-fg: #7a2a0c;
+  --tD-bg: #f4c3d3; --tD-fg: #94183a; --tD-ring: #c93545;
+  --dot: #1f9d55; --draft: #b45309;
+  --r-obj: 18px; --r-in: 12px; --r-chip: 8px;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg: #0d0b0f; --bg-2: #241f29;
+  --fg: #ece8ee; --fg-2: rgba(255, 255, 255, 0.62); --fg-meta: rgba(255, 255, 255, 0.72); --fg-dis: rgba(255, 255, 255, 0.56);
+  --obj: rgba(255, 255, 255, 0.05); --obj-solid: #18151b; --tray: rgba(255, 255, 255, 0.07); --hair: rgba(255, 255, 255, 0.11); --hover: rgba(255, 255, 255, 0.05);
+  --elev: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.28);
+  --float: 0 2px 8px rgba(0, 0, 0, 0.45), 0 18px 44px rgba(0, 0, 0, 0.5);
+  --accent: #f45152; --accent-word: #fe8a91; --glow: rgba(201, 53, 69, 0.1);
+  --tone-crimson: #7d2033; --tone-crimson-ink: #ffdfe1;
+  --tone-green: rgba(47, 211, 89, 0.13); --tone-green-ink: #83e499;
+  --tone-blue: rgba(96, 165, 250, 0.15); --tone-blue-ink: #a6caff;
+  --tone-amber: rgba(247, 203, 88, 0.13); --tone-amber-ink: #f7cb58;
+  --tone-violet: rgba(232, 121, 249, 0.13); --tone-violet-ink: #f0a0fb;
+  --tS-bg: #2fd359; --tS-fg: #06280f;
+  --tA-bg: #164a2e; --tA-fg: #8eeaa3;
+  --tB-bg: #564710; --tB-fg: #f9d362;
+  --tC-bg: #5c2c14; --tC-fg: #ffb07a;
+  --tD-bg: #58193f; --tD-fg: #ff9fc4; --tD-ring: #ff6b78;
+  --dot: #2fd359; --draft: #f7cb58;
+  color-scheme: dark;
+}
+
+/* ---- letter chip, shared by the table, the legend, the details and the cards.
+   A coloured letter is my pick for the work: S first pick, A strong pick, B useful with supervision, C I'd pick another.
+   A dash (.t-N) stands in the few cells that have no letter on purpose: a seat set by configuration. */
+.t { display: inline-flex; align-items: center; justify-content: center; border: 0; padding: 0; margin: 0; border-radius: var(--r-chip);
+  font-family: inherit; font-weight: 700; font-variant-numeric: tabular-nums; background: transparent; color: inherit; }
+.t-S { background: var(--tS-bg); color: var(--tS-fg); }
+.t-A { background: var(--tA-bg); color: var(--tA-fg); }
+.t-B { background: var(--tB-bg); color: var(--tB-fg); }
+.t-C { background: var(--tC-bg); color: var(--tC-fg); }
+.t-D { background: var(--tD-bg); color: var(--tD-fg); box-shadow: inset 0 0 0 1.5px var(--tD-ring); }
+.t-N { background: transparent; color: var(--fg-dis); font-weight: 600; }
+
+/* tile tones */
+.t-crimson { --tone-bg: var(--tone-crimson); --tone-ink: var(--tone-crimson-ink); }
+.t-green { --tone-bg: var(--tone-green); --tone-ink: var(--tone-green-ink); }
+.t-blue { --tone-bg: var(--tone-blue); --tone-ink: var(--tone-blue-ink); }
+.t-amber { --tone-bg: var(--tone-amber); --tone-ink: var(--tone-amber-ink); }
+.t-violet { --tone-bg: var(--tone-violet); --tone-ink: var(--tone-violet-ink); }
+
+/* What Ouroboros thinks of your LLMs: page styles.
+   Tokens follow the Ouroboros app ("airy dopamine": a plain room, objects on a soft shadow, tone tiles, a crimson accent)
+   and the dark palette of ouroboros-agent.ai. Colour tokens live in tokens.css, which the build puts in front of this file. */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; background: var(--bg); }
+body { margin: 0; min-width: 320px; background: radial-gradient(circle at 78% 0%, var(--glow), transparent 34rem), var(--bg); color: var(--fg);
+  font-family: var(--font); font-size: 14px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+img { max-width: 100%; }
+[hidden] { display: none !important; }
+a { color: inherit; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+.shell { max-width: 1280px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+@media (min-width: 900px) { .shell { padding-left: max(28px, env(safe-area-inset-left, 0px)); padding-right: max(28px, env(safe-area-inset-right, 0px)); } }
+
+/* ---- site bar: the same brand, link and hairline cues as ouroboros-agent.ai */
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; padding-top: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--hair); }
+.brand { display: inline-flex; align-items: center; gap: 11px; text-decoration: none; font-size: 13px; font-weight: 650; border-radius: 10px; }
+.brand img { width: 34px; height: 34px; border-radius: 10px; box-shadow: var(--elev); display: block; }
+.bar nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 20px; margin-left: auto; }
+.bar nav a { color: var(--fg-2); text-decoration: none; font-size: 13px; padding: 6px 0; border-radius: 6px; }
+.bar nav a:hover, .bar nav a[aria-current="page"] { color: var(--fg); }
+.tools { display: flex; align-items: center; gap: 8px; flex: none; }
+.seg { display: flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--tray); }
+.seg button { min-width: 38px; height: 30px; padding: 0 10px; border: 0; border-radius: 999px; background: transparent; color: var(--fg-meta); font-size: 12.5px; font-weight: 650; letter-spacing: 0.02em; cursor: pointer; }
+.seg button:hover { color: var(--fg); }
+.seg button[aria-pressed="true"] { background: var(--obj-solid); color: var(--accent-word); box-shadow: var(--elev); }
+.icon-btn { width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 999px; background: var(--tray); color: var(--fg-meta); cursor: pointer; }
+.icon-btn:hover { color: var(--fg); }
+.icon-btn svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.icon-btn .moon, :root[data-theme="dark"] .icon-btn .sun { display: none; }
+:root[data-theme="dark"] .icon-btn .moon { display: block; }
+@media (max-width: 760px) { .bar nav .far { display: none; } .bar nav { gap: 6px 14px; } }
+@media (max-width: 420px) { .brand span { display: none; } }
+
+.page { display: flex; flex-direction: column; gap: 14px; padding-top: 22px; padding-bottom: 44px; }
+
+/* ---- head: short on purpose. The title, one sentence that says whose opinion this is, the edition; the table comes next.
+   On a small laptop window, 1100 x 750, the whole ranking stays in view under it (render.py checks it) */
+.head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px 28px; }
+.head-main { min-width: 0; flex: 1 1 560px; }
+.eyebrow { margin: 0 0 8px; color: var(--accent-word); font: 11px/1.4 var(--mono); letter-spacing: 0.11em; text-transform: uppercase; }
+h1 { margin: 0; font-size: clamp(28px, 3.4vw, 46px); font-weight: 680; letter-spacing: -0.035em; line-height: 1.04; text-wrap: balance; }
+.lead { margin: 9px 0 0; font-size: 15.5px; line-height: 1.42; color: var(--fg-meta); max-width: 68ch; text-wrap: pretty; }
+.head-side { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; padding-bottom: 3px; max-width: 360px; }
+.status { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--fg); }
+.status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--dot); flex: none; }
+.status.draft::before { background: var(--draft); }
+.head-side .sub { font-size: 12.5px; color: var(--fg-meta); font-variant-numeric: tabular-nums; text-wrap: balance; }
+.head-side a { color: var(--accent-word); text-underline-offset: 3px; display: inline-block; padding: 3px 0; }
+@media (min-width: 900px) { .head-side { flex-direction: column; flex-wrap: nowrap; align-items: flex-end; gap: 3px; text-align: right; } }
+.notice { margin: 0; padding: 9px 12px; border-radius: 10px; background: var(--tone-amber); font-size: 13px; }
+
+/* ---- board: the legend, the views of the table, the table, my first picks */
+.board { background: var(--obj-solid); border-radius: var(--r-obj); box-shadow: var(--elev); padding: 14px 0 12px; min-width: 0; }
+.board-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 20px; padding: 0 18px; }
+h2 { margin: 0; font-size: 19px; line-height: 1.25; font-weight: 660; letter-spacing: -0.012em; }
+.note { margin: 3px 0 0; font-size: 13px; color: var(--fg-meta); max-width: 78ch; }
+.board-head .note { margin: 0; font-size: 12.5px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0; list-style: none; font-size: 12.5px; color: var(--fg-meta); }
+.legend li { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend .t { width: 22px; height: 22px; font-size: 12px; border-radius: 6px; }
+.chips { display: flex; gap: 6px; padding: 9px 18px 5px; overflow-x: auto; scrollbar-width: none; }
+.chips::-webkit-scrollbar { display: none; }
+.chip { flex: none; min-height: 32px; border: 0; border-radius: 999px; padding: 6px 12px; font-size: 13px; font-weight: 600; color: var(--fg-meta); background: var(--tray); cursor: pointer; white-space: nowrap; }
+.chip small { font-size: 12px; font-weight: 500; opacity: 0.8; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.chip:hover { color: var(--fg); }
+.chip[aria-pressed="true"] { background: var(--tone-crimson); color: var(--tone-crimson-ink); }
+.hint { display: none; margin: 0; padding: 2px 18px 6px; font-size: 12px; color: var(--fg-meta); }
+/* my first picks: who holds the top letter in each column, under the table */
+.picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 12px 18px 2px; }
+.picks h3 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 12.5px; font-weight: 650; color: var(--fg-meta); white-space: nowrap; }
+.picks ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.picks li { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 11px; border-radius: 999px; background: var(--tray); font-size: 12.5px; white-space: nowrap; }
+.picks .g { color: var(--fg-meta); }
+.picks b { font-weight: 650; }
+.picks .t { width: 20px; height: 20px; font-size: 11.5px; border-radius: 6px; }
+
+/* the matrix is one grid; rows are display:contents so the sticky header and the sticky first column both work */
+.mxwrap { overflow: auto; max-height: calc(100vh - 12px); max-height: calc(100dvh - 12px); padding: 0 0 4px; overscroll-behavior-x: contain; }
+.mx { --cw: 28px; --gapw: 8px; --namew: 132px; --rowh: 36px; --ghh: 28px;
+  display: grid; grid-template-columns: var(--tpl); align-items: center; width: 100%; min-width: min-content; padding: 0 10px 0 0; font-size: 13px; }
+@media (min-width: 900px) { .mx { --namew: 168px; } }
+.mx .hr, .mx .r { display: contents; }
+.mx .hr > * { position: sticky; z-index: 2; background: var(--obj-solid); }
+.mx .gh, .mx .hr1 > .sp, .mx .corner { top: 0; }
+.mx .wh, .mx .hr2 > .sp { top: var(--ghh); }
+.mx .corner { grid-column: 1; left: 0; z-index: 4; align-self: stretch; display: flex; align-items: flex-end; gap: 8px; padding: 0 0 9px 20px; font-size: 12px; color: var(--fg-meta); }
+.mx .hr1 > .corner { grid-row: span 2; }
+.mx .gh { height: var(--ghh); align-self: stretch; display: flex; align-items: flex-end; justify-content: center; font-size: 12px; font-weight: 650; color: var(--accent-word); white-space: nowrap; overflow: hidden; }
+.mx .gh span { display: block; width: 100%; text-align: center; padding-bottom: 3px; border-bottom: 2px solid var(--tone-crimson); margin: 0 2px; overflow: hidden; text-overflow: ellipsis; }
+:root[data-theme="dark"] .mx .gh span { border-bottom-color: rgba(244, 81, 82, 0.5); }
+.mx .wh { height: 138px; align-self: stretch; display: flex; align-items: flex-end; justify-content: center; min-width: 0; padding: 6px 0 8px; }
+.mx .wh .wl { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; color: var(--fg); }
+.mx .wbtn { border: 0; background: none; padding: 4px 2px; margin: 0; font-size: 12.5px; cursor: pointer; border-radius: 6px; display: flex; align-items: flex-end; justify-content: center; height: 100%; width: 100%; }
+.mx .wbtn:hover .wl, .mx .wbtn.sel .wl { color: var(--accent-word); }
+.mx .hr > .sp { align-self: stretch; }
+.mx .m { grid-column: 1; position: sticky; left: 0; z-index: 1; background: var(--obj-solid); min-width: 0; height: var(--rowh); align-self: stretch; display: flex; align-items: center; padding-left: 10px; }
+.mx .mbtn { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; height: 30px; border: 0; background: none; padding: 0 6px 0 10px; margin: 0; font-size: 13.5px; cursor: pointer; border-radius: 8px; text-align: left; }
+.mx .mbtn:hover, .mx .mbtn.sel { background: var(--hover); }
+/* the place in my ranking stands in front of every name, in every view of the table */
+.mx .rk { flex: none; width: 18px; text-align: right; font-size: 12.5px; font-weight: 700; color: var(--fg-meta); font-variant-numeric: tabular-nums; }
+.mx .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mx .c { display: flex; align-items: center; justify-content: center; align-self: stretch; min-width: 0; height: var(--rowh); padding: 0 1px; }
+.mx .c .t { width: 100%; max-width: 46px; height: 28px; font-size: 13px; }
+.mx button.t { cursor: pointer; transition: transform 0.12s ease; scroll-margin: 176px 12px 12px 190px; }
+.mx .mbtn { scroll-margin-top: 176px; }
+.mx button.t:hover { transform: scale(1.12); }
+.mx button.t.sel { outline: 2px solid var(--fg); outline-offset: 1px; transform: scale(1.12); }
+.mx .r:hover > .c, .mx .r:hover > .sp { background: var(--hover); }
+.mx .r > .sp { align-self: stretch; }
+.mx:not([data-group="all"]) { --cw: 40px; }
+.mx:not([data-group="all"]) .sp { display: none; }
+/* my ranking: one header row, wide letters */
+.mx[data-group="rating"] { --ghh: 0px; }
+.mx[data-group="rating"] .c .t { max-width: 68px; font-size: 14px; }
+.mx:not([data-group="all"]):not(.hz) .wh { height: 88px; }
+/* upright column names may take two lines, so "Reading & checking" does not stretch the header */
+.mx:not([data-group="all"]):not(.hz) .wh .wl { white-space: normal; max-height: 72px; line-height: 1.12; text-align: left; }
+.mx.hz .wh { height: auto; min-height: 42px; }
+.mx.hz .wh .wl { writing-mode: horizontal-tb; transform: none; white-space: normal; text-align: center; line-height: 1.25; }
+.mx.hz .wbtn { padding: 4px 6px; }
+@media (prefers-reduced-motion: reduce) { .mx button.t { transition: none; } }
+@media (min-width: 900px) and (max-height: 800px) {
+  /* a short laptop window: slightly lower rows, so the whole ranking stays in view under the head */
+  .mx[data-group="rating"] { --rowh: 34px; }
+}
+@media (max-width: 560px) {
+  /* phones: a narrower name column, so the six columns or one group of work fit the screen */
+  .mx { --namew: 124px; --rowh: 40px; padding-right: 6px; }
+  .mx .c .t { height: 32px; }
+  .mx:not([data-group="all"]) { --cw: 27px; }
+  .mx .corner { padding-left: 12px; gap: 6px; }
+  .mx .m { padding-left: 4px; }
+  .mx .mbtn { padding: 0 4px 0 8px; gap: 6px; font-size: 13px; }
+  .mx .rk { width: 16px; font-size: 12px; }
+  /* the hint is a nicety; on a phone the table matters more */
+  .board-head .note { display: none; }
+}
+@media (max-width: 359px) {
+  /* the narrowest phones: the six columns still fit */
+  .mx { --namew: 112px; }
+  .mx:not([data-group="all"]) { --cw: 25px; }
+}
+@media (min-width: 1240px) {
+  /* the whole table fits: let the page scroll it, so the header sticks to the window */
+  .mx { --cw: 26px; }
+  .mxwrap { overflow: visible; max-height: none; }
+}
+@media (max-width: 1239px) { .hint { display: block; } }
+.hint[hidden] { display: none; }
+
+/* ---- tiles under the table: three tone tiles and a quiet one. They count what stands behind the ranking */
+.stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (min-width: 900px) { .stats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.stat { border-radius: var(--r-obj); box-shadow: var(--elev); background: var(--tone-bg); min-width: 0; padding: 11px 14px 10px; }
+.stat b { display: block; font-size: 27px; line-height: 1.05; font-weight: 680; letter-spacing: -0.02em; color: var(--tone-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat b small { font-size: 15px; font-weight: 650; letter-spacing: 0; margin-left: 2px; }
+.stat .label { display: block; margin-top: 5px; font-size: 13px; line-height: 1.3; font-weight: 600; color: var(--fg); }
+.stat .sub { display: block; margin-top: 1px; font-size: 12px; line-height: 1.3; color: var(--fg-meta); font-variant-numeric: tabular-nums; }
+.stat.pending { box-shadow: none; background: transparent; outline: 1.5px dashed var(--hair); outline-offset: -1.5px; }
+.stat.pending b { color: var(--fg-dis); }
+/* the token total says how much I worked and nothing about any model: no tone, a hairline, grey ink */
+.stat.quiet { box-shadow: none; background: transparent; outline: 1px solid var(--hair); outline-offset: -1px; }
+.stat.quiet b { color: var(--fg-2); }
+.stat.quiet .label { color: var(--fg-meta); }
+.stat.quiet.pending { outline: 1.5px dashed var(--hair); outline-offset: -1.5px; }
+@media (max-width: 560px) {
+  .stats { gap: 8px; }
+  .stat { padding: 9px 12px 8px; border-radius: 14px; }
+  .stat b { font-size: 22px; }
+  .stat b small { font-size: 13px; }
+  .stat .label { margin-top: 3px; font-size: 12.5px; }
+  .page { padding-top: 18px; }
+}
+
+/* ---- detail: inline under the row on wide screens, a sheet from the bottom on narrow ones */
+.detail { grid-column: 1 / -1; min-width: 0; padding: 4px 10px 10px; }
+.dbox { background: var(--bg-2); border-radius: var(--r-in); padding: 14px 16px 16px; outline: none; }
+.dh { display: flex; align-items: flex-start; gap: 12px; }
+.dh .t { width: 40px; height: 40px; font-size: 20px; border-radius: 10px; flex: none; }
+.dh .t-N { background: var(--tray); }
+/* the place of a model, in the corner where a letter stands for a cell */
+.t.rkb { background: var(--tray); color: var(--fg); font-variant-numeric: tabular-nums; }
+.dh h3 { margin: 0; font-size: 16px; line-height: 1.3; font-weight: 650; }
+.dh .dsub { margin: 2px 0 0; font-size: 13px; color: var(--fg-meta); max-width: 78ch; }
+.dh .dt { flex: 1; min-width: 0; }
+.x { flex: none; width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 999px; background: var(--tray); color: var(--fg-meta); cursor: pointer; }
+.x:hover { color: var(--fg); }
+.x svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.dg { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px 28px; margin-top: 14px; }
+@media (min-width: 860px) { .dg { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); } }
+.dcol { min-width: 0; }
+.kpis { display: flex; flex-wrap: wrap; gap: 6px 26px; }
+.kpis div { min-width: 0; }
+.kpis b { display: block; font-size: 24px; line-height: 1.1; font-weight: 660; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.kpis span { display: block; font-size: 12px; color: var(--fg-meta); }
+.dist { margin-top: 14px; }
+.dist .cap { font-size: 12px; color: var(--fg-meta); margin-bottom: 5px; }
+.dist .barrow { display: flex; gap: 2px; height: 10px; }
+.dist .seg-b { height: 100%; border-radius: 3px; background: var(--fg-dis); opacity: 0.5; min-width: 2px; }
+.dist .seg-b.on { background: var(--accent); opacity: 1; }
+.dist .seg-b.rest { opacity: 0.22; }
+.dist .keys { margin: 6px 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; color: var(--fg-meta); font-variant-numeric: tabular-nums; }
+.dist .keys li.on { color: var(--accent-word); font-weight: 650; }
+.quiet { margin: 10px 0 0; font-size: 12px; color: var(--fg-meta); }
+.why { margin: 14px 0 0; padding: 9px 12px; border-radius: 10px; background: var(--tone-amber); font-size: 13px; }
+.why b { color: var(--tone-amber-ink); font-weight: 650; }
+.why.mine { background: var(--tone-crimson); font-size: 13.5px; }
+.why.mine b { color: var(--tone-crimson-ink); }
+.why.note { background: var(--tone-blue); }
+.why.note b { color: var(--tone-blue-ink); }
+.why.use { background: var(--tray); }
+.why.use b { color: var(--fg); }
+.why + .why { margin-top: 8px; }
+.dcol > .why:first-child, .dcol > .gps:first-child { margin-top: 0; }
+h4.in { margin-top: 14px; }
+.tierlines.inside .t { width: 22px; height: 22px; }
+.tierlines.inside li { align-items: flex-start; }
+.tierlines.inside li > span:last-child { padding-top: 1px; }
+.tierlines.inside small { display: block; margin-top: 1px; font-size: 12.5px; line-height: 1.4; color: var(--fg-meta); }
+.more { margin: 10px 0 0; }
+.link { border: 0; background: none; padding: 3px 0; font-size: 13px; font-weight: 600; color: var(--accent-word); cursor: pointer; border-radius: 6px; text-decoration: underline; text-underline-offset: 3px; }
+/* a model's letters by column, and what I trust it with and what I check */
+.gps { display: flex; flex-wrap: wrap; gap: 5px 6px; margin-top: 8px; }
+.gp { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px 2px 3px; border-radius: 999px; background: var(--tray); font-size: 12px; color: var(--fg-meta); white-space: nowrap; }
+.gp .t { width: 20px; height: 20px; font-size: 11.5px; border-radius: 6px; }
+.tc { margin: 6px 0 0; font-size: 13.5px; line-height: 1.45; max-width: 74ch; }
+.tc b { font-weight: 650; }
+.long + .tc { margin-top: 10px; }
+.dcol > .gps + .tc { margin-top: 12px; }
+.dlong { margin: 0; font-size: 13.5px; line-height: 1.5; max-width: 74ch; }
+.dcol > .dlong + .gps { margin-top: 12px; }
+details .why.note { margin-top: 8px; }
+h4 { margin: 0 0 6px; font-size: 12px; font-weight: 650; color: var(--fg-meta); }
+.facts, .cases { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; font-size: 13px; }
+.facts { margin-top: 14px; }
+.facts li { padding-left: 14px; position: relative; }
+.facts li::before { content: ""; position: absolute; left: 2px; top: 0.62em; width: 5px; height: 5px; border-radius: 50%; background: var(--fg-dis); }
+.cases li { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 12px; }
+.cases small { display: block; margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--fg-meta); font-variant-numeric: tabular-nums; }
+.cases time { white-space: nowrap; font-size: 12px; line-height: 1.6; color: var(--accent-word); font-weight: 650; font-variant-numeric: tabular-nums; }
+.none { margin: 0; font-size: 13px; color: var(--fg-meta); }
+.tierlines { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.tierlines li { display: flex; gap: 10px; align-items: baseline; }
+.tierlines .t { width: 22px; height: 22px; font-size: 12px; border-radius: 6px; flex: none; align-self: flex-start; }
+.scrim { position: fixed; inset: 0; z-index: 40; background: rgba(12, 10, 16, 0.42); }
+.sheet { position: fixed; z-index: 41; left: 0; right: 0; bottom: 0; margin: 0 auto; width: min(100%, 760px); max-height: 86vh; max-height: 86dvh; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--bg-2); border-radius: 20px 20px 0 0; box-shadow: var(--float); padding-bottom: env(safe-area-inset-bottom, 0px); animation: rise 0.18s ease-out; }
+.sheet .dbox { background: transparent; border-radius: 0; padding: 16px 16px 20px; }
+.sheet .dh { position: sticky; top: 0; z-index: 1; background: var(--bg-2); margin: -16px -16px 0; padding: 16px 16px 10px; }
+.sheet .x { width: 44px; height: 44px; margin: -6px -6px 0 0; }
+@keyframes rise { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .sheet { animation: none; } }
+html.locked { overflow: hidden; }
+
+/* ---- the models one by one, in the order of the ranking */
+.sec { background: var(--obj); border-radius: var(--r-obj); box-shadow: var(--elev); padding: 16px 18px 6px; min-width: 0; }
+.vlist { margin: 10px 0 0; padding: 0; list-style: none; }
+.vrow { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px 12px; padding: 14px 0; border-top: 1px solid var(--hair); }
+.vrow:first-child { border-top: 0; }
+@media (min-width: 900px) { .vrow { grid-template-columns: 250px minmax(0, 1fr); gap: 4px 24px; } }
+.vrow .who { min-width: 0; }
+.vrow .who h3 { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 16px; line-height: 1.3; font-weight: 650; }
+.vrow .who h3 .rk { flex: none; min-width: 20px; color: var(--accent-word); font-weight: 700; font-variant-numeric: tabular-nums; }
+.vrow .who .mk { padding-left: 28px; font-size: 12px; color: var(--fg-meta); }
+.vrow .who .gps { padding-left: 25px; }
+.vrow .say { min-width: 0; }
+.vrow .liner { margin: 0; font-size: 16.5px; line-height: 1.35; font-weight: 640; letter-spacing: -0.01em; max-width: 64ch; text-wrap: balance; }
+.vrow .long { margin: 6px 0 0; font-size: 14px; line-height: 1.5; color: var(--fg-meta); max-width: 74ch; }
+details { margin-top: 8px; }
+summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--accent-word); width: fit-content; border-radius: 6px; list-style: none; padding: 3px 0; }
+summary::-webkit-details-marker { display: none; }
+summary::after { content: " ↓"; }
+details[open] summary::after { content: " ↑"; }
+details .facts { margin-top: 8px; }
+details h4 { margin-top: 14px; }
+details > .cases:first-of-type { margin-top: 6px; }
+.ps { margin: 0; padding: 14px 0 12px; border-top: 1px solid var(--hair); font-size: 14px; line-height: 1.5; color: var(--fg-meta); }
+.ps span { display: block; max-width: 82ch; }
+
+.two { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+@media (min-width: 900px) { .two { grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); align-items: start; } }
+.sec.pad { padding-bottom: 16px; }
+.subh { margin: 14px 0 0; font-size: 14px; line-height: 1.3; font-weight: 650; }
+.plain { margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 9px; font-size: 14px; }
+.plain b { font-weight: 650; }
+.plain .mut { color: var(--fg-meta); }
+.plain a, .foot a { color: var(--accent-word); text-underline-offset: 3px; }
+.plain details { margin-top: 4px; }
+
+.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px 24px; margin-top: 6px; padding-top: 18px; border-top: 1px solid var(--hair); font-size: 12.5px; color: var(--fg-meta); }
+.foot p { margin: 0; max-width: 70ch; }
+.foot nav { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.foot nav a { display: inline-flex; align-items: center; min-height: 28px; color: var(--fg-2); text-decoration: none; }
+.foot nav a:hover { color: var(--fg); }
+
+/* ---- editions page */
+.edlist { margin: 6px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 14px; }
+.ed { background: var(--obj); border-radius: var(--r-obj); box-shadow: var(--elev); padding: 16px 18px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px 24px; }
+@media (min-width: 900px) { .ed { grid-template-columns: minmax(0, 1fr) 380px; align-items: start; } }
+.ed h2 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 24px; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.pill { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 12px; font-weight: 650; letter-spacing: 0; background: var(--tone-green); color: var(--tone-green-ink); }
+.pill.draft { background: var(--tone-amber); color: var(--tone-amber-ink); }
+.ed dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 16px; margin: 12px 0 0; font-size: 13.5px; }
+.ed dt { color: var(--fg-meta); }
+.ed dd { margin: 0; font-variant-numeric: tabular-nums; }
+.ed .moved { margin: 12px 0 0; font-size: 14px; max-width: 70ch; }
+.ed .moved b { font-weight: 650; }
+.ed .links { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; font-size: 13.5px; }
+.ed .links a { color: var(--accent-word); text-underline-offset: 3px; }
+.ed figure { margin: 0; }
+.ed figure img { display: block; width: 100%; height: auto; border-radius: 12px; box-shadow: var(--elev); }

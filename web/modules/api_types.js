@@ -49,7 +49,7 @@
  * @property {Array<ProjectEntry>} projects  // the pins and the 50 newest others by last_message_at
  * @property {?string} project_messages_revision  // moves with any Project's last_message_at; null until history is dated
  * @property {?number} project_listable_count
- * @property {Array<number>} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
+ * @property {Array<number>|null} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0); null: registry unreadable, keep the held set
  * @property {?number=} main_visible_revision  // Main's room revision (its standalone messages, as a Project's visible_revision counts); null while unreadable
  * @property {?Object<string, {project_id: string, chat_id: number, project_name: string, origin_bound?: boolean}>} task_bindings  // null only when task_bindings_unchanged; bound task -> its project: suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4). origin_bound marks a task the host included because its OWNER MESSAGE already has a project (#902), so one message cannot keep a second convertible card
  * @property {string} task_bindings_revision  // opaque revision of task_bindings (a digest of the map as sent); '' after a failed read (never held)
@@ -761,7 +761,7 @@
  * @property {boolean=} outcome_final  // true only after the canonical task outcome settles; false marks a pre-finalization narrative
  * @property {{status: string, phase: string, ts: string, provenance: string, model_execution?: Object}=} historical_terminal
  * @property {Object=} model_execution
- * @property {{v: 1, occurred_at: ?string, source: "executor_terminal"|"unknown", attempt: Object}=} terminal_time  // a task_summary row's host end fact; `ts` stays its publication time
+ * @property {{v: 1, occurred_at: ?string, source: "executor_terminal"|"supervisor_cancel"|"unknown", attempt: Object}=} terminal_time  // a task_summary row's host end fact; `ts` stays its publication time
  */
 
 /**

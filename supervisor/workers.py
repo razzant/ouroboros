@@ -1885,7 +1885,7 @@ def _settle_cancelled_pending_row(
     try:
         from supervisor.cancel_publication import queued_address
         stored = write_task_result(
-            DRIVE_ROOT, task_id, status_cancelled,
+            DRIVE_ROOT, task_id, status_cancelled, _cancel_observed=True,
             strict_existing_dict=True,
             result=("Cancelled before this continuation started." if int(task.get("_attempt") or 1) > 1
                     else "Cancelled before start."), **cost_fields,

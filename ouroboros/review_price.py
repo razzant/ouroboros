@@ -4,7 +4,7 @@ A review is not one model call: a reading reviewer makes many calls in one wave,
 reviewer one, and every seat's verdict extraction adds a light call. The usage ledger records
 each physical attempt with its wave (``review_wave_id``) and its row (``review_slot_id``), so
 the price of one review by a row is the median, over that row's recent waves on its current
-model, of what the seat cost in one wave — every attempt summed — with how many reviews it
+model, of what the seat cost in one wave — every attempt summed (``usage_store.review_seat_costs``) — with how many reviews it
 covers and their range. No history is "cost unknown", never a one-call estimate. A session row
 spends a seat and time, not money; callers say so before asking for a price.
 
