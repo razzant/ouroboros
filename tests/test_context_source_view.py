@@ -34,7 +34,7 @@ def test_the_view_imports_first_in_a_fresh_interpreter():
     repo = pathlib.Path(__file__).resolve().parents[1]
     done = subprocess.run([sys.executable, "-c", "import ouroboros.context_source_view"], cwd=repo,
                           env={**os.environ, "PYTHONPATH": str(repo), "PYTHONDONTWRITEBYTECODE": "1"},
-                          check=False, capture_output=True, text=True)
+                          check=False, capture_output=True, text=True, timeout=120)
     assert done.returncode == 0, done.stderr[-2000:]
 
 

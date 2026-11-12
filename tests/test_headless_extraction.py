@@ -111,9 +111,9 @@ def test_headless_facade_reexports_every_moved_identity():
 
 
 def test_headless_extraction_size_bounds_have_meaningful_headroom():
-    """The headless family meets the repository's line contract as the size lane reads it: a module past the
-    target or the cap has its entry in `ouroboros/size_ratchet_manifest.py`. The `size_ratchet` lane is that
-    contract's blocking home; this test keeps no number of its own."""
+    """The headless family meets the repository's line contract as the size lane's tip check reads it: a module in
+    the 1001-1500 band or past the cap has its entry in `ouroboros/size_ratchet_manifest.py` (one at 1501-1600 lines
+    needs none). The `size_ratchet` lane is that contract's blocking home; this test keeps no number of its own."""
     inventory = review.collect_size_ratchet_inventory(REPO, repo_paths=[
         pathlib.Path(module.__file__).relative_to(REPO).as_posix() for module in (headless, *_LEAVES)])
     manifest = review.load_size_ratchet_manifest(REPO / review.SIZE_RATCHET_MANIFEST_PATH)

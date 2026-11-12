@@ -876,7 +876,6 @@ def _authored_view(
                                replaced_notes=replaced_notes, **facts)
 
 
-
 def compact_tool_history_llm(
     messages: list,
     *,
