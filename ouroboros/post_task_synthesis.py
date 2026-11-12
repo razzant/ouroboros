@@ -2,13 +2,13 @@
 
 The best-effort work the post-task orchestrator
 (``agent_task_pipeline._run_post_task_processing_async``) dispatches after a
-task ends: the tool-trace summary, the free host facts row, the fallback
-memory draft or candidate and scratchpad compression,
-plus the shared pre-synthesis usage snapshot and the compact review
-projection. No stage writes lessons or knowledge notes: the acting mind
-authors those (``knowledge_write``). Extracted from
-agent_task_pipeline.py; the pipeline re-exports every name, so historical
-imports and monkeypatch targets keep working."""
+task ends: the tool-trace summary, the free host facts row and the fallback
+memory draft or candidate, plus the shared pre-synthesis usage snapshot and
+the compact review projection. No stage writes lessons or knowledge notes:
+the acting mind authors those (``knowledge_write``); no stage rewrites the
+scratchpad: the mind folds it (#918, ``update_scratchpad`` with ``replaces``).
+Extracted from agent_task_pipeline.py; the pipeline re-exports every name, so
+historical imports and monkeypatch targets keep working."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from typing import Any, Dict
 from ouroboros.dialogue_provenance import presence_provenance_fields
 from ouroboros.llm_claudexor import propagate_model_error
 from ouroboros.observability import without_finalization_timing
-from ouroboros.outcomes import normalize_outcome_axes
+from ouroboros.outcomes import SAFETY_HELD_STATUSES, normalize_outcome_axes
 from ouroboros.subagent_messages import initiator_meta
 from ouroboros.synthesis_cost_text import _summary_row_cost_fields
 from ouroboros.tool_capabilities import routing_action_for_tool
@@ -50,8 +50,9 @@ def task_tool_metrics(llm_trace: dict) -> dict:
     calls = llm_trace.get("tool_calls") or []
     metrics = {
         "tool_calls": None if unavailable else len(calls),
-        "tool_errors": None if unavailable else sum(
-            1 for call in calls if isinstance(call, dict) and call.get("is_error")),
+        "tool_errors": None if unavailable else sum(  # a call Safety held took no effect, and is no tool error
+            1 for call in calls if isinstance(call, dict) and call.get("is_error")
+            and call.get("status") not in SAFETY_HELD_STATUSES),
         # The addressing calls among them (tool_capabilities owns the family), so
         # a replayed block can tell a receipt-only turn from real work without
         # a client list of tool names.
@@ -77,7 +78,6 @@ def task_tool_metrics(llm_trace: dict) -> dict:
 def capture_task_inputs(ctx: Any, task: dict, drive_root: Any, receipts: list) -> dict:
     """Freeze the existing owner corpus and check receipts before actor cleanup."""
     from ouroboros._outcome_receipts import verification_receipt_ledger_row
-    from ouroboros.observability import redact_projection
     from ouroboros.review_evidence_sections import (
         _accept_owner_directives, _accept_verification_summary,
     )
@@ -116,7 +116,7 @@ def capture_task_inputs(ctx: Any, task: dict, drive_root: Any, receipts: list) -
         log.warning("Task verification input unavailable for synthesis: %s", task_id, exc_info=True)
     # Copy once into the normal durable completion package. Prompt workers must
     # neither retain mutable actor objects nor re-read a later task's messages.
-    return json.loads(json.dumps(redact_projection(result).value, ensure_ascii=False, default=str))
+    return json.loads(json.dumps(result, ensure_ascii=False, default=str))
 
 
 
@@ -144,7 +144,10 @@ def build_trace_summary(llm_trace: dict) -> str:
     _cosmetic = len(_buckets.get("cosmetic") or [])
     _recovered = len(_buckets.get("recovered") or [])
     _ignored = len(_buckets.get("ignored") or [])
-    _breakdown_bits = [f"{_unresolved} errors"]
+    _held = sum(1 for error in _buckets.get("unresolved") or [] if error.get("status") in SAFETY_HELD_STATUSES)
+    _breakdown_bits = [f"{_unresolved - _held} errors"]
+    if _held:
+        _breakdown_bits.append(f"{_held} held by Safety")
     if _policy:
         _breakdown_bits.append(f"{_policy} policy-denied")
     if _recovered:
@@ -186,7 +189,8 @@ def build_trace_summary(llm_trace: dict) -> str:
             if tc.get("signal"):
                 facts.append(f"signal={tc.get('signal')}")
             fact_suffix = f" [{', '.join(facts)}]" if facts else ""
-            suffix = " → ERROR" if tc.get("is_error") else ""
+            held = status in SAFETY_HELD_STATUSES  # it carries is_error, yet it is no error
+            suffix = " → HELD BY SAFETY" if held else " → ERROR" if tc.get("is_error") else ""
             return f"{index + 1}. {name}({args_str}){fact_suffix}{suffix}"
 
         if n > 30:
@@ -439,41 +443,6 @@ def _run_memory_fallback_draft(env: Any, task: Dict[str, Any], llm: Any, drive_l
         propagate_paid_interruption(error)
         log.debug("Fallback memory draft setup failed", exc_info=True)
         return "stage_setup_failed"
-
-
-def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
-    """Run scratchpad consolidation inside the root post-task worker."""
-    try:
-        from ouroboros import consolidator as _c
-
-        should_consolidate = _c.should_consolidate_scratchpad
-        consolidate = _c.consolidate_scratchpad
-        if should_consolidate(memory):
-            _identity = memory.load_identity()
-            from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
-
-            base_scope = current_usage_scope()
-            scratch_scope = (
-                replace(base_scope, category="consolidation", source="scratchpad_consolidation")
-                if base_scope is not None
-                else UsageScope(
-                    drive_root=env.drive_root,
-                    category="consolidation",
-                    source="scratchpad_consolidation",
-                )
-            )
-
-            with usage_scope(scratch_scope):
-                u = consolidate(memory, llm, _identity)
-            if u and (u.get("cost") or u.get("prompt_tokens")):
-                from supervisor.state import update_budget_from_usage
-                update_budget_from_usage(u)
-            return _post_task_paid_interruption(u.get("_consolidation_errors") if isinstance(u, dict) else [])
-    except Exception as error:
-        propagate_paid_interruption(error)
-        log.debug("Scratchpad consolidation setup failed", exc_info=True)
-        return "stage_setup_failed"
-
 
 
 # --- a Pause an earlier version saved: ended once by the maintenance pass ---

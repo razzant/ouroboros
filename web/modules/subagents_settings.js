@@ -15,6 +15,7 @@ import {
     routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, updateRouteControlOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
 } from './route_editor_primitives.js';
+import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
 import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog } from './settings_catalog.js';
 import {
@@ -22,6 +23,7 @@ import {
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { recheckMarkHtml } from './safety_recheck.js';
+import { settingsSection } from './settings_controls.js';
 import { revealNewRow } from './ui_helpers.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
@@ -533,7 +535,7 @@ function rowDetailsHtml(row, state, rowKey) {
     const stored = session ? '' : String(row.route.target_id || '').trim();
     const minted = MINTED_FROM[row.minted_from] || '';
     const fact = (label, value, attrs) => `<div${value ? '' : ' hidden'}${attrs ? ` ${attrs}` : ''}><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`;
-    return `<details class="model-role-details available-subagent-details" data-subagent-details>
+    return `<details class="model-role-details available-subagent-details ui-disclosure" data-subagent-details>
                 <summary>Details &amp; history</summary>
                 <dl class="available-subagent-facts">
                     <div><dt>Review cost</dt><dd data-subagent-review-facts>${escapeHtml(reviewCost(row, state))}</dd></div>
@@ -603,8 +605,8 @@ export function availableSubagentRowMarkup(row, state, index = 0) {
             <div class="available-subagent-route">
                 ${field('Source', selectHtml(`data-subagent-field="route" aria-label="Source for Subagent ${ordinal}"`, routeGroups, encodeRouteChoice(row)))}
                 <div class="ui-field available-subagent-field available-subagent-field-model">Model ${session
-                    ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model' })
-                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, state.apiModels, `actor-${rowKey}-models`)}</div>
+                    ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
+                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
@@ -641,7 +643,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         state.snapshot?.subagent_last_delegation || null,
         (state.setting?.items || []).map((row) => row?.route?.kind === ROUTE_KIND_AGENT_SESSION
             ? sessionRouteVerdict(row, state, nowMs).text : ''),
-        state.apiModels, state.modelSources, state.modelCatalogNote, state.processingPreference,
+        state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
     ]);
 }
@@ -1027,7 +1029,7 @@ export function createAvailableSubagentsEditor({
             </div>
             <div class="available-subagents-source" data-review-pool-stays ${pool.stays ? '' : 'hidden'}>${escapeHtml(pool.stays)}</div>
             <div class="available-subagents-diagnostics" data-review-pool-note ${pool.note ? '' : 'hidden'}>${escapeHtml(pool.note)}</div>
-            <details class="model-role-details" data-review-pool-history ${pool.history ? '' : 'hidden'}><summary>Reviewer origin</summary>
+            <details class="model-role-details ui-disclosure" data-review-pool-history ${pool.history ? '' : 'hidden'}><summary>Reviewer origin</summary>
                 <div class="available-subagents-source" data-review-pool-history-text>${escapeHtml(pool.history)}</div></details>
             <div class="available-subagents-source" data-subagents-read-problem ${readProblem ? '' : 'hidden'}>${escapeHtml(readProblem)}</div>
             <div data-subagents-diagnostics class="available-subagents-diagnostics" ${diagnostics.length ? '' : 'hidden'}>${escapeHtml(diagnostics.join(' · '))}</div>
@@ -1205,6 +1207,16 @@ export function createAvailableSubagentsEditor({
         }
     }
 
+    function adoptCatalog(data) {
+        const catalog = mergeModelCatalog(state.modelCatalog || {items: state.apiModels, model_sources: state.modelSources}, data);
+        state.modelCatalog = catalog;
+        state.modelSources = catalog.model_sources;
+        state.apiModels = catalog.items;
+        state.modelCatalogNote = catalogReadNote(catalog);
+        state.signature = '';
+        paint({discoveryOnly: true});
+    }
+
     function mount({ bindStatus = true } = {}) {
         adoptStatus();
         if (bindStatus && !state.statusDisposer) {
@@ -1222,14 +1234,7 @@ export function createAvailableSubagentsEditor({
         }
         if (!state.catalogDisposer) {
             const target = getDoc();
-            const onCatalog = (event) => {
-                const catalog = mergeModelCatalog({ items: state.apiModels, model_sources: state.modelSources }, event?.detail);
-                state.modelSources = catalog.model_sources;
-                state.apiModels = catalog.items;
-                state.modelCatalogNote = catalogReadNote(catalog);
-                state.signature = '';
-                paint({ discoveryOnly: true });
-            };
+            const onCatalog = (event) => adoptCatalog(event?.detail);
             target?.addEventListener?.('settings-model-catalog:updated', onCatalog);
             state.catalogDisposer = () => target?.removeEventListener?.('settings-model-catalog:updated', onCatalog);
         }
@@ -1262,7 +1267,7 @@ export function createAvailableSubagentsEditor({
             markDirty({ structural: true }); paint();
             return { applied: true, error: '' };
         },
-        setPreviewFailure,
+        setPreviewFailure, adoptCatalog,
         validate: validationErrors,
         noteSaveAttempt,
         // An untouched generated draft is no owner choice: Save leaves it unsaved (only an edit here authors it).
@@ -1308,23 +1313,22 @@ export const reviewerTickCaption = (enforcement, access) => REVIEWER_TICK_CAPTIO
     ? 'cyber_pro' : String(enforcement || '').trim().toLowerCase() === 'blocking' ? 'blocking' : 'advisory'];
 
 export function renderSubagentsSection() {
-    return `
-        <div class="form-section" id="subagents-section">
-            <h3>Available subagents</h3>
-            <div class="settings-section-copy">
-                Describe when Ouroboros should choose each numbered subagent, then select how it runs.
-                Clearing a subagent's checkbox keeps its configuration and stops new tasks and reviews
-                from choosing it. Internal references stay stable automatically. A route that is unavailable stays saved
-                and returns an explicit refusal instead of silently changing actor or model. An unpinned
-                session row may rotate among compatible healthy accounts for that same route.
-                Rows marked Reviewer form the review pool; an unmarked row Ouroboros asks is an adviser, heard but never counted.
-            </div>
-            <div class="settings-inline-note" data-reviewer-tick-caption hidden></div>
-            <div class="settings-inline-note">
-                Saved reviewer changes apply from the next task: a task that is already running keeps the
-                reviewers it started with. A reviewer on a subscription waits for capacity rather than
-                silently falling back to API spend.
-            </div>
+    return settingsSection({
+        title: 'Available subagents',
+        id: 'subagents-section',
+        lead: 'Which agents Ouroboros may hand work to, and which of them review it.',
+        details: `Configure the subagents and reviewers Ouroboros works with. Subscriptions and
+            API keys are in Accounts; global model roles are in Models.
+            Describe when Ouroboros should choose each numbered subagent, then select how it runs.
+            Clearing a subagent's checkbox keeps its configuration and stops new tasks and reviews
+            from choosing it. Internal references stay stable automatically. A route that is unavailable stays saved
+            and returns an explicit refusal instead of silently changing actor or model. An unpinned
+            session row may rotate among compatible healthy accounts for that same route.
+            Rows marked Reviewer form the review pool; an unmarked row Ouroboros asks is an adviser, heard but never counted.
+            Saved reviewer changes apply from the next task: a task that is already running keeps the
+            reviewers it started with. A reviewer on a subscription waits for capacity rather than
+            silently falling back to API spend.`,
+        body: `<div class="settings-inline-note" data-reviewer-tick-caption hidden></div>
             ${availableSubagentsEditorHost()}
             <div class="settings-effort-card">
                 <label>Allow mutative subagents</label>
@@ -1356,7 +1360,7 @@ export function renderSubagentsSection() {
                     <div class="settings-inline-note">How deep the chain may nest. <code>0</code> turns delegation off entirely.</div>
                 </div>
             </div>
-            <details class="settings-subsection" id="delegation-advanced">
+            <details class="settings-subsection ui-disclosure" id="delegation-advanced">
                 <summary>Advanced — where subagents check out their work</summary>
                 <div class="settings-subsection-body">
                     <div class="form-grid two">
@@ -1374,8 +1378,8 @@ export function renderSubagentsSection() {
                         Genesis projects are durable; worktrees follow the GC retention setting.
                     </div>
                 </div>
-            </details>
-        </div>`;
+            </details>`,
+    });
 }
 
 let settingsEditor = null;

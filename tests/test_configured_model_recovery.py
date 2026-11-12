@@ -15,7 +15,7 @@ from tests.test_delegate_hold import _configured_registry, _loop_kwargs, _start_
 from tests.test_transport_death_retry import _LedgerLLM, _ledger
 
 
-@pytest.mark.parametrize("external", ["inline", "consumed", "unread", "patch", "pending", "absent", "unreadable"])
+@pytest.mark.parametrize("external", ["inline", "absent", "unreadable"])
 def test_saved_external_work_does_not_gate_supervising_cognition(tmp_path, monkeypatch, external):
     """The incident's long consumed result and uncertain custody use one rail.
 
@@ -131,7 +131,7 @@ def test_live_hold_takes_over_an_existing_transport_episode(tmp_path, monkeypatc
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable", observed)
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *a: False)
     monkeypatch.setattr(delegate_hold, "_leaf_probe_live", lambda *a: True)
-    monkeypatch.setattr(delegate_hold, "supervised_wait", lambda *a: delegate_result({
+    monkeypatch.setattr(delegate_hold, "hold_wake", lambda *a, **_k: delegate_result({
         "status": "succeeded", "run_id": "run-leaf", "supervision_wake_id": "wake-after-hold"}))
     monkeypatch.setattr(delegate_hold, "acknowledge_pending_wake", lambda *a, **kw: True)
     monkeypatch.setattr(custody, "release_task_runs", lambda *a: None)

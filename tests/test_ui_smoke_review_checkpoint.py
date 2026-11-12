@@ -222,7 +222,7 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
                 page.wait_for_timeout(900)  # cover the routine background history sync
                 assert no_summary.locator('.chat-live-line-repeat:not([hidden])').count() == 0
                 assert card.locator('.chat-live-line-repeat:not([hidden])').count() == 0
-                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "review-checkpoint") / "review-truth-chat.png"), full_page=True)
+                page.screenshot(path=str(diagnostic_directory(data_dir.parent, "review-checkpoint", publish=True) / "review-truth-chat.png"), full_page=True)
 
                 page.click('[data-nav-page="dashboard"]')
                 page.click('[data-dashboard-tab="logs"]')
@@ -240,7 +240,7 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
                 assert "Reviewer fable findings omitted: 1" in log_text
                 assert log_card.locator('[data-task-phase]').inner_text() == "warn"
                 review.scroll_into_view_if_needed()
-                review.screenshot(path=str(diagnostic_directory(data_dir.parent, "review-checkpoint") / "review-truth-logs.png"))
+                review.screenshot(path=str(diagnostic_directory(data_dir.parent, "review-checkpoint", publish=True) / "review-truth-logs.png"))
             finally:
                 browser.close()
     except PlaywrightError as exc:
@@ -250,7 +250,6 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_ui_smoke_action_only_author_finish_keeps_the_reviewer_fail(direct_server_with_data):
     """TZ-2 C4 in the real review renderer: Main's final response after a FAIL panel was an
     action-only finish (no stance). The retired acceptance loop stored that decision on the
@@ -319,7 +318,7 @@ def test_ui_smoke_action_only_author_finish_keeps_the_reviewer_fail(direct_serve
                 assert "FAIL" in facts_text
                 assert not re.search(r"\bsolved\b", card.inner_text(), re.I)
                 card.scroll_into_view_if_needed()
-                card.screenshot(path=str(diagnostic_directory(data_dir.parent, "review-checkpoint") / "c4-action-only-author-finish.png"))
+                card.screenshot(path=str(diagnostic_directory(data_dir.parent, "review-checkpoint", publish=True) / "c4-action-only-author-finish.png"))
             finally:
                 browser.close()
     except PlaywrightError as exc:

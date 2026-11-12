@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 REPO = Path(__file__).resolve().parents[1]
 SERVED = ("modules/subagents_settings.js", "modules/settings.js")
@@ -287,7 +287,7 @@ def test_catalogue_access_saves_reloads_restarts_and_reaches_the_pool(direct_ser
             untouched = settings_path.read_bytes()
             _access(page, 2).select_option("full")
             _mark(page, 4).check()
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(re.compile("is-visible"))
+            expect(page.locator("#settings-status")).to_have_text("Unsaved changes")
             _reload(page, discard=True)
             assert _shown(page) == seeded
             assert settings_path.read_bytes() == untouched and not posts

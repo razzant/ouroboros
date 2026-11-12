@@ -107,6 +107,91 @@ def test_auto_does_not_reuse_last_discovered_accounts_capacity(tmp_path, catalog
     assert len(catalog["calls"]) == 2
 
 
+def test_an_auto_start_reads_the_catalog_once_and_rewrites_nothing_it_already_holds(tmp_path, catalog):
+    """Every Auto start reads the engine's catalog live, exactly once: that read answers the window and the output
+    limit even when the output record is past its ten minutes, the same statement read again is not written again,
+    and another advertisement is what the very next start plans by."""
+    from ouroboros import context_timing
+
+    def start(**kwargs):
+        with context_timing.measured_sections():
+            return _probe(tmp_path, **kwargs), context_timing.section_spans()["work"]
+
+    hours_ago = (ce.utc_now() - __import__("datetime").timedelta(hours=2)).isoformat()
+    catalog["value"]["observedAt"] = hours_ago  # no maximum and an output record already past its ten minutes
+    first, work = start()
+    assert (first.window_tokens, first.credential_profile_id, len(catalog["calls"])) == (872_000, "account-a", 1)
+    assert work == {"catalog_calls": 1, "evidence_writes": 2}  # the probe and the output limit; no second read
+    again, work = start()
+    assert (again.to_json(), len(catalog["calls"]), work) == (first.to_json(), 2, {"catalog_calls": 1})
+    catalog["value"] = _catalog("account-b", "identity-b", 500_000)
+    changed, work = start()
+    assert (changed.window_tokens, changed.credential_profile_id, len(catalog["calls"])) == (500_000, "account-b", 3)
+    assert work["catalog_calls"] == 1 and "catalog_calls_again" not in work
+
+
+def test_one_catalog_read_serves_window_and_output_and_a_failed_read_is_not_repeated(tmp_path, monkeypatch):
+    """A probe reads the engine's catalog once. When that read fails (now, or its ten-minute record), the output limit
+    names that failed read instead of waiting on a second read of the same daemon; a read that answered without an
+    account's window answers the output limit too, so a nameless answer is read once per probe."""
+    from ouroboros.llm import LLMClient
+
+    reads = []
+
+    def unreachable(source, credential_profile_id=None, *, requested_model=None):
+        reads.append("timed out")
+        raise TimeoutError("controlled daemon timeout")
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(unreachable))
+    failed = _probe(tmp_path)
+    assert failed.status == ce.STATUS_FAILED and reads == ["timed out"]
+    assert failed.response_limit["source"] == "claudexor metadata: metadata read failed"  # its provenance, not none
+    assert _probe(tmp_path).status == ce.STATUS_FAILED and reads == ["timed out"]  # the failure's record: no read
+    nameless = {**_catalog(), "accountFingerprint": ""}  # answered, but names no account to hold a window
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog",
+                        staticmethod(lambda *_a, **_kw: reads.append("answered") or copy.deepcopy(nameless)))
+    (tmp_path / "fresh").mkdir()
+    assert _probe(tmp_path / "fresh").status == ce.STATUS_UNPROBEABLE and reads[1:] == ["answered"]
+
+
+def test_a_failed_auto_catalog_read_plans_by_the_pools_smallest_fresh_statement(tmp_path, catalog, monkeypatch):
+    """Window B (owner, 07.11.2026): when the engine's catalog does not answer, an unpinned Auto plan is bounded by the
+    smallest window this model's accounts stated within the confirmed TTL, labelled ``pool`` and dated: a bound of one
+    plan, no account witness and no server statement, while the store keeps the failure. A pin (even without its
+    fingerprint), a stale or another model's statement, a catalog that answered without a window and a reader that
+    may not fetch leave the window unknown."""
+    from ouroboros.context_window import resolve_window
+    from ouroboros.llm import LLMClient
+
+    for account, window in (("account-a", 872_000), ("account-b", 500_000)):  # two Auto reads advertised two accounts
+        catalog["value"] = _catalog(account, f"identity-{account[-1]}", window)
+        assert _probe(tmp_path).window_tokens == window
+    reads = []
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+        lambda *_a, **_kw: reads.append(1) or (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+    bound = _probe(tmp_path)
+    assert (bound.window_tokens, bound.status, bound.source) == (500_000, ce.STATUS_CONFIRMED, "pool") and reads == [1]
+    assert not (bound.account_fingerprint or bound.credential_profile_id or bound.server_window)
+    assert bound.ts == max(row["ts"] for row in ce._read(tmp_path)["probes"].values() if row["status"] == "confirmed")
+    assert bound.detail.startswith("smallest advertised capacity of 2 accounts, newest stated 20")
+    assert ce._read(tmp_path)["probes"][bound.route_fp]["status"] == ce.STATUS_FAILED  # only the failure is stored
+    assert resolve_window(bound, 65_536, bound=False).usable == 500_000 - 65_536
+    assert _probe(tmp_path).to_json() == bound.to_json() and reads == [1]  # its ten-minute record reads nothing
+    assert _probe(tmp_path, allow_fetch=False).status == ce.STATUS_FAILED  # a reader that may not fetch: unknown
+    pinned = _probe(tmp_path, options={"source_id": "test-source", "credential_profile_id": "account-a"})
+    assert pinned.status == ce.STATUS_FAILED and pinned.window_tokens == 0  # a pin without its fingerprint is no Auto
+    other = ce.probe(tmp_path, provider="claudexor", model=MODEL + "-other")
+    assert other.window_tokens == 0 and other.status == ce.STATUS_FAILED  # another model's accounts state nothing here
+    data = ce._read(tmp_path)
+    for row in data["probes"].values():
+        row["ts"] = "2020-01-01T00:00:00Z"
+    monkeypatch.setattr(ce, "_read", lambda _root: data)
+    assert not ce._pool_bound(tmp_path, bound, {"provider": "claudexor", "model": MODEL})  # stale statements: unknown
+    monkeypatch.undo()
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    assert _probe(fresh, allow_fetch=False).window_tokens == 0  # not probed: unknown, no pool
+
+
 def test_exact_observed_binding_reuses_only_its_cache(tmp_path, catalog):
     first = _probe(tmp_path)
     options = ce.model_account_options(MODEL, model_route=_binding(first))
@@ -133,8 +218,7 @@ def test_mismatched_catalog_cannot_supply_requested_account_capacity(tmp_path, c
 
 
 @pytest.mark.parametrize("change", [
-    {"accountFingerprint": None}, {"credentialProfileId": ""}, {"provenance": ""},
-    {"observedAt": ""}, {"models": []},
+    {"accountFingerprint": None}, {"models": []},
     {"models": [{"id": "exact-model", "contextWindow": None, "maxContextWindow": None,
                  "effectiveContextWindow": 250_240}]},
 ])

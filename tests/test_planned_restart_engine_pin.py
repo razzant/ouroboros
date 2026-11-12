@@ -3,7 +3,8 @@
 Self-restart after self-modification and the managed update (or its rollback) share
 one seam, the lifespan teardown of a requested restart; the comparison reads the pin
 the next generation selects and the serving engine's own handshake, and the stop is
-the manual Restart's attested stop, never a veto.
+the attested owned-daemon stop, never a veto. The owner's Restart stops no engine of
+its own and takes the same rule (owner 3A, 2026-11-06).
 """
 
 import inspect
@@ -189,7 +190,7 @@ def test_a_switch_intent_compares_the_targets_pin_not_the_landed_checkouts(plann
     assert planned.calls == ["daemon_stop"] and asked == [("c" * 40, "ouroboros/claudexor_runtime_pin.json")]
 
 
-@pytest.mark.parametrize("version", ["3.10.1", "3.11.0", "4.3.0", "10.0.0"])
+@pytest.mark.parametrize("version", ["3.10.1", "4.3.0", "10.0.0"])
 def test_newer_release_survives_lower_checkout_pin(planned, caplog, version):
     gateway = planned.serving(version, "b" * 40)
     with caplog.at_level(logging.WARNING):
@@ -228,7 +229,7 @@ def test_an_adopted_candidates_lower_pin_keeps_newer_engine(planned, monkeypatch
 
 
 @pytest.mark.parametrize("version,other,below", [
-    ("4.3.0", "4.3.1", True), ("3.10.0", "10.0.0", True), ("4.3.1", "4.3.0", False), ("4.3.1", "4.3.1", False),
+    ("4.3.0", "4.3.1", True), ("4.3.1", "4.3.0", False), ("4.3.1", "4.3.1", False),
     ("4.3.0", "v4.3.1", False), ("4.3.0", "4.3.1-rc.1", False), ("4.3.0", "4.3", False), ("4.3.0", "", False),
     ("4.3.0", "4.3.1\n", False), ("4.3.0", "\u0664.\u0663.\u0661", False), ("v4.3.0", "4.3.1", False),
 ])
@@ -237,7 +238,7 @@ def test_release_order_is_the_engines_plain_semver_only(version, other, below):
     assert claudexor_runtime.release_below(version, other) is below
 
 
-@pytest.mark.parametrize("serving", ["v4.3.0", "4.4.0-rc.1", "4.3", ""])
+@pytest.mark.parametrize("serving", ["v4.3.0", "4.4.0-rc.1", ""])
 def test_an_unordered_engine_spelling_keeps_the_existing_stop(planned, monkeypatch, serving):
     planned.serving(serving, "b" * 40)
     monkeypatch.setattr(planned.manager, "stop_outcome", lambda: planned.calls.append("daemon_stop") or "stopped")
@@ -272,14 +273,16 @@ def test_owner_rollback_and_update_doors_keep_the_newer_engine(planned, monkeypa
     assert planned.calls == [] and "keeps newer owned Claudexor 4.3.0" in caplog.text
 
 
-@pytest.mark.parametrize("serving", ["4.3.0", "3.9.8"], ids=["newer engine", "older engine"])
-def test_the_owners_restart_keeps_the_second_attested_stop(planned, monkeypatch, serving):
-    """Its own stop may have been unconfirmed; the teardown still makes the attested stop for any other pin."""
+@pytest.mark.parametrize("serving,stops", [("4.3.0", []), ("3.9.8", ["daemon_stop"])],
+                         ids=["newer engine kept", "older engine replaced"])
+def test_the_owners_restart_takes_the_one_pin_rule(planned, monkeypatch, serving, stops):
+    """Owner Restart no longer stops the engine itself (owner 3A); its teardown takes the one rule every door
+    takes: a newer engine on a lower checkout pin is kept, an older one is replaced by the attested stop."""
     server_restart._OWNER_STOP_BEGAN.set()  # what ``_stop_owned_work`` records first
     planned.serving(serving, "b" * 40)
     monkeypatch.setattr(planned.manager, "stop_outcome", lambda: planned.calls.append("daemon_stop") or "stopped")
     server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == ["daemon_stop"]
+    assert planned.calls == stops
 
 
 def test_a_stale_restart_marker_does_not_turn_a_rollback_into_a_manual_restart(planned):
@@ -310,7 +313,7 @@ def test_the_emergency_cleanup_site_makes_the_same_choice(planned, monkeypatch, 
     if manual:
         server_restart._OWNER_STOP_BEGAN.set()
     server._emergency_process_cleanup()
-    assert planned.calls == ["workers", *(["daemon_stop"] if manual else []), "owned-stop"]
+    assert planned.calls == ["workers", "owned-stop"], "a newer engine is kept on both doors (owner 3A)"
 
 
 def test_the_check_lives_in_the_restart_teardown_and_the_handoff_performer_is_untouched(planned, monkeypatch, tmp_path):
@@ -350,7 +353,6 @@ def test_the_check_lives_in_the_restart_teardown_and_the_handoff_performer_is_un
     assert planned.calls == []
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="POSIX measured process custody")
 def test_real_engine_ends_only_for_another_pin_that_is_not_lower(startup, monkeypatch):  # noqa: F811
     """On the real fake engine (9.9.9 / c*40) the same generation keeps it while the pin matches or is a

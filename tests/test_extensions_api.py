@@ -2278,3 +2278,52 @@ def test_api_extensions_index_presents_dead_running_review_job_as_interrupted_wi
         assert _log_bytes(drive_root) == logs_before
     finally:
         _stop_patches(patches)
+
+
+def test_the_listing_projects_declared_secret_fields_as_configured_missing_or_unknown(tmp_path, monkeypatch):
+    """Skills › Installed reads whether each declared secret field holds a value from one strict read of the
+    effective settings: configured, missing or unknown; never a value, prefix or length, and no requirement."""
+    import ouroboros.gateway.extensions as extensions_api
+    from ouroboros import config as cfg
+
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(cfg, "get_skills_repo_path", lambda: "")
+    for name, extra in (("fakeplug", "env_from_settings: [FAKEPLUG_TOKEN]\nsecret_fields:\n  botToken: FAKEPLUG_TOKEN\n"),
+                        ("plain", "")):
+        skill = tmp_path / "skills" / "external" / name
+        (skill / "scripts").mkdir(parents=True)
+        (skill / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: d\nversion: 0.1.0\ntype: script\nruntime: python3\n{extra}"
+            "scripts:\n  - name: run.py\n---\n# skill\n", encoding="utf-8")
+
+    def rows(document):
+        if document is None:
+            cfg.SETTINGS_PATH.write_text("{\"FAKEPLUG_TOKEN\": ", encoding="utf-8")
+        else:
+            cfg.SETTINGS_PATH.write_text(json.dumps(document), encoding="utf-8")
+        payload = extensions_api._build_extensions_index(tmp_path, repo_path="")
+        return {row["name"]: row.get("secret_config") for row in payload["skills"]}
+
+    secret = "synthetic-secret-value"
+    configured = rows({"FAKEPLUG_TOKEN": secret})
+    assert configured == {"fakeplug": {"fields": [{"id": "botToken", "key": "FAKEPLUG_TOKEN", "state": "configured"}]},
+                          "plain": None}
+    assert secret not in json.dumps(extensions_api._build_extensions_index(tmp_path, repo_path=""))
+    assert rows({"FAKEPLUG_TOKEN": "  "})["fakeplug"]["fields"][0]["state"] == "missing"
+    assert rows(None)["fakeplug"]["fields"][0]["state"] == "unknown"
+
+    # One rule with the secret form: the card asks secret_requests.configured_fields, so a change there reaches it.
+    from ouroboros import secret_requests
+
+    asked: list[list[dict]] = []
+
+    def rule(document, request):
+        asked.append(request["fields"])
+        return {row["id"]: document.get(row["setting_key"]) == "counts" for row in request["fields"]}
+
+    monkeypatch.setattr(secret_requests, "configured_fields", rule)
+    assert rows({"FAKEPLUG_TOKEN": "counts"})["fakeplug"]["fields"][0]["state"] == "configured"
+    assert rows({"FAKEPLUG_TOKEN": secret})["fakeplug"]["fields"][0]["state"] == "missing"
+    assert asked and all(fields == [{"id": "botToken", "setting_key": "FAKEPLUG_TOKEN"}] for fields in asked)
+    assert rows(None)["fakeplug"]["fields"][0]["state"] == "unknown" and len(asked) == 2  # unreadable: never asked

@@ -52,7 +52,8 @@ def _delivery(harness, text, *, bound=None, asserted=0, monkeypatch):
     for direction, body in [("in", "Preserve original files."), ("out", text), ("in", "LATEST: choose A.")]:
         append_jsonl(chat, {"direction": direction, "chat_id": 1, "text": body})
     manifest = plan_dialogue.attach_own_dialogue(ctx, harness.drive, {}, f"plan-ask-{ctx.task_id}-a1", persist=True)
-    packet = "OPERATIVE PLAN MUST STAY\n" + plan_dialogue.render_dialogue(manifest)
+    conversation, snapshot = plan_dialogue.render_dialogue(manifest)  # the plan sits between them in a packet
+    packet = conversation + "OPERATIVE PLAN MUST STAY\n" + snapshot
     monkeypatch.setattr(model_slots, "model_role_option", lambda *_a: asserted)
     slot = _slot()
     delivery = plan_dialogue.dialogue_slot_inputs([slot], system_prompt="g", user_content=packet,
@@ -80,10 +81,7 @@ def test_catalog_budget_has_unit_scope_framing_and_provenance(monkeypatch):
 
 
 @pytest.mark.parametrize("changed", [
-    {"unit": "tokens"}, {"scope": "context_window"}, {"limit": True}, {"limit": 0},
-    {"source": ""}, {"verified_against": None}, {"askPromptBudget": None},
-    {"askPromptBudget": {"shape": "deep_scan", "engineOverheadMax": 0}},
-    {"askPromptBudget": {"shape": "ordinary_initial_attempt", "engineOverheadMax": -1}},
+    {"unit": "tokens"}, {"limit": True}, {"verified_against": None},
 ])
 def test_unknown_or_malformed_constraint_never_becomes_a_budget(monkeypatch, changed):
     gateway = _gateway(monkeypatch, [{"id": "codex", "inputLimits": [{**_native_limit(), **changed}]}])

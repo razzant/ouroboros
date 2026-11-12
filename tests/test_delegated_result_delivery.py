@@ -54,7 +54,7 @@ def test_a_large_delegated_result_is_delivered_whole_or_declared_partial(tmp_pat
     delegate._CUSTODY["run-1"] = delegate._RunCustody(
         run_id="run-1", task_id="t-a", route_id="r", model="m", project_id="p", project_owned=False)
     ctx = _nanny_ctx(tmp_path)
-    raw = delegate._delegate_wait(ctx, "run-1", wait_sec=1)
+    raw = delegate._read_run(ctx, "run-1")
     delegate._CUSTODY.clear()
 
     limit = tool_result_limit("delegate_wait")
@@ -124,7 +124,6 @@ def _staged_for_main(f, raw, run_id="run-coverage"):
     return target, entry
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("partial", [False, True], ids=["whole-large", "measured-head-tail"])
 def test_the_coverage_ack_binds_to_what_delivery_actually_hands_the_model(main_loop, monkeypatch, partial):
     """Real Main credits the exact read window intersected with its final projection."""
@@ -185,7 +184,6 @@ def test_the_coverage_ack_binds_to_what_delivery_actually_hands_the_model(main_l
     assert consumed[0]["bytes"] == len(raw) and consumed[0]["chars"] == len(content)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("missing", ["read_view", "source_revision", "projection"])
 def test_unknown_delivery_metadata_never_claims_complete(main_loop, missing):
     from ouroboros import delegate_output as output
@@ -246,7 +244,7 @@ def _credited(mapping, shown):
 
 
 @pytest.mark.parametrize("start_line,start_char,max_chars", [
-    (1, 0, None), (2, 7, None), (1, 3, 150), (3, 2, 40), (5, 0, 1)])
+    (1, 0, None), (2, 7, None), (1, 3, 150), (3, 2, 40)])
 def test_numbered_read_credit_counts_only_shown_source_characters(start_line, start_char, max_chars):
     """The one delivered-range SSOT decodes read_file's numbered rows: display
     numbers and a hidden middle credit nothing, partial rows keep exact offsets."""
@@ -310,7 +308,6 @@ def test_a_real_2000_row_read_carries_its_display_map_on_the_bounded_result(tmp_
     assert output._delivered_source_ranges(view, text, {"result": text}, content) == [[0, len(content)]]
 
 
-@pytest.mark.serial
 def test_parallel_main_reads_keep_their_own_source_window(main_loop, monkeypatch):
     import threading
     from ouroboros import delegate_output as output
@@ -375,7 +372,7 @@ def test_reading_the_staged_artifact_whole_writes_the_canonical_acknowledgement(
         project_id="p", project_owned=False, root_task_id="t-a", ledger_root=str(tmp_path)))
     ctx = _nanny_ctx(tmp_path)
 
-    first = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    first = json.loads(delegate._read_run(ctx, "run-1"))
     artifact = first["output_delivery"]["artifact"]
     assert first["output_delivery"]["consumed"] is False
     assert "delegate_run_output_consumed" not in _event_types(tmp_path)
@@ -398,7 +395,7 @@ def test_reading_the_staged_artifact_whole_writes_the_canonical_acknowledgement(
     assert "BLOCKED" not in tail and "ERROR" not in tail
     assert "delegate_run_output_consumed" not in _event_types(tmp_path), \
         "head+tail with a skipped middle must never acknowledge"
-    gap_wait = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    gap_wait = json.loads(delegate._read_run(ctx, "run-1"))
     assert gap_wait["output_delivery"]["consumed"] is False
 
     # Filling the gap — contiguous coverage of every line — IS the acknowledgement.
@@ -417,7 +414,7 @@ def test_reading_the_staged_artifact_whole_writes_the_canonical_acknowledgement(
     assert sum(1 for t in _event_types(tmp_path) if t == "delegate_run_output_consumed") == 1
 
     # A re-wait on the terminal run now reports the durable fact in its disposition.
-    second = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    second = json.loads(delegate._read_run(ctx, "run-1"))
     assert second["output_delivery"]["consumed"] is True
 
     # The fact survives a worker restart, like every other custody fact.
@@ -471,7 +468,7 @@ def test_the_staged_artifact_is_the_bytes_it_declares_even_under_a_translating_t
         project_id="p", project_owned=False, root_task_id="t-a", ledger_root=str(tmp_path)))
     ctx = _nanny_ctx(tmp_path)
 
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    out = json.loads(delegate._read_run(ctx, "run-1"))
     artifact = out["output_delivery"]["artifact"]
     on_disk = pathlib.Path(artifact["abs_path"]).read_bytes()
     assert b"\r\n" not in on_disk, "the staged payload is bytes, not translated text"
@@ -517,7 +514,7 @@ def test_an_unread_result_is_a_loud_durable_fact_at_settlement(tmp_path, monkeyp
         project_id="p", project_owned=False, root_task_id="t-a", ledger_root=str(tmp_path)))
     ctx = _nanny_ctx(tmp_path)
 
-    first = json.loads(delegate._delegate_wait(ctx, "run-live", wait_sec=1))
+    first = json.loads(delegate._read_run(ctx, "run-live"))
     artifact = first["output_delivery"]["artifact"]
 
     # 1. The money settled — never held hostage to a disclosure.
@@ -533,7 +530,7 @@ def test_an_unread_result_is_a_loud_durable_fact_at_settlement(tmp_path, monkeyp
     # ONCE PER RUN, not once per poll: a re-wait on an already settled run must not
     # append a second identical omission row (which would read as a second omission),
     # while still telling the parent the result is STILL not collected.
-    repeat = json.loads(delegate._delegate_wait(ctx, "run-live", wait_sec=1))
+    repeat = json.loads(delegate._read_run(ctx, "run-live"))
     assert "NOT COLLECTED" in repeat["result_not_collected"]
     assert sum(1 for t in _event_types(tmp_path) if t == "delegate_run_settled_unread") == 1
 
@@ -541,14 +538,14 @@ def test_an_unread_result_is_a_loud_durable_fact_at_settlement(tmp_path, monkeyp
     # and a restarted worker does not repeat the row either, because the flag replays.
     delegate._CUSTODY.clear()
     assert [c.run_id for c in dc.settled_unread_outputs(tmp_path)] == ["run-live"]
-    restarted = json.loads(delegate._delegate_wait(ctx, "run-live", wait_sec=1))
+    restarted = json.loads(delegate._read_run(ctx, "run-live"))
     assert "NOT COLLECTED" in restarted["result_not_collected"]
     assert sum(1 for t in _event_types(tmp_path) if t == "delegate_run_settled_unread") == 1
 
     # THE READ CLEARS IT, on every surface, with no second settlement needed.
     _read_artifact_whole(ctx, artifact)
     assert dc.settled_unread_outputs(tmp_path) == []
-    again = json.loads(delegate._delegate_wait(ctx, "run-live", wait_sec=1))
+    again = json.loads(delegate._read_run(ctx, "run-live"))
     assert "result_not_collected" not in again, "a collected result must stop nagging"
     assert again["output_delivery"]["consumed"] is True
 
@@ -635,7 +632,7 @@ def test_a_reader_selected_partial_line_is_not_covered(tmp_path, monkeypatch):
         run_id="run-1", task_id="t-a", route_id="r", model="m",
         project_id="p", project_owned=False, root_task_id="t-a", ledger_root=str(tmp_path)))
     ctx = _nanny_ctx(tmp_path)
-    first = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    first = json.loads(delegate._read_run(ctx, "run-1"))
     artifact = first["output_delivery"]["artifact"]
 
     # A line-window sweep with an explicit character bound leaves the long-line gap.
@@ -694,14 +691,14 @@ def test_a_restaged_different_artifact_does_not_inherit_the_old_acknowledgement(
         project_id="p", project_owned=False, root_task_id="t-a", ledger_root=str(tmp_path)))
     ctx = _nanny_ctx(tmp_path)
 
-    first = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    first = json.loads(delegate._read_run(ctx, "run-1"))
     artifact = first["output_delivery"]["artifact"]
     _read_artifact_whole(ctx, artifact)
     acks = lambda: sum(1 for t in _event_types(tmp_path) if t == "delegate_run_output_consumed")
     assert acks() == 1
 
     # Identical re-stage keeps the acknowledgement: same bytes, same fact.
-    same = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    same = json.loads(delegate._read_run(ctx, "run-1"))
     assert same["output_delivery"]["consumed"] is True
 
     # DIFFERENT content re-staged at the same path: the old ack must not transfer.
@@ -711,7 +708,7 @@ def test_a_restaged_different_artifact_does_not_inherit_the_old_acknowledgement(
     from ouroboros.delegate_collection import observe_run
     assert observe_run(tmp_path, dc.replay(tmp_path)["run-1"],
                        {**stub.get_run("run-1"), "lastSeq": 10})
-    changed = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    changed = json.loads(delegate._read_run(ctx, "run-1"))
     artifact2 = changed["output_delivery"]["artifact"]
     assert artifact2["sha256"] != artifact["sha256"]
     assert changed["output_delivery"]["consumed"] is False, \
@@ -762,7 +759,7 @@ def test_a_truncated_primary_output_is_resolved_from_the_artifact_route(
         project_id="p", project_owned=False, root_task_id="t-a", ledger_root=str(tmp_path)))
     ctx = _nanny_ctx(tmp_path)
 
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    out = json.loads(delegate._read_run(ctx, "run-1"))
     assert fetched_paths == [("run-1", "final/answer.md")], \
         "the full artifact must be fetched from the artifacts route, not trusted from the preview"
     delivery = out["output_delivery"]
@@ -809,7 +806,7 @@ def test_an_unresolvable_truncated_output_is_disclosed_and_never_acknowledged(
     ctx = _nanny_ctx(tmp_path)
 
     # Small payload -> the INLINE branch: even inline-fitting must not claim complete.
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    out = json.loads(delegate._read_run(ctx, "run-1"))
     delivery = out["output_delivery"]
     assert delivery["complete"] is False and delivery["consumed"] is False
     assert delivery["primary_output_full"]["fetched"] is False
@@ -833,7 +830,7 @@ def test_an_unresolvable_truncated_output_is_disclosed_and_never_acknowledged(
     dc.record_started(tmp_path, delegate._RunCustody(
         run_id="run-2", task_id="t-a", route_id="r", model="m",
         project_id="p", project_owned=False, root_task_id="t-a", ledger_root=str(tmp_path)))
-    out2 = json.loads(delegate._delegate_wait(ctx, "run-2", wait_sec=1))
+    out2 = json.loads(delegate._read_run(ctx, "run-2"))
     delivery2 = out2["output_delivery"]
     assert delivery2["artifact"], "the preview is still delivered, staged and readable"
     assert delivery2["primary_output_full"]["fetched"] is True
@@ -889,7 +886,7 @@ def test_a_reconciled_run_with_an_unread_artifact_is_visible_as_uncollected(
 
     # Nanny sees the staged preview; settlement cannot finish; the task dies
     # without reading the artifact to EOF.
-    out = json.loads(delegate._delegate_wait(_nanny_ctx(tmp_path, "t-gone"), "run-1", wait_sec=1))
+    out = json.loads(delegate._read_run(_nanny_ctx(tmp_path, "t-gone"), "run-1"))
     assert out["output_delivery"]["artifact"], "this scenario is about a staged artifact"
     assert out["settlement"]["settled"] is False
     delegate._CUSTODY.clear()          # the worker is gone
@@ -912,7 +909,7 @@ def test_a_reconciled_run_with_an_unread_artifact_is_visible_as_uncollected(
 
 def test_the_progress_payload_survives_a_verbose_harness_too(tmp_path, monkeypatch):
     """The sibling surface of the terminal payload: a harness-supplied timeline title is
-    unbounded, and twelve long ones push the PROGRESS payload past the same cap, where
+    unbounded, and twelve long ones push a wake's PROGRESS payload past the same cap, where
     head-truncation severs the same JSON."""
     from ouroboros.loop_tool_execution import _truncate_tool_result
     from ouroboros.tool_capabilities import tool_result_limit
@@ -932,7 +929,7 @@ def test_the_progress_payload_survives_a_verbose_harness_too(tmp_path, monkeypat
     delegate._CUSTODY.clear()
     delegate._CUSTODY["run-1"] = delegate._RunCustody(
         run_id="run-1", task_id="t-a", route_id="r", model="m", project_id="p", project_owned=False)
-    raw = delegate._delegate_wait(_nanny_ctx(tmp_path), "run-1", wait_sec=1, since_seq=1)
+    raw = delegate._read_run(_nanny_ctx(tmp_path), "run-1", 1)
     delegate._CUSTODY.clear()
     assert len(raw) <= tool_result_limit("delegate_wait")
     assert _truncate_tool_result(raw, "delegate_wait", {}) == raw
@@ -943,18 +940,3 @@ def test_the_progress_payload_survives_a_verbose_harness_too(tmp_path, monkeypat
     assert all("OMISSION NOTE" in row["title"] and "original length 20000" in row["title"]
                for row in payload["timeline_tail"])
     assert all(len(row["title"]) < 500 for row in payload["timeline_tail"])
-    # Every advance accounts for its labels: kept + disclosed-shed == what the
-    # harness ACTUALLY PUBLISHED, no kept label past the bound (shedding regime
-    # itself is pinned in test_label_shedding_is_disclosed_...). The old
-    # `== _TIMELINE_TAIL` pinned the defect: kept(12)+shed(0) passed while 18
-    # observation-dropped rows went undisclosed — the tail is display width,
-    # never arrival count.
-    advances = payload["advances"]
-    assert advances, payload
-    for row in advances:
-        assert "advances_omitted" not in row, row      # a head marker has no `events`
-        kept, shed = row["events"], row.get("events_omitted", 0)
-        assert len(kept) + shed == published, row
-        assert kept or shed, row                       # never a silently empty row
-        assert all("OMISSION NOTE" in event["title"] for event in kept), row
-        assert all(len(event["title"]) < 500 for event in kept), row

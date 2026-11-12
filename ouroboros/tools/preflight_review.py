@@ -60,14 +60,18 @@ def _handle_review_status(
     attempt: Optional[int] = None, include_raw: bool = False,
 ) -> str:
     from ouroboros.review_ledger import ledger_root
-    from ouroboros.review_state import compute_snapshot_hash
     from ouroboros.review_status_projection import build_review_projection, build_review_status_payload
 
     # ledger_root is review_state_root's canonical root without its move: reading migrates nothing.
     projection = build_review_projection(
         ctx.drive_root, repo_dir=getattr(ctx, "repo_dir", ""), repo_key=repo_key, tool_name=tool_name,
-        task_id=task_id, attempt=attempt, snapshot_hash_fn=compute_snapshot_hash,
+        task_id=task_id, attempt=attempt,
         reader_task_id=str(getattr(ctx, "task_id", "") or ""), canonical_root=ledger_root(ctx))
+    selected = projection.get("selected_attempt")
+    if selected is not None and selected.tool_name == "commit_reviewed" and selected.status == "reviewing":
+        # Read-only repair view of an unfinished projection, never a new handback for a blocked commit.
+        from ouroboros.tools.review_change_custody import settled_record
+        projection["selected_settled"] = settled_record(ledger_root(ctx), selected) is not None
     payload = build_review_status_payload(projection, next_step=_next_step(projection), include_raw=include_raw)
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -114,8 +118,8 @@ _REVIEW_STATUS_DESCRIPTION = (
     "brief); open commit-readiness debt (`commit_readiness_debts`, `commit_readiness_debts_count`; a durable "
     "anti-thrashing signal that `retry_anchor` names, never an admission gate); the checkout's newest "
     "preflight look (`preflight`) and whether the worktree "
-    "moved since it (`stale_from_edit`, its editor when a tool recorded the edit); the history of legacy "
-    "advisory runs; and a next_step. Pass include_raw=true "
+    "moved since it (`stale_from_edit`, its editor when a tool recorded the edit); where this drive archives the "
+    "retired advisory lane's rows (`advisory_run_archive`, history only); and a next_step. Pass include_raw=true "
     "for the targeted attempt's full per-actor evidence (triad_raw_results, scope_raw_result)."
 )
 

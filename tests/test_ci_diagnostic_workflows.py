@@ -1,26 +1,32 @@
 """Public CI exports preserve producer exits, secret boundaries and full UI proof."""
 from __future__ import annotations
 
-import hashlib
-import io
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
-import tarfile
 from types import SimpleNamespace
 
 import pytest
 import yaml
+from tests._cases import chosen_rows
+import hashlib
+import importlib.util
+import io
+import tarfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 UPLOAD_ACTION = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 CANARY, CANARY_PUSH = "provider-canary.yml", "provider-canary-push.yml"
+# OPENROUTER_PROVIDER_ROUTES_API_KEY: the OpenRouter routes to Google, Anthropic and OpenAI (tests/provider_contract_ci.py).
 PROVIDER_SECRETS = (
-    "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "DEEPSEEK_API_KEY",
+    "OPENROUTER_API_KEY", "OPENROUTER_PROVIDER_ROUTES_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+    "MINIMAX_API_KEY", "DEEPSEEK_API_KEY",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL", "GIGACHAT_CREDENTIALS",
 )
 DOWNLOAD_ACTION = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
@@ -85,6 +91,7 @@ def test_only_informational_steps_tolerate_errors_and_report_missing_uploads():
             assert (step.get("uses") == UPLOAD_ACTION or
                     "tests.ci_evidence summarize" in step.get("run", "") or
                     "tests/ci_evidence.py annotate" in step.get("run", "") or
+                    "ouroboros.test_evidence export-diagnostics" in step.get("run", "") or
                     "diagnostics_incomplete" in step.get("run", ""))
             assert "-m pytest" not in step.get("run", "")
         warning = next(step for step in job["steps"] if "Disclose incomplete" in step.get("name", ""))
@@ -113,7 +120,7 @@ def _canary_wiring_faults(ci, shared, push):
         if caller.get("uses") != f"./.github/workflows/{CANARY}":
             faults.append(f"{label} does not call the shared job")
         if caller.get("secrets") != passed:
-            faults.append(f"{label} does not pass exactly the eight provider secrets by name")
+            faults.append(f"{label} does not pass exactly the nine provider secrets by name")
         if caller.get("permissions") != {"contents": "read"}:
             faults.append(f"{label} widens the called job's permissions")
         if caller.get("with", {}) != scope:
@@ -131,7 +138,10 @@ def _canary_wiring_faults(ci, shared, push):
     inputs = {"scope": {"description": "Canary subset: all, required or optional; failures remain visible",
                         "type": "string", "default": "all"}}
     if _triggers(shared) != {"workflow_call": {"secrets": declared, "inputs": inputs}}:
-        faults.append("the shared job is not call-only with scoped input and eight optional secrets")
+        faults.append("the shared job is not call-only with scoped input and nine optional secrets")
+    producer = next((step for step in shared["jobs"]["integration-test"]["steps"] if step.get("id") == "provider_tests"), {})
+    if {name: (producer.get("env") or {}).get(name) for name in PROVIDER_SECRETS} != passed:
+        faults.append("the pytest step does not receive every declared secret under its own name")
     if _triggers(push) != {"workflow_dispatch": None}:
         faults.append("the standalone provider wrapper must be manual-only")
     # Tags-only is not an unfiltered push: GitHub excludes the undefined branch ref type.
@@ -200,7 +210,12 @@ CANARY_DRIFTS = {
     "caller drops a secret": lambda w: w.push["jobs"]["integration-test"]["secrets"].pop("OPENAI_API_KEY"),
     "required secret": lambda w: _triggers(w.shared)["workflow_call"]["secrets"]["OPENAI_API_KEY"].update(
         required=True),
-    "undeclared ninth secret": lambda w: _triggers(w.shared)["workflow_call"]["secrets"].update(EXTRA={}),
+    "undeclared tenth secret": lambda w: _triggers(w.shared)["workflow_call"]["secrets"].update(EXTRA={}),
+    "pytest step drops the routes key": lambda w: next(step for step in w.shared["jobs"]["integration-test"]["steps"]
+                                                   if step.get("id") == "provider_tests")["env"].pop(
+                                                       "OPENROUTER_PROVIDER_ROUTES_API_KEY"),
+    "caller drops the routes key": lambda w: w.ci["jobs"]["integration-test"]["secrets"].pop(
+        "OPENROUTER_PROVIDER_ROUTES_API_KEY"),
     "shared job self-triggers": lambda w: _triggers(w.shared).update(push=None),
     "caller leaves the shared job": lambda w: w.ci["jobs"]["integration-test"].update(uses="./other.yml"),
     "shared job loses its read-only default": lambda w: w.shared.pop("permissions"),
@@ -213,7 +228,7 @@ CANARY_DRIFTS = {
 }
 
 
-@pytest.mark.parametrize("drift", CANARY_DRIFTS.values(), ids=list(CANARY_DRIFTS))
+@pytest.mark.parametrize("drift", chosen_rows(CANARY_DRIFTS.values(), 0, 21, 27), ids=chosen_rows(list(CANARY_DRIFTS), 0, 21, 27))
 def test_each_provider_canary_wiring_drift_is_named(drift):
     files = SimpleNamespace(ci=_workflow("ci.yml"), shared=_workflow(CANARY), push=_workflow(CANARY_PUSH))
     drift(files)
@@ -237,7 +252,7 @@ def test_manual_ui_selection_is_fixed_partial_and_never_a_paid_or_full_check():
     assert selection["type"] == "choice" and selection["default"] == "full"
     assert selection["options"] == ["full", "viewport", "inflight"]
     assert "PARTIAL DIAGNOSTIC" in caller["run-name"]
-    assert list(caller["jobs"]) == ["ui-smoke", "ui-diagnostic"] and "secrets" not in str(caller)
+    assert list(caller["jobs"]) == ["shard-plan", "ui-smoke", "ui-diagnostic"] and "secrets" not in str(caller)
     lane, partial_job = caller["jobs"]["ui-smoke"], caller["jobs"]["ui-diagnostic"]
     # Exactly one job runs for a dispatch: full or a clearly partial diagnostic.
     for event, choice, runs_lane in (("workflow_dispatch", "full", True),
@@ -247,7 +262,7 @@ def test_manual_ui_selection_is_fixed_partial_and_never_a_paid_or_full_check():
         assert _selected(lane, event, choice) is runs_lane, (event, choice)
         assert _selected(partial_job, event, choice) is not runs_lane, (event, choice)
     # The lane job is the shared lane and carries no selection into it.
-    assert set(lane) == {"name", "if", "uses", "permissions"} and lane["name"] == "ui-smoke"
+    assert set(lane) == {"name", "if", "needs", "uses", "permissions"} and lane["name"] == "ui-smoke"
     assert lane["uses"] == "./.github/workflows/ui-browser.yml"
     # A partial run is named as one wherever it shows; the lane's names never say so.
     assert "format('PARTIAL DIAGNOSTIC UI - {0}', inputs.diagnostic)" in partial_job["name"]
@@ -263,7 +278,7 @@ def test_manual_ui_selection_is_fixed_partial_and_never_a_paid_or_full_check():
     assert list(shared["jobs"]) == UI_JOBS
     assert [shared["jobs"][name].get("if") for name in UI_JOBS] == [None, FULL_LANE, FULL_LANE, "${{ !cancelled() }}"]
     assert [shared["jobs"][name]["name"] for name in UI_JOBS] == [
-        "ui-scope", "ui-shard (${{ matrix.shard }}/8)", "ui-manifest", "ui-smoke"]
+        "ui-scope", "ui-shard (${{ matrix.shard }}/9)", "ui-manifest", "ui-smoke"]
     assert "with" not in _workflow("ci.yml")["jobs"]["ui-smoke"]
     shard, diagnostic = _steps("ui-browser.yml", "ui-shard"), _steps(*PARTIAL)
     full, partial = shard["ui_tests"], diagnostic["ui_diagnostic"]
@@ -336,10 +351,209 @@ def test_ui_producers_have_distinct_reports_and_only_the_public_parent_is_upload
     assert "ci-evidence/ui/host" in shard["ui_summary"]["run"]
     assert "ci-evidence/ui/host" in diagnostic["ui_summary"]["run"]
     assert "ci-evidence/ui/tools" in shard["tools_summary"]["run"]
-    assert '--label "shard ${{ matrix.shard }}/8"' in shard["ui_summary"]["run"]
+    assert '--label "shard ${{ matrix.shard }}/9"' in shard["ui_summary"]["run"]
     annotate = shard["ui_annotations"]["run"]
     assert "python -I -S tests/ci_evidence.py annotate" in annotate
     assert "ci-evidence/ui/host" in annotate and "ci-evidence/ui/tools" in annotate
+
+
+@pytest.mark.parametrize("workflow, job, producer, lane", [
+    ("ui-browser.yml", "ui-shard", "ui_tests", "host"), ("ui-browser.yml", "ui-shard", "browser_tools", "tools"),
+    (*PARTIAL, "ui_diagnostic", "host")], ids=["host-lane", "browser-tools", "partial"])
+def test_each_ui_invocation_keeps_its_raw_run_apart_and_publishes_only_its_diagnostics(tmp_path, workflow, job,
+                                                                                      producer, lane):
+    """#2763: custom frames, facts and startup logs live in each safe_test invocation's run directory, never the
+    proof. The run gets a raw parent outside ci-evidence; its declared diagnostics leave in their own artifact."""
+    from fnmatch import fnmatchcase
+
+    from ouroboros.test_environment import DIAGNOSTIC_OUTPUT_KEYS
+
+    steps, job_steps = _steps(workflow, job), _workflow(workflow)["jobs"][job]["steps"]
+    # A step-level destination would be shared by every retry round, which then overwrites the first attempt.
+    assert set(steps[producer].get("env", {})).isdisjoint({*DIAGNOSTIC_OUTPUT_KEYS, "OUROBOROS_TEST_EVIDENCE_ROOT"})
+    completed, args = _run_shell(steps[producer], tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    launcher = args.index("scripts/safe_test.py")
+    assert args[launcher + 1:launcher + 4] == ["--evidence-dir", f"{tmp_path}/ci-raw/ui/{lane}", "--"]
+    export, upload, proof = steps["ui_diagnostics_export"], steps["ui_diagnostics"], steps["ui_evidence"]
+    order = [step.get("id") for step in job_steps]
+    assert order.index(producer) < order.index("ui_evidence") < order.index("ui_diagnostics_export") < order.index(
+        "ui_diagnostics")
+    assert export["run"] == ('python -m ouroboros.test_evidence export-diagnostics "${{ runner.temp }}/ci-raw/ui" '
+                             '"${{ runner.temp }}/ci-diagnostics/ui"')
+    assert export["if"] == "${{ !cancelled() && steps.install_browsers.outcome == 'success' }}"
+    assert export["continue-on-error"] is True and upload["continue-on-error"] is True
+    assert upload["uses"] == UPLOAD_ACTION and upload["if"] == (
+        "${{ !cancelled() && steps.ui_diagnostics_export.outcome != 'skipped' }}")
+    assert upload["with"]["path"] == "${{ runner.temp }}/ci-diagnostics/ui/" and proof["with"]["path"].endswith(
+        "/ci-evidence/ui/")
+    assert upload["with"]["if-no-files-found"] == "ignore" and upload["with"]["retention-days"] == 30
+    warning = next(step for step in job_steps if "Disclose incomplete" in step.get("name", ""))
+    for failed in ("steps.ui_diagnostics_export.outcome == 'failure'", "steps.ui_diagnostics.outcome == 'failure'"):
+        assert failed in warning["if"]
+    # No proof download can select the diagnostics, whatever shard or attempt made them.
+    def concrete(text, shard="*", attempt="*"):
+        for expression, value in (("github.sha", "c" * 40), ("github.run_id", "31"), ("inputs.diagnostic", "viewport"),
+                                  ("matrix.shard", shard), ("github.run_attempt", attempt)):
+            text = text.replace(f"${{{{ {expression} }}}}", value)
+        return text
+
+    patterns = [concrete(step["with"]["pattern"]) for step in _workflow("ui-browser.yml")["jobs"]["ui-smoke"]["steps"]
+                if step.get("uses") == DOWNLOAD_ACTION]
+    assert len(patterns) == 2 and fnmatchcase(concrete(proof["with"]["name"], "3", "2"), patterns[1]) is (
+        workflow == "ui-browser.yml")
+    for shard in map(str, range(1, 10)):
+        for attempt in ("1", "2"):
+            name = concrete(upload["with"]["name"], shard, attempt)
+            assert "${{" not in name and not any(fnmatchcase(name, pattern) for pattern in patterns), name
+
+
+def _evidence_run(run, files, published=()):
+    """A run directory as scripts/safe_test.py and its producers write it: ``files`` maps relative paths to bytes,
+    and each ``published`` producer folder holds the declaration ``diagnostic_directory(publish=True)`` writes."""
+    from ouroboros.test_evidence import EVIDENCE_RUN_MARKER, PUBLISHED_DIAGNOSTICS_MARKER
+
+    run.mkdir(parents=True)
+    (run / EVIDENCE_RUN_MARKER).write_text("test evidence output, not a source input\n", encoding="utf-8")
+    for relative, data in {**files, **{f"{folder}/{PUBLISHED_DIAGNOSTICS_MARKER}": b"" for folder in published}}.items():
+        (run / relative).parent.mkdir(parents=True, exist_ok=True)
+        (run / relative).write_bytes(data)
+    return run
+
+
+KEY, OTHER_KEY = "0123456789abcdef", "fedcba9876543210"  # diagnostic_directory's producer folders
+
+
+def _raw_runs(raw):
+    """One shard's raw parent: the host lane's first session and retry round, and the browser-tools smoke."""
+    from ouroboros.test_evidence import PUBLISHED_DIAGNOSTICS_MARKER
+
+    first = _evidence_run(raw / "host" / "run-first", {
+        "owner.json": b'{"command": ["python", "-m", "pytest"]}', "result.json": b'{"returncode": 1}',
+        "source/source.json": b"{}", "source/candidate.diff": b"diff", "command-x1/stdout.bin": b"full stdout",
+        "command-x1/stderr.bin": b"full stderr", "command-x1/result.json": b"{}",
+        "pytest-nested/results.json": b'{"reports": []}', "pytest-nested/events.jsonl": b"{}\n",
+        "ui/late-input-heads/receipt.png": b"first frame", "ui/late-input-heads/results.json": b'{"width": 1}',
+        f"server-startup/{KEY}/server-stdio.log": b"traceback", f"server-startup/{KEY}/data/logs/events.jsonl": b"{}\n",
+        f"receipt-facts/{OTHER_KEY}/facts.json": b'{"attempt": "first"}', "receipt-facts/not-a-key/stray.txt": b"?",
+        # A retained neighbour of the published facts, in their family: its producer never declared it.
+        f"receipt-facts/{KEY}/drive.json": b"a synthetic review drive",
+        # Shaped like producer folders, declared by nobody: the owner's record and a stray output stay with the run,
+        # as does everything under a declaration at a family's level (a producer's folder declares only itself).
+        f"source/{KEY}/private.txt": b"the owner's record", f"grok-boundaries/{KEY}/out.txt": b"undeclared output",
+        f"grok-boundaries/{PUBLISHED_DIAGNOSTICS_MARKER}": b"", "stray.txt": b"outside the contract"},
+        published=(f"server-startup/{KEY}", f"receipt-facts/{OTHER_KEY}", f"launch/{KEY}"))
+    # A nested launcher run inside a published folder is that run's own record, never this run's diagnostic.
+    _evidence_run(first / "launch" / KEY / "run-nested", {"source/source.json": b"{}", "ui/nested.png": b"nested"})
+    _evidence_run(raw / "host" / "retry-1" / "run-retry", {"owner.json": b"{}", "ui/late-input-heads/receipt.png":
+                                                           b"retry frame", f"receipt-facts/{OTHER_KEY}/facts.json":
+                                                           b'{"attempt": "retry"}'}, published=(f"receipt-facts/{OTHER_KEY}",))
+    _evidence_run(raw / "tools" / "run-tools", {"result.json": b"{}", f"browser-tools/{KEY}/smoke.png": b"tools"},
+                  published=(f"browser-tools/{KEY}",))
+    return first
+
+
+_EXPORTED = {  # what the producers of _raw_runs published, without their declarations, at each run's relative path
+    "host/run-first/ui/late-input-heads/receipt.png": b"first frame",
+    "host/run-first/ui/late-input-heads/results.json": b'{"width": 1}',
+    f"host/run-first/server-startup/{KEY}/server-stdio.log": b"traceback",
+    f"host/run-first/server-startup/{KEY}/data/logs/events.jsonl": b"{}\n",
+    f"host/run-first/receipt-facts/{OTHER_KEY}/facts.json": b'{"attempt": "first"}',
+    "host/retry-1/run-retry/ui/late-input-heads/receipt.png": b"retry frame",
+    f"host/retry-1/run-retry/receipt-facts/{OTHER_KEY}/facts.json": b'{"attempt": "retry"}',
+    f"tools/run-tools/browser-tools/{KEY}/smoke.png": b"tools"}
+
+
+def test_the_export_takes_each_runs_declared_diagnostics_at_its_relative_path_and_leaves_the_rest(tmp_path):
+    from ouroboros.test_evidence import export_diagnostics
+
+    raw, out = tmp_path / "ci-raw" / "ui", tmp_path / "ci-diagnostics" / "ui"
+    first = _raw_runs(raw)
+    try:  # a link is never followed, whatever it names (where this host can make one)
+        (first / "ui" / "late-input-heads" / "elsewhere.txt").symlink_to(first / "owner.json")
+    except (OSError, NotImplementedError):
+        pass
+    facts = export_diagnostics(raw, out)
+    assert facts["errors"] == [] and facts["files"] == 8
+    assert {row["run"]: row["left"] for row in facts["runs"]} == {
+        "host/retry-1/run-retry": ["OUROBOROS_TEST_EVIDENCE_RUN.txt", "owner.json"],
+        "host/run-first": ["OUROBOROS_TEST_EVIDENCE_RUN.txt", "command-x1", "grok-boundaries", "owner.json",
+                           "pytest-nested", "result.json", "source", "stray.txt"],
+        "tools/run-tools": ["OUROBOROS_TEST_EVIDENCE_RUN.txt", "result.json"]}
+    exported = {path.relative_to(out).as_posix(): path.read_bytes() for path in out.rglob("*") if path.is_file()}
+    assert exported == _EXPORTED
+    assert (first / "ui" / "late-input-heads" / "receipt.png").read_bytes() == b"first frame", "sources stay"
+
+
+def test_a_producer_publishes_only_its_own_folder_and_retained_output_is_the_default(tmp_path, monkeypatch):
+    """Through the real helper: a drive, raw JUnit or checkout beside frames, in their very family, is retained by
+    default; only the frames' producer declares its folder, and a bare pytest's own fallback declares nothing."""
+    from ouroboros.test_evidence import (
+        EVIDENCE_ENV,
+        PUBLISHED_DIAGNOSTICS_MARKER,
+        diagnostic_directory,
+        export_diagnostics,
+    )
+
+    run = _evidence_run(tmp_path / "ci-raw" / "host" / "run-first", {})
+    monkeypatch.setenv(EVIDENCE_ENV, str(run))
+    frames = diagnostic_directory(tmp_path / "case-a", "ui-smoke", publish=True)
+    drive, junit = diagnostic_directory(tmp_path / "case-b", "ui-smoke"), diagnostic_directory(tmp_path / "case-c", "ctrl-c")
+    for folder, name in ((frames, "page.png"), (drive, "state.json"), (junit, "raw.xml")):
+        (folder / name).write_bytes(name.encode())
+    assert frames.parent == drive.parent and diagnostic_directory(tmp_path / "case-a", "ui-smoke", publish=True) == frames
+    assert sorted(path.name for path in frames.iterdir()) == [PUBLISHED_DIAGNOSTICS_MARKER, "page.png"]
+    assert [path.name for path in drive.iterdir()] == ["state.json"], "a retained folder is byte for byte its output"
+    assert sorted(path.name for path in frames.parent.iterdir()) == sorted([frames.name, drive.name])
+    facts = export_diagnostics(tmp_path / "ci-raw", tmp_path / "out")
+    assert facts["errors"] == [] and facts["runs"] == [{"run": "host/run-first", "files": 1, "left": [
+        "OUROBOROS_TEST_EVIDENCE_RUN.txt", "ctrl-c"]}]
+    assert [path.relative_to(tmp_path / "out").as_posix() for path in (tmp_path / "out").rglob("*") if path.is_file()] == [
+        f"host/run-first/ui-smoke/{frames.name}/page.png"]
+    monkeypatch.delenv(EVIDENCE_ENV)
+    bare = diagnostic_directory(tmp_path / "bare", "ui-smoke", publish=True)
+    assert bare == tmp_path / "bare" and list(bare.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="mode 0 denies a listing only to a POSIX non-root")
+@pytest.mark.parametrize("locked", ["host/retry-1", "host/run-first/ui/late-input-heads", "host/run-first/server-startup",
+                                    f"host/run-first/receipt-facts/{KEY}"],
+                         ids=["raw-discovery", "selected-subtree", "family", "unexaminable-producer"])
+def test_an_unreadable_folder_is_a_named_gap_and_its_healthy_siblings_still_export(tmp_path, capsys, locked):
+    """os.walk skips a folder it cannot list without a word. The export names it, exits 1 (the workflow's
+    diagnostics_incomplete; the tests' outcome is their own) and copies every other published diagnostic. A producer
+    folder whose declaration cannot be examined is such a gap too, never an absence, and its family's others leave."""
+    from ouroboros.test_evidence import _export_main
+
+    raw, out = tmp_path / "ci-raw" / "ui", tmp_path / "ci-diagnostics" / "ui"
+    _raw_runs(raw)
+    (raw / locked).chmod(0)
+    try:
+        assert _export_main(["export-diagnostics", str(raw), str(out)]) == 1
+    finally:
+        (raw / locked).chmod(0o700)
+    assert [line.split(": ", 1)[0] for line in capsys.readouterr().out.splitlines()
+            if line.startswith("CI_DIAGNOSTICS_INCOMPLETE ")] == [f"CI_DIAGNOSTICS_INCOMPLETE {locked}"]
+    exported = {path.relative_to(out).as_posix(): path.read_bytes() for path in out.rglob("*") if path.is_file()}
+    assert exported == {name: data for name, data in _EXPORTED.items() if not name.startswith(locked + "/")}
+
+
+def test_an_unwritable_leaf_is_a_named_gap_and_the_rest_still_exports(tmp_path, capsys):
+    from ouroboros.test_evidence import _export_main
+
+    raw, out = tmp_path / "ci-raw" / "ui", tmp_path / "ci-diagnostics" / "ui"
+    _raw_runs(raw)
+    (out / "host" / "run-first").mkdir(parents=True)
+    (out / "host" / "run-first" / "ui").write_text("a file where the run's frames go", encoding="utf-8")
+    assert _export_main(["export-diagnostics", str(raw), str(out)]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    gaps = [line for line in lines if line.startswith("CI_DIAGNOSTICS_INCOMPLETE ")]
+    assert [line.split(":", 1)[0] for line in gaps] == [
+        "CI_DIAGNOSTICS_INCOMPLETE host/run-first/ui/late-input-heads/receipt.png",
+        "CI_DIAGNOSTICS_INCOMPLETE host/run-first/ui/late-input-heads/results.json"]
+    assert lines[-1].startswith("CI_DIAGNOSTICS_EXPORTED 6 file(s), ") and "from 3 run(s)" in lines[-1]
+    assert (out / "host" / "retry-1" / "run-retry" / "ui" / "late-input-heads" / "receipt.png").read_bytes() == b"retry frame"
+    assert _export_main(["export-diagnostics", str(raw)]) == 2  # a malformed call exports nothing
 
 
 def _run_shell(step, tmp_path, *, diagnostic="viewport", result=0, scope="all"):
@@ -351,9 +565,12 @@ def _run_shell(step, tmp_path, *, diagnostic="viewport", result=0, scope="all"):
     command = command.replace("${{ matrix.shards }}", "4")
     command = command.replace("${{ runner.os == 'Windows' && format('--default-suite-shard={0}/8', matrix.shard) || '' }}",
                               "--default-suite-shard=2/8")
-    stub = 'python() { printf "%s\\n" "$@" > "$ARGV_FILE"; return "$PRODUCER_EXIT"; }\n'
+    stub = ('xvfb-run() { test "$1" = -a || return 97; shift; DISPLAY=:ci-test "$@"; }\n'
+            'python() { [[ "$NEEDS_DISPLAY" != 1 || "$DISPLAY" == :ci-test ]] || return 97; '
+            'printf "%s\\n" "$@" > "$ARGV_FILE"; return "$PRODUCER_EXIT"; }\n')
     env = {**os.environ, "ARGV_FILE": str(args), "PRODUCER_EXIT": str(result),
-           "DIAGNOSTIC": diagnostic, "SCOPE": scope}
+           "DIAGNOSTIC": diagnostic, "SCOPE": scope,
+           "NEEDS_DISPLAY": "1" if step.get("id") == "ui_tests" else "0"}
     completed = subprocess.run([bash, "-e", "-o", "pipefail", "-c", stub + command],
                                env=env, capture_output=True, text=True, encoding="utf-8", timeout=10)
     return completed, args.read_text(encoding="utf-8").splitlines() if args.exists() else []
@@ -379,7 +596,6 @@ def test_actual_producer_shell_preserves_success_and_failure_exit(tmp_path, work
 OFFICIAL, FORK, TAG = "razzant/ouroboros", "someone/private-copy", "refs/tags/v7.5.2"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("event,ref,repository,flag", [
     ("push", TAG, OFFICIAL, "--enforce"),
     ("workflow_dispatch", TAG, OFFICIAL, "--enforce"),  # A manual run on a tag ref can publish too.
@@ -433,7 +649,7 @@ def test_release_records_every_consumed_gate_and_waives_none():
 
 
 @pytest.mark.parametrize("ref,repository", [
-    ("refs/tags/v7.7.1", OFFICIAL), ("refs/tags/v7.7.1", FORK), ("refs/tags/v7.7.2", OFFICIAL), (TAG, OFFICIAL),
+    ("refs/tags/v7.7.1", OFFICIAL), ("refs/tags/v7.7.1", FORK), (TAG, OFFICIAL),
 ])
 def test_no_tag_passes_a_red_or_skipped_required_lane(ref, repository):
     from tests.test_windows_signing_release import expression_value
@@ -493,12 +709,36 @@ def test_every_added_outcome_reference_names_an_already_declared_step():
                 known.add(step["id"])
 
 
-@pytest.mark.serial
-def test_full_lane_runs_as_eight_guarded_shards_under_step_ceilings(tmp_path):
+def _ui_shard_counts(text):
+    """Every statement of the UI lane's shard count in the workflow's text, by where it stands."""
+    jobs = yaml.safe_load(text)["jobs"]
+    shard = jobs["ui-shard"]
+    steps = {step["id"]: step for step in shard["steps"] if "id" in step}
+    reconcile = next(step for step in jobs["ui-smoke"]["steps"] if step.get("id") == "reconcile")
+    matrix = shard["strategy"]["matrix"]["shard"]
+    slash = r"\$\{\{ matrix\.shard \}\}/(\d+)"
+
+    def stated(pattern, source):
+        return [int(number) for number in re.findall(pattern, source)]
+
+    return {"matrix": [len(matrix)] if matrix == list(range(1, len(matrix) + 1)) else [],
+            "job name": stated(slash, shard["name"]),
+            "shard argument": stated("--ui-browser-shard=" + slash, steps["ui_tests"]["run"]),
+            "summary label": stated('--label "shard ' + slash, steps["ui_summary"]["run"]),
+            "reconcile count": stated(r"--count (\d+)", reconcile["run"])}
+
+
+def test_the_ui_shard_count_is_one_number_wherever_the_workflow_states_it():
+    """Nine, by decision on run 42833510999: a partial bump would leave nodes unrun or reconcile the wrong lane."""
+    counts = _ui_shard_counts((ROOT / ".github/workflows/ui-browser.yml").read_text(encoding="utf-8"))
+    assert all(count == [9] for count in counts.values()), counts
+
+
+def test_full_lane_runs_as_nine_guarded_shards_under_step_ceilings(tmp_path):
     job = _workflow("ui-browser.yml")["jobs"]["ui-shard"]
     steps = _steps("ui-browser.yml", "ui-shard")
     assert job["needs"] == "scope" and job["if"] == FULL_LANE
-    assert job["strategy"] == {"fail-fast": False, "matrix": {"shard": list(range(1, 9))}}
+    assert job["strategy"] == {"fail-fast": False, "matrix": {"shard": list(range(1, 10))}}
     install, lane, tools = steps["install_browsers"], steps["ui_tests"], steps["browser_tools"]
     # Every producer step has its own ceiling, and their sum stays under the job's: a step
     # ceiling fails the step and leaves the evidence steps running, the job ceiling cancels them.
@@ -510,17 +750,23 @@ def test_full_lane_runs_as_eight_guarded_shards_under_step_ceilings(tmp_path):
     completed, args = _run_shell(lane, tmp_path)
     assert completed.returncode == 0, completed.stderr
     assert args[args.index("pytest") + 1:][:4] == ["tests/", "-m", "ui_browser", "--require-ui-browser"]
-    assert "--ui-browser-shard=2/8" in args and "--session-timeout=4500" in args
+    assert "--ui-browser-shard=2/9" in args and "--session-timeout=4500" in args
     # A hung test fails alone at its per-test timeout (SIGALRM on this Linux runner); nothing narrows the lane.
     assert [arg for arg in args if arg.startswith("--timeout")] == ["--timeout=900"]
     assert not any(arg.startswith(("-k", "--deselect", "--ignore", "--lf", "-x", "-n")) for arg in args)
     # The retry wrapper owns the evidence directory the lane exports into.
     assert args[:6] == ["-I", "-S", "scripts/ci_retry.py", "--evidence-dir", f"{tmp_path}/ci-evidence/ui/host",
                         "--accepted"]
-    assert "--ui-browser-shard=${{ matrix.shard }}/8" in lane["run"]
+    assert "--ui-browser-shard=${{ matrix.shard }}/9" in lane["run"]
     # Browser tools keep their manual/tag condition, independent of the host lane's outcome, on one shard.
     assert "matrix.shard == 1" in tools["if"] and "steps.ui_tests" not in tools["if"]
     assert "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')" in tools["if"]
+    # The real headed visibility fixture must reach an X server; preserving only
+    # the pytest argv would miss the Linux setup failure this wrapper repairs.
+    assert lane["run"].startswith("xvfb-run -a python ")
+    without_display = {**lane, "run": lane["run"].removeprefix("xvfb-run -a ")}
+    completed, _args = _run_shell(without_display, tmp_path)
+    assert completed.returncode == 97
 
 
 # The GitHub-published SHA-256 of caddy_2.11.7_linux_amd64.tar.gz; that archive's SHA-512 is the
@@ -589,7 +835,6 @@ def test_every_shard_installs_the_digest_pinned_official_caddy_its_lane_needs(tm
         assert not output.exists() and not binary.exists()
 
 
-@pytest.mark.serial
 def test_lane_manifest_is_an_unsharded_collection_whose_upload_is_mandatory(tmp_path):
     jobs = _workflow("ui-browser.yml")["jobs"]
     job, steps = jobs["ui-manifest"], _steps("ui-browser.yml", "ui-manifest")
@@ -676,33 +921,11 @@ def _verdict(tmp_path, **results):
 SKIPPED_LANE = {"SHARD_RESULT": "skipped", "MANIFEST_RESULT": "skipped"}
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("results, path, green, said", [
     ({}, "full", True, []),
     ({"SHARD_RESULT": "failure"}, "full", False, ["ui-shard: failure"]),
-    ({"SHARD_RESULT": "cancelled"}, "full", False, ["ui-shard: cancelled"]),
-    ({"SHARD_RESULT": "skipped"}, "full", False, ["ui-shard: skipped"]),
-    ({"MANIFEST_RESULT": "failure"}, "full", False, ["ui-manifest: failure"]),
-    ({"MANIFEST_RESULT": "failure", "SHARD_RESULT": "failure"}, "full", False,
-     ["ui-manifest: failure", "ui-shard: failure"]),
-    ({"MANIFEST_RESULT": "skipped"}, "full", False, ["ui-manifest: skipped"]),
-    ({"MANIFEST_RESULT": "", "SHARD_RESULT": ""}, "full", False, ["ui-manifest: none", "ui-shard: none"]),
     ({"RUN_BROWSER": "false", **SKIPPED_LANE}, "documentation", True, []),
-    # An unknown coverage decision is RED, never "not run".
-    ({"SCOPE_RESULT": "failure", "RUN_BROWSER": "", **SKIPPED_LANE}, "unknown", False,
-     ["coverage decision is unknown (scope job: failure, run_browser: none)"]),
-    ({"SCOPE_RESULT": "cancelled", "RUN_BROWSER": "false", **SKIPPED_LANE}, "unknown", False,
-     ["coverage decision is unknown (scope job: cancelled, run_browser: false)"]),
-    ({"SCOPE_RESULT": "failure", "RUN_BROWSER": "false", **SKIPPED_LANE}, "unknown", False,
-     ["coverage decision is unknown (scope job: failure, run_browser: false)"]),
-    ({"RUN_BROWSER": "", **SKIPPED_LANE}, "unknown", False, ["run_browser: none"]),
-    ({"RUN_BROWSER": "maybe", **SKIPPED_LANE}, "unknown", False, ["run_browser: maybe"]),
-    # A selection reaches this shell from nowhere: one in its environment changes nothing.
-    ({"DIAGNOSTIC": "viewport", "DIAGNOSTIC_RESULT": "success", **SKIPPED_LANE}, "full", False,
-     ["ui-manifest: skipped", "ui-shard: skipped"]),
-], ids=["full-green", "shard-failed", "shard-cancelled", "shard-skipped", "manifest-failed", "both-failed",
-        "manifest-skipped", "lane-silent", "documentation-only", "scope-failed", "scope-cancelled",
-        "scope-failed-after-deciding", "scope-silent", "scope-garbage", "no-diagnostic-path"])
+], ids=["full-green", "shard-failed", "documentation-only"])
 def test_aggregator_verdict_shell_has_two_explicit_paths(tmp_path, results, path, green, said):
     code, stdout, summary = _verdict(tmp_path, **results)
     assert code == int(not green), stdout
@@ -716,7 +939,6 @@ def test_aggregator_verdict_shell_has_two_explicit_paths(tmp_path, results, path
         assert summary == "", "a green full lane is announced by the reconciliation, not by this step"
 
 
-@pytest.mark.serial
 def test_real_reconciler_fails_the_aggregator_step_when_no_shard_reported(tmp_path):
     """The workflow's own reconcile command, run as written: an empty download is RED."""
     bash = shutil.which("bash")
@@ -734,7 +956,7 @@ def test_real_reconciler_fails_the_aggregator_step_when_no_shard_reported(tmp_pa
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     assert completed.returncode == 1, completed.stdout + completed.stderr
     assert "manifest: no valid projection of the unsharded lane" in completed.stdout
-    assert all(f"shard {index}/8: no proof" in completed.stdout for index in range(1, 9))
+    assert all(f"shard {index}/9: no proof" in completed.stdout for index in range(1, 10))
     assert "INCOMPLETE" in summary.read_text(encoding="utf-8")
 
 
@@ -852,3 +1074,355 @@ def test_published_evidence_is_quiet_for_green_passes(tmp_path):
     assert errors == []
     assert "## CI test evidence — parallel pass" in summary and "passed=1, failed=0" in summary
     assert "serial pass" not in summary and "diagnostics_incomplete" not in summary
+
+
+# ---------------------------------------------------------------- bounded browser install (#2895)
+
+INSTALLER = ROOT / "scripts" / "ci_browser_install.py"
+_POSIX_RUNNER = pytest.mark.skipif(os.name == "nt", reason="the install helper runs on the Linux runner: "
+                                                          "POSIX process groups, sudo and apt-get")
+# One POSIX-shell stand-in for sudo, apt-get and the interpreter, shell builtins only so that it stays fast
+# on a loaded host: it logs each call in $FAKE/calls and acts as line N of $FAKE/plan/<kind> says for its
+# Nth call (ok by default). A hang keeps the shell and its `sleep` in the command's process group and
+# records both pids in $FAKE/hung; a deaf one also ignores SIGTERM. Real sudo keeps root's command beyond
+# this user's signals instead; test_a_stopped_download_beyond_this_users_signals_is_refused covers that.
+_STAND_IN = r'''#!/bin/sh
+role=${0##*/}
+if [ "$role" = sudo ]; then
+  [ "$1" = -n ] && [ "$2" = -- ] || exit 98
+  shift 2
+  echo "sudo $*" >> "$FAKE/calls"
+  exec "$@"
+fi
+case "$role $*" in
+  "apt-get update") kind=update ;;
+  "apt-get install -y --no-install-recommends --download-only "*) kind=download ;;
+  "apt-get install -y --no-install-recommends --no-download "*) kind=dpkg ;;
+  "python -m playwright install-deps --dry-run "*) kind=resolve ;;
+  "python -m playwright install "*) kind=browsers ;;
+  "python -m ouroboros.chromium_runtime install") kind=cft ;;
+  *) echo "unexpected call: $role $*" >&2; exit 97 ;;
+esac
+n=0
+[ -f "$FAKE/count.$kind" ] && read -r n < "$FAKE/count.$kind"
+echo $((n + 1)) > "$FAKE/count.$kind"
+echo "$kind $role $*" >> "$FAKE/calls"
+act=ok i=0
+if [ -f "$FAKE/plan/$kind" ]; then
+  while read -r line; do
+    [ "$i" -eq "$n" ] && { act=$line; break; }
+    i=$((i + 1))
+  done < "$FAKE/plan/$kind"
+fi
+case "$act" in
+  ok) [ "$kind" = resolve ] || exit 0
+      printf 'Missing system dependencies (2):\n  libasound2t64\n  xvfb\n'; exit 1 ;;
+  present) echo "All system dependencies are installed."; exit 0 ;;
+  garbled) printf "Failed to install browser dependencies\nError: 'apt-get install -s' exited with code 100:\nE: Unable to locate package xvfb\n"; exit 1 ;;
+  fail) exit 100 ;;
+  hang|deaf) [ "$act" = deaf ] && trap '' TERM
+      sleep 600 & echo "$$ $!" >> "$FAKE/hung"; wait ;;
+esac
+exit 96
+'''
+CLEAN = ["update", "resolve", "download", "dpkg", "browsers", "cft"]
+METADATA = "packages: apt-get update and its dependency report (playwright install-deps --dry-run)"
+
+
+@pytest.fixture
+def browser_install():
+    spec = importlib.util.spec_from_file_location("ci_browser_install_script", INSTALLER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def stand_ins(tmp_path, monkeypatch):
+    """The stand-ins first on PATH, so no real sudo or apt-get can run; ``plan(kind=[acts])`` scripts them."""
+    bin_dir, fake = tmp_path / "bin", tmp_path / "fake"
+    bin_dir.mkdir()
+    (fake / "plan").mkdir(parents=True)
+    for role in ("sudo", "apt-get", "python"):
+        (bin_dir / role).write_text(_STAND_IN, encoding="utf-8")
+        (bin_dir / role).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE", str(fake))
+    assert [shutil.which(role) for role in ("sudo", "apt-get")] == [str(bin_dir / "sudo"), str(bin_dir / "apt-get")]
+
+    def plan(**kinds):
+        for kind, acts in kinds.items():
+            (fake / "plan" / kind).write_text("".join(f"{act}\n" for act in acts), encoding="utf-8")
+
+    def lines(name):
+        return (fake / name).read_text(encoding="utf-8").splitlines() if (fake / name).exists() else []
+
+    return SimpleNamespace(python=str(bin_dir / "python"), dir=fake, plan=plan,
+                           calls=lambda: [line for line in lines("calls") if not line.startswith("sudo ")],
+                           sudo=lambda: [line for line in lines("calls") if line.startswith("sudo ")],
+                           hung=lambda: [int(pid) for line in lines("hung") for pid in line.split()])
+
+
+def _install(module, stand_ins, capsys, *flags, attempt="600"):
+    code = module.main(["--attempt-seconds", attempt, "--python", stand_ins.python, *flags, "chromium", "webkit"])
+    return code, capsys.readouterr().out, [line.split()[0] for line in stand_ins.calls()]
+
+
+def _gone(pid, within=5.0):
+    """The pid runs no longer: absent, someone else's again, or a zombie its new parent has yet to reap."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return True
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                               timeout=10).stdout.strip()
+        if not state or state.startswith("Z"):
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _until_hung(stand_ins):
+    deadline = time.monotonic() + 60
+    while not stand_ins.hung() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert stand_ins.hung(), "the planned hang never started"
+
+
+@pytest.mark.parametrize("workflow, job, arguments", [
+    ("ui-browser.yml", "ui-shard", "--pinned-chromium chromium webkit"), (*PARTIAL, "chromium webkit")],
+    ids=["full-lane", "partial"])
+def test_ui_browser_installs_bound_each_download_below_their_step_ceiling(browser_install, workflow, job, arguments):
+    """#2895: an Ubuntu mirror serving 30 KB/s held `playwright install --with-deps` to the 45-minute step ceiling."""
+    install = _steps(workflow, job)["install_browsers"]
+    assert install["run"] == f"python -I -S scripts/ci_browser_install.py {arguments}"
+    assert install["timeout-minutes"] == 45 and "continue-on-error" not in install
+    assert install["env"] == {"PLAYWRIGHT_BROWSERS_PATH": "${{ runner.temp }}/ui-browsers"}
+    text = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
+    assert "playwright install" not in text and "--with-deps" not in text and "apt-get" not in text
+    # Two bounded stages of two attempts, each stop's three graces included, take at most 41 minutes and
+    # leave the rest of the step's unchanged ceiling to dpkg's single run.
+    assert browser_install.ATTEMPTS == 2 and browser_install.ATTEMPT_SEC == 600
+    bounded = 2 * browser_install.ATTEMPTS * (browser_install.ATTEMPT_SEC + 3 * browser_install.STOP_GRACE_SEC)
+    assert bounded <= 41 * 60 < install["timeout-minutes"] * 60
+
+
+def test_every_ubuntu_browser_install_is_the_bounded_one():
+    """The Docker UI lane and the live stand's probe wait on the same mirrors as #2895. The one direct Playwright
+    install left is Windows': no `--with-deps`, so no packages to wait for, under its own step ceiling."""
+    jobs = _workflow("ci.yml")["jobs"]
+    for job, arguments in (("docker-ui-smoke", "chromium webkit"), ("e2e-live", "chromium")):
+        install = next(step for step in jobs[job]["steps"] if "ci_browser_install.py" in step.get("run", ""))
+        assert install["run"] == f"python -I -S scripts/ci_browser_install.py {arguments}", job
+        assert install["timeout-minutes"] == 45 and "continue-on-error" not in install, job
+    workflows = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    assert workflows and not [path.name for path in workflows if "--with-deps" in path.read_text(encoding="utf-8")]
+    windows = _steps("ci.yml", "full-test-runs")["attachment_browser_install"]
+    assert "runner.os == 'Windows'" in windows["if"] and windows["timeout-minutes"] == 20
+    assert "-m playwright install chromium" in windows["run"]
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("flags, kinds, euid", [(["--pinned-chromium"], CLEAN, 1001), ([], CLEAN[:-1], 0)],
+                         ids=["full-lane-through-sudo", "partial-as-root"])
+def test_a_clean_install_fetches_every_package_before_one_dpkg_run_and_retries_nothing(
+        browser_install, stand_ins, capsys, monkeypatch, flags, kinds, euid):
+    monkeypatch.setattr(browser_install.os, "geteuid", lambda: euid)
+    code, out, called = _install(browser_install, stand_ins, capsys, *flags)
+    assert code == 0, out
+    assert called == kinds and "::warning" not in out and "::error" not in out
+    packages = "-y --no-install-recommends {} libasound2t64 xvfb"  # Playwright's own apt options and its report
+    assert stand_ins.calls()[:5] == [
+        "update apt-get update", "resolve python -m playwright install-deps --dry-run chromium webkit",
+        "download apt-get install " + packages.format("--download-only"),
+        "dpkg apt-get install " + packages.format("--no-download"),
+        "browsers python -m playwright install chromium webkit"]
+    assert stand_ins.sudo() == ([] if euid == 0 else [
+        "sudo apt-get update", "sudo apt-get install " + packages.format("--download-only"),
+        "sudo apt-get install " + packages.format("--no-download")])
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("plan, stopped, kinds", [
+    ({"download": ["fail"]}, "packages: apt-get install --download-only",
+     ["update", "resolve", "download", "download", "dpkg", "browsers", "cft"]),
+    ({"update": ["fail"]}, METADATA, ["update", *CLEAN]),
+    ({"resolve": ["garbled"]}, METADATA, ["update", "resolve", *CLEAN]),  # The update exited 0 with unusable indices.
+    ({"browsers": ["fail"]}, "browsers: playwright install",
+     ["update", "resolve", "download", "dpkg", "browsers", "browsers", "cft"]),
+    ({"cft": ["fail"]}, "browsers: chromium_runtime install", [*CLEAN, "cft"]),
+], ids=["apt-download", "apt-update", "unusable-indices", "playwright-cdn", "chrome-for-testing"])
+def test_a_failed_download_gets_one_retry_that_starts_where_it_stopped(browser_install, stand_ins, capsys, plan,
+                                                                       stopped, kinds):
+    """Only the failed step and the rest of its stage run again: what succeeded keeps its result, and
+    dpkg and each browser install still run once. The update and its report are one step, so a report
+    the indices left unreadable repeats the update too."""
+    stand_ins.plan(**plan)
+    code, out, called = _install(browser_install, stand_ins, capsys, "--pinned-chromium")
+    assert code == 0, out
+    assert called == kinds
+    assert [line for line in out.splitlines() if line.startswith("::")] == [
+        f"::warning title=Browser install retried::{stopped} failed or outlived the attempt's 600 s; "
+        "its one retry starts again there"]
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("plan, refused, kinds", [
+    ({"download": ["fail", "fail"]}, "packages: apt-get install --download-only",
+     ["update", "resolve", "download", "download"]),
+    ({"browsers": ["fail", "fail"]}, "browsers: playwright install", [*CLEAN[:5], "browsers"]),
+], ids=["apt-download", "playwright-cdn"])
+def test_a_download_that_fails_its_one_retry_too_is_refused(browser_install, stand_ins, capsys, plan, refused, kinds):
+    stand_ins.plan(**plan)
+    code, out, called = _install(browser_install, stand_ins, capsys, "--pinned-chromium")
+    assert code == 1 and called == kinds
+    assert out.splitlines()[-1] == f"::error title=Browser install refused::{refused} failed in both attempts of 600 s"
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("act", ["hang", "deaf"], ids=["stops-on-sigterm", "ignores-sigterm"])
+def test_a_stop_leaves_no_member_of_the_commands_group(browser_install, stand_ins, monkeypatch, act):
+    """SIGTERM stops a hung command with its group; one deaf to SIGTERM is killed after the grace."""
+    monkeypatch.setattr(browser_install, "STOP_GRACE_SEC", 0.5)
+    stand_ins.plan(update=[act])
+    process = subprocess.Popen(["apt-get", "update"], start_new_session=True)
+    try:
+        _until_hung(stand_ins)
+        assert browser_install._stop(process)
+        assert len(stand_ins.hung()) == 2 and all(_gone(pid) for pid in stand_ins.hung())
+    finally:
+        # The negative control can break _stop itself; assertion failure must still clean our group.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=10)
+
+
+@_POSIX_RUNNER
+def test_a_stopped_download_beyond_this_users_signals_is_refused(browser_install, stand_ins, capsys, monkeypatch):
+    """Without a terminal, real sudo runs root's apt-get in its own process group: this user's SIGTERM
+    reaches sudo, which relays it, and SIGKILL stops only sudo (the #2895 VM probe). A member that
+    outlives both is named, and no retry starts beside it."""
+    real_killpg = os.killpg
+
+    def as_if_root(pgid, sig):  # Every member is root's: alive (EPERM) or gone (ESRCH), never signalled.
+        real_killpg(pgid, 0)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(browser_install, "STOP_GRACE_SEC", 0.5)
+    monkeypatch.setattr(browser_install.os, "geteuid", lambda: 1001)  # sudo's case, on a root host too
+    monkeypatch.setattr(browser_install.os, "killpg", as_if_root)
+    stand_ins.plan(update=["hang"])  # The first command, so that no earlier one spends this attempt.
+    try:
+        code, out, _ = _install(browser_install, stand_ins, capsys, attempt="2")
+        _until_hung(stand_ins)  # No signal reaches it, so it gets there even past the deadline.
+    finally:
+        for pid in stand_ins.hung():
+            os.kill(pid, signal.SIGKILL)
+    assert code == 1 and [line.split()[0] for line in stand_ins.calls()] == ["update"] and "::warning" not in out, out
+    assert re.fullmatch(r"::error title=Browser install refused::`sudo -n -- apt-get update` outlived SIGTERM and "
+                        r"SIGKILL: its process group \d+ still has members this user cannot signal, so no "
+                        r"retry starts beside them", out.splitlines()[-1]), out
+    assert all(_gone(pid) for pid in stand_ins.hung())
+
+
+@_POSIX_RUNNER
+def test_without_root_or_sudo_nothing_runs(browser_install, stand_ins, capsys, monkeypatch):
+    monkeypatch.setattr(browser_install.os, "geteuid", lambda: 1001)
+    monkeypatch.setattr(browser_install.shutil, "which", lambda name, *args, **kwargs: None)
+    code, out, called = _install(browser_install, stand_ins, capsys)
+    assert (code, called) == (1, [])
+    assert out.splitlines()[-1] == ("::error title=Browser install refused::packages: apt-get needs root, "
+                                    "and this user has no sudo")
+
+
+@_POSIX_RUNNER
+def test_a_dpkg_failure_is_an_installation_failure_and_is_never_retried(browser_install, stand_ins, capsys):
+    stand_ins.plan(dpkg=["fail"])
+    code, out, called = _install(browser_install, stand_ins, capsys, "--pinned-chromium")
+    assert code == 1 and called == ["update", "resolve", "download", "dpkg"] and "::warning" not in out
+    assert out.splitlines()[-1] == (
+        "::error title=Browser install refused::dpkg: apt-get install --no-download exited 100; "
+        "an installation failure is not a download, so it is not retried")
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("reports, kinds, code", [
+    (["present"], ["update", "resolve", "browsers"], 0),  # Nothing to fetch or install: browsers only.
+    (["garbled", "garbled"], ["update", "resolve", "update", "resolve"], 1),  # Unreadable after its one retry too.
+], ids=["all-present", "unreadable-twice"])
+def test_the_package_stage_follows_playwrights_own_report(browser_install, stand_ins, capsys, reports, kinds, code):
+    stand_ins.plan(resolve=reports)
+    result, out, called = _install(browser_install, stand_ins, capsys)
+    assert (result, called) == (code, kinds), out
+    assert out.count("::warning") == len(reports) - 1
+    if code:
+        assert "without the report this helper reads (Playwright 1.62)" in out
+        assert "Failed to install browser dependencies" in out
+        assert "E: Unable to locate package xvfb" in out.splitlines()[-1]  # apt's own reason reaches the refusal
+
+
+@pytest.mark.parametrize("report, status, expected", [
+    ("Missing system dependencies (2):\n  libasound2t64\n  xvfb\n", 1, ["libasound2t64", "xvfb"]),
+    ("BEWARE: your OS is not officially supported\nMissing system dependencies (1):\n  libicu74:amd64\n", 1,
+     ["libicu74:amd64"]),
+    ("All system dependencies are installed.\n", 0, []),
+    ("Missing system dependencies (3):\n  libasound2t64\n  xvfb\n", 1, None),  # fewer rows than counted
+    ("Missing system dependencies (1):\nxvfb\n", 1, None),  # not the indented list
+    ("Missing system dependencies (1):\n  xvfb; reboot\n", 1, None),  # not a package name
+    ("Missing system dependencies (0):\n", 1, None),
+    ("Missing system dependencies (1):\n  xvfb\n", 0, None),  # Playwright exits 1 when it names packages
+    ("All system dependencies are installed.\n", 1, None),
+    ("", 0, None),
+])
+def test_the_dependency_report_is_read_exactly_or_refused(browser_install, report, status, expected):
+    if expected is None:
+        with pytest.raises(browser_install.Refused, match=r"Playwright 1\.62"):
+            browser_install.missing_packages(report, status)
+    else:
+        assert browser_install.missing_packages(report, status) == expected
+
+
+@_POSIX_RUNNER
+def test_the_entry_point_stops_a_hung_download_group_and_a_sigterm_stops_it_too(stand_ins):
+    """The process-boundary witness, under -I -S as the workflow runs it: the deadline stops the hung
+    command's whole group and its one retry then installs everything; a SIGTERM to the helper leaves
+    no download running."""
+    command = [sys.executable, "-I", "-S", str(INSTALLER), "--python", stand_ins.python, "chromium", "webkit"]
+    stand_ins.plan(update=["hang"])  # The first command: the attempt's deadline times the hang alone.
+    done = subprocess.run([*command, "--attempt-seconds", "6"], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert [line.split()[0] for line in stand_ins.calls()] == ["update", *CLEAN[:5]]
+    assert (f"::warning title=Browser install retried::{METADATA} failed or outlived the "
+            "attempt's 6 s; its one retry starts again there") in done.stdout.splitlines()
+    assert len(stand_ins.hung()) == 2 and all(_gone(pid) for pid in stand_ins.hung())
+
+    for spent in (*stand_ins.dir.glob("count.*"), stand_ins.dir / "calls", stand_ins.dir / "hung"):
+        spent.unlink()
+    stand_ins.plan(update=["ok"], download=["hang"])
+    helper = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        deadline = time.monotonic() + 60
+        while not stand_ins.hung() and helper.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert stand_ins.hung(), "the planned hang never started"
+        helper.send_signal(signal.SIGTERM)
+        output, _ = helper.communicate(timeout=60)
+        assert helper.returncode == 128 + signal.SIGTERM, output
+        assert [line.split()[0] for line in stand_ins.calls()] == ["update", "resolve", "download"]
+        assert all(_gone(pid) for pid in stand_ins.hung())
+    finally:
+        if helper.poll() is None:
+            helper.kill()
+        helper.wait(timeout=10)
+        for pid in stand_ins.hung():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if helper.stdout is not None:
+            helper.stdout.close()

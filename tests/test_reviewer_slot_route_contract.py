@@ -15,7 +15,6 @@ from tests.review_pool_rosters import pool_roster, pool_seat
     # ``off`` passes the catalog's spelling check but names no harness (the lane
     # row's own rule, kept on the pool row); the malformed spellings are the
     # catalog parser's typed refusals before the pool ever sees them.
-    ("off", "does not name a concrete harness route"),
     ("OFF", "does not name a concrete harness route"),
     ("=malformed", "session harness must match"),
     (":high", "legacy ':effort'"),

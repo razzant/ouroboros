@@ -18,7 +18,6 @@ from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_batch4_producer_custody import _registry
 
-pytestmark = pytest.mark.serial
 
 
 @contextmanager
@@ -86,7 +85,7 @@ def test_joined_read_has_one_executor_and_no_claim_despite_delayed_passive_callb
         release.set()
 
 
-@pytest.mark.parametrize("control_kind", ["open", "pause", "stop", "deadline", "inherited_deadline"])
+@pytest.mark.parametrize("control_kind", ["open", "pause", "inherited_deadline"])
 def test_fresh_control_after_registry_preparation_precedes_actual_handler(tmp_path, monkeypatch, control_kind):
     registry, _, _ = _registry(tmp_path, monkeypatch)
     prepared, release = threading.Event(), threading.Event()
@@ -491,13 +490,423 @@ def test_final_admission_retry_uses_parent_controls_while_body_keeps_soft_envelo
                 elif control == "deadline":
                     holders[0].task["deadline_at"] = "2000-01-01T00:00:00Z"
                 if control != "open":
-                    with pytest.raises(PhysicalDispatchInterrupted):
+                    with pytest.raises(PhysicalDispatchInterrupted) as refused:
                         future.result(timeout=3)  # hard controls work while the database remains held
                     assert inner_bounds == []
+                    assert getattr(refused.value, "invocation_not_started", None) is True, "nothing began"
                 release_reader()
             if control == "open":
                 assert not future.result(timeout=3)["is_error"]
                 assert inner_bounds == [0.0]  # only final admission ignores the tool's wait envelope
         finally:
             proceed.set()
+    assert not claims(tmp_path)
+
+
+@pytest.mark.parametrize(("kind", "control"), [("mcp", "open"), ("isolated", "stop"), ("isolated", "deadline")])
+def test_a_dynamic_entry_waits_out_a_contended_control_read_under_parent_controls(tmp_path, monkeypatch, kind, control):
+    """MCP and isolated extensions have no run_tool_handler, so their entry gate reads the caller's controls itself;
+    with no in-memory owner control that read goes to the store. Under real contention it waits the same way: off every
+    lock, under the caller's controls rather than the tool's expired soft envelope, then one effect. A deadline seen
+    while it waits, or the owner's durable Stop, whose writer competes for the same store and lands meanwhile, begins
+    nothing and says so."""
+    from ouroboros import cancel_intents, loop_tool_execution, queue_observation, safety, store
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from tests.test_admission_contention import database_reader
+    from tests.test_live_effect_admission import dynamic_tool
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    effects, holders = [], []
+    prepared, proceed, waiting, stopped = threading.Event(), threading.Event(), threading.Event(), threading.Event()
+    name = dynamic_tool(monkeypatch, kind, effects)
+    checked = safety.check_safety
+
+    def after_preparation(tool, *args, **kwargs):  # registry preparation is done; the entry gate comes next
+        if tool == name:
+            prepared.set()
+            assert proceed.wait(5)
+        return checked(tool, *args, **kwargs)
+    monkeypatch.setattr(safety, "check_safety", after_preparation)
+    # A joined caller, as a foreground mutator's: the tool's soft wait expires while its admission still waits.
+    monkeypatch.setattr(loop_tool_execution, "FOREGROUND_MUTATIVE_TOOLS",
+                        loop_tool_execution.FOREGROUND_MUTATIVE_TOOLS | {name})
+    sleep = queue_observation._sleep
+
+    def observed_wait(seconds):
+        first = not waiting.is_set()
+        waiting.set()
+        if first and control == "stop":  # the gate's first wait outlasts the owner's Stop
+            assert stopped.wait(10), "the owner's Stop was never recorded"
+        sleep(seconds)
+    monkeypatch.setattr(queue_observation, "_sleep", observed_wait)
+
+    def stop():
+        while True:  # an ingress retries its own contention on the same store
+            try:
+                cancel_intents.request_cancel(tmp_path, "root", requested_stop_policy=cancel_intents.STOP_POLICY_IMMEDIATE)
+                return stopped.set()
+            except store.StoreBusy:
+                time.sleep(.02)
+
+    def call():
+        with owner(registry) as held:
+            holders.append(held)
+            return run(registry, timeout=.05, name=name, args={})
+    with ThreadPoolExecutor(1) as executor:
+        future = executor.submit(call)
+        try:
+            assert prepared.wait(3)
+            with database_reader(tmp_path, exclusive=True) as release_reader:
+                time.sleep(.08)  # the tool's soft wait expires before its entry gate
+                proceed.set()
+                assert waiting.wait(3), "the contended entry read did not wait"
+                assert effects == []
+                if control == "stop":
+                    stopping = threading.Thread(target=stop)
+                    stopping.start()
+                elif control == "deadline":
+                    holders[0].task["deadline_at"] = "2000-01-01T00:00:00Z"
+                    with pytest.raises(PhysicalDispatchInterrupted) as refused:
+                        future.result(timeout=3)  # seen while waiting, the database still held
+                release_reader()
+            if control == "stop":
+                stopping.join(10)
+                with pytest.raises(PhysicalDispatchInterrupted) as refused:
+                    future.result(timeout=5)
+            if control == "open":
+                result = future.result(timeout=3)
+                assert not result["is_error"], result["result"]
+                assert effects == [name]
+            else:
+                assert getattr(refused.value, "invocation_not_started", None) is True, "nothing began"
+                assert effects == []
+        finally:
+            proceed.set()
+    assert not claims(tmp_path)
+
+
+def one_contended_strict_read(monkeypatch, controls, *, stop=False, meanwhile=None):
+    """Armed, the next strict control read meets a contended store once (rollback confirmed), as when another
+    connection holds it; with ``stop`` the owner's Stop lands meanwhile, and ``meanwhile`` runs there. Only a
+    dispatch gate reads strictly: launch validation and the waiting owner's own checks read non-strictly, so they pass
+    through."""
+    from ouroboros import model_wait, store
+    armed, hits = [False], []
+    read = model_wait.TaskModelWait.control_reason
+
+    def control_reason(self, *, strict_current=False):
+        if armed[0] and strict_current and not hits:
+            hits.append(True)
+            if stop:
+                controls[0] = "cancelled"
+            if meanwhile is not None:
+                meanwhile()
+            busy = store.StoreBusy("contended control read", reason="contention")
+            busy.rollback_confirmed = True
+            raise busy
+        return read(self, strict_current=strict_current)
+    monkeypatch.setattr(model_wait.TaskModelWait, "control_reason", control_reason)
+    return lambda: armed.__setitem__(0, True), hits
+
+
+@pytest.mark.parametrize(("gate", "control"), [("operation_start", "open"), ("submit_async_preparation", "stop")])
+def test_a_nested_start_waits_out_its_contended_control_read_and_keeps_its_begun_phase(tmp_path, monkeypatch, gate,
+                                                                                         control):
+    """A started handler's nested start reads fresh controls in its own admission. When that read is contended, only the
+    admission repeats, its launch lock released, and the nested effect then begins once. A Stop landing meanwhile starts
+    nothing new, and the refusal says the invocation had begun."""
+    import asyncio
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    controls, events = [None], []
+    arm, hits = one_contended_strict_read(monkeypatch, controls, stop=control == "stop")
+
+    def body(*_a, **_kw):
+        events.append("handler")
+        arm()
+        if gate == "operation_start":
+            with owner_pause.operation_start():
+                events.append("nested")
+        else:
+            async def nested():
+                events.append("nested")
+
+            async def start():
+                await owner_pause.submit_async_preparation(nested)
+            asyncio.run(start())
+        return "nested start done"
+    registry.override_handler("knowledge_read", body)
+    with owner(registry, control=controls):
+        if control == "open":
+            result = run(registry)
+        else:
+            with pytest.raises(PhysicalDispatchInterrupted) as refused:
+                run(registry)
+    assert hits == [True], "the nested gate's own strict read met the contended store"
+    if control == "open":
+        assert not result["is_error"], result["result"]
+        assert events == ["handler", "nested"]
+    else:
+        assert events == ["handler"], "nothing new began after the Stop"
+        assert getattr(refused.value, "invocation_not_started", None) is False, "the handler had begun"
+    assert not claims(tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["builtin", "mcp"])
+def test_a_contended_store_inside_a_body_is_never_retried(tmp_path, monkeypatch, kind):
+    """Only the unsent gate waits. The same contention met by a body or its transport is that call's own error: the
+    effect is entered once, never again."""
+    from ouroboros import mcp_client, store
+    from tests.test_live_effect_admission import dynamic_tool
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    entered = []
+
+    def contended(*_a, **_kw):
+        entered.append(kind)
+        if len(entered) == 1:
+            busy = store.StoreBusy("contended inside the effect", reason="contention")
+            busy.rollback_confirmed = True
+            raise busy
+        return "entered a second time"
+    if kind == "builtin":
+        registry.override_handler("knowledge_read", contended)
+        name, args = "knowledge_read", {"topic": "fixture"}
+    else:
+        name, args = dynamic_tool(monkeypatch, "mcp", []), {}
+        monkeypatch.setattr(mcp_client, "_call_mcp_tool_result", contended)
+    with owner(registry):
+        result = run(registry, name=name, args=args)
+    assert entered == [kind] and result["is_error"], result["result"]
+    assert not claims(tmp_path)
+
+
+SOFT_WAIT_ARGS = {"edit_text": {"path": "a.txt", "old_str": "x", "new_str": "y"},
+                  "knowledge_read": {"topic": "fixture"}}
+
+
+def nested_start(gate, events, label="nested"):
+    """One nested start of a running handler: a process start's gate, or an async transport's preparation gate."""
+    import asyncio
+    if gate == "operation_start":
+        with owner_pause.operation_start():
+            events.append(label)
+        return
+
+    async def nested():
+        events.append(label)
+
+    async def start():
+        await owner_pause.submit_async_preparation(nested)
+    asyncio.run(start())
+
+
+def nested_start_after_soft_wait(registry, tool, gate, *, control, deadline, before_start, reader=None):
+    """``tool`` runs with a 0.05 s soft wait inside the caller's own execution bound ``deadline``. Past that wait its
+    body calls ``before_start`` and makes one nested start. The task's owner is held until the body ended, as a live
+    task's owner outlives a tool it stopped waiting for. ``reader`` is bound around the call alone, as a live call's
+    batch binds its End; an abandoned worker keeps it after the call came back. Returns what the body saw and what
+    reached the caller."""
+    from ouroboros import model_wait
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    events, body_bounds, refusals, outcome = [], [], [], {}
+    done = threading.Event()
+
+    def body(*_a, _resolved_binding=None, **_kw):
+        try:
+            time.sleep(.15)  # past the soft wait: the loop joins a foreground mutator and abandons a read
+            body_bounds.append(model_wait.dispatch_deadline_remaining_sec())
+            before_start()
+            try:
+                nested_start(gate, events)
+            except (PhysicalDispatchInterrupted, owner_pause.OwnerPauseRefused) as refused:
+                refusals.append((type(refused).__name__, getattr(refused, "control_reason", str(refused)),
+                                 getattr(refused, "invocation_not_started", None)))
+                raise
+            return "applied"
+        finally:
+            done.set()
+    registry.override_handler(tool, body)
+    with owner(registry, control=control):
+        with model_wait.execution_deadline_scope(deadline), (
+                owner_pause.call_end_reader(registry._ctx, reader) if reader is not None else nullcontext()):
+            try:
+                outcome["is_error"] = run(registry, timeout=.05, name=tool, args=SOFT_WAIT_ARGS[tool])["is_error"]
+            except (PhysicalDispatchInterrupted, owner_pause.OwnerPauseRefused) as refused:
+                outcome["raised"] = type(refused).__name__
+        assert done.wait(5)
+        assert budget_pause.drain_local_tool_futures(registry._ctx, timeout_sec=5)["drained"]
+    return events, body_bounds, refusals, outcome
+
+
+@pytest.mark.parametrize(("tool", "gate", "control"), [
+    ("edit_text", "operation_start", "open"),
+    ("edit_text", "operation_start", "end"),
+    ("edit_text", "operation_start", "durable_stop"),
+    ("knowledge_read", "submit_async_preparation", "caller_deadline"),
+    ("knowledge_read", "submit_async_preparation", "stop"),
+    ("knowledge_read", "submit_async_preparation", "pause"),
+])
+def test_a_nested_start_after_the_soft_wait_keeps_the_callers_bounds(tmp_path, monkeypatch, tool, gate, control):
+    """A tool's soft wait decides only when the loop stops waiting for it. A later nested start of its body is a new
+    start whose gate reads the bounds the invocation inherited, as nested starts did before that gate existed: it
+    begins while they allow, and the caller's own expired deadline, the call's End, a Stop or a Pause refuse it,
+    saying the invocation had begun. The body keeps its spent envelope, so its own model sends still stop."""
+    from ouroboros import cancel_intents, model_wait
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    controls, ended = [None], [None]
+    deadline = model_wait.monotonic_now() + (.4 if control == "caller_deadline" else 30)
+
+    def before_start():
+        if control == "caller_deadline":
+            while model_wait.monotonic_now() <= deadline:
+                time.sleep(.01)
+        elif control == "end":
+            ended[0] = "owner_end"
+        elif control == "stop":
+            controls[0] = "cancelled"
+        elif control == "durable_stop":  # no in-memory control: the gate reads the owner's recorded Stop
+            cancel_intents.request_cancel(tmp_path, "root", requested_stop_policy=cancel_intents.STOP_POLICY_IMMEDIATE)
+        elif control == "pause":
+            owner_pause.install_fence(tmp_path, "root", request_id="after-the-soft-wait")
+    events, body_bounds, refusals, outcome = nested_start_after_soft_wait(
+        registry, tool, gate, control=None if control == "durable_stop" else controls, deadline=deadline,
+        before_start=before_start, reader=lambda: ended[0])
+    assert body_bounds == [0.0], "the body itself is past its soft wait"
+    if control == "open":
+        assert events == ["nested"] and refusals == []
+        assert outcome == {"is_error": tool == "knowledge_read"}, outcome  # joined and applied / left in background
+    elif control == "pause":
+        assert events == [] and [refusal[0] for refusal in refusals] == ["OwnerPauseRefused"]
+    else:
+        reason = {"caller_deadline": "execution_deadline", "end": "owner_end"}.get(control, "cancelled")
+        assert events == [] and refusals == [("PhysicalDispatchInterrupted", reason, False)], refusals
+    assert not claims(tmp_path)
+
+
+@pytest.mark.parametrize(("tool", "gate", "control"), [
+    ("edit_text", "operation_start", "open"),
+    ("edit_text", "operation_start", "stop"),
+    ("knowledge_read", "submit_async_preparation", "caller_deadline"),
+])
+def test_a_contended_nested_start_after_the_soft_wait_waits_under_the_callers_bounds(tmp_path, monkeypatch, tool, gate,
+                                                                                    control):
+    """The same nested start when its gate's read meets a contended store: its wait checks the caller's bounds too, so
+    the spent soft envelope never ends it and the start then begins once, its lock released while it waits. The
+    caller's deadline or a Stop seen by that check refuse it there, before any sleep, saying the invocation had
+    begun."""
+    from ouroboros import model_wait, queue_observation
+    from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    controls = [None]
+    deadline = model_wait.monotonic_now() + (.4 if control == "caller_deadline" else 30)
+
+    def expire():  # the caller's own bound passes while the read is contended
+        while model_wait.monotonic_now() <= deadline:
+            time.sleep(.01)
+    arm, hits = one_contended_strict_read(monkeypatch, controls, stop=control == "stop",
+                                          meanwhile=expire if control == "caller_deadline" else None)
+    waits, sleep = [], queue_observation._sleep
+
+    def observed_wait(seconds):
+        waits.append(seconds)
+        sleep(seconds)
+    monkeypatch.setattr(queue_observation, "_sleep", observed_wait)
+    events, body_bounds, refusals, _outcome = nested_start_after_soft_wait(
+        registry, tool, gate, control=controls, deadline=deadline, before_start=arm)
+    assert hits == [True] and body_bounds == [0.0]
+    if control == "open":
+        assert events == ["nested"] and refusals == [] and waits == [ACQUISITION_SLICE_SEC], (refusals, waits)
+    else:
+        reason = "execution_deadline" if control == "caller_deadline" else "cancelled"
+        assert events == [] and waits == [], "the wait's own check refused it"
+        assert refusals == [("PhysicalDispatchInterrupted", reason, False)], refusals
+    assert not claims(tmp_path)
+
+
+def test_concurrent_nested_starts_check_their_own_copies_of_the_caller_context(tmp_path, monkeypatch):
+    """Three threads of one body start nested effects together. The first holds the launch lock inside its gate read
+    while the other two, refused that lock, check their controls at the same moment in their waits. Each read runs in
+    its own copy of the invocation's caller context, which no thread enters itself (a context entered twice at once
+    raises); each lock is released by the thread and context that took it, and every start begins once."""
+    import contextvars
+    from ouroboros import model_wait
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    controls, events, errors = [None], [], []
+    holding, waited = threading.Event(), threading.Event()
+    together = threading.Barrier(2, timeout=3)
+    gate, read = owner_pause.require_tool_dispatch, model_wait.TaskModelWait.control_reason
+
+    def held_gate(source):
+        if threading.current_thread().name == "nested-first" and not holding.is_set():
+            holding.set()
+            assert waited.wait(5), "the refused starts never checked their controls together"
+        return gate(source)
+
+    def control_reason(self, *, strict_current=False):
+        if (not strict_current and threading.current_thread().name in {"nested-second", "nested-third"}
+                and not waited.is_set()):
+            together.wait()  # the two waits' checks overlap
+            waited.set()
+        return read(self, strict_current=strict_current)
+    monkeypatch.setattr(owner_pause, "require_tool_dispatch", held_gate)
+    monkeypatch.setattr(model_wait.TaskModelWait, "control_reason", control_reason)
+
+    def start(label):
+        try:
+            nested_start("operation_start", events, label)
+        except BaseException as exc:  # noqa: BLE001 - reported below with its thread
+            errors.append(f"{label}: {type(exc).__name__}: {exc}")
+
+    def body(*_a, **_kw):
+        threads = {label: threading.Thread(target=contextvars.copy_context().run, args=(start, label),
+                                           name=f"nested-{label}") for label in ("first", "second", "third")}
+        threads["first"].start()
+        assert holding.wait(3)
+        threads["second"].start()
+        threads["third"].start()
+        for thread in threads.values():
+            thread.join(10)
+        return "started"
+    registry.override_handler("knowledge_read", body)
+    with owner(registry, control=controls):
+        result = run(registry, timeout=10)
+    assert errors == [], errors
+    assert events[0] == "first" and sorted(events) == ["first", "second", "third"], events
+    assert not result["is_error"], result["result"]
+    root_drive, root_id, _task = owner_pause._member_coordinates(registry._ctx)
+    with owner_pause.launch_lock(root_drive, root_id, wait=False):  # every start released its own lock
+        pass
+    assert not claims(tmp_path)
+
+
+@pytest.mark.parametrize("control", ["open", "stop"])
+@pytest.mark.parametrize("form", ["native", "gateway"])
+def test_a_gateway_call_has_the_custody_of_its_native_mcp_call(tmp_path, monkeypatch, form, control):
+    """A call_mcp_tool envelope resolved at the executor entry runs as its MCP tool's own call: the same tool name on
+    the started and settled rows (the envelope recorded as ``via``), no claim left open, and an owner Stop before
+    launch begins nothing, exactly as for the native call."""
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.tools.tool_discovery import resolve_gateway_call
+    from tests.test_live_effect_admission import dynamic_tool
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    effects = []
+    name = dynamic_tool(monkeypatch, "mcp", effects)
+    call = {"id": "call", "function": {"name": name, "arguments": json.dumps({"query": "fixture"})}}
+    if form == "gateway":
+        envelope = {"name": name, "arguments": {"query": "fixture"}}
+        call = resolve_gateway_call({"id": "call", "function": {"name": "call_mcp_tool",
+                                                                "arguments": json.dumps(envelope)}})
+        assert (call["function"]["name"], call["via"]) == (name, "call_mcp_tool")
+    with owner(registry, control=["cancelled" if control == "stop" else None]):
+        if control == "stop":
+            with pytest.raises(PhysicalDispatchInterrupted):
+                _execute_with_timeout(registry, call, registry._ctx.drive_root / "logs", 3, task_id=registry._ctx.task_id)
+        else:
+            result = _execute_with_timeout(registry, call, registry._ctx.drive_root / "logs", 3,
+                                           task_id=registry._ctx.task_id)
+            assert result["fn_name"] == name
+    assert bool(effects) is (control == "open")
+    log = registry._ctx.drive_root / "logs" / "tools.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    assert (bool(rows) or control == "stop") and {row.get("tool") for row in rows} <= {name}
+    assert {row.get("via") for row in rows} <= {"call_mcp_tool" if form == "gateway" else None}
     assert not claims(tmp_path)

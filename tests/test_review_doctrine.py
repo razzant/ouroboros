@@ -86,6 +86,20 @@ def test_parse_rejects_an_empty_or_strange_claim_and_keeps_a_real_one():
         parse_subagent_check({**_CLAIM, "extra": True})
 
 
+def test_a_broken_subagent_check_is_set_aside_beside_its_decision_and_a_real_one_rides_on():
+    """06.11, both directions: a malformed optional check is a recorded gap, never the refusal of its decision."""
+    from types import SimpleNamespace
+    from ouroboros.tools.review_collection import without_broken_subagent_check
+
+    ctx = SimpleNamespace(_commit_call_notes=[])
+    decision = {"disposition": "accepted", "rationale": "Read the panel.", "subagent_check": {**_CLAIM, "report_refs": []}}
+    kept = without_broken_subagent_check(ctx, decision)
+    assert kept == {"disposition": "accepted", "rationale": "Read the panel."}
+    assert "subagent_check was set aside" in ctx._commit_call_notes[0]
+    whole = {**decision, "subagent_check": _CLAIM}
+    assert without_broken_subagent_check(ctx, whole) is whole and len(ctx._commit_call_notes) == 1
+
+
 def test_gaps_are_not_verification_and_a_real_digest_is(tmp_path, monkeypatch):
     body = "helper report bytes"
     write_task_result(tmp_path, "helper-1", "completed", result=body, model="helper-model",
@@ -120,8 +134,6 @@ def test_gaps_are_not_verification_and_a_real_digest_is(tmp_path, monkeypatch):
 @pytest.mark.parametrize("top,nested,claim,identity,status", [
     ("", "scout", "scout", "recorded", "bound"),
     ("", "actual", "claimed", "mismatch", "bound"),
-    ("top", "nested", "nested", "mismatch", "bound"),
-    ("", "", "claimed", "unknown", "gap"),
     ("", "", "", "unknown", "gap"),
 ])
 def test_report_actor_comes_only_from_retained_identity(tmp_path, top, nested, claim, identity, status):

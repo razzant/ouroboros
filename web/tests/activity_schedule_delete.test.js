@@ -42,12 +42,14 @@ test('a deleted row still owing work stays in the standing list after reload', (
     delete legacy.withdrawal;
     assert.equal(scheduleStatus(legacy), 'delete_pending');
     assert.equal(isRetainedSchedule(legacy), false);
-    assert.match(scheduleRowHtml(legacy), / · deletion pending · related/);
+    assert.match(scheduleRowHtml(legacy), / · deletion pending<\/span>/);
+    assert.match(scheduleRowHtml(legacy), /<p class="activity-facts">relation related/, 'the relation is a fact of its Details');
     assert.doesNotMatch(scheduleRowHtml(legacy), /work in flight|data-act="schedule-toggle"/);
     assert.equal(isRetainedSchedule(consumedPending), false, 'not collapsed into History');
     assert.equal(isRetainedSchedule({ ...consumedPending, status: 'consumed', delete_requested_at: '' }), true);
     const html = scheduleRowHtml(consumedPending);
-    assert.match(html, / · deletion pending · work in flight · related/);
+    assert.match(html, / · deletion pending · work in flight<\/span>/);
+    assert.match(html, /<p class="activity-facts">relation related · already fired<\/p>/);
     assert.doesNotMatch(html.split('activity-row-actions')[1], /work in flight/, 'wrapping detail stays with the description');
     assert.match(html, /data-action="restore">Restore</, 'restore cancels withdrawal without rearming a consumed one-shot');
     assert.match(html, /data-act="schedule-delete" data-id="fu-1"/);
@@ -95,14 +97,19 @@ test('a legacy note keeps its name, shows its words and offers the same lifecycl
         notification: { text: 'Call <mother>', set_at: '2027-01-15T08:00:00Z' },
     };
     const html = scheduleRowHtml(note);
-    assert.match(html, /<span class="activity-name" data-i18n-authored>Reminder of task t1<\/span>/);
-    assert.match(html, /<span class="activity-sub" data-i18n-authored>Call &lt;mother&gt;<\/span>/);
+    assert.match(html, /<span class="ui-row-title activity-name" data-i18n-authored>Reminder of task t1<\/span>/);
+    // Its words are behind the row's one Details, never sliced into a second title.
+    assert.match(html, /<summary data-act="schedule-text" data-id="followup-t1-abc123">Details<\/summary>\s*<p class="activity-order" data-i18n-authored>Call &lt;mother&gt;<\/p>/);
     assert.doesNotMatch(html, /title="Call/);
-    assert.match(html, /<span class="activity-sub">reminder · one-shot · at\/after /);
+    assert.match(html, /<span class="activity-sub">Reminder · Once on <time /);
+    // The server's display name is the note's own first line: then the title says it and Details holds no copy.
+    const named = scheduleRowHtml({ ...note, display_name: 'Call <mother>' });
+    assert.match(named, /activity-name" data-i18n-authored>Call &lt;mother&gt;<\/span>/);
+    assert.doesNotMatch(named, /activity-order/);
     assert.match(html, /data-act="schedule-toggle" data-id="followup-t1-abc123" data-action="disable">Disable</);
     assert.match(html, /data-act="schedule-delete" data-id="followup-t1-abc123" data-note="1">Delete</);
     const task = scheduleRowHtml({ ...note, kind: undefined });
-    assert.match(task, /<span class="activity-name" data-i18n-authored>Reminder of task t1<\/span>/, 'a task row keeps its schedule name');
+    assert.match(task, /<span class="ui-row-title activity-name" data-i18n-authored>Reminder of task t1<\/span>/, 'a task row keeps its schedule name');
     assert.match(task, /data-note="">Delete</);
 });
 
@@ -113,10 +120,37 @@ test('a row shows its stored error: a consumed note whose chat write was not con
         completed_at: '2027-01-15T09:00:05Z', notification: { text: 'Call mother' },
     };
     const failed = scheduleRowHtml({ ...note, last_error: 'delivery <not> confirmed' });
-    assert.match(failed, / · already fired · <span class="activity-tag">last error: delivery &lt;not&gt; confirmed<\/span>/);
+    assert.match(failed, /<span class="activity-sub">last error: delivery &lt;not&gt; confirmed<\/span>/);
+    assert.equal(failed.split('delivery &lt;not&gt; confirmed').length, 2, 'said once');
+    assert.doesNotMatch(failed, /activity-tag">last error/, 'never a second, italic copy in the meta line');
+    // The run's own line already says it: the stored error is not printed again.
+    const said = scheduleRowHtml({ ...note, last_error: 'Not queued', outcome: { state: 'failed', line: 'Not queued' } });
+    assert.equal(said.split('Not queued').length, 2);
+    assert.match(said, /last run: failed · <span data-i18n-authored>Not queued<\/span>/);
     assert.match(failed, /consumed once · history/, 'still history: no retry control appears');
     assert.doesNotMatch(failed, /data-act="schedule-toggle"/);
     for (const quiet of [note, { ...note, last_error: '' }]) {
         assert.doesNotMatch(scheduleRowHtml(quiet), /last error/, 'a row with no stored error says none');
     }
+});
+
+test('a switched-off one-shot whose moment passed is finished; one still ahead stays standing', () => {
+    const once = { id: 'o', status: 'disabled', enabled: false, trigger: { type: 'once', run_at: '2026-09-25T12:00:00Z' } };
+    assert.equal(isRetainedSchedule({ ...once, time_passed_on: '2026-09-25T12:00:00+00:00' }), true);
+    assert.equal(isRetainedSchedule(once), false, 'the server, never the browser clock, says the moment passed');
+    assert.equal(isRetainedSchedule({ ...once, status: 'held', time_passed_on: '2026-09-25T12:00:00+00:00' }), false,
+        'a held row keeps its control in view');
+    assert.equal(isRetainedSchedule({ ...once, status: 'active', enabled: true }), false);
+});
+
+test('the outcome speaks the word of the pressed button', () => {
+    const ok = { ok: true, changed: true, status: 'updated', audit: 'recorded', running_or_queued: true };
+    assert.match(scheduleOutcomeToast('restore', ok, { word: 'enable', done: 'enabled' })[0], /^Schedule enabled\. A task/);
+    assert.match(scheduleOutcomeToast('restore', ok, { word: 'restore', done: 'restored' })[0], /^Schedule restored\. /);
+    assert.equal(scheduleOutcomeToast('restore', { changed: true, status: 'stale_hold', audit: 'recorded' }, { word: 'enable' })[0],
+        'Schedule enable refused: stale_hold');
+    assert.equal(scheduleOutcomeToast('restore', { changed: true }, { word: 'enable' })[0],
+        'Schedule enable refused: no status reported');
+    assert.equal(scheduleOutcomeToast('restore', { ...ok, running_or_queued: false }, { word: 'enable', done: 'enabled' }), null,
+        'a clean change says nothing: the row itself shows it');
 });

@@ -20,7 +20,6 @@ from ouroboros.skill_identity import payload_bucket, release_declaration, releas
 from ouroboros.skill_loader import (
     _MANIFEST_NAMES,
     LoadedSkill,
-    SkillPayloadUnreadable,
     _iter_payload_files,
 )
 from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
@@ -201,14 +200,11 @@ def capture_skill_publish_candidate(loaded: LoadedSkill) -> SkillPublishSnapshot
         fallback_name=skill_dir.name,
     )
 
-    try:
-        inventory = _iter_payload_files(
-            skill_dir,
-            manifest_entry=parsed.entry,
-            manifest_scripts=parsed.scripts,
-        )
-    except SkillPayloadUnreadable as exc:
-        raise SkillPublishSnapshotError("snapshot_payload_unreadable") from exc
+    inventory = _iter_payload_files(
+        skill_dir,
+        manifest_entry=parsed.entry,
+        manifest_scripts=parsed.scripts,
+    )
 
     captured: list[CapturedSkillFile] = []
     public: list[CapturedSkillFile] = []

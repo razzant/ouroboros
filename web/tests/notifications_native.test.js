@@ -13,11 +13,12 @@ import {
     nativeStatusText,
     resetNotifier,
 } from '../modules/notifications.js';
-import { loadDesktopShell } from '../modules/desktop_shell.js';
+import { loadDesktopShell, mountDesktopShell } from '../modules/desktop_shell.js';
 import { recordingAudio, settle } from './notification_audio_fixture.js';
 
 const ON = { ...DEFAULT_NOTIFY_PREFS, enabled: true };
-const FINISHED = { role: 'system', system_type: 'task_summary', task_id: 't1', chat_id: 7, content: 'Report ready' };
+const FINISHED = { role: 'system', system_type: 'task_summary', task_id: 't1', chat_id: 7, content: 'Done. Root task t1.',
+    outcome_phase: 'done', target_label: 'Report ready' };
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function storage(prefs = ON) {
@@ -95,7 +96,7 @@ test('Sound off asks the system for a silent notification', async () => {
     const fx = fixture({ answer: { ok: true, status: 'submitted', sound: 'off' }, prefs: { ...ON, sound: false, show_text: true } });
     fx.notifier.handleFrame(FINISHED, { kind: 'chat', isMain: true });
     await tick();
-    assert.equal(fx.calls[0][2], 'Report ready', 'text shown only when the owner turned it on');
+    assert.equal(fx.calls[0][2], 'Report ready · Done', 'text shown only when the owner turned it on');
     assert.equal(fx.calls[0][3], false);
     assert.equal(fx.tones(), 0);
     fx.notifier.destroy();
@@ -271,8 +272,8 @@ test('the status line names what the desktop app can do, and the old app honestl
     assert.match(nativeStatusText({ ...on, capability: { status: 'unavailable', reason: 'not_an_app_bundle' } }),
         /unavailable to this desktop app \(7\.7\.0\) here \(not_an_app_bundle\)/);
     const legacy = nativeStatusText({ native: false, shell: { desktop: true, version: '6.82.0' } });
-    assert.match(legacy, /need the current Ouroboros desktop app; this desktop app \(6\.82\.0\) predates them/);
-    assert.match(legacy, /do not replace the app itself/);
+    assert.match(legacy, /This desktop app \(6\.82\.0\) has no system-notification method here, so alerts fall back/);
+    assert.doesNotMatch(legacy, /predates|current Ouroboros desktop app|Update/, 'a missing method proves no remedy');
 });
 
 test('permission and the last hand-off are two facts: a failure never reads as a withdrawn permission', () => {
@@ -353,14 +354,85 @@ test('a current app whose shell_info failed is never called old (desktop_shell -
     const fx = fixture({ answer: { ok: true, status: 'submitted' }, documentRef: nodes({ '[data-notify-status]': [status] }) });
     const api = { shell_info: async () => { throw new Error('bridge gone'); }, show_native_notification() {} };
     fx.notifier.configure({ shell: await loadDesktopShell({ win: { pywebview: { api } }, appVersion: async () => '7.7.0' }) });
-    assert.doesNotMatch(status.textContent, /predates/);
+    assert.doesNotMatch(status.textContent, /no system-notification method/);
     const old = await loadDesktopShell({ win: { pywebview: { api: { request_attention() {} } } }, appVersion: async () => '6.82.0' });
     const legacy = fixture({ answer: null, extra: { show_native_notification: undefined },
         documentRef: nodes({ '[data-notify-status]': [status] }) });
     legacy.notifier.configure({ shell: old });
-    assert.match(status.textContent, /this desktop app \(6\.82\.0\) predates them/, 'an app without the method is old (3A)');
+    assert.match(status.textContent, /This desktop app \(6\.82\.0\) has no system-notification method here/,
+        'an app without the method says so (3A), and nothing more');
     fx.notifier.destroy();
     legacy.notifier.destroy();
+});
+
+/* settings.js hands each shell to the notifier: `mountDesktopShell(page, (shell) => getNotifier().configure({ shell }))`.
+   A shell a failed read kept is not a new observation, so the permission the owner granted since stands. */
+test('a shell kept through a failed read never undoes a permission granted meanwhile (Settings wiring)', async () => {
+    let reads = 0;
+    let failSlowRead;
+    const status = { textContent: '' };
+    const asking = {
+        shell_info: () => {
+            reads += 1;
+            if (reads === 1) return Promise.resolve({ shell_version: '7.7.0', persistent_storage: true,
+                native_notifications: { available: true, status: 'not_determined', platform: 'macos', reason: '' } });
+            return new Promise((_resolve, reject) => { failSlowRead = reject; });
+        },
+        request_native_notifications: async () => ({ available: true, status: 'authorized', platform: 'macos', reason: '' }),
+    };
+    const fx = fixture({ answer: { ok: true, status: 'submitted' }, extra: asking,
+        documentRef: nodes({ '[data-notify-status]': [status] }) });
+    const listeners = new Map();
+    const win = { pywebview: { api: asking }, addEventListener: (type, fn) => listeners.set(type, fn),
+        removeEventListener: (type) => listeners.delete(type) };
+    let health = 0;
+    const dispose = mountDesktopShell({ querySelectorAll: () => [] }, (shell) => fx.notifier.configure({ shell }), {
+        win, load: (options) => loadDesktopShell({ ...options, appVersion: async () => { health += 1; return ''; } }),
+    });
+    try {
+        await settle();
+        assert.match(status.textContent, /has not been asked yet/);
+        listeners.get('pywebviewready')();  // its read is slow
+        await settle();
+        await fx.notifier.requestPermission();  // the owner allows notifications meanwhile
+        assert.match(status.textContent, /^System notifications are on/);
+        failSlowRead(new Error('the slow read failed'));
+        await settle();
+        assert.match(status.textContent, /^System notifications are on/, 'the kept snapshot is older than the grant');
+        assert.equal(reads, 2);
+        assert.equal(health, 0, 'no extra read of the server');
+    } finally {
+        dispose();
+        fx.notifier.destroy();
+    }
+});
+
+test('a new successful shell answer still reaches the notifier (Settings wiring)', async () => {
+    let reads = 0;
+    const status = { textContent: '' };
+    const answering = {
+        shell_info: async () => {
+            reads += 1;
+            return { shell_version: '7.7.0', persistent_storage: true, native_notifications: {
+                available: true, status: reads === 1 ? 'not_determined' : 'denied', platform: 'macos', reason: '' } };
+        },
+    };
+    const fx = fixture({ answer: { ok: true, status: 'submitted' }, extra: answering,
+        documentRef: nodes({ '[data-notify-status]': [status] }) });
+    const listeners = new Map();
+    const win = { pywebview: { api: answering }, addEventListener: (type, fn) => listeners.set(type, fn),
+        removeEventListener: (type) => listeners.delete(type) };
+    const dispose = mountDesktopShell({ querySelectorAll: () => [] }, (shell) => fx.notifier.configure({ shell }), { win });
+    try {
+        await settle();
+        assert.match(status.textContent, /has not been asked yet/);
+        listeners.get('pywebviewready')();
+        await settle();
+        assert.match(status.textContent, /^The system denied notifications/, 'the window\'s newer answer is a new fact');
+    } finally {
+        dispose();
+        fx.notifier.destroy();
+    }
 });
 
 test('the client-level notifier answers the desktop app\'s click by token', async () => {

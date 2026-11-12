@@ -16,7 +16,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 ROOT = Path(__file__).resolve().parents[1]
 TTS_URL = "/api/extensions/device_voice/ui/r1/ui/tts.js"
@@ -154,7 +154,7 @@ def test_dictation_mic_appears_once_chosen_records_and_puts_words_at_the_caret(s
     menu = page.locator(".chat-plus-menu:not([data-leaving])")
     menu.wait_for()
     items = [text.strip() for text in menu.locator("[role=menuitem]").all_inner_texts()]
-    assert items[-2:] == ["Add dictation…", "Make a button with Ouroboros…"], items
+    assert items[-2:] == ["Add dictation…", "Make a button…"], items
     menu.locator("[data-plus-item='dictation']").click()
     chooser = page.locator(".voice-chooser:not([data-leaving])")
     chooser.wait_for()
@@ -233,8 +233,8 @@ def test_read_aloud_reads_one_reply_shows_stop_and_offers_honest_voices(subscrip
     read = answer.locator("[data-message-action='read-aloud']")
     read.wait_for()
     controls = answer.locator(".chat-message-actions > *").evaluate_all(
-        "nodes => nodes.map(node => node.className.split(' ')[0])")
-    assert controls == ["chat-message-reply", "chat-message-action", "chat-message-copy"], "beside Copy, one control"
+        "nodes => nodes.map(node => node.dataset.messageAction || node.className.split(' ')[0])")
+    assert controls == ["chat-message-reply", "read-aloud", "share", "chat-message-copy"], "beside Copy, Read aloud first"
     assert page.locator(".chat-bubble.user [data-message-action]").count() == 0
     assert read.get_attribute("aria-label") == "Read aloud"
     read.click()
@@ -252,7 +252,7 @@ def test_read_aloud_reads_one_reply_shows_stop_and_offers_honest_voices(subscrip
     rows = page.locator(".chat-row-menu:not([data-leaving])")
     rows.wait_for()
     labels = rows.locator("[role=menuitem]").all_inner_texts()
-    assert labels[-2:] == ["Read aloud", "Read aloud voice…"], labels
+    assert labels[-3:] == ["Read aloud", "Read aloud voice…", "Share"], labels
     rows.get_by_role("menuitem", name="Read aloud voice…").click()
     voices = page.locator(".voice-menu:not([data-leaving])")
     voices.wait_for()

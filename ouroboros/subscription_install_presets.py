@@ -511,7 +511,7 @@ def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """The factory review pool for THIS settings document, as catalog rows (pure).
 
     The panel follows the Main the document runs (owner 4A), whatever other access sits beside
-    it: a reachable OpenRouter Main → OpenRouter's three ``OPENROUTER_REVIEW_DEFAULTS``; a
+    it: a reachable OpenRouter Main → OpenRouter's three ``OPENROUTER_REVIEW_DEFAULTS`` on Main's connection; a
     reachable direct Main → its provider's ``DIRECT_PROVIDER_REVIEW_ROLES`` panel (one Main row;
     MiniMax's Main, Light, Light), each seat in its ROLE's whole binding (a Light seat runs Light's,
     never Main's by a shared model name; a blank or another provider's Light leaves the provider's
@@ -531,7 +531,9 @@ def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
     reviewer template.
     """
     from ouroboros.config import EFFORT_SCALE
-    from ouroboros.provider_models import compute_direct_review_seats, provider_for_model
+    from ouroboros.provider_models import (
+        compute_direct_review_seats, parse_model_route, provider_for_model, route_on_connection,
+    )
     from ouroboros.server_runtime import has_startup_ready_provider
     from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
 
@@ -541,6 +543,9 @@ def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
     bindings = {role: role_route_binding(settings, role) for role in ("main", "light")}
     main = bindings["main"]["route"]["target_id"] if bindings["main"] else main
     router_main = provider_for_model(main) == "openrouter"
+    # The router panel runs on Main's connection: a named OpenRouter Main's key and routing pay for it.
+    router_panel = [route_on_connection(model, "openrouter", parse_model_route(main).connection)
+                    for model in router_panel] if router_main else router_panel
     if bindings["main"] and not router_main:
         seats = compute_direct_review_seats(provider_for_model(main), main, light) or [("main", main)]
     else:  # a router Main reviews on the diverse router panel, never as twins of itself

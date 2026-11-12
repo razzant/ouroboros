@@ -2,38 +2,57 @@
 
 The commit trailer is evidence, never approval. Author declarations remain labelled;
 missing executions stay unknown. Fetching checks consult GitHub, passive readers do not.
-No prose is classified: older commit bodies reach the letter's author unchanged.
+No prose is classified: older commit bodies reach the description's author unchanged, and
+a refreshed run never rewrites a description of the same range.
 """
 from __future__ import annotations
 
 import json
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 TRAILER = "Ouroboros-Qualification: "
 CHECKS = ("full_battery", "cost_contract")
 STATES = ("passed", "failed", "not_run", "unknown")
+RED_LABEL = "post-merge-red"  # scripts/post_merge_routing.py labels each red it hands over with it
+REVIEW_STATES = ("settled", "pending", "unknown", "no_record")
+REVIEW_RELATIONS = ("covers_head", "changes_after_review", "unknown", "not_declared", "delta_only")
 
 
-def merge_qualification(review: dict, checks: list | None = None) -> dict:
+def merge_qualification(review: dict, checks: list | None = None, *, relation: str = "") -> dict:
+    """The trailer's facts. ``relation`` is the subject relation the merge request saw (its coverage
+    status); with it the observed verdict keeps its record's state. Without it neither is recorded."""
     declared = {row["name"]: {**row, "source": "author_declared"} for row in checks or []}
     for name in CHECKS:
         declared.setdefault(name, {"name": name, "status": "unknown", "source": "missing",
                                    "detail": "No execution evidence was supplied."})
     record = review.get("record") or {}
+    seen = {"observed": (record.get("verdict") or {}).get("aggregate", "unknown")}
+    if relation:
+        seen.update(state=str(record.get("state") or "unknown") if record else "no_record", relation=relation)
+    seen["declared"] = (review.get("declared") or {}).get("verdict", "unknown")
     return {"schema": 1, "checks": list(declared.values()),
-            "review": {"observed": (record.get("verdict") or {}).get("aggregate", "unknown"),
-                       "declared": (review.get("declared") or {}).get("verdict", "unknown")},
+            "review": seen,
             "post_merge": {"status": "not_run", "detail": "The post-merge check follows this merge."}}
+
+
+def _review_line(review: dict) -> str:
+    """The observed verdict beside its record state and the relation the merge request saw; a receipt
+    written before both were carried says so instead of inventing them."""
+    if "state" in review or "relation" in review:
+        seen = (f"record {review.get('state', 'not recorded')}, subject relation at the merge request "
+                f"{review.get('relation', 'not recorded')}")
+    else:
+        seen = "record state and subject relation at the merge request not recorded"
+    return f"- Review: observed {review['observed']} ({seen}); author declared {review['declared']}"
 
 
 def commit_summary(qualification: dict) -> str:
     lines = ["Ouroboros qualification receipt (declarations are not host-observed PASS):"]
     for row in qualification["checks"]:
         lines.append(f"- {row['name']}: {row['status']} ({row['source']}); {row.get('detail') or 'no detail supplied'}")
-    review = qualification["review"]
-    lines += [f"- Review: observed {review['observed']}; author declared {review['declared']}",
+    lines += [_review_line(qualification["review"]),
               "- Post-merge check: not run yet.", TRAILER + json.dumps(qualification, ensure_ascii=False)]
     return "\n".join(lines)
 
@@ -54,7 +73,13 @@ def commit_qualification(body: str) -> dict | None:
     return None
 
 
-def _get_json(url: str) -> dict:
+def _github_repo(repo_url: str) -> str | None:
+    parsed = urllib.parse.urlparse(repo_url)
+    parts = parsed.path.removesuffix(".git").strip("/").split("/")
+    return "/".join(parts) if parsed.hostname == "github.com" and len(parts) == 2 else None
+
+
+def _get_json(url: str):
     request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
                                                   "User-Agent": "Ouroboros-update-check"})
     with urllib.request.urlopen(request, timeout=15) as response:
@@ -102,9 +127,8 @@ def post_merge_checks(commits: list[dict], repo_url: str, *, get_json=None) -> d
     if not commits:
         return {"status": "observed", "runs": [], "missing_shas": []}
     get_json = get_json or _get_json
-    parsed = urllib.parse.urlparse(repo_url)
-    parts = parsed.path.removesuffix(".git").strip("/").split("/")
-    if parsed.hostname != "github.com" or len(parts) != 2:
+    repo = _github_repo(repo_url)
+    if repo is None:
         return {"status": "unavailable", "reason": "The update source has no supported GitHub check reader.",
                 "runs": [], "missing_shas": sorted(c["sha"] for c in commits)}
     wanted = {c["sha"] for c in commits}
@@ -113,7 +137,7 @@ def post_merge_checks(commits: list[dict], repo_url: str, *, get_json=None) -> d
     status, reason = "partial", "GitHub response page budget reached."
     try:
         for page in range(1, 11):
-            data = get_json(f"https://api.github.com/repos/{'/'.join(parts)}/actions/workflows/"
+            data = get_json(f"https://api.github.com/repos/{repo}/actions/workflows/"
                             f"post-merge.yml/runs?per_page=100&page={page}")
             rows = data["workflow_runs"]
             for row in rows:
@@ -134,6 +158,43 @@ def post_merge_checks(commits: list[dict], repo_url: str, *, get_json=None) -> d
             "missing_shas": _missing_runs(commits, runs, absent)}
 
 
+def post_merge_reds(repo_url: str, *, get_json=None) -> dict:
+    """The update source's open ``post-merge-red`` issues, read by each completed update check (at boot
+    and on each manual check).
+
+    Each is a test or lint finding that stayed red after merges into the development branch, with the
+    merge it was bisected to when the bisection finished, and is still open: unfixed work on the body
+    this install runs or will run. One public page, no credential; a full page stays ``partial``. A
+    failed read is ``unavailable`` and lists nothing; ``kept_reds`` keeps the stored observation.
+    """
+    repo = _github_repo(repo_url)
+    if repo is None:
+        return {"read": "unavailable", "reason": "The update source has no supported GitHub issue reader.",
+                "issues": []}
+    try:
+        rows = (get_json or _get_json)(f"https://api.github.com/repos/{repo}/issues?labels={RED_LABEL}"
+                                       "&state=open&per_page=100")
+        issues = [{"number": row["number"], "title": str(row.get("title") or ""),
+                   "opened": str(row.get("created_at") or "")} for row in rows if "pull_request" not in row]
+    except Exception as exc:
+        return {"read": "unavailable", "reason": type(exc).__name__, "repository": repo, "issues": [],
+                "observed_at": ""}
+    return {"read": "partial" if len(rows) >= 100 else "observed", "repository": repo, "issues": issues,
+            "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+
+def kept_reds(read: dict | None, stored: dict | None) -> dict | None:
+    """What a check records: its own read, or after a failed read the stored observation of the same
+    repository with its time, never "none open". Called under the letter lock with the record on disk,
+    so a late failure never replaces a fresher observation that another check wrote meanwhile."""
+    if read is None:
+        return stored
+    if (read.get("read") == "unavailable" and isinstance(stored, dict) and stored.get("observed_at")
+            and stored.get("repository") == read.get("repository")):
+        return {**read, "issues": stored.get("issues") or [], "observed_at": stored["observed_at"]}
+    return read
+
+
 def range_qualification(material: dict, repo_url: str) -> dict:
     commits = material.get("first_parent_commits", material.get("commits")) or []
     return {"base_sha": material["base_sha"], "target_sha": material["target_sha"],
@@ -144,11 +205,85 @@ def range_qualification(material: dict, repo_url: str) -> dict:
             "github": post_merge_checks(commits, repo_url)}
 
 
-def refresh_qualification(authored: dict, repo_url: str, *, previous: dict | None = None) -> tuple[dict, bool]:
-    """Refresh facts without making an outage erase observations or buy prose.
+def compact_qualification(value):
+    """A context form of qualification receipts, never a new qualification verdict.
 
-    The boolean names new check evidence relative to the letter's authoring input.
-    Availability is shown separately, with the latest retained observations.
+    Checks count by outcome; each review counts as one combination (observed verdict, record
+    state, request-time relation, declaration), never as separate totals; a receipt without state
+    and relation counts as ``not_recorded``. Unknown evidence and new fields stay verbatim, bound
+    to their commit. Exact receipts live in the host capture.
+    """
+    import copy
+    from collections import Counter
+
+    if not isinstance(value, dict):
+        return value
+    result = copy.deepcopy(value)
+    commits = result.get('commits')
+    if isinstance(commits, list):
+        checks, reviews, post_merge, whole = Counter(), Counter(), Counter(), []
+        for commit in commits:
+            receipt = commit.get('receipt') if isinstance(commit, dict) else None
+            if (not isinstance(receipt, dict) or set(commit) - {'sha', 'subject', 'date', 'receipt', 'body_read'}
+                    or set(receipt) - {'schema', 'checks', 'review', 'post_merge'} or receipt.get('schema') != 1
+                    or not isinstance(receipt.get('checks'), list) or not isinstance(receipt.get('review'), dict)
+                    or not isinstance(receipt.get('post_merge'), dict)
+                    or commit.get('body_read') is False):
+                whole.append(commit)
+                continue
+            unknown = {}
+            for check in receipt.get('checks') or ():
+                if (not isinstance(check, dict) or set(check) - {'name', 'status', 'source', 'detail'}
+                        or check.get('status') not in ('passed', 'failed', 'not_run')
+                        or check.get('source') != 'author_declared'):
+                    unknown.setdefault('checks', []).append(check)
+                else:
+                    checks[(check.get('name', ''), check['status'], check['source'])] += 1
+            review = receipt.get('review') or {}
+            recorded = {'state', 'relation'} & set(review)
+            if (set(review) - {'observed', 'declared', 'state', 'relation'}
+                    or any(review.get(k) not in ('PASS', 'FAIL') for k in ('observed', 'declared'))
+                    or (recorded and (review.get('state') not in REVIEW_STATES
+                                      or review.get('relation') not in REVIEW_RELATIONS))):
+                unknown['review'] = review
+            else:
+                reviews[(review['observed'], review.get('state', 'not_recorded'),
+                         review.get('relation', 'not_recorded'), review['declared'])] += 1
+            post = receipt.get('post_merge') or {}
+            if set(post) - {'status', 'detail'} or post.get('status') not in ('passed', 'failed', 'not_run'):
+                unknown['post_merge'] = post
+            else:
+                post_merge[post['status']] += 1
+            if unknown:
+                whole.append({'sha': commit.get('sha'), 'receipt': unknown})
+        result['commits'] = {'count': len(commits),
+            'checks': [{'name': name, 'status': status, 'source': source, 'count': count}
+                       for (name, status, source), count in sorted(checks.items())],
+            'reviews': [{'observed': observed, 'state': state, 'relation': relation, 'declared': declared,
+                         'count': count} for (observed, state, relation, declared), count in sorted(reviews.items())],
+            'post_merge': dict(post_merge), 'unabridged': whole,
+            'fact': 'Declarations are not observed PASS; missing or unconfirmed evidence remains unknown.',
+            'details': 'retained full runtime section: official_update.letter.qualification'}
+    github = result.get('github')
+    if isinstance(github, dict) and isinstance(github.get('runs'), list):
+        counts, whole = Counter(), []
+        for run in github['runs']:
+            if (not isinstance(run, dict) or set(run) - {'sha', 'status', 'conclusion', 'url', 'run_id', 'attempt'}
+                    or run.get('status') != 'completed'
+                    or run.get('conclusion') not in ('success', 'failure', 'cancelled', 'skipped', 'timed_out')):
+                whole.append(run)
+            else:
+                counts[run['conclusion']] += 1
+        github['runs'] = {'count': len(github['runs']), 'completed': dict(counts), 'unabridged': whole,
+                          'details': 'retained full runtime section: official_update.letter.qualification.github.runs'}
+    return result
+
+
+def refresh_qualification(authored: dict, repo_url: str, *, previous: dict | None = None) -> tuple[dict, bool]:
+    """Refresh facts without making an outage erase observations; prose never follows them.
+
+    The boolean names new check evidence relative to ``authored``, the recorded facts being
+    refreshed. Availability is shown separately, with the latest retained observations.
     """
     if not previous or any(previous.get(k) != authored.get(k) for k in ("base_sha", "target_sha")):
         previous = authored
@@ -172,32 +307,52 @@ def qualification_summary(qualification: dict | None) -> dict | None:
 
     The panel, preflight and the letter's author keep the full record (owner 8B); a task sees the range, how
     many commits carry a receipt, each check's outcomes by their source (``author_declared``: the author's
-    word, not a host run) and the reviews observed and declared, the post-merge read with its runs and gaps.
+    word, not a host run), each review combination as one row (observed verdict, record state, request-time
+    relation, declaration; ``not_recorded`` for older receipts, unknown fields kept), the post-merge read.
     """
     if not isinstance(qualification, dict):
         return qualification
     commits = [c for c in qualification.get("commits") or [] if isinstance(c, dict)]
     receipts = [c["receipt"] for c in commits if isinstance(c.get("receipt"), dict)]
     checks: dict = {}
-    reviews: dict = {"observed": {}, "declared": {}}
+    reviews: dict = {}
     for receipt in receipts:
         for row in receipt.get("checks") or []:
             outcome = checks.setdefault(str(row.get("name")), {})
             key = f"{row.get('status')} ({row.get('source') or 'unknown'})"
             outcome[key] = outcome.get(key, 0) + 1
-        for side, verdicts in reviews.items():
-            verdict = str((receipt.get("review") or {}).get(side) or "unknown")
-            verdicts[verdict] = verdicts.get(verdict, 0) + 1
+        review = receipt.get("review") if isinstance(receipt.get("review"), dict) else {}
+        # One row per combination, so a verdict never meets another commit's state or relation.
+        row = {"observed": "unknown", "state": "not_recorded", "relation": "not_recorded", "declared": "unknown"}
+        # Runtime summaries are a projection, but not a lossy one: future JSON fields, including
+        # explicit null/empty values and nested shapes, remain their original values.
+        row.update({str(k): v for k, v in review.items()})
+        key = json.dumps(row, sort_keys=True)
+        reviews[key] = reviews.get(key, 0) + 1
     github = qualification.get("github") if isinstance(qualification.get("github"), dict) else {}
     conclusions: dict = {}
     for run in github.get("runs") or []:
         key = str(run.get("conclusion") or run.get("status") or "unknown")
         conclusions[key] = conclusions.get(key, 0) + 1
     return {"base_sha": qualification.get("base_sha"), "target_sha": qualification.get("target_sha"),
-            "commits": len(commits), "with_receipt": len(receipts), "checks": checks, "reviews": reviews,
+            "commits": len(commits), "with_receipt": len(receipts), "checks": checks,
+            "reviews": _review_summary_rows(reviews),
             "post_merge": {"read": github.get("status", "unknown"), "reason": github.get("reason"),
                            "runs": conclusions, "missing": len(github.get("missing_shas") or [])},
             "full": "query_data(op='json', kind='update_letter')"}
+
+
+def _review_summary_rows(reviews: dict) -> list[dict]:
+    """Add the projection's aggregate count without overwriting an unknown source field."""
+    rows = []
+    for encoded, aggregate_count in reviews.items():
+        row = json.loads(encoded)
+        key = "count"
+        while key in row:
+            key = f"_{key}"
+        row[key] = aggregate_count
+        rows.append(row)
+    return rows
 
 
 def runtime_letter(letter: dict | None) -> dict | None:

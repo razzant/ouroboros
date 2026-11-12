@@ -106,7 +106,7 @@ def test_cold_launcher_panic_stops_task_bound_skill_with_slow_census(tmp_path):
         assert not problem, problem
 
 
-def _worker(wid, in_q, out_q, repo_dir, drive_root, custody_session_id="", stop_socket=None):
+def _worker(wid, in_q, out_q, repo_dir, drive_root, custody_session_id="", stop_socket=None, transport_no_proxy=None):
     """The real worker's custody/lifeline prologue, then one skill invocation."""
     import contextlib
     from ouroboros.platform_layer import create_new_session

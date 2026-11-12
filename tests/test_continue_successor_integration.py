@@ -31,11 +31,10 @@ from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from tests._store_shared import read_result, result_signature, seed_result
 
 # Actual Git subprocess fixtures follow the repository's real-process lane.
-pytestmark = pytest.mark.serial
 
 NONCE = "continue-nonce-1"
 SUCCESSOR = successor_id("pred", NONCE)
-LINEAGE_KEYS = {"decision_authority", "original_parent_task_id", "child_result_sha256"}
+LINEAGE_KEYS = {"decision_authority", "original_parent_task_id"}
 
 
 def git(root, *args):
@@ -207,9 +206,12 @@ def test_successor_decides_a_shared_result_and_its_own_child_stays_ordinary(worl
 
     own = repo(world.tmp / "own", {"a.txt": b"base\n"})
     shared_child(world, own, task_id="own", parent=successor)
+    consumed = _child_result_sha256(load_effective_task_result(world.data, "own"))
     out = invoke(ctx, task_id="own", decision=decision, reason="my own helper")
     assert "owner-Continue" not in out, out
     assert not LINEAGE_KEYS & set(verdict(world, successor, "own"))
+    assert verdict(world, successor, "own")["child_result_sha256"] == consumed
+    assert dispositions(world, successor)[-1]["child_result_sha256"] == consumed
     assert load_effective_task_result(world.data, "own")["child_result_disposition"] == (
         "integrated" if decision == "apply" else "irrelevant")
 
@@ -366,21 +368,42 @@ def test_the_predecessors_own_decision_stands(world, monkeypatch, prior, refusal
                        workspace_root=world.project, workspace_mode="external")
     with monkeypatch.context() as patched:
         if prior == "apply_tree_row_lost":  # its verdict landed, its tree row did not
-            patched.setattr("ouroboros.tools.join_ledger._record_current_child_result_disposition",
+            patched.setattr("ouroboros.tools.join_ledger.tree_ledger_append",
                             lambda *_a, **_k: "⚠️ CHILD_RESULT_DISPOSITION_WRITE_FAILED: fixture")
         out = _integrate_subagent_patch(pred, task_id="child", decision="reject" if prior == "reject" else "apply",
                                         reason="decided before the restart")
     assert ("🚫 Rejected" if prior == "reject" else "✅ Integrated") in out, out
+    if prior == "apply_tree_row_lost":
+        assert "INTEGRATE_DISPOSITION_FAILED" in out, out
     project = (world.project / "a.txt").read_bytes(), git(world.project, "diff", "--cached", "--name-only")
     successor = continue_from(world.data)
     for decision in ("apply", "reject"):
         out = _integrate_subagent_patch(successor_ctx(world), task_id="child", decision=decision)
         assert "INTEGRATE_LINEAGE_FORBIDDEN" in out and refusal in out, out
         if prior == "apply_tree_row_lost":
-            assert "covers every revision" in out and "this exact result" not in out, out
+            assert "covers every revision" not in out and "this exact result" in out, out
     assert ((world.project / "a.txt").read_bytes(),
             git(world.project, "diff", "--cached", "--name-only")) == project
     assert not (task_artifact_dir_path(world.data, successor) / "subagent_patch_verdict_child.json").exists()
+
+
+@pytest.mark.parametrize("store", ["artifact", "custody"])
+def test_truly_legacy_hashless_decision_still_covers_every_revision(world, store):
+    from ouroboros import delegate_custody as custody
+
+    interrupted_root(world.data)
+    shared_child(world, repo(world.tmp / "shared", {"a.txt": b"base\n"}))
+    # Historical records predate consumed-result hashes; no new writer creates these.
+    if store == "artifact":
+        path = task_artifact_dir_path(world.data, "pred", create=True) / "subagent_patch_verdict_shared.json"
+        path.write_text(json.dumps({"parent_task_id": "pred", "child_task_id": "shared", "outcome": "rejected"}))
+    else:
+        assert custody.emit(world.data, "delegate_run_patch_verdict", {
+            "task_id": "pred", "child_task_id": "shared", "pipeline": "subagent", "disposition": "rejected"})
+    write_task_result(world.data, "shared", "completed", result="a later report")
+    successor = continue_from(world.data)
+    out = invoke(successor_ctx(world, task_id=successor), task_id="shared", decision="reject")
+    assert "INTEGRATE_LINEAGE_FORBIDDEN" in out and "covers every revision" in out, out
 
 
 @pytest.mark.parametrize("kind, decision, recorded", [
@@ -449,6 +472,32 @@ def test_a_decision_binds_the_exact_result_it_judged(world):
     out = _integrate_subagent_patch(successor_ctx(world, task_id=second), task_id="shared", reason="the new result")
     assert "Verified external_workspace child" in out, out
     assert verdict(world, second, "shared")["child_result_sha256"] not in ("", judged)
+
+
+@pytest.mark.parametrize("decision", ["apply", "accept", "reject"])
+def test_successor_binds_the_consumed_result_when_current_changes_during_lookup(world, monkeypatch, decision):
+    from ouroboros.tools import subagent_integration as integration
+
+    interrupted_root(world.data)
+    shared_child(world, repo(world.tmp / "shared", {"a.txt": b"base\n"}))
+    successor = continue_from(world.data)
+    before = _child_result_sha256(load_effective_task_result(world.data, "shared"))
+    locate = integration._locate_child_patch
+
+    def read_then_publish(ctx, tid):
+        consumed = locate(ctx, tid)
+        write_task_result(world.data, tid, "completed", result="Corrected report after the consumed result")
+        return consumed
+
+    with monkeypatch.context() as racing:
+        racing.setattr(integration, "_locate_child_patch", read_then_publish)
+        out = invoke(successor_ctx(world), task_id="shared", decision=decision, reason="the observed result")
+    assert "owner-Continue successor" in out, out
+    assert verdict(world, successor, "shared")["child_result_sha256"] == before
+    assert _child_result_sha256(load_effective_task_result(world.data, "shared")) != before
+    # The old verdict never decides this later result for the successor either.
+    out = invoke(successor_ctx(world), task_id="shared", decision="reject", reason="the corrected result")
+    assert "Rejected" in out and "already recorded" not in out, out
 
 
 def test_unreadable_decision_records_refuse_and_an_unlanded_decision_is_disclosed(world, monkeypatch):

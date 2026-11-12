@@ -7,10 +7,19 @@
  * window, so there the app's value is the setting. A touch screen lays the page out at another width
  * (`window.ouroViewportScale`, web/theme.js), stored by this browser. A browser on a computer keeps its own zoom,
  * which no page can set, so the control names its keys. Anywhere else (a Mini App in Telegram for Android, Telegram
- * Desktop, a desktop app older than the bridge) the size stays 100 % and the control says so. */
+ * Desktop, a desktop app older than the bridge) the size stays 100 % and the control says so.
+ *
+ * The window's answer is read through desktop_shell.js (`readShellInfo`, `shellCapability`), the one reading of what
+ * this window can do: before pywebview injects its bridge nothing is claimed, a failed read says the state could not
+ * be read (never "cannot"), and an earlier answer outlives a later failed read. A size the page asks for is the
+ * owner's choice until the window takes it (`ok`): on its way, refused or unanswered, it stays the choice on screen,
+ * says so and keeps the control, and is no size of the window's (client_surface.js sends only a taken one); a read
+ * older than a call's return never undoes what that call settled. The note states what this window does; what to
+ * update, if anything, is Dashboard › Updates' alone. */
 
 import { fmtInto } from './i18n.js';
 import { isTelegramHost } from './host_telegram.js';
+import { readShellInfo, shellCapability } from './desktop_shell.js';
 
 /** The desktop window's range; the keys move in tens, the slider in fives. */
 export const DESK = Object.freeze({ min: 50, max: 200, step: 5, key: 10 });
@@ -44,12 +53,19 @@ function bridgeOf(win) {
 
 const isMac = (win) => /Mac|iPhone|iPad/.test(String(win?.navigator?.platform || win?.navigator?.userAgent || ''));
 
+// What this window's capability read says, as the note's reason: an app that lacks the bridge or its field ('app'),
+// a window that answered it cannot ('engine'), a read that failed ('unread'), a bridge not injected yet ('pending').
+const SHELL_REASONS = Object.freeze({ missing: 'app', unsupported: 'engine', error: 'unread', pending: 'pending' });
+
 /** The one controller of this page's Interface size. */
 export function createInterfaceSize({ win = globalThis.window, doc = globalThis.document } = {}) {
     const listeners = new Set();
-    let native = null;  // the desktop bridge's answer: {min, max, percent}
-    let nativeChecked = false;
-    let nativeKnown = false;  // the app answered for its window: an engine without a page zoom, not an older app
+    let native = null;  // the desktop bridge's answer: {min, max, percent}, percent the size the window last reported
+    // The newest size asked of the window that it has not reported back: {percent, open} (open: its call is out).
+    let asked = null;
+    let returned = 0;  // calls of ours that came back, answered or not: a read out meanwhile may predate their effect
+    let capability = { state: (() => { try { return win?.pywebview ? 'pending' : 'none'; } catch { return 'none'; } })() };
+    let bridgeReady = false;  // pywebviewready was seen: an absent method is now a fact
     let sequence = 0;
     const since = win?.performance?.timeOrigin ?? Date.now();
 
@@ -58,38 +74,46 @@ export function createInterfaceSize({ win = globalThis.window, doc = globalThis.
 
     function state() {
         if (native) {
-            return { route: 'app', percent: native.percent, min: native.min, max: native.max, step: DESK.step };
+            const current = { route: 'app', percent: native.percent, min: native.min, max: native.max, step: DESK.step };
+            // A size asked is the owner's choice, shown and stepped on from, never the window's (`requested`), and
+            // `unconfirmed` once its call came back without a size the window took: what it holds is then unknown.
+            if (asked) Object.assign(current, { percent: asked.percent, requested: true });
+            if (asked && !asked.open) current.unconfirmed = true;
+            return current;
         }
         const vp = viewport();
         if (vp && vp.state !== 'unavailable') {
             return { route: 'screen', percent: vp.percent, min: vp.min, max: vp.max, step: vp.step,
                 pending: vp.state === 'pending' };
         }
-        const shell = Boolean(win?.pywebview);
         const topLevel = (() => { try { return win.top === win; } catch { return false; } })();
-        if (shell && nativeChecked) return { route: 'none', reason: nativeKnown ? 'engine' : 'app', percent: 100 };
+        // A failed read keeps the window's last answer; without one it says only that the state was not read.
+        const known = ['error', 'pending'].includes(capability.state) && capability.last ? capability.last : capability;
+        const reason = SHELL_REASONS[known.state] || (known.state === 'supported' ? 'unread' : '');  // no setter left
+        if (reason) return { route: 'none', reason, percent: 100 };
         if (isTelegramHost({ win, doc }) && topLevel) return { route: 'none', reason: 'telegram', percent: 100 };
         return { route: 'browser', percent: 100, touch: Boolean(win?.matchMedia?.('(pointer: coarse)')?.matches) };
     }
 
     async function readNative() {
-        const api = bridgeOf(win);
-        if (!api || typeof api.shell_info !== 'function') {
-            nativeChecked = Boolean(win?.pywebview);
-            notify();
-            return;
+        // A read speaks for the window's size only if none of our calls came back while it was out: pywebview answers
+        // each call on its own thread, so such a read may be older than what that call did or acknowledged.
+        const returnedBefore = returned;
+        const read = await readShellInfo({ win, ready: bridgeReady });
+        let next = shellCapability(read, 'interface_size', capability);
+        // The slider needs the window's setter too: support without it is an app that lacks the method.
+        if (next.state === 'supported' && !bridgeOf(win)) next = { state: 'missing' };
+        capability = next;
+        if (next.state === 'supported') {
+            const info = next.value;
+            const current = returned === returnedBefore || !native;
+            native = { min: Number(info.min) || DESK.min, max: Number(info.max) || DESK.max,
+                percent: current ? Number(info.percent) || 100 : native.percent };
+            if (current && asked && !asked.open) asked = null;  // the window's own size settles a call left unanswered
+        } else if (!(['error', 'pending'].includes(next.state) && next.last?.state === 'supported' && bridgeOf(win))) {
+            native = null;  // an answer that it cannot, or no answer at all; a failed read keeps a working slider
+            asked = null;
         }
-        try {
-            const info = (await api.shell_info())?.interface_size;
-            nativeKnown = Boolean(info && typeof info === 'object');
-            native = info && info.supported ? {
-                min: Number(info.min) || DESK.min, max: Number(info.max) || DESK.max,
-                percent: Number(info.percent) || 100,
-            } : null;
-        } catch {
-            native = null;
-        }
-        nativeChecked = true;
         notify();
     }
 
@@ -99,16 +123,26 @@ export function createInterfaceSize({ win = globalThis.window, doc = globalThis.
         if (now.route === 'app') {
             const percent = Math.min(now.max, Math.max(now.min, Math.round(Number(value) / DESK.step) * DESK.step));
             const mine = ++sequence;
-            native = { ...native, percent };  // the next key press steps on from here, not from a late answer
+            asked = { percent, open: true };  // the next key press steps on from here, not from a late answer
             notify();
+            let answer = null;
+            let threw = false;
             try {
-                const answer = await bridgeOf(win)?.set_interface_size(percent, since, mine);
-                // Only the newest call's answer speaks: an older one arriving late never moves the control back.
-                if (mine === sequence && Number.isFinite(Number(answer?.percent))) {
-                    native = { ...native, percent: Number(answer.percent) };
-                }
+                answer = await bridgeOf(win)?.set_interface_size(percent, since, mine);
             } catch {
-                if (mine === sequence) await readNative();  // the control shows what the app holds
+                threw = true;
+            }
+            returned += 1;
+            // Only the newest call's answer speaks: an older one arriving late never moves the control back. Only one
+            // the window took (`ok`) acknowledges a size: a refusal's percent may be a size it stored without applying.
+            if (mine === sequence && native) {
+                if (answer?.ok === true && typeof answer.percent === 'number' && Number.isFinite(answer.percent)) {
+                    native = { ...native, percent: answer.percent };
+                    asked = null;
+                } else {
+                    asked = { percent, open: false };  // no size it took: what the window holds is unknown
+                    if (threw) await readNative();  // the control shows what the app holds, if a read can say
+                }
             }
             notify();
             return state();
@@ -133,10 +167,11 @@ export function createInterfaceSize({ win = globalThis.window, doc = globalThis.
         if (command === 'reset') reset(); else step(command === 'in' ? 1 : -1);
     }
 
+    const onBridgeReady = () => { bridgeReady = true; return readNative(); };
     const offViewport = viewport()?.subscribe?.(notify);
     doc?.addEventListener?.('keydown', onKey, true);
-    win?.addEventListener?.('pywebviewready', readNative);
-    if (bridgeOf(win)) readNative();
+    win?.addEventListener?.('pywebviewready', onBridgeReady);
+    if (capability.state === 'pending') readNative();  // a bridge injected before this page's script is read now
 
     return {
         state, set, step, reset,
@@ -144,7 +179,7 @@ export function createInterfaceSize({ win = globalThis.window, doc = globalThis.
         dispose() {
             offViewport?.();
             doc?.removeEventListener?.('keydown', onKey, true);
-            win?.removeEventListener?.('pywebviewready', readNative);
+            win?.removeEventListener?.('pywebviewready', onBridgeReady);
             listeners.clear();
         },
     };
@@ -165,17 +200,25 @@ export function getInterfaceSize() {
     return shared;
 }
 
-/** The note under the slider, how the size works on this surface: [template, params] for `fmt`. */
+/** The note under the slider, how the size works on this surface: [template, params] for `fmt`. A fact about this
+ * surface only: no Update, Restart or reinstall advice (Dashboard › Updates alone owns those actions). */
 export function sizeNote(current, { mac = false } = {}) {
     const modifier = mac ? '⌘' : 'Ctrl';
     const keys = { zoomIn: `${modifier} +`, zoomOut: `${modifier} −`, reset: `${modifier} 0` };
+    if (current.route === 'app' && current.unconfirmed) {
+        return ['This window did not confirm {percent}%. Choose a size again, or use {zoomIn}, {zoomOut} and {reset}.',
+            { ...keys, percent: current.percent }];
+    }
+    if (current.route === 'app' && current.requested) {
+        return ['Waiting for this window to confirm {percent}%.', { percent: current.percent }];  // the call is still out
+    }
     if (current.route === 'app') {
         return ['For this window; the next one opens at the same size. {zoomIn}, {zoomOut} and {reset} work here too.', keys];
     }
     if (current.route === 'screen') return ['On this screen from {min}% to {max}%.', { min: current.min, max: current.max }];
-    if (current.reason === 'app') {
-        return ['This desktop app cannot change its size yet. Restart Ouroboros after updating to set it here.', {}];
-    }
+    if (current.reason === 'pending') return ['', {}];  // the window has not answered yet: nothing to say
+    if (current.reason === 'app') return ['This desktop app cannot change its size.', {}];
+    if (current.reason === 'unread') return ['Could not read whether this window can change its size.', {}];
     if (current.reason === 'engine') {
         return ['This window cannot change its size. Your system’s display size setting makes everything larger or '
             + 'smaller.', {}];
@@ -214,7 +257,8 @@ export function mountInterfaceSize(root, controller = getInterfaceSize(), { win 
             input.disabled = Boolean(current.pending);
         }
         if (output && !dragging) output.textContent = `${current.percent}%`;
-        if (resetButton) resetButton.disabled = !adjustable || current.percent === 100;
+        // An unconfirmed 100 % is no size to keep: Reset stays to ask again.
+        if (resetButton) resetButton.disabled = !adjustable || (current.percent === 100 && !current.unconfirmed);
         if (note) { const [template, params] = sizeNote(current, { mac }); fmtInto(note, template, params, template); }
     };
     // The size changes only when the slider is let go: a page zooming under the finger would move the slider itself.

@@ -4,7 +4,8 @@
 
 import { apiClient } from './api_client.js';
 import { ACCOUNTS_UNSUPPORTED_STATUS, claudexorStatus, accountRows, familyLabel } from './claudexor_status_store.js';
-import { LOGIN_CARD_FULL, createLoginCardController } from './harness_login_cards.js';
+import { LOGIN_CARD_FULL, SIGN_IN_SCOPE_NOTE, createLoginCardController } from './harness_login_cards.js';
+import { familyStatus } from './harness_accounts.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import {
     availableSubagentsEditorHost,
@@ -129,9 +130,13 @@ export function onboardingSettingsDraft({
 } = {}) {
     const clean = (value) => trim(value);
     return {
+        OUROBOROS_CONNECTIONS: state.connections || [],
         ...Object.fromEntries(providerFields.map(
             (field) => [field.settingKey, clean(state[field.stateKey])],
         )),
+        // The saved legacy address, so readiness and discovery read the pair the runtime reads;
+        // no wizard field edits it, and completion keeps the saved value.
+        ...(clean(state.legacyCompatibleBaseUrl) ? { OPENAI_BASE_URL: clean(state.legacyCompatibleBaseUrl) } : {}),
         ...Object.fromEntries(budgetFields.filter((field) => state[field.stateKey] !== '').map(
             (field) => [field.settingKey, Number(state[field.stateKey] || 0)],
         )),
@@ -352,15 +357,13 @@ export function agentsOutcomeText(connected = [], {
         return 'Accounts could not be checked. Your draft is kept; refresh the connection '
             + 'or configure API access to continue.';
     }
-    if (!connected.length) {
-        return 'Connect Codex to start without an API key, or add API access below. '
-            + 'Other subscriptions remain available for agents.';
-    }
+    // Nothing connected: the rows and the reason beside Continue already say what to do.
+    if (!connected.length) return '';
     const labels = joinLabels(familyLabels(connected, snapshot, { catalogKnown }));
     if (skipPresets) {
-        return `${labels} ${connected.length === 1 ? 'is' : 'are'} connected, but you chose to `
+        return `Signed in to ${labels}, but you chose to `
             + 'skip the automatic subscription preset. The Available subagents draft below '
-            + 'is still saved exactly as you edit it; other agent defaults stay unchanged.';
+            + `is still saved exactly as you edit it; other agent defaults stay unchanged. ${SIGN_IN_SCOPE_NOTE}`;
     }
     const reviewerHarnesses = connected.filter(
         (harness) => REVIEW_CAPABLE_AGENT_HARNESSES.has(harness),
@@ -369,14 +372,14 @@ export function agentsOutcomeText(connected = [], {
         (harness) => !REVIEW_CAPABLE_AGENT_HARNESSES.has(harness),
     );
     const clauses = [
-        `${labels} ${connected.length === 1 ? 'is' : 'are'} connected. When you finish, `
+        `Signed in to ${labels}. When you finish, `
             + 'Ouroboros will try to add subscription-backed choices to Available subagents '
             + `through ${connected.length === 1 ? 'it' : 'them'}.`,
     ];
     if (reviewerHarnesses.length) {
         const reviewerLabels = familyLabels(reviewerHarnesses, snapshot, { catalogKnown });
         clauses.push(`${joinLabels(reviewerLabels)} can `
-            + 'also move commit, scope, advisory, plan, skill and result review.');
+            + 'also move commit, plan, skill and result review.');
     }
     if (taskOnlyHarnesses.length) {
         const taskOnlyLabels = familyLabels(taskOnlyHarnesses, snapshot, { catalogKnown });
@@ -387,18 +390,15 @@ export function agentsOutcomeText(connected = [], {
     clauses.push(connected.includes('codex')
         ? 'Codex can also supply your model roles without an API key.'
         : 'Main still needs Codex, an API key, or a local model.');
+    clauses.push(SIGN_IN_SCOPE_NOTE);
     return clauses.join(' ');
 }
 
 export function familyStatusText(snapshot, harness, { accountsKnown = true, accountsUnsupported = false } = {}) {
     if (accountsUnsupported) return { tone: 'muted', text: ACCOUNTS_UNSUPPORTED_STATUS };
     if (!accountsKnown) return { tone: 'muted', text: 'Not checked' };
-    const count = harnessAccountCount(snapshot, harness);
-    if (!count) return { tone: 'muted', text: 'Not connected' };
-    return {
-        tone: 'ok',
-        text: count === 1 ? 'Connected' : `${count} accounts connected · they rotate`,
-    };
+    const status = familyStatus(accountRows(snapshot).filter((row) => row.harness === harness));
+    return { tone: status.tone, text: status.label };
 }
 
 export function subagentPreviewStatusSignature(view, snapshot) {
@@ -522,7 +522,7 @@ export function familyRowHtml(family, { status, connected = false, connectable =
                 </span>
                 <span class="agent-family-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.text)}</span>
             </span>
-            ${connectable ? `<button type="button" class="btn btn-secondary" data-agent-connect="${escapeHtml(family.harness)}">
+            ${connectable ? `<button type="button" class="btn btn-default" data-agent-connect="${escapeHtml(family.harness)}">
                 ${escapeHtml(connected ? 'Add another' : 'Connect')}
             </button>` : ''}
         </div>
@@ -558,6 +558,7 @@ export function agentsStepHtml({ compact = false, showRoster = true } = {}) {
             <h3>Subscriptions</h3>
             <div id="agents-status-note" class="agent-service-note" hidden></div>
             <div id="agents-family-list" class="agent-family-list"></div>
+            <div class="wizard-inline-note agent-limits-note">Subscription limits still apply. This connection does not enable paid credits or change your provider's spending limits.</div>
             <div id="agents-login-host"></div>
             <div id="agents-outcome" class="agent-outcome"></div>
         </div>
@@ -897,6 +898,7 @@ export function createAgentsStep({
         get accountsKnown() { return accountsKnown(); },
         get reads() { return store.reads; },
         refreshStatus() { return store.refresh(); },
+        adoptCatalog(data) { subagents.adoptCatalog(data); },
         get availableSubagents() { return subagents.setting; },
         get allowEmptyReviewPool() { return subagents.allowEmptyReviewPool; },
         setProcessingPreference(value) { subagents.setProcessingPreference(value); },

@@ -108,6 +108,18 @@ def normalize_zai_reasoning_effort(value: str) -> str:
     return ZAI_REASONING_EFFORT_ALIASES.get(normalized, "low")
 
 
+# MiniMax's global/China OpenAI docs (2026-11-01; no live send) list five tiers
+# for this exact model, default to max and reject none. Other models keep their
+# requested tier. Evidence and re-check policy: DEVELOPMENT "External facts".
+MINIMAX_FLASH_MODEL = "MiniMax-M3.1-Flash"
+MINIMAX_FLASH_EFFORT_ALIASES = {"none": "low", "minimal": "low", "ultra": "max"}
+
+
+def normalize_minimax_reasoning_effort(model: str, value: str) -> str:
+    """Project one canonical tier for one exact direct MiniMax model."""
+    return MINIMAX_FLASH_EFFORT_ALIASES.get(value, value) if model == MINIMAX_FLASH_MODEL else value
+
+
 @dataclass(frozen=True)
 class KindSpec:
     """One API connection kind: its label, its fields in order as ``(row_field,
@@ -489,6 +501,22 @@ ALL_PROVIDER_CREDENTIAL_KEYS: frozenset[str] = frozenset(
 ROUTE_CREDENTIAL_SETTING_KEYS: frozenset[str] = ALL_PROVIDER_CREDENTIAL_KEYS | {CONNECTIONS_KEY}
 
 
+def _search_route_models(settings: dict) -> list[str]:
+    """Routed spellings, in route order, of the legs the configured built-in search of ``settings``
+    sends its choice on, whatever their local readiness: every leg of the saved model (its named
+    connection kept); where the Source's recommendations are the choice instead (blank or unapplied
+    Model, or a saved one no transport serves, which a call naming its own model meets), every
+    recommended leg. Auto's other-model fallback behind a saved model is no part of that choice."""
+    from ouroboros.search_routes import resolve_web_search_route
+
+    route = resolve_web_search_route(settings=settings)
+    if route.get("error"):
+        route = resolve_web_search_route(settings=settings, model="")
+    legs = [leg for leg in route["legs"] + route["unavailable"] if leg["source"] != "ddgs"]
+    chosen = [leg for leg in legs if leg["model_source"] == "selection"] or legs
+    return [f"{connection_id(leg['source'], leg.get('connection', ''))}::{leg['model']}" for leg in chosen]
+
+
 def provider_credential_plan(
     settings: dict,
     *,
@@ -501,9 +529,15 @@ def provider_credential_plan(
     at all) the plan is the FULL credential universe, because a benchmark that dies on a
     missing key at hour six is worse than one that carries a spare.  The optional
     ``include_claude_sdk_defaults`` switch is RETIRED (no-op): the Claude-SDK transport and
-    its dedicated model slots are gone, so both values produce the same plan."""
+    its dedicated model slots are gone, so both values produce the same plan. The web search
+    Model is planned as the routes its configured search sends (``_search_route_models``),
+    never by reading its value as a chat route."""
+    from ouroboros.model_slots import MODEL_ROLE_SETTINGS
+
     declared = declared_model_settings(settings)
-    providers = providers_for_declared_models(declared)
+    search_key = MODEL_ROLE_SETTINGS["websearch"]
+    chat = {key: value for key, value in declared.items() if key != search_key}
+    providers = providers_for_declared_models({**chat, search_key: ",".join(_search_route_models(settings or {}))})
     planned = credential_keys_for_providers(providers)
     if any(parse_model_route(model).connection for models in providers.values() for model in models):
         planned += (CONNECTIONS_KEY,)  # a named connection travels as its row, not as flat keys
@@ -714,6 +748,27 @@ def exclusive_direct_kind(settings: Mapping[str, Any] | None = None) -> str:
     return direct[0] if len(direct) == 1 else ""
 
 
+def proposal_connection(kind: str, settings: Mapping[str, Any] | None = None) -> str | None:
+    """The connection of ``kind`` an automatic proposal names (#2969): '' — the built-in one —
+    when it serves or none of the kind does, else the only named one that serves; None when
+    several named ones serve and the built-in does not: the owner chooses, nothing is guessed."""
+    from ouroboros.provider_connections import configured_connections
+
+    names = [name for served, name in configured_connections(settings) if served == kind]
+    if not names or "" in names:
+        return ""
+    return names[0] if len(names) == 1 else None
+
+
+def route_on_connection(model: str, kind: str, name: str) -> str:
+    """A route of ``kind``'s built-in connection (``openai::m``, a bare OpenRouter id) spelled on
+    its named connection ``name`` (``openai@name::m``); any other route, or ``name`` '', as written."""
+    route = parse_model_route(model)
+    if not name or route.kind != kind or route.connection or not route.valid:
+        return model
+    return f"{connection_id(kind, name)}::{route.model}"
+
+
 # The settings whose presence decides whether a built-in connection is configured (and
 # the named connections): credentials by presence only, never their values.
 READINESS_SETTING_KEYS: frozenset[str] = frozenset({
@@ -805,16 +860,21 @@ def compute_direct_review_seats(
 ) -> list[tuple[str, str]]:
     """The same panel as ``(role, model)`` seats, one per declared role: ``role`` is the owner slot a
     seat runs (``main``, or ``light`` for a Light of this provider), '' where the provider's shipped
-    Light stands in."""
+    Light stands in, on Main's connection (a named Main's key pays for its whole panel)."""
     if provider not in DIRECT_PROVIDER_DEFAULTS:
         return []
-    provider_prefix = f"{provider}::"
+
+    def of_provider(model: str) -> bool:
+        route = parse_model_route(model)
+        return route.valid and route.kind == provider
+
     main = migrate_model_value(provider, main_model)
-    if not main.startswith(provider_prefix):
+    if not of_provider(main):
         return []
     light = migrate_model_value(provider, light_model) if light_model else ""
-    default_light = migrate_model_value(provider, DIRECT_PROVIDER_DEFAULTS[provider].get("light", ""))
-    seats = {"main": ("main", main), "light": ("light", light) if light.startswith(provider_prefix)
+    default_light = route_on_connection(migrate_model_value(provider, DIRECT_PROVIDER_DEFAULTS[provider].get(
+        "light", "")), provider, parse_model_route(main).connection)
+    seats = {"main": ("main", main), "light": ("light", light) if of_provider(light)
              else ("", default_light) if default_light else ("main", main)}
     roles = DIRECT_PROVIDER_REVIEW_ROLES.get(provider, ("main", "light", "light"))
     return [seats.get(role, seats["main"]) for role in roles]

@@ -256,7 +256,10 @@ def test_window_close_after_panic_keeps_the_local_owner_until_flag(settings, mon
     try:
         assert waiting.wait(2)
         assert not flag.exists()
-        assert bg.closing() is None
+        assert bg.closing() is False  # the window stays; the quit's closer yields to the accepted Panic
+        closer = next((t for t in threading.enumerate() if t.name == "ouroboros-quit"), None)
+        if closer is not None:
+            closer.join(timeout=3)
         thread = next(t for t in threading.enumerate() if t.name == "ouroboros-indicator-panic")
         assert thread.is_alive() and thread.daemon is False
         assert events == []
@@ -372,6 +375,9 @@ def test_tray_quit_closes_the_active_git_setup_loop(settings, monkeypatch):
 
     def run_setup(**kwargs):
         owners[0].request_quit()
+        closer = next((t for t in threading.enumerate() if t.name == 'ouroboros-quit'), None)
+        if closer is not None:
+            closer.join(timeout=3)  # its body runs off this UI thread
         assert events == ['setup destroyed'], 'Quit must end the setup window, not just its icon'
         assert webview.windows == [], 'the real window registry must be emptied'
 

@@ -17,7 +17,6 @@ from tests.test_available_subagents_runtime import _api_row, _session_row, _sett
 from tests.test_supervisor_route import cognition_row, selected_task
 from tests.test_swarm_host_admission import host as host
 
-pytestmark = pytest.mark.serial
 
 
 def root_context(tmp_path, settings, monkeypatch):
@@ -37,8 +36,48 @@ def schedule(ctx, **extra):
                           expected_output="Findings", memory_mode="empty", **extra)
 
 
-@pytest.mark.parametrize("installation", ["api", "subscription", "mixed"])
-@pytest.mark.parametrize("mode", ["advisory", "blocking", "cyber_pro"])
+@pytest.mark.parametrize("role", ["main", "consciousness"])
+@pytest.mark.parametrize("choice", [None, {"kind": "following", "role": "main"},
+                                    {"kind": "explicit", "source": "fallback"}])
+def test_fallback_answer_schedules_child_on_parents_role(tmp_path, monkeypatch, role, choice):
+    settings = {**_settings(_session_row()), "OUROBOROS_MODEL": "claudexor::codex=primary",
+                "OUROBOROS_MODEL_CONSCIOUSNESS": "claudexor::codex=consciousness",
+                "OUROBOROS_MODEL_ACCOUNTS": json.dumps({role: "role-account", "fallback": ["fallback-account"]}),
+                "OUROBOROS_MODEL_PROCESSING_PREFERENCES": json.dumps({role: "economy", "fallback": ["fast"]})}
+    ctx = root_context(tmp_path, settings, monkeypatch)
+    ctx.task_metadata["model_role"] = role
+    ctx.context_fit_plan = SimpleNamespace(model_role="fallback:0")
+    ctx.active_model = "openai::paid-fallback"
+    ctx.route_choice = {**choice, "role": role} if choice and choice["kind"] == "following" else choice
+    ctx.model_wait_context = SimpleNamespace(overrides={"fallback:0": {
+        "model": "openai::paid-fallback", "model_account_override": "fallback-account"}})
+    answer = schedule(ctx)
+    event = next(e for e in ctx.pending_events if e["type"] == "schedule_subagent")
+    route = event["parent_cognitive_route"]
+    expected = settings["OUROBOROS_MODEL" if role == "main" else "OUROBOROS_MODEL_CONSCIOUSNESS"]
+    assert route["chosen_by"] == "inherited" and route["follows_role"] == role
+    assert route["source_role"] == role and route["model"] == expected
+    assert route["credential_profile_id"] == "role-account"
+    assert route["processing_preference"] == "economy"
+    assert f"recursive nanny on {expected}" in answer and "bills as subscription" in answer
+    assert ctx.active_model == "openai::paid-fallback"  # parent's return policy is unchanged
+
+
+def test_explicit_parent_switch_still_schedules_its_chosen_binding(tmp_path, monkeypatch):
+    ctx = root_context(tmp_path, _settings(_session_row()), monkeypatch)
+    ctx.route_choice = {"kind": "explicit", "source": "switch_model"}
+    answer = schedule(ctx)
+    event = next(e for e in ctx.pending_events if e["type"] == "schedule_subagent")
+    route = event["parent_cognitive_route"]
+    assert route["chosen_by"] == "parent_switch" and route["follows_role"] == ""
+    assert route["model"] == ctx.active_model and "parent's own choice" in answer
+
+
+@pytest.mark.parametrize(("mode", "installation"), [
+    ("advisory", "api"),
+    ("blocking", "subscription"),
+    ("cyber_pro", "mixed"),
+])
 def test_schema_and_selection_are_unconditional_across_installs_and_modes(tmp_path, monkeypatch, installation, mode):
     from ouroboros.tools.control_subagent_spec import schedule_subagent_properties
 

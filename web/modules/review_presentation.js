@@ -891,7 +891,22 @@ export function reviewRecordGroupFromTaskDetail(detail, ownerTaskId = '') {
         warning: '', authorDecisionText: '', activeCount: 0, attemptCount: attempts.length,
         // Older records stay in the ledger: the count is exact only when the projection says none exist.
         countIsAuthoritative: projection.review_records_omitted === 0, attempts,
+        // The task's own settled adoptions, joined with each record's landed commit; a source without the
+        // field leaves what an earlier read said (absent is unknown, never "none adopted").
+        ...(Array.isArray(detail?.body_adoptions) ? { adoptions: detail.body_adoptions } : {}),
     };
+}
+
+// One row per adoption at its highest revision across two reads: a history row read before a later outcome settled
+// cannot take that adoption back, nor drop one the other read named.
+function mergeAdoptions(prior, incoming) {
+    const revision = (row) => (Number.isSafeInteger(row?.revision) ? row.revision : 0);
+    const rows = new Map();
+    for (const row of [...prior, ...incoming]) {
+        const id = text(row?.adoption_id) || JSON.stringify(row);
+        if (!(revision(rows.get(id)) > revision(row))) rows.set(id, row);
+    }
+    return [...rows.values()];
 }
 
 export function reviewGroupsFromTaskDetail(detail, ownerTaskId = '') {
@@ -1015,6 +1030,7 @@ export function mergeReviewGroup(store, incoming) {
         attempts: order.map((id) => mergedById.get(id)).filter(Boolean),
         attemptCount: Math.max(prior.attemptCount || 0, incoming.attemptCount || 0, mergedById.size),
     };
+    if (Array.isArray(prior.adoptions) && Array.isArray(incoming.adoptions)) merged.adoptions = mergeAdoptions(prior.adoptions, incoming.adoptions);
     if (staleActiveRegression) {
         merged.state = prior.state;
         merged.verdict = prior.verdict;
@@ -1140,14 +1156,18 @@ function reviewRevision(value) {
 // read keeps its slot until it settles; one whose response never comes is aborted
 // at the slot's bound and fails like any lost read (its card offers Retry), so a dead
 // connection neither stalls every card's details nor stays open beside the next
-// reads. A closed owner's queued reads never start.
+// reads. A closed owner's queued reads never start; an owner away (its room off
+// the screen) starts none until it is back.
 export const REVIEW_DETAIL_READS = 2;
 export const REVIEW_DETAIL_SLOT_MS = 30000;
 const detailQueue = [];
 let detailReads = 0;
 function drainDetailReads() {
-    while (detailReads < REVIEW_DETAIL_READS && detailQueue.length) {
-        const job = detailQueue.pop();
+    while (detailReads < REVIEW_DETAIL_READS) {
+        let index = detailQueue.length - 1;
+        while (index >= 0 && detailQueue[index].away()) index -= 1;
+        if (index < 0) return;
+        const [job] = detailQueue.splice(index, 1);
         detailReads += 1;
         const abort = new AbortController();
         const lost = new Promise((_resolve, reject) => abort.signal.addEventListener('abort',
@@ -1157,19 +1177,24 @@ function drainDetailReads() {
             .finally(() => { clearTimeout(timer); detailReads -= 1; drainDetailReads(); });
     }
 }
-const queueDetailRead = (owner, read) => new Promise((resolve, reject) => {
-    detailQueue.push({ owner, read, resolve, reject });
+const queueDetailRead = (owner, read, away) => new Promise((resolve, reject) => {
+    detailQueue.push({ owner, read, resolve, reject, away });
     drainDetailReads();
 });
 
-// Revisions are opaque SHA-256 tokens; one distinct token may trail a live GET.
+// Revisions are opaque SHA-256 tokens; one distinct token may trail a live GET. An owner away (`suspend`, a room that
+// left the screen) draws nothing: what a read already sent returns, its status, a retry and the owner's settling wait
+// for `resume`, in order.
 export function createReviewHydrator({ fetchDetail, applyDetail, onState = () => {}, onSettled = () => {} } = {}) {
     const states = new Map();
+    let held = null;  // while away, what waits for the return
+    const later = (fn) => (held ? new Promise((resolve) => held.push(() => resolve(fn()))) : fn());
     const start = (taskId, state, revision, onDomWrite) => {
         clearTimeout(state.migrationTimer); state.migrationTimer = null;
         const generation = ++state.generation;
         state.inFlightRevision = revision;
-        const write = typeof onDomWrite === 'function' ? onDomWrite : (mutate) => mutate();
+        const draw = typeof onDomWrite === 'function' ? onDomWrite : (mutate) => mutate();
+        const write = (mutate) => later(() => draw(mutate));
         // First load/retry announces; routine refresh over applied content stays quiet.
         const notify = (status) => {
             state.lastStatus = status;
@@ -1178,7 +1203,7 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
         const request = Promise.resolve()
             .then(() => {
                 if (!state.everApplied || state.lastStatus === 'error') notify('loading');
-                return queueDetailRead(states, (signal) => fetchDetail(taskId, { signal }));
+                return queueDetailRead(states, (signal) => fetchDetail(taskId, { signal }), () => held !== null);
             })
             .then((detail) => {
                 // The strict seam rejects failures; null means genuinely absent (404).
@@ -1195,7 +1220,7 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
                 if (states.get(taskId) !== state) return false;
                 if (isStoreMigrating(error)) {
                     notify('loading');
-                    state.migrationTimer = setTimeout(() => start(taskId, state, revision, onDomWrite), 700);
+                    state.migrationTimer = setTimeout(() => later(() => start(taskId, state, revision, onDomWrite)), 700);
                     return false;
                 }
                 notify('error');
@@ -1210,7 +1235,7 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
                 if (pending && pending.revision !== state.appliedRevision) {
                     start(taskId, state, pending.revision, pending.onDomWrite);
                 }
-                onSettled(taskId);
+                later(() => onSettled(taskId));
             });
         state.inFlight = request;
         return request;
@@ -1264,7 +1289,15 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
             // Reset the presentation receipt after rebuild; keep joining any physical GET.
             for (const state of states.values()) state.appliedRevision = null;
         },
+        suspend() { held ||= []; },
+        resume() {
+            const owed = held || [];
+            held = null;
+            for (const fn of owed) fn();
+            drainDetailReads();
+        },
         clear() {
+            held = null;
             for (const state of states.values()) clearTimeout(state.migrationTimer);
             states.clear();
             for (const [index, job] of [...detailQueue.entries()].reverse()) {
@@ -1392,9 +1425,11 @@ export function createReviewPresentationController({
             || (state.hydrateStatus === 'loading' && state.hadHydrateError === true)
         );
         summary.hidden = groupCount === 0 && !failedEmpty;
-        summary.textContent = groupCount
-            ? `Reviews ${groupCount}${activeCount ? ` · ${activeCount} active` : ''}`
-            : (failedEmpty ? 'Reviews' : '');
+        // The door's words are its one text node, before the chevron its card draws (chat.js), as a status chip's are.
+        let words = summary.firstChild;
+        if (words?.nodeType !== 3) words = summary.insertBefore(summary.ownerDocument.createTextNode(''), words || null);
+        const said = groupCount ? `Reviews ${groupCount}${activeCount ? ` · ${activeCount} active` : ''}` : (failedEmpty ? 'Reviews' : '');
+        if (words.data !== said) words.data = said;
         summary.setAttribute?.('aria-expanded', state.sectionExpanded ? 'true' : 'false');
         const history = [...groups.values()].find(group => group.historyTask);
         if (history) {

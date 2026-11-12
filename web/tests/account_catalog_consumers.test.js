@@ -111,7 +111,7 @@ test('session availability does not borrow a sibling model or treat a failed pin
     const snapshot = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url))).status;
     snapshot.harnesses = [structuredClone(harness)];
     snapshot.quota = [{ subject: { harness: 'codex', subject_id: 'personal' }, freshness: 'fresh',
-        availability: { state: 'available' }, constraints: [] }];
+        availability: { state: 'available' }, constraints: [{ id: 'primary', used_ratio: 0.2 }] }];
     const state = { snapshot, catalogKnown: true, accountsKnown: true, quotaKnown: true };
     const row = { route: { kind: 'agent_session', target_id: 'codex=only-a', credential_profile_id: 'personal' } };
     assert.equal(sessionRouteVerdict(row, state).label, 'Not checked', 'catalog membership alone is not quota proof');
@@ -160,7 +160,7 @@ test('Claude [1m] catalog qualifier survives unknown quota without borrowing sib
     ] }];
     snapshot.profiles.profiles.forEach((row) => { row.profile.harness_id = 'claude'; });
     snapshot.quota = [{ subject: { harness: 'claude', subject_id: 'personal' }, freshness: 'fresh',
-        availability: { state: 'available' }, constraints: [] }];
+        availability: { state: 'available' }, constraints: [{ id: 'primary', used_ratio: 0.2 }] }];
     const state = { snapshot, catalogKnown: true, accountsKnown: true, quotaKnown: true };
     const row = { route: { kind: 'agent_session', target_id: 'claude=claude-future[1M]', credential_profile_id: '' } };
     const verdict = sessionRouteVerdict(row, state);

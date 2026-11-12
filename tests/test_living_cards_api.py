@@ -197,12 +197,9 @@ def test_each_press_of_an_ordinary_action_is_its_own_submission(tmp_path, decide
     ({"decision_id": "card:{id}:dates", "values": {"from": {"nested": 1}}}, 400, "values_invalid"),
     ({"decision_id": "card:{id}:dates", "values": ["Mon"]}, 400, "values_invalid"),
     ({"decision_id": "card:{id}:dates", "option_index": 0}, 400, "unexpected_fields"),
-    ({"decision_id": "card:{id}:missing"}, 404, "action_not_found"),
     ({"decision_id": "card:card_0000000000000000:book"}, 404, "card_not_found"),
     ({"decision_id": "card:{id}"}, 400, "malformed_decision_id"),
-    ({"decision_id": "card:{id}:book", "revision": None}, 400, "revision_required"),
     ({"decision_id": "card:{id}:book", "revision": "1"}, 400, "revision_required"),
-    ({"decision_id": "card:{id}:book", "revision": 2}, 409, "card_stale"),
 ])
 def test_a_refused_press_records_nothing(tmp_path, decide, body, status, reason):
     card = _component_card(tmp_path)

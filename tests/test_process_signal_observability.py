@@ -47,8 +47,14 @@ _KILL_NAME = signal_name_for_returncode(-9)
 
 
 @pytest.fixture(autouse=True)
-def _clean_facts_slot():
-    """Tests in one pytest worker share a thread; keep the TLS slot clean."""
+def _clean_facts_slot(monkeypatch):
+    """Tests in one pytest worker share a thread and a process: keep the TLS slot clean, and give each test its
+    own tracked registry. The runners keep naming a child whose tree they could not measure, and a double has no
+    group to measure: in the shared registry it would outlive its test and leave every later reader of that
+    registry in the worker (a teardown, an owned-work stop) a child that never settles."""
+    from ouroboros.tools import shell_process
+
+    monkeypatch.setattr(shell_process, "_active_subprocesses", set())
     consume_last_process_facts()
     yield
     consume_last_process_facts()
@@ -349,7 +355,6 @@ def _read_receipts(drive):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="signal-death semantics are POSIX-only (declared residual)")
 def test_verify_receipt_records_duration_and_signal_for_killed_check(tmp_path):
     from ouroboros.tools.verify import _verify_and_record
@@ -369,7 +374,6 @@ def test_verify_receipt_records_duration_and_signal_for_killed_check(tmp_path):
     assert "duration_ms" not in out_text and "SIGKILL" not in out_text
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_receipt_healthy_default_has_duration_and_no_other_new_keys(tmp_path):
     from ouroboros.tools.verify import _verify_and_record
@@ -386,7 +390,6 @@ def test_verify_receipt_healthy_default_has_duration_and_no_other_new_keys(tmp_p
     assert "PASS: exit=0" in out_text and "duration_ms" not in out_text
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_receipt_stores_resolved_runtime_when_attested(tmp_path):
     """The receipt writer accepts and stores the Stream-A attested runtime; the
@@ -604,7 +607,6 @@ def test_freshness_audit_receives_epoch_not_monotonic(tmp_path, fake_subprocess,
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_check_publishes_typed_exit_and_signal(tmp_path):
     """verify_and_record renders ``exit=`` for the agent but never stamped the
@@ -620,7 +622,6 @@ def test_verify_check_publishes_typed_exit_and_signal(tmp_path):
     assert isinstance(facts["duration_ms"], int)
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_killed_check_publishes_signal_fact(tmp_path):
     from ouroboros.tools.verify import _verify_and_record
@@ -632,7 +633,6 @@ def test_verify_killed_check_publishes_signal_fact(tmp_path):
     assert facts["signal"] == "SIGKILL"
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_timeout_publishes_typed_kill_facts(tmp_path, monkeypatch):
     from ouroboros.tools import verify as verify_mod
@@ -719,20 +719,27 @@ def test_skill_preflight_timeout_reports_no_returncode_instead_of_fake_minus_nin
     Windows too, where a host kill produces no signal at all. The honest record
     is no returncode plus the typed kill facts."""
     import ouroboros.tools.skill_preflight as preflight
+    from ouroboros.tools import shell_process
 
     class _FakeProc:
         returncode = None
         stdout = None
         stderr = None
 
+        def poll(self):
+            return self.returncode
+
         def communicate(self, timeout=None):
             raise subprocess.TimeoutExpired(cmd="node", timeout=timeout or 1)
 
-    monkeypatch.setattr(preflight, "Popen", lambda *_a, **_k: _FakeProc())
+    proc, registry = _FakeProc(), set()
+    monkeypatch.setattr(shell_process, "_active_subprocesses", registry)
+    monkeypatch.setattr(preflight, "Popen", lambda *_a, **_k: proc)
     monkeypatch.setattr(preflight, "_kill_process_group", lambda _p: None)
     result = preflight._run_check(["node", "--check", "x.js"], cwd=tmp_path)
     assert result["returncode"] is None
     assert result["timeout"] is True and result["killed_by_host"] is True
+    assert registry == {proc}, "a validator whose exit was never observed stays named for Panic and the stop"
     facts = consume_last_process_facts()
     assert facts["timed_out"] is True and facts["killed_by_host"] is True
     assert "exit_code" not in facts and "signal" not in facts

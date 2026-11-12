@@ -28,6 +28,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -60,7 +61,7 @@ from tests.separate_ui_support import (
     wait_until,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 CORE_PREFIXES = ("/api", "/auth", "/onboarding", "/ws")
 
@@ -319,6 +320,83 @@ def test_an_empty_browser_signs_in_on_the_shared_origin_and_returns_with_http_an
     assert any(r["uri"] == "/ws" and r["status"] == 403 for r in routed)
     assert any(r["uri"] == "/ws" and r["status"] == 101 and r["role"] == "core" for r in routed)
     assert not [p for p in stack.interface_paths() if p.startswith(("/api", "/auth", "/ws", "/onboarding"))]
+
+
+def test_a_rewritten_host_reports_the_failed_live_channel_and_recovers_in_place(stack):
+    """Real TLS/Caddy/core: HTTP works, Chromium's Origin-only socket is refused, then repaired."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    site = stack.proxy.site
+    good = site.read_text(encoding="utf-8")
+    line = f"header_up X-Forwarded-For {SYNTHETIC_PEER}"
+    assert good.count(line) == 1
+    stack.proxy.stop()
+    site.write_text(good.replace(line, line + "\n\t\t\theader_up Host {upstream_hostport}"), encoding="utf-8")
+    stack.proxy.start()
+    with sync_playwright() as playwright:
+        session = _session(playwright, stack, "chromium")
+        page = session.page
+        try:
+            page.goto(stack.url + "/")
+            page.wait_for_url(stack.url + "/auth/login?next=%2F", timeout=30_000)
+            session.sign_in()
+            page.wait_for_url(stack.url + "/", timeout=30_000)
+            page.locator("#chat-input").fill("Keep this draft while the connection is repaired")
+            page.wait_for_function("() => window.__ouroWs?.serverAnswersWhileDown() === true", timeout=60_000)
+            assert session.api("GET", "/api/state")["status"] == 200
+            assert not page.evaluate(CONNECTED)
+            trigger = page.locator("#page-chat .rw-trigger")
+            trigger.click()
+            note = page.locator("#page-chat .rw-note")
+            note.filter(has_text="check WebSocket forwarding and the server log").wait_for(state="visible")
+            assert page.locator("#chat-status").get_attribute("data-step") == "server answers"
+            assert "server answers" in trigger.get_attribute("title")
+            before = session.loads()
+            # Past the old four-probe fuse, this never-connected page and its draft stay in place.
+            page.wait_for_function("() => window.__ouroWs._recoveryHealthyProbes >= 5", timeout=160_000)
+            assert session.loads() == before
+            assert page.locator("#chat-input").input_value() == "Keep this draft while the connection is repaired"
+            for theme in ("dark", "light"):
+                page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+                page.set_viewport_size({"width": 1100, "height": 800})
+                session.shot(f"host-refused-{theme}-desktop")
+                page.set_viewport_size({"width": 390, "height": 844})
+                note.wait_for(state="visible")
+                session.shot(f"host-refused-{theme}-phone")
+            expected = f"expected=https://127.0.0.1:{stack.core.port}"
+            assert f"origin={stack.url} {expected}" in stack.core.process.log_text()
+            assert any(r["uri"] == "/ws" and r["status"] == 403 for r in stack.routed())
+
+            # Repair only this test proxy. The same page reconnects; no manual reload, no lost draft.
+            stack.proxy.stop()
+            site.write_text(good, encoding="utf-8")
+            stack.proxy.start()
+            page.wait_for_function(CONNECTED, timeout=60_000)
+            page.wait_for_function("() => window.__ouroWs.serverAnswersWhileDown() === false")
+            assert session.loads() == before
+            assert page.locator("#chat-input").input_value() == "Keep this draft while the connection is repaired"
+            assert "live updates cannot connect" not in page.locator("#page-chat .rw-note").inner_text()
+            session.shot("host-repaired-phone")
+
+            # A foreign page still cannot open the repaired core's socket, and raw XFH grants nothing.
+            foreign = session.context.new_page()
+            foreign.goto(f"http://127.0.0.1:{stack.interface.port}/static/style.css")
+            code = foreign.evaluate("""url => new Promise(resolve => {
+                const socket = new WebSocket(url);
+                socket.onopen = () => { socket.close(); resolve('opened'); };
+                socket.onclose = event => resolve(event.code);
+            })""", stack.url.replace("https:", "wss:") + "/ws")
+            assert code == 1006
+            foreign.close()
+            status, _, body, _ = _Client(stack).request("POST", "/api/settings", body={}, headers={
+                "Origin": "https://other.example", "X-Forwarded-Host": "other.example"})
+            assert status == 403 and json.loads(body)["code"] == "cross_origin_request"
+            stack.extra["host_repair"] = {"loads": before, "foreign_close": code, "xfh_status": status,
+                                          "proxy_expected_origin": expected, "page_errors": session.unexpected_errors()}
+            assert session.unexpected_errors() == [], session.errors
+        finally:
+            session.close()
 
 
 def _signed_session(data_dir: Path, age_sec: int) -> str:
@@ -619,6 +697,9 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
 
     core = stack.core
     settings_path = core.data_dir / "settings.json"
+    # A restart-required setting with its own field: the skills repository path (the worker cap is read live).
+    skills = core.data_dir.parent / "skills-restart-fixture"
+    skills.mkdir(exist_ok=True)
     with sync_playwright() as playwright:
         session = _session(playwright, stack, "chromium")
         page = session.page
@@ -630,10 +711,11 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
                 expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
 
             open_settings()
-            wait_until(lambda: "OUROBOROS_MAX_WORKERS" not in session.api("GET", "/api/settings", None)["json"]
-                       ["_meta"]["restart_state"]["unknown_keys"], 30, "worker count never applied")
-            page.locator("#s-workers").evaluate(
-                "(node) => {node.value='2'; node.dispatchEvent(new Event('input', {bubbles: true}));}")
+            wait_until(lambda: "OUROBOROS_SKILLS_REPO_PATH" not in session.api("GET", "/api/settings", None)["json"]
+                       ["_meta"]["restart_state"]["unknown_keys"], 30, "skills path never applied")
+            page.locator("#s-skills-repo-path").evaluate(
+                "(node, value) => {node.value=value; node.dispatchEvent(new Event('input', {bubbles: true}));}",
+                str(skills))
             with page.expect_response(lambda r: r.url.endswith("/api/settings") and r.request.method == "POST") as saved:
                 page.locator("#btn-save-settings").click()
                 if page.locator("[data-confirm-ok]").is_visible():
@@ -665,11 +747,11 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
             session.close()
     stack.extra["settings"] = {"save_request": save_request, "restart_state": state,
                                "refused": refused, "file_unchanged": unchanged, "after_restart": after}
-    assert written["OUROBOROS_MAX_WORKERS"] in (2, "2")
+    assert written["OUROBOROS_SKILLS_REPO_PATH"] == str(skills)
     assert "OUROBOROS_UI_DIR" not in written, "a save never authors the operator's interface choice"
-    assert "OUROBOROS_MAX_WORKERS" in state["restart_keys"] and state["restart_required"] is True
+    assert "OUROBOROS_SKILLS_REPO_PATH" in state["restart_keys"] and state["restart_required"] is True
     assert refused["status"] == 400 and unchanged, refused
-    assert after["restart_required"] is False and "OUROBOROS_MAX_WORKERS" not in after["restart_keys"]
+    assert after["restart_required"] is False and "OUROBOROS_SKILLS_REPO_PATH" not in after["restart_keys"]
 
 
 @pytest.mark.parametrize("browser_name", BROWSERS)
@@ -758,9 +840,14 @@ def test_widgets_and_the_author_kit_run_through_the_proxy_under_the_password(sta
             probe = page.frame_locator(f'{card(PROBE + ":probe")} iframe')
             for key, value in (("data", "separate-ui"), ("module", "blob-module-ok"), ("blob-image", "1")):
                 probe.locator(f'#root[data-{key}="{value}"]').wait_for(timeout=30_000)
-            # A load that bypasses the bridge: its outcome is the engine's cookie policy (compared below).
+            # A load that bypasses the bridge and the lease: the frame's own policy admits images from its lease only
+            # (compared below).
             probe.locator("#root[data-passive]").wait_for(timeout=30_000)
             passive = probe.locator("#root").get_attribute("data-passive")
+            # The owner sees that policy refuse it on the card itself.
+            blocked = page.locator(f'{card(PROBE + ":probe")} [data-widget-status][data-widget-fault]')
+            blocked.wait_for(timeout=30_000)
+            blocked_text = blocked.inner_text()
             fault = page.locator(f'{card(PROBE + ":fault")} [data-widget-status][data-widget-fault]')
             fault.wait_for(timeout=30_000)
             fault_text = fault.inner_text()
@@ -785,22 +872,37 @@ def test_widgets_and_the_author_kit_run_through_the_proxy_under_the_password(sta
         finally:
             session.close()
     stack.extra["widgets"] = {"toggles": toggles, "fault": fault_text, "preview": preview, "page_src": frame_src,
-                              "hits": hits, "passive_load": passive}
+                              "hits": hits, "passive_load": passive, "passive_banner": blocked_text}
     # The fault reaches its card in both engines; WebKit masks the frame's message as "Script error.".
     assert fault_text.startswith("Widget script error: "), fault_text
     assert "separate-ui deliberate fault" in fault_text or browser_name == "webkit", fault_text
     assert preview == "My notes: List, enabled", preview
-    assert frame_src == "/api/extensions/author_ui_kit/page"
+    # A route frame loads from its mount's route lease (docs/WIDGET_HOST_PROTOCOL.md "Route leases"): an absolute URL on
+    # the one TLS origin the page was served from, never the core's own address and never the skill's un-leased route.
+    leased = re.fullmatch(rf"{re.escape(stack.url)}(/api/widget-resources/[A-Za-z0-9_-]{{43}}/)page", frame_src)
+    assert leased, frame_src
+    lease_uri = f"{leased.group(1)}page"
     routed = stack.routed()
-    statuses = {(r["uri"], r["status"]) for r in routed if r["uri"].startswith("/api/extensions/")}
-    # Chromium sends no session from the sandboxed frame (401, refused); WebKit was observed to send it.
-    passive_status = {"refused": 401, "loaded": 200}[passive]
+    prefixes = ("/api/extensions/", "/api/widget-resources/", "/api/widgets/")
+    statuses = {(r["uri"], r["status"]) for r in routed if r["uri"].startswith(prefixes)}
     for expected in ((f"/api/extensions/{PROBE}/data", 200), (f"/api/extensions/{PROBE}/lib", 200),
-                     (f"/api/extensions/{PROBE}/logo", 200), (f"/api/extensions/{PROBE}/logo?passive=1", passive_status),
-                     (f"/api/extensions/{PROBE}/disposed", 200), ("/api/extensions/author_ui_kit/author-kit", 200),
-                     ("/api/extensions/author_ui_kit/page", 200), (f"/api/extensions/{PROBE}/module/widget.js", 200)):
+                     (f"/api/extensions/{PROBE}/logo", 200), (f"/api/extensions/{PROBE}/disposed", 200),
+                     ("/api/extensions/author_ui_kit/author-kit", 200), (f"/api/extensions/{PROBE}/module/widget.js", 200),
+                     ("/api/widgets/asset-leases", 200), (lease_uri, 200)):
         assert expected in statuses, (expected, sorted(statuses))
-    assert {r["role"] for r in routed if r["uri"].startswith("/api/extensions/")} == {"core"}
+    # The page was asked for only after the signed-in session minted its lease through the proxy.
+    asked = next(i for i, r in enumerate(routed) if r["uri"] == lease_uri)
+    assert any(r["method"] == "POST" and r["uri"] == "/api/widgets/asset-leases" and r["status"] == 200
+               for r in routed[:asked])
+    # Everything that bypasses the bridge and the lease is refused by the frame's own policy before it is sent (WebKit
+    # too): the passive image of the skill's raw route and the route page's raw address never reach the proxy.
+    assert passive == "refused", passive
+    assert blocked_text.startswith("Widget blocked by frame policy: "), blocked_text
+    assert blocked_text.endswith(f"/api/extensions/{PROBE}/logo?passive=1"), blocked_text
+    bypassing = [r["uri"] for r in routed if r["uri"].startswith(f"/api/extensions/{PROBE}/logo?")
+                 or r["uri"] == "/api/extensions/author_ui_kit/page"]
+    assert not bypassing, bypassing
+    assert {r["role"] for r in routed if r["uri"].startswith(prefixes)} == {"core"}
     assert not [p for p in stack.interface_paths() if p.startswith(("/api", "/auth", "/ws", "/onboarding"))]
 
 
@@ -892,8 +994,10 @@ def test_a_fresh_install_is_set_up_without_a_key_through_the_proxy(tmp_path, req
             before = session.api("GET", "/api/onboarding/bootstrap", None)
             wizard = page.frame_locator("#onboarding-overlay iframe.onboarding-frame")
             wizard.locator('[data-collapse="api-access"] > summary').click(timeout=30_000)
-            wizard.locator('[data-collapse="more-providers"] > summary').click()
-            wizard.locator("#openai-compatible-url").fill(core.model.base_url)
+            # A keyless endpoint is the compatible card's own Default key (docs/DESIGN.md §7: a key is a row of its
+            # provider's card), and the card opens by its own head, apart from the "More options" disclosure.
+            wizard.locator('[data-provider-card="compatible"] [data-provider-toggle]').click()
+            wizard.locator("#s-openai-compatible-base-url").fill(core.model.base_url)
             session.shot("1-setup-provider")
             wizard.locator("#next-btn").click()
             wizard.locator('[data-model-role="main"] [data-model-role-model]').fill("openai-compatible::mock-model")

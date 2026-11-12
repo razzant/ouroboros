@@ -22,7 +22,25 @@ The file (``task_results/artifacts/<task>/source_handles/working/working_checkpo
 never a deliverable: every artifact/evidence scanner skips ``source_handles``)
 has exactly one writer, its attempt's loop, and is replaced atomically (temp +
 ``os.replace``: a process crash leaves the old or the new state, never a torn
-one; no fsync, so no power-loss promise). It is deleted only once the
+one; no fsync, so no power-loss promise). It stores each repeated element once:
+every dict element of a list reached through dicts (messages, tool schemas, trace
+tool calls, owner directives, call refs, the copies inside the context
+observations) on which custody projection and redaction are no-ops is a blob of
+the observability CAS (the same part a request view stores,
+``shared_values``), listed once per attempt by the manifest
+``observability/calls/<task>/working-a<attempt>.json`` (``call_type``
+``working_parts``: the packer keeps and retires them with the task); this union
+of every part the attempt named is written before the checkpoint that names it.
+Crashing between a part write and its manifest leaves an orphan of one element,
+the same class of orphan as a whole observability blob.
+Each part holds its ``_json_bytes`` and is named by ``{"$shared": <sha256>}``; the file
+is the wrapper ``{"format": "working_shared_v1", "state": <skeleton>}``, which
+an older body refuses as an identity mismatch, keeping its original-prompt path
+(fail closed). Elements that are not plain JSON or not public-safe stay inline;
+a state carrying a token-shaped dict is written whole. ``read_working`` expands
+the state (a part nothing holds is typed ``SharedValueMissing``); the frozen
+recovery source and any pause completed from it are always the expanded whole.
+It is deleted only once the
 attempt's result, owed final or exact pause is durable, or once the attempt
 that continues it loaded the frozen copy (never at the freeze itself, whose
 locator is not durable yet); storage stays one state per live attempt.
@@ -30,6 +48,9 @@ Only a real recovery FREEZES its exact bytes into the existing immutable
 continuation-source store, so a retry or a restart restores a verified
 source, never the mutable file. A live park (owner wait, exact pause, sleep)
 keeps its own newer source: recovery never prefers this file over it.
+The recovery locator carries clock facts to assignment and agent startup,
+independently of fresh idle timestamps; legacy sources without an origin keep
+fresh-start timing without old exclusions.
 
 Recovery restores cognition only. A tool call of the interrupted batch with no
 recorded result is closed as UNKNOWN and never re-executed; content mail
@@ -54,6 +75,8 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger(__name__)
 
 FILE_PREFIX = "working_checkpoint-a"
+WORKING_SHARED_FORMAT = "working_shared_v1"  # the rolling file: a skeleton over CAS parts (``shared_values``)
+WORKING_PARTS_CALL_TYPE = "working_parts"  # the per-attempt manifest listing the parts the checkpoint names
 # What a ``_working_recovery`` locator names: a rolling working state, or a parked
 # question/review wait's own continuation source (each read by its own contract).
 SOURCE_WORKING = "working"
@@ -105,6 +128,9 @@ def save_round(limit_ctx: Any, boundary: str) -> bool:
     if boundary not in BOUNDARIES:
         raise ValueError(f"unknown working checkpoint boundary: {boundary!r}")
     ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
+    if boundary == "pre_effect" and ctx is not None:  # what the batch may say is recorded before any of it runs
+        from ouroboros.place_reply import note_possible_sends
+        note_possible_sends(ctx, getattr(limit_ctx, "llm_trace", None), limit_ctx.messages)
     if ctx is None or not str(getattr(ctx, "task_id", "") or "") or not (
             getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)) or not _root(ctx).is_dir():
         return False  # no durable task root: nothing here could be recovered from it
@@ -127,7 +153,82 @@ def save_resumed(tools: Any, state: Dict[str, Any], messages: list, trace: dict,
         tools=tools, messages=messages, llm_trace=trace, accumulated_usage=usage, owner_msg_seen=seen,
         round_idx=int(state["round_idx"]), tool_schemas=state["tool_schemas"],
         budget_tail=str((state.get("resume_point") or {}).get("budget_tail") or "tool"),
-        context_model_role=str(state.get("context_model_role") or "")), RESUMED)
+        context_model_role=str(state.get("context_model_role") or ""),
+        context_start=state.get("context_start")), RESUMED)
+
+
+def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
+    """The part bytes of a continuation element the CAS may hold, or ``None`` to keep it inline.
+
+    A part's bytes are the element's ``observability._json_bytes`` (plain JSON, sorted keys), the
+    same bytes a request view's part has, so a message the views stored is not stored again.
+    Only an element on which custody projection and redaction are no-ops is shared: its bytes
+    are public-safe, as every CAS part is. Live handles, opaque values (not plain JSON) and
+    secret-bearing elements stay inline. The verdict is the task's redaction fact of those bytes,
+    the one its request records keep (``observability.task_parts``): what either met is not scanned again.
+    """
+    from ouroboros.observability import _json_bytes, task_parts
+    from ouroboros.redaction import part_fact
+
+    found = part_fact(element, task_parts(_root(ctx), str(ctx.task_id))[1])
+    if found is None or found[0] is not None:
+        return None
+    try:
+        return _json_bytes(element)
+    except TypeError:  # keys of mixed types have no sorted form: it stays inline
+        return None
+
+
+def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
+    """Write the parts new to this attempt into the CAS and list them in the attempt's manifest.
+
+    The manifest holds the union of every part this attempt's checkpoints ever named (a part a
+    later state drops is still a listed blob the packer retires with the task, never an orphan);
+    the union is seeded from the manifest on disk once per process, so a resumed attempt keeps
+    the earlier listings. A part counts as listed only once a manifest naming it landed, so a
+    failed write is written again by the next save. Returns the number of parts written.
+    """
+    from ouroboros.observability import call_manifest_path, write_call_manifest, write_parts
+
+    root, task_id = _root(ctx), str(ctx.task_id)
+    attempt = int(getattr(ctx, "task_attempt", None) or 1)
+    call_id = f"working-a{attempt}"
+    listed = getattr(ctx, "_working_parts_listed", None)
+    created_at = None
+    if listed is None:
+        listed = ctx._working_parts_listed = {}
+        path = call_manifest_path(root, task_id, call_id)
+        if path.is_file():
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            created_at = manifest.get("created_at")
+            listed.update({ref["sha256"]: ref for ref in manifest.get("shared_parts") or [] if isinstance(ref, dict)})
+        ctx._working_parts_created_at = created_at
+    new = {digest: raw for digest, raw in parts.items() if digest not in listed}
+    if not new:
+        return 0
+    union = dict(listed)
+    union.update(write_parts(root, new))
+    created_at = getattr(ctx, "_working_parts_created_at", None)
+    write_call_manifest(root, task_id=task_id, call_id=call_id, manifest={
+        "call_type": WORKING_PARTS_CALL_TYPE, "task_attempt": attempt, "shared_parts": list(union.values()),
+        **({"created_at": created_at} if created_at else {})})
+    ctx._working_parts_listed = union
+    return len(new)
+
+
+def _encode_working(ctx: Any, state: Dict[str, Any], encode: Any) -> tuple:
+    """``(file bytes, whole bytes, parts written)``: the wrapper over a skeleton whose shareable
+    elements are CAS parts (written and listed before the file replaces the previous state), or
+    the whole state as before when nothing is shareable."""
+    from ouroboros.shared_values import tokenize
+
+    tokenized = tokenize(state, encode, part_bytes=lambda element: _shared_element(ctx, element))
+    if tokenized is None:
+        data = encode(state)
+        return data, len(data), 0
+    written = _list_working_parts(ctx, tokenized.parts)
+    data = encode({"format": WORKING_SHARED_FORMAT, "state": None}).replace(b"null", tokenized.skeleton, 1)
+    return data, tokenized.whole_digest()[1], written
 
 
 def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -> None:
@@ -154,6 +255,9 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -
         state["context_model_role"] = model_call.model_role or state["context_model_role"]
     if boundary == RESUMED:  # written before the rebind: the plan is still the new worker's
         state["context_model_role"] = limit_ctx.context_model_role
+        from ouroboros.context_fit import carried_start
+
+        state["context_start"] = list(carried_start(limit_ctx.context_start))  # the source's start, or unknown
     state["working"] = {"boundary": boundary, "seq": seq, "saved_at": utc_now_iso(),
                         "budget_tail": getattr(limit_ctx, "budget_tail", "tool"),
                         "pending_tool_call_ids": pending_tool_call_ids(limit_ctx.messages)}
@@ -165,17 +269,23 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -
         degraded.append(type(value).__name__)
         return {"__unserializable__": type(value).__name__}
 
-    data = json.dumps(state, ensure_ascii=False, default=opaque).encode("utf-8")
+    def encode(value: Any) -> bytes:
+        return json.dumps(value, ensure_ascii=False, default=opaque).encode("utf-8")
+
+    data, whole_bytes, parts_written = _encode_working(ctx, state, encode)
     if degraded:
         state["working"]["opaque_values"] = sorted(set(degraded))
-        data = json.dumps(state, ensure_ascii=False, default=opaque).encode("utf-8")
+        data, whole_bytes, more = _encode_working(ctx, state, encode)
+        parts_written += more
     encoded = time.perf_counter()
     write_bytes_atomic(checkpoint_path(_root(ctx), ctx.task_id, int(getattr(ctx, "task_attempt", None) or 1),
                                        create=True), data)
     written = time.perf_counter()
     ctx._working_checkpoint_seq, ctx._working_checkpoint_signature = seq, signature
-    stats = usage.setdefault("working_checkpoint", {"saves": 0, "max_bytes": 0, "encode_ms": 0.0, "write_ms": 0.0})
+    stats = usage.setdefault("working_checkpoint", {"saves": 0, "max_bytes": 0, "encode_ms": 0.0, "write_ms": 0.0,
+                                                    "parts_written": 0})
     stats.update(saves=stats["saves"] + 1, last_bytes=len(data), max_bytes=max(stats["max_bytes"], len(data)),
+                 last_whole_bytes=whole_bytes, parts_written=stats.get("parts_written", 0) + parts_written,
                  last_boundary=boundary, encode_ms=round(stats["encode_ms"] + (encoded - started) * 1000, 3),
                  write_ms=round(stats["write_ms"] + (written - encoded) * 1000, 3))
 
@@ -286,13 +396,39 @@ def discard(root: Any, task_id: str) -> None:
 
 # --- recovery: supervisor freezes, the next start restores ---------------------------
 
+def expand_working(root: Any, wrapper: Dict[str, Any]) -> Dict[str, Any]:
+    """The whole state of a ``working_shared_v1`` file: its parts read from the CAS below ``root``.
+
+    A part nothing holds is ``SharedValueMissing`` (a ``ValueError``, like an identity mismatch):
+    the caller keeps its original-prompt or terminal path, never a narrower continuation.
+    """
+    from ouroboros.evidence_packs import blob_bytes
+    from ouroboros.shared_values import SharedValueMissing, expand
+
+    def part(digest: str) -> Any:
+        try:
+            return json.loads(blob_bytes(root, {"sha256": digest, "kind": "json", "encoding": "gzip"},
+                                         expected_kind="json"))
+        except FileNotFoundError:
+            raise SharedValueMissing(digest, "working checkpoint") from None
+
+    return expand(wrapper.get("state"), part)
+
+
 def read_working(root: Any, task_id: str, attempt: int) -> tuple:
-    """``(bytes, state)`` of one attempt's working checkpoint; ``(b"", {})`` when it has none."""
+    """``(bytes, state)`` of one attempt's working checkpoint; ``(b"", {})`` when it has none.
+
+    The bytes are the whole state (a shared-form file is expanded and re-encoded): what a
+    recovery freezes is always self-contained.
+    """
     try:
         data = checkpoint_path(root, task_id, attempt).read_bytes()
     except FileNotFoundError:
         return b"", {}
     state = json.loads(data.decode("utf-8"))
+    if isinstance(state, dict) and state.get("format") == WORKING_SHARED_FORMAT:
+        state = expand_working(root, state)
+        data = json.dumps(state, ensure_ascii=False).encode("utf-8")
     if (not isinstance(state, dict) or state.get("task_id") != str(task_id)
             or int(state.get("task_attempt") or 0) != int(attempt) or not isinstance(state.get("working"), dict)):
         raise ValueError("working checkpoint identity mismatch")
@@ -357,9 +493,14 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
     text and any preserved copy's ``preserved_path`` travel), ``delivered`` (a retained
     receipt whose bytes are re-read; a legacy id proves no bytes, so ``text`` may be
     empty) or ``unreadable`` (the registry could not be read: an answer may exist, which
-    is not permission to regenerate). Never the task result's prose.
+    is not permission to regenerate). Never the task result's prose. A Presence root's
+    final also carries its conversation's own delivery (``presence_delivery``).
     """
     from supervisor.terminal_delivery import terminal_answer_receipts
+
+    def carried(source: Dict[str, Any]) -> Dict[str, Any]:
+        delivery = source.get("presence_delivery")
+        return {"presence_delivery": dict(delivery)} if isinstance(delivery, dict) else {}
 
     receipts = terminal_answer_receipts(root, task_id)
     if receipts.get("registry") == "unreadable":
@@ -369,12 +510,12 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
         if rows:
             row = max(rows, key=lambda item: str(item.get("registered_at") or ""))
             return {"basis": basis, "text": str(row.get("text") or ""), "delivery_id": str(row.get("delivery_id") or ""),
-                    "terminal_origin": str(row.get("terminal_origin") or ""),
+                    "terminal_origin": str(row.get("terminal_origin") or ""), **carried(row),
                     **({"preserved_path": str(row["preserved_path"])} if row.get("preserved_path") else {})}
     delivered = [row for row in (receipts.get("delivered") or []) if isinstance(row, dict)]
     if delivered:
         receipt = max(delivered, key=lambda item: str(item.get("sent_at") or ""))
-        text = origin = ""
+        text, origin, record = "", "", {}
         try:
             from ouroboros.artifacts import read_actor_source_bytes
 
@@ -384,7 +525,7 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
         except Exception:
             log.debug("Retained terminal answer of %s could not be re-read", task_id, exc_info=True)
         return {"basis": "delivered", "text": text, "delivery_id": str(receipt.get("delivery_id") or ""),
-                "terminal_origin": origin}
+                "terminal_origin": origin, **(carried(record) if isinstance(record, dict) else {})}
     unverified = [str(did) for did in (receipts.get("unverified_delivery_ids") or [])]
     if unverified:
         return {"basis": "delivered", "text": "", "delivery_id": unverified[-1], "terminal_origin": ""}
@@ -448,13 +589,29 @@ def adopt_registered_answer(root: Any, task: Dict[str, Any], task_id: str, *, at
             log.warning("Preserved host salvage of %s could not be read; the receipt stays the result", task_id)
     if answer["text"] and origin:  # the producer's stamp travels; an unstamped legacy row claims none
         fields["terminal_origin"] = origin
+    from ouroboros.dialogue_provenance import is_presence_task
+
+    delivery, presence = answer.get("presence_delivery"), is_presence_task(task or {})
+
+    def keep_delivery(existing: Dict[str, Any], projected: Dict[str, Any]) -> Dict[str, Any]:
+        # A Presence root's conversation hears what its result stamped before the death, explicit
+        # emptiness included; the local final's text is never its speech, so without those facts it hears none.
+        metadata = dict(existing.get("metadata") or {})
+        if isinstance(delivery, dict):
+            metadata.update(delivery)
+        elif (presence or isinstance(metadata.get("presence"), dict)) and "presence_outcome" not in metadata:
+            metadata.update(presence_outcome="silent", presence_result_text="")
+        else:
+            return projected
+        return {**projected, "metadata": metadata}
+
     log.warning("Task %s attempt %s: finalizing from its registered answer (%s) instead of a retry (%s)",
                 task_id, attempt, answer["basis"], cause)
-    return write_task_result(pathlib.Path(root), task_id, STATUS_FAILED, **fields)
+    return write_task_result(pathlib.Path(root), task_id, STATUS_FAILED, _field_projector=keep_delivery, **fields)
 
 
 def prepare_recovery(root: Any, task_id: str, *, from_attempt: int, cause: str) -> Dict[str, Any]:
-    """Freeze the dead attempt's exact working bytes; ``{}`` when there is nothing to continue.
+    """Freeze the dead attempt's exact working state (expanded, whole); ``{}`` when there is nothing to continue.
 
     Raises when a checkpoint exists but cannot be read or frozen: the caller
     keeps its existing (original-prompt or terminal) path rather than guess.
@@ -742,9 +899,10 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
             row: {"task_id": source, **record[row]} for row in ("first", "repeat") if isinstance(record.get(row), dict)})}
         if not same_id:
             usage.setdefault("_vision_caption_memo", dict(state["usage"].get("_vision_caption_memo") or {}))
-    from ouroboros.loop_output_exhaustion import KEY as OUTPUT_RECOVERY_KEY
-    if record := (state.get("usage") or {}).get(OUTPUT_RECOVERY_KEY):
-        usage[OUTPUT_RECOVERY_KEY] = dict(record)
+    from ouroboros.loop_output_exhaustion import RECORD_KEYS as OUTPUT_RECOVERY_KEYS
+    for key in OUTPUT_RECOVERY_KEYS:
+        if record := (state.get("usage") or {}).get(key):
+            usage[key] = dict(record)
     # Saved prose is evidence, never permission to skip today's finalization:
     # a restored attempt holds no seal of the interrupted one.
     ctx._task_acceptance_sealed_fence_token = None
@@ -770,6 +928,8 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
     usage["_task_attempt"] = getattr(ctx, "task_attempt", None)
     ctx.working_recovery = None
     plan, mode = rebind_restored_route(tools, state, messages)
+    from ouroboros.place_reply import note_possible_sends
+    note_possible_sends(ctx, trace, messages, interrupted=True)  # before synthetic rows close unanswered calls
     pending = close_unanswered_calls(messages, "interruption")
     try:
         from ouroboros import delegate_custody as custody

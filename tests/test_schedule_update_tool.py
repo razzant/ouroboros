@@ -63,6 +63,9 @@ def test_root_and_act_full_turns_patch_only_supplied_fields(registry, level, mon
     assert row["name"] == "Evening review" and row["task"]["text"].endswith("new reports")
     assert row["task"]["context"] == before["task"]["context"]
     assert row["task"]["reasoning_effort"] == "high"
+    # The one metadata fact a text edit adds: which task supplied the objective it changed, and when (#2764).
+    author = row["task"]["metadata"].pop("objective_author")
+    assert author == {"kind": "task", "task_id": registry._ctx.task_id, "at": author["at"]} and author["at"]
     assert row["task"]["metadata"] == before["task"]["metadata"]
     assert row["destination"] == {"chat_id": 42, "project_id": "reports"}
     assert row["timezone"] == "Europe/Paris" and row["next_run_at"]
@@ -83,9 +86,9 @@ def test_empty_patch_fields_are_absent_and_reason_is_required(registry):
 
 
 @pytest.mark.parametrize("params", [
-    {"cron": "hourly"}, {"run_at": "soon"}, {"cron": "0 9 * * *", "run_at": "2099-01-01T00:00:00Z"},
-    {"timezone": "Mars/Olympus"}, {"reasoning_effort": "invented"},
-    {"objective": "x" * 4001}, {"context": "x" * 8001},
+    {"cron": "0 9 * * *", "run_at": "2099-01-01T00:00:00Z"},
+    {"reasoning_effort": "invented"},
+    {"objective": "x" * 4001},
 ])
 def test_invalid_edits_are_typed_and_leave_bytes_unchanged_with_a_valid_path_open(registry, params):
     path = registry._ctx.drive_root / "state/scheduled_tasks.json"

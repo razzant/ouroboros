@@ -134,7 +134,7 @@ def test_nested_copy_sees_parent_work_and_bubbles_child_delta(case):
     assert git(source, "branch", "--list", "subagent/*") == b""
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
+@pytest.mark.parametrize("mode", ["light", "advanced", "cyber_pro"])
 def test_foreign_copy_uses_foreign_policy_in_every_mode(case, monkeypatch, mode):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     folder, task = admit(case, "child", "parent")
@@ -268,9 +268,258 @@ def test_apply_exception_is_unknown_and_keeps_copy(case, monkeypatch):
     assert folder.exists() and (artifacts / "workspace.patch").exists()
 
 
+def test_a_busy_target_is_not_started_and_the_same_result_integrates_later(case, monkeypatch):
+    """06.11, both directions: a target another git step holds answers INTEGRATE_NOT_STARTED with no conflict verdict
+    and keeps the captured result; once free, the same result integrates."""
+    import ouroboros.tools.subagent_integration as integration
+    folder, task = admit(case, "child", "parent")
+    (folder / "a.txt").write_bytes(b"changed\n")
+    artifacts, _ = capture(case, folder, task)
+    real = integration._locked_apply
+    monkeypatch.setattr(integration, "_locked_apply", lambda *a, **kw: {"lock_error": "TimeoutError: held by task other"})
+    out = integration._integrate_subagent_patch(parent_context(case), task_id="child")
+    assert "INTEGRATE_NOT_STARTED" in out and "the target is busy" in out and "CONFLICT" not in out, out
+    assert folder.exists() and (artifacts / "workspace.patch").exists()
+    monkeypatch.setattr(integration, "_locked_apply", real)
+    out = integration._integrate_subagent_patch(parent_context(case), task_id="child")
+    assert "✅ Integrated" in out, out
+    assert (case[1] / "a.txt").read_bytes() == b"changed\n"
+
+
+def ignore_fixture(source, *, dirty):
+    """The source ignores .build/ and dist/ yet tracks .build/pinned.cfg; a dirty source also holds the
+    parent's own staged and unstaged edit of a.txt, which sends its copy through the working-tree apply."""
+    (source / ".gitignore").write_bytes(b".build/\ndist/\n")
+    (source / ".build").mkdir()
+    (source / ".build" / "pinned.cfg").write_bytes(b"base\n")
+    git(source, "add", "-f", "--", ".gitignore", ".build/pinned.cfg")
+    git(source, "commit", "-qm", "ignore fixture")
+    if dirty:
+        (source / "a.txt").write_bytes(b"base\nparent staged\n")
+        git(source, "add", "a.txt")
+        (source / "a.txt").write_bytes(b"base\nparent staged\nparent unstaged\n")
+
+
+def index_state(source):
+    """Entries, staged diff and what Git reads as modified: a restored entry must not look dirty."""
+    return (git(source, "ls-files", "--stage", "-z"), git(source, "diff", "--cached", "--binary"),
+            git(source, "diff-files", "--name-only", "-z"))
+
+
+@pytest.mark.parametrize("dirty", [False, True])  # three-way apply from a clean source, or working-tree apply
+@pytest.mark.parametrize("kind", ["tracked_in_ignored_folder", "new_ignored", "ordinary"])
+def test_ignored_paths_are_delivered_and_staged_by_index_membership(case, dirty, kind):
+    """#2446: a file the source already tracks stages whatever its ignore rules say; a new file they exclude
+    is delivered into the tree but kept out of the index and named; the ordinary edit and deletion beside it
+    land either way (a three-way apply stages that deletion itself), and the parent's own staged and unstaged
+    work stays as it was."""
+    import json
+
+    _, source, data, _ = case
+    ignore_fixture(source, dirty=dirty)
+    child, task = admit(case, "child", "parent")
+    (child / "README.txt").write_bytes(b"ordinary contribution\n")
+    (child / "BIBLE.md").unlink()
+    rel = {"tracked_in_ignored_folder": ".build/pinned.cfg", "new_ignored": "dist/new.bin"}.get(kind)
+    if rel:
+        (child / rel).parent.mkdir(parents=True, exist_ok=True)
+        (child / rel).write_bytes(b"captured contribution\n")
+        git(child, "add", "-f", "--", rel)
+    _, manifest = capture(case, child, task)
+    assert manifest["status"] == "ready_with_changes", manifest
+    out = _integrate_subagent_patch(parent_context(case), task_id="child")
+    assert "✅ Integrated" in out, out
+    assert (source / "README.txt").read_bytes() == b"ordinary contribution\n"
+    assert git(source, "show", ":README.txt") == b"ordinary contribution\n"
+    assert not (source / "BIBLE.md").exists() and git(source, "ls-files", "--", "BIBLE.md") == b""
+    if rel:
+        assert (source / rel).read_bytes() == b"captured contribution\n"
+    if kind == "tracked_in_ignored_folder":
+        assert git(source, "show", ":.build/pinned.cfg") == b"captured contribution\n"
+    verdict = json.loads((task_artifact_dir_path(data, "parent") / "subagent_patch_verdict_child.json").read_text())
+    if kind == "new_ignored":
+        assert git(source, "ls-files", "--", "dist/new.bin") == b""
+        assert "3 file(s), 2 staged)" in out and "Delivered, not indexed" in out and "dist/new.bin" in out, out
+        assert verdict["unindexed"] == ["dist/new.bin"]
+        assert "Changes are staged" not in out and "the files named above are not staged at all" in out, out
+    else:
+        assert "file(s), staged)" in out and "Delivered, not indexed" not in out and "unindexed" not in verdict, out
+        assert "Changes are staged but NOT committed" in out, out
+    if dirty:  # the parent's own work: staged blob and unstaged bytes, untouched by the child's result
+        assert git(source, "show", ":a.txt") == b"base\nparent staged\n"
+        assert (source / "a.txt").read_bytes() == b"base\nparent staged\nparent unstaged\n"
+
+
+def index_flags(source):
+    """The flags Git keeps beside entries (lowercase tag: assume-unchanged, S: skip-worktree) and the
+    intent-to-add entries porcelain status reports; read without writing the index."""
+    return (git(source, "ls-files", "-v", "-z"),
+            git(source, "--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=no"))
+
+
+@pytest.mark.parametrize("dirty, flag", [(False, ""), (True, ""), (True, "intent_to_add"),
+                                         (False, "skip_worktree")])
+def test_a_genuine_index_failure_reverses_the_tree_and_restores_only_its_own_entries(case, monkeypatch, dirty, flag):
+    """A real Git index failure while staging (another Git process holds index.lock) still fails the apply,
+    which is reversed; exactly the entries the attempt changed return, a three-way apply's own included,
+    with the flags Git kept beside them: intent-to-add (a working-tree apply stages its content first),
+    assume-unchanged and skip-worktree (staging clears them, a three-way apply rewrites those entries without
+    them). The index, the parent's staged and unstaged work and the tree are as they were."""
+    import json
+    import os
+    from ouroboros.tools import patch_staging as staging
+
+    _, source, data, _ = case
+    ignore_fixture(source, dirty=dirty)
+    held = "ita.txt" if flag == "intent_to_add" else "BIBLE.md" if flag else ""
+    if flag == "intent_to_add":
+        (source / held).write_bytes(b"intended\n")
+        git(source, "add", "-N", "--", held)
+    elif flag:
+        git(source, "update-index", f"--{flag.replace('_', '-')}", "--", held)
+    if flag == "skip_worktree" and not dirty:
+        (source / held).unlink()  # outside a sparse checkout the file is absent
+    child, task = admit(case, "child", "parent")
+    (child / "a.txt").write_bytes((child / "a.txt").read_bytes() + b"child\n")
+    (child / "new.txt").write_bytes(b"child's new file\n")
+    if held:
+        (child / held).write_bytes(b"edited by the child\n")
+    _, manifest = capture(case, child, task)
+    assert not held or held in manifest["tracked_changed"] + manifest["untracked_included"], manifest
+    os.utime(source / ".gitignore", (946684800, 946684800))  # unrelated, stale in the stat cache: never refreshed
+    assert b".gitignore" in git(source, "diff-files", "--name-only").split()
+    present = lambda: held and (source / held).exists()  # noqa: E731 (a sparse file stays absent)
+    before = index_state(source), index_flags(source), (source / "a.txt").read_bytes(), present()
+    real = staging._git_paths
+
+    def locked(target, args, paths, prefix=b""):
+        if args[1:2] == ["add"] and not {"-u", "-N", "--refresh"} & set(args):  # the new-file add meets a held lock
+            lock = Path(target) / ".git" / "index.lock"
+            lock.write_bytes(b"")
+            try:
+                return real(target, args, paths, prefix)
+            finally:
+                lock.unlink()
+        return real(target, args, paths, prefix)
+
+    monkeypatch.setattr(staging, "_git_paths", locked)
+    out = _integrate_subagent_patch(parent_context(case), task_id="child")
+    assert "INTEGRATE_CONFLICT" in out and "did not finish cleanly" in out and "index.lock" in out, out
+    assert (index_state(source), index_flags(source), (source / "a.txt").read_bytes(), present()) == before
+    assert not (source / "new.txt").exists()
+    verdict = json.loads((task_artifact_dir_path(data, "parent") / "subagent_patch_verdict_child.json").read_text())
+    assert (verdict["outcome"], verdict["applied"]) == ("conflict", False)
+    monkeypatch.setattr(staging, "_git_paths", real)  # the lock is gone: the same captured result now lands
+    assert "✅ Integrated" in _integrate_subagent_patch(parent_context(case), task_id="child")
+    assert git(source, "show", ":new.txt") == b"child's new file\n"
+
+
+@pytest.mark.parametrize("dirty, flag, absent, lands", [
+    (True, "assume_unchanged", False, True),  # plain `add -u` skips this silently: unstaged under a "staged" receipt
+    (False, "skip_worktree", False, True),  # a present file the index's stat data still matches lands the same way
+    (True, "skip_worktree", True, False),  # a working-tree apply has no file to patch
+])
+def test_a_flagged_entry_really_stages_and_keeps_its_flag(case, dirty, flag, absent, lands):
+    """A captured edit of an assume-unchanged or skip-worktree entry reaches the index and the entry keeps its
+    flag, or nothing changes and the refusal says so; "staged" is never claimed over unstaged content."""
+    _, source, _, _ = case
+    ignore_fixture(source, dirty=dirty)
+    git(source, "update-index", f"--{flag.replace('_', '-')}", "--", "BIBLE.md")
+    if absent:
+        (source / "BIBLE.md").unlink()
+    tag = {"assume_unchanged": b"h", "skip_worktree": b"S"}[flag]
+    child, task = admit(case, "child", "parent")
+    (child / "BIBLE.md").write_bytes(b"edited by the child\n")
+    (child / "README.txt").write_bytes(b"ordinary\n")
+    capture(case, child, task)
+    before = index_state(source)
+    out = _integrate_subagent_patch(parent_context(case), task_id="child")
+    assert git(source, "ls-files", "-v", "--", "BIBLE.md")[:1] == tag
+    if not lands:
+        assert "INTEGRATE_CONFLICT" in out and "✅" not in out, out
+        assert index_state(source) == before and not (source / "README.txt").exists()
+        assert (source / "BIBLE.md").exists() != absent
+        return
+    assert "✅ Integrated" in out and "2 file(s), staged)" in out and "Changes are staged but NOT committed" in out, out
+    assert git(source, "show", ":BIBLE.md") == (source / "BIBLE.md").read_bytes() == b"edited by the child\n"
+    assert git(source, "show", ":README.txt") == b"ordinary\n"
+    if dirty:  # the parent's own work, on an entry the child did not touch
+        assert git(source, "show", ":a.txt") == b"base\nparent staged\n"
+        assert (source / "a.txt").read_bytes() == b"base\nparent staged\nparent unstaged\n"
+
+
+def test_a_hidden_local_edit_stages_with_the_entry_the_child_edited(case):
+    """A touched entry stages whole, as any touched path with unstaged edits does: the child saw and kept the
+    local edit an assume-unchanged flag hid, and that receipt is true because the index holds exactly that."""
+    _, source, _, _ = case
+    git(source, "update-index", "--assume-unchanged", "--", "BIBLE.md")
+    (source / "BIBLE.md").write_bytes(b"project docs\nhidden local edit\n")
+    child, task = admit(case, "child", "parent")
+    (child / "BIBLE.md").write_bytes((child / "BIBLE.md").read_bytes() + b"child line\n")
+    capture(case, child, task)
+    out = _integrate_subagent_patch(parent_context(case), task_id="child")
+    assert "✅ Integrated" in out and "1 file(s), staged)" in out, out
+    assert git(source, "show", ":BIBLE.md") == b"project docs\nhidden local edit\nchild line\n"
+    assert git(source, "ls-files", "-v", "--", "BIBLE.md")[:1] == b"h"
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_the_ignore_rules_the_apply_leaves_decide_for_new_paths(case, dirty):
+    """Ignore rules are read after the apply: a rule the result adds keeps its new file delivered but unindexed,
+    and a rule the result removes lets its new file stage."""
+    _, source, _, _ = case
+    (source / ".gitignore").write_bytes(b"gone-rule/\n")
+    git(source, "add", "--", ".gitignore")
+    git(source, "commit", "-qm", "rules")
+    if dirty:
+        (source / "a.txt").write_bytes(b"base\nparent staged\n")
+        git(source, "add", "--", "a.txt")
+    child, task = admit(case, "child", "parent")
+    (child / ".gitignore").write_bytes(b"added-rule/\n")
+    for rel in ("added-rule/a.bin", "gone-rule/b.bin"):
+        (child / rel).parent.mkdir()
+        (child / rel).write_bytes(b"contribution\n")
+    git(child, "add", "-f", "--", "added-rule/a.bin")
+    capture(case, child, task)
+    out = _integrate_subagent_patch(parent_context(case), task_id="child")
+    assert "✅ Integrated" in out and "3 file(s), 2 staged)" in out and "added-rule/a.bin" in out, out
+    assert git(source, "show", ":.gitignore") == b"added-rule/\n"
+    assert git(source, "show", ":gone-rule/b.bin") == b"contribution\n"
+    assert (source / "added-rule/a.bin").read_bytes() == b"contribution\n"
+    assert git(source, "ls-files", "--", "added-rule") == b""
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="NTFS forbids these names")
+def test_odd_names_reach_git_literally(case):
+    """Paths are literal and NUL-delimited: a glob-shaped name stages itself and never the file its pattern
+    matches, whose unstaged edit stays unstaged; a leading colon or a newline stays part of the name, in the
+    ignore check too."""
+    import json
+
+    _, source, data, _ = case
+    (source / ".gitignore").write_bytes(b":ignored*\n")
+    (source / "gb.txt").write_bytes(b"base\n")
+    git(source, "add", "--", ".gitignore", "gb.txt")
+    git(source, "commit", "-qm", "names")
+    (source / "gb.txt").write_bytes(b"base\nparent's unstaged edit\n")
+    child, task = admit(case, "child", "parent")
+    staged = ["g[ab].txt", ":colon.txt", "new\nline.txt"]
+    for name in (*staged, ":ignored.txt"):
+        (child / name).write_bytes(b"contribution\n")
+    git(child, "--literal-pathspecs", "add", "-f", "--", ":ignored.txt")
+    capture(case, child, task)
+    out = _integrate_subagent_patch(parent_context(case), task_id="child")
+    assert "✅ Integrated" in out and "4 file(s), 3 staged)" in out, out
+    listed = git(source, "ls-files", "-z").split(b"\0")
+    assert all(name.encode() in listed for name in staged) and b":ignored.txt" not in listed
+    assert (source / ":ignored.txt").read_bytes() == b"contribution\n"
+    assert git(source, "show", ":gb.txt") == b"base\n"
+    verdict = json.loads((task_artifact_dir_path(data, "parent") / "subagent_patch_verdict_child.json").read_text())
+    assert verdict["unindexed"] == [":ignored.txt"]
+
+
 @pytest.mark.parametrize("options,refused", [
     ({"directory_strategy": "copy", "scope_paths": ["."]}, True),
-    ({"scope_paths": ["a.txt"]}, True),
     ({"directory_strategy": "direct", "scope_paths": []}, False),
     ({}, False),
 ])

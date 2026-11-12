@@ -62,11 +62,14 @@ def test_a_successor_gets_a_result_older_than_two_hundred_newer_calls(tmp_path, 
     from ouroboros.tool_call_log import logical_calls
 
     registry, slow = _timed_out(tmp_path, monkeypatch, guard=240.0)  # pending through 201 calls under load
-    for index in range(201):
-        call = _call("fast_probe", f"newer-{index}")["tool_calls"][0]
-        lte._execute_with_timeout(registry, call, tmp_path / "logs", 1, task_id="pred-task")
-    own = [row for row in _rows(tmp_path / "logs") if row.get("task_id") == "pred-task"]
-    assert len(logical_calls(own)) == 202, "the timed-out call is older than 201 newer ones"
+    try:
+        for index in range(201):
+            call = _call("fast_probe", f"newer-{index}")["tool_calls"][0]
+            lte._execute_with_timeout(registry, call, tmp_path / "logs", 1, task_id="pred-task")
+        own = [row for row in _rows(tmp_path / "logs") if row.get("task_id") == "pred-task"]
+        assert len(logical_calls(own)) == 202, "the timed-out call is older than 201 newer ones"
+    finally:
+        slow.release.set()  # an early failure must not strand the held worker for its 240 s guard
     ref = _settle(tmp_path, slow)
     seen, successor = _successor_requests(tmp_path, monkeypatch, "succ-task", "pred-task", slow)
     (note,) = seen[0]
@@ -218,7 +221,7 @@ def test_evidence_packing_keeps_late_manifests_loose_and_the_source_readable(tmp
     settled = _settled(tmp_path / "logs")
     ref = settled["result_ref"]
     write_task_result(tmp_path, "packed-task", "completed", result="done")
-    manifest = json.loads(call_manifest_path(tmp_path, "packed-task", ref["call_id"]).read_text())
+    manifest = json.loads(call_manifest_path(tmp_path, "packed-task", ref["call_id"]).read_text(encoding="utf-8"))
     blob = manifest["redacted_projection_ref"]
     loose_blob = tmp_path / "observability" / "blobs" / f"{blob['sha256']}.{blob['kind']}.gz"
     assert loose_blob.is_file()

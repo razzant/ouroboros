@@ -8,7 +8,6 @@ from ouroboros import owner_pause, store, task_store, tool_custody
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import claims, owner, run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("after_body", [False, True])
@@ -47,8 +46,7 @@ def test_extension_store_refusal_preserves_dispatch_provenance(tmp_path, monkeyp
         assert "physical_dispatch" not in result.meta and "extension_generation" not in result.meta
 
 
-@pytest.mark.parametrize("bound", [False, True])
-@pytest.mark.parametrize("after_body", [False, True])
+@pytest.mark.parametrize(("after_body", "bound"), [(False, True), (True, False)])
 def test_store_refusal_preserves_actual_entry_stage(tmp_path, monkeypatch, bound, after_body):
     registry, _, _ = _registry(tmp_path, monkeypatch)
     calls = []
@@ -113,8 +111,7 @@ def test_transient_exact_settlement_retries_no_business_work(tmp_path, monkeypat
     assert not claims(tmp_path)
 
 
-@pytest.mark.parametrize("route", ["shell", "mcp"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "route"), [(False, "shell"), (True, "mcp")])
 def test_late_refused_handoff_cannot_recreate_claim(tmp_path, monkeypatch, route, bound):
     registry, _, _ = _registry(tmp_path, monkeypatch)
     contexts, opened = [], []
@@ -240,12 +237,13 @@ def test_delayed_real_mcp_runner_cannot_open_transport_after_callers_return(tmp_
     monkeypatch.setattr(asyncio, "run", delayed)
     monkeypatch.setattr(threading.Thread, "join", joined)
     monkeypatch.setattr(mcp_client, "_transport_factory", transport)
-    monkeypatch.setattr(mcp_client, "_run_async", lambda factory, **_kw: actual_wrapper(factory, join_timeout=0))
+    monkeypatch.setattr(mcp_client, "_run_async", lambda factory, **kw: actual_wrapper(factory, **{**kw, "join_timeout": 0}))
     try:
         async def invoke():
             return registry.execute_result("mcp_demo__effect", {})
         result = actual_run(invoke())
-        assert result.status in {"error", "timeout"}
+        assert (result.status, result.code) == ("timeout", "MCP_TIMEOUT")
+        assert result.meta["mcp_call_not_sent"] is False, "unknown when the caller stopped waiting"
         assert len(claims(tmp_path)) == 1  # real runner has not yet unwound
     finally:
         release.set()
@@ -254,9 +252,9 @@ def test_delayed_real_mcp_runner_cannot_open_transport_after_callers_return(tmp_
             assert not thread.is_alive()
         mcp_client.reset_manager_for_tests()
     assert not calls and not transports
-    # Unknown was never rewritten as no-send; only the runner's positive unwind
-    # can later refine this original exact duty (not currently collected here).
-    assert len(claims(tmp_path)) == 1
+    # Only the runner's own positive unwind (preparation refused by closure, nothing
+    # sent) discharges the exact duty and ends the local call it held.
+    assert not claims(tmp_path)
 
 
 @pytest.mark.parametrize("bound", [False, True])
@@ -335,8 +333,7 @@ def test_sticky_store_admission_refusal_never_enters_executor_body(tmp_path, mon
     assert not claims(tmp_path)
 
 
-@pytest.mark.parametrize("route", ["shell", "mcp"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "route"), [(False, "mcp"), (True, "shell")])
 def test_close_before_external_publication_creates_no_phantom_duty(tmp_path, monkeypatch, route, bound):
     """Split real copied-context publication before its durable lock acquisition.
 

@@ -58,6 +58,14 @@ test('private contact source stays in the voice line, separate from authored wor
         assert.equal(plain.querySelector('.md-link'), null);
         const unknown = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: { label: 'unbound' } }, document.createElement('div'));
         assert.equal(unknown.querySelector('.sender').children.length, 0);
+        // A label stored before its connector stopped prefixing its own word (audit 05.11, U015) reads that word once.
+        const doubled = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: { ...origin, label: 'Telegram · Telegram · Anton' } },
+            document.createElement('div'));
+        assert.equal(doubled.querySelector('.sender').querySelector('.md-link').textContent, 'Telegram · Anton');
+        const repeatedName = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: { ...origin, label: 'GitHub · ouroboros · GitHub' } },
+            document.createElement('div'));
+        assert.equal(repeatedName.querySelector('.sender').querySelector('.md-link').textContent, 'GitHub · ouroboros · GitHub',
+            'only a segment equal to the one right before it goes');
     } finally { fx.controller.destroy(); fx.restore(); }
 });
 
@@ -357,6 +365,54 @@ test('rejected clipboard writeText falls back to textarea copy', async () => {
         assert.equal(button.textContent, '✓');
         assert.equal(button.attributes.get('aria-label'), 'Message copied');
         assert.equal(fx.tracker.created.filter((node) => node.tagName === 'TEXTAREA').at(-1).selectCalls, 1);
+        assert.equal(globalThis.document.body.querySelectorAll('.chat-copy-fallback').length, 0);
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
+test('a write the API settled copies once and never opens the selection fallback', async () => {
+    const fx = fixture();
+    try {
+        const writes = [];
+        let execCalls = 0;
+        globalThis.document.execCommand = () => { execCalls += 1; return true; };
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: { clipboard: { writeText: async (text) => { writes.push(text); } } },
+        });
+        const bubble = new NodeStub('div', fx.tracker);
+        const button = fx.controller.attachCopyControl(bubble, () => 'raw message');
+        await button.click();
+        assert.deepEqual(writes, ['raw message']);
+        assert.equal(execCalls, 0);
+        assert.equal(fx.tracker.created.filter((node) => node.tagName === 'TEXTAREA').length, 0);
+        assert.equal(button.textContent, '✓');
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
+test('a copy refused by the API and by the engine shows the failure, never the check', async () => {
+    const fx = fixture();
+    try {
+        let execCalls = 0;
+        globalThis.document.execCommand = () => { execCalls += 1; return false; };
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: { clipboard: { writeText: async () => { throw new Error('denied'); } } },
+        });
+        const bubble = new NodeStub('div', fx.tracker);
+        const button = fx.controller.attachCopyControl(bubble, 'raw message');
+        button.focus();
+        await button.click();
+        assert.equal(execCalls, 1, 'the refused API still got its one selection attempt');
+        assert.equal(button.textContent, '✗');
+        assert.equal(button.title, 'Copy failed');
+        assert.equal(button.attributes.get('aria-label'), 'Copy failed');
+        assert.equal(globalThis.document.activeElement, button, 'a keyboard owner stays on Copy');
         assert.equal(globalThis.document.body.querySelectorAll('.chat-copy-fallback').length, 0);
     } finally {
         fx.controller.destroy();

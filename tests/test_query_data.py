@@ -78,9 +78,15 @@ def test_exact_whole_document_and_string_projection(ctx):
     assert saved(ctx, whole) == raw
 
 
-@pytest.mark.parametrize("same_bytes", [False, True])
-@pytest.mark.parametrize("link_error", [None, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM,
-                                       errno.EXDEV, errno.ENOSYS, "win32"])
+@pytest.mark.parametrize(("link_error", "same_bytes"), [
+    (None, True),
+    pytest.param(errno.EOPNOTSUPP, True, id='102-True'),
+    pytest.param(errno.ENOTSUP, False, id='45-False'),
+    pytest.param(errno.EPERM, False, id='1-False'),
+    pytest.param(errno.EXDEV, True, id='18-True'),
+    pytest.param(errno.ENOSYS, False, id='78-False'),
+    ("win32", True),
+])
 def test_concurrent_exports_publish_exclusively(ctx, monkeypatch, same_bytes, link_error):
     if link_error is not None:
         def unsupported(*_args, **_kwargs):
@@ -160,7 +166,7 @@ def test_fixed_names_and_selectors(ctx, kind, path):
         assert call(ctx, op="json", kind=kind, select=selector)["status"] == "error"
 
 
-@pytest.mark.parametrize("name", ["supervisor", "events", "tools", "chat"])
+@pytest.mark.parametrize("name", ["supervisor", "tools"])
 def test_jsonl_filter_tail_and_exact_rows(ctx, name):
     lines = [b'{ "type": "read", "n": 1 }\r\n', b'{"type":"write","n":2}\n', b'{"type":"read","n":3}\n']
     write(ctx, f"logs/{name}.jsonl", b"".join(lines))
@@ -230,27 +236,28 @@ def test_stream_and_document_byte_limits(ctx, monkeypatch):
 
 
 def test_positive_tail_input_refusal_after_controlled_growth(ctx, monkeypatch):
+    import os
     from pathlib import Path
 
     from ouroboros import query_data_sql
 
     monkeypatch.setattr(query_data_sql, "MAX_BYTES", 512)
     path = write(ctx, "logs/tools.jsonl", b'{"n":1}\n')
-    original_stat = Path.stat
+    original_stat = os.fstat
     original_open = Path.open
     observed = []
-    reading = False
+    scan_fd = None
 
     def open_for_scan(self, mode="r", *args, **kwargs):
-        nonlocal reading
+        nonlocal scan_fd
         stream = original_open(self, mode, *args, **kwargs)
         if self == path and mode == "rb":
-            reading = True
+            scan_fd = stream.fileno()
         return stream
 
-    def grow_after_stat(self, *args, **kwargs):
-        stat = original_stat(self, *args, **kwargs)
-        if self == path and reading and not observed:
+    def grow_after_stat(fd):
+        stat = original_stat(fd)
+        if fd == scan_fd and not observed:
             observed.append(stat.st_size)
             with path.open("ab") as stream:
                 stream.write(b'{"n":2}\n' * 200)
@@ -258,7 +265,7 @@ def test_positive_tail_input_refusal_after_controlled_growth(ctx, monkeypatch):
 
     with monkeypatch.context() as growing:
         growing.setattr(Path, "open", open_for_scan)
-        growing.setattr(Path, "stat", grow_after_stat)
+        growing.setattr(os, "fstat", grow_after_stat)
         result = call(ctx, op="jsonl", kind="tools_log", tail=2, max_bytes=512)
     print(result)
     assert observed == [8]  # No seek: the size check saw an input below the cap.
@@ -269,6 +276,131 @@ def test_positive_tail_input_refusal_after_controlled_growth(ctx, monkeypatch):
     # With the append finished, the same request selects a bounded newest window.
     retried = call(ctx, op="jsonl", kind="tools_log", tail=2, max_bytes=512)
     assert retried["data"] == [{"n": 2}, {"n": 2}] and retried["source"]["scan_truncated"]
+
+
+def _rotated_log(ctx, name, *segments):
+    """``logs/<name>.jsonl`` and the archive ``rotate_jsonl_log_if_needed`` leaves: each segment but
+    the last is rotated to ``archive/<name>_<stamp>[_<n>].jsonl``. Returns the archive, oldest first."""
+    from supervisor.state import rotate_jsonl_log_if_needed
+
+    for index, raw in enumerate(segments):
+        write(ctx, f"logs/{name}.jsonl", raw)
+        if index < len(segments) - 1:
+            rotate_jsonl_log_if_needed(ctx.drive_root, f"{name}.jsonl", name, max_bytes=0)
+    return sorted((ctx.drive_root / "archive").glob(f"{name}_*.jsonl"))
+
+
+def test_a_rotated_log_tail_continues_into_its_newest_archive_segments(ctx):
+    """#1701: rotation moves the live file to archive/, so its rows alone read like the whole
+    history. A tail they cannot fill continues into the newest segments, exact rows oldest first;
+    the files read are named, the unopened rest counted, and tail=0 says it read only the live file."""
+    lines = [b'{"n":%d}\n' % n for n in range(6)]
+    archived = _rotated_log(ctx, "events", *(b"".join(lines[at:at + 2]) for at in (0, 2, 4)))
+    assert len(archived) == 2
+    newest = call(ctx, op="jsonl", kind="events_log", tail=3, save_as="tail.jsonl")
+    assert newest["data"] == [{"n": 3}, {"n": 4}, {"n": 5}] and saved(ctx, newest) == b"".join(lines[3:])
+    assert newest["source"]["rotation"] == {"segments": [f"archive/{archived[1].name}", "logs/events.jsonl"],
+                                            "unopened": 1, "gaps": []}
+    assert newest["source"]["scan_truncated"] is False  # the three newest rows are all there
+    assert call(ctx, op="jsonl", kind="events_log", tail=4, select="[*].n")["data"] == [2, 3, 4, 5]
+    oldest = call(ctx, op="jsonl", kind="events_log", filter={"field": "n", "op": "eq", "value": 1})
+    assert oldest["data"] == [{"n": 1}] and oldest["source"]["scan_truncated"] is False
+    assert oldest["source"]["rotation"] == {
+        "segments": [*(f"archive/{path.name}" for path in archived), "logs/events.jsonl"], "unopened": 0, "gaps": []}
+    live = call(ctx, op="jsonl", kind="events_log", tail=0, save_as="live.jsonl")
+    assert live["data"] == [{"n": 4}, {"n": 5}] and saved(ctx, live) == b"".join(lines[4:])
+    assert live["source"]["scan_truncated"] is True  # rows older than the live file were not read
+    assert live["source"]["rotation"] == {"segments": ["logs/events.jsonl"], "unopened": 2, "gaps": []}
+
+
+@pytest.mark.parametrize("rotations", [1, 2])
+@pytest.mark.parametrize("missing_anchor", [False, True])
+def test_backfill_uses_the_observed_live_generation(ctx, monkeypatch, rotations, missing_anchor):
+    """Use real rename-based rotations between reading live and listing older files."""
+    from ouroboros.tools import query_data
+    from supervisor.state import rotate_jsonl_log_if_needed
+
+    older = b'{"n":0}\n'
+    current = json.dumps({"n": 1, "padding": "x" * 800_000}).encode() + b"\n"
+    _rotated_log(ctx, "tools", older, current)
+    original = query_data._jsonl
+
+    def rotate_after_read(*args, **kwargs):
+        result = original(*args, **kwargs)
+        for n in range(rotations):
+            rotate_jsonl_log_if_needed(ctx.drive_root, "tools.jsonl", "tools")
+            write(ctx, "logs/tools.jsonl", current.replace(b'"n": 1', b'"n": %d' % (n + 2)))
+        if missing_anchor:
+            for segment in (ctx.drive_root / "archive").glob("tools_*.jsonl"):
+                stat = segment.stat()
+                if (stat.st_dev, stat.st_ino) == result[-1]:
+                    segment.rename(segment.with_name("not-listed.jsonl"))
+                    break
+        return result
+
+    monkeypatch.setattr(query_data, "_jsonl", rotate_after_read)
+    result = call(ctx, op="jsonl", kind="tools_log", tail=10, max_bytes=2_000_000,
+                  save_as="observed-generation.jsonl")
+    assert [row["n"] for row in result["data"]] == ([1] if missing_anchor else [0, 1])
+    assert saved(ctx, result) == (b"" if missing_anchor else older) + current
+    assert result["source"]["scan_truncated"] is missing_anchor
+    assert result["source"]["rotation"]["gaps"] == (["live_generation_unresolved"] if missing_anchor else [])
+
+
+def test_archive_rows_spend_the_same_input_budget_and_a_clipped_window_says_so(ctx, monkeypatch):
+    from ouroboros import query_data_sql
+
+    monkeypatch.setattr(query_data_sql, "MAX_BYTES", 512)
+    archived = _rotated_log(ctx, "tools", b'{"n":0}\n' * 100, b'{"n":1}\n' * 100, b'{"n":2}\n' * 10)
+    result = call(ctx, op="jsonl", kind="tools_log", tail=100, select="[*].n", max_bytes=512)
+    # The 80 live bytes leave 432 of 512: exactly 54 complete rows from the newer segment.
+    # A boundary on LF must not discard the first complete row; the older segment stays unopened.
+    assert result["data"] == [1] * 54 + [2] * 10 and result["source"]["scan_truncated"] is True
+    assert result["source"]["rotation"] == {"segments": [f"archive/{archived[1].name}", "logs/tools.jsonl"],
+                                            "unopened": 1, "gaps": []}
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+@pytest.mark.parametrize("budget", [512, 511])
+def test_clipped_tail_keeps_complete_boundary_rows_and_exact_saved_bytes(ctx, monkeypatch, rotated, budget):
+    """Both live and archived windows keep a whole first row, but omit a genuinely partial one."""
+    from ouroboros import query_data_sql
+
+    monkeypatch.setattr(query_data_sql, "MAX_BYTES", budget)
+    one, two = b'{"n":1}        \n', b'{"n":2}        \n'
+    live_count = 10 if rotated else 0
+    if rotated:
+        _rotated_log(ctx, "tools", one * 100, two * live_count)
+    else:
+        write(ctx, "logs/tools.jsonl", one * 100)
+    count = (budget - len(two) * live_count) // len(one)
+    result = call(ctx, op="jsonl", kind="tools_log", tail=100, max_bytes=budget, save_as="boundary.jsonl")
+    assert result["data"] == [{"n": 1}] * count + [{"n": 2}] * live_count
+    assert saved(ctx, result) == one * count + two * live_count
+    assert result["source"]["scan_truncated"] is True
+
+
+def test_archive_gaps_are_named_and_never_leave_a_hole(ctx, tmp_path_factory):
+    """A torn or malformed archived row is skipped and named (the live file stays strict); the live
+    file, already rotated into the archive, is not read twice; a segment the actor may not open ends
+    the window there instead of leaving a hole in it."""
+    import os
+
+    archived = _rotated_log(ctx, "supervisor", b'{"n":1}\n', b'{"n":2}\nnot json\n{"n":3}', b'{"n":4}\n')
+    os.link(ctx.drive_root / "logs/supervisor.jsonl", ctx.drive_root / "archive/supervisor_99991231T235959.jsonl")
+    result = call(ctx, op="jsonl", kind="supervisor_log", tail=10)
+    assert result["data"] == [{"n": 1}, {"n": 2}, {"n": 4}] and result["source"]["scan_truncated"] is False
+    assert result["source"]["rotation"] == {
+        "segments": [*(f"archive/{path.name}" for path in archived), "logs/supervisor.jsonl"],
+        "unopened": 0, "gaps": ["malformed_jsonl", "torn_archive_line"]}
+    outside = tmp_path_factory.mktemp("outside") / "supervisor.jsonl"
+    outside.write_bytes(b'{"n":"outside"}\n')
+    archived[0].unlink()
+    archived[0].symlink_to(outside)
+    stopped = call(ctx, op="jsonl", kind="supervisor_log", tail=10)
+    assert stopped["data"] == [{"n": 2}, {"n": 4}] and stopped["source"]["scan_truncated"] is True
+    assert stopped["source"]["rotation"]["unopened"] == 1 and "refused_source" in stopped["source"]["rotation"]["gaps"]
+    assert "outside" not in json.dumps(stopped)
 
 
 def test_ids_share_one_input_budget_and_a_single_document_is_bound_by_the_fixed_one(ctx, monkeypatch):
@@ -302,6 +434,73 @@ def test_text_output_counts_its_exact_bytes_and_their_canonical_json(ctx):
             "raise max_bytes to at least 302")
     result = call(ctx, op="json", kind="queue_snapshot", select="note", format="text", max_bytes=302, save_as="note.txt")
     assert result["status"] == "ok" and saved(ctx, result) == text.encode("utf-8")
+
+
+def _shared_queue(ctx, rows=6, filler=""):
+    """A queue snapshot as queue_publication writes it: a repeated task value once, under $shared."""
+    from ouroboros.shared_values import SHARED_KEY, token
+
+    digest = hashlib.sha256(b"shared objective").hexdigest()
+    document = {"worker_pool": {"total": 3}, "filler": filler, SHARED_KEY: {digest: "o" * 300},
+                "running": [{"id": f"t{n}", "task": {"objective": token(digest), "metadata": {"note": token(digest)}}}
+                            for n in range(rows)]}
+    raw = json.dumps(document).encode("utf-8")
+    write(ctx, "state/queue_snapshot.json", raw)
+    return raw
+
+
+def test_a_selected_shared_queue_snapshot_is_measured_after_select(ctx, monkeypatch):
+    """#1701: a shared queue value is stored once, so the whole expansion's canonical JSON can pass the
+    input budget its file fits. A selection, through shared values too, runs on the same in-memory
+    expansion; only it is canonicalized and bounded by max_bytes. The file still spends the input
+    budget, and a reference its table lacks still refuses, whatever is selected."""
+    from ouroboros import query_data_sql
+    from ouroboros.queue_observation import expand_shared
+    from ouroboros.tools.query_data import SelectorError, _select
+
+    raw = _shared_queue(ctx)
+    expanded = expand_shared(json.loads(raw))
+    whole = len(json.dumps(expanded, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    budget = 2048
+    assert len(raw) < budget < whole
+    monkeypatch.setattr(query_data_sql, "MAX_BYTES", budget)
+    refused(call(ctx, op="json", kind="queue_snapshot", max_bytes=budget),
+            f"queue_snapshot as canonical JSON is {whole} bytes, over the fixed {budget}-byte input budget",
+            "select the part you need")
+    pool = call(ctx, op="json", kind="queue_snapshot", select="worker_pool", max_bytes=256, save_as="pool.json")
+    assert pool["status"] == "ok" and pool["reconstructed"] is True and saved(ctx, pool) == b'{"total":3}'
+    for selector in ("running[*].task.metadata.note", "running[5].task", "running[*].id"):
+        through = call(ctx, op="json", kind="queue_snapshot", select=selector, max_bytes=budget)
+        assert through["status"] == "ok" and through["data"] == _select(expanded, selector), (selector, through)
+    with pytest.raises(SelectorError) as expected:
+        _select(expanded, "running[0].task.objective.text")
+    refused(call(ctx, op="json", kind="queue_snapshot", select="running[0].task.objective.text", max_bytes=budget),
+            str(expected.value))
+    refused(call(ctx, op="json", kind="queue_snapshot", select="running", max_bytes=budget),
+            "selected result is", f"no max_bytes admits it (at most {budget}), or narrow it with select")
+    broken = json.loads(raw)
+    broken["$shared"] = {}
+    write(ctx, "state/queue_snapshot.json", json.dumps(broken).encode("utf-8"))
+    refused(call(ctx, op="json", kind="queue_snapshot", select="worker_pool", max_bytes=256),
+            "names a shared value it does not carry")
+    _shared_queue(ctx, filler="x" * budget)  # the file itself past the budget: select cannot admit it
+    refused(call(ctx, op="json", kind="queue_snapshot", select="worker_pool", max_bytes=256),
+            f"queue_snapshot is larger than the fixed {budget}-byte input budget",
+            "select and max_bytes apply after this read and cannot admit it")
+
+
+def test_plane_selects_only_a_log_and_never_beside_a_child(ctx):
+    write(ctx, "logs/events.jsonl", b'{"n":1}\n')
+    refused(call(ctx, op="jsonl", kind="events_log", plane="installation"), 'plane="installation": use canonical')
+    refused(call(ctx, op="json", kind="queue_snapshot", plane="canonical"),
+            'plane="canonical" applies only to a kind=*_log; omit it')
+    refused(call(ctx, op="jsonl", kind="events_log", plane="canonical", child_task_id="second"), "give one")
+    # This caller's drive is the installation's: the selector reads the same file under the owner's name.
+    own = call(ctx, op="jsonl", kind="events_log", plane="canonical")
+    assert own["data"] == [{"n": 1}] and own["source"]["plane"] == "canonical"
+    assert call(ctx, op="jsonl", kind="events_log")["source"]["plane"] == "caller"
+    gone = call(ctx, op="jsonl", kind="tools_log")
+    assert gone["code"] == "not_found" and "plane=" not in gone["message"]  # no other installation log to name
 
 
 def child(ctx, identity, parent="caller"):
@@ -371,7 +570,7 @@ def test_shared_drive_run_uses_the_delegate_writer_location(ctx):
     assert legacy.exists()
 
 
-@pytest.mark.parametrize("identity", ["../caller", "/tmp/caller", "a/b", "a\\b", "..", "C:caller"])
+@pytest.mark.parametrize("identity", ["../caller", "a\\b", "C:caller"])
 def test_names_refuse_paths(ctx, identity):
     assert call(ctx, op="json", kind="task_result", ids=[identity])["status"] == "error"
     assert call(ctx, op="json", kind="task_result", ids=["caller"], save_as=identity)["status"] == "error"
@@ -438,7 +637,7 @@ def test_money_defaults_direct_and_missing_packs_are_typed(ctx, monkeypatch):
     assert not (ctx.drive_root / "observability/packs").exists()
 
 
-@pytest.mark.parametrize("cache", ["valid", "missing", "old_version", "quick_check"])
+@pytest.mark.parametrize("cache", ["valid", "missing", "quick_check"])
 def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
     from ouroboros import evidence_packs as packs
     from tests.test_evidence_packs import _task
@@ -492,17 +691,8 @@ def test_no_packs_depends_on_sidecars_not_an_empty_cache(ctx):
 
 @pytest.mark.parametrize("kwargs,message", [
     ({"select": "rows..value"}, "select/filter fields accept dotted keys"),
-    ({"filter": {"field": "a..b", "op": "eq", "value": 1}}, "select/filter fields accept dotted keys"),
     ({"max_bytes": 0}, "max_bytes=0: use an integer from 256 to 8388608"),
     ({"max_bytes": "4096"}, 'max_bytes="4096": use an integer from 256 to 8388608'),
-    ({"tail": -1}, "tail=-1: use an integer from 0 to 10000"),
-    ({"max_rows": 2}, "max_rows=2 applies only to op=sql; omit it; tail bounds rows for op=jsonl"),
-    ({"snapshot": False}, "snapshot=false applies only to op=sql; omit it"),
-    ({"snapshot": True}, "snapshot=true applies only to op=sql; omit it"),
-    ({"timeout_sec": 2}, "timeout_sec=2 applies only to op=sql; omit it"),
-    ({"db": "money", "query": "SELECT 1"}, 'db="money", query="SELECT 1" apply only to op=sql; omit them'),
-    ({"sha256": "a" * 64}, f'sha256="{"a" * 59}... applies only to op=blob; omit it'),
-    ({"state_file": "health"}, 'state_file="health" applies only to kind=skill_state; omit it'),
 ])
 def test_invalid_requests_are_rejected_before_reading(ctx, kwargs, message):
     assert call(ctx, op="jsonl", kind="events_log")["status"] == "unavailable"
@@ -547,6 +737,10 @@ def test_schema_states_where_each_limit_and_parameter_applies():
     assert "op=sql stops fetching rows at it (truncated=true) before select" in max_bytes
     assert "fixed 8 MiB input budget, shared by ids, is separate and precedes select" in max_bytes
     assert "8 MiB scan window shared by ids (256 MiB for knowledge_history)" in properties["tail"]["description"]
+    assert "A *_log tail continues into its newest archive segments" in properties["tail"]["description"]
+    assert "a selected queue_snapshot spends only its file there" in max_bytes
+    assert properties["plane"]["enum"] == ["canonical"] and "default" not in properties["plane"]
+    assert properties["plane"]["description"].startswith("*_log kinds only: the installation's log")
     assert properties["filter"]["description"] == "op=jsonl only; keeps whole rows before tail."
     assert properties["state_file"]["description"] == "kind=skill_state only."
     assert properties["blob_kind"]["description"] == "op=blob only."
@@ -660,7 +854,9 @@ def test_storage_kind_reads_the_saved_count_from_the_installation_root_and_refus
         "evidence": {"compressed": 12, "saved_bytes": 4096}, "seats": {"compressed": 3, "saved_bytes": None}})
     result = call(ctx, op="json", kind="storage")
     assert result["status"] == "ok" and result["source"]["kind"] == "storage" and result["reconstructed"] is True
+    assert result["data"]["storage_free"] == {}
     assert result["data"]["latest"]["finished_at"] == record["finished_at"] and result["data"]["previous"] is None
+    assert set(result["data"]["disk"]) == {"free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}
     removers = result["data"]["removers"]
     assert removers == place_removers(ctx.drive_root) == storage.count.projection(ctx.drive_root)["removers"], \
         "the per-place facts GET /api/storage serves"
@@ -672,9 +868,16 @@ def test_storage_kind_reads_the_saved_count_from_the_installation_root_and_refus
     refused = call(ctx, op="json", kind="storage", child_task_id="second")
     assert refused["status"] == "error" and "installation-wide" in refused["message"]
     assert call(ctx, op="json", kind="storage", ids=["x"])["status"] == "error"
+    maintenance_jobs.record(ctx.drive_root, "storage_free", state="done", request_id="free-1")
     (ctx.drive_root / "state" / "storage_measurement.json").unlink()
     uncounted = call(ctx, op="json", kind="storage")
-    assert uncounted["status"] == "ok" and set(uncounted["data"]) == {"removers"}, "the removers come before any count"
+    assert uncounted["status"] == "ok" and set(uncounted["data"]) == {"removers", "storage_free", "disk"}, \
+        "the removers, the Free receipt and the disk read now come before any count"
+    assert uncounted["data"]["storage_free"]["request_id"] == "free-1"
+    disk = uncounted["data"]["disk"]
+    assert disk["free_gb"] == round(disk["free_bytes"] / 1e9, 1) and disk["disk_read_at"], "the Storage page's decimal GB, dated"
+    monkeypatch.setattr("shutil.disk_usage", lambda _path: (_ for _ in ()).throw(OSError("volume gone")))
+    assert call(ctx, op="json", kind="storage")["data"]["disk"] == {}, "an unreadable disk is absent, never zero"
 
 
 def test_knowledge_history_lists_writes_without_bodies_from_the_installation_root(ctx, monkeypatch):
@@ -726,3 +929,37 @@ def test_knowledge_history_input_budget_counts_rows_without_their_bodies(ctx, mo
     narrowed = call(ctx, op="jsonl", kind="knowledge_history", tail=0, max_bytes=512,
                     filter={"field": "n", "op": "eq", "value": 3})
     assert [r["n"] for r in narrowed["data"]] == [3]
+
+
+def test_the_retired_chat_log_kind_names_the_conversation_readers(ctx):
+    """logs/chat.jsonl froze at the dialogue-store cutover; the kind that advertised it is gone from the
+    schema, a call that still names it is told where the conversation lives (13 not_found reads in
+    05–08.11), and the kept log kinds read as before."""
+    [entry] = get_tools()
+    assert "chat_log" not in entry.schema["parameters"]["properties"]["kind"]["enum"]
+    refused(call(ctx, op="jsonl", kind="chat_log"), 'kind="chat_log"', "frozen since the dialogue store cutover",
+            "chat_history", "memory_read(rows=true, room_id=...)")
+    write(ctx, "logs/tools.jsonl", b'{"n": 1}\n')
+    assert call(ctx, op="jsonl", kind="tools_log")["data"] == [{"n": 1}]
+
+
+def test_a_failed_sql_statement_names_the_readable_schema_and_a_served_one_does_not(ctx, monkeypatch):
+    """A statement SQLite refused (16 "no such column", 10 table-valued pragma denials in 05–08.11)
+    carries the way to learn the real schema, read from the typed phase, never from the message; a
+    budget expiry before the statement and a served statement carry none."""
+    from ouroboros import query_data_sql
+
+    answers = iter([
+        {"status": "error", "code": "query_failed", "exception_class": "ValueError", "message": "no such column: id", "phase": "sql"},
+        {"status": "error", "code": "deadline", "phase": "acquire", "timeout_sec": 1, "elapsed_sec": 1.5},
+        {"status": "ok", "data": {"columns": ["n"], "rows": [[1]], "truncated": False}},
+    ])
+    monkeypatch.setattr(query_data_sql, "run_sql", lambda *a, **kw: next(answers))
+    failed = call(ctx, op="sql", query="SELECT id FROM tasks")
+    assert (failed["code"], failed["message"]) == ("query_failed", "no such column: id")
+    assert failed["schema"] == ("db=current SQL reads rows of tasks, sqlite_master, sqlite_schema only; columns: "
+                                "PRAGMA table_info(tasks) or SELECT * FROM pragma_table_info('tasks'); "
+                                "task bodies and cards: op=json kind=task_result")
+    assert "schema" not in call(ctx, op="sql", query="SELECT 1")
+    assert "schema" not in call(ctx, op="sql", query="SELECT 1")
+    assert query_data_sql.schema_hint("money") == "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"

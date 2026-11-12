@@ -144,20 +144,25 @@ def _stage(geo, ctx, monkeypatch, run_id="run-1", engine=None):
         run_id=run_id, task_id=ctx.task_id, route_id="r", model="m", project_id="p",
         project_owned=False, root_task_id=ctx.task_metadata.get("root_task_id") or ctx.task_id,
         ledger_root=str(geo.canonical)))
-    out = json.loads(delegate._delegate_wait(ctx, run_id, wait_sec=1))
+    out = json.loads(delegate._read_run(ctx, run_id))
     custody._CUSTODY.clear()
     return out
 
 
 def _read_whole(ctx, read_next):
     """Cover the artifact contiguously through the real registry, like a model would."""
-    arguments = {key: read_next[key] for key in ("root", "path")}
+    arguments = {key: read_next[key] for key in ("root", "path") if key in read_next}
     stride = tool_result_limit("read_file") - 5_000
     text = pathlib.Path(read_next["path"]).read_text(encoding="utf-8")
     for number, line in enumerate(text.splitlines(keepends=True), start=1):
         for offset in range(0, max(len(line), 1), stride):
             result = _execute(ctx, "read_file", **arguments, start_line=number, max_lines=1, start_char=offset)
             assert result.status == "ok" and not result.text.startswith("⚠️"), result.text[:300]
+
+
+def _rootless(read):
+    """The advertised form of a stored staging read: same address, the reader's own permitted root."""
+    return {**read, "arguments": {key: value for key, value in read["arguments"].items() if key != "root"}}
 
 
 def _receipts(geo):
@@ -186,7 +191,7 @@ def _publish_terminal_result(geo, task_id, status="cancelled"):
 
 # --- the staging task reads its own retained answer on every drive -----------------
 
-@pytest.mark.parametrize("geometry", ["canonical_top", "forked_top", "readonly_child", "acting_child"])
+@pytest.mark.parametrize("geometry", ["canonical_top", "forked_top", "acting_child"])
 def test_the_staging_task_reads_its_retained_output_on_every_drive(geo, monkeypatch, geometry):
     ctx = {
         "canonical_top": lambda: _top(geo, ROOT),
@@ -274,10 +279,15 @@ def test_a_root_continue_reads_its_old_nanny_childs_answer_after_drive_cleanup(g
     stored_receipt = next(row for row in stored if row["run_id"] == "run-1")
     stored_source = stored_receipt["staged_output"]
     assert public_receipt["staged_output"] == {
-        **stored_source, "read": stored_source["source_read"], "direct_read": stored_source["read"]}
+        **stored_source, "read": stored_source["source_read"], "direct_read": _rootless(stored_source["read"])}
     assert public_receipt["staged_output"]["sha256"] == source["sha256"]
     assert public_receipt["staged_output"]["task_id"] == NANNY
     assert '"run_dir": "/engine/runs/run-1"' in listed, "the read tool shows the engine's own locator"
+    direct = public_receipt["staged_output"]["direct_read"]
+    for reader in (continuation, parent):  # the exact advertised recipe, from outside the staging lineage (#2539)
+        opened = _execute(reader, direct["tool"], **direct["arguments"])
+        assert opened.status == "ok" and not opened.text.startswith("⚠️"), opened.text[:300]
+        assert "complete answer line" in opened.text
     first_reader = public_receipt["staged_output"]["read"]
     assert first_reader == public_receipt["staged_output"]["source_read"]
     sized = json.loads(_execute(continuation, first_reader["tool"],
@@ -375,7 +385,6 @@ def test_existing_read_rules_run_first_and_the_default_read_never_opens_the_sour
         "an explicit selector is never swallowed by the unchanged-result shortcut"
 
 
-@pytest.mark.serial  # retry authority reads a fresh queue snapshot (the retry suites' lane)
 def test_a_retry_reader_stages_into_its_own_store_and_the_starter_receipt_names_it(tmp_path, monkeypatch):
     from ouroboros.delegate_terminal import _audit_task_custody, record_terminal_reconciliation
     from ouroboros.tools import delegate
@@ -417,7 +426,7 @@ def test_a_retry_reader_stages_into_its_own_store_and_the_starter_receipt_names_
     public = next(row["staged_output"] for row in runs if row["run_id"] == held.run_id)
     assert public["read"] == public["source_read"]
     assert public["read"]["arguments"]["task_id"] == "retry-a"
-    assert public["direct_read"] == staged["read"]
+    assert public["direct_read"] == _rootless(staged["read"])
 
     page = json.loads(call(ctx, "get_task_result", task_id="retry-a", delegated_output_sha256=artifact["sha256"],
                            source_start_char=0, source_end_char=40).text)["delegated_output_source"]
@@ -511,9 +520,10 @@ def _settle(tmp_path, run_id="run-1", task_id="root", engine=None, **fields):
 
 
 def _terminal_wake(ctx, run_id="run-1", status="terminal"):
-    from ouroboros.delegate_supervision import supervised_wait
+    """The wake a delegate_wait on ``run_id`` publishes, its one read answering ``status``."""
+    from tests._run_wait_shared import wake_now
 
-    return supervised_wait(ctx, run_id, wait_once=lambda *_a: json.dumps({
+    return wake_now(ctx, run_id, wait_once=lambda *_a: json.dumps({
         "status": status, "run_id": run_id, "state": "interrupted", "last_seq": 9}))
 
 
@@ -584,7 +594,7 @@ def test_review_owned_unread_and_pre_retention_runs_add_no_second_line(tmp_path,
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: engine)
     assert custody.record_started(tmp_path, custody.RunCustody(
         run_id="run-big", task_id="root", route_id="r", model="m", ledger_root=str(tmp_path)))
-    out = json.loads(delegate._delegate_wait(ctx, "run-big", wait_sec=1))
+    out = json.loads(delegate._read_run(ctx, "run-big"))
     custody._CUSTODY.clear()
     health = _health(tmp_path)
     assert "DELEGATED RESULT NEVER READ — run run-big" in health

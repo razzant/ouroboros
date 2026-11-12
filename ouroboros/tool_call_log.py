@@ -13,6 +13,8 @@ same frozen facts:
   from a process's own ``duration_ms``.
 - ``tool_call_timeout`` — the caller's wait ended; the worker may still settle
   later. Timeout and settlement are independent facts and may land in either order.
+  It names where the worker stood at that moment (``worker_position``), so an
+  abandoned call stays diagnosable from its own record (BIBLE P1).
 
 Readers count invocations, never rows. A row without ``invocation_id`` is legacy
 and stands alone (never joined by guesswork); a start with no later row is
@@ -31,6 +33,7 @@ from contextvars import ContextVar
 from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional
 
+from ouroboros._outcome_tool_errors import SAFETY_HELD_STATUSES
 from ouroboros.utils import append_jsonl, truncate_for_log
 
 CALL_STARTED = "tool_call_started"
@@ -52,10 +55,12 @@ def current_args_source() -> Dict[str, Any]:
 
 @contextmanager
 def invocation_scope(invocation):
+    invocation["_worker_thread"] = threading.get_ident()  # the thread a wait end inspects
     token = _ACTIVE_CALL.set(invocation)
     try:
         yield
     finally:
+        invocation["_worker_done"] = True  # the thread may serve another call from here on
         _ACTIVE_CALL.reset(token)
 
 
@@ -148,6 +153,38 @@ def append_call_row(meta: Dict[str, Any], drive_logs: pathlib.Path, payload: Dic
 
 def append_failed(outcome: Optional[Dict[str, Any]]) -> bool:
     return bool(outcome) and (outcome.get("task_log") is False or outcome.get("canonical") is False)
+
+
+def worker_position(invocation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Where an abandoned call's worker stands as its wait ends (BIBLE P1): ``worker_at`` names the
+    innermost frame of Ouroboros's own code and the frame it waits in, for the live row and the
+    model; ``worker_stack`` is the whole stack without locals, for the observability record.
+    ``worker_started: False`` when the call never reached a worker thread."""
+    import sys
+
+    from ouroboros.server_liveness import _innermost_repo_frame, _loop_thread_stack
+
+    if invocation is None:
+        return {}  # no invocation record: where the worker stood is unknown, not "never started"
+    ident = invocation.get("_worker_thread")
+    if not ident:
+        return {"worker_started": False}
+    stack = _loop_thread_stack(ident, limit=sys.getrecursionlimit())
+    if invocation.get("_worker_done"):  # read after the capture: its thread may already serve another call
+        return {"worker_at": "settled as its wait ended"}
+    if not stack:
+        return {"worker_at": "unknown (its stack could not be read)"}
+    own = _innermost_repo_frame(stack)
+    return {"worker_at": " <- ".join(dict.fromkeys(filter(None, (own, stack[-1])))), "worker_stack": stack}
+
+
+def worker_phrase(position: Dict[str, Any]) -> str:
+    """The same fact in the sentence the model reads."""
+    if position.get("worker_started") is False:
+        return " The call never reached a worker."
+    if not position.get("worker_at"):
+        return ""
+    return f" Its worker {'was at' if position.get('worker_stack') else 'stood:'} {position['worker_at']}."
 
 
 def start_log_field(invocation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -243,7 +280,8 @@ def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200, *, 
             if row is not None:
                 observations.append({**base, "fact": fact, "live": False,
                     "receipt": base["receipt"] or row.get("completion_control") is True,
-                    "status": ("error" if row.get("is_error") else "ok") if slot == "settled" else "unknown",
+                    "status": ("held" if row.get("status") in SAFETY_HELD_STATUSES else "error" if row.get("is_error")
+                               else "ok") if slot == "settled" else "unknown",  # the live step row's reading
                     "hostError": row.get("status") == "host_error",
                     # The row's own recorded host time, as written; a row without one stays without
                     # (never reconstructed), so a reader can order a call by its first observation.

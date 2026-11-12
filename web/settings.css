@@ -9,12 +9,6 @@
     padding: 0 20px 16px;
 }
 
-.settings-tabs-bar {
-    padding: 0;
-    background: transparent;
-    backdrop-filter: none;
-}
-
 .settings-scroll {
     flex: 1;
     min-width: 0;
@@ -22,7 +16,7 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: var(--space-4);
     padding: 4px 2px 88px;
 }
 
@@ -31,60 +25,54 @@
     min-width: 0;
     overflow-wrap: anywhere;
     flex-direction: column;
-    gap: 18px;
+    gap: var(--space-4);
 }
 
 .settings-panel.active {
     display: flex;
 }
 
-/* Design-system tokens only (docs/DESIGN.md); guarded by
-   tests/test_web_typography_static.py. */
-.settings-section-copy {
-    color: var(--text-meta);
-    font-size: var(--type-body);
-    line-height: var(--line-body);
-    max-width: 900px;
-    overflow-wrap: anywhere;
-}
-
-.settings-shell .form-section,
-.settings-card {
+/* The section (settings_controls.js settingsSection; DESIGN.md principle 7): a .ui-card holding the title row, one
+   lead in owner words, the controls, and the former copy behind one Details disclosure. The section is the size
+   container its segmented rows measure against (the tray below is one too, for the rows it holds). */
+.settings-shell .form-section {
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    padding: 18px;
-}
-
-.settings-shell .form-section {
+    gap: var(--space-3);
     margin-bottom: 0;
+    container: settingsbox / inline-size;
 }
-
-.settings-shell .form-section.compact {
-    margin-top: 0;
-}
-
-.settings-shell .form-section.danger {
-    border-color: rgba(220, 38, 38, 0.18);
-    background: rgba(239, 68, 68, 0.05);
-}
+/* The Danger Zone is the red tone on the object. */
+.settings-shell .form-section.danger { background: var(--tone-red); }
 
 .settings-shell .form-section h3 {
     margin-bottom: 0;
 }
 
-.settings-card h3 {
-    margin: 0;
-}
-
-.settings-card-head {
+/* The title row: the title, and the section's quiet actions docked at its end. */
+.settings-section-head {
     display: flex;
-    align-items: flex-start;
+    flex-wrap: wrap;
+    align-items: center;
     justify-content: space-between;
-    gap: 14px;
+    gap: var(--space-2) var(--space-3);
+}
+.settings-section-head > h3 { flex: 1 1 12rem; min-width: 0; }
+
+.settings-section-lead,
+.settings-section-copy {
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    max-width: 72ch;
+    overflow-wrap: anywhere;
 }
 
+/* A provider card's inset lives in its head and body (the disclosure's summary is the head), so the card itself
+   has none: the inset token is set to nothing on this scope, never the padding property. */
 .settings-provider-card {
+    --card-pad: 0;
     overflow: hidden;
 }
 
@@ -116,7 +104,7 @@
 .settings-provider-toggle:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: 4px;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inner);
 }
 
 .settings-provider-head > .btn { flex: 0 0 auto; }
@@ -139,6 +127,7 @@
     color: var(--text-meta);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
+    font-weight: 400;
     text-align: right;
 }
 
@@ -179,67 +168,24 @@
     overflow-wrap: anywhere;
 }
 
-/* Collapsed "More providers" wrapper: rarely used provider cards (Cloud.ru,
-   GigaChat) stay mounted inside it whether it is open or not. The summary
-   reuses the provider-card visual grammar (shared ui-card border/background
-   variables) so it reads as a peer of the cards above it. */
-.settings-more-providers > summary {
-    list-style: none;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 16px 18px;
-    border: 1px solid var(--ui-card-border);
-    border-radius: var(--radius);
-    background: var(--ui-card-bg);
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.settings-more-providers > summary::-webkit-details-marker {
-    display: none;
-}
+/* "More providers" (the shared disclosure, ui.css details.ui-disclosure): rarely used provider cards stay mounted
+   inside it whether it is open or not; the summary names them in meta ink, its caret says it opens. */
+.settings-more-providers > summary { flex-wrap: wrap; padding: var(--space-2) 0; }
+.settings-more-providers > summary .settings-provider-title { flex: 1 1 auto; }
+.settings-more-providers > summary .settings-provider-hint { flex: 1 1 100%; padding-left: calc(6px + 2px + var(--space-1) + var(--space-2)); }
 
 .settings-more-providers-body {
     display: flex;
     flex-direction: column;
-    gap: 18px;
-    padding-top: 18px;
+    gap: var(--space-4);
 }
 
-/* Collapsed subsection INSIDE a form section (Agents → Delegation → Advanced):
-   the same "More options" grammar as the provider wrapper above, one step
-   quieter because it sits within a section rather than beside cards. Two path
-   roots nobody edits in a normal week must not cost the tab its scannability. */
-.settings-subsection > summary {
-    list-style: none;
-    cursor: pointer;
-    padding: 8px 0;
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
-    color: var(--text-meta);
-    border-top: 1px solid var(--divider);
-}
-
-.settings-subsection > summary::-webkit-details-marker {
-    display: none;
-}
-
-.settings-subsection > summary::before {
-    content: "▸ ";
-}
-
-.settings-subsection[open] > summary::before {
-    content: "▾ ";
-}
-
+/* A collapsed subsection inside a section (Agents → Delegation → Advanced) is the same shared disclosure. */
 .settings-subsection-body {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 4px 0 8px;
+    gap: var(--space-3);
+    padding: var(--space-1) 0 var(--space-2);
 }
 
 .settings-extension-sections {
@@ -267,18 +213,6 @@
     gap: 10px;
 }
 
-/* Save, joined by Edit anyway while the stored values are unknown: one row that
-   wraps on a narrow card. A lone Save keeps the full width it always had. */
-.settings-extension-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-
-.settings-extension-actions > .btn {
-    flex: 1 1 160px;
-}
-
 .settings-extension-checkbox {
     display: inline-flex;
     align-items: center;
@@ -288,7 +222,8 @@
     line-height: var(--line-body);
 }
 
-.settings-shell .form-row {
+.settings-shell .form-row,
+.connection-fields .form-row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
     gap: 14px;
@@ -324,30 +259,35 @@
 }
 
 
+/* MCP servers: one tray per server (DESIGN "List editors"): the row (name, one state chip, Enabled, its actions),
+   the action's result under it, then the form behind Edit and the stamps behind Details (the shared disclosure). */
 .mcp-servers-list {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--space-2);
 }
 
 .mcp-server-card {
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    padding: 14px;
+    gap: var(--space-2);
+    padding: var(--space-3);
 }
 
 .mcp-server-card-head {
     display: flex;
-    align-items: flex-start;
+    flex-wrap: wrap;
+    align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--space-2) var(--space-3);
 }
 
 .mcp-server-card-title {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    flex: 1 1 16rem;
     min-width: 0;
 }
 
@@ -356,15 +296,15 @@
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--space-2);
 }
 
+/* The chip is a flat status tint (DESIGN "Status and chips"): the state word in its hue, never pressable. */
 .mcp-server-status {
-    width: fit-content;
     max-width: 100%;
-    white-space: normal;
     overflow-wrap: anywhere;
-    padding: 3px 8px;
+    padding: 1px var(--space-2);
+    border-radius: var(--pill-radius);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     background: var(--status-neutral-bg);
@@ -375,16 +315,25 @@
 .mcp-server-status-danger { color: var(--status-error-fg); background: var(--status-error-bg); }
 .mcp-server-status-muted { color: var(--status-neutral-fg); }
 
-.mcp-tools-disclosure {
-    border-radius: 12px;
-    border: 1px solid rgba(var(--neutral-rgb), 0.06);
-    padding: 10px 12px;
+/* A remote server's sign-in: one fact and one button; the paste and the app registration under Details. */
+.mcp-sign-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mcp-sign-in[hidden] { display: none; }
+.mcp-sign-in-details { flex-basis: 100%; }
+.mcp-sign-in-details label { display: grid; gap: 6px; margin: 8px 0; }
+
+.mcp-server-message:empty, .mcp-server-message[hidden] { display: none; }
+
+.mcp-server-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
 }
 
-.mcp-tools-disclosure summary {
-    cursor: pointer;
-    color: var(--text-secondary);
-}
+.mcp-server-facts { margin: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.mcp-server-facts > div { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); font-size: var(--type-meta); line-height: var(--line-meta); }
+.mcp-server-facts dt { flex: 0 1 9em; color: var(--text-meta); }
+.mcp-server-facts dd { flex: 1 1 16rem; min-width: 0; margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.mcp-server-facts:empty + [data-mcp-weight][hidden] { display: none; }
 
 .mcp-tools-list {
     display: flex;
@@ -424,14 +373,14 @@
 .local-model-progress-wrap {
     margin-top: 8px;
     height: 6px;
-    border-radius: var(--radius-xs);
+    border-radius: var(--pill-radius);
     background: rgba(var(--neutral-rgb), 0.08);
     overflow: hidden;
 }
 
 .local-model-progress-bar {
     height: 100%;
-    border-radius: var(--radius-xs);
+    border-radius: var(--pill-radius);
     background: var(--accent);
     width: 0%;
     transition: width 0.4s ease;
@@ -442,88 +391,65 @@
     margin-top: 10px;
 }
 
-.settings-unsaved-indicator {
-    color: var(--status-warn-fg);
-    font-weight: 600;
-    min-width: 126px;
-    opacity: 0;
-    visibility: hidden;
-    text-align: right;
-}
-
-.settings-unsaved-indicator.is-visible {
-    opacity: 1;
-    visibility: visible;
-}
-
 .settings-toolbar {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 10px;
 }
+/* Rows that wrap on a phone (a toolbar, a secret's buttons, an account's actions and its resources, a segmented scale):
+   under a finger their controls take the touch minimum as their own height through the control tokens (the lock
+   writes the box), so no reach covers a neighbour (DESIGN "Touch and containment"). */
+@media (pointer: coarse) {
+    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .account-resource-panel, .settings-effort-group,
+        .settings-extension-actions, .harness-maintenance-actions) {
+        --control-h: var(--touch-target-min);
+        --control-h-sm: var(--touch-target-min);
+    }
+}
 
-/* A single action with a durable result belongs to one row: the result stays
-   readable on the left while the action keeps a stable right edge. */
+/* One reader left, outside Settings: the Skills › Browse cards (skill_browse.js). Settings and Dashboard › Updates
+   compose ui.css .ui-action-row; this goes with its last reader, once Skills composes the shared row too. */
 .settings-action-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-3);
     min-width: 0;
 }
-
-.settings-action-row > .settings-inline-status {
+.settings-action-row > :first-child {
+    flex: 1 1 0;
+    min-width: min(100%, var(--result-copy-min-width));
+    overflow-wrap: anywhere;
+}
+.settings-action-row > :last-child:not(:first-child) {
+    flex: 0 1 auto;
     min-width: 0;
+    max-width: 100%;
+    margin-inline-start: auto;
+    white-space: normal;
 }
+.settings-action-row > :empty { display: none; }
 
-.settings-action-row > .btn-default {
-    justify-self: end;
-}
-
+/* The Save bar is one shared action row (ui.css .ui-action-row): Reload, Save, then the one result right after
+   them; About hides it. */
 .settings-footer {
     flex-shrink: 0;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
     padding: var(--space-3) 2px 0;
-    border-top: 1px solid rgba(var(--neutral-rgb), 0.06);
-    background: linear-gradient(180deg, rgba(var(--shell-rgb), 0), rgba(var(--shell-rgb), 0.92) 55%);
+    border-top: 1px solid var(--divider);
+    background: var(--surface-object);
 }
+.settings-footer[hidden] { display: none; }
+.settings-footer > #settings-restart-status[hidden] { display: none; }
 
-.settings-footer-actions,
-.settings-footer-status {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px;
-}
-
-.settings-footer-actions {
-    flex: 0 0 auto;
-}
-
-.settings-footer-status {
-    flex: 1 1 auto;
-    justify-content: flex-end;
-    min-width: 0;
-}
-
-.settings-footer-status #settings-status {
-    min-width: 0;
-    max-width: 52ch;
-    flex: 1 1 220px;
-    overflow-wrap: anywhere;
-    text-align: right;
-}
-
+/* A secret's field row: the input, then its buttons at the field's middle, however many the row has. */
 .secret-input-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    gap: 10px;
-    align-items: stretch;
+    grid-auto-flow: column;
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-columns: auto;
+    gap: var(--space-2);
+    align-items: center;
 }
 
 .secret-input-row input {
@@ -610,9 +536,9 @@
     flex-direction: column;
     gap: var(--space-2);
     padding: var(--space-3);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius);
-    background: var(--surface-card-soft);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
     container: subagentcard / inline-size;
 }
 
@@ -734,11 +660,6 @@
     overflow-wrap: anywhere;
 }
 
-.available-subagent-actions .btn-default {
-    min-height: 34px;
-    padding: 0 11px;
-}
-
 .available-subagent-reviewer {
     display: inline-flex;
     align-items: center;
@@ -800,25 +721,20 @@
     font-size: var(--type-meta);
 }
 
+/* A key is its name, its field and who asked for it; the space between two keys is wider than inside one. */
 .settings-secret-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-4);
 }
 
+/* A custom key's row: its name beside its value (the value's field row holds every button). */
 .settings-custom-secret-row {
     display: grid;
-    /* A track minimum yields to the container: the viewport query does not know
-       the Settings column width, so the two fields shrink and Remove keeps its own. */
-    grid-template-columns: minmax(0, 0.65fr) minmax(0, 1.35fr) auto;
-    gap: 10px;
-    align-items: start;
+    grid-template-columns: minmax(0, 0.65fr) minmax(0, 1.35fr);
+    gap: var(--space-2);
+    align-items: center;
     padding: var(--space-3);
-}
-
-.settings-custom-secret-remove {
-    align-self: end;
-    padding-inline: var(--space-3);
 }
 
 .settings-model-grid {
@@ -865,8 +781,8 @@
 
 .settings-effort-card {
     gap: 10px;
-    /* The card's own width, not the viewport, decides when a segmented group wraps. */
-    container: effortcard / inline-size;
+    /* The tray's own width, not the viewport, decides when a segmented group wraps. */
+    container: settingsbox / inline-size;
 }
 
 .settings-effort-card label {
@@ -896,7 +812,7 @@
    labels ("Development" in three columns, "Advanced" in four) still sit inside
    their buttons, and the default desktop window keeps its four-column effort
    scales. */
-@container effortcard (max-width: 20rem) {
+@container settingsbox (max-width: 20rem) {
     .settings-effort-group {
         --segment-columns: min(var(--segment-count, 4), 2);
     }
@@ -908,60 +824,8 @@
     --segment-columns: var(--segment-count, 5);
 }
 
-/* .ui-segment — SSOT base look for a segmented single-select button (sibling of
-   .app-tab). Settings-specific overrides (layout, accent colors) stay on
-   .settings-effort-*; the resting look + centering live here. The flex centering
-   fixes labels that sat top-left in taller cells (the effort-button bug); a word
-   longer than its column (a translated label) breaks rather than overflowing. */
-.ui-segment {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    min-height: 38px;
-    line-height: 1.2;
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    background: rgba(var(--neutral-rgb), 0.04);
-    color: var(--text-secondary);
-    border-radius: 12px;
-    padding: 10px 12px;
-    cursor: pointer;
-    font-size: var(--button-font-size);
-    font-weight: 600;
-    overflow-wrap: anywhere;
-}
+/* The segment itself (.ui-segment, its states) is ui.css's; the group's layout stays here. */
 
-/* Keyboard focus is the one DESIGN ring, apart from the hover and selected paint. */
-.ui-segment:focus-visible {
-    outline: 2px solid var(--focus-accent-border);
-    outline-offset: 2px;
-}
-
-.settings-effort-btn.active,
-.settings-effort-btn:hover {
-    color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.35);
-    background: rgba(232, 93, 111, 0.12);
-}
-
-/* Shared disabled segmented-button style. */
-.settings-effort-btn:disabled {
-    cursor: not-allowed;
-    opacity: 0.55;
-}
-.settings-effort-btn:disabled:hover {
-    background: rgba(var(--neutral-rgb), 0.04);
-    border-color: rgba(var(--neutral-rgb), 0.08);
-    color: var(--text-secondary);
-    transform: none;
-}
-
-[data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"].active,
-[data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"]:hover {
-    color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.5);
-    background: var(--accent-18);
-}
 
 /* The local toggle's checkbox and gap: one pair of dimensions for the toggles and for the
    notes that line up with their label text (Startup & background). */
@@ -989,6 +853,14 @@
     width: var(--local-toggle-box);
     height: var(--local-toggle-box);
     cursor: pointer;
+}
+
+/* The notification choices sit under their master switch; while it is off they are disabled (the words say so
+   in the disabled ink). */
+.notify-choices { display: flex; flex-direction: column; gap: 10px; padding-left: calc(var(--local-toggle-box) + var(--local-toggle-gap)); }
+.notify-choices :is(.local-toggle:has(> input:disabled), .notify-tone-volume > label:has(+ input:disabled)) {
+    color: var(--text-disabled);
+    cursor: default;
 }
 
 /* A slider row (Notifications: the soft app tone's level, under Sound; Appearance: the interface size). The label on
@@ -1098,34 +970,18 @@
         gap: var(--space-1);
     }
 
-    .settings-footer {
-        align-items: stretch;
-        flex-direction: column;
-    }
-
-    .settings-footer-actions,
-    .settings-footer-status {
-        justify-content: flex-start;
-        align-items: stretch;
-    }
-
-    .settings-footer-status #settings-status,
-    .settings-unsaved-indicator {
-        text-align: left;
-    }
-
     .settings-provider-hint {
         text-align: left;
     }
 
+    /* A narrow field row: the input on its own line, the buttons under it from the left. */
     .secret-input-row {
-        grid-template-columns: minmax(0, 1fr) auto auto;
+        display: flex;
+        flex-wrap: wrap;
     }
     .secret-input-row > input,
-    .secret-input-row > .settings-secret-value { grid-column: 1 / -1; }
-    .secret-input-row > button:first-of-type { grid-column: 2; }
+    .secret-input-row > .settings-secret-value { flex: 1 1 100%; }
 
-    .settings-card-head,
     .settings-custom-secret-row {
         grid-template-columns: 1fr;
         align-items: stretch;
@@ -1135,18 +991,6 @@
         margin-left: 0;
     }
 
-    .settings-action-row {
-        grid-template-columns: 1fr;
-        align-items: start;
-    }
-
-    .settings-action-row > .settings-inline-status:empty {
-        display: none;
-    }
-
-    .settings-action-row > .btn-default {
-        justify-self: end;
-    }
 }
 
 @media (max-width: 640px) {
@@ -1154,21 +998,7 @@
         padding: 0 10px 10px;
     }
 
-    .settings-tab {
-        flex: 0 0 auto;
-        min-height: 38px;
-        padding: 8px 14px;
-        font-size: var(--pill-font-size);
-        white-space: nowrap;
-        border-radius: 999px;
-    }
-
-    .settings-shell .form-section {
-        padding: 14px;
-    }
-
-    .settings-provider-head,
-    .settings-more-providers > summary {
+    .settings-provider-head {
         padding: 14px 14px;
     }
 
@@ -1177,70 +1007,11 @@
     }
 }
 
-/* track-migration:begin — Removed after remaining form consumers adopt ui-control. */
-.settings-shell .form-field input:not(.ui-control):not(.ui-checkbox),
-.settings-shell .form-field select:not(.ui-control):not(.ui-checkbox),
-.settings-shell .form-field textarea:not(.ui-control):not(.ui-checkbox),
-.settings-shell .available-subagent-row input:not(.ui-control):not(.ui-checkbox),
-.settings-shell .available-subagent-row select:not(.ui-control):not(.ui-checkbox),
-.settings-shell .available-subagent-row textarea:not(.ui-control):not(.ui-checkbox),
-.settings-shell .model-role-row input:not(.ui-control):not(.ui-checkbox),
-.settings-shell .model-role-row select:not(.ui-control):not(.ui-checkbox) {
-    width: 100%;
-    min-width: 0;
-    padding: 10px 12px;
-    border-radius: 12px;
-    border: 1px solid var(--surface-border);
-    background: rgba(var(--composer-rgb), 0.88);
-    color: var(--text-primary);
-    font-size: var(--type-body);
-    font-family: inherit;
-    outline: none;
-    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-}
-
-.settings-shell .form-field input:not(.ui-control):not(.ui-checkbox)::placeholder,
-.settings-shell .form-field textarea:not(.ui-control):not(.ui-checkbox)::placeholder,
-.settings-shell .available-subagent-row input:not(.ui-control):not(.ui-checkbox)::placeholder,
-.settings-shell .available-subagent-row textarea:not(.ui-control):not(.ui-checkbox)::placeholder,
-.secret-input:not(.ui-control)::placeholder {
-    color: rgba(var(--neutral-rgb), 0.24);
-}
-
-.settings-shell .form-field input:not(.ui-control):not(.ui-checkbox):focus,
-.settings-shell .form-field select:not(.ui-control):not(.ui-checkbox):focus,
-.settings-shell .form-field textarea:not(.ui-control):not(.ui-checkbox):focus,
-.settings-shell .available-subagent-row input:not(.ui-control):not(.ui-checkbox):focus,
-.settings-shell .available-subagent-row select:not(.ui-control):not(.ui-checkbox):focus,
-.settings-shell .available-subagent-row textarea:not(.ui-control):not(.ui-checkbox):focus,
-.settings-shell .model-role-row input:not(.ui-control):not(.ui-checkbox):focus,
-.settings-shell .model-role-row select:not(.ui-control):not(.ui-checkbox):focus {
-    border-color: var(--focus-accent-border);
-    box-shadow: 0 0 0 3px var(--focus-accent-ring);
-}
-
-.settings-shell .form-field textarea:not(.ui-control):not(.ui-checkbox) {
-    min-height: 84px;
-    resize: vertical;
-}
-
-.settings-shell .form-field select:not(.ui-control):not(.ui-checkbox),
-.settings-shell .available-subagent-row select:not(.ui-control):not(.ui-checkbox) {
-    appearance: none;
-    padding-right: 36px;
-    background-image: var(--select-arrow);
-    background-repeat: no-repeat;
-    background-position: right 12px center;
-}
-
-
-/* track-migration:end */
 
 /* Account resource disclosure (the Accounts store owns its data). */
 .account-resource-panel {
     grid-column: 1 / -1;
     margin-top: var(--space-3);
-    padding: var(--space-4);
     background: var(--bg-primary);
     color: var(--text-primary);
     font-size: var(--type-body);
@@ -1303,8 +1074,8 @@
 }
 .resource-track {
     height: var(--space-1);
-    border-radius: var(--radius-xs);
-    background: var(--bg-hover);
+    border-radius: var(--pill-radius);
+    background: var(--surface-tray);
     overflow: hidden;
     margin-bottom: var(--space-1);
 }
@@ -1312,7 +1083,7 @@
     width: var(--resource-used);
     height: 100%;
     background: var(--text-meta);
-    border-radius: var(--radius-xs);
+    border-radius: var(--pill-radius);
 }
 .resource-window[data-spent="true"] .resource-fill {
     background: var(--amber);
@@ -1320,7 +1091,7 @@
 .resource-reset-section {
     margin-top: var(--space-4);
     padding-top: var(--space-4);
-    border-top: 1px solid var(--surface-border);
+    border-top: 1px solid var(--divider);
 }
 .resource-reset-section > h6 {
     font-size: var(--type-body);
@@ -1336,7 +1107,7 @@
     padding: var(--space-3) 0;
 }
 .resource-offer + .resource-offer {
-    border-top: 1px solid var(--surface-border);
+    border-top: 1px solid var(--divider);
 }
 .resource-offer-title {
     font-size: var(--type-body);
@@ -1355,8 +1126,8 @@
 .resource-message {
     padding: var(--space-3);
     margin-bottom: var(--space-4);
-    border-radius: var(--radius-sm);
-    background: var(--bg-hover);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
     color: var(--text-primary);
     font-size: var(--type-body);
     line-height: var(--line-body);
@@ -1384,12 +1155,12 @@
 }
 
 .resource-reset-offer + .resource-reset-offer {
-    border-top: 1px solid var(--surface-border);
+    border-top: 1px solid var(--divider);
     padding-top: var(--space-3);
     margin-top: var(--space-3);
 }
 .harness-account-actions [data-resources][aria-expanded="true"] {
-    background: var(--bg-hover);
+    background: var(--surface-capsule-hover);
 }
 @media (max-width: 980px) {
     .account-resource-panel {
@@ -1400,7 +1171,7 @@
         gap: var(--space-2);
     }
     .resource-section + .resource-section {
-        border-top: 1px solid var(--surface-border);
+        border-top: 1px solid var(--divider);
         padding-top: var(--space-3);
     }
     .resource-offer {
@@ -1410,9 +1181,6 @@
     }
     .account-resource-head {
         align-items: flex-start;
-    }
-    .account-resource-panel .btn, .harness-account-actions .btn {
-        min-height: var(--touch-target-min);
     }
     .resource-offer .btn {
         align-self: flex-start;
@@ -1443,27 +1211,28 @@
 .mcp-import-choice { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 @media (max-width: 600px) {
     .mcp-header-row { grid-template-columns: minmax(0, 1fr); }
-    .mcp-server-card-head { flex-wrap: wrap; }
 }
 
-/* ---- Airy dopamine (DESIGN.md design bible) -------------------------------------------------------------------
-   A segmented choice is the one capsule control: neutral options standing on the rest shadow, the chosen one in the
-   soft crimson and still standing, no outline. Hover and press change colour, never height. A setting's value is
-   never amber: Advisory reads like every other value. */
-:root[data-theme] .ui-segment {
-    border-color: transparent;
-    border-radius: var(--pill-radius);
-    background: var(--surface-capsule);
-    box-shadow: var(--elev-rest);
-    transition: var(--motion-tone);
+/* About: a centred page block, its title at the page size and the versions as one meta line. */
+.about-body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: var(--space-5);
+    padding: 40px 20px;
+    text-align: center;
 }
-:root[data-theme] .ui-segment:not(:disabled):not(.active):hover {
-    border-color: transparent; background: var(--surface-capsule-hover); color: var(--text-primary);
+.about-logo {
+    width: 96px;
+    height: 96px;
+    border-radius: var(--radius-object);
+    object-fit: cover;
 }
-:root[data-theme] .ui-segment:not(:disabled):active { transform: none; filter: var(--press); }
-:root[data-theme] .settings-effort-btn.active,
-:root[data-theme] [data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"].active {
-    border-color: transparent; background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink);
-}
-:root[data-theme] .ui-segment:disabled { box-shadow: none; }
-:root[data-theme] .settings-effort-btn:disabled:hover { border-color: transparent; background: var(--surface-capsule); }
+.about-title { font-size: var(--type-page); line-height: var(--line-title); font-weight: 600; margin: 0; }
+.about-version { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); margin: var(--space-1) 0 0; }
+.about-desc { max-width: 480px; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
+.about-credits { display: flex; flex-direction: column; gap: var(--space-2); font-size: var(--type-body); }
+.about-links { display: flex; gap: var(--space-4); justify-content: center; margin-top: var(--space-1); }
+.about-links a { color: var(--accent); text-decoration: none; }

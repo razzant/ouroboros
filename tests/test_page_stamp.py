@@ -29,7 +29,8 @@ from tests._store_shared import result_signature, seed_result, unreadable_result
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 ORIGINAL_KEYS = {"task_id", "status", "outcome", "outcome_phase", "source", "result_ref", "review_verdict"}
-OPTIONAL = {"outcome_final", "outcome_authority", "reason_code", "objective_status", "source_address"}
+OPTIONAL = {"outcome_final", "outcome_authority", "reason_code", "objective_status", "objective_source", "objective_reason",
+            "source_address"}
 
 
 def ts(n: int) -> str:
@@ -313,3 +314,19 @@ def test_the_stamp_body_lives_only_in_terminal_projection_and_host_stamp_delegat
     lazy = {node.module for node in ast.walk(host) if isinstance(node, ast.ImportFrom)}
     top = {node.module for node in tree.body if isinstance(node, ast.ImportFrom)}
     assert "ouroboros.terminal_projection" in lazy and "ouroboros.terminal_projection" not in top
+
+
+def test_a_stamp_keeps_whose_objective_it_is():
+    """An author's acceptance is never a reviewer's pass: the stamp copies the objective's source and reason beside
+    its status, and the memory line says them."""
+    from ouroboros.memory_fallback import _stamp_line
+    from ouroboros.terminal_projection import _stamp_entry
+
+    row = {"status": "completed", "outcome": "succeeded", "outcome_phase": "warn", "outcome_axes": {"objective": {
+        "status": "pass", "source": "author_acceptance", "reason": "author_finish"}}}
+    entry = _stamp_entry("t1", row, "task_results")
+    assert (entry["objective_status"], entry["objective_source"], entry["objective_reason"]) == (
+        "pass", "author_acceptance", "author_finish")
+    assert "objective pass by author_acceptance (author_finish)" in _stamp_line(entry, 0)
+    plain = _stamp_entry("t2", {"status": "completed", "outcome_axes": {"objective": {"status": "pass"}}}, "task_results")
+    assert "objective_source" not in plain and "objective pass;" in _stamp_line(plain, 0)

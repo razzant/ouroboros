@@ -195,8 +195,10 @@ def scan_occurrences(inventory: ci.CodeInventory, query: str | None, *, mode: st
             scan.limits[reason] += 1
             continue
         try:
-            with path.open("rb") as source:
-                raw = source.read(MAX_FILE_SIZE_BYTES + 1)
+            from ouroboros import work_domain
+            raw = work_domain.read_bytes(path, limit=MAX_FILE_SIZE_BYTES + 1)
+        except work_domain.WorkDomainUnsettled:
+            raise
         except OSError:
             scan.limits["read error"] += 1
             continue

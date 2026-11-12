@@ -1,6 +1,7 @@
-/** Rich, sanitized markdown rendering for assistant and system chat messages. */
+/** Rich, sanitized markdown rendering for assistant and system chat messages; linked plain text for the owner's. */
 
-import { safeExternalUrl } from './utils.js';
+import { safeExternalHrefAttr, safeExternalUrl } from './utils.js';
+import { copyTextToClipboard } from './ui_helpers.js';
 import { tr } from './i18n.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
 
@@ -258,6 +259,48 @@ export function chatMarkdownUrl(value) {
     }
     const safe = safeExternalUrl(text);
     return safe === '#' ? '' : safe;
+}
+
+// An explicit http(s) address in plain text: it follows no letter, digit or underscore and runs to a
+// blank, quote, angle bracket, backtick, backslash or an invisible control or format character.
+const PLAIN_TEXT_ADDRESS = /(?<![\p{L}\p{N}_])https?:\/\/(?![/\\])[^\s<>"`\\\p{Cc}\p{Cf}]+/giu;
+// Punctuation that ends a sentence or closes a quotation is not part of the address before it; a
+// closing bracket is, while it closes one opened inside the address (`wiki/Foo_(bar)`).
+const ADDRESS_TRAIL = new Set([...'.,:;!?…\'’”»›。、，；：！？']);
+const ADDRESS_CLOSERS = { ')': '(', ']': '[', '}': '{' };
+
+function addressEnd(candidate) {
+    const count = { '(': 0, '[': 0, '{': 0, ')': 0, ']': 0, '}': 0 };
+    for (const char of candidate) if (char in count) count[char] += 1;
+    let end = candidate.length;
+    while (end) {
+        const char = candidate[end - 1];
+        const opener = ADDRESS_CLOSERS[char];
+        if (opener && count[char] > count[opener]) count[char] -= 1;
+        else if (!ADDRESS_TRAIL.has(char)) break;
+        end -= 1;
+    }
+    return end;
+}
+
+/**
+ * The owner's words exactly as written, every character literal (Markdown, HTML and code marks
+ * included), with each explicit http(s) address a chat link to its parsed destination. Nothing
+ * else is read as structure, and the shown text is never rewritten: only the href is normalized.
+ */
+export function linkify(text) {
+    const source = String(text ?? '');
+    let html = '';
+    let from = 0;
+    for (const match of source.matchAll(PLAIN_TEXT_ADDRESS)) {
+        const address = match[0].slice(0, addressEnd(match[0]));
+        const href = safeExternalHrefAttr(address);
+        if (!href) continue;
+        html += `${escapeText(source.slice(from, match.index))}<a class="md-link" href="${href}"`
+            + ` target="_blank" rel="noopener noreferrer">${escapeText(address)}</a>`;
+        from = match.index + address.length;
+    }
+    return html + escapeText(source.slice(from));
 }
 
 /** Parse and bound an untrusted JSON chart configuration. */
@@ -703,32 +746,6 @@ function renderChartNodes(root, state, onDomWrite) {
     }
 }
 
-async function copyCode(code) {
-    const text = code?.textContent || '';
-    if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return;
-    }
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    textarea.setAttribute('readonly', '');
-    // Inside a modal dialog (the document reader) the rest of the page is inert:
-    // the selection is made within that dialog, and focus returns after.
-    const dialog = code.closest?.('dialog[open]') || null;
-    const focused = document.activeElement;
-    let copied = false;
-    try {
-        (dialog || document.body).appendChild(textarea);
-        if (dialog) textarea.focus({ preventScroll: true });
-        textarea.select();
-        copied = typeof document.execCommand === 'function' && document.execCommand('copy') === true;
-    } finally {
-        textarea.remove();
-        if (dialog && focused?.isConnected) focused.focus({ preventScroll: true });
-    }
-    if (!copied) throw new Error('copy command failed');
-}
-
 /* A table scrolls sideways only when its columns cannot fit even wrapped. Its
    edges follow the actually hidden columns, as `scroll_fade.js` does for the
    vertical scroll bodies, and only while it scrolls is its wrapper a named
@@ -873,7 +890,8 @@ export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThem
         const code = button.closest('.md-code-block')?.querySelector('pre > code');
         if (!code) return;
         try {
-            await copyCode(code);
+            // The code block is the anchor: inside the document reader's modal it names the dialog that owns the selection.
+            await copyTextToClipboard(code.textContent || '', { anchor: code });
             if (state.destroyed) return;
             button.classList.add('is-copied');
             button.textContent = tr('code.copied', 'Copied');

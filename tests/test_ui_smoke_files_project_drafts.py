@@ -14,7 +14,7 @@ import pytest
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _browser(pw, engine):
@@ -42,6 +42,7 @@ def _files_gateway(page):
         "uploads": 0, "upload_error": "Upload refused.", "directories": [], "deleted": [],
         "hold_navigation": False, "pending_navigation": [],
         "hold_operation": "", "pending_operations": [], "transfers": [], "list_paths": [], "upload_paths": [],
+        "content": {},  # a file's text as another client saved it meanwhile
     }
     root = "/workspace/" + "long-project-name-" * 5
     names = ["sample.txt", "other.txt", "unreadable.txt", "picture.png", "paper.pdf", "archive.bin", "large.txt"]
@@ -71,7 +72,7 @@ def _files_gateway(page):
                 return
             payload = {"path": path, "name": path, "size": 31, "root_path": root,
                        "display_path": f"{root}/{path}", "is_text": True,
-                       "content": "Original file contents\nSecond line\n"}
+                       "content": fixture["content"].get(path, "Original file contents\nSecond line\n")}
             if path in {"picture.png", "paper.pdf", "archive.bin"}:
                 payload.update(is_text=False, content="")
             if path == "picture.png":
@@ -230,7 +231,7 @@ def test_files_retains_document_and_submits_one_write(direct_server_with_data, e
             page.locator("#files-new-dir").click()
             page.locator("[data-confirm-input]").fill("created-dir")
             page.get_by_role("button", name="Create", exact=True).click()
-            expect(page.locator("#files-preview-status")).to_contain_text("Directory created-dir created")
+            expect(page.locator("#files-preview-status")).to_contain_text("Folder created-dir created")
             _same_draft(page, "Draft before save\nKeep this text.", [2, 8])
             assert fixture["directories"] == [{"path": ".", "name": "created-dir"}]
 
@@ -302,8 +303,11 @@ def test_files_retains_document_and_submits_one_write(direct_server_with_data, e
             expect(page.locator("#files-preview-status")).to_contain_text("Directory temporarily unavailable")
             _same_draft(page, "Draft survives list error")
             expect(page.locator("#files-save")).to_be_enabled()
+            # Another page keeps the draft for the return (owner 2026-11-03): no question, the same draft.
             page.locator('[data-nav-page="dashboard"]').click()
-            page.get_by_role("button", name="Stay", exact=True).click()
+            expect(page.locator("#page-dashboard")).to_have_class(re.compile(r"\bactive\b"))
+            expect(page.get_by_role("button", name="Stay", exact=True)).to_have_count(0)
+            page.locator('[data-nav-page="files"]').click()
             expect(page.locator("#page-files")).to_have_class(re.compile(r"\bactive\b"))
             _same_draft(page, "Draft survives list error")
 
@@ -383,7 +387,10 @@ def test_files_late_mutations_keep_newer_work(direct_server_with_data, engine): 
                     elif newer == "directory":
                         page.locator(".files-entry").filter(has_text="docs").click()
                         page.get_by_role("button", name="Discard", exact=True).click()
-                        expect(page.locator("#files-preview-path")).to_contain_text("/docs")
+                        # The folder opened (its list starts with the way up); the preview keeps no header until a
+                        # file is chosen.
+                        expect(page.locator("#files-list .files-entry.parent-link")).to_have_count(1)
+                        expect(page.locator(".files-preview-header")).to_be_hidden()
                     else:
                         editor.fill("Newer input while action is pending")
                         editor.evaluate("el => {window.filesEditor = el; el.setSelectionRange(4, 9);}")
@@ -468,13 +475,14 @@ def test_project_sources_keep_selected_target(direct_server_with_data, engine): 
                 opener = page.locator("#nav-projects-add")
                 opener.focus()
                 page.evaluate("window.openTestProject(); undefined")
-                expect(page.locator("[data-np-name]")).to_be_focused()
-                close = page.locator('.new-project-dialog [aria-label="Close"]')
-                close.focus()
+                name = page.locator("[data-np-name]")
+                expect(name).to_be_focused()
+                # The foot's Cancel is the one way out (no head Close, U024); the focus still wraps inside the dialog.
+                expect(page.locator('.new-project-dialog [aria-label="Close"]')).to_have_count(0)
                 page.keyboard.press("Shift+Tab")
                 expect(page.locator("[data-np-create]")).to_be_focused()
                 page.keyboard.press("Tab")
-                expect(close).to_be_focused()
+                expect(name).to_be_focused()
                 page.locator("[data-np-name]").fill("Scoped project")
                 page.locator(f'input[name="np-source"][value="{source}"]').check()
                 expected = {"name": "Scoped project"}
@@ -593,5 +601,246 @@ def test_files_project_actions_fit_available_viewport(direct_server_with_data, e
                 _capture(page, f"project-{engine}-{width}x{height}-actions")
                 page.keyboard.press("Escape")
             assert not failures, json.dumps(failures, indent=2)
+        finally:
+            browser.close()
+
+
+_PANES = """() => {
+    const shown = (el) => Boolean(el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+    const list = document.querySelector('#files-list'), active = document.activeElement;
+    return {view: document.querySelector('.files-layout').dataset.filesView,
+        list: shown(document.querySelector('.files-sidebar')), file: shown(document.querySelector('.files-preview')),
+        back: shown(document.querySelector('[data-files-back]')), listHeight: list.getBoundingClientRect().height,
+        status: shown(document.querySelector('#files-preview-status')) ? document.querySelector('#files-preview-status').textContent : '',
+        statusAboveList: Boolean(document.querySelector('#files-preview-status').compareDocumentPosition(list)
+            & Node.DOCUMENT_POSITION_FOLLOWING) && list.parentElement.contains(document.querySelector('#files-preview-status')),
+        unsaved: [...document.querySelectorAll('.files-entry')].filter((row) => shown(row.querySelector('.files-entry-unsaved')))
+            .map((row) => row.querySelector('.files-entry-name, .files-entry-untitled').textContent),
+        focus: active === document.body ? 'body' : (active.matches('[data-files-back]') ? 'back'
+            : active.closest('.files-entry')?.querySelector('.files-entry-name, .files-entry-untitled')?.textContent
+            || active.getAttribute('aria-label') || active.id || active.className),
+        focusShown: shown(active), sideways: document.scrollingElement.scrollWidth > innerWidth + 1,
+        layers: window.__ouroLayers.ids()};
+}"""
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direct_server_with_data, engine):  # noqa: F811
+    """#7 on a phone: the list owns the page, a chosen file replaces it with Back to folder above it, Back keeps an
+    unsaved draft that the file's row (or a new file's row) reopens, leaving it still asks, and the desk keeps both."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import expect, sync_playwright
+
+    with sync_playwright() as pw:
+        browser = _browser(pw, engine)
+        try:
+            page = browser.new_page(viewport={"width": 390, "height": 844}, has_touch=True)
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            fixture = _files_gateway(page)
+            page.goto(direct_server_with_data["url"] + "/#files", wait_until="domcontentloaded")
+            row = page.locator(".files-entry").filter(has_text="sample.txt")
+            row.wait_for()
+            panes = page.evaluate(_PANES)
+            assert (panes["view"], panes["list"], panes["file"]) == ("list", True, False), panes
+            assert panes["listHeight"] > 844 * 0.6 and not panes["sideways"], panes
+            _capture(page, f"files-{engine}-390-list")
+
+            row.click()
+            editor = page.get_by_role("textbox", name="File contents", exact=True)
+            expect(editor).to_be_visible()
+            panes = page.evaluate(_PANES)
+            assert (panes["view"], panes["list"], panes["file"], panes["back"], panes["focus"], panes["layers"]) == (
+                "file", False, True, True, "back", ["files-file"]), panes
+            editor.fill("Draft typed on a phone")
+            editor.evaluate("el => { window.filesEditor = el; }")
+            expect(page.locator("#files-save")).to_be_enabled()
+
+            # Back keeps the draft, says so on the file's row and returns focus there; nothing is asked or written.
+            page.get_by_role("button", name="Back to folder", exact=True).click()
+            panes = page.evaluate(_PANES)
+            assert (panes["view"], panes["list"], panes["file"], panes["focus"], panes["unsaved"], panes["layers"]) == (
+                "list", True, False, "sample.txt", ["sample.txt"], []), panes
+            expect(page.locator(".confirm-dialog")).to_have_count(0)
+            assert fixture["writes"] == []
+            row.click()
+            expect(editor).to_be_visible()
+            _same_draft(page, "Draft typed on a phone")
+            assert page.evaluate(_PANES)["focus"] == "back"
+            page.get_by_role("button", name="Back to folder", exact=True).click()
+
+            # Leaving the draft for another file still asks; Stay keeps the list, the draft and its mark.
+            page.locator(".files-entry").filter(has_text="other.txt").click()
+            page.get_by_role("button", name="Stay", exact=True).click()
+            panes = page.evaluate(_PANES)
+            assert (panes["view"], panes["unsaved"], panes["focusShown"]) == ("list", ["sample.txt"], True), panes
+            _same_draft(page, "Draft typed on a phone")
+            _capture(page, f"files-{engine}-390-back-unsaved")
+
+            # A read that fails is said over the list it came from; the draft survives it.
+            page.locator(".files-entry").filter(has_text="unreadable.txt").click()
+            page.get_by_role("button", name="Discard", exact=True).click()
+            expect(page.locator("#files-preview-status")).to_contain_text("File is unavailable")
+            panes = page.evaluate(_PANES)
+            assert panes["view"] == "list" and panes["statusAboveList"] and "File is unavailable" in panes["status"], panes
+            _same_draft(page, "Draft typed on a phone")
+
+            # A new file's draft has no folder row yet: Back gives it one, at the top, which reopens it.
+            page.locator("#files-new-file").click()
+            page.get_by_role("button", name="Discard", exact=True).click()
+            name = page.get_by_role("textbox", name="File name", exact=True)
+            expect(name).to_be_focused()
+            name.fill("phone-notes.md")
+            editor.fill("A new draft")
+            editor.evaluate("el => { window.filesEditor = el; }")
+            page.get_by_role("button", name="Back to folder", exact=True).click()
+            panes = page.evaluate(_PANES)
+            assert (panes["view"], panes["focus"], panes["unsaved"]) == ("list", "phone-notes.md", ["phone-notes.md"]), panes
+            expect(page.locator(".files-entry").first).to_contain_text("phone-notes.md")
+            page.locator(".files-entry.is-draft").click()
+            assert name.input_value() == "phone-notes.md"
+            _same_draft(page, "A new draft")
+
+            # The desk shows both again, the draft rows and Back gone, and focus in sight stays put; the phone width
+            # returns to the same file. Focus on Back when both panes come back lands on a shown control.
+            editor.focus()
+            _resize(page, 1280, 800)
+            panes = page.evaluate(_PANES)
+            assert (panes["list"], panes["file"], panes["back"], panes["unsaved"], panes["focusShown"], panes["layers"]) == (
+                True, True, False, [], True, []), panes
+            assert page.evaluate("document.activeElement === window.filesEditor")
+            _resize(page, 390, 844)
+            panes = page.evaluate(_PANES)
+            assert (panes["view"], panes["list"], panes["file"], panes["back"]) == ("file", False, True, True), panes
+            assert page.evaluate("document.activeElement === window.filesEditor")
+            _same_draft(page, "A new draft")
+            page.get_by_role("button", name="Back to folder", exact=True).focus()
+            _resize(page, 1280, 800)
+            panes = page.evaluate(_PANES)
+            assert panes["focusShown"] and panes["focus"] != "body", panes
+            _resize(page, 390, 844)
+            panes = page.evaluate(_PANES)
+            assert (panes["view"], panes["focus"], panes["focusShown"]) == ("file", "back", True), panes
+
+            # Without a draft, an image opens straight away and Back returns to its row.
+            page.get_by_role("button", name="Back to folder", exact=True).click()
+            page.locator(".files-entry").filter(has_text="picture.png").click()
+            page.get_by_role("button", name="Discard", exact=True).click()
+            expect(page.locator(".files-preview-image")).to_be_visible()
+            assert page.evaluate(_PANES)["focus"] == "back"
+            _capture(page, f"files-{engine}-390-image")
+            # Another page put in front drops the file's layer with the page's watch; Files shown again re-reads its
+            # panes and the file alone is a layer once more.
+            page.evaluate("document.querySelector('[data-nav-page=\"skills\"]').click()")
+            page.wait_for_function("document.querySelector('#page-skills').classList.contains('active')")
+            assert page.evaluate("window.__ouroLayers.ids()") == []
+            page.evaluate("document.querySelector('[data-nav-page=\"files\"]').click()")
+            page.wait_for_function("window.__ouroLayers.ids().includes('files-file')")
+            panes = page.evaluate(_PANES)
+            assert (panes["view"], panes["list"], panes["file"], panes["back"]) == ("file", False, True, True), panes
+            page.get_by_role("button", name="Back to folder", exact=True).click()
+            panes = page.evaluate(_PANES)
+            assert (panes["view"], panes["focus"], panes["unsaved"], panes["sideways"]) == (
+                "list", "picture.png", [], False), panes
+            assert not errors, errors
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_a_files_draft_kept_across_pages_says_when_its_file_changed_meanwhile(direct_server_with_data, engine):  # noqa: F811
+    """Another page keeps the unsaved draft (owner 2026-11-03); its return reads the file again and says when it changed
+    meanwhile, before a Save would replace that change (Opus review, 6 Nov). Unchanged, the return says nothing."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import expect, sync_playwright
+
+    with sync_playwright() as pw:
+        browser = _browser(pw, engine)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            fixture = _files_gateway(page)
+            page.goto(direct_server_with_data["url"] + "/#files", wait_until="domcontentloaded")
+            page.locator(".files-entry").filter(has_text="sample.txt").click()
+            editor = page.get_by_role("textbox", name="File contents", exact=True)
+            expect(editor).to_have_value("Original file contents\nSecond line\n")
+            editor.fill("Draft kept across pages")
+            status = page.locator("#files-preview-status")
+
+            def away_and_back():
+                page.evaluate("document.querySelector('[data-nav-page=\"skills\"]').click()")
+                page.wait_for_function("document.querySelector('#page-skills').classList.contains('active')")
+                page.evaluate("document.querySelector('[data-nav-page=\"files\"]').click()")
+                page.wait_for_function("document.querySelector('#page-files').classList.contains('active')")
+
+            away_and_back()
+            page.wait_for_timeout(500)  # the return's read of the file has answered
+            expect(status).not_to_contain_text("changed after this draft began")
+            expect(editor).to_have_value("Draft kept across pages")
+            fixture["content"]["sample.txt"] = "Saved meanwhile by another client\n"
+            away_and_back()
+            expect(status).to_have_text("This file changed after this draft began; Save replaces those changes.")
+            expect(editor).to_have_value("Draft kept across pages")
+            assert fixture["writes"] == [], "said, nothing written"
+            _capture(page, f"files-{engine}-changed-elsewhere")
+        finally:
+            browser.close()
+
+
+_STACKED = """() => {
+    const preview = document.querySelector('.files-preview'), drawer = document.getElementById('primary-sidebar');
+    const rect = drawer.getBoundingClientRect(), hit = document.elementFromPoint(rect.left + 24, innerHeight / 2);
+    return {layers: window.__ouroLayers.ids(), view: document.querySelector('.files-layout').dataset.filesView,
+        fileInert: Boolean(preview.closest('[inert]')), drawerInert: Boolean(drawer.closest('[inert]')),
+        drawerOnTop: rect.width > 0 && rect.right > 0 && Boolean(hit) && drawer.contains(hit)};
+}"""
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_a_file_read_landing_behind_the_phone_drawer_stays_under_it(direct_server_with_data, engine):  # noqa: F811
+    """#7 with a slow read: the chosen file arrives after the person opened the drawer. The file takes its layer under
+    the drawer, which stays the top layer over an inert room: Escape closes the drawer and leaves the file shown, the
+    next Escape returns the file to the list as Back to folder does."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser = _browser(pw, engine)
+        try:
+            page = browser.new_page(viewport={"width": 390, "height": 844}, has_touch=True)
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            fixture = _files_gateway(page)
+            page.goto(direct_server_with_data["url"] + "/#files", wait_until="domcontentloaded")
+            row = page.locator(".files-entry").filter(has_text="other.txt")
+            row.wait_for()
+            fixture["hold_navigation"] = True
+            row.click()
+            for _ in range(100):
+                if fixture["pending_navigation"]:
+                    break
+                page.wait_for_timeout(50)
+            assert len(fixture["pending_navigation"]) == 1, fixture["pending_navigation"]
+            page.locator("[data-mobile-nav-toggle]:visible").first.click()
+            page.wait_for_function("window.__ouroLayers.top() === 'drawer'")
+            pending, payload = fixture["pending_navigation"].pop()
+            fixture["hold_navigation"] = False
+            pending.fulfill(json=payload)
+            page.wait_for_function("window.__ouroLayers.ids().includes('files-file')")
+            _resize(page, 390, 844)
+            stacked = page.evaluate(_STACKED)
+            _capture(page, f"files-{engine}-390-late-read-under-drawer")
+            assert stacked == {"layers": ["files-file", "drawer"], "view": "file", "fileInert": True,
+                               "drawerInert": False, "drawerOnTop": True}, stacked
+
+            page.keyboard.press("Escape")
+            page.wait_for_function("!window.__ouroLayers.ids().includes('drawer')")
+            _resize(page, 390, 844)
+            stacked = page.evaluate(_STACKED)
+            assert (stacked["layers"], stacked["view"], stacked["fileInert"]) == (["files-file"], "file", False), stacked
+            page.keyboard.press("Escape")
+            page.wait_for_function("document.querySelector('.files-layout').dataset.filesView === 'list'")
+            panes = page.evaluate(_PANES)
+            assert (panes["layers"], panes["list"], panes["file"], panes["focus"]) == ([], True, False, "other.txt"), panes
+            assert not errors, errors
         finally:
             browser.close()

@@ -146,7 +146,8 @@ def test_registered_orphan_returns_to_original_host_target_without_rebinding(rec
     head = _git(target, "rev-parse", "HEAD").stdout if kind == "git" else None
     out = apply(ctx)
     assert ("✅ Integrated" in out if kind == "git" else json.loads(out)["status"] == "applied"), out
-    assert str(target) in out
+    # The folder result is JSON: its target is a decoded field (a Windows path's backslashes are escaped there).
+    assert (str(target) in out) if kind == "git" else json.loads(out)["target"] == str(target), out
     expected = engine.body if engine else b"accepted child result\n"
     assert (target / "content.txt").read_bytes() == expected
     if kind == "git":

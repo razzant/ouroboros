@@ -161,13 +161,46 @@ def _collapse_description_copies(record):
             template.pop("description", None)
 
 
-_PATCH_FIELDS = frozenset({"name", "objective", "context", "trigger", "timezone", "reasoning_effort"})
+# ``owner_corpus`` is internal: the editing run's carried words (``tools.followup._update_schedule``), joined
+# to the template's by identity when the assignment itself changes or the write carries a verified cite.
+_PATCH_FIELDS = frozenset({"name", "objective", "context", "trigger", "timezone", "reasoning_effort", "owner_corpus"})
+# Who supplied each text field of a task template, and when: the host's record, beside the text it describes.
+TEXT_AUTHOR_KEYS = (("objective", "objective_author"), ("context", "context_author"))
+
+
+def _stamp_text_authors(current: Optional[Dict[str, Any]], incoming: Dict[str, Any],
+                        supplier: Optional[Dict[str, Any]]) -> None:
+    """Record, per text field, who supplied it: separate from the row's work kind and lifecycle writer.
+
+    A field whose text this write leaves byte-identical keeps the CURRENT row's record of its supplier,
+    or its absence (an exact repost, a time edit, an edit of the other field); a changed field takes
+    ``supplier`` with the write's time; a field with no text has no supplier. ``supplier`` None (a
+    writer that cannot say) leaves a changed field's supplier unrecorded: unknown, never the owner.
+    A note carries no task text and is left as it is.
+    """
+    if incoming.get("kind") == "notify":
+        return
+    metadata = incoming.setdefault("task", {}).setdefault("metadata", {})
+    known = ((current or {}).get("task") or {}).get("metadata") or {}
+    for field, key in TEXT_AUTHOR_KEYS:
+        text = _patch_value(incoming, field)
+        if current is not None and text == _patch_value(current, field):
+            if key in known:
+                metadata[key] = copy.deepcopy(known[key])
+            else:
+                metadata.pop(key, None)
+        elif isinstance(text, str) and text.strip() and supplier is not None:
+            metadata[key] = {**copy.deepcopy(supplier), "at": utc_now_iso()}
+        else:
+            metadata.pop(key, None)
 
 
 def _patch_value(record, key):
     if key == "objective":
         return ((record.get("notification") or {}).get("text") if record.get("kind") == "notify"
                 else (record.get("task") or {}).get("text"))
+    if key == "owner_corpus":
+        return ((record.get("task") or {}).get("metadata") or {}).get("owner_corpus")
     if key in {"context", "reasoning_effort"}:
         return (record.get("task") or {}).get(key)
     return record.get(key)
@@ -181,6 +214,8 @@ def _patched_definition(current, patch):
     incoming = copy.deepcopy(current)
     note = incoming.get("kind") == "notify"
     for key, value in patch.items():
+        if key == "owner_corpus":
+            continue  # joined below, once the new assignment is known
         if key != "trigger" and not isinstance(value, str):
             raise ScheduleRefused("invalid_template", f"{key} must be a string")
         if key == "objective":
@@ -219,6 +254,13 @@ def _patched_definition(current, patch):
     _require_template_effort(template)
     if not note:
         incoming["task"] = template
+    cited = any(isinstance(row, dict) and row.get("basis") == "cited" for row in patch.get("owner_corpus") or [])
+    if patch.get("owner_corpus") and (cited or any(_patch_value(current, key) != _patch_value(incoming, key)
+                                                   for key in ("objective", "context"))):
+        from ouroboros.owner_words import merged_corpus  # the words of the run that changed the assignment, or its cite
+
+        metadata = incoming.setdefault("task", {}).setdefault("metadata", {})  # the one home, a note's template too
+        metadata["owner_corpus"] = merged_corpus(metadata.get("owner_corpus"), patch["owner_corpus"])
     changed = sorted(key for key in patch if _patch_value(current, key) != _patch_value(incoming, key))
     if "trigger" in changed or "timezone" in changed:
         old = current.get("trigger") or {}
@@ -263,6 +305,8 @@ def patch_scheduled_task(schedule_id: str, patch: dict, *, reason: str, actor: s
             remember_claim_basis(current)
             _collapse_description_copies(current)
             incoming, changed_fields = _patched_definition(current, patch)
+            # A task's edit: the text it changed is the task's (``tools.followup._update_schedule``).
+            _stamp_text_authors(current, incoming, {"kind": "task", "task_id": str(task_id)} if task_id else None)
             changed = bool(changed_fields or adopted)
             reconsidered = False
             if changed:
@@ -270,8 +314,9 @@ def patch_scheduled_task(schedule_id: str, patch: dict, *, reason: str, actor: s
                 from supervisor.followup_policy import relation_kind
 
                 _collapse_description_copies(incoming)
-                stamp_schedule_writer(incoming, writer_kind, writer_metadata,
-                                      started_root=relation_kind(incoming) == "independent")
+                stamp_schedule_writer(incoming, writer_kind, writer_metadata,  # the same work unless its assignment changed
+                                      started_root=relation_kind(incoming) == "independent",
+                                      same_work=not ({"objective", "context"} & set(changed_fields)))
                 if fingerprint(before) != fingerprint(incoming):
                     incoming.pop("hold", None)
                     occ = current.get("occurrence") or {}
@@ -314,7 +359,8 @@ def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | 
                           host_followup: dict | None = None,
                           continuation_of: Optional[Dict[str, Any]] = None,
                           new_resource_intent: Optional[Dict[str, Any]] = None,
-                          writer_kind: str = "consciousness", writer_metadata: Any = None) -> Dict[str, Any]:
+                          writer_kind: str = "consciousness", writer_metadata: Any = None,
+                          text_supplier: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Create or replace a scheduled task record.
 
     Returns the stored row plus an ``audit`` field: ``recorded`` when both audit
@@ -324,6 +370,9 @@ def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | 
     ``continuation_of``) are never taken from a payload: ``continuation_of`` is
     set only by the host follow-up path through its own keyword, and an authored
     change clears a wait so the next pass retries at once (#1315).
+    ``text_supplier`` is the writing door's account of who supplies the text it
+    sends (the owner's Schedules door: ``schedule_api``); without it the template's
+    host-written authors stand (``tools.followup``).
     """
     root = pathlib.Path(drive_root or _store._queue().DRIVE_ROOT)
     with schedule_transaction(root):
@@ -361,9 +410,17 @@ def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | 
                               started_root=relation_kind(incoming) == "independent")
         incoming["task"] = normalize_template(incoming)
         _require_template_effort(incoming["task"])  # refused before the audit intent: nothing changed
-        if incoming.get("followup_origin"):
-            incoming["task"]["metadata"]["objective_author"] = {
-                "kind": "task", "task_id": incoming["followup_origin"]["task_id"]}
+        if text_supplier is not None:
+            # The owner's door: each field's supplier from the CURRENT row, a changed field this door's;
+            # the words a run carried into the row are the row's, never a caller's copy.
+            _stamp_text_authors(existing, incoming, text_supplier)
+            kept = ((existing or {}).get("task") or {}).get("metadata") or {}
+            if "owner_corpus" in kept:
+                incoming["task"]["metadata"]["owner_corpus"] = copy.deepcopy(kept["owner_corpus"])
+        elif incoming.get("followup_origin"):
+            # A host follow-up's text is its scheduling task's (the tool stamps it; an older template gains it).
+            incoming["task"]["metadata"].setdefault("objective_author", {
+                "kind": "task", "task_id": incoming["followup_origin"]["task_id"]})
         if new_resource_intent is not None:
             # The producer may describe a NEW row. Editing an old followup cannot
             # turn absent intent into self-work; preserve its current evidence.
@@ -425,13 +482,16 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                           actor: str, task_id: str = "",
                           drive_root: pathlib.Path | None = None,
                           expected_hold_id: str = "", relation: str = "",
-                          writer_kind: str = "consciousness", writer_metadata: Any = None) -> Dict[str, Any]:
+                          writer_kind: str = "consciousness", writer_metadata: Any = None,
+                          owned_by: Any = None) -> Dict[str, Any]:
     """Apply one owner-governed future-dispatch mutation, audited intent-first.
 
     Affects DISPATCH only: a task already admitted from this schedule keeps
     running, and ``running_or_queued`` says so rather than implying a stop — or
     says ``None`` when this process cannot see the live queue, because an
-    unknown in-flight run is not the same claim as no run at all.
+    unknown in-flight run is not the same claim as no run at all. ``owned_by``,
+    a narrowed caller's ownership predicate, is judged on the stored row under the
+    same transaction; a row it does not own reads ``not_found`` with nothing written.
     """
     wanted, operation = str(schedule_id or "").strip(), str(action or "").strip().lower()
     if operation not in SCHEDULE_ACTIONS:
@@ -462,7 +522,7 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                         "schedule_id": wanted, "detail": str(exc), "audit": "not_written"}
             tasks = list(data.get("tasks") or [])
             current = next((item for item in tasks if str(item.get("id") or "") == wanted), None)
-            if current is None:
+            if current is None or (owned_by is not None and not owned_by(current)):
                 return {"ok": False, "changed": False, "status": "not_found",
                         "schedule_id": wanted, "audit": "not_written"}
             try:
@@ -514,8 +574,8 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             if changed:
                 _collapse_description_copies(current)
                 from ouroboros.consciousness_authority import stamp_schedule_writer
-                stamp_schedule_writer(current, writer_kind, writer_metadata,
-                                      started_root=relation_kind(current) == "independent")
+                stamp_schedule_writer(current, writer_kind, writer_metadata,  # a lifecycle step of the same work
+                                      started_root=relation_kind(current) == "independent", same_work=True)
                 current["updated_at"] = utc_now_iso()
                 data["tasks"] = tasks
                 _write_scheduled_tasks(data, root)

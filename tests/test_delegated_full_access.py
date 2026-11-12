@@ -16,7 +16,6 @@ from tests._delegated_transport_shared import (
 )
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('selected,expected', [(None, 'workspace_write'), ('workspace_write', 'workspace_write'), ('full', 'full')])
@@ -155,7 +154,7 @@ def test_full_start_http_contract_and_real_snapshot_capture(full_run):
     assert not custody.replay(custody.custody_root(ctx))['full-run'].settled
     gateway = claudexor_daemon.ensure_owned_gateway()
     try:
-        terminal = json.loads(delegate._delegate_wait(ctx, 'full-run', wait_sec=1, gateway=gateway))
+        terminal = json.loads(delegate._read_run(ctx, 'full-run', gateway=gateway))
     finally:
         gateway.close()
     assert terminal['status'] == 'terminal' and terminal['settlement']['settled']
@@ -329,7 +328,7 @@ def test_retry_preserves_recorded_binding_evidence(full_run, monkeypatch, histor
     with monkeypatch.context() as prior:
         if historical:
             prior.setattr(delegate, "execution_binding_fingerprint", lambda *args: "")
-            prior.setattr(delegate, "apply_execution_binding", lambda instructions, *args, **kwargs: instructions)
+            prior.setattr(delegate, "execution_binding_text", lambda *args, **kwargs: "")
         initial = delegate_payload(delegate._delegate_start(ctx, "Exact original assignment."))
     invocation = initial["pending_invocation_id"]
     drive = custody.custody_root(ctx)

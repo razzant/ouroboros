@@ -1,8 +1,8 @@
 """Qualify #1350 in the served SPA without a model call.
 
-A root and a child task each observe a delegated run through the real producer
-(``delegate_progress.emit`` → ``delegate_activity.observations`` over the engine's event
-stream, served by a fixture daemon), the real progress transport (``agent._emit_progress`` →
+A root and a child task each observe a delegated run through the real reader
+(``delegate_activity.stream_observations`` over the engine's event stream, served by a fixture
+daemon), the real progress transport (``agent._emit_progress`` →
 ``events_chat_delivery`` → ``message_bus``) and the real history endpoint. The page receives
 the live frames over its WebSocket, then reconnects and reloads; every retained original is
 downloaded through the real task-file route. Screenshots and the raw frames, history and
@@ -23,7 +23,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ouroboros import delegate_activity, delegate_progress
+from ouroboros import delegate_activity
 from ouroboros.agent import OuroborosAgent
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.subagent_messages import subagent_message_meta
@@ -34,7 +34,7 @@ from tests.test_reconnect_feed_browser import HISTORY_LANDED
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 from tests.test_task_file_serving import _client
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 ROOT, KID = "root1350q", "kid1350q"
 LINEAGE = {"delegation_role": "subagent", "root_task_id": ROOT, "parent_task_id": ROOT, "subagent_role": "UI reviewer",
            "model": "coordinator-model", "executor_route": "claude"}
@@ -110,11 +110,22 @@ class Producer:
         return self._deliver(events)
 
     def observe(self, worker, gateway, run_id, through, *, after, drain=None):
-        """One wait advance through the seam ``delegate_wait`` uses."""
+        """Publish one read through the current stream producer. An explicit legacy fence also exercises
+        rendering of saved pre-feed records: their final gaps must remain readable in live/replayed views."""
+        from ouroboros.gateways.claudexor_run_events import read_run_events
+
         ctx, events = worker
-        entry = SimpleNamespace(run_id=run_id, task_id=ctx.task_id)
-        delegate_progress.emit(ctx, run_id, SimpleNamespace(seq=through, events=[], events_omitted=0),
-                               entry=entry, gateway=gateway, after_seq=after, drain_sec=drain)
+        after = delegate_activity.shown_cursor(ctx, ctx.task_id, run_id, after)
+        read = read_run_events(gateway, run_id, after_seq=after, through_seq=None, timeout_sec=2)
+        problem = read.problem
+        reason = f"stream_error:{problem['code']}" if problem else "read_bound:time"
+        gaps = [{"after_seq": read.through_seq, "through_seq": through, "reason": reason,
+                 **({"retryable": problem["retryable"]} if problem else {}),
+                 **({"final": True} if drain is not None else {})}] if read.through_seq < through else []
+        for activity, commit in delegate_activity.stream_observations(
+                ctx, run_id, read, after=after, through=through, gaps=gaps):
+            ctx.emit_progress_fn(delegate_activity.progress_text(activity), delegated_activity=activity)
+            commit()
         return self._deliver(events)
 
     def lifecycle(self, text, event):
@@ -208,20 +219,17 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
         cursor = through
     root_daemon.revealed = 1
     push(producer.observe(root_worker, root_gateway, "run-root", 3, after=0))
-    # The worker restarts and the run ends: its drain resumes at the last retained range,
-    # and its read allowance is spent after a byte bound cuts the first tail read.
+    # A restarted reader resumes at the last retained range. This fixture retains a pre-feed
+    # final gap after the byte bound, verifying old records still render and replay.
     delegate_activity.reset_process_memo()
     child_daemon.revealed = 5
     real_read = run_events.read_run_events
-    clock = SimpleNamespace(now=0.0)
 
     def bounded_read(*args, **kwargs):
         read = real_read(*args, **{**kwargs, "max_bytes": 1800})
-        clock.now += 1.0
         return read
 
     with monkeypatch.context() as bounded:
-        bounded.setattr(delegate_activity.time, "monotonic", lambda: clock.now)
         bounded.setattr(run_events, "read_run_events", bounded_read)
         push(producer.observe(kid_worker, child_gateway, "run-kid", 19, after=19, drain=1))
 
@@ -280,7 +288,7 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
     capture(page, "1350-live-stretch-expanded")
     stretch_row.locator("[data-live-line-toggle]").click()
 
-    # A later wait on the ended run catches the tail up: no new run, only the journal read.
+    # A later read of the ended run catches the tail up: no new run, only the journal read.
     push(producer.observe(kid_worker, child_gateway, "run-kid", 19, after=19, drain=30))
     page.wait_for_function(f"() => !document.querySelector('#chat-live-timeline-{KID} .chat-delegated-final')")
     caught_up = page.evaluate(SNAPSHOT, [ROOT, KID])
@@ -328,4 +336,79 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
     _evidence("1350-history-pages.json", served)
     _evidence("1350-dom.json", {"live_with_gap": live_snapshot, "caught_up": caught_up, "reconnected": reconnected,
                                 "reloaded": reloaded})
+    assert not ui["errors"].unexpected(), ui["errors"].report()
+
+
+@pytest.mark.parametrize("empty_tail", [False, True])
+def test_later_permanent_refusal_updates_earlier_gap_without_losing_words(engine_ui, tmp_path, monkeypatch, empty_tail):
+    """The real worker→history→SPA flow renders current journal availability, not an older retry promise."""
+    from tests.test_delegated_activity import LoopbackEngine, _refusal
+
+    ui, data = engine_ui, tmp_path / "data"
+    page = ui["page"]
+    producer = Producer(data, monkeypatch)
+    history = TestClient(Starlette(routes=[Route("/api/chat/history", endpoint=make_chat_history_endpoint(data))]))
+    sockets = []
+
+    def history_route(route):
+        url = route.request.url
+        response = history.get(url[url.index("/api/chat/history"):])
+        route.fulfill(status=response.status_code, content_type="application/json", body=response.text)
+
+    def socket_route(ws):
+        sockets.append(ws)
+        ws.send(json.dumps({"type": "heartbeat"}))
+
+    page.route("**/api/chat/history*", history_route)
+    page.route_web_socket("**/ws", socket_route)
+    page.goto(ui["url"])
+    page.wait_for_selector("#chat-input")
+    worker = producer.worker(ROOT, None)
+    frames = producer.say(worker, "Checking a delegated result.")
+    words = "I read the candidate before the journal was removed."
+    if empty_tail:
+        words += " Extra detail." * 1000
+        monkeypatch.setattr(delegate_activity, "_persist", lambda *_a: {})
+    engine = LoopbackEngine([_harness(1, "message", text=words)], tail=_refusal("run_event_not_found", True))
+    variant = "empty-tail" if empty_tail else "gap"
+    with engine.serving() as gateway:
+        frames += producer.observe(worker, gateway, "run-1", 1 if empty_tail else 2, after=0)
+        for frame in frames:
+            sockets[-1].send(json.dumps(frame))
+        card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first
+        card.wait_for()
+        card.locator("[data-live-disclosure]").first.click()
+        page.wait_for_function("() => document.querySelector('.chat-delegated-message')?.textContent.includes('I read the candidate')")
+        capture(page, f"track07-{variant}-before-permanent-refusal")
+        engine.journal, engine.tail = [], _refusal("run_expired_by_retention", False)
+        if empty_tail:
+            from ouroboros import delegate_progress
+            from ouroboros.gateways.claudexor_run_events import read_run_events
+
+            # The body's follow of the run's journal (``delegate_feed.Feed._beat``): the refusal arrives inside the read.
+            read = read_run_events(gateway, "run-1", after_seq=1, through_seq=None, timeout_sec=10)
+            delegate_progress.emit_stream(worker[0], "run-1", read, after_seq=1)
+            updates = producer._deliver(worker[1])
+        else:
+            updates = producer.observe(worker, gateway, "run-1", 3, after=1, drain=10)
+        for frame in updates:
+            sockets[-1].send(json.dumps(frame))
+        page.wait_for_function("() => document.querySelector('.chat-live-card')?.textContent.includes('can no longer be read')")
+    text = card.inner_text()
+    assert "I read the candidate before the journal was removed." in text
+    assert "next advance" not in text and "tries again" not in text and "reads them" not in text
+    for toggle in card.locator("[data-live-line-toggle]").all():
+        toggle.click()
+    if empty_tail:
+        card.locator(".chat-delegated-sources").first.scroll_into_view_if_needed()
+    capture(page, f"track07-{variant}-after-permanent-refusal")
+    page.reload()
+    card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first
+    card.wait_for()
+    page.evaluate(EXPAND, [ROOT])
+    page.wait_for_function("() => document.querySelector('.chat-live-card')?.textContent.includes('can no longer be read')")
+    assert "I read the candidate before the journal was removed." in card.inner_text()
+    assert "next advance" not in card.inner_text() and "tries again" not in card.inner_text()
+    assert "journal holds it whole" not in card.inner_text()
+    capture(page, f"track07-{variant}-refusal-after-reload")
     assert not ui["errors"].unexpected(), ui["errors"].report()

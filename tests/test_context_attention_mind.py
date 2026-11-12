@@ -141,7 +141,7 @@ def test_actual_refusal_runs_the_host_copies_step_first(tmp_path, monkeypatch):
     assert inner.messages is context.messages and inner._transcript_rewrite_sanctioned == "refusal_pass:host_copies"
     emergency = [e for e in events if e.get("checkpoint_kind") == "context_reclaim_emergency"]
     assert [(e["rung"], e["status"]) for e in emergency] == [("host_copies", "applied"), ("bodies", "no_eligible")]
-    assert inner._context_overflow_retries == {("exec:round:1", "host_copies+bodies")}  # once per round, whatever the route
+    assert inner._context_overflow_retries == {("exec:round:1", "host_copies+bodies+floor")}  # once per round, whatever the route
 
 
 def _candidate(disposition, size):
@@ -190,7 +190,8 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
         p.reproject_transcript = lambda messages, mode: [{"role": "system", "content": system}, *messages[1:]]
 
         def reproject_for_route(*, window_tokens, known_window, ratio, output_reserve,
-                                tool_schemas, start_mode, current_messages, refused_tokens):
+                                tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens):
+            assert measured_input_tokens is None  # this fixture has no prepared-input anchor
             seen.append({"window": window_tokens, "known": known_window, "mode": start_mode,
                          "messages": list(current_messages), "schemas": list(tool_schemas),
                          "reserve": output_reserve, "refused": refused_tokens})
@@ -284,7 +285,8 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
     assert "round 2" in second and "own recorded cost $1.23 (total not final)" in second
     assert "Task tree spend: ~$3.00 of $40.00 hard tree cap" in second
     assert "shared wallet unknown (not observed)" in second
-    assert "tariff $2.00/M in, $10.00/M out" in second and "quota unknown" in second
+    # No producer ever filled a quota slot: the line says nothing about quota rather than "quota unknown" every round.
+    assert "tariff $2.00/M in, $10.00/M out" in second and "quota" not in second
     unbound = _ctx(tmp_path)
     unbound.context_fit_plan = None
     assert "input unmeasured" in context_facts_line(unbound, measured=False) and "window unknown" in context_facts_line(unbound, measured=False)

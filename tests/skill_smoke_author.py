@@ -1,8 +1,9 @@
 """The paid skill-smoke consumer: one ordinary author task, never a Python agent loop.
 
 Only the existing public skill_review tool buys review. Two paid cycles are the
-conservative ceiling (infrastructure failures consume it too); ambiguous/pending
-work is red, not retried by starting another task. The task policy is a tool
+conservative ceiling (infrastructure failures consume it too); a first review that
+settled without any verdict may spend the second on one plain retry; other
+ambiguous/pending work is red, not retried by starting another task. The task policy is a tool
 boundary, not OS confinement. The server has a fresh HOME/state, no enabled
 payload and no turn-on intent. Its tree stops before the caller tests enablement.
 """
@@ -143,8 +144,12 @@ Only if source evidence substantively refutes the negative finding, state that
 argument in skill_review(skill={name!r}, review_rebuttal=<your evidence-grounded argument>).
 At most ONE substantive reassessment is permitted. Do not reroll a review, invent
 an argument, treat trusted/preflight as proof of correctness, change reviewers or
-settings, accept author_disposition, or enable/execute the skill. Pending/unknown
-or a failed review stays RED; no transport resubmission. The two-paid-cycle ceiling
+settings, accept author_disposition, or enable/execute the skill. A review that
+settled without any verdict (the reviewer's answer was empty or unreadable) is no
+opinion: you may spend the second paid cycle on one more review,
+skill_review(skill={name!r}, review_rebuttal=<one sentence: the previous review
+returned no verdict>), and say so. After any verdict there is no such retry.
+Otherwise pending/unknown or a failed review stays RED. The two-paid-cycle ceiling
 also counts infrastructure attempts. Do not start another task to reset it.
 Preserve the original findings and your reasoning in your final answer. Your prose
 cannot grant PASS: the independent persisted review gate is the CI authority.
@@ -229,9 +234,13 @@ def assert_review_evidence(data: Path, name: str, original_hash: str, task_id: s
     history = load_review_waves(data, name)
     paid = [row for row in history if row.get("paid")]
     assert 1 <= len(paid) <= REVIEW_CYCLES, "missing review or paid-cycle ceiling exceeded"
+    verdicts = {"clean", "warnings", "blockers"}
+    # A first wave that settled without any verdict is no opinion: it buys one retry, the second paid cycle, whose
+    # one-line note says so (an identical request does not reach the reviewer again: razzant/ouroboros#2410).
+    retried = len(paid) == 2 and paid[0].get("status") not in verdicts
     expected_group = f"task:{task_id}:{name}"
     contracts = set()
-    for row in paid:
+    for index, row in enumerate(paid):
         assert (row.get("group_id") == expected_group and row.get("root_task_id") == task_id
                 and row.get("attempt_root_task_id") == task_id), "review group drift"
         assert row.get("content_hash") == original_hash, "review material drift"
@@ -241,7 +250,7 @@ def assert_review_evidence(data: Path, name: str, original_hash: str, task_id: s
         assert fingerprint and fingerprint == row.get("attempt_contract_fingerprint"), "review panel/contract drift"
         contracts.add(fingerprint)
         assert (row.get("state") == "settled" and not row.get("late_result_pending")
-                and row.get("status") in {"clean", "warnings", "blockers"}), "pending/unknown review stays red"
+                and (row.get("status") in verdicts or retried and index == 0)), "pending/unknown review stays red"
         actors = row.get("raw_actor_records")
         assert actors, "missing independent reviewer evidence"
         stack = list(actors)
@@ -257,7 +266,7 @@ def assert_review_evidence(data: Path, name: str, original_hash: str, task_id: s
                 assert actor.get("operation_state") in {"settled", "late_settled"}, "reviewer settlement is unknown"
     assert len(contracts) == 1, "review panel/contract drift"
     assert not paid[0].get("rebuttal_sha256"), "initial review was replaced by a rebuttal"
-    if len(paid) == 2:
+    if len(paid) == 2 and not retried:
         assert paid[0]["status"] == "blockers" and paid[1].get("rebuttal_sha256"), "not one substantive rebuttal"
     review_path = data / "state" / "skills" / name / "review.json"
     review = json.loads(review_path.read_text(encoding="utf-8"))

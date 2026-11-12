@@ -8,9 +8,11 @@ attempt outlives the process as one ``state.json`` value (``STATE_KEY``), bound
 to its initiating generation and, before any transaction is written, to that
 transaction's existing ``attempt_id``. A later generation concludes it only
 from a boot branch's explicit meaning (``observed``) for the transaction that
-branch processed, while serving the commit that meaning implies; missing,
-unbound or unreadable evidence is a named ``unknown``, never success. A request
-refused before admission stays its own HTTP answer.
+branch processed, while serving the commit that meaning implies; a branch's
+known ``failed`` recovery names no checkout, so it needs no served commit and a
+later restored generation may still conclude it. Missing, unbound or unreadable
+evidence is a named ``unknown``, never success. A request refused before
+admission stays its own HTTP answer.
 """
 
 from __future__ import annotations
@@ -34,7 +36,9 @@ STATE_KEY = "managed_update_attempt"
 # immediately before each lane's first repository step (pinned by source tests).
 _TEARDOWN_STAGES = frozenset({"stopping_workers", "stopping_services"})
 _MUTATION_STAGE = "applying"
-_BOOT_OUTCOMES = frozenset({"applied", "not_applied", "rolled_back"})
+_BOOT_OUTCOMES = frozenset({"applied", "not_applied", "rolled_back", "failed"})
+# A later boot's conclusion replaces an earlier boot's, its failure detail included.
+_BOOT_DETAIL = {"error": "", "reason": "", "stash_note": "", "blockers": []}
 _FIELDS = ("operation_id", "generation", "stage", "started_at", "stage_started_at", "active", "result",
            "error", "restart_required", "outcome", "outcome_at", "concluded_by", "reason", "blockers",
            "work_stop", "base_sha", "target_sha", "tx_attempt_id", "keep_branch", "stash_note", "generation_facts")
@@ -300,26 +304,58 @@ def _finish(response, error: Exception | None) -> None:
 
 
 def _conclude(seen: dict, result: dict, bootstrap_ok: bool) -> None:
+    global _current
     from ouroboros.server_process import server_source_baseline
 
-    outcome, reason = str(seen["outcome"]), ""
-    if outcome == "applied" and not bootstrap_ok:
+    outcome, reason, note, failure = str(seen["outcome"]), "", str(result.get("stash_note") or ""), {}
+    if outcome == "failed":
+        # The branch's own report, whatever the checkout now holds: cause, recovery detail, unproven stops.
+        reason, error = str(seen["reason"]), str(result.get("msg") or "")
+        failure = {"error": error, "blockers": [str(item) for item in result.get("blockers") or []]}
+        note = "" if note == error else note
+    elif outcome == "applied" and not bootstrap_ok:
         outcome, reason = "unknown", "startup_unconfirmed"
     elif not (seen.get("commit") and server_source_baseline() == seen["commit"]):
         outcome, reason = "unknown", "running_source_mismatch"
     change = {"active": False, "outcome": outcome, "outcome_at": utc_now_iso(), "concluded_by": "boot",
-              "restart_required": False, **({"reason": reason} if reason else {}),
-              **({"stash_note": str(result["stash_note"])} if result.get("stash_note") else {})}
+              "restart_required": False, **({"reason": reason} if reason else {}), **failure,
+              **({"stash_note": note} if note or outcome == "failed" else {})}
     from ouroboros.update_generation_facts import sample
     after = sample() if outcome == "applied" else None
+
+    concluded: dict = {}
 
     def mutate(stored: dict):
         if stored.get("tx_attempt_id") != seen["attempt_id"] or stored.get("generation") == _generation():
             return None  # another attempt, or this very server: no restart happened in between
-        return _shape({**stored, **change, "generation_facts": {
-            **(stored.get("generation_facts") or {"before": None}), "after": after}})
+        prior = dict(_BOOT_DETAIL) if stored.get("concluded_by") else {}
+        current = {**prior, **change}
+        # `result` remains the executor's result across boots. Its original error
+        # is not a boot diagnostic to replace or erase after a later recovery.
+        original_error = str(stored.get("error") or "") if stored.get("result") == "failed" else ""
+        if original_error:
+            current["error"] = original_error
+            if outcome == "failed":
+                current["stash_note"] = "\n".join(dict.fromkeys(
+                    text for text in (str(result.get("msg") or ""), note) if text and text != original_error))
+        concluded.update(_shape({**stored, **current, "generation_facts": {
+            **(stored.get("generation_facts") or {"before": None}), "after": after}}))
+        return dict(concluded)
 
-    _store(mutate)
+    try:
+        _store(mutate)
+        return
+    except Exception:
+        log.warning("Could not retain the boot update conclusion", exc_info=True)
+    if not concluded:
+        # The write path failed before reading the record: the same guards over the typed read.
+        status, stored = _read_saved()
+        if status == "valid":
+            mutate(stored)
+    with _lock:
+        # Kept live, as an unsaved executor attempt is; never over a newer attempt this server began.
+        if concluded and _current.get("operation_id") in (None, concluded["operation_id"]):
+            _current = {**concluded, "retention_unconfirmed": True}
 
 
 def observe_boot(finalize, *, ready: bool, bootstrap_ok: bool) -> dict:
@@ -328,7 +364,8 @@ def observe_boot(finalize, *, ready: bool, bootstrap_ok: bool) -> dict:
     result = finalize(supervisor_ready=ready)
     try:
         seen = (result or {}).get("observed")
-        if isinstance(seen, dict) and seen.get("attempt_id") and seen.get("outcome") in _BOOT_OUTCOMES:
+        if (isinstance(seen, dict) and seen.get("attempt_id") and seen.get("outcome") in _BOOT_OUTCOMES
+                and (seen["outcome"] != "failed" or seen.get("reason"))):
             _conclude(seen, result, bootstrap_ok)
     except Exception:
         log.debug("Could not observe the boot update outcome", exc_info=True)

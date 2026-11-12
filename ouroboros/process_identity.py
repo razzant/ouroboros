@@ -15,9 +15,12 @@ prove nothing. Validated kinds:
 ``ps -o lstart=`` text (the macOS ``platform_layer.process_start_time``) renders
 the start in the writer's timezone and locale, so two readings of one living
 process can differ: it is never a kind. ``process_kernel_birth`` is additive
-evidence beside ``process_start_time``, whose token, ledger fields and equality
-comparators stay as they are: processes of an older release, such as a
-supervisor beside newer workers, keep agreeing with this one.
+evidence beside ``process_start_time``, whose token and ledger fields stay as
+they are. Worker ready/quiescent rows and review controller identities carry it
+as ``kernel_birth``; their comparators let ``same_birth`` decide first. A worker
+record without a comparable one keeps the older spelling comparison, so processes
+of an older release keep agreeing with this one; a review controller's differing
+spelling proves its end only as one validated kind, otherwise it is unknown.
 """
 
 from __future__ import annotations
@@ -42,10 +45,20 @@ def birth_identity(token: str) -> tuple | None:
     return None
 
 
+def same_birth(first: str | None, second: str | None) -> bool | None:
+    """True or False only for two validated identities of one kind; None proves nothing.
+
+    True names one process, never one program image: the birth survives exec.
+    """
+    first_id, second_id = birth_identity(first), birth_identity(second)
+    if not (first_id and second_id and first_id[0] == second_id[0]):
+        return None
+    return first_id == second_id
+
+
 def different_birth(live: str, recorded: str) -> bool:
     """Positive only when both identities are validated, of one kind, and unequal."""
-    live_id, recorded_id = birth_identity(live), birth_identity(recorded)
-    return bool(live_id and recorded_id and live_id[0] == recorded_id[0] and live_id != recorded_id)
+    return same_birth(live, recorded) is False
 
 
 def process_kernel_birth(pid: int) -> str | None:

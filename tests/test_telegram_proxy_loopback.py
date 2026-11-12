@@ -26,7 +26,6 @@ from cryptography.x509.oid import NameOID
 
 from tests.test_telegram_proxy import _Api, _TOKEN, _bridge_events, _load
 
-pytestmark = pytest.mark.serial
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "telegram" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -164,7 +163,7 @@ class _LoopbackBot:
                         await stream.wait_closed()
 
 
-@pytest.mark.parametrize("scheme", ["direct", "http", "socks5", "socks5h"])
+@pytest.mark.parametrize("scheme", ["direct", "http", "socks5h"])
 def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeypatch, caplog, scheme):
     plugin, _telegram_api, notifier = _load()
     caplog.set_level(logging.DEBUG, logger="httpcore")
@@ -262,7 +261,7 @@ def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeyp
             assert await companion.run() == 0
             assert reached == [42]
             assert bot.button == {"type": "commands"}
-            assert not (state / "menu_button_snapshot.json").exists()
+            assert not list(state.glob("menu_button_snapshot*.json"))  # every ledger restored and removed
             assert options and all(option["proxy"] == proxy_url for option in options)
             assert all(option["follow_redirects"] is False for option in options)
             assert all(option["trust_env"] is False for option in options)

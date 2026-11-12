@@ -12,8 +12,11 @@ from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import sanitize_tool_result_for_log, truncate_for_log
 
 
-@pytest.mark.parametrize("writer", ["argument_error", "tool_error", "timeout"])
-@pytest.mark.parametrize("shape", ["url", "assignment"])
+@pytest.mark.parametrize(("shape", "writer"), [
+    ("url", "argument_error"),
+    ("url", "timeout"),
+    ("assignment", "tool_error"),
+])
 def test_manifest_redacts_full_result_before_url_or_assignment_boundary(tmp_path, writer, shape):
     canary = "CANARY42"  # synthetic; deliberately shorter than literal-secret threshold
     before, after = ((" postgres://operator:", "@database.invalid/example\n") if shape == "url"

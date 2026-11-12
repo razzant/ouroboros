@@ -17,7 +17,7 @@ setup = subscription_transport
 live_wait = wait_fixture
 subscription_ui = ui_fixture
 waiting_ui = waiting_fixture
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_real_mailbox_refusal_retries_exact_request_and_applies_once(subscription_ui, live_wait, monkeypatch):
@@ -144,6 +144,7 @@ def test_current_attempt_snapshot_never_reopens_old_wait_after_reload(waiting_ui
             "sha": "browser-fixture", "supervisor_ready": True, "projects": [], **fields}))
 
     page.route("**/api/state", current_state)
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     # Activities own the header, not card creation. A retained old wait alone
     # must not mint a card for this attempt before its first real progress.

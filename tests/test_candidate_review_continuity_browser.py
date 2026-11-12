@@ -14,7 +14,7 @@ from tests.test_skill_review_runner import _reset_queue
 from tests.test_history_retention_browser import HTML, WEB
 from ouroboros.test_evidence import diagnostic_directory
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ def test_actual_candidate_and_origin_review_cards(engine, width, theme, inherite
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     evidence = Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR') or diagnostic_directory(
-        tmp_path / 'browser-evidence', 'candidate-review-continuity'))
+        tmp_path / 'browser-evidence', 'candidate-review-continuity', publish=True))
     evidence.mkdir(parents=True, exist_ok=True)
     prefix = f'{engine}-{width}-{theme}' + ('-inherited' if inherited else '')
     (evidence / f'{prefix}-producer-rows.json').write_text(json.dumps([done, review], ensure_ascii=False, indent=2))
@@ -167,7 +167,8 @@ def test_actual_candidate_and_origin_review_cards(engine, width, theme, inherite
                 playwright.expect(owner.locator('[data-live-review-summary]')).to_contain_text(re.compile(r'Reviews\s*1'))
                 assert page.locator('.chat-live-card[data-task-id="marketplace_install"]').count() == 0
                 owner.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
-                owner.locator('[data-review-section-toggle]').click()
+                # Reviews opens through its own door since #2278 (docs/DESIGN.md "Reviews inside task cards").
+                owner.locator('[data-live-review-summary]').click()
                 playwright.expect(owner.locator('[data-review-group-toggle]')).to_be_visible()
                 playwright.expect(owner.locator('[data-review-group-toggle]')).to_contain_text('Skill review')
                 owner.scroll_into_view_if_needed()

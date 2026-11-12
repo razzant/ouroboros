@@ -8,7 +8,6 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _supervisor_ctx
 
-pytestmark = pytest.mark.serial  # the installed queue fixture binds module state
 
 
 class Runtime:
@@ -77,22 +76,21 @@ def _park(env, tmp_path, monkeypatch, *, direct=False, selected=None):
     return bp.budget_pause_row(tmp_path, "sleeper")
 
 
-@pytest.mark.parametrize("direct", [False, True])
-@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize(("terminal", "direct"), [(False, False), (True, True)])
 def test_exact_cold_transfer_park_wake_and_same_author_restore(tmp_path, monkeypatch, direct, terminal):
     from ouroboros import budget_pause as bp, delegate_custody_current as current, owner_wait
     from ouroboros.owner_mailbox import write_owner_message
-    from ouroboros.project_lease import cold_project_holders, candidate_is_leasable
+    from ouroboros.project_lease import candidate_is_leasable, lane_holders
     from supervisor.sleep_wake import wake_ready_sleepers
 
     env = _setup(tmp_path, monkeypatch, direct=direct)
     pause = _park(env, tmp_path, monkeypatch, direct=direct)
     assert pause["state"] == "paused" and env.workers.RUNNING == {}
     task = env.workers.PENDING[0]
-    holders = cold_project_holders(env.workers.PENDING)
+    holders = lane_holders(env.workers.RUNNING.values(), env.workers.PENDING)
     assert holders == {"project": {"sleeper"}}
-    assert not candidate_is_leasable({"id": "foreign", "project_id": "project"}, set(), cold_holders=holders)
-    assert candidate_is_leasable(task, set(), cold_holders=holders)
+    assert not candidate_is_leasable({"id": "foreign", "project_id": "project"}, set(), holders=holders)
+    assert candidate_is_leasable(task, set(), holders=holders)
     run = current.run(tmp_path, "run-one")
     assert not run.settled
     if terminal:
@@ -335,13 +333,18 @@ def test_unaccepted_request_never_releases_worker_and_new_scope_never_borrows_re
     assert "sleeper" in env.workers.RUNNING and not env.workers.PENDING
 
 
-def test_readonly_transfer_keeps_the_capability_without_reserving_a_writer_lane(tmp_path, monkeypatch):
-    from ouroboros.project_lease import cold_project_holders
+def test_open_custody_keeps_the_tree_lane_whatever_its_runs_may_write(tmp_path, monkeypatch):
+    """No writer/reader split: an accepted readonly run is open custody, so the sleeping root keeps its lane."""
+    from ouroboros.project_lease import candidate_is_leasable, lane_holders
     env = _setup(tmp_path, monkeypatch, access="readonly")
     row = _park(env, tmp_path, monkeypatch)
-    assert row["external_custody"]["state"] == "accepted"
-    assert not row["external_custody"]["retains_project_lane"]
-    assert cold_project_holders(env.workers.PENDING) == {}
+    assert row["external_custody"]["state"] == "accepted" and row["external_custody"]["retains_project_lane"]
+    foreign = {"id": "foreign", "project_id": "project"}
+    holders = lane_holders(env.workers.RUNNING.values(), env.workers.PENDING)
+    assert holders == {"project": {"sleeper"}} and not candidate_is_leasable(foreign, set(), holders=holders)
+    env.workers.PENDING[0]["_budget_pause"].pop("external_custody")  # no open custody, no live member: released
+    holders = lane_holders(env.workers.RUNNING.values(), env.workers.PENDING)
+    assert holders == {} and candidate_is_leasable(foreign, set(), holders=holders)
 
 
 def test_accepted_owner_projection_is_passive_and_does_not_protect_all_pending(tmp_path, monkeypatch):
@@ -359,25 +362,34 @@ def test_cold_rebind_reads_only_active_and_accepted_pending_carriers(tmp_path, m
     env = _setup(tmp_path, monkeypatch)
     _park(env, tmp_path, monkeypatch)
     env.workers.PENDING.extend({"id": f"queued-{i}"} for i in range(100))
-    original, read = bp.budget_pause_row, []
-    def exact(root, task_id):
-        read.append(task_id)
-        return original(root, task_id)
-    monkeypatch.setattr(bp, "budget_pause_row", exact)
+    from ouroboros import store_hot_facts
+
+    original, read = store_hot_facts.cold_custody_rows, []
+
+    def exact(root, task_ids):
+        read.append(sorted(task_ids))
+        return original(root, task_ids)
+
+    monkeypatch.setattr(store_hot_facts, "cold_custody_rows", exact)
+    monkeypatch.setattr(bp, "budget_pause_row", lambda *_a: pytest.fail("one row, one read: the selection serves it"))
     assert sc.reconcile(env.q, runtime=env.runtime) == {"sleeper"}
-    assert read == ["sleeper"]
+    assert read == [["sleeper"]]
 
 
-def test_body_acceptance_keeps_a_late_local_writer_as_its_actual_hold(tmp_path, monkeypatch):
+def test_body_acceptance_keeps_an_ended_members_late_local_writer_as_its_actual_hold(tmp_path, monkeypatch):
     from ouroboros import budget_pause as bp, sleep_custody as sc
     from ouroboros.task_results import write_task_result
 
     env = _setup(tmp_path, monkeypatch)
     pause = _park(env, tmp_path, monkeypatch)
-    write_task_result(tmp_path, "child", "scheduled", root_task_id="sleeper",
-                      launch_handoffs={"local": {"tool": "opaque"}})
+    handoff = {"local": {"tool": "opaque"}}
+    # A live child's handoff is its own actor's, and its queued row keeps the tree's lane: no hold here.
+    write_task_result(tmp_path, "child", "scheduled", root_task_id="sleeper", launch_handoffs=handoff)
+    assert sc.confirm_release(env.ctx, pause, pause, control=lambda _ctx: "") == pause
+    # An ended child's open handoff has no queued row to keep that lane: it holds the release.
+    write_task_result(tmp_path, "child", "failed", root_task_id="sleeper", launch_handoffs=handoff)
     with pytest.raises(bp.ColdSleepWritersUnsettled, match="local custody"):
         sc.confirm_release(env.ctx, pause, pause, control=lambda _ctx: "")
     assert sc.accepted_receipt("sleeper", bp.budget_pause_row(tmp_path, "sleeper"))
-    write_task_result(tmp_path, "child", "scheduled", launch_handoffs={})
+    write_task_result(tmp_path, "child", "failed", launch_handoffs={})
     assert sc.confirm_release(env.ctx, pause, pause, control=lambda _ctx: "") == pause

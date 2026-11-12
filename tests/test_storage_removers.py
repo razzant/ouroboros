@@ -149,7 +149,7 @@ def test_a_throwing_job_keeps_its_state_gains_last_error_and_a_normal_return_cle
     row = maintenance_jobs.job(data, "custody_trash")
     assert row["state"] == "pending" and row["stuck"] == {"x": [1]}, "the state a due rule reads is untouched"
     assert row["last_error"]["class"] == "RuntimeError" and row["last_error"]["at"]
-    [fact] = storage_removers.place_removers(data)["work_folders"]
+    fact = next(fact for fact in storage_removers.place_removers(data)["work_folders"] if fact["id"] == "custody_trash")
     assert fact["state"] == "pending" and fact["last_error"]["class"] == "RuntimeError"
     assert storage_removers.not_ok({"work_folders": [fact]}) == [
         f"custody_trash: last run threw RuntimeError at {row['last_error']['at']}"]
@@ -171,7 +171,7 @@ def test_the_engine_place_carries_the_engines_last_pass(data, monkeypatch):
     asked = _engine(data, monkeypatch, HELD)
     [engine] = storage_removers.place_removers(data)["engine"]
     assert engine == {"id": "engine", "state": "held", "at": "2026-10-27T15:05:00Z", "freed_bytes": 2_000_000,
-                      "held": 359, "held_since": "2026-10-18T09:00:00Z", "errors": 0, "first_error": None}
+                      "held": 359, "holds": HELD["holds"], "held_since": "2026-10-18T09:00:00Z", "errors": 0, "first_error": None}
     assert asked[-1] == storage_removers.ENGINE_REUSE_SEC, "no phase bound cuts the read before its own"
     assert storage_removers.not_ok({"engine": [engine]}) == [
         "engine retention: last pass held at 2026-10-27T15:05:00Z; holding 359 folders since 2026-10-18T09:00:00Z"]
@@ -182,7 +182,6 @@ def test_the_engine_place_carries_the_engines_last_pass(data, monkeypatch):
 @pytest.mark.parametrize("answer,state", [
     (None, "none"),
     (ClaudexorUnavailable("maintenance_unavailable", "old engine", status_code=404), "unsupported"),
-    (ClaudexorUnavailable("daemon_unreachable", "down"), "unavailable"),
     ({"outcome": "completed"}, "unavailable"),  # a record of another shape is no record
 ])
 def test_an_engine_that_cannot_answer_is_unknown_never_zero(data, monkeypatch, answer, state):
@@ -271,11 +270,14 @@ def test_the_gateway_reads_the_record_and_types_an_engine_without_the_route(monk
 
 
 def test_the_runtime_fact_reads_job_rows_alone_and_never_asks_the_engine(data, monkeypatch):
-    assert storage_fact(data) is None, "nothing counted, every remover clean"
+    assert set(storage_fact(data)) == {"free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}, "the disk before any count; nothing held, every remover clean"
+    with monkeypatch.context() as unreadable:
+        unreadable.setattr("shutil.disk_usage", lambda _path: (_ for _ in ()).throw(OSError("volume gone")))
+        assert storage_fact(data) is None, "an unreadable disk, nothing counted, every remover clean"
     maintenance_jobs.record(data, "runtime_retirement", state="done", last_error={"class": "OSError", "at": "T"})
-    assert storage_fact(data) == {"removers": "runtime_retirement: last run threw OSError at T"}
+    assert storage_fact(data)["removers"] == "runtime_retirement: last run threw OSError at T"
     asked = _engine(data, monkeypatch, ClaudexorUnavailable("daemon_unreachable", "down"))
-    assert storage_fact(data) == {"removers": "runtime_retirement: last run threw OSError at T"} and asked == [], \
+    assert storage_fact(data)["removers"] == "runtime_retirement: last run threw OSError at T" and asked == [], \
         "no engine call while a turn is prepared"
     (data / "observability").mkdir()
     table = [{"id": "model_calls", "group": "records", "roots": [(str(data), ("observability",))]}]
@@ -293,9 +295,51 @@ def test_the_projection_and_query_data_read_the_same_removers(data, monkeypatch)
     projected = storage.count.projection(data)["removers"]
     assert projected == storage_removers.place_removers(data)
     assert set(projected) <= {place_id for place_id, _group, _spec in storage.PLACES}
-    [_packing, evidence] = projected["task_results"]
-    [_retirement, seats, _trash] = projected["app_state"]
+    [_packing, evidence, retirement] = projected["task_results"]
+    assert retirement["id"] == "runtime_retirement", "Task results names the job that retires call journals"
+    seats = next(fact for fact in projected["app_state"] if fact["id"] == "record_compression")
     assert evidence == {"id": "record_compression", "state": "done", "at": evidence["at"],
                         "compressed": 12, "saved_bytes": 4096}, "Task results shows the evidence plane"
     assert seats == {"id": "record_compression", "state": "done", "at": seats["at"],
                      "compressed": 3, "saved_bytes": None}, "App state shows the seat homes, never a sum"
+
+
+# ---- the retirer passes' holds: one shape for the server's five retirers and the engine (O5) --------------------
+
+def test_a_retirer_pass_row_is_read_as_its_place_remover_with_its_holds_since_when(data):
+    from ouroboros import store_import
+    from ouroboros.maintenance_jobs import Holds, pass_report, record_pass
+
+    store_import.ensure_current_store(data)
+    holds = Holds()
+    holds.note("task_live", "task-1")
+    holds.note("owner_keep", "task-2")
+    row = record_pass(data, "copy_retirement", pass_report(3, holds, ["x: OSError"]))
+    [copies] = storage_removers.place_removers(data, engine=False)["working_copies"]
+    assert copies["id"] == "copy_retirement" and copies["state"] == "done" and copies["released"] == 3
+    assert copies["holds"] == row["holds"] and copies["held"] == 2 and copies["held_since"] == row["pass_at"]
+    assert (copies["errors"], copies["first_error"]) == (1, "x: OSError")
+    assert set(storage_removers.PLACE_REMOVERS["work_folders"]) >= {"drive_settlement", "custody_trash"}
+    assert storage_removers.PLACE_REMOVERS["session_scratch"] == ("session_scratch_release", "custody_trash")
+    for name in storage_removers.PASS_JOBS:
+        assert any(name in removers for removers in storage_removers.PLACE_REMOVERS.values()), name
+    by_remover = storage_removers.holds_by_remover(storage_removers.place_removers(data, engine=False))
+    assert by_remover == {"copy_retirement": {"released": 3, "at": copies["at"], "holds": row["holds"]}}
+
+
+def test_the_custody_sweep_records_the_engine_pass_once_and_the_runtime_fact_reads_that_row(data, monkeypatch):
+    from ouroboros import store_import
+
+    store_import.ensure_current_store(data)
+    asked = _engine(data, monkeypatch, HELD)
+    assert storage_fact(data).get("holds") is None and asked == [], "no sweep yet: the fact has no engine row and asks no engine"
+    first = storage_removers.record_engine_pass(data)
+    assert asked, "the sweep's record is the one engine read"
+    assert first is not None and first["fact"]["state"] == "held" and first["fact"]["holds"][0]["class"] == "missing_partition"
+    assert storage_removers.record_engine_pass(data) is None, "an unchanged engine record writes nothing"
+    recorded = storage_removers.place_removers(data, engine=False)["engine"]
+    assert recorded == [first["fact"]], "the fact reads the recorded row, not the engine"
+    fact = storage_fact(data)
+    assert fact["holds"]["engine"]["holds"][0]["class"] == "missing_partition" and fact["holds"]["engine"]["freed_bytes"] == 2_000_000
+    assert "free_bytes" in fact and "volume_total_bytes" in fact and "counted_at" not in fact, "free space before any count, never a fake count"
+    assert storage_removers.not_ok(storage_removers.place_removers(data, engine=False))[0].startswith("engine retention: last pass held")

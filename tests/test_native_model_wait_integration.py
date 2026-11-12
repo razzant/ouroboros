@@ -11,10 +11,35 @@ from ouroboros import cancel_intents, model_wait, owner_mailbox, server_restart
 from supervisor import active_activity, workers
 from supervisor.task_model_wait import handle_task_model_wait
 from tests.test_model_wait import _action_for, _decision_clients
-from tests.test_native_conversation_activity import _native_chat_thread, _next_native_phase
+from tests.test_native_conversation_activity import _next_native_phase
 from tests.test_post_task_model_wait import phase as post_phase_fixture
 
 phase = post_phase_fixture
+
+
+def _native_chat_thread(monkeypatch, actor, chat_id, phases, *, root, events, project_id, text="ordinary conversation"):
+    """The owner's turn through the real door (a lane RUNNING row, the ready spare's queue), carried by the
+    real worker body with ``actor`` on a thread; phases and errors travel by the queue, never by timing."""
+    from supervisor import worker_chat_lane
+    from tests.conversation_carrier_support import carry, isolate_lane_pool
+
+    [spare] = isolate_lane_pool(monkeypatch, root, event_q=events)
+    assert workers.open_repo_writer_admission()
+    worker_chat_lane.handle_chat_direct(chat_id, text, task_metadata={"project_id": project_id, "origin_suppressed": True})
+    [task_id] = [tid for tid, meta in workers.RUNNING.items() if meta.get("lane") == "conversation"]
+    assert spare.busy_task_id == task_id
+
+    def run():
+        try:
+            carry(workers, spare, actor)
+        except BaseException as error:
+            phases.put(error)
+        finally:
+            phases.put("returned")
+
+    thread = threading.Thread(target=run)
+    thread.spare, thread.task_id = spare, task_id
+    return thread
 
 
 def test_native_wait_controls_and_manual_restart_address_all_registered_actors(tmp_path, monkeypatch):
@@ -139,7 +164,7 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
             return pending
 
     actor = Actor()
-    thread = _native_chat_thread(monkeypatch, actor, 7 if project_id else 1, phases,
+    thread = _native_chat_thread(monkeypatch, actor, 7 if project_id else 1, phases, root=f.root, events=f.events,
                                  project_id=project_id, text="Already answered")
     release_stop, stop_observed = threading.Event(), threading.Event()
     try:
@@ -148,11 +173,13 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
         owner, task_id = observed["owner"], f.task["id"]
         row = next(row for row in owner.waits.values() if row["state"] == "waiting")
         assert workers.direct_chat_turn(task_id) is None  # ordinary dialogue remains closed
-        assert active_activity.get_direct_activity_registry().get(task_id).actor is actor
+        # The lane row is the turn's custody (its carrier holds the slot); no in-process actor is registered.
+        assert active_activity.get_direct_activity_registry().get(task_id) is None
+        assert workers.RUNNING[task_id]["worker_id"] == thread.spare.wid and thread.spare.busy_task_id == task_id
         assert post_task_model_wait(f.root, task_id) is owner
-        assert workers.drain_repo_writers(0) == [task_id]
+        assert workers.drain_repo_writers(0) == []  # the row is the pool's to stop, not a writer of this process
         activity = next(item for item in _chat_activities_snapshot_safe(f.root) if item["activity_id"] == task_id)
-        assert activity["kind"] == "direct_chat" and activity["phase"] == "finalizing"
+        assert activity["kind"] == "direct_chat"
         assert activity["model_waits"][row["wait_id"]]["state"] == "waiting"
         assert not row["worker_slot_held"]
         events = list(f.events.queue)
@@ -229,7 +256,7 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
             assert f.engine.uploads[-1][0]["account"] == {"mode": "pin", "profileId": "replacement"}
         else:
             assert row["resolution"] == "cancelled"
-            assert f.stages == ["facts", "scratch", "promotion"]
+            assert f.stages == ["facts", "draft", "promotion"]
         assert workers.drain_repo_writers(0) == []
         assert post_task_model_wait(f.root, task_id) is None
     finally:

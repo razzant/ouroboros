@@ -18,7 +18,7 @@ from tests.test_composer_subagents_browser import STATE_READS, SUBAGENTS, _hold,
 from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 EFFORT = "#page-chat .chat-effort-range"
 # The hint of the capsule `sel` against the window that shows it (the visual viewport where there is one).

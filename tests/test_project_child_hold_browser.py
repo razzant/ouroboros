@@ -19,10 +19,10 @@ from tests.test_project_admission_refusal_browser import _producers
 from tests.test_project_authority_outages import _uncertain_child
 from tests.test_project_hold_recovery import worker
 from tests._store_shared import result_signature
-from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
+from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame, state_reads
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WAIT = "Waiting for Project verification"
 CHILD = '.chat-live-card[data-task-id="held"]'
 # A held card waits for something that ends by itself: still dots on a neutral chip, nothing that moves, no amber.
@@ -46,6 +46,7 @@ def _assert_narrow_identity(card):
         const r = role.getBoundingClientRect(), c = chip.getBoundingClientRect();
         const d = details.getBoundingClientRect();
         return {width: r.width, clipped: role.scrollWidth > role.clientWidth,
+            cut: role.scrollHeight > role.clientHeight + 1, lines: r.height / parseFloat(style.lineHeight),
             ellipsis: style.textOverflow, overflow: style.overflowX, whiteSpace: style.whiteSpace,
             roleTop: r.top, chipTop: c.top,
             detailsTop: d.top - parseFloat(getComputedStyle(details).marginTop),
@@ -55,8 +56,11 @@ def _assert_narrow_identity(card):
     }""")
     assert facts["width"] >= 40, facts  # A readable role fragment, not a zero-width flex item.
     assert role.is_visible() and role.inner_text() == "researcher"
-    assert facts["clipped"] and facts["ellipsis"] == "ellipsis", facts
-    assert facts["overflow"] == "hidden" and facts["whiteSpace"] == "nowrap", facts
+    # A role is sized by its own words and takes a second line before it is cut (DESIGN "A nested child card is
+    # subordinate to its root", owner 29.10): this short one stands whole beside a status that wraps inside its chip,
+    # and the clamp that would cut a longer one ends in an ellipsis.
+    assert not facts["clipped"] and not facts["cut"] and facts["lines"] <= 2.2, facts
+    assert facts["ellipsis"] == "ellipsis" and facts["overflow"] == "hidden" and facts["whiteSpace"] == "normal", facts
     assert abs(facts["roleTop"] - facts["chipTop"]) <= 1, facts
     assert abs(facts["detailsTop"] - facts["chipTop"]) <= 1, facts
     assert facts["ordered"] and facts["cardFits"] and facts["chipFits"], facts
@@ -130,7 +134,7 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
             errors = PageErrors(page, engine)
             page.route("**/api/tasks*", task_transport)
             page.route("**/api/tasks/**", task_transport)
-            page.route("**/api/state", state_transport)
+            page.route(state_reads, state_transport)
             page.goto(server["url"], wait_until="domcontentloaded")
             page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
             page.wait_for_selector('#chat-messages[data-history-hydrated="true"]')
@@ -308,7 +312,7 @@ def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_s
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.route("**/api/tasks*", task_transport)
             page.route("**/api/tasks/**", task_transport)
-            page.route("**/api/state", state_transport)
+            page.route(state_reads, state_transport)
             page.goto(server["url"], wait_until="domcontentloaded")
             page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
             page.wait_for_selector('#chat-messages[data-history-hydrated="true"]')

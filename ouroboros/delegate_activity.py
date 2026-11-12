@@ -1,10 +1,7 @@
 """What a delegated executor said and did, kept typed on the existing progress carrier (#1350).
 
-``delegate_progress`` observes a run by polling its detail, whose ``timeline`` rows carry
-typed facts (text kind, delta, severity, actor) but no identity of their own. Flattening
-them into one string before any consumer saw them made the executor's sentences sit behind
-``Bash · tool_result`` labels, dropped severity, and left history with overlapping window
-snapshots that no reader could reconcile. This module keeps the facts typed instead:
+``delegate_progress`` and the body's feed (``delegate_feed``) share this projection of journal events and
+bounded timeline windows: text kind, delta, severity and actor stay typed for every consumer.
 
 * **Source identity.** Each record covers an exact run-journal range, ``after_seq``
   (exclusive) to ``source.read_through`` (inclusive), read from the engine's own event
@@ -26,12 +23,13 @@ snapshots that no reader could reconcile. This module keeps the facts typed inst
 * **Commit after emission.** The per-run cursor moves only when the caller reports the
   frame emitted. A process that lost it resumes at the last retained range, re-reading
   that range once; a reader's seq identity keeps it shown once.
-* **Honest gaps.** A range a bounded read did not reach is named by seq with its reason.
-  A failed read does not advance the cursor: the record shows the bounded timeline window
-  as provisional and the next read retries the exact range. At the run's end the wait
-  drains the tail within its own read allowance, checking owner controls and remaining
-  time before each catalog/stream read; an unread tail stays a final gap with its source.
-  An engine without the stream keeps the window view.
+* **Honest gaps.** Unreadable or missing events inside a served range stay explicit gaps.
+  The body follows the journal through its terminal tail (``Feed.follow``); failed reads keep
+  its cursor for retry. An engine without the stream keeps the window view. The engine's
+  refusal (``stream_error:<code>``) keeps what it served before it: a retryable one is retried;
+  a permanent one is not read again. Later window records name the refused range, pass it
+  only after emission, and promise no later read. Retained legacy provisional/final gaps
+  remain readable and replayable.
 * **Voice.** The executor's words stay attributed to the executor; the frame keeps
   ``narration=False``. An executor sentence is not evidence that a claim holds.
 * **One utterance per engine key.** A message the engine keys (``speech``: an opaque key,
@@ -58,10 +56,9 @@ import logging
 import os
 import re
 import threading
-import time
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.utils import truncate_within_limit
 
@@ -86,7 +83,6 @@ _DETAIL_CHARS = 160
 _RECAP_CHARS = 700
 _LINE_MESSAGE_CHARS = 600
 _PROGRESS_TEXT_CHARS = 2000
-_RETRY_SEC = 0.5
 _OMISSION = "\n⚠️ OMISSION NOTE: truncated at "
 # The engine's typed error kinds beyond ``payload.error`` / ``tool.status == "error"``:
 # mirrors ERROR_EVENT_TYPES in Claudexor control-api/src/run-timeline.ts (80ef3839).
@@ -111,6 +107,7 @@ class _RunMemo:
     drafts: "OrderedDict[str, Tuple[str, Any, int, Optional[int]]]" = field(default_factory=OrderedDict)
     speech_whole: Optional[bool] = None
     pending_drafts: Optional["OrderedDict[str, Tuple[str, Any, int, Optional[int]]]"] = None
+    refused: Optional[Dict[str, Any]] = None  # the engine's refusal of the stream for good: never read again
 
 
 _MEMO: "OrderedDict[Tuple[str, str], _RunMemo]" = OrderedDict()
@@ -119,10 +116,7 @@ _MEMO_LOCK = threading.Lock()
 
 def reset_process_memo() -> None:
     """Forget what this process showed and which engines list the stream (tests reuse ids)."""
-    from ouroboros.gateways import claudexor_run_events
-
-    from ouroboros import delegate_observe
-    from ouroboros.gateways import claudexor_observation
+    from ouroboros.gateways import claudexor_observation, claudexor_run_events
 
     with _MEMO_LOCK:
         _MEMO.clear()
@@ -130,7 +124,6 @@ def reset_process_memo() -> None:
         claudexor_run_events._SUPPORT.clear()
     with claudexor_observation._SUPPORT_LOCK:
         claudexor_observation._SUPPORT.clear()
-    delegate_observe.reset_process_seen()
 
 
 def _memo(task_id: str, run_id: str) -> _RunMemo:
@@ -386,7 +379,7 @@ def _displayed(drafts: "OrderedDict[str, Tuple[str, Any, int, Optional[int]]]", 
     """Keep a draft's displayed prefix only while its frame texts showed every piece whole:
     kept uncut in the record, within its line's bound, in a frame within its own bound.
     Otherwise the frame log prints its complete text from the start (within those bounds)."""
-    fits = len(_frame(record)) <= _PROGRESS_TEXT_CHARS
+    fits = len(progress_text(record, limit=None)) <= _PROGRESS_TEXT_CHARS
     shown = {(part["actor"], part["speech"]["key"]) for part in record["parts"]
              if fits and (part.get("speech") or {}).get("op") == "fragment" and not part.get("truncated")
              and len(part["text"]) <= _LINE_MESSAGE_CHARS}
@@ -639,31 +632,42 @@ def _commit(memo: _RunMemo, record: Dict[str, Any], shown_through: Optional[int]
     return commit
 
 
-def shown_cursor(ctx: Any, task_id: str, run_id: str, after_seq: Optional[int]) -> int:
-    """Where this process's view of the run's journal ends: what it showed, else the last
-    retained range, else the journal's beginning — the same resolution ``observations`` makes."""
+def shown_cursor(ctx: Any, task_id: str, run_id: str, after_seq: Optional[int] = None) -> int:
+    """Where this process's view of the run's journal ends: what it showed, else the last retained
+    range (read again once), else the journal's beginning; ``window_observations`` resumes here too,
+    narrowed by its own cursor (``after_seq``), which the body's feed does not have."""
     memo = _memo(task_id, run_id)
     if memo.shown_through is None:
         retained = _retained_range(ctx, task_id, run_id)
-        memo.shown_through = min(int(after_seq or 0), retained[0] - 1) if retained else 0
+        start = retained[0] - 1 if retained else 0
+        memo.shown_through = start if after_seq is None or not retained else min(int(after_seq or 0), start)
     return int(memo.shown_through or 0)
 
 
-def stream_observations(ctx: Any, run_id: str, read: Any, *, after: int):
-    """The typed record of one journal read the caller already made (the supervised wait's
-    speech read), with the commit its emitter calls; nothing for a read that carried no event."""
-    if not read.events:
-        return
+def stream_observations(ctx: Any, run_id: str, read: Any, *, after: int, through: Optional[int] = None,
+                        gaps: Optional[List[Dict[str, Any]]] = None):
+    """Retain one journal read and yield its frame/commit, optionally naming an observed fence and unread gaps."""
     task_id = str(getattr(ctx, "task_id", "") or "")
     memo = _memo(task_id, run_id)
-    source: Dict[str, Any] = {"kind": "run_events", "read_through": read.through_seq, "events": len(read.events)}
+    memo.refused = dict(read.problem) if read.problem is not None and not read.problem["retryable"] else memo.refused
+    availability = not read.events and through is None and memo.refused is not None
+    if not read.events and through is None and not (availability and after > 0):
+        return
+    through = max(read.through_seq, after) if through is None else through
+    source: Dict[str, Any] = {"kind": "timeline_window" if availability else "run_events", "read_through": read.through_seq, "events": len(read.events)}
+    if read.problem is not None:
+        source.update(reason=f"stream_error:{read.problem['code']}", retryable=read.problem["retryable"])
     if read.ended:
         source["ended"] = True
-    ref = _persist(ctx, task_id, run_id, read.events)
-    source.update({"ref": ref} if ref else {"retained": False})
-    record = _record(task_id, run_id, int(after), int(read.through_seq),
-                     [_event_item(event.seq, event.value) for event in read.events], source, [], memo)
-    yield record, _commit(memo, record, read.through_seq)
+    if read.events:
+        ref = _persist(ctx, task_id, run_id, read.events)
+        source.update({"ref": ref} if ref else {"retained": False})
+    if memo.refused is not None and memo.pending is not None:
+        yield from retained_observations(ctx, run_id)
+        after = max(after, int(memo.shown_through or 0))
+    record = _record(task_id, run_id, 0 if availability else int(after), max(int(through), int(after)),
+                     [_event_item(event.seq, event.value) for event in read.events if event.seq > after], source, gaps or [], memo)
+    yield record, _commit(memo, record, through if memo.refused is not None and gaps else read.through_seq)
 
 
 def retained_observations(ctx: Any, run_id: str):
@@ -676,10 +680,12 @@ def retained_observations(ctx: Any, run_id: str):
     if memo.pending is not None:
         record = memo.pending
         source = record["source"]
-        shown = (None if source.get("provisional") else
-                 source.get("read_through", record["through_seq"]))
+        refused = any(gap.get("retryable") is False for gap in record.get("gaps") or [])
+        shown = (None if source.get("provisional") else record["through_seq"] if refused
+                 else source.get("read_through", record["through_seq"]))
         yield record, _commit(memo, record, shown)
-        return
+        if memo.pending is record:
+            return  # the caller did not commit; never advance past that undelivered frame
     after = int(memo.shown_through or 0)
     for first, last, ref in _retained_sources(ctx, task_id, run_id):
         if last <= after or first > after + 1:
@@ -703,151 +709,30 @@ def retained_observations(ctx: Any, run_id: str):
         after = int(memo.shown_through or 0)
 
 
-def _owner_stop(ctx: Any, task_id: str) -> str:
-    """The existing native owner and durable Stop/Panic facts; ``""`` when none."""
-    try:
-        from ouroboros.cancel_intents import cancel_pending
-        from ouroboros.delegate_custody import custody_root
-        from ouroboros.model_wait import current_model_wait
-        from ouroboros.delegate_recovery import owner_restart_in_progress
+def window_observations(ctx: Any, run_id: str, advance: Any, *, after_seq: int):
+    """The body's window fallback after it found no journal or a permanent refusal.
 
-        owner = current_model_wait()
-        if owner is not None and (reason := owner.control_reason()):
-            return reason
-        root = custody_root(ctx)
-        if owner_restart_in_progress(root):
-            return "owner_restart"
-        return "cancelled" if cancel_pending(root, task_id) else ""
-    except Exception:
-        log.debug("owner stop facts unreadable during a delegated drain", exc_info=True)
-        return "control_unavailable"
-
-
-def _read_allowance(ctx: Any, task_id: str, until: float, read_sec: float,
-                    read_remaining: Optional[Callable[[], float]]) -> Tuple[float, str]:
-    """Narrow to existing operation/task clocks, without minting a positive floor."""
-    from ouroboros.deadline_utils import dispatch_window_remaining_sec
-    from ouroboros.model_wait import current_model_wait, dispatch_deadline_remaining_sec
-    from ouroboros.task_pacing import effective_finalization_reserve_sec
-
-    stopped = _owner_stop(ctx, task_id)
-    if stopped:
-        return 0.0, f"owner_{stopped}"
-    remaining = min(float(read_sec), until - time.monotonic())
-    if read_remaining is not None:
-        remaining = min(remaining, read_remaining())
-    if remaining <= 0:
-        return 0.0, "read_bound:time"
-    metadata = getattr(ctx, "task_metadata", {}) or {}
-    owner = current_model_wait()
-    bounds = (dispatch_window_remaining_sec(deadline_at=metadata.get("deadline_at"),
-                                           reserve_sec=effective_finalization_reserve_sec(ctx)),
-              dispatch_deadline_remaining_sec(),
-              owner.execution_window_remaining() if owner is not None else None)
-    for bound in bounds:
-        if bound is not None:
-            remaining = min(remaining, bound)
-    return (remaining, "") if remaining > 0 else (0.0, "owner_deadline")
-
-
-def _gap(after: int, through: int, reason: str, final: bool) -> Dict[str, Any]:
-    gap: Dict[str, Any] = {"after_seq": after, "through_seq": through, "reason": reason}
-    return {**gap, "final": True, "where": "run_journal"} if final else gap
-
-
-def observations(ctx: Any, gateway: Any, run_id: str, advance: Any, *, after_seq: int, read_sec: float,
-                 drain_sec: Optional[float] = None,
-                 read_remaining: Optional[Callable[[], float]] = None) -> Iterator[Tuple[Dict[str, Any], Callable[[], None]]]:
-    """The typed records for one wait advance, each with the commit its emitter calls.
-
-    Resumes from what this process committed for the run (else the last retained range,
-    else the journal's beginning). The wait's ``after_seq`` is a wake cursor, not evidence
-    that its earlier events reached this consumer. One bounded read per advance; with
-    ``drain_sec`` (the run ended) the
-    reads repeat within that allowance until the journal's end or the bound, retrying a
-    failed read. A record is yielded before its cursor moves: an emitter that raises leaves
-    the range to be read again. Without the stream, the advance's window rows are the view.
-    ``read_remaining`` consults the caller's original operation clock before each request;
-    in-flight HTTP socket phases retain the transport's bounds, not total-wall preemption.
+    Replay unshown local words first, then commit the new window only after emission. No engine
+    read belongs here: ``Feed.follow`` owns the journal, including its terminal tail. A refused
+    journal's gap names its range without promising a later read; an unlisted journal claims no
+    exact coverage. Window rows have no sequence identity of their own.
     """
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-    from ouroboros.gateways.claudexor_run_events import read_run_events, run_events_supported
-
     task_id = str(getattr(ctx, "task_id", "") or "")
     memo = _memo(task_id, run_id)
-    if memo.shown_through is None:
-        retained = _retained_range(ctx, task_id, run_id)
-        memo.shown_through = min(int(after_seq or 0), retained[0] - 1) if retained else 0
-    through = int(advance.seq)
-    final = drain_sec is not None
-    until = time.monotonic() + max(0.0, float(drain_sec if final else read_sec))
-    rows = [_window_item(row) for row in list(getattr(advance, "events", None) or [])]
-    window = {"rows": len(rows), **({"rows_omitted": advance.events_omitted}
-                                    if getattr(advance, "events_omitted", 0) else {})}
-    after = int(memo.shown_through or 0)
-    while True:
-        if through <= after:
-            return
-        read, listed = None, True
-        allowance, reason = _read_allowance(ctx, task_id, until, read_sec, read_remaining)
-        try:
-            if allowance > 0:
-                listed = run_events_supported(gateway, timeout_sec=allowance)
-                allowance, reason = _read_allowance(ctx, task_id, until, read_sec, read_remaining)
-                if listed and allowance > 0:
-                    read = read_run_events(gateway, run_id, after_seq=after, timeout_sec=allowance,
-                                           through_seq=None if final else through)
-        except ClaudexorUnavailable as exc:
-            reason = f"stream_unavailable:{exc.code}"
-        except Exception:
-            log.debug("delegated activity read of %s failed", run_id, exc_info=True)
-            reason = "stream_read_failed"
-        if not listed:
-            # No exact source on this engine at all: the bounded window is the whole view
-            # and nothing better will come, so the cursor passes the range.
-            record = _record(task_id, run_id, after, through, rows,
-                             {"kind": "timeline_window", "reason": "stream_not_listed", **window}, [], memo)
-            yield record, _commit(memo, record, through)
-            return
-        allowance, cut = _read_allowance(ctx, task_id, until, read_sec, read_remaining)
-        if read is None:
-            if final and allowance > 0:
-                time.sleep(min(_RETRY_SEC, allowance))
-                allowance, cut = _read_allowance(ctx, task_id, until, read_sec, read_remaining)
-                if allowance > 0:
-                    continue
-            # The exact range stays unread and the cursor stays: this row is the window,
-            # marked provisional, and a later exact record covering the range supersedes it.
-            if not reason:
-                reason = cut
-            elif cut.startswith("owner_") and cut != reason:
-                reason = f"{reason};{cut}"
-            record = _record(task_id, run_id, after, through, rows,
-                             {"kind": "timeline_window", "reason": reason, "provisional": True, **window},
-                             [_gap(after, through, reason, final)], memo)
-            yield record, _commit(memo, record, None)
-            return
-        through = max(through, read.through_seq)
-        caught_up = read.through_seq >= through
-        if not caught_up and not read.ended and not read.events and final and allowance > 0:
-            time.sleep(min(_RETRY_SEC, allowance))
-            continue  # a quiet read of an ended run: nothing to show yet, the allowance remains
-        more = not caught_up and not read.ended and final and allowance > 0
-        gap_reason = "stream_end_before_fence" if read.ended else cut or f"read_bound:{read.stop}"
-        gaps = [] if caught_up or more else [_gap(read.through_seq, through, gap_reason, final)]
-        source: Dict[str, Any] = {"kind": "run_events", "read_through": read.through_seq, "events": len(read.events)}
-        if read.ended:
-            source["ended"] = True
-        if read.events:
-            ref = _persist(ctx, task_id, run_id, read.events)
-            source.update({"ref": ref} if ref else {"retained": False})
-        record = _record(task_id, run_id, after, through,
-                         [_event_item(event.seq, event.value) for event in read.events], source, gaps, memo)
-        yield record, _commit(memo, record, read.through_seq)
-        if not more:
-            return
-        # Resumed only after its emitter committed the record: the drain reads on from here.
-        after, rows, window = read.through_seq, [], {"rows": 0}
+    shown_cursor(ctx, task_id, run_id, after_seq)
+    yield from retained_observations(ctx, run_id)
+    after, through = shown_cursor(ctx, task_id, run_id, after_seq), int(advance.seq)
+    if through <= after:
+        return
+    rows = [_window_item(row) for row in advance.events]
+    problem = memo.refused
+    reason = f"stream_error:{problem['code']}" if problem else "stream_not_listed"
+    source = {"kind": "timeline_window", "reason": reason, "rows": len(rows),
+              **({"retryable": False} if problem else {}),
+              **({"rows_omitted": advance.events_omitted} if advance.events_omitted else {})}
+    gaps = [{"after_seq": after, "through_seq": through, "reason": reason, "retryable": False}] if problem else []
+    record = _record(task_id, run_id, after, through, rows, source, gaps, memo)
+    yield record, _commit(memo, record, through)
 
 
 # -- plain renderings (frame text, Telegram card) ----------------------------------------
@@ -864,6 +749,12 @@ def gap_line(gap: Dict[str, Any], run_id: str) -> str:
                 f"the retained source keeps every line served")
     if gap.get("reason") == "stream_end_before_fence":
         return f"not shown: {span} (stream ended before the observed cursor); coverage unresolved on run {run_id}"
+    if gap.get("retryable") is False:  # the engine refused the stream for good
+        return (f"not shown: {span} ({gap.get('reason')}); run {run_id}'s journal can no longer be read, "
+                f"so no later delegate_wait shows them — the run's result is reported separately")
+    if gap.get("final") and gap.get("retryable"):
+        return (f"not shown: {span} ({gap.get('reason')}); the engine could not read run {run_id}'s journal — "
+                f"another delegate_wait on the run tries again")
     if gap.get("final"):
         return (f"not shown: {span} ({gap.get('reason')}); the wait returned before reading them — "
                 f"they remain on run {run_id}'s journal, and another delegate_wait on the run reads them")
@@ -907,8 +798,7 @@ def activity_lines(activity: Dict[str, Any], *, message_chars: int, recap: bool,
         if part.get("kind") == "problem":
             label = " ".join(v for v in (_actor_label(part.get("actor", "")), part.get("label", "")) if v)
             lines.append(f"⚠ {label}: {_text(part.get('text'), 300)}")
-    thinking = sum(1 for part in parts if part.get("kind") == "thinking")
-    if thinking:
+    if thinking := sum(1 for part in parts if part.get("kind") == "thinking"):
         lines.append(f"thinking ×{thinking} (in the task card's details)")
     technical = activity.get("technical") or {}
     if technical.get("count"):
@@ -925,19 +815,16 @@ def activity_lines(activity: Dict[str, Any], *, message_chars: int, recap: bool,
     return lines
 
 
-def _frame(activity: Dict[str, Any]) -> str:
-    """The frame text before its own bound."""
+def progress_text(activity: Dict[str, Any], *, limit: Optional[int] = _PROGRESS_TEXT_CHARS) -> str:
+    """The frame text: speech-first, bounded, naming the retained source."""
     head = f"🛰 delegated run {activity['run_id']} @seq {activity['through_seq']}"
     lines = activity_lines(activity, message_chars=_LINE_MESSAGE_CHARS, recap=False, log=True)
     ref = (activity.get("source") or {}).get("ref") or {}
     if ref.get("path"):
         lines.append(f"source: {ref.get('root')}:{ref['path']}")
-    return "\n".join([head, *lines]) if lines else f"{head}: (new session events)"
-
-
-def progress_text(activity: Dict[str, Any]) -> str:
-    """The frame text: speech-first, bounded, naming the retained source."""
-    return truncate_within_limit(_frame(activity), _PROGRESS_TEXT_CHARS)
+    text = "\n".join([head, *lines]) if lines else f"{head}: " + (
+        "journal unavailable; shown words and retained sources are unchanged" if (activity.get("source") or {}).get("retryable") is False else "(new session events)")
+    return text if limit is None else truncate_within_limit(text, limit)
 
 
 def card_text(activity: Dict[str, Any], limit: int) -> str:

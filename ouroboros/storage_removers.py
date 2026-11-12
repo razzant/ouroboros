@@ -1,15 +1,18 @@
-"""Who retires or shrinks what each counted place holds, and how its last pass ended.
+"""Who retires or shrinks what each counted place holds, how its last pass ended and what it holds.
 
 Dashboard -> Storage shows one line per place from ``place_removers`` and ``query_data(kind="storage")``
 returns the same facts; both read them on every request, with or without a count. A place names its
 removers (``PLACE_REMOVERS``): the maintenance child's job rows (``maintenance_jobs``: the row's state,
-``last_error`` while its last run threw, ``record_compression``'s totals for the plane in that place) and,
+``last_error`` while its last run threw, ``record_compression``'s totals for the plane in that place), the
+server's five retirer passes (drive settlement, private copies, review checkouts, session scratch, engine
+program copies: ``maintenance_jobs.record_pass`` rows with ``released`` and typed ``holds`` since when) and,
 for the engine place, the engine's last retention pass (the read-only ``GET /v2/maintenance/gc``, which
 never starts one; answered within a wall bound, connect and read together, the read itself ended by a
 longer one, a projection polled every second reusing a record read in the last few seconds). An engine
 that cannot be asked, or not within the bound, is ``unavailable`` and one that keeps no such record
 ``unsupported``: unknown, never zero. The runtime ``storage`` fact reads the job rows alone
-(``engine=False``: no engine call while a turn is prepared); ``not_ok`` names what it lists.
+(``engine=False``: no engine call while a turn is prepared; the engine row is then the one the custody
+sweep last recorded, ``ENGINE_RECORD_JOB``); ``not_ok`` names what it lists.
 """
 from __future__ import annotations
 
@@ -25,16 +28,23 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
 
 from ouroboros import maintenance_jobs, store
 
-# place id -> its removers: the maintenance child's jobs that retire or shrink its bytes, and ``engine``.
+# place id -> its removers: the maintenance child's jobs and the server's retirer passes that retire or
+# shrink its bytes (job rows), and ``engine``. Every server retirer of a disposable plane is named here, so
+# a pass that keeps everything is a fact the page shows, never a silent no-op.
 PLACE_REMOVERS: Dict[str, tuple] = {
     "model_calls": ("evidence_packing",),
     "engine": ("engine",),
-    "task_results": ("evidence_packing", "record_compression"),
+    "task_results": ("evidence_packing", "record_compression", "runtime_retirement"),
     "archives": ("evidence_packing",),
-    "work_folders": ("custody_trash",),
-    "app_state": ("runtime_retirement", "record_compression", "custody_trash"),
+    "work_folders": ("drive_settlement", "custody_trash"),
+    "working_copies": ("copy_retirement",),
+    "session_scratch": ("session_scratch_release", "custody_trash"),
+    "app_state": ("runtime_retirement", "record_compression", "custody_trash", "review_checkout_prune", "engine_runtime_prune"),
     "data_other": ("runtime_retirement",),
 }
+ENGINE_RECORD_JOB = "engine_retention"  # the engine's last pass as the custody sweep recorded it (no engine call)
+# The retirer passes (``maintenance_jobs.record_pass`` rows): released count, typed holds since when.
+PASS_JOBS = ("drive_settlement", "copy_retirement", "review_checkout_prune", "session_scratch_release", "engine_runtime_prune")
 # record_compression's plane in a place: task evidence in Task results, reviewer seat homes in App state.
 _COMPRESSION_PLANES = {"task_results": "evidence", "app_state": "seats"}
 ENGINE_READ_SEC = 2.0  # the answer: connect and read together, in wall time (a later record fills the reuse slot)
@@ -45,18 +55,20 @@ _recent_lock = threading.Lock()
 
 
 class StorageRemover(TypedDict):
-    """One remover of a place: a maintenance job's row or the engine's last retention pass."""
+    """One remover of a place: a maintenance job's row, a server retirer pass's row or the engine's last retention pass."""
 
-    id: str  # engine | runtime_retirement | custody_trash | evidence_packing | record_compression
+    id: str  # engine | runtime_retirement | custody_trash | evidence_packing | record_compression | drive_settlement | copy_retirement | review_checkout_prune | session_scratch_release | engine_runtime_prune
     state: str  # a job: pending | running | done | failed | never | unsupported | unavailable; the engine: completed | held | truncated | failed | none | unavailable | unsupported
     at: Optional[str]  # the job row's last write; the engine pass's end
     last_error: NotRequired[Dict[str, str]]  # a job whose last run threw: {class, at}, until a run returns normally
     compressed: NotRequired[int]  # record_compression: files compressed so far in this place's plane
     saved_bytes: NotRequired[Optional[int]]  # record_compression: that plane's allocation saved; null where unreported
     freed_bytes: NotRequired[int]  # the engine pass
-    held: NotRequired[int]  # the engine pass: folders it held (project roots and native homes)
+    released: NotRequired[int]  # a retirer pass: items it released
+    holds: NotRequired[List[Dict[str, Any]]]  # a retirer pass or the engine pass: typed holds {class, count, example, since}
+    held: NotRequired[int]  # the engine pass: folders it held (project roots and native homes); a retirer pass: items held
     held_since: NotRequired[str]  # the earliest of those holds
-    errors: NotRequired[int]  # the engine pass's errors
+    errors: NotRequired[int]  # the engine pass's errors; a retirer pass's pass-level errors
     first_error: NotRequired[Optional[str]]
 
 
@@ -64,14 +76,14 @@ def place_removers(data_root: Any, *, engine: bool = True, recent: bool = False)
     """Each place's removers as read now (module docstring); a place nothing removes is absent. ``engine``
     False reads the local job rows alone; ``recent`` reuses an engine record read in ``ENGINE_REUSE_SEC``."""
     root = pathlib.Path(data_root)
-    names = sorted({name for names in PLACE_REMOVERS.values() for name in names if name != "engine"})
+    names = sorted({name for names in PLACE_REMOVERS.values() for name in names if name != "engine"} | {ENGINE_RECORD_JOB})
     rows: Optional[Dict[str, Dict[str, Any]]] = {}  # no store file yet: no job has recorded a fact (and a
     if store.store_path(root).is_file():            # passive read never lists a folder to learn that)
         try:
             rows = maintenance_jobs.jobs(root, names)
         except Exception:  # an unreadable store: each job's outcome is unknown, never "not run"
             rows = None
-    engine_fact = _engine(root, recent=recent) if engine else None
+    engine_fact = _engine(root, recent=recent) if engine else _recorded_engine(rows)
     found = {place: [engine_fact if name == "engine" else _job(name, rows, place) for name in removers]
              for place, removers in PLACE_REMOVERS.items()}
     return {place: [fact for fact in removers if fact is not None]  # type: ignore[misc]
@@ -93,7 +105,41 @@ def _job(name: str, rows: Optional[Dict[str, Dict[str, Any]]], place: str) -> St
     total = totals.get(_COMPRESSION_PLANES.get(place, "")) or {}
     if "compressed" in total:  # this place's own plane, never a job-wide sum under two places
         fact["compressed"], fact["saved_bytes"] = int(total.get("compressed") or 0), total.get("saved_bytes")
+    if "holds" in row:  # a retirer pass (maintenance_jobs.record_pass) or the trash job: what it released, what it holds, since when
+        holds = [dict(hold) for hold in row.get("holds") or () if isinstance(hold, dict)]
+        released = row.get("released") if "released" in row else row.get("removed")  # the trash job counts what it removed
+        fact["released"], fact["holds"], fact["held"] = int(released or 0), holds, sum(int(h.get("count") or 0) for h in holds)
+        since = sorted(str(hold["since"]) for hold in holds if hold.get("since"))
+        if since:
+            fact["held_since"] = since[0]
+        if row.get("errors"):
+            fact["errors"], fact["first_error"] = len(row["errors"]), str(row["errors"][0])
     return fact
+
+
+def _recorded_engine(rows: Optional[Dict[str, Dict[str, Any]]]) -> Optional[StorageRemover]:
+    """The engine's last pass as the custody sweep recorded it (``ENGINE_RECORD_JOB``, written by
+    ``record_engine_pass`` when it changed): the Runtime fact's engine row, with no engine call. None
+    while nothing was recorded (no engine, or no sweep yet); unavailable when the rows cannot be read."""
+    if rows is None:
+        return {"id": "engine", "state": "unavailable", "at": None}
+    row = (rows or {}).get(ENGINE_RECORD_JOB) or {}
+    fact = row.get("fact")
+    return dict(fact) if isinstance(fact, dict) and fact.get("id") == "engine" else None  # type: ignore[return-value]
+
+
+def record_engine_pass(data_root: Any) -> Optional[Dict[str, Any]]:
+    """Read the engine's last pass once (``ENGINE_READ_SEC`` bound) and record it as ``ENGINE_RECORD_JOB``
+    when it differs from the row: the custody sweep's step, so the mind's fact shows the engine's holds
+    without asking the engine while a turn is prepared. Returns the row written, or None."""
+    root = pathlib.Path(data_root)
+    fact = _engine(root)
+    if fact is None:
+        return None
+    current = maintenance_jobs.job(root, ENGINE_RECORD_JOB) or {}
+    if current.get("fact") == fact:
+        return None
+    return maintenance_jobs.record(root, ENGINE_RECORD_JOB, state="done", fact=fact)
 
 
 def _engine(root: pathlib.Path, *, recent: bool = False) -> Optional[StorageRemover]:
@@ -180,14 +226,35 @@ def _engine_pass(last: Dict[str, Any]) -> StorageRemover:
             "id": "engine", "state": str(last["outcome"]), "at": str(last["finished_at"]),
             "freed_bytes": int(last["freed_bytes"]), "held": int(held.get("roots") or 0) + int(held.get("native_homes") or 0),
             "errors": int(errors["count"]), "first_error": errors.get("first")}
-        since = sorted(str(hold["since"]) for hold in last.get("holds") or () if hold.get("since"))
+        holds = [{"class": str(hold["class"]), "count": int(hold["count"]), "example": str(hold.get("example") or ""),
+                  "since": str(hold.get("since") or "")} for hold in last.get("holds") or ()]
+        since = sorted(hold["since"] for hold in holds if hold["since"])
     except (KeyError, TypeError, ValueError, AttributeError):
         return {"id": "engine", "state": "unavailable", "at": None}
     if fact["state"] not in _ENGINE_OUTCOMES:
         return {"id": "engine", "state": "unavailable", "at": None}
+    if holds:
+        fact["holds"] = holds  # the engine's typed holds, the same shape the server's retirer passes report
     if since:
         fact["held_since"] = since[0]
     return fact
+
+
+def holds_by_remover(found: Dict[str, List[StorageRemover]]) -> Dict[str, Dict[str, Any]]:
+    """The mind's view of what is held and what moved: per remover that holds something or released
+    something in its last pass, ``{released, holds: [{class, count, example, since}], at}`` (each remover once
+    though it serves several places; the engine's pass included when its record is here). Empty when nothing
+    is held and nothing moved: a fact absent, never zero."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for removers in found.values():
+        for fact in removers:
+            if fact["id"] in out or not (fact.get("holds") or fact.get("released") or fact.get("held")):
+                continue
+            out[fact["id"]] = {"released": int(fact.get("released") or 0), "at": fact.get("at"),
+                               "holds": [dict(hold) for hold in fact.get("holds") or ()]}
+            if fact["id"] == "engine" and fact.get("freed_bytes") is not None:
+                out["engine"]["freed_bytes"] = fact["freed_bytes"]
+    return out
 
 
 def not_ok(found: Dict[str, List[StorageRemover]]) -> List[str]:

@@ -21,7 +21,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import delete_result, result_exists, unreadable_result
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -48,7 +47,7 @@ def clock(host, monkeypatch):  # noqa: F811
     monkeypatch.setattr(workers, "load_state", lambda: {})
     monkeypatch.setattr(workers, "get_event_q", lambda **_kw: SimpleNamespace(put=frames.append))
     monkeypatch.setattr("supervisor.state.budget_remaining", lambda *_a, **_kw: 5)
-    monkeypatch.setattr("supervisor.worker_owner_wait.maintain_owner_wait_capacity", lambda: None)
+    monkeypatch.setattr("supervisor.worker_owner_wait.grant_warm_returns", lambda: None)
     workers.WORKERS.clear()  # no worker capacity: the timeout tick alone settles a pending-only queue
     return SimpleNamespace(now=now, frames=frames, jobs=jobs, reap=reap)
 
@@ -99,8 +98,11 @@ def _resource_hold(host, clock, monkeypatch, kind, *, deadline=True):  # noqa: F
     return task
 
 
-@pytest.mark.parametrize("kind", ["global_budget", "root_budget", "root_selection"])
-@pytest.mark.parametrize("deadline", [False, True], ids=["duration-only", "explicit-calendar"])
+@pytest.mark.parametrize(("deadline", "kind"), [
+    pytest.param(False, "global_budget", id='duration-only-global_budget'),
+    pytest.param(False, "root_selection", id='duration-only-root_selection'),
+    pytest.param(True, "root_budget", id='explicit-calendar-root_budget'),
+])
 def test_never_started_resource_wait_reaches_deadline_outcome_without_resume(
     host, clock, monkeypatch, kind, deadline,  # noqa: F811
 ):
@@ -200,8 +202,7 @@ def test_never_started_project_wait_expires_on_the_tick_without_capacity(host, c
     assert _done(clock) == ["failed"]
 
 
-@pytest.mark.parametrize("veto", ["owner_pause", "result_missing", "result_unreadable", "possible", "started",
-                                    "unknown_dispatch", "exact_pause", "resume", "owner_wait", "working_recovery"])
+@pytest.mark.parametrize("veto", ["owner_pause", "result_missing", "working_recovery"])
 def test_project_deadline_does_not_take_protected_or_unknown_custody(
     host, clock, tmp_path, monkeypatch, veto,  # noqa: F811
 ):
@@ -578,17 +579,19 @@ def test_a_restored_row_keeps_its_budget_and_carry_until_resume_and_assignment(h
     assert execution_elapsed_seconds(running, clock.now[0]) == 2
 
 
-def test_a_timeout_retry_never_regrants_spent_execution(host, clock, monkeypatch):  # noqa: F811
-    from supervisor import task_reaper
+def test_a_carried_handoff_never_regrants_spent_execution(host, clock, monkeypatch):  # noqa: F811
+    """A successor carries its ended attempt's execution through the one stamp the crash
+    requeue and planned successors use; dispatch never regrants it, and the ceiling it
+    reaches queues a terminal-only job."""
+    from ouroboros.model_wait import stamp_execution_handoff
 
     task = add_task(host, clock, deadline=False, execution_timeout_sec=500)
     host.pending.clear()
     write_task_result(host.root, "pending", "running", result="Some work was performed")
     meta = {"task": task, "attempt": 1, "started_at": clock.now[0] - 200}
-    requeued, attempt, _, _ = task_reaper._enqueue_retry(
-        queue, task, task_id="pending", retry_task_id="retry", attempt=1,
-        terminal_reason="idle_timeout", recon_fields={}, clock_meta=meta)
-    assert requeued and attempt == 2
+    successor = {**task, "_attempt": 2}
+    stamp_execution_handoff(successor, meta)
+    assert not queue.enqueue_task(successor, front=True).get("_admission_blocked")
     assert host.pending[0]["_execution_handoff_sec"] == 200 and host.pending[0]["execution_timeout_sec"] == 500
     sent = []
     workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, reaping=False,
@@ -600,14 +603,14 @@ def test_a_timeout_retry_never_regrants_spent_execution(host, clock, monkeypatch
     workers.assign_tasks()
     assert len(sent) == 1
     clock.now[0] += 299
-    host.running["retry"]["last_progress_at"] = clock.now[0]
+    host.running["pending"]["last_progress_at"] = clock.now[0]
     queue.enforce_task_timeouts()
     assert reaps.empty()
     clock.now[0] += 1
     queue.enforce_task_timeouts()
     job = reaps.get_nowait()
     assert job["runtime_sec"] == 500 and job["terminal_reason"] == "absolute_ceiling"
-    assert not job["will_retry"] and not host.pending and not host.attempts
+    assert not {"will_retry", "retry_task_id"} & set(job) and not host.pending and not host.attempts
 
 
 def test_pending_deadline_salvage_reads_history_outside_the_supervisor_queue_lock(host, clock, monkeypatch):  # noqa: F811

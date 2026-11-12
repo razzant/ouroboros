@@ -13,7 +13,7 @@ def proc_observer_function(*, proc_root: str = "/proc") -> str:
 
     Runtime callers always inspect the container's /proc. A missing process is
     exited; present but unreadable or malformed stat data is unknown. Group
-    scope includes the leader even when the launcher could not use setsid.
+    scope also includes the leader for older records; new launches require setsid.
     """
     return r'''
 _ouroboros_proc_observe() {

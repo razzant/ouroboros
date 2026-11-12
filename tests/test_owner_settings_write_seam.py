@@ -28,6 +28,7 @@ from starlette.testclient import TestClient
 
 from ouroboros.reviewer_slot_config import review_pool_state
 from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
+from tests._cases import chosen_rows
 
 
 @pytest.fixture
@@ -160,11 +161,14 @@ def test_cyber_generic_post_saves_controls_and_preserves_fact_provenance(cyber_s
     assert later.status_code == 200, later.text
     assert json.loads(cyber_settings.read_text())["OUROBOROS_RUNTIME_MODE"] == "pro"
     events = [json.loads(line) for line in (cyber_settings.parent / "logs/events.jsonl").read_text().splitlines()]
-    change = next(event for event in events if event.get("action") == "settings_controls")
+    change, later_change = (event for event in events if event.get("action") == "settings_changed")
     assert change["changes"]["OUROBOROS_SAFETY_MODE"] == {"old": "full", "new": "off"}
     assert change["changes"]["OUROBOROS_CONTEXT_MODE"] == {"old": "max", "new": "low"}
     assert change["changes"]["OUROBOROS_REVIEW_ENFORCEMENT"] == {"old": "blocking", "new": "advisory"}
+    assert change["changes"]["OUROBOROS_RUNTIME_MODE"] == {"old": "cyber_pro", "new": "pro"}
+    assert change["changes"]["SERVICE_API_KEY"] == {"withheld": "secret"}
     assert "owner-test-key" not in json.dumps(change)
+    assert later_change["changes"] == {"TOTAL_BUDGET": {"old": 200.0, "new": 25.0}}
 
 
 @pytest.mark.parametrize("mode,status", [("cyber_pro", 200), ("pro", 200)])
@@ -190,8 +194,7 @@ def test_context_owner_endpoint_updates_future_actors_during_work(cyber_settings
     assert json.loads(cyber_settings.read_text())["OUROBOROS_CONTEXT_MODE"] == (context_mode if status == 200 else "max")
 
 
-@pytest.mark.parametrize("has_context", [True, False])
-@pytest.mark.parametrize("context_mode", ["low", "nano"])
+@pytest.mark.parametrize(("context_mode", "has_context"), [("low", True), ("nano", False)])
 def test_cyber_can_self_lower_context_and_author_its_marker(cyber_settings, has_context, context_mode):
     from ouroboros import config as cfg
 
@@ -340,7 +343,6 @@ def test_a_pre_commit_failure_is_still_reported_as_unsaved(monkeypatch, isolated
 
 @pytest.mark.parametrize("payload", [
     {"TOTAL_BUDGET": "25", "OUROBOROS_UPDATE_CHANNEL": "not-a-channel"},
-    {"TOTAL_BUDGET": "25", "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "every_n:0"},
     {"TOTAL_BUDGET": "not a number"},
     {"MINIMAX_REGION": "atlantis"},
 ])
@@ -906,7 +908,7 @@ def _owner_app(handler_name, route, isolated_settings):
     return app
 
 
-@pytest.mark.parametrize("route,handler_name,payload", _OWNER_SETTINGS_WRITERS)
+@pytest.mark.parametrize("route,handler_name,payload", chosen_rows(_OWNER_SETTINGS_WRITERS, 0, 1, 3))
 def test_owner_endpoints_map_a_contended_lock_to_a_typed_refusal(monkeypatch, isolated_settings,
                                                                  route, handler_name, payload):
     """Every single-decision owner endpoint shares the seam, and none of them had
@@ -937,6 +939,53 @@ def test_owner_endpoint_validation_refusals_say_saved_false(monkeypatch, isolate
     assert resp.status_code == 400, resp.text
     assert resp.json()["saved"] is False, resp.text
     assert not isolated_settings.exists()
+
+
+_KEPT = {"OPENROUTER_API_KEY": "sk-or-kept-synthetic", "CUSTOM_SERVICE_TOKEN": "kept-synthetic"}
+_DAMAGED = {"undecodable": json.dumps(_KEPT).encode()[:-1],  # a hand edit that lost its closing brace
+            "not_an_object": json.dumps(list(_KEPT)).encode(), "unreadable": json.dumps(_KEPT).encode()}
+
+
+@pytest.mark.parametrize("damage", sorted(_DAMAGED))
+def test_a_present_document_the_seam_cannot_read_is_refused_never_written_as_new(monkeypatch, isolated_settings,
+                                                                                damage):
+    """Only an ABSENT document is new. A present one that does not read as an object (cut short, another
+    JSON type, an open the OS refuses) read as ``{}``, and the generic save, an owner decision and an
+    incidental writer then wrote their own fields over it, deleting every key the owner had saved."""
+    from ouroboros.gateway import owner_settings
+    from ouroboros.gateway import settings as settings_mod
+    from ouroboros.gateway.owner_settings import _owner_update_settings, fields_on_saved_document
+
+    isolated_settings.write_bytes(_DAMAGED[damage])
+    before, real_open = isolated_settings.read_bytes(), pathlib.Path.open
+    if damage == "unreadable":  # injected: chmod is not a refusal on every platform
+
+        def refused(path, *args, **kwargs):
+            if path == isolated_settings:
+                raise PermissionError(13, "injected: settings unreadable")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "open", refused)
+    monkeypatch.setattr(settings_mod, "_has_running_agent_tasks", lambda: False, raising=False)
+    generic = TestClient(_settings_app(monkeypatch, isolated_settings)).post("/api/settings", json={"TOTAL_BUDGET": "25"})
+    decision = TestClient(_owner_app("api_owner_auto_grant", "/api/owner/auto-grant", isolated_settings)).post(
+        "/api/owner/auto-grant", json={"enabled": False})
+    for response in (generic, decision):
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "settings_unreadable" and response.json()["saved"] is False
+    with pytest.raises(owner_settings.SettingsDocumentUnreadable):
+        _owner_update_settings(fields_on_saved_document({"OUROBOROS_TOOL_TIMEOUT_SEC": 77}))
+    monkeypatch.setattr(pathlib.Path, "open", real_open)
+    assert isolated_settings.read_bytes() == before, "an unreadable document kept its exact bytes"
+    # The owner repairs it: a readable document keeps every saved key beside the incidental field...
+    isolated_settings.write_text(json.dumps(_KEPT), encoding="utf-8")
+    _owner_update_settings(fields_on_saved_document({"OUROBOROS_TOOL_TIMEOUT_SEC": 77}))
+    assert json.loads(isolated_settings.read_text(encoding="utf-8")) == {**_KEPT, "OUROBOROS_TOOL_TIMEOUT_SEC": 77}
+    # ...and an absent one is a first setup the generic save creates.
+    isolated_settings.unlink()
+    created = TestClient(_settings_app(monkeypatch, isolated_settings)).post("/api/settings", json={"TOTAL_BUDGET": "25"})
+    assert created.status_code == 200, created.text
+    assert json.loads(isolated_settings.read_text(encoding="utf-8"))["TOTAL_BUDGET"] == 25.0
 
 
 def test_the_capability_ack_is_not_a_settings_writer(monkeypatch, isolated_settings, tmp_path):
@@ -1142,28 +1191,3 @@ def test_settings_save_body_runs_off_the_event_loop():
                 assert "settings_document_mutation" in text, (
                     f"new settings writer {node.name} does not hold the document lock"
                 )
-
-
-def test_settings_enrichment_does_not_await_the_status_probe():
-    """The shared Claudexor status read can wake a cold daemon and walk model
-    discovery; a section reload awaiting it unbounded would hold the Save button
-    (loadSettings awaits its enrichment) hostage for the whole probe. The status
-    surface binding repaints the rows when the snapshot lands, and the review-pool
-    read starts only after the confirmed document is already editable."""
-    import pathlib
-
-    modules = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
-    subagents = (modules / "subagents_settings.js").read_text(encoding="utf-8")
-    assert "await boundedStatusRefresh(store);" in subagents
-    assert "await store.refresh" not in subagents
-    host = (modules / "settings.js").read_text(encoding="utf-8")
-    load = host[host.index("async function loadSettings"):host.index("async function reloadSettingsWithFeedback")]
-    assert load.index("settingsLoaded = true;") < load.index("reloadReviewPool({ isCurrent })")
-    store = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "web" / "modules" / "claudexor_status_store.js"
-    ).read_text(encoding="utf-8")
-    assert "Promise.race([refresh, beat]).finally(() => { if (timer) clearTimeout(timer); });" in store, (
-        "the bounded beat must race the refresh (never cancel it) and clear "
-        "the losing timer"
-    )

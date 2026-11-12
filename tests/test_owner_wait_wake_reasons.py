@@ -20,7 +20,7 @@ from ouroboros.owner_mailbox import (
 from ouroboros.owner_quiz import mark_wait_ended, quiz_states, record_answered, record_asked
 from ouroboros.owner_wait import (
     _fresh_wake, announce_wait_ended, append_wake_notice, classify_wake, owner_wait_ended_notice,
-    owner_wait_timeout_notice, wait_after_tools, worker_owner_wait,
+    wait_after_tools, worker_owner_wait,
 )
 from ouroboros.task_results import load_task_result
 from tests.test_native_owner_wait import native_context
@@ -118,7 +118,6 @@ def test_a_hurry_wakes_the_direct_wait_but_never_reads_as_an_answer(tmp_path, mo
     assert [entry["kind"] for entry in drain_owner_entries(tmp_path, ctx.task_id, set())] == [KIND_HURRY]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("order", ["answer_before_parked", "answer_after_parked",
                                    "answer_before_parked_with_spent_bound"])
 def test_an_answer_racing_the_park_is_reported_as_the_answer(tmp_path, order):
@@ -231,13 +230,13 @@ def test_a_peer_wake_leaves_the_question_open_and_a_new_wait_ends_on_the_answer(
     assert len(_quiz_frames(frames)) == 1  # the answered card was not re-announced as open
 
 
-def test_owner_wait_ended_notice_keeps_the_timeout_text_under_both_names(tmp_path):
+def test_owner_wait_ended_notice_keeps_timeout_as_its_default(tmp_path):
     ctx = native_context(tmp_path)
     record_asked(tmp_path, ctx.task_id, quiz_id="q1", question="?", options=[],
                  wait_for_answer=True, assumption="keep going")
     checkpoint = {"quiz_id": "q1", "wait_max_minutes": 5}
     timeout = owner_wait_ended_notice(ctx, checkpoint, "timeout")
-    assert timeout == owner_wait_timeout_notice(ctx, checkpoint) == owner_wait_ended_notice(ctx, checkpoint)
+    assert timeout == owner_wait_ended_notice(ctx, checkpoint)
     assert "No owner answer arrived within 5 minutes" in timeout["content"]
     assert "Proceed under your stated assumption: keep going" in timeout["content"]
     ended = owner_wait_ended_notice(ctx, checkpoint, "not_answered", woke_by="task mail from peer-1")

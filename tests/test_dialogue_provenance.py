@@ -130,3 +130,42 @@ def test_one_row_grammar_serves_memory_read_and_the_view_and_only_indents_later_
     assert indented == header + " first line\n  ## not a section"
     assert "\n## " in _chronicle_view(row) and "\n## " not in indented
     assert memory_row_header(address, {"ts": ""}, author={}).startswith("[time not recorded; author not recorded; ")
+
+
+def test_memory_and_evidence_keep_a_relays_quoted_owner_words_and_what_a_reply_answers(tmp_path):
+    """F3: every text reader of a row (memory rows, chat_history lines, room evidence) shows the relations the
+    host resolved: the owner's words a relay quotes, with where they were said and what they answered."""
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.dialogue_evidence import read_room_source
+    from ouroboros.dialogue_provenance import render_memory_row, row_author
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_results import write_task_result
+
+    beta = create_project(tmp_path, "beta", name="Beta")
+    write_task_result(tmp_path, "recipient", "running", chat_id=1, title="recipient")
+    bind_task_to_project(tmp_path, "recipient", beta["id"], beta["chat_id"], origin={"absent": "system"})
+    notice = {"chat_id": 1, "direction": "out", "type": "main_notice", "task_id": "teller",
+              "ts": "2026-10-01T00:00:00Z", "text": "A specific project observation."}
+    dialogue_store.append(tmp_path, "chat", notice)
+    owner = {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:01:00Z", "client_message_id": "owner-reply",
+             "text": "Why is that here?", "reply_to": reference_from_row(notice)}
+    dialogue_store.append(tmp_path, "chat", owner)
+    relay_row = {"chat_id": beta["chat_id"], "direction": "out", "type": "relay_entry", "task_id": "recipient",
+                 "ts": "2026-10-01T00:02:00Z", "client_message_id": "relay:quoted:recipient",
+                 "text": "Please answer the owner.", "relay": relay_envelope("quoted", [owner_quote(tmp_path, owner)], chat_id=1)}
+    dialogue_store.append(tmp_path, "chat", relay_row)
+    notice_address = format_address(row_address(notice))
+    for text in (render_memory_row(row_address(relay_row), relay_row, author=row_author(relay_row)),
+                 Memory._format_chat_line(relay_row, compact=False)):
+        assert "Please answer the owner." in text and "Why is that here?" in text
+        assert format_address(row_address(owner)) in text and notice_address in text
+    owner_text = render_memory_row(row_address(owner), owner, author=row_author(owner))
+    assert owner_text.startswith("[2026-10-01T00:01:00Z; ") and "Why is that here?" in owner_text
+    assert notice_address in owner_text and "A specific project observation." in owner_text
+    evidence = read_room_source(tmp_path, beta["chat_id"], task_id="recipient")
+    assert "Why is that here?" in evidence["text"] and notice_address in evidence["text"]
+    plain = {"chat_id": 1, "direction": "out", "ts": "2026-10-01T00:03:00Z", "text": "No relations here."}
+    assert Memory._format_chat_line(plain, compact=False) == "→ [2026-10-01T00:03] No relations here."

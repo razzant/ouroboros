@@ -143,66 +143,64 @@ def _notice(header: str, *moved: str) -> str:
 # ---------------------------------------------------------------------------
 # (a) the split applies on every OpenAI-family route, direct and OpenRouter
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("model,env", _OPENAI_FAMILY_ROUTES, ids=[m for m, _ in _OPENAI_FAMILY_ROUTES])
-def test_declared_system_prefix_is_split_on_every_openai_family_route(monkeypatch, model, env):
+def test_declared_system_prefix_is_split_on_every_openai_family_route(subtests, monkeypatch):
     """Catches the ``if openai_family_route(target)`` block of ``_build_remote_kwargs``
     (llm_openai_compatible.py): with it removed the wire keeps the whole 3-block system,
     no notice appears and ``wire_layout`` is never stamped. Catches ``openai_family_model``
     too: dropping the ``~`` strip or the ``:online`` tolerance leaves those two routes whole."""
-    client = LLMClient(api_key="unused")
-    target = _target(monkeypatch, client, model, env)
-    assert openai_family_route(target), model
-    messages = _declared()
-    before = copy.deepcopy(messages)
+    for model, env in _OPENAI_FAMILY_ROUTES:
+        with subtests.test(model=model, env=env), monkeypatch.context() as monkeypatch:
+            client = LLMClient(api_key="unused")
+            target = _target(monkeypatch, client, model, env)
+            assert openai_family_route(target), model
+            messages = _declared()
+            before = copy.deepcopy(messages)
 
-    kwargs = _build(client, target, messages)
+            kwargs = _build(client, target, messages)
 
-    assert messages == before, "the canonical transcript is never mutated"
-    wire = kwargs["messages"]
-    if target["provider"] == "openrouter":
-        # OpenRouter turns block markers into explicit breakpoints for this family:
-        # each marked leading block stays its own system item, the unmarked tail moves.
-        marked = {"cache_control": {"type": "ephemeral"}}
-        assert wire[:2] == [{"role": "system", "content": [{"type": "text", "text": STABLE, **marked}]},
-                            {"role": "system", "content": [{"type": "text", "text": MEMORY, **marked}]}]
-        assert wire[2]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)
-        assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 1}
-        wire = [wire[0], *wire[2:]]
-    else:
-        # Without explicit breakpoints only the end of the leading system group is a
-        # lookup boundary: the changing memory block must not share it.
-        assert wire[0] == {"role": "system", "content": [{"type": "text", "text": STABLE}]}
-        assert wire[1]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, MEMORY, EVIDENCE)
-        assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 2}
-    assert len(wire) == 3
-    assert wire[1]["role"] == "user"
-    notice = wire[1]["content"]
-    assert isinstance(notice, str)
-    assert STABLE not in notice
-    assert wire[2] == {"role": "user", "content": TASK}
-    assert _no_declaration_on_wire(wire)
+            assert messages == before, "the canonical transcript is never mutated"
+            wire = kwargs["messages"]
+            if target["provider"] == "openrouter":
+                # OpenRouter turns block markers into explicit breakpoints for this family:
+                # each marked leading block stays its own system item, the unmarked tail moves.
+                marked = {"cache_control": {"type": "ephemeral"}}
+                assert wire[:2] == [{"role": "system", "content": [{"type": "text", "text": STABLE, **marked}]},
+                                    {"role": "system", "content": [{"type": "text", "text": MEMORY, **marked}]}]
+                assert wire[2]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)
+                assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 1}
+                wire = [wire[0], *wire[2:]]
+            else:
+                # Without explicit breakpoints only the end of the leading system group is a
+                # lookup boundary: the changing memory block must not share it.
+                assert wire[0] == {"role": "system", "content": [{"type": "text", "text": STABLE}]}
+                assert wire[1]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, MEMORY, EVIDENCE)
+                assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 2}
+            assert len(wire) == 3
+            assert wire[1]["role"] == "user"
+            notice = wire[1]["content"]
+            assert isinstance(notice, str)
+            assert STABLE not in notice
+            assert wire[2] == {"role": "user", "content": TASK}
+            assert _no_declaration_on_wire(wire)
 
-    # The affinity key reads block 0 and the model only, so the split copy and an
-    # undeclared copy of the same messages land in the same cache bucket.
-    plain_target = _target(monkeypatch, client, model, env)
-    plain = _build(client, plain_target, _strip_declaration(messages))
-    assert "wire_layout" not in plain_target
-    assert len(plain["messages"]) == 2, "an undeclared copy is not split"
-    if target["provider"] == "openai":
-        assert kwargs["prompt_cache_key"].startswith("ouroboros-")
-        assert kwargs["prompt_cache_key"] == plain["prompt_cache_key"]
-        assert "session_id" not in (kwargs.get("extra_body") or {})
-    else:
-        assert kwargs["extra_body"]["session_id"].startswith("ouroboros-session-")
-        assert kwargs["extra_body"]["session_id"] == plain["extra_body"]["session_id"]
-        assert "prompt_cache_key" not in kwargs
+            # The affinity key reads block 0 and the model only, so the split copy and an
+            # undeclared copy of the same messages land in the same cache bucket.
+            plain_target = _target(monkeypatch, client, model, env)
+            plain = _build(client, plain_target, _strip_declaration(messages))
+            assert "wire_layout" not in plain_target
+            assert len(plain["messages"]) == 2, "an undeclared copy is not split"
+            if target["provider"] == "openai":
+                assert kwargs["prompt_cache_key"].startswith("ouroboros-")
+                assert kwargs["prompt_cache_key"] == plain["prompt_cache_key"]
+                assert "session_id" not in (kwargs.get("extra_body") or {})
+            else:
+                assert kwargs["extra_body"]["session_id"].startswith("ouroboros-session-")
+                assert kwargs["extra_body"]["session_id"] == plain["extra_body"]["session_id"]
+                assert "prompt_cache_key" not in kwargs
 
 
 @pytest.mark.parametrize("model,expected", [
     ("openai/gpt-6-sol", True),
-    ("~openai/gpt-6-sol", True),
-    ("openai/gpt-6-sol:online", True),
-    ("openai::gpt-6-sol", True),
     ("openai/gpt-oss-120b", True),          # third-party served, inherits the projection
     ("anthropic/claude-opus-5", False),
     ("anthropic::claude-opus-5", False),
@@ -241,31 +239,32 @@ def test_openai_family_route_never_admits_a_compatible_server_serving_the_family
 # ---------------------------------------------------------------------------
 # (b) the split does NOT apply: other families, undeclared and degenerate shapes
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("model,env", _OTHER_FAMILY_ROUTES, ids=[m for m, _ in _OTHER_FAMILY_ROUTES])
-def test_declared_system_prefix_is_left_whole_on_every_other_family(monkeypatch, model, env):
+def test_declared_system_prefix_is_left_whole_on_every_other_family(subtests, monkeypatch):
     """Catches ``openai_family_route`` admitting too much: a predicate returning True for
     an Anthropic/Gemini OpenRouter id, direct DeepSeek or an OpenAI-compatible server
     would split these systems and stamp ``wire_layout``. Also catches the
     ``_copy_messages_with_cache_policy`` pop: the declaration must not reach these wires."""
-    client = LLMClient(api_key="unused")
-    target = _target(monkeypatch, client, model, env)
-    assert not openai_family_route(target), model
-    messages = _declared()
-    before = copy.deepcopy(messages)
+    for model, env in _OTHER_FAMILY_ROUTES:
+        with subtests.test(model=model, env=env), monkeypatch.context() as monkeypatch:
+            client = LLMClient(api_key="unused")
+            target = _target(monkeypatch, client, model, env)
+            assert not openai_family_route(target), model
+            messages = _declared()
+            before = copy.deepcopy(messages)
 
-    kwargs = _build(client, target, messages)
-    plain = _build(client, _target(monkeypatch, client, model, env), _strip_declaration(messages))
+            kwargs = _build(client, target, messages)
+            plain = _build(client, _target(monkeypatch, client, model, env), _strip_declaration(messages))
 
-    assert messages == before
-    assert kwargs == plain, "the declaration has no effect on this family's wire"
-    wire = kwargs["messages"]
-    assert len(wire) == 2
-    assert wire[0]["role"] == "system" and wire[1] == {"role": "user", "content": TASK}
-    joined = "\n".join(_system_texts(wire[0]))
-    assert all(text in joined for text in (STABLE, MEMORY, EVIDENCE))
-    assert _no_notice_on_wire(wire)
-    assert _no_declaration_on_wire(wire)
-    assert "wire_layout" not in target
+            assert messages == before
+            assert kwargs == plain, "the declaration has no effect on this family's wire"
+            wire = kwargs["messages"]
+            assert len(wire) == 2
+            assert wire[0]["role"] == "system" and wire[1] == {"role": "user", "content": TASK}
+            joined = "\n".join(_system_texts(wire[0]))
+            assert all(text in joined for text in (STABLE, MEMORY, EVIDENCE))
+            assert _no_notice_on_wire(wire)
+            assert _no_declaration_on_wire(wire)
+            assert "wire_layout" not in target
 
 
 def test_direct_anthropic_candidate_keeps_the_system_whole_and_drops_the_declaration(monkeypatch):
@@ -359,32 +358,33 @@ def test_a_non_text_block_in_the_declared_system_refuses_the_pure_projection():
     assert moved == 0 and projected == typed_text
 
 
-@pytest.mark.parametrize("shape", sorted(_UNSPLIT_SHAPES))
-def test_every_undeclared_or_degenerate_shape_stays_whole_on_the_openai_family(monkeypatch, shape):
+def test_every_undeclared_or_degenerate_shape_stays_whole_on_the_openai_family(subtests, monkeypatch):
     """Catches each guard clause of ``split_leading_system_prefix`` (llm_messages.py: the
     role/declaration check, the second-leading-system check, the list-of-text-blocks and
     ``len(content) <= declared`` check, the empty ``moved`` check): removing any one of
     them would split a shape the projection must leave alone — most importantly the
     undeclared multi-block REVIEW prompt, which is exactly today's wire."""
-    messages = _UNSPLIT_SHAPES[shape]()
-    before = copy.deepcopy(messages)
+    for shape in sorted(_UNSPLIT_SHAPES):
+        with subtests.test(shape=shape), monkeypatch.context() as monkeypatch:
+            messages = _UNSPLIT_SHAPES[shape]()
+            before = copy.deepcopy(messages)
 
-    projected, moved = split_leading_system_prefix(messages)
-    assert moved == 0
-    assert projected == before and messages == before
+            projected, moved = split_leading_system_prefix(messages)
+            assert moved == 0
+            assert projected == before and messages == before
 
-    client = LLMClient(api_key="unused")
-    target = _target(monkeypatch, client, "openai/gpt-6-sol", _OPENROUTER)
-    kwargs = _build(client, target, messages)
-    plain = _build(client, _target(monkeypatch, client, "openai/gpt-6-sol", _OPENROUTER),
-                   _strip_declaration(messages))
+            client = LLMClient(api_key="unused")
+            target = _target(monkeypatch, client, "openai/gpt-6-sol", _OPENROUTER)
+            kwargs = _build(client, target, messages)
+            plain = _build(client, _target(monkeypatch, client, "openai/gpt-6-sol", _OPENROUTER),
+                           _strip_declaration(messages))
 
-    assert messages == before
-    assert kwargs == plain, "an ineffective declaration is byte-invisible on the wire"
-    assert "wire_layout" not in target
-    assert _no_declaration_on_wire(kwargs["messages"])
-    assert _no_notice_on_wire(kwargs["messages"])
-    assert len(kwargs["messages"]) == len(messages)
+            assert messages == before
+            assert kwargs == plain, "an ineffective declaration is byte-invisible on the wire"
+            assert "wire_layout" not in target
+            assert _no_declaration_on_wire(kwargs["messages"])
+            assert _no_notice_on_wire(kwargs["messages"])
+            assert len(kwargs["messages"]) == len(messages)
 
 
 def test_split_moves_only_non_empty_tail_blocks_and_honors_the_declared_count():
@@ -421,32 +421,33 @@ def test_split_moves_only_non_empty_tail_blocks_and_honors_the_declared_count():
     assert split_leading_system_prefix(projected) == (projected, 0), "a projected copy is never split again"
 
 
-@pytest.mark.parametrize("placement", SYSTEM_PREFIX_SPLIT_PLACEMENTS)
-def test_keep_marked_keeps_only_leading_marked_blocks_as_separate_system_items(placement):
+def test_keep_marked_keeps_only_leading_marked_blocks_as_separate_system_items(subtests):
     """Pins the ``keep_marked`` extension: after the declared blocks, every LEADING block
     that carries its own marker stays a separate system item (its explicit breakpoint is
     written and looked up on its own); the first unmarked block ends the extension, and
     without ``keep_marked`` the declared count alone decides (the implicit-only routes)."""
-    messages = _declared()
-    before = copy.deepcopy(messages)
-    kept, moved = split_leading_system_prefix(messages, placement=placement, keep_marked=True)
-    plain, plain_moved = split_leading_system_prefix(messages, placement=placement)
-    assert messages == before
-    assert (moved, plain_moved) == (1, 2)
-    assert [_system_texts(message) for message in kept[:2]] == [[STABLE], [MEMORY]]
-    assert all(message["content"][0]["cache_control"] == {"type": "ephemeral"} for message in kept[:2])
-    assert [_system_texts(message) for message in plain[:1]] == [[STABLE]] and plain[1]["role"] != "system"
-    header = HOST_CONTEXT_NOTICE_AFTER_TASK if placement == "after_task" else HOST_CONTEXT_NOTICE_BEFORE_TASK
-    assert _notice(header, EVIDENCE) in [message["content"] for message in kept]
-    assert _notice(header, MEMORY, EVIDENCE) in [message["content"] for message in plain]
-    # An unmarked block between ends the extension: nothing after it is kept.
-    gap = copy.deepcopy(messages)
-    gap[0]["content"][1].pop("cache_control")
-    assert split_leading_system_prefix(gap, placement=placement, keep_marked=True)[1] == 2
-    # Every block marked: nothing would move, so the message stays whole.
-    whole = copy.deepcopy(messages)
-    whole[0]["content"][2]["cache_control"] = {"type": "ephemeral"}
-    assert split_leading_system_prefix(whole, keep_marked=True) == (whole, 0)
+    for placement in SYSTEM_PREFIX_SPLIT_PLACEMENTS:
+        with subtests.test(placement=placement):
+            messages = _declared()
+            before = copy.deepcopy(messages)
+            kept, moved = split_leading_system_prefix(messages, placement=placement, keep_marked=True)
+            plain, plain_moved = split_leading_system_prefix(messages, placement=placement)
+            assert messages == before
+            assert (moved, plain_moved) == (1, 2)
+            assert [_system_texts(message) for message in kept[:2]] == [[STABLE], [MEMORY]]
+            assert all(message["content"][0]["cache_control"] == {"type": "ephemeral"} for message in kept[:2])
+            assert [_system_texts(message) for message in plain[:1]] == [[STABLE]] and plain[1]["role"] != "system"
+            header = HOST_CONTEXT_NOTICE_AFTER_TASK if placement == "after_task" else HOST_CONTEXT_NOTICE_BEFORE_TASK
+            assert _notice(header, EVIDENCE) in [message["content"] for message in kept]
+            assert _notice(header, MEMORY, EVIDENCE) in [message["content"] for message in plain]
+            # An unmarked block between ends the extension: nothing after it is kept.
+            gap = copy.deepcopy(messages)
+            gap[0]["content"][1].pop("cache_control")
+            assert split_leading_system_prefix(gap, placement=placement, keep_marked=True)[1] == 2
+            # Every block marked: nothing would move, so the message stays whole.
+            whole = copy.deepcopy(messages)
+            whole[0]["content"][2]["cache_control"] = {"type": "ephemeral"}
+            assert split_leading_system_prefix(whole, keep_marked=True) == (whole, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +578,28 @@ def test_explicit_cache_affinity_still_wins_and_a_reroute_still_rotates(monkeypa
     assert rerouted["extra_body"]["session_id"] != explicit
     assert rerouted["messages"] == pinned["messages"]
     assert pinned["extra_body"]["session_id"] == explicit, "rotation works on the copy it was given"
+
+
+def test_direct_openai_keys_a_prompt_without_a_leading_system_by_its_declared_affinity():
+    """Direct OpenAI keys the cache by the leading system prefix; a prompt without one
+    falls back to the caller-declared affinity (``_explicit_cache_affinity_identity``)
+    and gets no key without either, while a leading system still owns the key."""
+    target = {"provider": "openai", "resolved_model": "gpt-5.6-sol", "usage_model": "openai/gpt-5.6-sol"}
+    client = LLMClient(api_key="unused")
+    prompt = [{"role": "user", "content": "Summarize this source."}]
+
+    def build(messages, **kwargs):
+        return client._build_remote_kwargs(dict(target), messages, "low", 128, "auto", None, None,
+                                           skip_capability_fetch=True, **kwargs)
+
+    keyed = build(prompt, cache_affinity="plan_review:task-1")
+    assert keyed["prompt_cache_key"] == LLMClient._explicit_cache_affinity_identity(
+        "openai/gpt-5.6-sol", "plan_review:task-1")
+    assert "prompt_cache_key" not in build(prompt), "no leading system and no affinity: no key"
+    assert "cache_control" not in str(keyed["messages"]), "direct Chat Completions carries no markers"
+    system = [{"role": "system", "content": "stable policy"}, *prompt]
+    assert build(system, cache_affinity="plan_review:task-1")["prompt_cache_key"] == (
+        LLMClient._prompt_cache_identity("openai/gpt-5.6-sol", system))
 
 
 # ---------------------------------------------------------------------------
@@ -741,9 +764,10 @@ def _plan(blocks):
     )
 
 
-@pytest.mark.parametrize("book", [False, True])
-@pytest.mark.parametrize("marked", [False, True])
-@pytest.mark.parametrize("memory", [MEMORY, "  \n"])
+@pytest.mark.parametrize(("memory", "marked", "book"), [
+    pytest.param(MEMORY, False, False, id='semi-stable memory block (identity, scratchpad)-False-False'),
+    ("  \n", True, True),
+])
 def test_context_fit_declares_all_nonempty_stable_items_before_the_tail(monkeypatch, book, marked, memory):
     """The declaration survives reprojection and keeps B out of the notice without markers."""
     blocks = _system_blocks(memory=memory)

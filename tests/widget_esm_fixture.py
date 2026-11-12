@@ -26,7 +26,7 @@ entry: plugin.py
 permissions: [widget, route]
 ---
 Finite browser files.
-""")
+""", encoding="utf-8", newline="\n")
     (skill / "plugin.py").write_text(f"""hits = 0
 async def ping(request):
     return {{'ok': True}}
@@ -43,7 +43,7 @@ def register(api):
     api.register_ui_tab('main', 'Module files', render={RENDER!r})
     api.register_ui_tab('other', 'Separate files', render={{'kind':'module', 'entry_type':'module', 'entry':'other.js', 'start':'auto'}})
     api.register_ui_tab('classic', 'Classic entry', render={{'kind':'module', 'entry':'classic.mjs', 'start':'auto'}})
-""")
+""", encoding="utf-8", newline="\n")
     files = {
         "app/main.js": """import { value, cycle } from './lib.js';
 const root = document.getElementById('root');
@@ -78,7 +78,7 @@ window.__ouroWidgetOnDispose(async () => { await fetch('/api/extensions/esm_read
     for name, source in files.items():
         file = skill / name
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(source)
+        file.write_text(source, encoding="utf-8", newline="\n")  # browser text is UTF-8 on every host
     (skill / "images").mkdir()
     (skill / "images/pixel.png").write_bytes(PNG)
     (skill / "data.bin").write_bytes(BINARY)

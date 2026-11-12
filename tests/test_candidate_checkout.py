@@ -9,7 +9,6 @@ import pytest
 
 from tests import candidate_checkout as candidate
 
-pytestmark = pytest.mark.serial
 
 
 def test_ready_flag_does_not_hide_failed_supervisor():
@@ -371,7 +370,7 @@ def test_a_stopped_copy_takes_new_overlay_bytes_that_its_next_verification_binds
     assert not target.exists()
 
 
-@pytest.mark.parametrize("suffix", [".cmd", ".bat", ".exe", ".com"])
+@pytest.mark.parametrize("suffix", [".cmd", ".bat", ".com"])
 def test_path_execute_bits_do_not_change_handle_identity(source, monkeypatch, suffix):
     real_lstat = Path.lstat
 

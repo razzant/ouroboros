@@ -1,4 +1,8 @@
-"""A real new-ID retry reads its inherited sources without inheriting authority."""
+"""A stored new-ID timeout retry reads its inherited sources without inheriting authority.
+
+No producer mints a new-ID successor now (#1376); one admitted before the upgrade is restored
+(``tests._silence_reaper_support``) and its real startup reads its predecessor's sources.
+"""
 from copy import deepcopy
 from pathlib import Path
 import time
@@ -12,6 +16,7 @@ from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_byte
 from ouroboros.context_source_view import emergency_address_view
 from ouroboros.task_results import load_task_result, write_task_result
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
+from tests._silence_reaper_support import historical_successor
 from tests.test_context_reclaim_materializer import _request
 from tests.test_context_source_view import _prefix, _tool
 from tests.test_root_effort_ingress import _pool_ready
@@ -44,10 +49,7 @@ def restored(tmp_path, monkeypatch, request):
     wc.save_round(limit, "ready")
     task = {"id": old.task_id, "type": "task", "text": "Keep exact source.", "chat_id": 0,
             "root_task_id": old.task_id, "_attempt": 1}
-    from supervisor import task_reaper
-    admitted = task_reaper._enqueue_retry(q, task, task_id=old.task_id, retry_task_id="checkpoint-successor",
-        attempt=1, terminal_reason="idle_timeout", recon_fields={})
-    assert admitted[0], admitted
+    historical_successor(task, 1, "checkpoint-successor")
     [retry] = workers.PENDING
     drive = root / "task_drives" / retry["id"] if getattr(request, "param", "") == "successor_drive" else root
     drive.mkdir(parents=True, exist_ok=True)

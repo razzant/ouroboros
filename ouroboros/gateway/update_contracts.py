@@ -1,5 +1,6 @@
 """Core update flow envelopes: ``/api/update/preflight``, ``/api/update/apply`` (and the rollback
-refusal that shares its error shape) and the two update WS frames; re-exported by ``gateway/contracts.py``.
+refusal that shares its error shape), ``/api/update/description`` and the two update WS frames;
+re-exported by ``gateway/contracts.py``.
 The JSDoc twin is ``web/modules/update_types.js``, re-exported by ``api_types.js``."""
 
 from typing import Any, Dict, List, Optional
@@ -85,6 +86,30 @@ class UpdateApplyErrorResponse(TypedDict):
     remaining_usd: NotRequired[Optional[float]]
 
 
+class UpdateDescriptionRequest(TypedDict):
+    """The owner's Write/Rewrite of the update description for one exact range."""
+    mode: Literal["write", "rewrite"]
+    base_sha: str
+    target_sha: str
+
+
+class UpdateDescriptionResponse(TypedDict):
+    """One ordinary Main task was admitted; its status rides ``letter.request`` in the update status."""
+    status: Literal["queued"]
+    task_id: str
+    key: Dict[str, Any]  # {base_sha, target_sha, update_channel, target_ref}
+
+
+class UpdateDescriptionErrorResponse(TypedDict):
+    """400 malformed; 409 a request still running (``task_id``, ``task_status``) or a range nobody
+    offered (``legal_ranges``); 503 record busy or the task not admitted (``reason``)."""
+    error: str
+    task_id: NotRequired[str]
+    task_status: NotRequired[str]
+    legal_ranges: NotRequired[List[Dict[str, Any]]]
+    reason: NotRequired[str]
+
+
 class UpdateProgressChangedOutbound(TypedDict):
     """Invalidation only; never proof that boot finalization completed."""
     type: Literal["update_progress_changed"]
@@ -98,6 +123,6 @@ class UpdateStatusReadyOutbound(TypedDict):
 
 __all__ = [
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
-    "UpdateApplySuccessResponse", "UpdateApplyErrorResponse", "UpdateProgressChangedOutbound",
-    "UpdateStatusReadyOutbound",
+    "UpdateApplySuccessResponse", "UpdateApplyErrorResponse", "UpdateDescriptionRequest", "UpdateDescriptionResponse",
+    "UpdateDescriptionErrorResponse", "UpdateProgressChangedOutbound", "UpdateStatusReadyOutbound",
 ]

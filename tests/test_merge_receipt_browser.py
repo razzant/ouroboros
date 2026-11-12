@@ -17,12 +17,23 @@ from tests.test_merge_receipt_qualification import (
 world = merge_fixture.world
 subscription_ui = ui_fixture.subscription_ui
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
-def assert_review_source(text, source):
-    other = "record" if source == "declaration" else "declaration"
-    assert f"review source: {source}" in text and f"review source: {other}" not in text
+def assert_coverage_placed(line, receipt):
+    """The card says the receipt's own coverage reading: its short label (none when the review passed exactly what
+    merged) ends the row's head, a sentence that says more is the row's second line, and no code reaches either;
+    the codes stay in the receipt, the PR body and the agent's result (DESIGN principle 7)."""
+    from ouroboros.merge_receipts import coverage_reading
+
+    label, sentence = coverage_reading(receipt)
+    head = line.locator(".chat-live-line-title").inner_text().strip()
+    body = line.locator(".chat-live-line-body")
+    detail = body.inner_text().strip() if body.count() else ""
+    assert detail == sentence and (not sentence or sentence not in head), (head, detail)
+    assert head.endswith(f" · {label}") if label else " · " not in head, head
+    codes = ("review source", "covers_head", "changes_after_review", "no_host_observed_review_record", "declaration")
+    assert not any(code in head + detail for code in codes), (head, detail)
 
 
 @pytest.mark.parametrize("source", ["declaration", "record", "closed"])
@@ -48,7 +59,7 @@ def test_merge_card_stays_current_after_outbox_delivery_and_reload(request, worl
         history = json.loads(asyncio.run(make_chat_history_endpoint(world.root)(
             SimpleNamespace(query_params={"chat_id": "7"}))).body)
         fixture = json.loads((world.root / "delivery-projection.json").read_text(encoding="utf-8"))
-    review_source = "record" if source == "record" else "declaration"
+    receipt = seen.stored if source == "closed" else merge_fixture._receipts(world)[0]
     ui = request.getfixturevalue("subscription_ui")
     page, url = ui["page"], ui["url"]
     page.route("**/receipt-projection", lambda route: route.fulfill(content_type="text/html", body='''
@@ -83,7 +94,7 @@ def test_merge_card_stays_current_after_outbox_delivery_and_reload(request, worl
         page.screenshot(path=str(output / f"merge-receipt-live{suffix}.png"), full_page=True)
         line = card.locator('.chat-live-line.result')
         assert line.count() == 1 and current in line.inner_text()
-        assert_review_source(line.inner_text(), review_source)
+        assert_coverage_placed(line, receipt)
         replay = page.evaluate("() => receiptChat.refreshHistory({revision: 1})")
         assert replay["painted"], "receipt history must paint successfully"
         card = page.locator('.chat-live-card[data-task-id="merge-task"]')
@@ -93,7 +104,7 @@ def test_merge_card_stays_current_after_outbox_delivery_and_reload(request, worl
         assert not page.get_by_role("button", name="Retry loading messages").is_visible()
         line = card.locator('.chat-live-line.result')
         assert line.count() == 1 and current in line.inner_text()
-        assert_review_source(line.inner_text(), review_source)
+        assert_coverage_placed(line, receipt)
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         if suffix == "-closed":  # the longer line wraps inside the card at phone width
             page.set_viewport_size({"width": 390, "height": 844})

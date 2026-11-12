@@ -45,7 +45,6 @@ def _held_completion(entered):
     return answer
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_a_settings_save_states_the_skill_key_rule_once(direct_server_with_data, monkeypatch, engine):
@@ -97,11 +96,11 @@ def test_a_settings_save_states_the_skill_key_rule_once(direct_server_with_data,
                 text = save("Settings saved. Changes took effect immediately", "immediate-key")
                 assert SKILL_RULE not in text and "next task" not in text, text
 
-                # A common provider key with no task running: the rule, once.
+                # A provider key is read live (route_choice, #2308): it took effect at once, with no skill rule.
                 page.click('[data-settings-tab="providers"]')
                 page.locator("#s-openrouter").fill(SYNTHETIC_OPENROUTER)
-                text = save(NEXT_TASK, "common-key")
-                assert text.count(SKILL_RULE) == 1 and "An agent task is running" not in text, text
+                text = save("Settings saved. Changes took effect immediately", "common-key")
+                assert SKILL_RULE not in text and "An agent task is running" not in text, text
                 assert saves[-1]["OPENROUTER_API_KEY"] == SYNTHETIC_OPENROUTER
                 assert stored()["OPENROUTER_API_KEY"] == SYNTHETIC_OPENROUTER
 

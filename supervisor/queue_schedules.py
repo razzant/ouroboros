@@ -19,7 +19,7 @@ import uuid
 from typing import Any, Callable, Dict, List
 from ouroboros.consciousness_authority import apply_consciousness_authority
 from ouroboros.contracts.task_contract import build_task_contract, normalize_allowed_resources
-from ouroboros.dialogue_provenance import presence_metadata_binding
+from ouroboros.dialogue_provenance import presence_metadata_binding, presence_metadata_relation
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS
 from ouroboros.utils import atomic_write_json, in_worker_process, read_json_dict, utc_now_iso
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
@@ -229,7 +229,7 @@ def load_schedule_store(drive_root: pathlib.Path | None = None) -> Dict[str, Any
     filtered list back, which is how a mutation about ONE schedule silently
     dropped another.
     """
-    from supervisor.state_initialization import confirm_absent
+    from ouroboros.installation_stop import confirm_absent
 
     path = _scheduled_tasks_path(drive_root)
     try:
@@ -366,6 +366,27 @@ def _schedule_projection_row(raw: Dict[str, Any]) -> Dict[str, Any]:
             row[key] = facts[key]
     row["display_name"] = _bounded_projection_text(row["display_name"])
     return row
+
+
+def presence_promise(binding: Any, row: Any) -> bool:
+    """Whether ``row`` is a follow-up the exact nonempty Presence ``binding`` scheduled (#1589).
+
+    The one ownership predicate behind a Presence caller's schedule reads, its context
+    listing and its withdrawal: the binding carrier ``tools/followup.py`` copies by value
+    onto the row's task template, the relation of the owner's related work included. An
+    owner or skill row, a note, another binding and an empty or malformed carrier never
+    match; objective text, room or writer kind decide nothing.
+    """
+    wanted = str(binding or "").strip()
+    template = row.get("task") if isinstance(row, dict) else None
+    return bool(wanted and isinstance(template, dict) and row.get("source") == "task_followup"
+                and row.get("kind") not in {"notify", "note"}
+                and presence_metadata_relation(template.get("metadata")) == wanted)
+
+
+def presence_promise_store(data: Dict[str, Any], binding: Any) -> Dict[str, Any]:
+    """The store narrowed to ``binding``'s own follow-ups, filtered BEFORE any page is cut."""
+    return {**data, "tasks": [row for row in data.get("tasks") or [] if presence_promise(binding, row)]}
 
 
 def schedule_tool_projection(
@@ -626,6 +647,7 @@ def _task_from_schedule(record: Dict[str, Any], *, task_id: str = "") -> Dict[st
     from ouroboros.consciousness_authority import stamp_scheduled_work
     stamp_scheduled_work(task, record, raw_metadata)
     task["task_contract"] = build_task_contract(apply_consciousness_authority(task))
+    task["task_contract"].pop("context_requires_development", None)  # start_task's answer alone, no template's
     workspace = task["task_contract"]["workspace"]
     if presence_metadata_binding(metadata) is not None and workspace["root"]:
         task.update(
@@ -668,13 +690,13 @@ def _scan_outcomes(root, snapshot):
                 continue
             notice = terminal_host_notice_text(result)
             words = str(result.get("wake_summary") or "").strip()
-            # A host notice is the run's public line, else the sentence it wrote for its human (whole),
-            # else the end of a spoken answer; a quiet run's internal note never is.
+            # A host notice's first line (its cause) is the run's public line, else the sentence it wrote
+            # for its human (whole), else the end of a spoken answer; a quiet run's internal note never is.
             text = str(notice or ("" if words or result.get("wake_silent") is True else result.get("result")) or "").strip()
             observed[str(row.get("id") or "")] = {
                 "task_id": task_id, "state": result["status"], "quiet": quiet_finish(result),
                 "notice": bool(notice), "ended_at": terminal_time_fact(result)["occurred_at"],
-                "line": text.splitlines()[-1][:160] if text else words,
+                "line": text.splitlines()[0 if notice else -1][:160] if text else words,
             }
         except Exception:
             log.debug("schedule result %s not observed this pass", task_id, exc_info=True)
@@ -728,14 +750,14 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
     root = _queue().DRIVE_ROOT
     from supervisor.followup_policy import control_guard, scan_policy, refresh_policy
 
-    # Copy the table while its writers are excluded. Policy reads below own no Q
-    # or table lock; a changed row/restart is retried rather than overwritten.
-    with schedule_transaction(root):
-        try:
-            snapshot = copy.deepcopy(load_schedule_store(root))
-        except ScheduleStoreUnreadable:
-            log.error("Scheduled task store is unreadable; skipping this scheduler pass")
-            return
+    # Its one writer seam replaces the table atomically, so a plain read is one whole committed
+    # version: no Q or table lock is taken just to copy it. Policy reads below own neither; the
+    # decisions re-read the table under both, and a row changed in between is retried there.
+    try:
+        snapshot = load_schedule_store(root)
+    except ScheduleStoreUnreadable:
+        log.error("Scheduled task store is unreadable; skipping this scheduler pass")
+        return
     outcomes = _scan_outcomes(root, snapshot)
     observed = scan_policy(root, snapshot)
     from ouroboros.retention import age_cutoff, get_gc_retention_days
@@ -749,6 +771,7 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
         if at is not None and at.timestamp() < cutoff:
             receipt_rows.append(row)
     reads = occurrences.prepare_receipts(receipt_rows, drive_root=root)
+    relations = occurrences.prepare_relations(receipt_rows, reads)
     claims: List[Dict[str, Any]] = []
     due_notes: List[Dict[str, Any]] = []
     with schedule_transaction(root):
@@ -786,7 +809,7 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                 continue
             try:
                 with control_guard(root, record):
-                    occurrences.repair_followup_binding(record, reads=reads)
+                    occurrences.repair_followup_binding(record, reads=reads, relations=relations)
                     view = refresh_policy(root, data, record, observed=view)
             except Exception as exc:
                 if not isinstance(exc, occurrences.ReceiptChanged) and not occurrences.contention(exc):
@@ -898,6 +921,11 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                 if not _audit_schedule_mutation(phase="outcome", result="removed", before=before, **audit):
                     log.error("schedule %s removed but its audit outcome is incomplete", before.get("id"))
             _queue().persist_queue_snapshot(reason="scheduled_tasks")
+        # Still under the table lock: no other writer can land between this pass's decision
+        # (and its own write) and the identity it records, so any later write wakes a pass.
+        from supervisor.schedule_time import note_pass, table_identity
+
+        note_pass(root, data, table_identity(_scheduled_tasks_path(root)), cutoff, now_utc)
     notes.deliver(due_notes, root)
     occurrences.retain_deferred(data.get("tasks") or [])
     prepared = []

@@ -37,6 +37,7 @@ def test_running_project_ids_counts_top_level_scoped_tasks_only():
         _task("beta"),                       # bare task dict
         _meta(_task("", tid="plain")),       # unscoped: no lane
         _meta(_task("gamma", role="subagent")),  # swarm member: no lease of its own
+        {**_meta(_task("delta")), "lane": "conversation"},  # a room's reply turn answers beside its work
         "garbage",
         None,
     ]
@@ -61,6 +62,38 @@ def test_candidate_is_leasable_matrix():
     assert candidate_is_leasable(_task("beta"), leased) is True
     # The leased project's OWN subagents must not deadlock the swarm.
     assert candidate_is_leasable(_task("alpha", role="subagent"), leased) is True
+
+
+def test_the_lane_is_its_trees_while_a_sleeping_root_waits_on_live_members():
+    """A sleep is its actor's wait: its tree keeps the lane its live children write under (``lane_holders``)."""
+    from ouroboros.project_lease import lane_holders
+
+    sleep = {"reason": "sleep", "sleep": {}}
+    root = {**_task("alpha", tid="root"), "root_task_id": "root", "_budget_pause": sleep}
+    kid = {**_task("alpha", role="subagent", tid="kid"), "root_task_id": "root"}
+    foreign = {**_task("alpha", tid="foreign"), "root_task_id": "foreign"}
+    foreign_kid = {**_task("alpha", role="subagent", tid="f-kid"), "root_task_id": "foreign"}
+    holders = lane_holders([_meta(kid)], [root, foreign, foreign_kid])
+    assert holders == {"alpha": {"root"}}, "a running child keeps its sleeping root's lane"
+    assert candidate_is_leasable(kid, set(), holders=holders), "its own tree's lane admits it"
+    assert not candidate_is_leasable(foreign, set(), holders=holders)
+    assert not candidate_is_leasable(foreign_kid, set(), holders=holders), "another tree's child waits too"
+    woken = {**{k: v for k, v in root.items() if k != "_budget_pause"}, "_budget_pause_resume": {"pause": sleep}}
+    assert lane_holders([], [woken, kid]) == {"alpha": {"root"}}, "woken, not yet started: a queued child keeps it"
+    assert lane_holders([], [root, foreign]) == {}, "nothing of its tree alive: the sleep alone keeps nothing"
+    assert candidate_is_leasable(foreign, set(), holders={}) and candidate_is_leasable(foreign_kid, set(), holders={})
+    assert lane_holders([_meta(kid)], [{**root, "_budget_pause": {"reason": "owner"}}]) == {}, "a Pause keeps its rule"
+    assert lane_holders([_meta(foreign)], []) == {"alpha": {"foreign"}}
+    assert lane_holders([{**_meta(foreign), "lane": "conversation"}], []) == {}
+    # A released tree takes its lane back only once it is free, never beside another tree: no two trees wait
+    # on each other. Of two sleeping trees whose members are all queued, the first queued keeps it.
+    taken = lane_holders([_meta(foreign)], [root, kid])
+    assert taken == {"alpha": {"foreign"}} and not candidate_is_leasable(kid, set(), holders=taken)
+    other = {**_task("alpha", tid="other"), "root_task_id": "other", "_budget_pause": sleep}
+    other_kid = {**_task("alpha", role="subagent", tid="o-kid"), "root_task_id": "other"}
+    first = lane_holders([], [root, kid, other, other_kid])
+    assert first == {"alpha": {"root"}} and candidate_is_leasable(kid, set(), holders=first)
+    assert not candidate_is_leasable(other_kid, set(), holders=first)
 
 
 def test_project_chat_id_policy():

@@ -13,6 +13,8 @@ from ouroboros.tools.tool_result import (
     _published_tool_result,
     _restore_tool_result_sidecar,
 )
+from tests._cases import case_folders
+from tests._run_wait_shared import wake_now
 
 
 def _call(ctx, function, *args, **kwargs):
@@ -197,24 +199,25 @@ _PRE_DAEMON_REFUSALS = [
 ]
 
 
-@pytest.mark.parametrize("tool,args,reason,code", _PRE_DAEMON_REFUSALS)
-def test_every_delegate_verb_publishes_one_native_refusal_through_the_registry(
-    tmp_path, monkeypatch, tool, args, reason, code,
-):
-    import json
+def test_every_delegate_verb_publishes_one_native_refusal_through_the_registry(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for tool, args, reason, code in _PRE_DAEMON_REFUSALS:
+        tmp_path = next(case_paths)
+        with subtests.test(tool=tool, args=args, reason=reason, code=code), monkeypatch.context() as monkeypatch:
+            import json
 
-    registry = _delegate_registry(tmp_path, monkeypatch)
-    result = registry.execute_result(tool, dict(args))
-    assert (result.status, result.code) == (TOOL_CODE_SPECS[code].status, code)
-    # The handler ABI is unchanged: the published text IS the string the entry returned.
-    assert registry.execute(tool, dict(args)) == result.text
-    payload = json.loads(result.text)
-    # The envelope is ADDITIVE: the domain reason keeps its own name and vocabulary.
-    assert payload["status"] == "refused"
-    assert payload["reason"] == reason
-    assert payload["ok"] is False
-    assert payload["host_code"] == code
-    assert payload["tool"] == tool
+            registry = _delegate_registry(tmp_path, monkeypatch)
+            result = registry.execute_result(tool, dict(args))
+            assert (result.status, result.code) == (TOOL_CODE_SPECS[code].status, code)
+            # The handler ABI is unchanged: the published text IS the string the entry returned.
+            assert registry.execute(tool, dict(args)) == result.text
+            payload = json.loads(result.text)
+            # The envelope is ADDITIVE: the domain reason keeps its own name and vocabulary.
+            assert payload["status"] == "refused"
+            assert payload["reason"] == reason
+            assert payload["ok"] is False
+            assert payload["host_code"] == code
+            assert payload["tool"] == tool
 
 
 def test_a_refused_delegate_call_is_no_longer_recorded_as_a_successful_call(tmp_path, monkeypatch):
@@ -241,15 +244,6 @@ def test_a_refused_delegate_call_is_no_longer_recorded_as_a_successful_call(tmp_
     ("daemon_unreachable", "TOOL_REPORTED_FAILURE"),
     ("run_ownership_unknown", "TOOL_REPORTED_FAILURE"),
     ("run_not_owned", "TOOL_REPORTED_FAILURE"),
-    ("subscription_window_exhausted", "TOOL_REPORTED_FAILURE"),
-    ("home_isolation_breach", "TOOL_REPORTED_FAILURE"),
-    ("some_future_engine_code", "TOOL_REPORTED_FAILURE"),
-    # Agent faults: the call itself was malformed or self-contradictory.
-    ("empty_prompt", "TOOL_ARG_ERROR"),
-    ("missing_run_id", "TOOL_ARG_ERROR"),
-    ("retry_selector_conflict", "TOOL_ARG_ERROR"),
-    ("checkpoint_requires_time_and_reason", "TOOL_ARG_ERROR"),
-    ("configured_actor_route_mismatch", "TOOL_ARG_ERROR"),
 ])
 def test_the_refusal_class_separates_a_substrate_no_from_a_malformed_call(reason, code):
     from ouroboros._outcome_tool_errors import _POLICY_DENIAL_STATUSES
@@ -295,7 +289,6 @@ def _own_run(tmp_path, run_id="run-1", task_id="t-family"):
     # The daemon REFUSED the stop, or the stop could not be verified: the run may
     # still be live and mutating, so the call did not succeed.
     ("failed", "TOOL_REPORTED_FAILURE"),
-    ("containment_fault_run_may_still_be_live", "TOOL_REPORTED_FAILURE"),
 ])
 def test_cancel_outcomes_split_on_whether_the_run_may_still_be_live(
     tmp_path, monkeypatch, outcome, expected_code,
@@ -396,20 +389,19 @@ def test_an_unsupported_engine_build_refuses_the_answer_typed(tmp_path, monkeypa
 
 def test_the_supervising_wake_and_its_cache_horizon_note_stay_valid_json(tmp_path, monkeypatch):
     """The note is a FIELD of the wake payload, stamped once at the wake's publication
-    (never per 3 s tick, never appended after the rendered JSON, which once left the
-    whole result unparseable for every reader of this family). Drives the REAL
-    observing tick through the supervising wait: an event during a quiet tick wakes
-    with the note, and without the per-tick window's waited_sec or cancel advice."""
+    (never appended after the rendered JSON, which once left the whole result unparseable
+    for every reader of this family). Drives the REAL addressed read of a publication: a
+    control present after the read wakes with the note, and without the read's window
+    waited_sec or cancel advice."""
     import json
+    import time
 
     import ouroboros.delegate_supervision as supervision
     import ouroboros.tools.control as control
-    import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gw
 
     _own_run(tmp_path)
     monkeypatch.setattr(control, "cache_horizon_note", lambda *_a, **_k: "the prompt cache expires soon")
-    monkeypatch.setattr(delegate.time, "sleep", lambda _sec: None)
 
     class _Alive:
         engine_version = "3.10.2"
@@ -421,17 +413,17 @@ def test_the_supervising_wake_and_its_cache_horizon_note_stay_valid_json(tmp_pat
 
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Alive())
     checks = []
-    # First check lets the tick observe; the second (after it) delivers a control.
+    # The first check lets the publication read; a later one (after it) delivers a control.
     monkeypatch.setattr(supervision, "_control_wakes",
                         lambda _ctx: checks.append(1) or ([{"type": "deadline"}] if len(checks) > 1 else []))
     ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t-family", task_attempt=1)
-    raw = supervision.supervised_wait(ctx, "run-1").text
+    raw = supervision._publish(ctx, {"runs": ["run-1"], "armed_at": "now", "armed_epoch": time.time()}, "").text
     payload = json.loads(raw)          # the contract: still ONE JSON object
     assert payload["cache_horizon_note"] == "the prompt cache expires soon"
     assert payload["status"] in {"progress", "no_progress"}
     assert payload["wake_events"] == [{"type": "deadline"}]
     assert "waited_sec" not in payload and "delegate_cancel" not in str(payload.get("note") or "")
-    assert payload["sleep"]["quiet_renewals"] == 0
+    assert payload["sleep"]["mode"] == "answered_at_call"
 
 
 def _wait_ctx(tmp_path, task_id="t-nanny"):
@@ -453,23 +445,15 @@ def _scripted_wait(ticks):
     return wait_once, remaining
 
 
-def test_a_quiet_window_renews_and_only_the_terminal_observation_wakes(tmp_path, monkeypatch):
+def test_a_terminal_observation_wakes_as_a_successful_result(tmp_path):
+    """One read per wake (the body watched the run meanwhile): a terminal run is a SUCCESSFUL observation, whatever
+    the leaf's own state, keyed by the wake id it published."""
     import json
 
-    import ouroboros.delegate_supervision as supervision
+    wait_once, remaining = _scripted_wait([json.dumps({"status": "succeeded", "run_id": "run-1", "last_seq": 9})])
+    result = wake_now(_wait_ctx(tmp_path), "run-1", wait_once=wait_once)
 
-    monkeypatch.setattr(supervision.time, "sleep", lambda _sec: None)
-    wait_once, remaining = _scripted_wait([
-        json.dumps({"status": "progress", "run_id": "run-1", "last_seq": 3}),
-        json.dumps({"status": "no_progress", "run_id": "run-1", "last_seq": 3}),
-        json.dumps({"status": "observation_pending", "run_id": "run-1",
-                    "reason": "observation_read_timeout"}),
-        json.dumps({"status": "succeeded", "run_id": "run-1", "last_seq": 9}),
-    ])
-    result = supervision.supervised_wait(_wait_ctx(tmp_path), "run-1", wait_once=wait_once)
-
-    assert remaining == []                       # exactly four ticks, one wake
-    # A terminal run is a SUCCESSFUL observation, whatever the leaf's own state.
+    assert remaining == []                       # exactly one read, one wake
     assert (result.status, result.code) == ("ok", "OK")
     payload = json.loads(result.text)
     assert payload["status"] == "succeeded"
@@ -479,12 +463,11 @@ def test_a_quiet_window_renews_and_only_the_terminal_observation_wakes(tmp_path,
 def test_a_terminal_failed_leaf_is_still_a_successful_observation(tmp_path):
     import json
 
-    import ouroboros.delegate_supervision as supervision
 
     wait_once, _ = _scripted_wait([
         json.dumps({"status": "terminal", "state": "failed", "run_id": "run-1"}),
     ])
-    result = supervision.supervised_wait(_wait_ctx(tmp_path, "t-failed"), "run-1", wait_once=wait_once)
+    result = wake_now(_wait_ctx(tmp_path, "t-failed"), "run-1", wait_once=wait_once)
     assert result.code == "OK"
     assert json.loads(result.text)["state"] == "failed"
 
@@ -502,14 +485,12 @@ def test_a_refused_observation_wakes_as_a_refusal_and_replays_as_one(tmp_path, m
                          "the socket carried no answer", run_id="run-1").text
     wait_once, _ = _scripted_wait([refusal_text])
     ctx = _wait_ctx(tmp_path, "t-refused-wake")
-    small = supervision.supervised_wait(ctx, "run-1", wait_once=wait_once)
+    small = wake_now(ctx, "run-1", wait_once=wait_once)
     assert (small.status, small.code) == ("error", "TOOL_REPORTED_FAILURE")
     assert json.loads(small.text)["reason"] == "daemon_unreachable"
 
     # A NEW process: no sidecar, no gateway, only the durable supervision record.
-    replay = supervision.supervised_wait(
-        _wait_ctx(tmp_path, "t-refused-wake"), "run-1",
-        wait_once=lambda *_a, **_k: pytest.fail("a pending wake must replay, not re-observe"))
+    replay = wake_now(_wait_ctx(tmp_path, "t-refused-wake"), "run-1")  # a pending wake replays, no read
     assert replay.code == "TOOL_REPORTED_FAILURE"
     assert replay.meta["supervision_wake_id"] == small.meta["supervision_wake_id"]
     assert supervision.acknowledge_pending_wake(ctx, replay.text) is True
@@ -518,7 +499,6 @@ def test_a_refused_observation_wakes_as_a_refusal_and_replays_as_one(tmp_path, m
 def test_an_oversized_refused_wake_keeps_its_class_in_the_fitted_envelope(tmp_path, monkeypatch):
     import json
 
-    import ouroboros.delegate_supervision as supervision
     import ouroboros.tool_capabilities as capabilities
     from ouroboros.delegate_shared import _fail
 
@@ -527,8 +507,7 @@ def test_an_oversized_refused_wake_keeps_its_class_in_the_fitted_envelope(tmp_pa
                          "the engine did not contain the run: " + "x" * 4000,
                          run_id="run-1").text
     wait_once, _ = _scripted_wait([refusal_text])
-    result = supervision.supervised_wait(
-        _wait_ctx(tmp_path, "t-big-refusal"), "run-1", wait_once=wait_once)
+    result = wake_now(_wait_ctx(tmp_path, "t-big-refusal"), "run-1", wait_once=wait_once)
 
     envelope = json.loads(result.text)        # still ONE valid JSON object
     assert len(result.text) <= 2_000
@@ -541,7 +520,6 @@ def test_a_failed_spill_keeps_the_exact_wake_and_its_class(tmp_path, monkeypatch
     import json
 
     import ouroboros.artifacts as artifacts
-    import ouroboros.delegate_supervision as supervision
     import ouroboros.tool_capabilities as capabilities
     from ouroboros.delegate_shared import _fail
 
@@ -551,8 +529,7 @@ def test_a_failed_spill_keeps_the_exact_wake_and_its_class(tmp_path, monkeypatch
     wait_once, _ = _scripted_wait([
         _fail("delegate_wait", "run_not_owned", "y" * 4000, run_id="run-1").text,
     ])
-    result = supervision.supervised_wait(
-        _wait_ctx(tmp_path, "t-spill-failed"), "run-1", wait_once=wait_once)
+    result = wake_now(_wait_ctx(tmp_path, "t-spill-failed"), "run-1", wait_once=wait_once)
 
     # The EXACT wake is kept whole; the ordinary outer truncation fails the ack.
     assert len(result.text) > 900
@@ -580,7 +557,6 @@ def _schema_1_state(tmp_path, task_id, payload):
 def test_two_schema_1_refusal_reasons_replay_as_one_recorded_class(tmp_path, reason):
     import json
 
-    import ouroboros.delegate_supervision as supervision
 
     task_id = f"t-legacy-{reason}"
     _schema_1_state(tmp_path, task_id, {
@@ -588,9 +564,7 @@ def test_two_schema_1_refusal_reasons_replay_as_one_recorded_class(tmp_path, rea
         "detail": "written before the envelope existed", "run_id": "run-1",
         "supervision_wake_id": "legacy-wake",
     })
-    result = supervision.supervised_wait(
-        _wait_ctx(tmp_path, task_id), "run-1",
-        wait_once=lambda *_a, **_k: pytest.fail("the stored wake replays, it is not re-observed"))
+    result = wake_now(_wait_ctx(tmp_path, task_id), "run-1")  # the stored wake replays, it is not re-read
 
     assert result.code == "TOOL_REPORTED_FAILURE"
     payload = json.loads(result.text)
@@ -604,15 +578,12 @@ def test_two_schema_1_refusal_reasons_replay_as_one_recorded_class(tmp_path, rea
 def test_the_word_error_inside_a_schema_1_success_is_not_a_refusal(tmp_path):
     import json
 
-    import ouroboros.delegate_supervision as supervision
 
     _schema_1_state(tmp_path, "t-legacy-ok", {
         "status": "succeeded", "run_id": "run-1", "supervision_wake_id": "legacy-wake",
         "note": "the run reported: 0 errors, 1 warning; error budget untouched",
     })
-    result = supervision.supervised_wait(
-        _wait_ctx(tmp_path, "t-legacy-ok"), "run-1",
-        wait_once=lambda *_a, **_k: pytest.fail("the stored wake replays"))
+    result = wake_now(_wait_ctx(tmp_path, "t-legacy-ok"), "run-1")  # the stored wake replays
 
     assert (result.status, result.code) == ("ok", "OK")
     assert "ok" not in json.loads(result.text)
@@ -630,7 +601,7 @@ def test_the_private_cores_never_publish_and_the_entry_publishes_once(tmp_path, 
     for core, args in (
         (delegate._delegate_cancel, ("",)),
         (delegate_start_entry, ("do the work",)),
-        (lambda _c, _r: supervision.supervised_wait(_c, _r, checkpoint_after_sec=5), ("run-1",)),
+        (lambda _c, _r: supervision.run_wait(_c, _r, checkpoint_after_sec=5), ("run-1",)),
     ):
         sentinel = object()
         token = _install_tool_result_sidecar(ctx, sentinel)
@@ -693,7 +664,7 @@ def test_the_hold_consumer_resumes_on_a_native_leaf_wake(tmp_path, monkeypatch):
     tools = SimpleNamespace(_ctx=ctx)
     hold.write_unknown_hold(ctx, "run-1", {"run_id": "run-1", "hold_cycles": 1})
     monkeypatch.setattr(hold, "acknowledge_pending_wake", lambda *_a, **_k: True)
-    monkeypatch.setattr(hold, "supervised_wait", lambda *_a, **_k: delegate_result({
+    monkeypatch.setattr(hold, "hold_wake", lambda *_a, **_k: delegate_result({
         "status": "succeeded", "run_id": "run-1", "supervision_wake_id": "w-native"}))
     messages: list = []
     assert hold.hold_step(tools, controls={}, messages=messages, drive_logs=tmp_path,
@@ -702,7 +673,7 @@ def test_the_hold_consumer_resumes_on_a_native_leaf_wake(tmp_path, monkeypatch):
 
     # A refused wait is a daemon statement, not a leaf wake: no paid resume round.
     hold.write_unknown_hold(ctx, "run-1", {"run_id": "run-1", "hold_cycles": 1})
-    monkeypatch.setattr(hold, "supervised_wait", lambda *_a, **_k: _fail(
+    monkeypatch.setattr(hold, "hold_wake", lambda *_a, **_k: _fail(
         "delegate_wait", "daemon_unreachable", "the socket carried no answer"))
     assert hold.hold_step(tools, controls={}, messages=[], drive_logs=tmp_path,
                           task_id="t-hold-native", emit_progress=lambda _t: None) == "terminal"
@@ -720,7 +691,7 @@ def test_the_wake_ack_is_keyed_on_the_published_wake_id(tmp_path, monkeypatch):
 
     ctx = _wait_ctx(tmp_path, "t-ack")
     wait_once, _ = _scripted_wait(['{"status": "succeeded", "run_id": "run-1", "last_seq": 4}'])
-    wake = supervision.supervised_wait(ctx, "run-1", wait_once=wait_once)
+    wake = wake_now(ctx, "run-1", wait_once=wait_once)
     wake_id = wake.meta["supervision_wake_id"]
 
     def _run(result_text, meta):

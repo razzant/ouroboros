@@ -52,7 +52,6 @@ def test_one_named_row_is_the_whole_panel(h: Harness, monkeypatch, member) -> No
 
 
 @pytest.mark.parametrize("reviewer, aggregate", [("t1", "NOT_PERFORMED"), ("t2", "PASS"), ("s1", "PASS")])
-@pytest.mark.serial
 def test_preflight_delivers_one_countercheck_through_the_real_review_wave(
         staged_body, tmp_path, monkeypatch, reviewer, aggregate):  # noqa: F811
     from ouroboros.tools.review_helpers import anti_pattern_lock_guard

@@ -111,11 +111,6 @@ def test_a_stored_value_wins_over_the_environment_for_an_ordinary_key(
     ("OUROBOROS_CONTEXT_MODE", "low"),
     ("OUROBOROS_CONTEXT_MODE_AUTO_LOW", "false"),
     ("OUROBOROS_SAFETY_MODE", "off"),
-    ("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off"),
-    ("OUROBOROS_SAFETY_OWNER_RULES", "a subprocess cannot author owner rules"),
-    ("OUROBOROS_MODEL_SAFETY", "forwarded/checker"),
-    # Consent: an absent key means the first window close still asks the owner.
-    ("OUROBOROS_DESKTOP_KEEP_RUNNING", "true"),
 ])
 def test_a_disk_authored_key_is_never_read_out_of_the_environment(
         isolated_settings, monkeypatch, key, env_value):

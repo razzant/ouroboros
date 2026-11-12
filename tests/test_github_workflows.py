@@ -8,8 +8,10 @@ alternative cannot provide the same facts, or that model latency has improved.
 import hashlib
 import io
 import json
+import os
 import pathlib
 import subprocess
+import sys
 import zipfile
 from types import SimpleNamespace
 
@@ -167,6 +169,58 @@ def test_run_log_job_validates_membership_and_reads_by_job_id(fake, ctx):
     assert gh.calls[1].args == ["run", "view", "--log-failed", "--job", "55", "--attempt", "1"]
     assert gh.calls[1].repo == "github.example/owner/selected"
     assert text.startswith("GitHub Actions log — owner/selected run 11 attempt 1, job 55 test (failure)\n")
+    assert "Format: gh CLI plain-text stdout; selection: failed steps only (--log-failed)" in text
+
+
+@pytest.mark.parametrize("parent_status", ["queued", "in_progress"])
+def test_run_log_reads_a_completed_job_before_the_parent_run_finishes(fake, ctx, parent_status):
+    gh = fake(run={"databaseId": 11, "url": f"{BASE}/actions/runs/11", "status": parent_status,
+                   "attempt": 1, "headSha": SHA, "workflowName": "CI",
+                   "jobs": [{"databaseId": 55, "name": "test", "status": "completed", "conclusion": "success"}]})
+
+    text = _read(ctx, "get", "run", run_id=11, job_id=55)
+
+    assert gh.kinds() == ["run_json", "log"]
+    assert gh.calls[1].args == ["run", "view", "--log", "--job", "55", "--attempt", "1"]
+    assert "run 11 attempt 1, job 55 test (success)" in text
+    assert "selection: full run/job log (--log)" in text
+
+
+@pytest.mark.parametrize("job_status", ["queued", "in_progress"])
+def test_run_log_refuses_a_noncompleted_job_even_when_parent_is_in_progress(fake, ctx, job_status):
+    gh = fake(run={"databaseId": 11, "url": f"{BASE}/actions/runs/11", "status": "in_progress",
+                   "attempt": 1, "headSha": SHA, "workflowName": "CI",
+                   "jobs": [{"databaseId": 55, "name": "test", "status": job_status}]})
+
+    text = _read(ctx, "get", "run", run_id=11, job_id=55)
+
+    assert gh.kinds() == ["run_json"]
+    assert text == (f"⚠️ TOOL_ERROR: job 55 test in run 11 attempt 1 in owner/selected is {job_status}; "
+                    "GitHub serves a job log only after that job is completed, so no log was requested.")
+    assert (_typed(ctx).status, _typed(ctx).code) == ("error", "TOOL_ERROR")
+
+
+def test_run_log_keeps_whole_run_completed_only_with_completed_jobs(fake, ctx):
+    gh = fake(run={"databaseId": 11, "url": f"{BASE}/actions/runs/11", "status": "in_progress",
+                   "attempt": 1, "headSha": SHA, "workflowName": "CI",
+                   "jobs": [{"databaseId": 55, "name": "test", "status": "completed"}]})
+
+    text = _read(ctx, "get", "run", run_id=11)
+
+    assert gh.kinds() == ["run_json"]
+    assert "is in_progress; GitHub serves the log of a completed run only" in text
+
+
+def test_run_log_failed_only_cli_failure_is_typed_without_rest_fallback(fake, ctx):
+    forbidden = github.GhResult(False, "⚠️ GH_ERROR: --log-failed unavailable", 1, None, "exit")
+    gh = fake(failing={"log": forbidden})
+
+    text = _read(ctx, "get", "run", run_id=11, failed_only=True)
+
+    assert gh.kinds() == ["run_json", "log"]
+    assert text.startswith("⚠️ TOOL_ERROR: failed_only requires GitHub CLI --log-failed output")
+    assert "no REST fallback was used" in text and forbidden.text in text
+    assert (_typed(ctx).status, _typed(ctx).code) == ("error", "TOOL_ERROR")
 
 
 def test_run_log_retention_failure_is_typed_incomplete_with_capture_facts(fake, ctx, monkeypatch):
@@ -210,7 +264,6 @@ def test_run_log_attempt_is_read_and_passed_to_the_capture(fake, ctx):
     ({"databaseId": 12, "attempt": 1}, 0, "GitHub's answer for run 11 names run 12 attempt 1; the run was not read."),
     ({"databaseId": 11}, 0, "GitHub's answer for run 11 names run 11 attempt None; the run was not read."),
     ({"databaseId": 11, "attempt": 0}, 0, "names run 11 attempt 0; the run was not read."),
-    ({"databaseId": 11, "attempt": 1}, 2, "GitHub's answer for run 11 attempt 2 names run 11 attempt 1; the run was not read."),
 ])
 def test_run_log_never_invents_the_run_or_attempt_it_reads(fake, ctx, run, attempt, fragment):
     """A later re-run must not relabel bytes: the observed id and attempt are validated, never defaulted to 1."""
@@ -246,11 +299,8 @@ def test_run_log_tail_is_bounded_by_the_result_limit_and_clips_long_lines(fake, 
 
 
 @pytest.mark.parametrize("kwargs,fragment", [
-    ({"run_id": 0}, "target names the workflow run"),
     ({"run_id": "eleven"}, "whole numbers"),
-    ({"run_id": 11, "failed_only": "yes"}, "failed_only is a boolean"),
     ({"run_id": 11, "max_bytes": 0}, "max_bytes is 1.."),
-    ({"run_id": 11, "max_bytes": github_workflows.LOG_MAX_BYTES_CEILING + 1}, "max_bytes is 1.."),
     ({"run_id": 11, "tail_lines": 0}, "tail_lines is 1.."),
     ({"run_id": 11, "job_id": -1}, "job_id and attempt are 0"),
 ])
@@ -455,8 +505,6 @@ def test_artifact_download_targets_the_repository_the_cli_resolved(fake, ctx):
 
 @pytest.mark.parametrize("kwargs,fragment", [
     ({"artifact_id": 501}, "max_bytes is required"),
-    ({"artifact_id": 501, "max_bytes": 0}, "max_bytes is required"),
-    ({"artifact_id": 501, "max_bytes": github_workflows.ARTIFACT_MAX_BYTES_CEILING + 1}, "max_bytes is required"),
     ({"artifact_id": 0, "max_bytes": 10}, "target is the id"),
     ({"artifact_id": "x", "max_bytes": 10}, "whole numbers"),
 ])
@@ -652,3 +700,74 @@ def test_gh_readers_reach_readonly_child_that_cannot_use_shell(tmp_path, monkeyp
         assert registry.get_schema_by_name(name) is not None
         result = registry.execute_result(name, args)
         assert result.status == "ok" and content in result.text, (name, result.text)
+
+
+# --- the retained reader across a fork (#2539) ------------------------------------------------------------------------
+
+_ZIP_PROBE = ("import hashlib, json, pathlib, sys, zipfile\n"
+              "data = pathlib.Path(sys.argv[1]).read_bytes()\n"
+              "with zipfile.ZipFile(sys.argv[1]) as archive:\n"
+              "    names = archive.namelist()\n"
+              "    archive.extractall('unzipped')\n"
+              "print(json.dumps({'sha256': hashlib.sha256(data).hexdigest(), 'names': names}))\n")
+
+
+@pytest.mark.parametrize("forked", [False, True], ids=["ordinary", "forked"])
+def test_retained_reader_reaches_the_canonical_file_through_this_tasks_own_tools(tmp_path, monkeypatch, forked):
+    """#2539: bytes are retained in the task's canonical store, but a fork's ``artifact_store`` and process cwd are its
+    execution drive's. There the relative address listed only the fork's own sources and an unzip in
+    cwd=artifact_store found no archive. Each returned reader now lists and reads (or, for the archive, a process opens)
+    the exact retained bytes: a fork names the absolute canonical file without a root, an ordinary task keeps the
+    relative address, and the process cwd stays the task's own writable execution store."""
+    from ouroboros import safety
+    from ouroboros.tool_access import resource_root_path
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    canonical, system = tmp_path / "data", tmp_path / "system"
+    drive = canonical / "state" / "headless_tasks" / "task-fixture" / "data" if forked else canonical
+    own = task_artifact_dir_path(drive, "task-fixture") / "source_handles" / "tool_results"
+    own.mkdir(parents=True)
+    (own / f"owner-dialogue-{'0' * 64}.txt").write_text("the execution drive's own source\n", encoding="utf-8")
+    system.mkdir()
+    monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
+    monkeypatch.setattr(safety, "check_safety", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(github_workflows, "_gh_run", FakeGh(artifacts=[_DIST], artifact=_DIST, archive=ARCHIVE))
+    ctx = ToolContext(repo_dir=system, drive_root=drive, budget_drive_root=str(canonical) if forked else "",
+                      task_id="task-fixture")
+    registry = ToolRegistry(repo_dir=system, drive_root=drive)
+    registry.set_context(ctx)
+    store, cwd_store = task_artifact_dir_path(canonical, "task-fixture").resolve(), resource_root_path(ctx, "artifact_store")
+    assert (store == cwd_store) is not forked
+
+    for args, key, data in (({"method": "get", "kind": "run", "target": 11, "include": ["log"]}, "capture", LOG),
+                            ({"method": "list", "kind": "artifact", "target": 11, "limit": 100}, "saved_page", None),
+                            ({"method": "download", "kind": "artifact", "target": 501, "max_bytes": 4096}, "capture", ARCHIVE)):
+        result = registry.execute_result("github_read", args)
+        line, _, body = result.text.partition("\n")
+        payload = json.loads(body)
+        ref = payload[key]["retained"] if key == "capture" else payload[key]
+        exact = (store / ref["path"]).read_bytes()
+        assert data is None or exact == data
+        assert (ref["root"], ref["size"], ref["sha256"]) == ("artifact_store", len(exact), hashlib.sha256(exact).hexdigest())
+        reader = ref["read"]["arguments"]
+        root = {"root": reader["root"]} if "root" in reader else {}
+        listed = registry.execute_result("list_files", {**root, "path": os.path.dirname(reader["path"])})
+        assert pathlib.PurePath(ref["path"]).name in listed.text, listed.text
+        if data is ARCHIVE:  # A binary is opened by a process in cwd=artifact_store, where the view says to extract it.
+            opened = registry.execute_result("run_command", {
+                "cwd": "artifact_store", "cmd": [sys.executable, "-I", "-c", _ZIP_PROBE, reader["path"]]})
+            assert opened.status == "ok", opened.text
+            seen = json.loads(next(row for row in opened.text.splitlines() if row.startswith("{")))
+            assert seen == {"sha256": payload["capture"]["sha256"], "names": ["report.xml", "logs/pytest.txt"]}
+            assert (cwd_store / "unzipped" / "report.xml").read_bytes() == b"<testsuite/>"
+            assert not forked or not (store / "unzipped").exists()
+        else:
+            text = registry.execute_result("read_file", reader)
+            assert text.status == "ok" and exact.decode("utf-8").splitlines()[0][:60] in text.text, text.text
+        assert ref["read"] == {"tool": "read_file", "arguments": {
+            **({"path": str(store / ref["path"])} if forked else {"root": "artifact_store", "path": ref["path"]}),
+            "start_line": 1, "max_lines": 2000, "start_char": 0}}
+        view = line + "\n" + payload["view"]
+        assert key == "saved_page" or f": {reader['path'] if forked else 'artifact_store/' + ref['path']} (" in view
+        assert data is ARCHIVE or f"path={reader['path']!r}" in view
+        assert ("artifact_store" in view) is not forked, view

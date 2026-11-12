@@ -90,12 +90,12 @@ def _cleanup_rejected_worktree(tid: str, result_fields: Dict[str, Any]) -> None:
     if not write_root:
         return
     try:
-        from ouroboros import subagent_worktrees
+        from ouroboros import genesis_project, subagent_worktrees
 
         if surface == "self_worktree":
             subagent_worktrees.remove_worktree(task_id=str(tid))
         elif surface == "genesis":
-            subagent_worktrees.remove_genesis_project(write_root)
+            genesis_project.remove_genesis_project(write_root, task_id=str(tid))
     except Exception:
         log.debug("Failed to clean up rejected acting write surface for %s", tid, exc_info=True)
 
@@ -606,8 +606,8 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
         )
         return
 
-    # Fail fast when the worker pool is disabled (e.g. after a crash storm put
-    # the supervisor in direct-chat mode). Without this, the task is written as
+    # Fail fast when the worker pool is disabled (readiness exhaustion put the
+    # supervisor in direct-chat mode). Without this, the task is written as
     # 'scheduled' and enqueued but nothing can ever run it — a permanent "ghost"
     # the parent keeps polling. Give the parent a clear terminal signal instead
     # so it can do the work inline.
@@ -694,7 +694,7 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
         r.task_contract, attempted_depth=r.depth, max_depth=r.max_depth, achieved_depth=None)
     text = _compose_subagent_text(
         r.desc, role=role, expected_output=r.expected_output, constraints=r.constraints, context=r.task_context,
-        task_constraint=r.task_constraint,
+        task_constraint=r.task_constraint, selected_inputs=r.intent.get("prepared_input_files"),
         delegation_budget=admitted_task_contract.get("delegation_budget") if isinstance(admitted_task_contract, dict) else None,
     ) if delegation_role == "subagent" else r.desc
     evt = r.evt
@@ -840,12 +840,11 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
             progress_meta["queued_behind_active_cap"] = True
     else:
         progress_meta["task_event"] = "scheduled"
-    workers = getattr(view, "WORKERS", {}) or {}
-    from supervisor import workers as pool
-    active = [w for w in workers.values() if getattr(w, "active_capacity", True)]
-    if len(active) >= pool.MAX_WORKERS and all(getattr(w, "busy_task_id", None) for w in active):
-        progress_meta["worker_saturation_warning"] = True
-        suffix = " (all workers are currently busy; it will start when one is free)"
+    from supervisor.worker_pool_lifecycle import acting_room
+
+    if acting_room(getattr(view, "WORKERS", {}) or {}, getattr(view, "RUNNING", {}) or {}) == 0:
+        progress_meta["worker_saturation_warning"] = True  # the owner's cap counts acting tasks, not processes
+        suffix = " (the owner's limit of acting tasks is reached; it will start when one is free)"
     else:
         suffix = ""
     if delegation_role == "subagent" and queued_behind_active_cap:

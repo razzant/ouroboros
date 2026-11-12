@@ -1,13 +1,17 @@
 """Transparent compression of finished records: the maintenance child's ``record_compression`` job.
 
-Finished records stay whole (PERSISTENCE ``[record]``); where the filesystem compresses transparently
-their bytes can occupy less with no byte a reader sees changed. Two planes (``PLANES``):
+Finished records stay whole while retained; where the filesystem compresses transparently their bytes
+can occupy less with no byte a reader sees changed. Task evidence remains PERSISTENCE ``[record]``;
+the call wire journal alone follows shared GC retention (``maintenance_retirement.prune_call_wire_journals``),
+also requiring a task proven over. Compression preserves its age. Two planes (``PLANES``):
 
 - ``evidence``: the published evidence of a task proven over (``subagent_worktrees._task_proven_over``: a
   terminal record, a negative live probe, no lineage process; this child holds no queue, so its probe is
   the queue snapshot's, ``task_has_live_queue_ownership``), ``task_results/artifacts/<task>/delegated_runs/
-  */evidence*/**`` and ``.../source_handles/test-evidence/**``, its row read again right before each
-  replace; a terminal task not proven over yet waits and is asked again on later passes;
+  */evidence*/**``, ``.../source_handles/{test-evidence,tool_results,delegated_activity}/**`` (write-once by
+  digest: a reader's ref keeps its path, size and sha256) and a live call's ``conversation-wire.jsonl``,
+  its row read again right before each replace; a terminal task not proven over yet waits and is asked
+  again on later passes;
 - ``seats``: reviewer seat homes ``review_checking_prune.finished_seat_homes`` offers (copy gone, task
   proven over the same way): their ``evidence*`` and ``.test-evidence`` folders, under the seat lock held
   through each replace.
@@ -17,15 +21,19 @@ Never ``area``/``area.noindex`` or a ``.git`` path; every file passes the one fl
 (``artifact_storage.is_compression_sibling``) in the folders it walks (under the seat lock in a home;
 ``temp_sweep`` never enters ``state/review_checkouts``); any other atomic-signature name is neither a
 candidate nor reaped. A folder it cannot list is counted (``unreadable``), never taken for empty.
+``in_scope`` names these places to read-only lineage staging, which streams uncompressed records where compression is supported.
 
 Pacing: at most ``FILES_PER_RUN`` files past the stat floor a run, a stop check between files, the cursor
 durable in the job row; a run reads and rewrites at the utility disk tier (its own thread, its ``ditto``).
 The first pass walks every task folder and seat home (the backlog); later passes look at the rows written
 terminal since the counter the last one covered, the seat homes changed since it looked and what still
-waits for its task (a task written again, or a home changed, is walked from its start). Due while a pass
-is unfinished, new terminal writes arrived or another platform's ``unsupported`` is on the row, never by
-elapsed time; Linux, Docker and Colab record ``unsupported`` once. Totals are kept per plane and are the
-job's own record: the Storage count stays the ground truth.
+waits for its task (a task written again, or a home changed, is walked from its start). ``COVERAGE`` names
+the evidence scope a position was earned under: a row from another scope, done or stopped partway, walks
+every task folder again from its first, since no terminal write will name an old task; what it already
+compressed costs one stat. Due while a pass is unfinished, new terminal writes arrived, the coverage differs
+or another platform's ``unsupported`` is on the row, never by elapsed time; Linux, Docker and Colab record
+``unsupported`` once. Totals are kept per plane and are the job's own record: the Storage count stays the
+ground truth.
 """
 from __future__ import annotations
 
@@ -41,6 +49,7 @@ from ouroboros import artifact_storage, maintenance_jobs, store
 from ouroboros.temp_sweep import is_atomic_temp
 
 JOB = "record_compression"
+COVERAGE = 2  # the evidence plane's scope; a row without it was covered by the scope before retained sources
 PLANES = ("evidence", "seats")  # task evidence (in the Task results place), reviewer seat homes (in App state)
 FILES_PER_RUN = 2_000  # files past the stat floor one run reads (and mostly rewrites): the rest waits a run
 _SEATS = pathlib.Path("state") / "review_checkouts" / "seats"
@@ -53,10 +62,12 @@ def _counter(root: pathlib.Path) -> int:
 
 def due(root: Any, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
     """A pass unfinished (the backlog, or a run its budget or a stop ended), rows written terminal
-    since the counter the last pass covered, or another platform's ``unsupported`` still on the row."""
+    since the counter the last pass covered, a position earned under another ``COVERAGE``, or another
+    platform's ``unsupported`` still on the row."""
     if not artifact_storage.compression_supported():
         return row.get("unsupported") != sys.platform
-    return row.get("state") != "done" or row.get("counter") != _counter(pathlib.Path(root)) or "unsupported" in row
+    return (row.get("state") != "done" or row.get("counter") != _counter(pathlib.Path(root))
+            or row.get("coverage") != COVERAGE or "unsupported" in row)
 
 
 def _settled(root: pathlib.Path, task_ids: List[str]) -> Dict[str, bool]:
@@ -67,19 +78,28 @@ def _settled(root: pathlib.Path, task_ids: List[str]) -> Dict[str, bool]:
         return {task_id: txn.row(task_id, "status") in SETTLED_STATUSES for task_id in task_ids}
 
 
+WIRE_JOURNAL = "conversation-wire.jsonl"  # a live call's wire evidence (``live_conversation.WireJournal``)
+_SOURCE_RECORDS = ("test-evidence", "tool_results", "delegated_activity")  # of ``source_handles``; never working material
+
+
 def _evidence_part(parts: Tuple[str, ...], directory: bool) -> bool:
-    """``delegated_runs/<run>/evidence*/**`` and ``source_handles/test-evidence/**`` of a task folder."""
+    """``delegated_runs/<run>/evidence*/**``, ``source_handles/<one of _SOURCE_RECORDS>/**`` and the call wire
+    journal of a task folder."""
+    if parts == (WIRE_JOURNAL,):
+        return not directory
     depth, named = {"delegated_runs": (3, lambda: parts[2].startswith("evidence")),
-                    "source_handles": (2, lambda: parts[1] == "test-evidence")}.get(parts[0], (0, None))
+                    "source_handles": (2, lambda: parts[1] in _SOURCE_RECORDS)}.get(parts[0], (0, None))
     return bool(depth) and (len(parts) < depth or named()) and (directory or len(parts) > depth)
 
 
 def _has_evidence(base: pathlib.Path) -> bool:
-    """A task folder holding either evidence plane (two stats): only such a task is worth its proof. One
+    """A task folder holding evidence (one stat a place): only such a task is worth its proof. One
     that cannot be looked into stays a candidate: the walk then counts it ``unreadable`` and goes on."""
-    for path in (base / "delegated_runs", base / "source_handles" / "test-evidence"):
+    for path, kind in ((base / "delegated_runs", stat.S_ISDIR),
+                       *((base / "source_handles" / name, stat.S_ISDIR) for name in _SOURCE_RECORDS),
+                       (base / WIRE_JOURNAL, stat.S_ISREG)):
         try:
-            if stat.S_ISDIR(os.stat(path).st_mode):
+            if kind(os.stat(path).st_mode):
                 return True
         except (FileNotFoundError, NotADirectoryError):
             continue
@@ -91,6 +111,27 @@ def _has_evidence(base: pathlib.Path) -> bool:
 def _seat_part(parts: Tuple[str, ...], directory: bool) -> bool:
     """A home's ``evidence``, ``evidence-<capture>`` and ``.test-evidence`` folders (never its copy)."""
     return (parts[0].startswith("evidence") or parts[0] == ".test-evidence") and (directory or len(parts) > 1)
+
+
+def in_scope(root: Any, path: Any) -> bool:
+    """Whether a pass may one day ask the floor about the file at PATH: a task folder's evidence or a seat
+    home's evidence folders under ROOT (the data root), never through ``.git``. By place alone, whatever its
+    size, name, task state or today's floor, so a small live record that grows is one. Read-only lineage staging
+    streams one not yet compressed: an APFS clone would leave it ``shared`` for good (``artifact_storage``). A path that cannot be
+    resolved answers True: not knowing is no licence to share blocks, and a stream costs only time."""
+    try:
+        path, root = pathlib.Path(path).resolve(), pathlib.Path(root).resolve()
+    except (OSError, RuntimeError):
+        return True
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    if ".git" in parts:
+        return False
+    if parts[:2] == ("task_results", "artifacts") and len(parts) > 3:
+        return _evidence_part(parts[3:], False)
+    return parts[:3] == _SEATS.parts and len(parts) > 4 and _seat_part(parts[4:], False)
 
 
 def _linked(entry: os.DirEntry) -> bool:
@@ -231,7 +272,9 @@ class _Run:
                 for entry in listing:
                     try:
                         if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
-                            present[entry.name] = entry.stat(follow_symlinks=False).st_mtime
+                            # The folder's own record: a Windows listing serves a folder's times from its parent's
+                            # index, which NTFS refreshes lazily, so a home changed after a pass read unchanged.
+                            present[entry.name] = os.stat(entry.path, follow_symlinks=False).st_mtime
                     except FileNotFoundError:
                         continue
         except FileNotFoundError:
@@ -301,7 +344,11 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
 
 
 def _pass(root: pathlib.Path, row: Dict[str, Any], should_stop: Callable[[], bool]) -> Dict[str, Any]:
-    """The run's planes in order; its position, cursor, waits and totals go to the job row."""
+    """The run's planes in order; its position, cursor, waits and totals go to the job row. A position
+    earned under another ``COVERAGE`` is dropped here, and durably only by a run that ends: one that throws
+    leaves the old row, still due. A seat pass it interrupts keeps what it owes by name."""
+    if row.get("coverage") != COVERAGE:
+        row = {**row, "counter": None, "cursor": None, "began": None}
     counter, now = _counter(root), time.time()
     began = row.get("began") or {"counter": counter, "at": now}  # a backlog pass keeps its start facts
     job = _Run(root, row, should_stop)
@@ -309,11 +356,13 @@ def _pass(root: pathlib.Path, row: Dict[str, Any], should_stop: Callable[[], boo
     owed_seats = None if owed_evidence is not None else job.seats()
     stopped = owed_evidence is not None or owed_seats is not None
     backlog = {"evidence": row.get("counter") is None, "seats": row.get("since") is None}
+    owed_seats_now = (row.get("owed") or {}).get("seats") if owed_evidence is not None else owed_seats
     facts: Dict[str, Any] = {  # a backlog resumes at its cursor; a later pass owes its rest by name
         "state": "pending" if stopped else "done", "cursor": job.cursor if stopped else None,
+        "coverage": COVERAGE, "counter": row.get("counter"),
         "waiting": {plane: sorted(job.waiting[plane]) for plane in PLANES},
         "owed": {"evidence": [] if backlog["evidence"] else owed_evidence or [],
-                 "seats": [] if backlog["seats"] else owed_seats or []}}
+                 "seats": [] if backlog["seats"] else owed_seats_now or []}}
     if job.census and (owed_evidence is None or not backlog["evidence"]):  # the census position moved
         facts["counter"] = began["counter"] if backlog["evidence"] else counter
     if owed_evidence is None and (owed_seats is None or not backlog["seats"]):  # the seats were looked at

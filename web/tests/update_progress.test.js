@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { dismissUpdateAttempt, initUpdateStatus, updateAttemptView } from '../modules/update_status.js';
+import { assistedUpdatePhase, dismissUpdateAttempt, initUpdateStatus, RECOVERY_RETRY, unfinishedRecovery, updateAttemptView } from '../modules/update_status.js';
 import { installDomDouble } from './dom_double.js';
 import { bindUpdateRefreshEvents, updateVerdict } from '../modules/updates.js';
 
@@ -103,6 +103,60 @@ test('progress invalidation refreshes an apply but cannot certify boot completio
     assert.deepEqual(restart, [{ afterBootNotice: false }, { afterBootNotice: false }]);
     binding.dispose();
     assert.equal(listeners.size, 0);
+});
+
+test('the requested description task ends through its own task_done, which alone reads the status again', () => {
+    const listeners = new Map();
+    const ws = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name); } };
+    let phase = '';
+    let requested = 'd3adb33f';
+    const reads = [];
+    const binding = bindUpdateRefreshEvents({ ws, getPhase: () => phase, loadStatus: (value) => reads.push(value),
+        reconcileRestart: () => {}, getRequestTaskId: () => requested });
+    const log = listeners.get('log');
+    log({ data: { type: 'task_done', task_id: 'other-task' } });
+    log({ data: { type: 'task_heartbeat', task_id: 'd3adb33f' } });
+    log({ data: { type: 'task_done', task_id: 'd3adb33f', _historical: true } });
+    assert.deepEqual(reads, [], 'another task, another event or a replayed frame is not this request ending');
+    log({ data: { type: 'task_done', task_id: 'd3adb33f' } });
+    assert.deepEqual(reads, [{ fetchRemote: false, preservePhase: true }]);
+    // A host retry ends under its own id with the request as its root; a child of the request does not end it.
+    log({ data: { type: 'task_done', task_id: 'd3adb33f-retry', root_task_id: 'd3adb33f', parent_task_id: 'd3adb33f' } });
+    assert.equal(reads.length, 1);
+    log({ data: { type: 'task_done', task_id: 'd3adb33f-retry', root_task_id: 'd3adb33f' } });
+    assert.equal(reads.length, 2);
+    reads.pop();
+    requested = '';
+    log({ data: { type: 'task_done', task_id: 'd3adb33f' } });
+    phase = 'restarting';
+    requested = 'd3adb33f';
+    log({ data: { type: 'task_done', task_id: 'd3adb33f' } });
+    assert.equal(reads.length, 1, 'no request, or a restart in progress, reads nothing');
+    binding.dispose();
+    assert.equal(listeners.size, 0);
+});
+
+test('Continue admitted in another client refreshes both panels and follows its terminal', () => {
+    const clients = [0, 1].map(() => {
+        const listeners = new Map(), reads = [];
+        const ws = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name); } };
+        let current = 'original';
+        const binding = bindUpdateRefreshEvents({ ws, getPhase: () => '', reconcileRestart() {},
+            getRequestTaskId: () => current,
+            loadStatus: (options) => { reads.push(options); current = 'successor'; } });
+        return { listeners, reads, binding };
+    });
+    // The host's existing log frame reaches both sockets. No document-local event is sent.
+    for (const client of clients) {
+        client.listeners.get('log')({ data: { type: 'owner_continue_admitted', predecessor_task_id: 'other' } });
+        assert.equal(client.reads.length, 0);
+        client.listeners.get('log')({ data: { type: 'owner_continue_admitted', task_id: 'successor', predecessor_task_id: 'original' } });
+        assert.equal(client.reads.length, 1);
+        client.listeners.get('log')({ data: { type: 'task_done', task_id: 'successor' } });
+        assert.equal(client.reads.length, 2);
+        client.binding.dispose();
+        assert.equal(client.listeners.size, 0);
+    }
 });
 
 const refusal = {
@@ -284,6 +338,133 @@ test('restart messages are untouched: a needed restart is a stage without a clos
             blockers: ['service:mcp'], work_stop: 'invoked', error: 'A service could not be stopped.' } });
         assert.deepEqual([pill().textContent, pill().dataset.tone, close().hidden], ['Update failed', 'error', false]);
         assert.match(pill().title, /Ouroboros needs a restart before updates can continue\./);
+    });
+});
+
+// #2671: the shapes /api/update/status serves for a resolver start whose boot rollback did not finish
+// (tests/test_update_attempt_consumers.py drives the real boot for each).
+const resolverStart = { ...refusal, operation_id: 'attempt-r', generation: 'server-a', current_generation: false,
+    stage: 'preparing', result: 'assisted_started', outcome: '', concluded_by: undefined, reason: '', error: '',
+    blockers: [], work_stop: undefined, tx_attempt_id: 'tx-r' };
+const unfinished = { ...resolverStart, outcome: 'failed', reason: 'rollback_incomplete', concluded_by: 'boot',
+    error: 'rollback could not clear update intent before restoring the repository',
+    stash_note: 'the conflicting update could not resume after the restart, and its rollback did not finish.',
+    blockers: ['worker:4242'] };
+const boundTx = (phase, attempt = 'tx-r') => ({ active: true, phase, task_id: '', restart_required: false, attempt_id: attempt });
+
+test('a boot rollback that did not finish reads as incomplete recovery everywhere, with no invented control', () => {
+    const view = updateAttemptView(unfinished, boundTx('rolling_back'));
+    assert.deepEqual([view.terminal, view.tone, view.pill, view.restoreTarget],
+        [true, 'error', 'Update recovery incomplete', '']);
+    assert.equal(view.headline, 'The update failed, and restoring the previous version did not finish.');
+    assert.match(view.text, /^Quit and reopen the desktop app/);
+    assert.equal(view.details.find((row) => row.label === 'Error').value, unfinished.error);
+    assert.equal(view.details.find((row) => row.label === 'Recovery note').value, unfinished.stash_note);
+    assert.doesNotMatch(view.text, /rollback could not clear|the conflicting/);
+    assert.equal(view.details.find((row) => row.label === 'Blocked by').value, 'worker:4242');
+    // History once its transaction is gone: the fact stays, the retry instruction does not.
+    assert.doesNotMatch(updateAttemptView(unfinished, { active: false }).text, /Quit and reopen/);
+    assert.doesNotMatch(updateAttemptView(unfinished, boundTx('rolling_back', 'tx-other')).text, /Quit and reopen/);
+    for (const phase of ['rolling_back', 'assisted_resolution', 'pending_boot_smoke']) {
+        const verdict = updateVerdict({ managed: true, update_progress: unfinished, update_tx: boundTx(phase) });
+        // pending_boot_smoke keeps the in-app Restart its phase allows (server_restart._RESTARTABLE_UPDATE_PHASES).
+        assert.deepEqual([verdict.state, verdict.tone, verdict.action, verdict.recoveryInstruction], ['resolving', 'error',
+            phase === 'pending_boot_smoke' ? { id: 'restart', label: 'Restart now' } : { id: 'check', label: 'Check again' }, true]);
+        assert.equal(verdict.headline, view.headline, `${phase}: the panel and the indicator say one thing`);
+        assert.equal(verdict.hint, view.text);
+        assert.doesNotMatch(verdict.headline, /under review|waiting for a restart/);
+    }
+    // An executor's own failure keeps its ordinary words: the reason names this boot report alone.
+    const executor = updateAttemptView({ ...unfinished, reason: 'update_writer_fence_blocked', concluded_by: 'executor' },
+        boundTx('rolling_back'));
+    assert.deepEqual([executor.pill, executor.headline], ['Update failed', 'The update did not complete.']);
+});
+
+test('only a bound transaction still in an assisted phase is a resolution at work', () => {
+    assert.equal(updateAttemptView(resolverStart, boundTx('assisted_resolution')).pill, 'Resolving update…');
+    assert.equal(updateAttemptView(resolverStart, boundTx('committing_assisted')).pill, 'Resolving update…');
+    for (const tx of [boundTx('marker_cleanup_retry'), boundTx('gate_blocked'), boundTx('rolling_back'),
+        { ...boundTx('pending_boot_smoke'), local_work_recovery: true }, boundTx('assisted_resolution', 'tx-other'),
+        { active: false }, null]) {
+        const view = updateAttemptView(resolverStart, tx);
+        assert.deepEqual([view.terminal, view.tone, view.pill, view.headline],
+            [false, 'neutral', 'Update not concluded', 'This update has not concluded yet.'], JSON.stringify(tx));
+    }
+});
+
+test('the panel can say the recovery instruction once without hiding other retained facts', () => {
+    const tx = boundTx('assisted_resolution');  // a failed write can leave this old phase on disk
+    for (const extra of [{ keep_branch: 'local-keep-test' }, { retention_unconfirmed: true },
+        { keep_branch: 'local-keep-test', retention_unconfirmed: true }]) {
+        const progress = { ...unfinished, ...extra };
+        const verdict = updateVerdict({ managed: true, update_progress: progress, update_tx: tx });
+        assert.equal(verdict.hint, RECOVERY_RETRY);
+        const view = updateAttemptView(progress, tx, { showRecoveryInstruction: !verdict.recoveryInstruction });
+        assert.doesNotMatch(view.text, /Quit and reopen/);
+        if (extra.keep_branch) assert.match(view.text, /local-keep-test/);
+        if (extra.retention_unconfirmed) assert.match(view.text, /could not be saved/);
+        assert.match(updateAttemptView(progress, tx).text, /Quit and reopen/, 'the indicator retains its instruction');
+    }
+});
+
+test('a verdict that gives the recovery instruction owns it, and a recorded completion outdates "did not finish"', () => {
+    const quitReopen = /Quit and reopen/g;
+    // local_work_recovery outranks the failed record: stash recovery after an unfinished rollback (still true), and a
+    // finished rollback awaiting its restart (marker_cleanup_retry, rollback_restart_pending).
+    for (const [phase, stale] of [['rolling_back', false], ['assisted_resolution', false], ['marker_cleanup_retry', true]]) {
+        const tx = { ...boundTx(phase), local_work_recovery: true };
+        const verdict = updateVerdict({ managed: true, update_progress: unfinished, update_tx: tx });
+        assert.equal(verdict.headline, 'Local changes still need recovery confirmation.');
+        assert.equal(verdict.recoveryInstruction, true);
+        const view = updateAttemptView(unfinished, tx, { showRecoveryInstruction: !verdict.recoveryInstruction });
+        const said = [verdict.hint, view.text].join(' ').match(quitReopen) || [];
+        assert.equal(said.length, 1, `${phase}: one quit/reopen instruction`);
+        assert.equal(view.headline, stale ? 'The update did not complete.'
+            : 'The update failed, and restoring the previous version did not finish.', phase);
+        assert.equal(Boolean(unfinishedRecovery(unfinished, tx)), !stale, phase);
+        // The exact diagnostics remain reachable, historical wording included.
+        assert.equal(view.details.find((row) => row.label === 'Recovery note').value, unfinished.stash_note);
+    }
+    // Cleanup retry alone (no local work): its own gate verdict gives the instruction; the record is history.
+    const cleanup = updateVerdict({ managed: true, update_progress: unfinished, update_tx: boundTx('marker_cleanup_retry') });
+    assert.equal(cleanup.headline, 'An update attempt stopped mid-flight and needs recovery.');
+    assert.equal(cleanup.recoveryInstruction, true);
+    const history = updateAttemptView(unfinished, boundTx('marker_cleanup_retry'));
+    assert.deepEqual([history.pill, history.headline], ['Update failed', 'The update did not complete.']);
+    assert.doesNotMatch(history.text, quitReopen);
+    // A corrupt marker's own instruction is not repeated either.
+    const corrupt = updateVerdict({ managed: true, update_progress: unfinished, update_tx: boundTx('corrupt') });
+    assert.equal(corrupt.recoveryInstruction, true);
+    // A verdict without its own instruction leaves the attempt's single one in place.
+    const plain = updateVerdict({ managed: true, update_progress: resolverStart, update_tx: boundTx('assisted_resolution') });
+    assert.notEqual(plain.recoveryInstruction, true);
+});
+
+test('one assisted-phase reading serves the panel verdict and the attempt record', () => {
+    for (const phase of ['materializing_assisted', 'assisted_resolution', 'committing_assisted',
+        'assisted_unknown_future', 'gate_blocked', 'pending_boot_smoke', '']) {
+        const tx = boundTx(phase);
+        const verdict = updateVerdict({ managed: true, update_progress: resolverStart, update_tx: tx });
+        const view = updateAttemptView(resolverStart, tx);
+        const resolving = assistedUpdatePhase(phase);
+        assert.equal(verdict.headline === 'A conflicting update is being resolved under review.', resolving, phase);
+        assert.equal(view.pill === 'Resolving update…', resolving, phase);
+    }
+});
+
+test('a hidden recovery notice stays hidden for its attempt while Last attempt takes the later conclusion', async () => {
+    await withIndicator(async ({ show, pill, close }) => {
+        await show({ managed: true, available: false, update_progress: resolverStart, update_tx: boundTx('assisted_resolution') });
+        assert.deepEqual([pill().textContent, close().hidden], ['Resolving update…', true]);
+        await show({ managed: true, available: false, update_progress: unfinished, update_tx: boundTx('rolling_back') });
+        assert.deepEqual([pill().hidden, pill().textContent, pill().dataset.tone, close().hidden],
+            [false, 'Update recovery incomplete', 'error', false]);
+        assert.match(pill().title, /Quit and reopen/);
+        close().click();
+        const restored = { ...unfinished, outcome: 'rolled_back', reason: '', error: '', stash_note: '', blockers: [] };
+        await show({ managed: true, available: false, update_progress: restored, update_tx: { active: false } });
+        assert.equal(pill().hidden, true, 'the same operation stays dismissed in this browser');
+        assert.equal(updateAttemptView(restored, { active: false }).pill, 'Previous version restored');
     });
 });
 

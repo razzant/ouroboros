@@ -2,7 +2,8 @@
 
 The retold old memory comes first, every unfolded record whole whatever its block (no block
 is privileged; the physical floor, F3, is what turns a room's records into one line), then
-my pages and parts of every room in stream order (never by publication time); a record
+my parts and accounts of every room in stream order, then the pages no part or account holds
+yet in publication order, so a new page joins the end and every byte before it stays; a record
 folded into a part shows only through the part, and the mind's corrections and rejections
 of a part's members stand under it. What is folded is ``memory_inventory``'s one rule. The
 block is byte-identical for every focus that carries a story, a child included, and depends
@@ -65,7 +66,9 @@ def _fold_block_zero(root, rooms):
     _page(root, "1", 0, 5)
 
 
-def test_pointers_come_first_then_pages_of_all_rooms_by_stream_position_not_publication(tmp_path):
+def test_retellings_come_first_then_pages_of_all_rooms_in_publication_order(tmp_path):
+    """The story closes the cached block B: a newly sealed page, whatever its room and period, joins the end
+    and leaves every byte before it unchanged; a fold is a settled retelling and stands before the pages."""
     rooms = shared.world(tmp_path)
     alpha, beta = str(rooms["alpha"]), str(rooms["beta"])
     # Published newest stream first: sequence and record time run against the stream.
@@ -75,9 +78,9 @@ def test_pointers_come_first_then_pages_of_all_rooms_by_stream_position_not_publ
     text = _story(tmp_path)
     headers = _headers(text)
     assert headers[0] == WHOLE
-    assert [header.rsplit(" ", 1)[1] for header in headers[1:]] == [early, middle, late]
-    assert headers[1].startswith("### Main · 2026-09-03 00:00 → 2026-09-03 00:02 · page ")
-    assert headers[3].startswith(f"### Project Beta [chat_id={beta}] · ")
+    assert [header.rsplit(" ", 1)[1] for header in headers[1:]] == [late, early, middle]
+    assert headers[1].startswith(f"### Project Beta [chat_id={beta}] · ")
+    assert headers[2].startswith("### Main · 2026-09-03 00:00 → 2026-09-03 00:02 · page ")
     whole = "#### legacy-b00-r1 — 2026-09-01 00:00 → 2026-09-01 00:05 — Main — 4 rows retold in 10 chars\n  Main talk."
     later = ("#### legacy-b01-r1 — 2026-09-02 00:00 → 2026-09-02 00:03 (block period) — Main — no row of this room in "
              "that period; retold in 15 chars\n  Main was quiet.")
@@ -85,6 +88,12 @@ def test_pointers_come_first_then_pages_of_all_rooms_by_stream_position_not_publ
     assert "memory_read(node_id='legacy-" not in text  # whole: no pointer line repeats a record
     # A child reads the same story, byte for byte: no block is privileged for anyone.
     assert _story(tmp_path, KID) == text
+    newest = _page(tmp_path, "777", 15, 15)
+    grown = _story(tmp_path)
+    assert grown.startswith(text.split("\n\nPages sealed by me")[0] + "\n\n### ")
+    assert [header.rsplit(" ", 1)[1] for header in _headers(grown)[1:]] == [late, early, middle, newest]
+    part = _part(tmp_path, beta, [late])  # its period is the latest of all, its place still before the pages
+    assert [header.rsplit(" ", 1)[1] for header in _headers(_story(tmp_path))[1:]] == [part, early, middle, newest]
 
 
 def test_a_pointers_period_is_its_rooms_own_rows_and_without_rows_the_marked_block_period(tmp_path):
@@ -409,7 +418,7 @@ def test_a_view_without_the_story_reads_its_own_rooms_pages_alone(tmp_path, monk
     _page(tmp_path, alpha, 13, 13, text="Alpha's page.")
     _part(tmp_path, "1", [_page(tmp_path, "1", 10, 11, text="Main's page."), _page(tmp_path, "1", 12, 12)])
     _page(tmp_path, beta, 14, 14, text="Beta's page.")
-    store, label = ChronicleStore(tmp_path), mv._labeler(tmp_path)
+    store, label = ChronicleStore(tmp_path), mv.room_labeler(tmp_path)
     units = {unit.record_id: unit for unit in mi.legacy_units(store, tmp_path)}
     whole = mv._story_pages(store, label, units)
     parsed, real = [], json.loads

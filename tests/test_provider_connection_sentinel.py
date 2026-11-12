@@ -19,6 +19,7 @@ import pytest
 
 from ouroboros.llm import LLMClient
 from ouroboros.provider_models import CONNECTIONS_KEY, ROUTE_CREDENTIAL_SETTING_KEYS
+from tests._source_scan import parse
 
 SENT_A, SENT_B = "sk-or-SENT-A-builtin-000000", "sk-or-SENT-B-named-111111"
 COMPAT_A, COMPAT_B = "sk-SENT-A-compatible-2222", "sk-SENT-B-vllm-3333"
@@ -141,6 +142,8 @@ OWNERS = {"ouroboros/provider_models.py", "ouroboros/llm_routing.py",
 JUSTIFIED = {
     "ouroboros/contracts/plugin_api.py": "frozen skill ABI: FORBIDDEN_SKILL_SETTINGS declares the owner-granted keys",
     "ouroboros/colab_bootstrap.py": "settings writer: copies Colab secrets into the built-in flat settings",
+    "ouroboros/gateway/contracts.py": "ABI: Provider Test's closed selector names a built-in pair by its key setting; reads no value",
+    "ouroboros/gateway/management_contracts.py": "ABI: discovery's closed selector names a built-in pair by its key setting; reads no value",
     "ouroboros/settings_setup_contract.py": "onboarding writer: the wizard's fields are the built-in settings it saves",
     "supervisor/state.py": "OpenRouter ground-truth drift diagnostic of the built-in key; never a money owner",
     "scripts/run_external_review.py": "operator wrapper: provisions the built-in keys from the operator's own secrets",
@@ -151,7 +154,7 @@ JUSTIFIED = {
 
 
 def _named_settings(source: str) -> set[str]:
-    tree = ast.parse(source)
+    tree = parse(source)
     docstrings = {id(node.body[0].value) for node in ast.walk(tree)
                   if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
                   and node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant)}

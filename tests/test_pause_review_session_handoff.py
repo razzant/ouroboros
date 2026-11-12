@@ -19,7 +19,6 @@ from ouroboros.task_results import load_task_result
 from tests._review_session_route_shared import FakeGateway
 from tests.test_review_operation_lifetime import TASK, _parent, env, until  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -166,8 +165,10 @@ def _settled(entry):
     until(lambda: entry.key not in review_custody._ACTIVE)
 
 
-@pytest.mark.parametrize("surface", ["multi_model_review", "scope_review"])
-@pytest.mark.parametrize("fast_resume", [False, True], ids=["pause-held", "fast-resume"])
+@pytest.mark.parametrize(("fast_resume", "surface"), [
+    pytest.param(False, "multi_model_review", id='pause-held-multi_model_review'),
+    pytest.param(True, "scope_review", id='fast-resume-scope_review'),
+])
 def test_fresh_checkpoint_cannot_send_after_author_pause(session, surface, fast_resume):
     f = session
     request = _request(f, surface)

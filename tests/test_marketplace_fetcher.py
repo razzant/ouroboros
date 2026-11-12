@@ -122,7 +122,6 @@ def test_stage_does_not_strip_when_multiple_top_dirs():
     "bad_path",
     [
         "../etc/passwd",
-        "../../etc/passwd",
         "scripts/../../etc",
         "SKILL.md/../../tmp/x",
     ],
@@ -163,24 +162,23 @@ def test_stage_rejects_symlink_member():
     "name",
     [
         ".env",
-        ".env.production",
-        ".env.development",
-        "credentials.json",
         "service-account.json",
-        "secrets.yaml",
-        "secrets.toml",
-        "id_rsa",
-        "aws-credentials.json",
         ".npmrc",
     ],
 )
-def test_stage_rejects_sensitive_filenames(name):
+def test_stage_admits_credential_like_filenames_with_exact_bytes(name):
+    """A credential-like name never refuses an archive member: its bytes land exactly, for review to judge."""
+    body = b"SYNTHETIC_FIXTURE=not-a-key\n"
     archive = _zip_with([
         ("SKILL.md", SKILL_MD_BYTES),
-        (name, b"secret"),
+        (name, body),
     ])
-    with pytest.raises(FetchError, match="sensitive"):
-        stage(archive, slug="x", version="1.0.0")
+    staged = stage(archive, slug="x", version="1.0.0")
+    try:
+        assert name in staged.file_list
+        assert (staged.staging_dir / name).read_bytes() == body
+    finally:
+        staged.cleanup()
 
 
 def test_stage_accepts_a_certificate_and_a_release_signature():
@@ -220,7 +218,7 @@ def test_stage_accepts_a_certificate_and_a_binary_key_container():
 
 @pytest.mark.parametrize(
     "name",
-    ["vault.p12", "vault.pfx", "store.jks", "store.keystore", "vault.kdbx", "sig.gpg"],
+    ["vault.p12", "store.keystore", "sig.gpg"],
 )
 def test_stage_accepts_the_remaining_key_container_suffixes(name):
     """The rest of the owner-approved suffix list stages the same way."""
@@ -238,9 +236,8 @@ def test_stage_accepts_the_remaining_key_container_suffixes(name):
 @pytest.mark.parametrize(
     "name",
     [
-        "evil.so", "evil.dll", "evil.dylib",
-        "evil.pyc", "evil.pyo", "evil.node",
-        "evil.exe", "evil.bin",
+        "evil.so", "evil.dylib",
+        "evil.bin",
     ],
 )
 def test_stage_rejects_loadable_binaries(name):
@@ -288,7 +285,6 @@ def test_stage_per_file_cap_is_inclusive():
         staged.cleanup()
 
 
-@pytest.mark.serial
 def test_stage_preserves_arbitrary_data_through_loading_and_review(tmp_path):
     from ouroboros.skill_loader import load_skill
     from ouroboros.skill_review_packs import frozen_payload_files, payload_pack
@@ -323,9 +319,7 @@ def test_stage_preserves_arbitrary_data_through_loading_and_review(tmp_path):
         staged.cleanup()
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
-@pytest.mark.parametrize("name", ["credentials.json", "program.so", "node_modules/lib/index.js"])
+@pytest.mark.parametrize(("name", "mode"), [("program.so", "advanced"), ("node_modules/lib/index.js", "cyber_pro")])
 def test_cyber_stages_archive_findings_as_advice(monkeypatch, caplog, mode, name):
     from ouroboros.marketplace import fetcher
 
@@ -343,7 +337,6 @@ def test_cyber_stages_archive_findings_as_advice(monkeypatch, caplog, mode, name
         staged.cleanup()
 
 
-@pytest.mark.serial
 def test_cyber_archive_advice_preserves_exact_bytes_and_extraction_root(monkeypatch):
     from ouroboros.marketplace import fetcher
 

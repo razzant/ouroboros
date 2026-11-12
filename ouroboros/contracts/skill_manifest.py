@@ -49,6 +49,9 @@ VALID_SKILL_PERMISSIONS = frozenset(
         "notify_owner",
         "page_module",  # Trusted same-origin JavaScript in the owner's page.
         "context_snapshot",
+        "realtime_provider",
+        "live_conversation",
+        "call_peer",
     }
 )
 _EVENT_TOPIC_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
@@ -146,6 +149,11 @@ class SkillManifest:
     # Unknown fields preserved for forward compatibility.
     raw_extra: Dict[str, Any] = field(default_factory=dict)
     schema_version: int = SKILL_MANIFEST_SCHEMA_VERSION
+    # Appended after every existing field so positional construction keeps its slots.
+    # Integration-secret form fields (showSecretHitl): public field id -> one of the
+    # env_from_settings keys it writes. Structural here; which keys may be written
+    # (owner-defined custom secrets only) is decided host-side, never by the request.
+    secret_fields: Dict[str, str] = field(default_factory=dict)
 
     def is_instruction(self) -> bool:
         return self.type == "instruction"
@@ -525,6 +533,7 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         "runtime",
         "timeout_sec",
         "env_from_settings",
+        "secret_fields",
         "scripts",
         "entry",
         "permissions",
@@ -664,6 +673,7 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         if canonical not in canonical_conflicts:
             canonical_conflicts.append(canonical)
 
+    env_from_settings = _string_list(data.get("env_from_settings"))
     return SkillManifest(
         name=str(data.get("name") or "").strip(),
         description=str(data.get("description") or "").strip(),
@@ -674,7 +684,8 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         os=",".join(item.lower() for item in _string_list(data.get("os"))) or "any",
         runtime=str(data.get("runtime") or "").strip().lower(),
         timeout_sec=timeout_sec,
-        env_from_settings=_string_list(data.get("env_from_settings")),
+        env_from_settings=env_from_settings,
+        secret_fields=_secret_fields(data.get("secret_fields"), env_from_settings),
         scripts=scripts,
         entry=str(data.get("entry") or "").strip(),
         permissions=_string_list(data.get("permissions")),
@@ -692,6 +703,33 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         raw_extra=extras,
         schema_version=schema_version_int,
     )
+
+
+MAX_SECRET_FIELDS = 8
+_SECRET_FIELD_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+
+def _secret_fields(value: Any, env_from_settings: List[str]) -> Dict[str, str]:
+    """``secret_fields`` as an ordered ``{field_id: env key}`` mapping, or a parse error."""
+    if value in (None, "", {}):
+        return {}
+    hint = "declare secret_fields as a mapping like {botToken: TELEGRAM_BOT_TOKEN} over env_from_settings keys"
+    if not isinstance(value, dict) or len(value) > MAX_SECRET_FIELDS:
+        raise SkillManifestError(f"'secret_fields' must be a mapping of at most {MAX_SECRET_FIELDS} fields",
+                                 fix_hint=hint)
+    fields: Dict[str, str] = {}
+    for raw_id, raw_key in value.items():
+        field_id, key = str(raw_id or "").strip(), str(raw_key or "").strip()
+        if not _SECRET_FIELD_ID_RE.fullmatch(field_id):
+            raise SkillManifestError(f"secret_fields id {field_id!r} must be a letter followed by up to 63 "
+                                     "letters, digits or underscores", fix_hint=hint)
+        if not isinstance(raw_key, str) or key not in env_from_settings:
+            raise SkillManifestError(f"secret_fields.{field_id} must name a key listed in env_from_settings",
+                                     fix_hint=hint)
+        if key in fields.values():
+            raise SkillManifestError(f"secret_fields maps two fields to {key}", fix_hint=hint)
+        fields[field_id] = key
+    return fields
 
 
 def _string_list(value: Any) -> List[str]:

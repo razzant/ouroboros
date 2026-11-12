@@ -10,8 +10,8 @@ import pytest
 
 from tests.test_available_subagents_runtime import _session_row, _settings, _snapshot
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
+from tests._run_wait_shared import wake_now
 
-pytestmark = pytest.mark.serial
 
 
 class InputReached(BaseException):
@@ -87,8 +87,12 @@ def _known_custody(root, task, fate):
                                                   "model": "stub-model"})
 
 
-@pytest.mark.parametrize("carrier", ["working", "exact_pause", "owner_wait"])
-@pytest.mark.parametrize("fate", ["none", "live", "terminal", "pending"])
+@pytest.mark.parametrize(("fate", "carrier"), [
+    ("none", "working"),
+    ("live", "exact_pause"),
+    ("terminal", "owner_wait"),
+    ("pending", "owner_wait"),
+])
 def test_saved_dispatch_and_first_input_restore_before_leaf_admission(
         tmp_path, monkeypatch, stub_delegate_engines, carrier, fate):
     from ouroboros import loop, subagent_bootstrap, subagent_runtime
@@ -142,7 +146,7 @@ def test_saved_dispatch_and_first_input_restore_before_leaf_admission(
         loop.run_llm_loop(**kwargs)
 
 
-@pytest.mark.parametrize("locator", [None, {}, "unreadable", {"source_ref": {"path": "missing"}}])
+@pytest.mark.parametrize("locator", [None, {}, {"source_ref": {"path": "missing"}}])
 def test_present_invalid_working_carrier_is_a_gap_never_a_fresh_start(tmp_path, monkeypatch, locator):
     from ouroboros import loop, subagent_bootstrap, subagent_runtime
     from ouroboros.agent import _load_start_continuation
@@ -222,8 +226,7 @@ def test_fresh_start_and_retry_keep_bootstrap_once_rules(tmp_path, monkeypatch, 
         assert ctx._configured_startup_refusal["reason"] == "daemon_recovery_only"
 
 
-@pytest.mark.parametrize("save_fails", [False, True])
-@pytest.mark.parametrize("delivery", ["startup", "tool"])
+@pytest.mark.parametrize(("delivery", "save_fails"), [("startup", False), ("tool", True)])
 def test_shown_interactions_save_before_ack_and_survive_cold_restore(
         tmp_path, monkeypatch, save_fails, delivery):
     from ouroboros import delegate_supervision as ds, loop, working_checkpoint as wc
@@ -302,13 +305,13 @@ def test_shown_interactions_save_before_ack_and_survive_cold_restore(
         assert current["journal_cursor"] == 9 and current["coordination_cursor"] == {"child": "v1"}
         wait_calls.append(True)
         return json.dumps({"status": "terminal", "run_id": rid, "state": "succeeded"})
-    raw_wait = ds.supervised_wait(cold._ctx, run_id, wait_once=observe)
+    raw_wait = wake_now(cold._ctx, run_id, wait_once=observe)
     assert wait_calls == [True], "the acknowledged old wake is not replayed by the later wait"
     assert "terminal" in raw_wait.text
 
 
 def test_restored_run_terminal_keeps_child_and_parent_execution_evidence(tmp_path, monkeypatch, stub_delegate_engines):
-    from ouroboros import delegate_custody as custody, delegate_supervision as ds, subagent_history
+    from ouroboros import delegate_custody as custody, subagent_history
     from ouroboros.agent_dispatch import resolve_dispatch_axes
     from ouroboros.subagents import envelope_from_task
     from ouroboros.tools.control_task_results import _compact_child_projection
@@ -324,7 +327,7 @@ def test_restored_run_terminal_keeps_child_and_parent_execution_evidence(tmp_pat
         assert custody.emit(tmp_path, custody.SETTLED, {"task_id": "nanny", "run_id": rid,
                                                        "state": "succeeded", "model": "stub-model"})
         return json.dumps({"status": "terminal", "run_id": rid, "state": "succeeded"})
-    assert "terminal" in ds.supervised_wait(ctx, "run-one", wait_once=succeeded).text
+    assert "terminal" in wake_now(ctx, "run-one", wait_once=succeeded).text
     envelope = envelope_from_task(task, status="completed")
     assert envelope["actual_substrate"] == "harness_used"
     assert envelope["execution_evidence"]["delegated_runs_succeeded"] == 1

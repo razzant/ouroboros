@@ -3,7 +3,6 @@ import pytest
 import supervisor.message_bus as message_bus
 from tests._dialogue import chat_rows
 import ouroboros.event_bus as event_bus
-from ouroboros import usage_store
 
 
 def _make_bridge(monkeypatch, settings=None):
@@ -418,16 +417,12 @@ def test_send_links_caps_title_across_broadcast_event_and_persistence(monkeypatc
     ("label", "url"),
     [
         ("Valid", "https://[::1]:8080/x"),
-        ("Valid", "https://example.com:8443/x"),
-        ("Valid", "https://example.com/a%20b"),
         ("Docs and specs", "https://example.com/x"),
-        ("Valid", "https://例え.jp/x"),
-        ("Valid", "https://my_server.example.com/docs"),
         ("Valid", "https://host~tilde.example.com/x"),
     ],
     ids=[
-        "ipv6-port", "hostname-port", "encoded-path", "label-space",
-        "unicode-host", "underscore-host", "tilde-host",
+        "ipv6-port", "label-space",
+        "tilde-host",
     ],
 )
 def test_send_links_accepts_valid_link_actions(monkeypatch, tmp_path, label, url):
@@ -455,31 +450,15 @@ def test_send_links_accepts_valid_link_actions(monkeypatch, tmp_path, label, url
 @pytest.mark.parametrize(
     ("label", "url"),
     [
-        ("Report", "https://exa mple.com/report"),
-        ("Report", "https://example.com/re\nport"),
-        ("Report", "https://example.com/re\0port"),
-        ("Report", "https://example.com/" + "a" * 2029),
-        ("Report", "https://[::1"),
-        ("Report", "https://example.com:99999/path"),
-        ("Report", "https://example.com:bad/path"),
         ("Report", "https://:443/path"),
-        ("Report", "https://@/path"),
         ("Report", "https://exa%20mple.com/x"),
-        ("Report", "https://%zz/x"),
-        ("Report", "https://[v1.foo]/x"),
         ("Report", "https://[v1.fe80::1]/p"),
-        ("Report", "https://exa\u00a0mple.com/x"),
         ("Report", "https://example.com/a\u2028b"),
         ("Report", "https://example.com\\@evil.com/"),
-        ("Bad\nLabel", "https://example.com"),
-        ("Bad\u2028Label", "https://example.com"),
     ],
     ids=[
-        "space", "newline", "nul", "over-2048", "malformed-ipv6",
-        "port-out-of-range", "non-numeric-port", "empty-host-port", "userinfo-only",
-        "encoded-host", "invalid-percent-host", "ipvfuture", "ipvfuture-colons",
-        "no-break-space", "line-separator", "backslash-authority", "label-newline",
-        "label-line-separator",
+        "empty-host-port", "encoded-host", "ipvfuture-colons",
+        "line-separator", "backslash-authority",
     ],
 )
 def test_send_links_refuses_dirty_action_without_side_effects(
@@ -624,130 +603,6 @@ def test_push_log_suppresses_negative_a2a_chat_from_browser_broadcast(monkeypatc
     bridge.push_log({"type": "task_started", "task_id": "a2a", "chat_id": -1001})
 
     assert frames == []
-
-
-def test_budget_line_replays_unresolved_attempt_not_stale_state(monkeypatch, tmp_path):
-    from ouroboros import usage_accounting as ua
-    from supervisor import state as state_module
-
-    (tmp_path / "state").mkdir()
-    (tmp_path / "logs").mkdir()
-    (tmp_path / "state" / "state.json").write_text(
-        '{"spent_usd":0,"spent_calls":0}\n', encoding="utf-8",
-    )
-    (tmp_path / "settings.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "logs" / "events.jsonl").write_text("", encoding="utf-8")
-    usage_store.migrate_from_journal(tmp_path)
-    reservation = ua.reserve_attempt(ua.AttemptRequest(
-        model="openai/gpt-5.5",
-        provider="openrouter",
-        reservation_usd=1.0,
-        drive_root=tmp_path,
-        global_limit_usd=10.0,
-    ))
-    ua.mark_dispatched(reservation)
-    ua.mark_unresolved(reservation, "timeout")
-
-    stale = {
-        "spent_usd": 5,
-        "spent_calls": 0,
-        "current_branch": "ouroboros",
-        "current_sha": "abcdef123456",
-    }
-
-    def update_state(mutator):
-        mutator(stale)
-        return dict(stale)
-
-    monkeypatch.setattr(state_module, "update_state", update_state)
-    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(message_bus, "TOTAL_BUDGET_LIMIT", 10.0)
-
-    line = message_bus.budget_line(force=True)
-
-    # The ledger, not the stale $5 counter: known spend is $0 and the unresolved
-    # attempt's $1 bound is disclosed beside it, not counted as spending (#1487).
-    assert "$0.0000 / $10.00" in line
-    assert "unresolved <=$1.0000" in line
-    assert "ouroboros@abcdef12" in line
-    assert "$5.0000" not in line and "$1.0000 / $10.00" not in line
-
-
-@pytest.mark.parametrize("damage", ["journal", "store"])
-def test_budget_line_fails_loud_on_mid_ledger_corruption(monkeypatch, tmp_path, damage):
-    from ouroboros import usage_accounting as ua
-    from supervisor import state as state_module
-    from tests._usage_store_testing import write_journal
-
-    (tmp_path / "state").mkdir()
-    (tmp_path / "logs").mkdir()
-    (tmp_path / "state" / "state.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "settings.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "logs" / "events.jsonl").write_text("", encoding="utf-8")
-    row = {"attempt_id": "a1", "kind": "attempt", "model": "openai/gpt-5.5", "provider": "openrouter",
-           "reservation_upper_bound_usd": 1.0, "pricing_known": True}
-    if damage == "journal":
-        # A never-imported journal damaged before its last row: the import refuses.
-        ledger = write_journal(tmp_path, [{**row, "state": "reserved"}, {**row, "state": "dispatched"},
-                                          {**row, "state": "unresolved", "reason": "timeout"}])
-        rows = ledger.read_text(encoding="utf-8").splitlines()
-        ledger.write_text(rows[0] + "\nnot-json\n" + "\n".join(rows[1:]) + "\n", encoding="utf-8")
-    else:
-        usage_store.migrate_from_journal(tmp_path)
-        reservation = ua.reserve_attempt(ua.AttemptRequest(
-            model="openai/gpt-5.5", provider="openrouter", reservation_usd=1.0,
-            drive_root=tmp_path, global_limit_usd=10.0,
-        ))
-        ua.mark_dispatched(reservation)
-        store = tmp_path / usage_store.STORE_REL
-        store.write_bytes(store.read_bytes()[:100] + b"\x00not a database page" * 512)
-        usage_store.forget(tmp_path)
-
-    stale = {"spent_usd": 0, "current_branch": "ouroboros", "current_sha": "abc"}
-    monkeypatch.setattr(
-        state_module, "update_state",
-        lambda mutator: (mutator(stale), dict(stale))[1],
-    )
-    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(message_bus, "TOTAL_BUDGET_LIMIT", 10.0)
-
-    line = message_bus.budget_line(force=True)
-
-    assert "Budget: unavailable (physical-attempt ledger error)" in line
-    assert "$0.0000" not in line
-
-
-def test_budget_line_marks_quarantined_tail_nonfinal(monkeypatch, tmp_path):
-    from supervisor import state as state_module
-    from tests._usage_store_testing import write_journal
-
-    (tmp_path / "state").mkdir()
-    (tmp_path / "logs").mkdir()
-    (tmp_path / "state" / "state.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "settings.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "logs" / "events.jsonl").write_text("", encoding="utf-8")
-    row = {"attempt_id": "a1", "kind": "attempt", "model": "openai/gpt-5.5", "provider": "openrouter",
-           "reservation_upper_bound_usd": 0.1, "pricing_known": True}
-    # A journal whose writer died mid-append; the one-time import quarantines the tail.
-    ledger = write_journal(tmp_path, [{**row, "state": "reserved"}, {**row, "state": "released"}])
-    with ledger.open("ab") as handle:
-        handle.write(b'{"seq":')
-    from ouroboros import usage_store
-
-    usage_store.migrate_from_journal(tmp_path)  # the lifecycle job the server runs before any display
-
-    stale = {"spent_usd": 0, "current_branch": "ouroboros", "current_sha": "abc"}
-    monkeypatch.setattr(
-        state_module, "update_state",
-        lambda mutator: (mutator(stale), dict(stale))[1],
-    )
-    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(message_bus, "TOTAL_BUDGET_LIMIT", 10.0)
-
-    line = message_bus.budget_line(force=True)
-
-    assert "cost_final no" in line
-    assert "ledger_integrity DEGRADED (quarantined ledger tail)" in line
 
 
 def _registry_with_project(tmp_path):

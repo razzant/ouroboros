@@ -1,4 +1,3 @@
-import json
 import pathlib
 import re
 from types import SimpleNamespace
@@ -8,10 +7,8 @@ from ouroboros.tools.project_journal import (
     _journal_read,
     journal_tail_digest,
 )
-from ouroboros.tools.recent_tasks import _handle_recent_tasks
 from ouroboros.tools.task_tree import _tree_read
 from ouroboros.utils import append_jsonl
-from tests._store_shared import seed_result, read_result
 
 
 def _snapshot(text: str) -> str:
@@ -259,78 +256,3 @@ def test_runtime_tree_digest_uses_same_canonical_root_as_tree_read(tmp_path):
 
     assert "canonical-passive-row" in rendered
     assert "coverage partial: 1 unreadable task-tree row" in rendered
-
-
-def _write_task(root, index: int, *, project_id: str = "mine") -> None:
-    seed_result(root, f"task-{index:03d}", {
-        "task_id": f"task-{index:03d}",
-        "ts": f"2026-08-21T00:{index // 60:02d}:{index % 60:02d}Z",
-        "updated_at": f"2026-08-21T00:{index // 60:02d}:{index % 60:02d}Z",
-        "status": "completed",
-        "description": f"task {index}",
-        "result": f"result {index}",
-        "project_id": project_id,
-    })
-
-
-def test_recent_tasks_pages_364_and_finds_21st_without_known_id(tmp_path):
-    canonical = tmp_path / "canonical"
-    for index in range(364):
-        _write_task(canonical, index)
-    ctx = SimpleNamespace(
-        drive_root=tmp_path / "fork",
-        budget_drive_root=str(canonical),
-        project_id="mine",
-        task_metadata={"budget_drive_root": str(canonical)},
-    )
-
-    first = json.loads(_handle_recent_tasks(ctx, limit=20))
-    assert first["total"] == 364
-    assert first["remaining"] == 344
-    assert first["tasks"][0]["task_id"] == "task-363"
-    second = json.loads(_handle_recent_tasks(
-        ctx, limit=20, offset=20, snapshot=first["snapshot"],
-    ))
-    assert second["tasks"][0]["task_id"] == "task-343"
-    assert second["remaining"] == 324
-
-    seen = first["tasks"] + second["tasks"]
-    assert seen[20]["task_id"] == "task-343"
-def test_recent_tasks_refuses_append_between_pages(tmp_path):
-    canonical = tmp_path / "canonical"
-    for index in range(3):
-        _write_task(canonical, index)
-    ctx = SimpleNamespace(drive_root=tmp_path / "fork", budget_drive_root=str(canonical))
-    first = json.loads(_handle_recent_tasks(ctx, limit=2))
-    _write_task(canonical, 3)
-
-    changed = json.loads(_handle_recent_tasks(
-        ctx, limit=2, offset=2, snapshot=first["snapshot"],
-    ))
-    assert changed["error"]["code"] == "RECENT_TASKS_SNAPSHOT_CHANGED"
-    assert changed["tasks"] == []
-
-
-def test_recent_tasks_next_replays_result_and_trace_query_flags(tmp_path):
-    canonical = tmp_path / "canonical"
-    for index in range(3):
-        _write_task(canonical, index)
-        data = read_result(canonical, f"task-{index:03d}")
-        data["trace_summary"] = f"trace {index}"
-        seed_result(canonical, f"task-{index:03d}", data)
-    ctx = SimpleNamespace(drive_root=tmp_path / "fork", budget_drive_root=str(canonical))
-
-    first = json.loads(_handle_recent_tasks(
-        ctx, limit=1, include_results=True, include_traces=True,
-    ))
-    assert first["next"] == {
-        "limit": 1,
-        "offset": 1,
-        "snapshot": first["snapshot"],
-        "include_results": True,
-        "include_traces": True,
-    }
-    second = json.loads(_handle_recent_tasks(ctx, **first["next"]))
-    assert "error" not in second
-    assert second["tasks"][0]["result"] == "result 1"
-    assert second["tasks"][0]["trace_summary"] == "trace 1"

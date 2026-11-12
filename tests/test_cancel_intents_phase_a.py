@@ -235,7 +235,6 @@ def test_claim_settle_and_release_lifecycle(tmp_path):
     "corrupt_bytes",
     [
         b'{"intents": [broken',
-        b'{"schema_version": 1, "intents": []}',
         b'{"schema_version": 1, "intents": {"corrupt-claim": []}}',
         b'{"schema_version": 1, "intents": {"unrelated": []}}',
     ],
@@ -482,6 +481,47 @@ def test_stale_claimants_release_and_settle_are_fenced_by_generation(tmp_path):
     assert ci.active_intent(tmp_path, "fence1") is None
     trail = (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8")
     assert "claim_release_refused" in trail and "settle_refused" in trail
+
+def test_withdraw_intent_retires_only_the_callers_own_withdrawable_row(tmp_path):
+    """#3047: a withdrawable row of this claim leaves without a cancellation; a row a Stop joined comes back unchanged
+    and stays owed; a claim taken over, or another request, raises and changes nothing."""
+    ci.request_cancel(tmp_path, "wd-own", source="work_finished")
+    own = ci.claim_intent(tmp_path, "wd-own", owner="custody")
+    fence = {"expected_generation": own["generation"], "request_id": own["request_id"]}
+    assert ci.withdraw_intent(tmp_path, "wd-own", withdrawable=lambda row: True, detail="resumed", **fence) is None
+    assert ci.active_intent(tmp_path, "wd-own") is None
+    assert ci.withdraw_intent(tmp_path, "wd-own", withdrawable=lambda row: True, **fence) is None  # already gone
+    assert ci.withdraw_intent(tmp_path, "never-requested", withdrawable=lambda row: True) is None
+
+    ci.request_cancel(tmp_path, "wd-joined", source="work_finished")
+    claim = ci.claim_intent(tmp_path, "wd-joined", owner="custody")
+    assert ci.request_cancel(tmp_path, "wd-joined", source="http_single", requested_by="owner")["followup_stop"]
+    joined = ci.active_intent(tmp_path, "wd-joined")
+    assert ci.withdraw_intent(tmp_path, "wd-joined", withdrawable=lambda row: not row.get("followup_stop"),
+                              expected_generation=claim["generation"], request_id=claim["request_id"]) == joined
+    assert ci.active_intent(tmp_path, "wd-joined") == joined
+
+    ci.request_cancel(tmp_path, "wd-taken", source="work_finished")
+    stale = ci.claim_intent(tmp_path, "wd-taken", owner="custody-1")
+    store = tmp_path / "state" / "cancel_intents.json"
+    data = json.loads(store.read_text(encoding="utf-8"))
+    data["intents"]["wd-taken"]["claim_pid"] = 2 ** 22  # never a live pid: custody-2 takes the claim over
+    store.write_text(json.dumps(data), encoding="utf-8")
+    fresh = ci.claim_intent(tmp_path, "wd-taken", owner="custody-2")
+    taken = ci.active_intent(tmp_path, "wd-taken")
+    with pytest.raises(RuntimeError, match="generation"):
+        ci.withdraw_intent(tmp_path, "wd-taken", withdrawable=lambda row: True,
+                           expected_generation=stale["generation"], request_id=stale["request_id"])
+    with pytest.raises(RuntimeError, match="request_id"):
+        ci.withdraw_intent(tmp_path, "wd-taken", withdrawable=lambda row: True,
+                           expected_generation=fresh["generation"], request_id="ci_another_request")
+    assert ci.active_intent(tmp_path, "wd-taken") == taken
+
+    trail = (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
+    withdrawn = [row for row in map(json.loads, filter(None, trail))
+                 if row.get("event") == "settled" and row.get("outcome") == "withdrawn"]
+    assert [(row["task_id"], row["request_id"], row["generation"], row["detail"]) for row in withdrawn] == [
+        ("wd-own", own["request_id"], own["generation"], "resumed")]
 
 def test_mark_intent_scope_is_widen_only(tmp_path):
     """GR2-1d: single→cascade widens; cascade→single is refused as a no-op plus

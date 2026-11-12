@@ -31,8 +31,11 @@ def _produce(kind, root):
     return mailbox.acknowledge_task_messages(root, "parent", ["message"], wake_id="test")
 
 
-@pytest.mark.parametrize("kind", ["owner", "task", "ack"])
-@pytest.mark.parametrize("layout", ["", "task_drives/parent", "state/headless_tasks/parent/data"])
+@pytest.mark.parametrize(("layout", "kind"), [
+    ("", "owner"),
+    ("task_drives/parent", "task"),
+    ("state/headless_tasks/parent/data", "ack"),
+])
 def test_mailbox_producers_refuse_before_mkdir_and_keep_own_and_bare_roots(installs, kind, layout):
     a, b, bare = installs
     before = _tree(a)

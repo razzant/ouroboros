@@ -70,7 +70,7 @@ def _tools(registry, monkeypatch, slow):
 
 def _rows(logs):
     path = logs / "tools.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
 
 def _settled(logs, tool="slow_probe", timeout=15):

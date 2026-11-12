@@ -284,6 +284,18 @@ def test_rescue_hook_clean_tree_without_merge_returns_empty(monkeypatch, tmp_pat
     assert git_ops.rescue_before_destructive_rollback("clean") == {}
     assert not (tmp_path / "data" / "logs" / "supervisor.jsonl").exists()
 
+def test_ensure_local_version_tag_never_tags_a_development_marker(monkeypatch, tmp_path):
+    (tmp_path / "VERSION").write_text("7.10.0-alpha.0\n", encoding="utf-8")
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+
+    def no_git(cmd):
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(git_ops, "git_capture", no_git)
+
+    git_ops._ensure_local_version_tag()
+
+
 def test_ensure_local_version_tag_accepts_rc_versions(monkeypatch, tmp_path):
     (tmp_path / "VERSION").write_text("4.50.0-rc.2\n", encoding="utf-8")
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)

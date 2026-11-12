@@ -15,8 +15,9 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from tests.ui_console_errors import PageErrors
 
-pytestmark = pytest.mark.serial
+
 
 WEB = Path(__file__).resolve().parents[1] / "web"
 ORIGIN = "http://widgets.test"
@@ -87,8 +88,9 @@ def _page(browser_name, tabs, ledger=None):
         browser = getattr(pw, browser_name).launch(headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.set_default_timeout(10_000)
-        errors = []
-        page.on("pageerror", lambda error: errors.append(str(error)))
+        # Strict until a scenario declares the navigation it makes (tests/ui_console_errors.py).
+        errors = state["errors"] = PageErrors(None, browser_name)
+        errors.watch(page, navigates=False)
 
         def route_request(route):
             url = urlsplit(route.request.url)
@@ -112,7 +114,12 @@ def _page(browser_name, tabs, ledger=None):
                 if route.request.method == "POST":
                     state["preferences"].update(route.request.post_data_json)
                 reply(state["preferences"])
-            elif url.path.startswith("/api/extensions/"):
+            elif url.path.startswith("/api/widgets/asset-leases"):
+                # A framed mount's route lease (mint, renew, revoke): the frame then loads under its URL.
+                lease = "L" * 43
+                reply({"ok": True} if url.path.endswith("/revoke") else
+                      {"token": lease, "base_url": f"/api/widget-resources/{lease}/", "expires_in": 120, "renew_after": 40})
+            elif url.path.startswith(("/api/extensions/", "/api/widget-resources/")):
                 state["requests"].append(url.path + (f"?{url.query}" if url.query else ""))
                 if state["hold"] and url.path.endswith(state["hold"]):
                     state["pending"].append(route)
@@ -152,7 +159,7 @@ def _page(browser_name, tabs, ledger=None):
         try:
             page.goto(ORIGIN, wait_until="domcontentloaded")
             yield page, state
-            assert errors == []
+            assert not errors.unexpected(), errors.report()
         finally:
             for pending in state["pending"]:
                 pending.abort()
@@ -348,7 +355,8 @@ def test_widget_failed_list_retry_preserves_frames_stop_and_initial_recovery(bro
         kept = page.locator('[data-widget-key="retry_probe:kept"]')
         stopped = page.locator('[data-widget-key="retry_probe:stopped"]')
         kept.frame_locator("iframe").locator("#increment").click()
-        stopped.locator('[data-widget-power]').click()
+        stopped.locator('[data-widget-menu-trigger]').click()  # the owner's Stop is the card menu's
+        page.get_by_role("menuitem", name="Stop", exact=True).click()
         page.wait_for_function("!document.querySelector('[data-widget-key=\"retry_probe:stopped\"] iframe')")
         page.evaluate("window.keptFrame = document.querySelector('[data-widget-key=\"retry_probe:kept\"] iframe')")
         state["list_error"] = True
@@ -363,6 +371,7 @@ def test_widget_failed_list_retry_preserves_frames_stop_and_initial_recovery(bro
         assert stopped.locator("iframe").count() == 0
         assert stopped.locator('[data-widget-power]').inner_text() == "Start"
         state["list_error"] = True
+        state["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
         page.reload(wait_until="domcontentloaded")
         page.locator('#widgets-list-error').wait_for()
         assert page.locator('[data-widget-key]').count() == 0

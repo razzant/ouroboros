@@ -1,226 +1,21 @@
-"""Poltergeist phase B (B3): the typed external-wait lease.
+"""The idle rail's leases: what spares a silent task, and what never does.
 
-A nanny holding a bounded ``delegate_wait`` window over a live delegated run is
-legitimately silent: the run streams into the daemon, not into the supervisor's
-``last_progress_at``. The lease is typed metadata with a hard expiry — granted
-per window, bounded by min(task deadline, the run's own maxSeconds horizon, an
-absolute ceiling), released when the wait returns — and it spares ONLY the idle
-rail: the explicit deadline, the absolute ceiling, budget fences and cancel all
-cut through it. Since #1376 that rail records dated silence attention, never a
-grace window or stop. No background thread holds anything (a thread-pool timeout
-does not kill threads; a lease is a number).
+A typed cognitive operation in flight (``cognitive_operation``) or a live model call
+(``main_llm_call_state``) is legitimate silence: each spares ONLY the idle rail, and the
+explicit deadline, the absolute ceiling, budget fences and cancel all cut through it.
+Since #1376 that rail records dated silence attention, never a grace window or stop. No
+background thread holds anything (a lease is a number). The external-wait lease a
+windowed ``delegate_wait`` granted went with that window: ``delegate_wait`` is a sleep on
+runs and holds no slot to spare.
 """
 
 import datetime as dt
-import json
 import queue as stdqueue
 import threading
 import time
 import types
 
 import pytest
-
-from ouroboros.delegate_progress import (
-    DELEGATE_WAIT_LEASE_GRACE_SEC,
-    EXTERNAL_WAIT_LEASE_CEILING_SEC,
-)
-
-
-@pytest.fixture(autouse=True)
-def _owned_gateway_uses_each_test_transport(monkeypatch):
-    from ouroboros import claudexor_daemon
-    from ouroboros.gateways import claudexor as gateway_module
-
-    monkeypatch.setattr(
-        claudexor_daemon,
-        "ensure_owned_gateway",
-        lambda: gateway_module.ClaudexorGateway(),
-    )
-
-
-# -- the bound ------------------------------------------------------------------
-
-
-def _ctx(meta=None):
-    return types.SimpleNamespace(task_metadata=meta or {}, task_id="t", event_queue=None)
-
-
-def test_lease_until_is_the_window_plus_grace_by_default():
-    from ouroboros.tools.delegate import _external_wait_lease_until
-
-    now = time.time()
-    until = _external_wait_lease_until(_ctx(), 600, None, 0)
-    assert until == pytest.approx(now + 600 + DELEGATE_WAIT_LEASE_GRACE_SEC, abs=2.0)
-
-
-def test_lease_until_is_clamped_by_the_task_deadline():
-    from ouroboros.tools.delegate import _external_wait_lease_until
-
-    deadline = dt.datetime.now(tz=dt.timezone.utc) + dt.timedelta(seconds=60)
-    until = _external_wait_lease_until(
-        _ctx({"deadline_at": deadline.isoformat()}), 1800, None, 0)
-    assert until == pytest.approx(deadline.timestamp(), abs=2.0)
-
-
-def test_lease_until_is_clamped_by_the_runs_own_max_seconds_horizon():
-    from ouroboros.tools.delegate import _external_wait_lease_until
-
-    started = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(seconds=100)
-    until = _external_wait_lease_until(_ctx(), 1800, started, 150)
-    assert until == pytest.approx(
-        started.timestamp() + 150 + DELEGATE_WAIT_LEASE_GRACE_SEC, abs=2.0)
-
-
-def test_lease_until_never_exceeds_the_absolute_ceiling():
-    from ouroboros.tools.delegate import _external_wait_lease_until
-
-    now = time.time()
-    until = _external_wait_lease_until(_ctx(), 10_000_000, None, 0)
-    assert until <= now + EXTERNAL_WAIT_LEASE_CEILING_SEC + 2.0
-
-
-# -- the wait grants and releases ----------------------------------------------
-
-
-def test_delegate_wait_grants_the_lease_and_releases_it(tmp_path, monkeypatch):
-    import ouroboros.tools.delegate as delegate
-    from ouroboros.contracts.task_constraint import TaskConstraint
-    from ouroboros.gateways import claudexor as gw
-    from ouroboros.tools.registry import ToolContext
-
-    class _Stub:
-        engine_version = "3.3.6"
-
-        def handshake(self, **_kw): return {}
-        def get_run(self, rid, *, timeout_sec=None):
-            return {"lastSeq": 1, "summary": {
-                "state": "running", "effectiveAccess": "readonly",
-            }}
-        def close(self): pass
-
-    monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path,
-                      task_constraint=TaskConstraint(mode="local_readonly_subagent"))
-    ctx.task_id = "t-nanny"
-    ctx.event_queue = stdqueue.Queue()
-    delegate._CUSTODY.clear()
-    delegate._CUSTODY["run-1"] = delegate._RunCustody(
-        task_id="t-nanny", route_id="some-route", model="m",
-        project_id="prj", project_owned=False,
-    )
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1, since_seq=1))
-    delegate._CUSTODY.clear()
-    assert out["status"] in ("progress", "no_progress"), out
-
-    events = []
-    while True:
-        try:
-            events.append(ctx.event_queue.get_nowait())
-        except stdqueue.Empty:
-            break
-    leases = [e for e in events if e.get("type") == "external_wait_lease"]
-    assert len(leases) == 2, events
-    grant, release = leases
-    assert grant["task_id"] == "t-nanny" and grant["run_id"] == "run-1"
-    assert grant["until_ts"] > time.time()
-    assert grant["until_ts"] <= time.time() + 1 + DELEGATE_WAIT_LEASE_GRACE_SEC + 2.0
-    assert release["until_ts"] == 0.0
-    # F5b lease identity: the grant minted an id and the release names the SAME
-    # one, so the supervisor can match them.
-    assert grant["lease_id"] and grant["lease_id"] == release["lease_id"]
-
-
-# -- the supervisor handler -----------------------------------------------------
-
-
-def test_handler_sets_clamps_and_clears_the_lease():
-    from supervisor import events as events_mod
-
-    meta = {"task": {"id": "t1"}}
-    ctx = types.SimpleNamespace(RUNNING={"t1": meta})
-    now = time.time()
-
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": now + 300}, ctx)
-    assert meta["external_wait_lease_until"] == pytest.approx(now + 300, abs=2.0)
-    assert meta["external_wait_lease_run_id"] == "r1"
-
-    # A malformed/oversized worker value is re-clamped supervisor-side.
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": now + 10_000_000}, ctx)
-    assert meta["external_wait_lease_until"] <= now + EXTERNAL_WAIT_LEASE_CEILING_SEC + 2.0
-
-    # Release drops it immediately.
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": 0.0}, ctx)
-    assert "external_wait_lease_until" not in meta
-    assert "external_wait_lease_run_id" not in meta
-
-    # An unknown task is a no-op, never a resurrection.
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "gone", "until_ts": now + 60}, ctx)
-    assert set(ctx.RUNNING) == {"t1"}
-
-
-def test_a_stale_release_cannot_blank_a_newer_grant():
-    """F5b lease identity, direction 1: an abandoned, executor-killed wait
-    thread's LATE release (its own lease_id) arrives after the task's next wait
-    granted a NEW lease — the release must be refused, or the newer hold loses
-    its idle-rail protection mid-window."""
-    from supervisor import events as events_mod
-
-    meta = {"task": {"id": "t1"}}
-    ctx = types.SimpleNamespace(RUNNING={"t1": meta})
-    now = time.time()
-
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": now + 300, "lease_id": "old"}, ctx)
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": now + 600, "lease_id": "new"}, ctx)
-    assert meta["external_wait_lease_id"] == "new"
-
-    # The abandoned thread's stale release names "old": refused.
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": 0.0, "lease_id": "old"}, ctx)
-    assert meta.get("external_wait_lease_id") == "new"
-    assert meta.get("external_wait_lease_until") == pytest.approx(now + 600, abs=2.0)
-
-
-def test_a_matching_release_clears_the_grant():
-    """F5b lease identity, direction 2: the release that NAMES the stored grant
-    clears it (and a legacy id-less release keeps the old unconditional
-    behaviour)."""
-    from supervisor import events as events_mod
-
-    meta = {"task": {"id": "t1"}}
-    ctx = types.SimpleNamespace(RUNNING={"t1": meta})
-    now = time.time()
-
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": now + 600, "lease_id": "new"}, ctx)
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": 0.0, "lease_id": "new"}, ctx)
-    assert "external_wait_lease_until" not in meta
-    assert "external_wait_lease_id" not in meta
-
-    # Legacy emitter: a release with NO id still clears an id-carrying grant.
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": now + 600, "lease_id": "solo"}, ctx)
-    events_mod._handle_external_wait_lease(
-        {"type": "external_wait_lease", "task_id": "t1", "run_id": "r1",
-         "until_ts": 0.0}, ctx)
-    assert "external_wait_lease_until" not in meta
 
 
 # -- the enforcer spares ONLY the idle rail -------------------------------------
@@ -233,7 +28,6 @@ def _enforcer(monkeypatch, tmp_path, running, *, abs_ceiling=10_000_000):
     monkeypatch.setattr(queue_mod, "RUNNING", running)
     monkeypatch.setattr(queue_mod, "PENDING", [])
     monkeypatch.setattr(queue_mod, "get_task_idle_timeout_sec", lambda: 900)
-    monkeypatch.setattr(queue_mod, "get_per_call_timeout_ceiling_sec", lambda: 60)
     monkeypatch.setattr(queue_mod, "get_task_abs_ceiling_sec", lambda: abs_ceiling)
     monkeypatch.setattr(queue_mod, "FINALIZATION_GRACE_SEC", 300)
     monkeypatch.setattr(queue_mod, "_request_finalization_grace",
@@ -246,41 +40,24 @@ def _enforcer(monkeypatch, tmp_path, running, *, abs_ceiling=10_000_000):
     return _run
 
 
-def test_a_live_lease_spares_the_idle_rail(monkeypatch, tmp_path):
-    meta = {
-        "task": {"id": "t1", "chat_id": 7},
-        "started_at": 1000.0, "last_progress_at": 1000.0, "worker_id": 0,
-        "external_wait_lease_until": 3000.0,
-    }
-    _enforcer(monkeypatch, tmp_path, {"t1": meta})(2500.0)  # idle > 960s, leased
-    assert "finalization_requested_at" not in meta and "silence_attention" not in meta
+def test_an_operation_lease_never_spares_deadline_or_ceiling(monkeypatch, tmp_path):
+    """A live operation lease spares the idle rail and nothing else: the absolute ceiling and an explicit deadline
+    cut through it."""
+    lease = {"active_operation_leases": {"llm-1": {"until_ts": 10_000_000.0, "kind": "llm", "task_attempt": 1}}}
+    idle = {"task": {"id": "t0", "chat_id": 7}, "attempt": 1, "started_at": 1000.0, "last_progress_at": 1000.0,
+            "worker_id": 0, **lease}
+    _enforcer(monkeypatch, tmp_path, {"t0": idle})(2500.0)  # idle > 960s, leased
+    assert "finalization_requested_at" not in idle and "silence_attention" not in idle
 
-    # The SAME idleness with the lease expired is dated silence: attention, no grace.
-    meta["external_wait_lease_until"] = 2400.0
-    _enforcer(monkeypatch, tmp_path, {"t1": meta})(2500.0)
-    assert meta["silence_attention"]["state"] == "pending_attention"
-    assert meta["silence_attention"]["observed_at"] == 2500.0
-    assert "finalization_requested_at" not in meta
-
-
-def test_the_lease_never_spares_deadline_or_ceiling(monkeypatch, tmp_path):
-    # Absolute ceiling cuts through a live lease.
-    meta = {
-        "task": {"id": "t1", "chat_id": 7},
-        "started_at": 1000.0, "last_progress_at": 1000.0, "worker_id": 0,
-        "external_wait_lease_until": 10_000_000.0,
-    }
+    meta = {"task": {"id": "t1", "chat_id": 7}, "attempt": 1, "started_at": 1000.0, "last_progress_at": 1000.0,
+            "worker_id": 0, **{key: {**value} for key, value in lease.items()}}
     _enforcer(monkeypatch, tmp_path, {"t1": meta}, abs_ceiling=1000)(2500.0)
     assert meta.get("finalization_requested_at") == 2500.0
     assert meta.get("finalization_reason") == "absolute_ceiling"
 
-    # An explicit task deadline cuts through it too.
     deadline = dt.datetime.fromtimestamp(2000.0, tz=dt.timezone.utc).isoformat()
-    meta2 = {
-        "task": {"id": "t2", "chat_id": 7, "deadline_at": deadline},
-        "started_at": 1000.0, "last_progress_at": 2400.0, "worker_id": 0,
-        "external_wait_lease_until": 10_000_000.0,
-    }
+    meta2 = {"task": {"id": "t2", "chat_id": 7, "deadline_at": deadline}, "attempt": 1, "started_at": 1000.0,
+             "last_progress_at": 2400.0, "worker_id": 0, **{key: {**value} for key, value in lease.items()}}
     _enforcer(monkeypatch, tmp_path, {"t2": meta2})(2500.0)
     assert meta2.get("finalization_requested_at") == 2500.0
     assert meta2.get("finalization_reason") == "deadline"
@@ -303,9 +80,10 @@ def test_no_task_lifetime_never_ends_a_progressing_task_and_silence_still_gets_a
 
 
 def test_an_operation_lease_stays_finite_without_a_task_lifetime(monkeypatch, tmp_path):
-    """#1196: without a task lifetime the operation's own finite window bounds the idle
-    reprieve from its start fact, so a lost terminal can never spare the rail forever."""
-    from ouroboros.config import OPERATION_WINDOW_FALLBACK_SEC
+    """#1196: without a task lifetime the finite idle lease bounds the idle reprieve from its
+    start fact, so a lost terminal can never spare the rail forever. The renamed constant is
+    attention only: the operation it describes gets no timer from it (1A)."""
+    from ouroboros.config import IDLE_LEASE_MAX_SEC
     from supervisor import events as events_mod
 
     monkeypatch.setattr("ouroboros.config.get_task_abs_ceiling_sec", lambda: None)
@@ -317,7 +95,7 @@ def test_an_operation_lease_stays_finite_without_a_task_lifetime(monkeypatch, tm
          "phase": "started", "kind": "llm", "task_attempt": 1},
         types.SimpleNamespace(RUNNING={"t5": meta}),
     )
-    assert meta["active_operation_leases"]["llm-1"]["until_ts"] == 1100.0 + OPERATION_WINDOW_FALLBACK_SEC
+    assert meta["active_operation_leases"]["llm-1"]["until_ts"] == 1100.0 + IDLE_LEASE_MAX_SEC == 1100.0 + 21600
 
 
 def test_parallel_cognitive_operations_are_independent_and_attempt_bound(
@@ -592,6 +370,36 @@ def test_active_llm_call_spares_idle_without_elapsed_expiry(monkeypatch, tmp_pat
     assert meta["silence_attention"]["state"] == "pending_attention"
     assert meta["silence_attention"]["observed_at"] == 5000.0
     assert "finalization_requested_at" not in meta
+
+
+@pytest.mark.parametrize("kind, phase, stamped", [
+    ("tool", "finished", True), ("review", "finished", True), ("llm", "finished", False),
+])
+def test_only_a_closed_tool_or_review_lease_is_fresh_progress(kind, phase, stamped, monkeypatch):
+    """A completed tool call and a review seat that physically ended, with an answer or an error, are the
+    task's own work: the confirmed lease closes INTO a progress stamp, so no tick reads the task as lease-less
+    and stale (a deep self-review reports nothing else before it ends; tests/test_deep_review_lease.py drives
+    that branch). A tool's ``failed`` stamps nothing, a model call is stamped by its own usage row and a wait
+    mark is no work; a terminal with no confirmed lease behind it never stamps."""
+    from supervisor import events as events_mod
+
+    monkeypatch.setattr(events_mod.time, "time", lambda: 5000.0)
+    meta = {"task": {"id": "t9", "chat_id": 7}, "attempt": 1, "started_at": 1000.0,
+            "last_progress_at": 1000.0, "worker_id": 0}
+    ctx = types.SimpleNamespace(RUNNING={"t9": meta})
+
+    def emit(step):
+        events_mod._handle_cognitive_operation({"type": "cognitive_operation", "task_id": "t9", "operation_id": "op-1",
+                                                "phase": step, "kind": kind, "task_attempt": 1}, ctx)
+
+    emit("started")
+    emit(phase)
+    assert "active_operation_leases" not in meta
+    closed_at = 5000.0 if stamped else 1000.0
+    assert meta["last_progress_at"] == closed_at
+    monkeypatch.setattr(events_mod.time, "time", lambda: 6000.0)
+    emit(phase)  # replayed: the lease it would close is gone
+    assert meta["last_progress_at"] == closed_at
 
 
 def test_stale_attempt_llm_call_does_not_spare_idle(monkeypatch, tmp_path):

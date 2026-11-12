@@ -9,6 +9,8 @@
 
 import { apiClient, updateStrategyForPlan } from './api_client.js';
 import { SHELL_ICONS } from './page_icons.js';
+import { errorWords } from './ui_primitives.js';
+import { durationLabel, formatBytes } from './storage_format.js';
 
 // Fail-soft wrapper around the api_client update helpers (the pill must never throw the app).
 async function safe(fn) {
@@ -56,51 +58,90 @@ export function verifiedUpdatePlan(preflight) {
     return { plan, strategy };
 }
 
+// The plan pins the prose: only a description of exactly its range is shown. The owner's request is
+// not prose: it stays the live status's own, so a task that saves or ends meanwhile is still followed.
 export function bindPreflightDescription(status, preflight) {
     const plan = preflight?.merge_plan || {};
     const letter = preflight?.letter;
     const matches = letter?.key?.base_sha === plan.base_sha && letter?.key?.target_sha === plan.target_sha;
+    const request = status?.letter?.request || null;
     return { ...status, preflight_range: plan, checked_target_sha: plan.target_sha,
-        latest_sha: plan.target_sha, letter: matches ? letter : null };
+        latest_sha: plan.target_sha, letter: matches ? { ...letter, request } : (request && { request }) };
 }
 
-export function preflightEvidenceText(preflight) {
-    const plan = preflight?.merge_plan || {};
+/** The saved description of exactly these preflight pins, as Markdown to render; '' when there is none. */
+export function preflightDescription(preflight) {
     const letter = bindPreflightDescription({}, preflight).letter;
+    return letter?.description_current && letter.text ? String(letter.text) : '';
+}
+
+// The receipt's review keys this reader words; any other key is shown verbatim, never dropped.
+const REVIEW_KEYS = new Set(['observed', 'declared', 'state', 'relation']);
+
+/** One commit's review line: its observed verdict beside its record state and the subject relation its merge
+ *  request saw, bound to this commit; a receipt that predates them says they were not recorded. */
+function reviewLine(review) {
+    const seen = 'state' in review || 'relation' in review
+        ? `record ${review.state || 'not recorded'}, subject relation at the merge request ${review.relation || 'not recorded'}`
+        : 'record state and subject relation at the merge request not recorded';
+    const other = Object.entries(review).filter(([key]) => !REVIEW_KEYS.has(key))
+        .map(([key, value]) => `; ${key} ${typeof value === 'string' ? value : JSON.stringify(value)}`).join('');
+    return `Review observed ${review.observed || 'unknown'}, author declared ${review.declared || 'unknown'}; ${seen}${other}.`;
+}
+
+/**
+ * The exact range's evidence as the confirmation's detail rows: every first-parent commit's receipt
+ * (declarations stay labelled as such; each observed verdict keeps its own record state and request-time
+ * relation), the post-merge read and each observed run. Missing, unread and non-green stay distinct;
+ * nothing here becomes a verdict.
+ * @returns {Array<{label: string, value: string}>}
+ */
+export function preflightEvidenceRows(preflight) {
+    const plan = preflight?.merge_plan || {};
     const facts = preflight?.qualification;
-    const lines = [letter?.description_current && letter.text
-        ? letter.text : 'No description is available for this exact preflight range.'];
     if (!facts || facts.base_sha !== plan.base_sha || facts.target_sha !== plan.target_sha) {
-        lines.push('Qualification for this range is unknown.');
-        return lines.join('\n');
+        return [{ label: 'Checks', value: 'Qualification for this range is unknown.' }];
     }
+    const rows = [];
     for (const commit of facts.commits || []) {
-        const name = `${String(commit.sha).slice(0, 8)} ${commit.subject || ''}`;
+        // The short SHA names the row; the subject leads its value, where a long one has room.
+        const label = String(commit.sha).slice(0, 8);
+        const lines = commit.subject ? [String(commit.subject)] : [];
         if (!commit.receipt) {
-            lines.push(`${name}: ${commit.body_read === false ? 'commit body not read; qualification unknown' : 'no qualification receipt'}.`);
+            lines.push(commit.body_read === false ? 'Commit body not read; qualification unknown.' : 'No qualification receipt.');
+            rows.push({ label, value: lines.join('\n') });
             continue;
         }
         for (const check of commit.receipt.checks || []) {
-            lines.push(`${name}: ${check.name} ${check.status} (${check.source || 'unknown source'})${check.detail ? `; ${check.detail}` : ''}.`);
+            const line = `${check.name} ${check.status} (${check.source || 'unknown source'})${check.detail ? `; ${check.detail}` : ''}`;
+            lines.push(/[.!?]$/.test(line) ? line : `${line}.`);
         }
-        const review = commit.receipt.review || {};
-        lines.push(`${name}: review observed ${review.observed || 'unknown'}, author declared ${review.declared || 'unknown'}.`);
+        lines.push(reviewLine(commit.receipt.review || {}));
+        rows.push({ label, value: lines.join('\n') });
     }
     const github = facts.github || {};
-    lines.push(`GitHub checks: ${github.status || 'unknown'}${github.reason ? `; ${github.reason}` : ''}.`);
+    rows.push({ label: 'GitHub checks', value: `${github.status || 'unknown'}${github.reason ? `; ${github.reason}` : ''}.` });
     for (const run of github.runs || []) {
-        lines.push(`${String(run.sha).slice(0, 8)} post-merge: ${run.conclusion || run.status || 'unknown'} ${run.url || ''}`);
-        if (run.covered_shas?.length) lines.push(`This run also covers: ${run.covered_shas.map((sha) => sha.slice(0, 8)).join(', ')}.`);
+        const covers = run.covered_shas?.length
+            ? `\nThis run also covers: ${run.covered_shas.map((sha) => sha.slice(0, 8)).join(', ')}.` : '';
+        rows.push({ label: `${String(run.sha).slice(0, 8)} post-merge`,
+            value: `${run.conclusion || run.status || 'unknown'}${run.url ? ` ${run.url}` : ''}${covers}` });
     }
-    if (github.missing_shas?.length) lines.push(`No matching run observed: ${github.missing_shas.map((sha) => sha.slice(0, 8)).join(', ')}.`);
-    return lines.join('\n');
+    if (github.missing_shas?.length) {
+        rows.push({ label: 'No matching run observed', value: github.missing_shas.map((sha) => sha.slice(0, 8)).join(', ') });
+    }
+    return rows;
 }
 
 // The retained attempt's before/after samples as labelled rows of its Last attempt (owner 25.10: A). Only a number
-// is a measurement, so null stays "unobserved", never 0. Peak RSS keeps its word; lifetime CPU time and one
-// interval's share are separate rows; the dispatch time runs from acceptance to the first model call, not to an
-// answer. Each side is one recorded sample: history, never a verdict about the update.
-const measured = (value, unit) => (typeof value === 'number' ? `${value.toFixed(2)} ${unit}` : 'unobserved');
+// is a measurement: a zero says so, never an absent value, and a value the sample did not record leaves its row out
+// (the raw record under the rows keeps its null). Sizes and durations read as the other Dashboard tabs write them
+// (storage_format.js). Peak RSS keeps its word; lifetime CPU time and one interval's share are separate rows; the
+// dispatch time runs from acceptance to the first model call, not to an answer. Each side is one recorded sample:
+// history, never a verdict about the update.
+const measured = (value, format) => (typeof value === 'number' ? format(value) : '');
+const overrunWords = (overruns) => (overruns && typeof overruns === 'object' ? Object.entries(overruns)
+    .map(([duty, count]) => `${duty.replace(/[-_]/g, ' ')} ×${count}`).join(', ') || 'none' : '');
 
 function utcOffset(date) {
     const minutes = -date.getTimezoneOffset();
@@ -113,26 +154,24 @@ function sampleRows(sample) {
     if (!sample) return [{ label: 'Sample', value: 'unobserved' }];
     const direct = sample.direct_message_first_dispatch;
     const when = attemptTime(sample.observed_at);
-    const percent = measured(sample.cpu_percent, '%');
-    const interval = measured(sample.cpu_interval_seconds, 'seconds');
+    const percent = measured(sample.cpu_percent, (value) => `${value.toFixed(1)} %`);
+    const interval = measured(sample.cpu_interval_seconds, durationLabel);
     return [
         { label: 'Source', value: sample.source_sha || 'unknown source' },
-        // The local minute to read, with the exact recorded stamp under it.
-        when ? { label: 'Observed', value: `${when} ${utcOffset(new Date(sample.observed_at))}`, exact: sample.observed_at }
-            : { label: 'Observed', value: sample.observed_at || 'unknown time' },
-        { label: `RSS${sample.rss_measure === 'peak' ? ' peak' : ''}`,
-            value: measured(typeof sample.rss_bytes === 'number' ? sample.rss_bytes / 1048576 : null, 'MiB') },
-        { label: 'CPU time, process lifetime', value: measured(sample.cpu_seconds, 'seconds') },
+        // The local minute to read; the exact recorded stamp is the raw record's.
+        { label: 'Observed', value: when ? `${when} ${utcOffset(new Date(sample.observed_at))}` : sample.observed_at || 'unknown time' },
+        { label: `RSS${sample.rss_measure === 'peak' ? ' peak' : ''}`, value: measured(sample.rss_bytes, formatBytes) },
+        { label: 'CPU time, process lifetime', value: measured(sample.cpu_seconds, durationLabel) },
+        // One measured half of the share still says which half is missing.
         { label: 'CPU share, sample interval',
-            value: percent === 'unobserved' && interval === 'unobserved' ? 'unobserved' : `${percent} over ${interval}` },
-        { label: 'Duty overruns', value: sample.duty_overruns == null ? 'unobserved' : JSON.stringify(sample.duty_overruns) },
+            value: percent || interval ? `${percent || 'unobserved'} over ${interval || 'unobserved'}` : '' },
+        { label: 'Duty overruns', value: overrunWords(sample.duty_overruns) },
         { label: 'Direct message to first model call', value: typeof direct?.seconds === 'number'
-            ? `${measured(direct.seconds, 'seconds')} from acceptance${direct.task_id ? ` · task ${direct.task_id}` : ''}`
-            : 'unobserved' },
-    ];
+            ? `${durationLabel(direct.seconds)} from acceptance${direct.task_id ? ` · task ${direct.task_id}` : ''}` : '' },
+    ].filter((row) => row.value);
 }
 
-/** `after_update` as rows: each side's heading (`head`), then its `{label, value, exact?}` rows; [] without facts. */
+/** `after_update` as rows: each side's heading (`head`), then its `{label, value}` rows; [] without facts. */
 export function afterUpdateRows(facts) {
     if (!facts) return [];
     return [['before', 'Before the update'], ['after', 'After the update']].flatMap(([side, name]) => {
@@ -182,13 +221,54 @@ const UNKNOWN_REASONS = {
     state_unreadable: 'The saved state could not be read, so the last attempt is unknown.',
 };
 
+// A boot recovery that reported its own rollback unfinished. The retry comes from this reason, never from the branch's
+// text, and only while that attempt's transaction is still open; it is no Restart or Restore control.
+export const RECOVERY_RETRY = 'Quit and reopen the desktop app, or restart the server process for a web deployment, '
+    + 'to retry the recovery.';
+const FAILED_REASONS = {
+    rollback_incomplete: { pill: 'Update recovery incomplete',
+        headline: 'The update failed, and restoring the previous version did not finish.' },
+};
+
+// supervisor/update_merge._ASSISTED_PHASES (pinned by a source test): only these are a reviewed resolution at work.
+const ASSISTED_PHASES = new Set(['materializing_assisted', 'assisted_resolution', 'committing_assisted']);
+// supervisor/update_merge.MARKER_CLEANUP_RETRY_PHASE: the transaction recorded its completion (a finished rollback
+// awaiting its restart included) and only cleanup is left, so an earlier unfinished report is history.
+const COMPLETION_RECORDED_PHASE = 'marker_cleanup_retry';
+
+/** Whether an update transaction phase is a reviewed resolution at work: the one reading for panel and record. */
+export function assistedUpdatePhase(phase) {
+    return ASSISTED_PHASES.has(String(phase || ''));
+}
+
+/** The still-active transaction this attempt is bound to (its `tx_attempt_id`), else null. */
+export function boundUpdateTx(progress, tx) {
+    return tx?.active && tx.attempt_id && tx.attempt_id === progress?.tx_attempt_id ? tx : null;
+}
+
+/** The attempt's one concluded reading: its outcome; a record without the field (an older shape) that failed is a failure. */
+export function attemptOutcome(progress) {
+    return progress?.outcome || (!progress?.active && progress?.result === 'failed' ? 'failed' : '');
+}
+
+function recoveryReport(progress) {
+    return attemptOutcome(progress) === 'failed' ? FAILED_REASONS[progress.reason] || null : null;
+}
+
+/** A bound attempt whose boot recovery reported its rollback unfinished, still the transaction's state: its words, else null. */
+export function unfinishedRecovery(progress, tx) {
+    const known = recoveryReport(progress);
+    const bound = boundUpdateTx(progress, tx);
+    return known && bound && bound.phase !== COMPLETION_RECORDED_PHASE ? known : null;
+}
+
 const REFUSALS = {
     release_moved: 'The update changed after it was prepared.',
     late_local_changes: 'Local files changed while the update was starting.',
     replace_not_applied: 'Git refused the first checkout step.',
 };
 
-function attemptText(progress) {
+function attemptText(progress, recovery = false) {
     const blockers = Array.isArray(progress.blockers) ? progress.blockers.map(String) : [];
     // Only the drain refusal names active writers, and it returns before any handoff or teardown.
     const busy = blockers.length > 0 && blockers.every((item) => item.startsWith('active:'));
@@ -206,7 +286,7 @@ function attemptText(progress) {
             || 'No completion record arrived; the running version alone does not establish the outcome.');
     } else if (progress.outcome === 'applied') {
         parts.push('The restarted server confirmed this update.');
-    } else {
+    } else if (!recovery) {
         parts.push(progress.error);
     }
     if (progress.work_stop === 'invoked') parts.push('Running work may have been interrupted.');
@@ -214,7 +294,7 @@ function attemptText(progress) {
         parts.push('Ouroboros needs a restart before updates can continue.');
     }
     if (progress.keep_branch) parts.push(`Your local commits are kept on branch ${progress.keep_branch}.`);
-    if (progress.stash_note) parts.push(progress.stash_note);
+    if (progress.stash_note && !recovery) parts.push(progress.stash_note);
     return parts.filter(Boolean).join(' ');
 }
 
@@ -225,11 +305,13 @@ function attemptDetails(progress, outcome) {
     };
     add('Base', String(progress.base_sha || '').slice(0, 12));
     add('Target', String(progress.target_sha || '').slice(0, 12));
-    add('Stage', progress.stage || (outcome ? 'not started' : ''));
+    // The executor's stage in its own words (the progress label without its ellipsis); an unknown stage keeps its name.
+    add('Stage', progress.stage ? (UPDATE_STAGE_LABELS[progress.stage] || progress.stage).replace(/…$/, '') : (outcome ? 'not started' : ''));
     add('Outcome', outcome);
     add('Reason', progress.reason);
     add('Blocked by', (Array.isArray(progress.blockers) ? progress.blockers : []).join(', '));
     add('Error', progress.error);
+    if (outcome === 'failed' && FAILED_REASONS[progress.reason]) add('Recovery note', progress.stash_note);
     add('Saved local work', progress.keep_branch);
     add('Concluded by', { executor: 'this update', boot: 'the restarted server' }[progress.concluded_by]);
     return rows;
@@ -237,12 +319,12 @@ function attemptDetails(progress, outcome) {
 
 /**
  * One reading of the retained attempt for the pill and the panel: the stage while it runs, then the
- * server's conclusion or its named uncertainty. `null` when there is no attempt to show.
+ * server's conclusion or its named uncertainty. `tx` is the same status read's `update_tx`. `null` when
+ * there is no attempt to show.
  */
-export function updateAttemptView(progress) {
+export function updateAttemptView(progress, tx = null, { showRecoveryInstruction = true } = {}) {
     if (!progress || typeof progress !== 'object' || !progress.operation_id) return null;
-    // A record without the outcome field (an older shape) that failed is still a failure, never a stage.
-    const key = progress.outcome || (!progress.active && progress.result === 'failed' ? 'failed' : '');
+    const key = attemptOutcome(progress);
     const base = {
         id: String(progress.operation_id),
         when: String(progress.outcome_at || progress.stage_started_at || progress.started_at || ''),
@@ -252,15 +334,25 @@ export function updateAttemptView(progress) {
         ? 'This observation could not be saved and may be unavailable after restart.' : '';
     const outcome = OUTCOMES[key];
     if (outcome && !progress.active) {
-        return { ...base, terminal: true, tone: outcome.tone, pill: outcome.pill, headline: outcome.headline,
+        const recovery = recoveryReport(progress);
+        // A later recorded completion of the bound transaction outdates "did not finish"; its record stays failed.
+        const named = recovery && boundUpdateTx(progress, tx)?.phase !== COMPLETION_RECORDED_PHASE ? recovery : outcome;
+        // Exact diagnostics stay in Details, including an older note's retry wording. The current action is said once:
+        // here, unless the panel's own verdict already gives a recovery instruction.
+        const retry = showRecoveryInstruction && unfinishedRecovery(progress, tx) ? RECOVERY_RETRY : '';
+        return { ...base, terminal: true, tone: outcome.tone, pill: named.pill, headline: named.headline,
             restoreTarget: key === 'applied' ? String(progress.base_sha || '') : '',
-            text: [attemptText({ ...progress, outcome: key }), retention].filter(Boolean).join(' ') };
+            text: [attemptText({ ...progress, outcome: key }, Boolean(recovery)), retry, retention].filter(Boolean).join(' ') };
     }
     // Not concluded: this server's stage, a restart it needs, a reviewed resolution, or a later server's checks.
     const stage = String(progress.stage || '');
     const here = progress.active || progress.current_generation !== false;
+    const resolving = assistedUpdatePhase(boundUpdateTx(progress, tx)?.phase);
     const [pill, headline] = progress.result === 'assisted_started'
-        ? ['Resolving update…', 'A reviewed resolution owns this update.']
+        // A resolver start whose transaction left the assisted phases (cleanup retry, stash recovery, a rollback or
+        // gate block) is not a resolution at work, and nothing here says how it ended.
+        ? (resolving ? ['Resolving update…', 'A reviewed resolution owns this update.']
+            : ['Update not concluded', 'This update has not concluded yet.'])
         : progress.result === 'restart_required' && here
             ? ['Restart needed', 'The update needs a restart to finish.']
             : here
@@ -268,6 +360,10 @@ export function updateAttemptView(progress) {
                 : ['Confirming update…', 'Waiting for the restarted server to confirm the update…'];
     return { ...base, terminal: false, tone: 'neutral', pill, headline, text: retention };
 }
+
+/** A request that never reached Ouroboros in owner words (errorWords); the server's own words are kept as they are. */
+export const failureWords = (err) => (err instanceof TypeError && err.response === undefined
+    ? errorWords(err).text : String(err?.message || err));
 
 export function attemptTime(value) {
     const date = new Date(value);
@@ -352,7 +448,7 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
 
     function renderPill(status) {
         const pill = ensurePill();
-        const attempt = updateAttemptView(status?.update_progress);
+        const attempt = updateAttemptView(status?.update_progress, status?.update_tx);
         // A stage always shows; a concluded attempt shows only if its outcome has a word for the pill (a success has
         // none) and this browser has not hidden it. What is hidden is the notice: the record stays in the panel.
         const shown = Boolean(attempt?.pill) && !(attempt.terminal && attempt.id === dismissedUpdateAttempt());

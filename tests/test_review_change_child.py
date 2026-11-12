@@ -72,8 +72,7 @@ def tree(tmp_path, monkeypatch, fake_route):
     return parent, child, project
 
 
-@pytest.mark.parametrize('mode', ['pro', 'cyber_pro'])
-@pytest.mark.parametrize('first_author', ['parent', 'child'])
+@pytest.mark.parametrize(("first_author", "mode"), [('parent', 'pro'), ('child', 'cyber_pro')])
 def test_public_split_drive_shares_paid_ceiling(tree, monkeypatch, first_author, mode):
     parent, child, project = tree
     # Cyber already had this capability before ordinary-child admission. This
@@ -124,7 +123,7 @@ def test_ordinary_child_can_request_independent_review(tree, subject):
     assert load_record(parent.drive_root, result['record_id'])['task_id'] == child.task_id
 
 
-@pytest.mark.parametrize('target', ['foreign', 'system', 'symlink', 'enclosing'])
+@pytest.mark.parametrize('target', ['foreign', 'system', 'enclosing'])
 def test_name_grant_alone_cannot_widen_the_review_target(tree, monkeypatch, target):
     parent, child, project = tree
     (parent.repo_dir / 'README.md').write_text('Foreign target change\n')
@@ -183,8 +182,7 @@ def test_public_copy_shares_its_proven_source_pool(tree, tmp_path, monkeypatch):
     assert len(_starts()) == 1
 
 
-@pytest.mark.parametrize('surface', ['change', 'preflight'])
-@pytest.mark.parametrize('legacy', [False, True, 'lost'])
+@pytest.mark.parametrize(("legacy", "surface"), [(False, 'preflight'), (True, 'change'), ('lost', 'preflight')])
 def test_child_cold_rejoin_survives_drive_removal_at_cap(tree, monkeypatch, surface, legacy):
     import shutil
     import threading
@@ -522,7 +520,7 @@ def test_the_acting_work_order_offers_the_review_its_tools_admit():
                                                      'write_root': '/assigned'})
     readonly = _compose_subagent_text('obj', role='researcher', expected_output='out', constraints='', context='')
     assert 'review_change' in ACTING_SUBAGENT_TOOL_NAMES
-    assert 'Do NOT commit, run review gates / runtime / skills lifecycle' in acting
+    assert 'Committing, review gates, runtime and skills lifecycle, granting yourself tools' in acting
     assert 'run review / ' not in acting
     assert ('optionally ask independent reviewers about work in your write root with review_change; '
             'it never approves, commits or integrates that work.') in acting

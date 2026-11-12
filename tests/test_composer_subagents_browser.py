@@ -20,12 +20,14 @@ import pytest
 from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat, _shot
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 SUBAGENTS = "#page-chat .chat-subagents-mode"
 CONTEXT = "#page-chat .chat-context-mode"
 EFFORT = "#page-chat .chat-effort-range"
 RULE = "Applies to new steps; running work finishes."
+# What each value means, read from the capsule's own module: the open hint says exactly these words.
+MEANINGS = "async () => (await import('/static/modules/composer_subagents.js')).SUBAGENT_MEANINGS"
 # The page's state read: the first `/api/state` and every `?bindings_since=` read after it (chat_activity.js).
 STATE_READS = re.compile(r"/api/state(\?|$)")
 # The capsule, the capsules shown on its line, its values and its hint.
@@ -132,7 +134,8 @@ def test_subagents_opens_in_the_row_with_the_hint_above_it(
                 facts = seen[f"{theme}-auto"] = opened = _open(page, press)
                 _shot(page, tmp_path, f"subagents-inline-auto-{engine}-{width}-{theme}")
                 _assert_in_the_row(facts, phone=phone)
-                assert facts["word"] == "Auto" and facts["meaning"] == "Ouroboros decides when helpers are worth it.", facts
+                meanings = page.evaluate(MEANINGS)
+                assert facts["word"] == "Auto" and facts["meaning"] == meanings["auto"], (facts, meanings)
                 assert facts["rule"] == RULE, facts
                 assert not facts["settings"] and not facts["lock"], facts
                 # A choice saves at once; the strip stays open and the meaning follows it.
@@ -143,7 +146,7 @@ def test_subagents_opens_in_the_row_with_the_hint_above_it(
                 facts = seen[f"{theme}-swarm"] = _since(opened["closed"], page.evaluate(FACTS))
                 _shot(page, tmp_path, f"subagents-inline-swarm-{engine}-{width}-{theme}")
                 _assert_in_the_row(facts, phone=phone)
-                assert facts["meaning"].startswith("Don't economise") and facts["rule"] == RULE, facts
+                assert facts["meaning"] == meanings["swarm"] and facts["rule"] == RULE, (facts, meanings)
                 assert [value[1] for value in facts["values"]] == ["false", "false", "true"], facts
                 page.keyboard.press("Escape")
                 page.wait_for_function("sel => document.querySelector(sel).dataset.open === 'false'", arg=SUBAGENTS)

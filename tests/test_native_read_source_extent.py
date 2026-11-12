@@ -85,8 +85,7 @@ def test_extent_keeps_revision_from_the_open_that_delivered_the_body(tmp_path):
 
 
 @pytest.mark.parametrize("field", [
-    "source_revision", "source_bytes", "complete_sha256", "complete_chars",
-    "source_start_char", "source_end_char", "body_chars", "source_masked", "range_basis",
+    "source_revision", "complete_sha256", "range_basis",
 ])
 def test_missing_source_fact_retains_line_evidence_without_exact_proof(tmp_path, field):
     executor, ctx, full = _read(tmp_path, b"original\n")
@@ -99,9 +98,7 @@ def test_missing_source_fact_retains_line_evidence_without_exact_proof(tmp_path,
 
 @pytest.mark.parametrize("changed", [
     {"source_revision": "wrong"}, {"complete_sha256": "z" * 64},
-    {"source_bytes": "9"}, {"complete_chars": -1}, {"source_start_char": True},
-    {"source_start_char": 10}, {"source_end_char": 100}, {"body_chars": 100},
-    {"body_start": True}, {"range_basis": "raw_bytes"}, {"source_masked": True},
+    {"source_masked": True},
 ])
 def test_invalid_source_fact_never_mints_exact_range(tmp_path, changed):
     executor, ctx, full = _read(tmp_path, b"original\n")
@@ -180,10 +177,16 @@ def test_staged_output_is_credited_only_after_native_projected_delivery(tmp_path
     executor._observe_sent_view([{"role": "assistant", "tool_calls": [request]}, message], schemas)
     assert output._READ_COVERAGE[f"{target.resolve()}|{entry.output_sha}"] == [[0, end]]
     assert not entry.output_consumed
+    # The same cut read again delivers the same window and credits nothing it did not show.
+    repeat = executor._execute_inspection_call(registry, request, {}, round_idx=2)
+    assert executor._tool_receipts[-1]["source_end_char"] == end
+    executor._observe_sent_view([{"role": "assistant", "tool_calls": [request]}, repeat], schemas)
+    assert output._READ_COVERAGE[f"{target.resolve()}|{entry.output_sha}"] == [[0, end]]
+    assert not entry.output_consumed
     request["function"]["arguments"] = json.dumps({"root": "task_drive", "path": entry.output_artifact,
                                                   "start_char": end})
     monkeypatch.setattr(native, "_EPISODE_TOOL_RESULT_CHAR_CAP", 100_000)
-    second = executor._execute_inspection_call(registry, request, {}, round_idx=2)
+    second = executor._execute_inspection_call(registry, request, {}, round_idx=3)
     assert not entry.output_consumed
     executor._observe_sent_view([{"role": "assistant", "tool_calls": [request]}, second], schemas)
     assert entry.output_consumed

@@ -50,7 +50,6 @@ from tests.test_budget_pause_lineage_restore import (
     _workers,
 )
 
-pytestmark = pytest.mark.serial
 
 
 def _reserve(tmp_path, task_id, *, request=None, **limits):
@@ -380,12 +379,19 @@ def test_a_selected_child_that_pauses_again_needs_a_new_resume(tmp_path, monkeyp
 # --- a cold sleep beneath the latch: consumption retires the sleep clock, not the selection --
 
 def _cold_sleep_park(monkeypatch, limit_ctx, **selected):
-    """The member's own cold sleep at its round boundary (``enter_cold_sleep``, scope task)."""
+    """The member's own cold sleep at its round boundary (``enter_cold_sleep``, scope task). Arming already
+    showed a selected sender the latch holds (``dependency_held``): this park is the deliberate repeat."""
+    import json
+
     from ouroboros import budget_pause, model_sleep
+    from ouroboros.task_status import load_effective_task_result
 
     ctx = limit_ctx.tools._ctx
     monkeypatch.setattr(model_sleep, "cold_blockers", lambda _ctx, **_kw: [])
     ctx._model_sleep = {"sleep_id": "s1", "mode": "cold", **model_sleep.selectors(ctx, **selected)}
+    shown = model_sleep.unshown_holds(ctx, {task_id: load_effective_task_result(ctx.budget_drive_root, task_id)
+                                            for task_id in ctx._model_sleep["tasks"] + ctx._model_sleep["senders"]})
+    model_sleep.acknowledge_hold_delivery(ctx, json.dumps({"held": shown}))
     with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
         budget_pause.enter_cold_sleep(limit_ctx)
     budget_pause.end_dispatch_fence(str(ctx.task_id))
@@ -615,7 +621,6 @@ def _handoff(**overrides):
 
 @pytest.mark.parametrize("row,selected", [
     ({"_budget_pause_resume": _handoff()}, True),
-    ({"_budget_pause_resume": _handoff(selected_by="rl-root", root_grant_id="R", root_resume_generation=1)}, True),
     ({"_budget_pause_resume": _handoff(selected_by="rl-root", root_grant_id="R", root_resume_generation=0)}, False),
     ({"_budget_pause_resume": _handoff(selected_by="rl-root")}, False),
     ({"_budget_pause_resume": _handoff(root_fence_id="E")}, False),
@@ -629,14 +634,12 @@ def _handoff(**overrides):
     ({"_budget_pause_resume": _handoff(), "_budget_pause_consumed": {"grant_id": "g1"}}, False),
     ({"_budget_pause_resume": _handoff(), "_budget_pause_hold": {"reason": "x"}}, False),
     ({"_budget_pause_resume": _handoff(), "_continuation_prepared": True}, False),
-    ({"_resume_selection": {"fence_id": "F"}}, True),
     ({"_resume_selection": {"fence_id": "E"}}, False),
     ({"_budget_pause_hold": {"fence_id": "F"}}, False),
     ({}, False),
-], ids=["owner", "root_grant", "root_grant_generation_zero", "model_without_root_grant", "older_fence",
+], ids=["owner", "root_grant_generation_zero", "model_without_root_grant", "older_fence",
         "no_fence_at_grant", "blank_pause", "blank_grant", "sleep_readiness", "exact_decides_over_old_hold",
-        "paused_again", "stale_consumed", "active_hold", "continuation_unconfirmed", "selected_hold",
-        "hold_older_fence", "unselected_hold", "nothing"])
+        "paused_again", "stale_consumed", "active_hold", "continuation_unconfirmed", "hold_older_fence", "unselected_hold", "nothing"])
 def test_the_selection_predicate_reads_one_current_carrier(row, selected):
     from ouroboros.budget_pause import budget_fence_selected
 

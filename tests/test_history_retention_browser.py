@@ -8,7 +8,7 @@ from threading import Thread
 
 import pytest
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 HTML = """<!doctype html><html class="ouro-ui"><head><meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/ui.css"><link rel="stylesheet" href="/style.css">
@@ -27,7 +27,8 @@ window.chat = createChatInstance({ws,state,updateUnreadBadge(){},chatId:1,idPref
         gate(){return Promise.resolve(this.begin());},isCurrent:()=>true,apply(){}}});
 initLogs({ws,state,mount:document.getElementById('logs-mount')});
 window.showLogs=()=>{document.getElementById('chat-mount').hidden=true;document.getElementById('logs-mount').hidden=false;
-    state.activePage='dashboard';state.dashboardActiveSubtab='logs';};
+    state.activePage='dashboard';state.dashboardActiveSubtab='logs';
+    window.dispatchEvent(new CustomEvent('ouro:page-shown',{detail:{page:'dashboard'}}));};
 window.fixtureReady=true;
 </script></body></html>"""
 

@@ -10,7 +10,6 @@ import pytest
 from tests._budget_pause_exact_helpers import _supervisor_ctx
 from tests.test_cold_external_custody import _setup
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -31,11 +30,11 @@ def direct_env(tmp_path, monkeypatch):
 
     class Gateway:
         def get_run(self, rid, **kwargs):
-            return {"summary": {"runId": rid, "state": "running"}, "lastSeq": 1}
+            return {"summary": {"runId": rid, "state": "running", "effectiveAccess": "readonly"}, "lastSeq": 1}
         def close(self):
             pass
 
-    env.runtime = body.start_body_runtime(root, gateway_factory=Gateway, max_workers=2)
+    env.runtime = body.start_body_runtime(root, gateway_factory=Gateway)
     registry = get_direct_activity_registry()
     registry.register("sleeper", 0, project_id="project",
                       actor=SimpleNamespace(tools=SimpleNamespace(_ctx=env.ctx)))

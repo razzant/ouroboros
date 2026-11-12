@@ -16,7 +16,7 @@ import pytest
 from tests import test_batch4_owner_controls_browser as b4
 from tests import test_ui_smoke_playwright as smoke
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 direct_server_with_data = smoke.direct_server_with_data
 
 
@@ -111,7 +111,8 @@ def test_sleep_lends_capacity_preserves_identity_and_owner_hold(direct_server_wi
                 record['sleep_queue_api'] = b4._get(page, url, '/api/tasks?queue_only=1')
                 open_activity_fresh(page)
                 sleeper = page.locator('.activity-row', has_text='Batch4 Alpha')
-                expect(sleeper.locator('.activity-sub')).to_contain_text('Waiting · Sleeping until it is woken', timeout=30_000)
+                # await_messages chose no source: any addressed message wakes it, and the line says so.
+                expect(sleeper.locator('.activity-sub')).to_contain_text('Waiting · Sleeping until a message arrives', timeout=30_000)
                 sleep_label = sleeper.inner_text()
                 record['sleep_activity_label'] = sleep_label
                 page.screenshot(path=str(evidence / '01-sleeping-capacity-released.png'))

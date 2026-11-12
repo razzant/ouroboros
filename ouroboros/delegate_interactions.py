@@ -13,6 +13,14 @@ into the run's live turn through the engine's capability-declared channel
 (``liveInput`` on the route's catalog row), typed end to end and never guessed.
 ``tools.delegate`` re-exports these names, so every existing reference (and the
 tests) still finds them there, and ``_REPORTED_INTERACTIONS`` stays one object.
+
+A row's ``delivery`` decides what the engine's ``delivered`` means. ``blocking``
+held the run, and the answer resumes it. ``async`` held nothing: the run never
+stopped, the answer is only handed to the agent's next user message, so it
+confirms no ``source_response``. A call reads the row only where the answer
+depends on it (``reply_to``, a verified source); the ordinary answer reads none
+just for a sentence, so its receipt names both meanings and claims neither, and
+an unread or unknown kind confirms no source.
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 from typing import Callable, Any, Dict, List, Optional, Tuple
 
@@ -42,12 +51,10 @@ from ouroboros.utils import truncate_within_limit
 
 log = logging.getLogger(__name__)
 
-# Which interaction ids each run has ALREADY had returned as an immediate
-# `waiting_on_user` payload. Process-local by design: the durable fact is the
-# engine's own pending-interaction store, and the only cost of losing this memo
-# (worker restart) is one duplicate immediate return. Without it, a nanny that
-# deliberately escalated a question up the task hierarchy and re-waited would busy-loop —
-# every delegate_wait would return instantly with the same known question.
+# Which interaction ids each run has ALREADY had returned as a `waiting_on_user` payload, process-local:
+# the durable fact is the engine's own pending-interaction store, and losing this memo (a new process)
+# costs one duplicate return. Without it a nanny that escalated a question up the task hierarchy and
+# waited again would get the same known question back, whole, at every wake.
 _REPORTED_INTERACTIONS: Dict[str, frozenset] = {}
 _REPORTED_INTERACTIONS_MAX_KEYS = 128
 
@@ -65,17 +72,18 @@ _OPTION_PREVIEW_CHARS = 200
 _SCALAR_PREVIEW_CHARS = 200
 _MAX_INLINE_QUESTIONS = 3
 _MAX_INLINE_OPTIONS = 12
-# The compact advances ride-along on the immediate waiting_on_user return (F17):
-# enough for the window's journal spine, small enough that the QUESTION stays
-# the payload's point.
-_WAITING_ADVANCES_BUDGET_CHARS = 2_000
 
 
-def _interactions_are_news(run_id: str, pending: List[Dict[str, Any]]) -> bool:
+def _interactions_are_news(run_id: str, pending: List[Dict[str, Any]], acknowledged: Any = ()) -> bool:
     """True when this pending set has not been returned for this run yet — and
-    record it. A re-ask after a decline is a NEW interaction id, so it is news."""
+    record it. A re-ask after a decline is a NEW interaction id, so it is news.
+    ``acknowledged`` is what the run's acknowledged wakes durably showed: a process
+    with no memory of the run (a cold sleep woke in a new one) does not show it again."""
     ids = frozenset(str(row.get("interaction_id") or "") for row in pending)
     if _REPORTED_INTERACTIONS.get(run_id) == ids:
+        return False
+    if run_id not in _REPORTED_INTERACTIONS and ids and ids <= frozenset(str(item) for item in acknowledged):
+        _REPORTED_INTERACTIONS[run_id] = ids
         return False
     if run_id not in _REPORTED_INTERACTIONS \
             and len(_REPORTED_INTERACTIONS) >= _REPORTED_INTERACTIONS_MAX_KEYS:
@@ -125,22 +133,44 @@ def _bounded_interactions(pending: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "source_tool": _preview_scalar(row.get("source_tool"), _SCALAR_PREVIEW_CHARS),
             "requested_at": _preview_scalar(row.get("requested_at"), _SCALAR_PREVIEW_CHARS),
             "timeout_at": _preview_scalar(row.get("timeout_at"), _SCALAR_PREVIEW_CHARS),
+            **({"delivery": _preview_scalar(row["delivery"], _SCALAR_PREVIEW_CHARS)} if "delivery" in row else {}),
             "questions": shown,
             "questions_omitted": max(0, len(questions) - len(shown)),
         })
     return out
 
 
-def _waiting_on_user_note(pending: List[Dict[str, Any]]) -> str:
+def _waiting_on_user_note(pending: List[Dict[str, Any]], async_only: bool = False) -> str:
     """The immediate waiting note, its expiry claim keyed on the rows' own
     ``timeout_at`` (R2-7e): a null ``timeout_at`` means NO automatic expiry, so
     promising a benign decline there would invite waiting for a timeout that
-    never comes."""
+    never comes. ``async_only`` is the whole set's fact (claudexor #628): the
+    agent keeps working, and an answer is a handoff to its next user message."""
     from ouroboros.delegate_progress import waiting_expiry_clause
 
+    if async_only:
+        return (
+            "The run KEEPS WORKING: the question(s) above hold nothing (async_questions_only; "
+            f"each row's delivery is async); {waiting_expiry_clause(pending, True)}. Answer "
+            "with delegate_answer(run_id, interaction_id, answers=[{question_id, "
+            "selected_labels, free_text}]) when an answer would help: it reaches the agent "
+            "as its next user message in this session, and `delivered` means the engine "
+            "handed it over, not that the agent read it. A question ABOVE your authority "
+            "(spending money, changing scope, external actions) is not yours to guess: "
+            "escalate it with escalate(question, options, stake, assumption, reply_to=<address "
+            "above>) — as a subagent you escalate to your PARENT task — and keep waiting with "
+            "delegate_wait. If the question carries a source-request envelope, answer with "
+            "source_response={schema:1, kind:'source_response', complete_sha256, source, "
+            "start_char, end_char, text}; the host verifies the exact canonical range before "
+            "delivering it, and that handoff alone does not confirm its delivery. Do not "
+            "promote a partial preview to complete authority. Do not cancel a run merely "
+            "because it asked a question."
+        )
+    mixed = (" Rows whose delivery is async hold nothing; the others hold the run."
+             if any(row.get("delivery") == "async" for row in pending if isinstance(row, dict)) else "")
     return (
         "The run is PAUSED on the question(s) above and stays paused until "
-        f"answered; {waiting_expiry_clause(pending)}. Answer with "
+        f"answered; {waiting_expiry_clause(pending)}.{mixed} Answer with "
         "delegate_answer(run_id, interaction_id, answers=[{question_id, "
         "selected_labels, free_text}]) — answer from the task context you "
         "already hold. A question ABOVE your authority (spending money, "
@@ -168,13 +198,24 @@ SAME_SESSION_CONTINUATION: Dict[str, str] = {
     "continuation_note": ("the answer resumes THIS session (delegate_answer, free_text "
                           "included); each resumed turn is a paid/quota round"),
 }
+# The same route for questions that hold nothing (claudexor #628): the agent never paused, and
+# an answer is handed to THIS running session as its next user message, not a resumed turn.
+ASYNC_SESSION_CONTINUATION: Dict[str, str] = {
+    "continuation": "same_session",
+    "continuation_note": ("the answer reaches THIS running session as the agent's next user "
+                          "message (delegate_answer, free_text included); nothing was paused"),
+}
 
 
 def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
                              last_seq: int, pending: List[Dict[str, Any]],
-                             seen: Any = None, source_request: Any = None,
-                             source_verification: Any = None) -> str:
+                             source_request: Any = None, source_verification: Any = None,
+                             async_only: bool = False, detail: Any = None) -> str:
     """The IMMEDIATE typed return for a run that is waiting on an answer.
+
+    ``async_only`` says no question of this WHOLE set holds the run; given the run
+    ``detail`` it is judged there (``claudexor_observation.question_attention``),
+    before any preview below can shed the only blocking row.
 
     The full question text rides inline when it fits the tool budget; otherwise
     the WHOLE set spills to the task drive (sha256/size receipt — never the
@@ -183,11 +224,11 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
     (``<run>.<sha12>.interactions.json``, F15): a different pending set writes a
     different file, so a receipt handed out for an earlier set keeps describing
     bytes that still exist instead of being silently overwritten.
-
-    ``seen`` is the wait's ``WindowObservations`` (F17): the window's observed
-    journal advances ride the immediate return too — compact and bounded — so
-    cutting the window short for a question does not lose the run's sequence.
     """
+    if detail is not None:
+        from ouroboros.gateways.claudexor_observation import question_attention
+
+        async_only = question_attention(detail, pending)[1]
     pending = addressed_questions(str(getattr(ctx, "task_id", "") or ""), run_id, pending)
     full: Dict[str, Any] = {
         "status": "waiting_on_user",
@@ -195,15 +236,14 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
         "state": state,
         "last_seq": last_seq,
         "pending_interactions": pending,
-        "note": _waiting_on_user_note(pending),
-        **SAME_SESSION_CONTINUATION,
+        **({"async_questions_only": True} if async_only else {}),
+        "note": _waiting_on_user_note(pending, bool(async_only)),
+        **(ASYNC_SESSION_CONTINUATION if async_only else SAME_SESSION_CONTINUATION),
     }
     if isinstance(source_request, dict) and source_request:
         full["work_order_source_request"] = dict(source_request)
     if isinstance(source_verification, dict) and source_verification:
         full["work_order_verification"] = dict(source_verification)
-    if seen is not None and getattr(seen, "advances", None):
-        full["advances"] = seen.rows(_WAITING_ADVANCES_BUDGET_CHARS)
     artifact_payload = {key: full[key] for key in (
         "run_id", "pending_interactions", "work_order_source_request", "work_order_verification",
     ) if key in full}
@@ -288,18 +328,28 @@ def _interactions_payload(ctx: ToolContext, full: Dict[str, Any], tool_name: str
 # What each typed answer outcome MEANS for the nanny — relayed verbatim so the
 # model never re-derives semantics from an enum member.
 _ANSWER_NOTES = {
-    "delivered": "The answer reached the live session; the run resumes on it. "
-                 "Keep watching with delegate_wait.",
-    "already_resolved": "The interaction was resolved before this answer arrived — "
-                        "the engine timed out into a benign decline, the run ended, "
-                        "or an earlier answer landed. The run already continued; do "
+    # The plain receipt: this call did not read the answered row, or read a kind this host
+    # does not know. The two below are earned by a row it did read.
+    "delivered": "The engine reports the answer delivered to the live session; this receipt "
+                 "alone does not say whether the question held the run. If it did "
+                 "(delivery=blocking), the run resumes on the answer; if it held nothing "
+                 "(delivery=async), the answer reaches the agent as its next user message, "
+                 "which does not prove the agent read it. Keep watching with delegate_wait.",
+    "delivered_blocking": "The answer reached the live session; the run resumes on it. "
+                          "Keep watching with delegate_wait.",
+    # ``delivered`` for a question that held nothing (claudexor #628): a handoff only.
+    "delivered_async": "The engine handed the answer to the running session as the agent's "
+                       "next user message; that is a handoff, not proof the agent read it, "
+                       "and the run was never paused on it. Keep watching with delegate_wait.",
+    "already_resolved": "The interaction was already resolved: it expired, the run ended, "
+                        "or an earlier answer landed. This answer was not accepted; do "
                         "NOT re-post this or any other answer for it.",
     "not_found": "No such pending interaction (or run) exists on the daemon. "
                  "Re-read the run with delegate_wait before doing anything else.",
     "rejected": "The engine refused the answer set as invalid for these questions "
-                "(see detail). Fix the answer rows — same interaction, corrected "
-                "shape — or stop answering (a question with a timeout_at declines "
-                "benignly at the engine timeout; one without waits until answered).",
+                "(see detail). Fix the answer rows for this interaction or leave it "
+                "unanswered. This refusal says nothing about whether the run is held "
+                "or when the question expires.",
 }
 
 
@@ -432,6 +482,22 @@ def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
     })
 
 
+def _observed_delivery(gateway: Any, run_id: str, interaction_id: str, seconds_left: float) -> Optional[str]:
+    """The pending row's ``delivery`` by one bounded read before a source answer is sent:
+    the fact its receipt rests on. ``None`` when unread or absent: unknown, never blocking."""
+    if seconds_left <= 0:
+        return None
+    try:
+        from ouroboros.delegate_progress import poll_bound
+        from ouroboros.gateways.claudexor import pending_interactions as cx_pending
+
+        detail = gateway.get_run(run_id, timeout_sec=poll_bound(seconds_left))
+        return next((row["delivery"] for row in cx_pending(detail) if row["interaction_id"] == interaction_id), None)
+    except Exception:
+        log.debug("delivery of %s/%s unread before its source answer", run_id, interaction_id, exc_info=True)
+        return None
+
+
 # The 4xx codes that are PAYLOAD-SEMANTIC — a verdict about these answer bytes
 # (fix the rows), mapped to the `rejected` shape (F3, narrowed by R2-1): 400/422
 # validation, 409 conflict, 413 too large. Everything else — 401/403 (auth),
@@ -441,8 +507,8 @@ def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
 _REJECTED_STATUS_CODES = frozenset({400, 409, 413, 422})
 
 # The internal wall-clock budget for ONE delegate_answer call, strictly below
-# its ToolEntry timeout (120s, pinned by test): handshake, the answer POST and
-# the ambiguity re-read are budgeted against what remains, and exhaustion
+# its ToolEntry timeout (120s, pinned by test): handshake, any row read, the answer
+# POST and the ambiguity re-read are budgeted against what remains, and exhaustion
 # returns the typed ``delivery_unknown`` instead of letting the executor
 # thread-kill the call mid-wire (F8/sol #5). The handshake gets at most a short
 # slice so the POST always has room inside the budget.
@@ -472,9 +538,9 @@ def _delegate_answer(
     ever reaches the model as a raw traceback (F7).
     """
     from ouroboros.delegate_progress import poll_bound
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import (
-        ClaudexorGateway,
-        ClaudexorSubscriptionWindowExhausted,
+        ClaudexorGateway, ClaudexorSubscriptionWindowExhausted,
         ClaudexorUnavailable,
     )
 
@@ -526,17 +592,22 @@ def _delegate_answer(
     except ValueError as exc:
         return _fail("delegate_answer", "reply_to_mismatch", str(exc), run_id=rid)
     deadline = time.monotonic() + _ANSWER_DEADLINE_SEC
+    delivery: Optional[str] = None  # the answered row's own kind, when this call read it
 
     def _left() -> float:
         return deadline - time.monotonic()
 
-    try:
-        gateway = ClaudexorGateway()
+    try:  # the engine the run was started on (``execution_domain``), never the current default
+        gateway = run_gateway(entry, ClaudexorGateway, timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
         gateway.handshake(timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
     except ClaudexorUnavailable as exc:
         return _fail("delegate_answer", exc.code, str(exc), run_id=rid)
     try:
         try:
+            # This read spends the call's budget (a spent one reads nothing), so it
+            # precedes the check that guards the POST.
+            if address is None and verified_source is not None:
+                delivery = _observed_delivery(gateway, rid, iid, _left())
             if _left() <= 0:
                 # Budget spent before the POST: typed, and NO further wire calls
                 # (the zero budget also suppresses the re-read inside).
@@ -551,15 +622,15 @@ def _delegate_answer(
 
                 try:
                     detail = _strict_poll(gateway, rid, poll_bound(_left(), strict=True))
-                    require_pending_address(address, pending_interactions(detail, strict=True))
+                    rows = pending_interactions(detail, strict=True)
+                    require_pending_address(address, rows)
+                    delivery = next((row["delivery"] for row in rows if row["interaction_id"] == iid), None)
                 except (ValueError, ClaudexorUnavailable) as exc:
                     return _fail("delegate_answer", "reply_to_unresolved", str(exc), run_id=rid)
                 if _left() <= 0:
                     return _fail("delegate_answer", "reply_to_unresolved",
                                  "Question validation exhausted the deadline; no answer was sent.", run_id=rid)
-                body = gateway.answer_interaction(rid, iid, wire, timeout_sec=poll_bound(_left(), strict=True))
-            else:
-                body = gateway.answer_interaction(rid, iid, wire)
+            body = gateway.answer_interaction(rid, iid, wire, timeout_sec=poll_bound(_left(), strict=True))
         except ClaudexorUnavailable as exc:
             status_code = int(getattr(exc, "status_code", 0) or 0)
             if isinstance(exc, ClaudexorSubscriptionWindowExhausted):
@@ -590,7 +661,9 @@ def _delegate_answer(
                     "This engine build has no interaction-answer service. A "
                     "question carrying a timeout_at benign-declines at the engine "
                     "timeout (the run continues on stated assumptions); one with "
-                    "timeout_at=null stays parked until the run is cancelled.",
+                    "timeout_at=null stays parked until the run is cancelled. An async "
+                    "question (delivery=async) holds nothing: the run keeps working and "
+                    "the question closes unanswered at its timeout_at, sending nothing.",
                     run_id=rid)
             if status_code == 404:
                 # A bodyless 404 is the daemon's own "no such run" — a definite
@@ -623,7 +696,10 @@ def _delegate_answer(
                                             seconds_left=_left())
         status = str(body.get("status") or "")
         source_receipt = None
-        source_delivery_proven = status == "delivered"
+        # ``delivered`` proves the answer reached a session that was HELD on it. For a question
+        # that held nothing it is the engine's handoff to the agent's next user message, never
+        # its consumption, so it confirms no source; an unread kind confirms nothing either.
+        source_delivery_proven = status == "delivered" and delivery == "blocking"
         if status == "already_resolved" and verified_source is not None:
             from ouroboros.delegate_source_coverage import source_delivery_confirmed
 
@@ -662,6 +738,7 @@ def _delegate_answer(
                 "status": "cannot_verify",
                 "reason": "source_delivery_unconfirmed",
                 "can_authorize": False,
+                **({"interaction_delivery": delivery or "unknown"} if status == "delivered" else {}),
             }
         if status in ("delivered", "already_resolved"):
             # F6 (gemini #2): the reported-question memo is stale the moment the
@@ -673,13 +750,15 @@ def _delegate_answer(
             "run_id": rid, "interaction_id": iid, "status": status,
             "questions_answered": len(wire),
         })
+        # The row this call read picks the sentence; unread or unknown keeps the plain receipt.
+        kind_note = _ANSWER_NOTES.get(f"delivered_{delivery}") if status == "delivered" else None
         result = {
             "status": status,
             "run_id": rid,
             "interaction_id": iid,
             "accepted": bool(body.get("accepted")),
             "detail": str(body.get("message") or ""),
-            "note": _ANSWER_NOTES.get(status, ""),
+            "note": kind_note or _ANSWER_NOTES.get(status, ""),
         }
         if status in ("rejected", "not_found"):
             # A definite typed refusal is recorded, never an OK observation: rejected
@@ -969,6 +1048,7 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
     traceback.
     """
     from ouroboros.delegate_progress import poll_bound
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
 
     rid = str(run_id or "").strip()
@@ -1009,52 +1089,24 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
     def _left() -> float:
         return deadline - time.monotonic()
 
-    gateway = ClaudexorGateway()
-    try:
+    gateway = None
+    try:  # the engine the run was started on (``execution_domain``); an unreachable one is a typed failure
+        gateway = run_gateway(entry, ClaudexorGateway, timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
         gateway.handshake(timeout_sec=poll_bound(min(_left(), _ANSWER_HANDSHAKE_MAX_SEC)))
     except ClaudexorUnavailable as exc:
-        gateway.close()
+        if gateway is not None:
+            gateway.close()
         return _fail("delegate_message", exc.code, str(exc), run_id=rid, message_id=mid)
     try:
-        try:
-            live_input = ""
-            if not replay:
-                reason, detail, live_input = _live_input_unsupported(
-                    gateway, str(entry.route_id or ""), _left)
-                if reason and reason != "deadline_exhausted":
-                    return _message_result(ctx, facts, outcome="unsupported", reason=reason,
-                                           host_code=SUBSTRATE_REFUSAL_CODE, detail=detail,
-                                           live_input=live_input)
-            if _left() <= 0:
-                # Spent before the POST: nothing was sent, and the same-id retry the
-                # delivery_unknown note prescribes is exactly right (the key is unused).
-                return _message_result(
-                    ctx, facts, outcome="delivery_unknown", reason="deadline_exhausted",
-                    detail=(f"local time budget ({_MESSAGE_DEADLINE_SEC:.0f}s) spent before "
-                            "the message POST was sent; nothing was sent"), live_input=live_input)
-            try:
-                body = gateway.send_run_message(rid, record["wire_text"], idempotency_key=mid,
-                                                timeout_sec=poll_bound(_left()))
-            except ClaudexorUnavailable as exc:
-                outcome, reason, host_code = _message_problem_outcome(exc)
-                return _message_result(
-                    ctx, facts, outcome=outcome, reason=reason, host_code=host_code,
-                    http_status=int(getattr(exc, "status_code", 0) or 0), detail=str(exc),
-                    live_input=live_input)
-            outcome = str(body.get("outcome") or "")
-            reason = str(body.get("reason") or "")
-            host_code = None
-            if outcome == "rejected":
-                host_code = refusal_host_code(reason)
-            elif outcome in ("not_active", "unsupported"):
-                host_code = SUBSTRATE_REFUSAL_CODE
-        except Exception as exc:  # noqa: BLE001 — F7: never a raw traceback to the model
-            log.warning("delegate_message failed untyped for %s/%s", rid, mid, exc_info=True)
-            return _message_result(
-                ctx, facts, outcome="delivery_unknown", reason="host_exception",
-                detail=f"{type(exc).__name__}: {exc}")
+        live_input = ""
+        if not replay:
+            reason, detail, live_input = _live_input_unsupported(gateway, str(entry.route_id or ""), _left)
+            if reason and reason != "deadline_exhausted":
+                return _message_result(ctx, facts, outcome="unsupported", reason=reason,
+                                       host_code=SUBSTRATE_REFUSAL_CODE, detail=detail, live_input=live_input)
+        verdict, body = _post_live_message(gateway, rid, record, _left, live_input)
         questions = None
-        if outcome == "not_active" and reason == "interaction_pending":
+        if body is not None and verdict["outcome"] == "not_active" and verdict["reason"] == "interaction_pending":
             try:
                 questions = _message_pending_observation(gateway, rid, _left)
                 if "pending_interactions" in questions:
@@ -1067,11 +1119,219 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
                     "detail": truncate_within_limit(f"{type(exc).__name__}: {exc}", 600),
                     "note": "Current questions are unknown; re-check with delegate_wait.",
                 }}
-        return _message_result(
-            ctx, facts, outcome=outcome, reason=reason, http_status=200,
-            host_code=host_code, detail=str(body.get("message") or ""),
-            attempt_id=body.get("attemptId"), harness_id=body.get("harnessId"),
-            live_input=body.get("liveInput") or live_input,
-            native_turn_id=body.get("nativeTurnId"), questions=questions)
+        return _message_result(ctx, facts, questions=questions, **verdict)
     finally:
         gateway.close()
+
+
+def _post_live_message(gateway: Any, rid: str, record: Dict[str, Any], left: Callable[[], float],
+                       live_input: str = "") -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """``(verdict, body)`` of ONE live message POST, the keyword facts ``_message_result`` records and renders,
+    shared by a caller's ``delegate_message`` and the placement of my human's rows (``_place_into_run``): a budget
+    spent before the POST sends nothing (the key stays unused, so the same-id retry is right), a typed refusal
+    is classified (``_message_problem_outcome``), the engine's verdict rides 1:1, and an untyped failure is
+    ``delivery_unknown`` (F7: never a raw traceback). ``body`` is the engine's answer when it gave one."""
+    from ouroboros.delegate_progress import poll_bound
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    mid = record["frame"]["message_id"]
+    try:
+        if left() <= 0:
+            return dict(outcome="delivery_unknown", reason="deadline_exhausted", live_input=live_input,
+                        detail=(f"local time budget ({_MESSAGE_DEADLINE_SEC:.0f}s) spent before "
+                                "the message POST was sent; nothing was sent")), None
+        try:
+            body = gateway.send_run_message(rid, record["wire_text"], idempotency_key=mid,
+                                            timeout_sec=poll_bound(left()))
+        except ClaudexorUnavailable as exc:
+            outcome, reason, host_code = _message_problem_outcome(exc)
+            return dict(outcome=outcome, reason=reason, host_code=host_code, detail=str(exc),
+                        http_status=int(getattr(exc, "status_code", 0) or 0), live_input=live_input), None
+        outcome, reason = str(body.get("outcome") or ""), str(body.get("reason") or "")
+        host_code = (refusal_host_code(reason) if outcome == "rejected"
+                     else SUBSTRATE_REFUSAL_CODE if outcome in ("not_active", "unsupported") else None)
+        return dict(outcome=outcome, reason=reason, http_status=200, host_code=host_code,
+                    detail=str(body.get("message") or ""), attempt_id=body.get("attemptId"),
+                    harness_id=body.get("harnessId"), live_input=body.get("liveInput") or live_input,
+                    native_turn_id=body.get("nativeTurnId")), body
+    except Exception as exc:  # noqa: BLE001 — F7: never a raw traceback to the model
+        log.warning("live message POST failed untyped for %s/%s", rid, mid, exc_info=True)
+        return dict(outcome="delivery_unknown", reason="host_exception",
+                    detail=f"{type(exc).__name__}: {exc}"), None
+
+
+_PLACED_ATTACHMENTS = ("[Host fact: the attachments named above are retained by the host; the task that started "
+                       "this session holds them and can be asked for them.]")
+
+
+def _placement_text(quote: Dict[str, Any], address: str, went: str) -> Tuple[str, Dict[str, Any]]:
+    """``(text, owner_words)`` of one row's frame: its words whole under the carried line (``_quote_body``), the
+    attachments' host fact when it carries files, and the frame's marker of the row (address, room, time)."""
+    from ouroboros.owner_relay import _quote_body, carried_quote_line
+
+    text = _quote_body(quote["owner_row"], carried_quote_line(quote, address=address, fact={"went_to": went}))
+    text += f"\n{_PLACED_ATTACHMENTS}" if quote.get("attachments") else ""
+    return text, {"address": address, "chat_id": quote["source"]["chat_id"], "ts": quote["source"]["ts"]}
+
+
+def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], str]], *, host: bool = False,
+                    replays: Any = ()) -> List[Tuple[str, Dict[str, Any], str, Dict[str, Any]]]:
+    """One session of my human's frames into ``run`` under the message deadline, one handshake: the pending frame
+    rows a caller already chose (``replays``: the body's, ``delegate_message_store.replay_frames``), then the owed
+    rows ``(address, quote, went)``, each framed as the starter's and chosen with any other placer's frames in one
+    transaction (``delegate_message_store.place_frame``: a row reaches a run once); every frame is sent on the
+    typed outcome path (``_message_result``: digest and size). A replay (prior ``prepared``/``delivery_unknown``)
+    always reaches the engine, its recorded bytes under its id. Only owed rows, which may take a new frame, read the
+    route's capability first: a new frame on a route with no live input, or an engine without the operation,
+    records ``unsupported`` with no POST. An engine that cannot be discovered or reached, or a read that fails,
+    sends nothing; the host's frames then wait ``prepared`` for the body, which replays them with no read.
+    ``(address, verdict, prior outcome, frame row)`` per frame sent."""
+    from ouroboros.delegate_message_store import PLACEMENT_REPLAYS, place_frame
+    from ouroboros.delegate_progress import poll_bound
+    from ouroboros.execution_domain import run_gateway
+    from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
+
+    deadline = time.monotonic() + _MESSAGE_DEADLINE_SEC
+    sent: List[Tuple[str, Dict[str, Any], str, Dict[str, Any]]] = []
+
+    def waits(why: str) -> list:
+        log.warning("owner words placement into run %s waits: %s", run.run_id, why, exc_info=True)
+        for address, quote, went in owed if host else ():
+            place_frame(ctx, run, *_placement_text(quote, address, went), host=True)  # ahead of the engine's answer
+        return sent
+    try:  # a missing or unreadable daemon descriptor is the engine's absence this pass, never the task's end
+        gateway = run_gateway(run, ClaudexorGateway,  # the run's own engine (``execution_domain``)
+                              timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
+    except ClaudexorUnavailable:
+        return waits("engine not discovered")
+    try:
+        try:
+            gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
+        except ClaudexorUnavailable:
+            return waits("engine handshake failed")
+        reason = detail = live_input = ""
+        if owed:
+            reason, detail, live_input = _live_input_unsupported(
+                gateway, str(run.route_id or ""), lambda: deadline - time.monotonic())
+            if reason in ("capability_read_failed", "deadline_exhausted"):
+                return waits(f"{reason} ({detail})")
+
+        def send(address: str, record: Dict[str, Any], prior: str) -> None:
+            facts = {"run_id": run.run_id, "message_id": record["frame"]["message_id"], "text_chars": len(record["text"]),
+                     "text_sha256": hashlib.sha256(record["text"].encode("utf-8", "replace")).hexdigest(),
+                     "frame": record["frame"]}
+            if reason and prior not in PLACEMENT_REPLAYS:  # a replay always reaches the engine: it may be delivered
+                verdict: Dict[str, Any] = dict(outcome="unsupported", reason=reason, host_code=SUBSTRATE_REFUSAL_CODE,
+                                               detail=detail, live_input=live_input)
+            else:
+                verdict, _body = _post_live_message(gateway, run.run_id, record, lambda: deadline - time.monotonic(),
+                                                    live_input)
+            _message_result(ctx, facts, **verdict)
+            sent.append((address, verdict, prior, record))
+        for row in replays:
+            send(str(row["frame"]["owner_words"].get("address") or ""), row, str(row.get("outcome") or ""))
+        for address, quote, went in owed:
+            try:  # the frame is the write-ahead record: no frame, no POST
+                record, prior = place_frame(ctx, run, *_placement_text(quote, address, went), host=host)
+            except Exception:  # noqa: BLE001
+                log.warning("owner words frame for %s into run %s unwritten", address, run.run_id, exc_info=True)
+                continue
+            if record is not None:  # None: another placer's frame ended the row for this run
+                send(address, record, prior)
+    finally:
+        gateway.close()
+    return sent
+
+
+def _fact_line(address: str, run_id: str, outcome: str, reason: Any) -> str:
+    return f"[Host fact: my human's row {address} for session run {run_id}: {outcome}{f' ({reason})' if reason else ''}]"
+
+
+def place_rows_into_runs(ctx: ToolContext) -> List[str]:
+    """The starter's catch-up of my human's rows in the sessions it has open, from its own round top alone
+    (``loop_round_limits._drain_incoming_messages`` with ``place_live_runs``), after the host's placement at receipt
+    (``place_at_receipt``): each run this task started and still holds open (``open_runs`` by this focus, never a
+    review-owned run) hears each row of the rows this run carries down (``owner_relay._rows_to_carry``) whose
+    identity stands in no START body of the run's line and whose last frame has not ended it (``_place_into_run``).
+    ``delivered``, ``accepted``, ``rejected`` and ``unsupported`` end a row for that run (``unsupported``: no live
+    input, so the row rides the next continuation); ``delivery_unknown`` and a frame never answered replay its bytes
+    under the same id; ``not_active`` or ``not_found`` on a run the census still holds open takes a new frame.
+    Nothing here raises. Returns the host fact lines for the starter's own context: one per row and run whose
+    outcome changed here, and one per frame the host placed that this context was not yet told of (``untold``)."""
+    from ouroboros.delegate_continuation import line_start_bodies
+    from ouroboros.delegate_custody import custody_root
+    from ouroboros.delegate_custody_reconcile import open_runs
+    from ouroboros.delegate_message_store import PLACEMENT_ENDED, PLACEMENT_REPLAYS, mark_told, placed_words
+    from ouroboros.owner_relay import _rows_to_carry, stamped_refs
+
+    lines: List[str] = []
+    try:
+        task_id, root = str(getattr(ctx, "task_id", "") or ""), custody_root(ctx)
+        runs = [run for run in open_runs(root) if run.task_id == task_id and not run.review_owned]
+        rows = _rows_to_carry(ctx, root) if runs else []
+        owed_by_run = {}
+        for run in runs if rows else []:
+            bodies = line_start_bodies(root, run.run_id)
+            seen = stamped_refs("\n".join(bodies)) if bodies is not None else set()
+            frames = placed_words(ctx, run.run_id)
+            last = {str(row["frame"]["owner_words"].get("address") or ""): row for row in frames}
+            untold = [row for row in frames if row.get("untold") and row.get("outcome") not in PLACEMENT_REPLAYS]
+            owed_by_run[run.run_id] = (run, untold, [
+                (address, quote, went) for identities, address, quote, went, _before in rows
+                if not identities & seen and str((last.get(address) or {}).get("outcome") or "") not in PLACEMENT_ENDED])
+    except Exception:  # noqa: BLE001 — a census that cannot be read places nothing this round; the loop goes on
+        log.warning("owner words placement census unavailable this round", exc_info=True)
+        return lines
+    for run, untold, owed in owed_by_run.values():
+        sent = _place_into_run(ctx, run, owed) if owed else []
+        lines += [_fact_line(row["frame"]["owner_words"]["address"], run.run_id, row["outcome"], row.get("reason"))
+                  for row in untold] + [_fact_line(address, run.run_id, verdict["outcome"], verdict.get("reason"))
+                                        for address, verdict, prior, _row in sent if verdict["outcome"] != prior]
+        if told := [row["frame"]["message_id"] for row in [*untold, *(row for *_sent, row in sent)] if row.get("untold")]:
+            try:
+                mark_told(ctx, run.run_id, told)
+            except Exception:  # noqa: BLE001 — a fact not marked is told once more, never lost
+                log.warning("owner words facts of run %s not marked told", run.run_id, exc_info=True)
+    return lines
+
+
+def place_at_receipt(root: Any, work_id: str, rows: List[Tuple[Any, ...]]) -> Optional[threading.Thread]:
+    """The host's placement of my human's rows a work just received (``owner_relay.carry_at_receipt``) into every
+    open session of its tree (``tree_open_runs``; never a review's run or a settled one), on a host thread started
+    now, outside every focus's turn and seat: each row no START body of the run's line holds, framed as the run's
+    starter's (``_place_into_run``). What the engine could not take this time waits for the next pass (the
+    starter's round top, or the next receipt). Returns the thread, or ``None`` when the tree holds no session open."""
+    from ouroboros.delegate_custody_reconcile import tree_open_runs
+
+    try:
+        runs = [run for run in tree_open_runs(root, work_id) if not run.review_owned]
+    except Exception:  # noqa: BLE001 — the starters' round tops place what this could not read
+        log.warning("owner words at receipt: open sessions of %s unreadable", work_id, exc_info=True)
+        return None
+    if not runs:
+        return None
+    thread = threading.Thread(target=_place_runs_at_receipt, args=(root, runs, rows), name="owner-words-placement",
+                              daemon=True)
+    thread.start()
+    return thread
+
+
+def _place_runs_at_receipt(root: Any, runs: List[Any], rows: List[Tuple[Any, ...]]) -> None:
+    from ouroboros.delegate_continuation import line_start_bodies
+    from ouroboros.delegate_feed import owe_placement
+    from ouroboros.delegate_message_store import PLACEMENT_ENDED, placed_words, starter
+    from ouroboros.owner_relay import stamped_refs
+
+    for run in runs:
+        try:
+            ctx = starter(root, run)
+            bodies = line_start_bodies(root, run.run_id)
+            seen = stamped_refs("\n".join(bodies)) if bodies is not None else set()
+            ended = {row["frame"]["owner_words"].get("address") for row in placed_words(ctx, run.run_id)
+                     if row.get("outcome") in PLACEMENT_ENDED}  # a later frame of a row is chosen again in its write
+            if owed := [(address, quote, went) for identities, address, quote, went, _before in rows
+                        if not identities & seen and address not in ended]:
+                _place_into_run(ctx, run, owed, host=True)
+            owe_placement(root)
+        except Exception:  # noqa: BLE001 — a host thread: what it could not place waits for the next pass
+            log.warning("owner words placement into run %s failed at receipt", run.run_id, exc_info=True)

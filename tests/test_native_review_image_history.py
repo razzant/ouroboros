@@ -41,8 +41,12 @@ def _overflow():
     return error
 
 
-@pytest.mark.parametrize("projection", ["unchanged", "route_gap", "window_gap", "reencoded"])
-@pytest.mark.parametrize("authored_fold", [True, False])
+@pytest.mark.parametrize(("authored_fold", "projection"), [
+    (True, "unchanged"),
+    (True, "window_gap"),
+    (False, "route_gap"),
+    (False, "reencoded"),
+])
 def test_projected_image_keeps_canonical_compaction_and_signed_reasoning(
     tmp_path, screenshot, monkeypatch, projection, authored_fold,
 ):

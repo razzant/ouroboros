@@ -9,6 +9,7 @@ import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 import { projection, room, SERVER_CASES, work } from './work_fixture.js';
+import { resumeAttemptWords, workLine } from '../modules/work_status.js';
 
 // The flat fixture's querySelector does not descend; lazily inserted controls
 // (the status badge, card internals) need a real descendant lookup.
@@ -968,3 +969,32 @@ for (const [chatId, asPanel] of [[1, false], [7, true]]) {
         });
     }
 }
+
+// #2380/#2411: a paused card says its refused Resume as the server sends it (dated at the end of its line, the door's
+// words in its Details), again in a fresh instance (as after a reload); a body without it drops both.
+test('a paused card says its refused Resume dated on its line and in words in its Details; a fresh read keeps it', () => {
+    const work = SERVER_CASES.paused_resume_refused.works[0];
+    const served = (keep) => {
+        const body = structuredClone(SERVER_CASES.paused_resume_refused);
+        const works = body.works.map((item) => ({ ...item, room: 1 }));
+        if (!keep) for (const item of works) [item, ...Object.values(item.members.states)].forEach((s) => delete s.last_resume);
+        return { active_chat_activities: [{ activity_id: 'rr', chat_id: 1, kind: 'managed_task', phase: 'budget_paused',
+            pause_cause: 'owner', can_resume: false, task_attempt: 1 }], active_chat_activities_complete: true,
+            supervisor_ready: true, ...body, works, rooms: { 1: Object.values(body.rooms)[0] } };
+    };
+    for (const round of ['live', 'fresh read']) {
+        const fx = makeInstance({ chatId: 1 });
+        const paint = (keep) => {
+            fx.instance.hydrateStateSnapshot(served(keep), Infinity);
+            const card = fx.card('rr'), detail = card.querySelector('[data-live-phase-detail]');
+            return [card.querySelector('[data-live-phase]').textContent,
+                card.querySelector('[data-live-phase-secondary]').textContent, detail.hidden ? '' : detail.textContent];
+        };
+        try {
+            fx.handlers.get('chat')({ task_id: 'rr', chat_id: 1, role: 'assistant', is_progress: true,
+                content: 'Comparing the saved notes', ts: '2026-10-17T14:00:00Z' });
+            assert.deepEqual(paint(true), ['Paused', workLine(work), resumeAttemptWords(work.last_resume)], round);
+            assert.deepEqual(paint(false), ['Paused', workLine({ ...work, last_resume: undefined }), ''], round);
+        } finally { fx.instance.destroy(); restoreDom(fx.prior); }
+    }
+});

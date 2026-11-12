@@ -145,7 +145,7 @@ def test_a_same_size_edit_in_the_index_s_own_second_reaches_the_snapshot(tmp_pat
     edited, stamp = source / "a.txt", int(time.time()) - 100
     os.utime(edited, (stamp, stamp))
     git(source, "update-index", "--refresh")  # the index records a.txt at that second
-    edited.write_bytes(b"two\n")  # same size as "one\n", same inode
+    edited.write_bytes(edited.read_bytes().replace(b"one", b"two"))  # same size and line end, same inode
     os.utime(edited, (stamp, stamp))
     os.utime(source / ".git" / "index", (stamp, stamp))  # and the index was written in that second
     index_before = (source / ".git" / "index").read_bytes()
@@ -502,7 +502,7 @@ def test_a_remnant_of_an_interrupted_release_or_restore_is_checked_out_again_who
     assert (copy / "a.txt").read_text(encoding="utf-8") == "child edit\n" and (copy / "sub" / "b.txt").is_file()
     assert git(copy, "rev-parse", "HEAD").stdout.strip() == handle.baseline_sha
     assert git(copy, "write-tree").stdout.strip() == result["result_tree"]
-    assert git(source, "worktree", "list", "--porcelain").stdout.count(f"worktree {copy}") == 1
+    assert git(source, "worktree", "list", "--porcelain").stdout.count(f"worktree {copy.as_posix()}") == 1
 
 
 def test_a_release_outside_its_root_deletes_nothing_and_never_marks_the_checkout(tmp_path):
@@ -533,7 +533,7 @@ def test_removing_a_copy_drops_only_its_own_worktree_registration(tmp_path):
     assert sw.remove_execution_snapshot("snap1", worktree_root=copies, data_dir=data) is True
 
     listed = git(source, "worktree", "list", "--porcelain").stdout
-    assert handle.path not in listed and f"worktree {own}" in listed
+    assert pathlib.Path(handle.path).as_posix() not in listed and f"worktree {own.as_posix()}" in listed
 
 
 def test_a_released_copy_without_a_captured_result_is_never_recreated_at_b(tmp_path):
@@ -567,7 +567,7 @@ def test_remove_drops_the_checkout_both_pins_and_the_record(tmp_path, released):
     for ref in (handle.baseline_ref, result["result_ref"]):
         assert git(source, "rev-parse", "--verify", "-q", ref, check=False).returncode != 0, ref
     assert sw.find_execution_snapshot("snap1", data) is None and not sw._record_file(handle.path, data).exists()
-    assert handle.path not in git(source, "worktree", "list", "--porcelain").stdout
+    assert pathlib.Path(handle.path).as_posix() not in git(source, "worktree", "list", "--porcelain").stdout
     # The sibling copy keeps its checkout, its pin and its record.
     assert pathlib.Path(other.path).is_dir() and refs(source) == f"{other.baseline_ref}\n"
     assert sw.find_execution_snapshot("other", data)["path"] == other.path

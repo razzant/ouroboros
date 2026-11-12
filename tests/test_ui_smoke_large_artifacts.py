@@ -73,7 +73,6 @@ def test_native_download_harnesses_build_the_launchers_real_bridge_class():
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_large_attachment_returns_through_real_document_handler_and_download(
     direct_server_with_data, monkeypatch, tmp_path,
 ):

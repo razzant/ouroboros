@@ -67,7 +67,10 @@ def payload_continuation(ctx, run_id) -> bool:
 
 
 def bind_thread(gateway, request, route, invocation_id, *, workspace_root="", prior=None) -> dict:
-    """Bind before START_REQUESTED; recovery already holds these exact local routing keys."""
+    """Bind before START_REQUESTED; recovery already holds these exact local routing keys.
+    A host-minted root (the start's ``scope.ephemeral``) stays one-shot on the thread too
+    where the engine sweeps such threads' lanes (``ephemeral_scope``)."""
+    from ouroboros.delegate_registration_policy import ephemeral_scope
     from ouroboros.review_thread_continuity import ensure_execution_thread
 
     thread_id = str((prior or {}).get("thread_id") or "")
@@ -75,7 +78,8 @@ def bind_thread(gateway, request, route, invocation_id, *, workspace_root="", pr
         thread_id = ensure_execution_thread(
             gateway, route=route, root=request["scope"]["root"], mode=request["mode"],
             access=request["access"], workspace_root=workspace_root,
-            title="Ouroboros delegated plan", idempotency_key=f"delegate-thread:{invocation_id}")
+            title="Ouroboros delegated plan", idempotency_key=f"delegate-thread:{invocation_id}",
+            ephemeral=bool(request["scope"].get("ephemeral")) and ephemeral_scope(gateway, thread=True))
     request["_thread_id"] = thread_id
     return {"thread_id": thread_id}
 
@@ -220,7 +224,15 @@ def continuation(ctx, drive, entry, gateway, authority, actor, invocation_id, te
              "authority_ceiling": copy.deepcopy(entry.authority_ceiling), "promotion": promotion}
     return ContinuationStart(facts={**facts, "continuation_of": entry.run_id, "resource_ref": copy.deepcopy(entry.resource_ref)}, prompt=text, request=request,
         custody={**facts, "continuation_of": entry.run_id, "capture_id": invocation_id,
-                 "snapshot_task_id": entry.snapshot_task_id or entry.task_id}, snapshot=snapshot)
+                 "snapshot_task_id": entry.snapshot_task_id or entry.task_id}, snapshot=snapshot,
+        folder=thread_folder(thread))
+
+
+def thread_folder(thread) -> str:
+    """The folder every turn of a plan thread runs in: the engine's own record of the root the thread was made on
+    (``GET /v2/threads/:id`` ``thread.repoRoot``, nullable since 4.5.0); "" when that record names none."""
+    root = (thread.get("thread") or {}).get("repoRoot") if isinstance(thread, dict) else None
+    return root if isinstance(root, str) else ""
 
 
 def answer_plan(ctx, entry, answers, reply_to=None):

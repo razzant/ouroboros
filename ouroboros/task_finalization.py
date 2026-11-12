@@ -72,25 +72,34 @@ def set_terminal_host_notice(usage: Dict[str, Any], *parts: str) -> None:
         usage.pop("terminal_host_notice", None)
 
 
-def terminal_host_notice_text(result: Dict[str, Any]) -> str:
-    """Host notices plus the latest stored delegated receipt, without rewriting history."""
+def set_terminal_plan_review_open(usage: Dict[str, Any], plan_suffix: str) -> None:
+    """Type the plan clause this exit states, and only it: an exit after a hold whose clause is gone
+    leaves no flag (absent = not open: a clean result carries no key)."""
+    if plan_suffix.strip():
+        usage["terminal_plan_review_open"] = True
+    else:
+        usage.pop("terminal_plan_review_open", None)
+
+
+def terminal_host_notice_text(result: Dict[str, Any], *, include_empty: bool = False) -> str:
+    """Join host notices and the stored receipt without changing history or its hash.
+    Replace only this audit's exact alternate suffix; preserve all other host text.
+    ``include_empty`` has the meaning of ``terminal_custody_notice``.
+    """
     from ouroboros.delegate_terminal import terminal_custody_notice
 
     base = str(result.get("terminal_host_notice") or "")
-    custody = terminal_custody_notice(result)
+    custody = terminal_custody_notice(result, include_empty=include_empty)
+    other = base and terminal_custody_notice(result, include_empty=not include_empty)
+    if other and other != custody and (base == other or base.endswith("\n\n" + other)):
+        base = base[:-len(other)].removesuffix("\n\n")
     if not custody or base == custody or base.endswith("\n\n" + custody):
         return base
     return "\n\n".join(part for part in (base, custody) if part)
 
 
 def terminal_custody_notice_text(result: Dict[str, Any]) -> str:
-    """The stored delegated-custody receipt, on its own, for the event builders.
-
-    Issue #1006: the custody fact is a typed row of the task card, so the live
-    send and the outbox replay carry it as its own field instead of folding it
-    into the host notice's text. Single-body transports keep the joined text.
-    That row is read by the owner, so it omits empty categories (#1403).
-    """
+    """Live/replayed card rows carry custody separately; single-body transports use the joined notice."""
     from ouroboros.delegate_terminal import terminal_custody_notice
 
     return terminal_custody_notice(result, owner_row=True)
@@ -99,6 +108,12 @@ def terminal_custody_notice_text(result: Dict[str, Any]) -> str:
 def quiet_finish(row: Dict[str, Any]) -> bool:
     """A silent finish is quiet only when neither the mind nor the host sent a message."""
     return row.get("wake_silent") is True and not row.get("owner_message_sent") and not terminal_host_notice_text(row)
+
+
+def work_label(*rows: Any) -> Dict[str, str]:
+    """``{"target_label": name}`` a finished task's notifications say (rows in hand, no read); ``{}``, never a placeholder."""
+    from ouroboros.projects_registry import task_presentation_name
+    return {"target_label": name} if (name := task_presentation_name(*rows, fallback="")) else {}
 
 
 def wake_cause_title(metadata: Dict[str, Any]) -> str:
@@ -116,10 +131,11 @@ def wake_cause_title(metadata: Dict[str, Any]) -> str:
     return ""
 
 
-def terminal_notice_text(result: Dict[str, Any]) -> str:
+def terminal_notice_text(result: Dict[str, Any], *, include_empty: bool = False) -> str:
     """The same terminal notices on transports with one text body or no event stream."""
     return "\n\n".join(part for part in (
-        str(result.get("terminal_provider_notice") or ""), terminal_host_notice_text(result),
+        str(result.get("terminal_provider_notice") or ""),
+        terminal_host_notice_text(result, include_empty=include_empty),
     ) if part)
 
 
@@ -198,6 +214,33 @@ def stamp_root_final_phase(
         send_event.setdefault("progress_meta", {})["task_terminal_status"] = terminal_status
 
 
+# The address of a final owed while its Project room was unreadable: no ``chat_id`` until the outbox
+# replay's room rule reads (``supervisor.terminal_delivery``), never the conversation's own room.
+PROJECT_ROOM_ADDRESS = "project_room"
+
+
+def presence_root_project_room(env_drive_root: Any, task: Dict[str, Any]) -> int | None:
+    """The internal Project room a Presence-origin root lives in: 0 when proven none, ``None`` while unknown.
+
+    Its conversation hears the Presence result; the room its work lives in by the room
+    rule (``projects_registry.RoomResolver``, strict: a binding or an admitted registered
+    Project chat) keeps that root's ordinary final, as every root's. A place room shares the
+    Project id range and is never one, so no number decides. Unreadable authority is neither
+    a guessed room that could be external nor "none" (logged): the final stays owed with
+    ``PROJECT_ROOM_ADDRESS`` for the outbox replay to ask this again.
+    """
+    from ouroboros.projects_registry import RoomResolver
+
+    try:
+        root = pathlib.Path(task.get("budget_drive_root") or env_drive_root)
+        return int(RoomResolver(root, strict=True)(task.get("id"), task.get("parent_task_id"),
+                                                  task.get("root_task_id")) or 0)
+    except Exception:
+        log.warning("Project room of Presence root %s unreadable; its final stays owed for the room rule",
+                    task.get("id"), exc_info=True)
+        return None
+
+
 def prepare_terminal_send_event(
     env_drive_root: Any, task: Dict[str, Any], text: str,
     usage: Dict[str, Any], send_event: Dict[str, Any],
@@ -268,10 +311,11 @@ def prepare_terminal_send_event(
 
 
 def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | None = None,
-                           title: str | None = "") -> Dict[str, Any]:
+                           title: str | None = "", metadata: Dict[str, Any] | None = None,
+                           task_contract: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Carry current custody and origin facts without minting empty custody envelopes."""
     from ouroboros.delegate_terminal import _stored_disclosure_matches
-
+    from ouroboros.project_naming import summary_names_run
     fields: Dict[str, Any] = {}
     audit = usage.get("delegate_terminal_reconciliation")
     prior = existing or {}
@@ -288,11 +332,10 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     if usage.get("wake_silent") is True:
         fields["wake_silent"] = True
     if usage.get("wake_summary"):
-        # The run's one sentence for its human names the card only when no authored name does
-        # (a wake); a schedule-born root keeps the schedule's name and shows the sentence under it.
-        fields["wake_summary"] = str(usage["wake_summary"])
-        if not str(title or prior.get("title") or "").strip():
+        fields["wake_summary"] = str(usage["wake_summary"])  # a self-started run's name, never over a title
+        if summary_names_run(metadata, task_contract) and not str(title or prior.get("title") or "").strip():
             fields["suggested_name"] = fields["wake_summary"]
+        fields.update({"fold_read": True} if usage.get("fold_read") is True else {})  # it stands for what was read
     if usage.get("owner_message_sent") is True:
         fields["owner_message_sent"] = True
     if usage.get("terminal_plan_review_open") is True:
@@ -404,7 +447,8 @@ def register_final_answer_owed(
     single-send (the live put passes ``register=False`` to
     ``deliver_final_message_live`` and the send handler suppresses the second
     copy). Fail-soft: registration is crash insurance, never a gate on the send.
-    Rows without a chat id are skipped (the replay could never send them), and an
+    Rows without a chat id are skipped (the replay could never send them) unless the
+    replay addresses them (``PROJECT_ROOM_ADDRESS``), and an
     EMPTY canonical root is refused rather than resolved relative to the process
     CWD (AR2-4).
 
@@ -413,7 +457,7 @@ def register_final_answer_owed(
     disclosed write failure: the send still happens, without crash insurance)
     or ``skipped`` (no chat id / no canonical root: nothing to owe).
     """
-    if not send_event.get("chat_id"):
+    if not send_event.get("chat_id") and send_event.get("address") != PROJECT_ROOM_ADDRESS:
         return OWED_SKIPPED
     try:
         # The CANONICAL data root the supervisor's boot/tick replay reads: the

@@ -38,7 +38,9 @@ def task_written(txn, task_id, columns=None):
     """Publish duty inputs in the task writer's transaction. The terminal-write counter moves on
     closing/closed writes, never on a live task's writes, and stamps the row's ``terminal_seq`` with
     its new value, so a pass keyed on the counter reads only the rows written since (``task_store``)."""
+    from ouroboros.store_hot_facts import note_written
     from ouroboros.task_status import SETTLED_STATUSES
+    note_written(columns)  # a control fact's writer moves the dispatcher's kept C2 admissions (dispatch_choice)
     if columns is None:
         row = txn.conn.execute("SELECT status, write_seq, updated_at, plan_collection_pending, drive_retention_at "
                                "FROM tasks WHERE task_id=?", (task_id,)).fetchone()
@@ -92,7 +94,10 @@ def members_in(txn: store.Txn, name: str) -> dict[str, dict]:
     if name in store.FLAG_COLUMNS:
         where = f"{store.FLAG_COLUMNS[name]}=1"
     elif name == "nonterminal":
-        where = "status IN ('running', 'interrupted')"
+        # The few live tasks among the whole history: ``unlikely`` keeps the read on the status index, which the
+        # maintenance child's ANALYZE statistics would otherwise trade for a walk of every task in task_id order
+        # (any SQLite, by the table's shape: tests/test_store_capture_readers.py).
+        where = "unlikely(status IN ('running', 'interrupted'))"
     else:
         return rows
     for record in txn.conn.execute(f"SELECT {','.join(_FACT_COLUMNS)} FROM tasks WHERE {where} ORDER BY task_id"):
@@ -216,15 +221,20 @@ def drive_finished(root: Any, task: dict, row: dict | None = None) -> None:
 
 
 def result_rows(root: Any, name: str, *, exclude=(), ids: Iterable[str] | None = None):
-    """Read only addressed candidates (``ids``: a pass's own selection of NAME's members);
-    unreadable members remain repair gaps."""
+    """Read only addressed candidates (``ids``: a pass's own selection of NAME's members), their
+    documents in ONE read (``task_results.admitted_results``); a member that read leaves out (absent,
+    refused) or a batch the store could not answer whole is read on its own, strictly, so unreadable
+    members remain repair gaps exactly as before and one damaged body never hides the others."""
     import logging
-    from ouroboros.task_results import load_task_result
-    for tid in members(root, name) if ids is None else ids:
-        if tid in exclude:
-            continue
+    from ouroboros.task_results import admitted_results, load_task_result
+    wanted = [tid for tid in (members(root, name) if ids is None else ids) if tid not in exclude]
+    try:
+        batch = admitted_results(root, wanted)
+    except Exception:  # the batch proves nothing about any one member: each is read on its own below
+        batch = {}
+    for tid in wanted:
         try:
-            row = load_task_result(root, tid, strict=True)
+            row = batch.get(tid) or load_task_result(root, tid, strict=True)
             if row:
                 yield row
             else:

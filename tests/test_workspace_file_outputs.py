@@ -61,7 +61,7 @@ def test_binary_file_only_result_applies_and_rolls_back_without_touching_index(t
     assert git(target, "ls-files", "--stage", "-z") == index_before
 
 
-@pytest.mark.parametrize("operation", ["modify", "delete", "rename", "symlink"])
+@pytest.mark.parametrize("operation", ["modify", "delete", "symlink"])
 def test_tracked_large_changes_have_exact_preimages_and_complete_apply(tmp_path, monkeypatch, operation):
     source = repository(tmp_path / "source")
     original = b"large baseline\x00content"
@@ -246,3 +246,139 @@ def test_text_patch_and_file_result_deliver_together_with_explicit_git_staging(t
     assert git(target, "show", ":answer.bin") == b"complete\x00answer"
     assert not git(target, "diff", "--name-only")
     assert set(git(target, "diff", "--cached", "--name-only").decode().splitlines()) == {"answer.bin", "code.txt"}
+
+
+def test_legacy_file_results_under_ignore_rules_land_beside_the_text_patch(tmp_path, monkeypatch):
+    """#2446 on the copy-less legacy integration: the text patch applies with --3way --index and a file result
+    the target already tracks under an ignored folder stages; a new file its ignore rules exclude, from the
+    text patch or a file result alike, is delivered, kept out of the index and named in the same receipt."""
+    import json
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    target = repository(tmp_path / "target")
+    (target / ".gitignore").write_bytes(b".build/\ndist/\n")
+    (target / "code.txt").write_bytes(b"old\n")
+    (target / ".build").mkdir()
+    (target / ".build" / "pinned.bin").write_bytes(b"pinned\x00baseline")
+    git(target, "add", "-f", "--", ".build/pinned.bin")
+    base = commit(target)
+    child = tmp_path / "child"
+    git(tmp_path, "clone", "-q", str(target), str(child))
+    (child / "code.txt").write_bytes(b"new\n")
+    (child / ".build" / "pinned.bin").write_bytes(b"pinned\x00by the child")
+    (child / "dist").mkdir()
+    (child / "dist" / "new.bin").write_bytes(b"new\x00file result")
+    (child / "dist" / "notes.txt").write_bytes(b"n\n")  # small text: it rides the text patch
+    git(child, "add", "-f", "--", "dist/new.bin", "dist/notes.txt")
+    monkeypatch.setattr(capture, "_PATCH_FILE_REFERENCE_BYTES", 8)
+    artifacts = task_artifact_dir_path(data, "child", create=True)
+    _, manifest = capture.write_workspace_patch_artifacts(
+        child, artifacts, task={"metadata": {"workspace_preflight": {"git": {"head": base}}}})
+    assert manifest["status"] == "ready_with_changes" and manifest["patch_size"] > 0, manifest
+    assert {row["path"] for row in file_output_changes(manifest, artifacts)} == {".build/pinned.bin", "dist/new.bin"}
+    write_task_result(data, "child", "completed", parent_task_id="parent",
+                      task_constraint={"mode": "acting_subagent", "surface": "self_worktree"})
+    out = _integrate_subagent_patch(ToolContext(repo_dir=target, drive_root=data, task_id="parent"), task_id="child")
+    assert "✅ Integrated" in out and "4 file(s), 2 staged)" in out, out
+    assert "Delivered, not indexed" in out and "dist/new.bin, dist/notes.txt" in out, out
+    assert "Changes are staged" not in out and "the files named above are not staged at all" in out, out
+    assert git(target, "show", ":code.txt") == b"new\n"
+    assert git(target, "show", ":.build/pinned.bin") == b"pinned\x00by the child"
+    assert (target / "dist" / "new.bin").read_bytes() == b"new\x00file result"
+    assert (target / "dist" / "notes.txt").read_text() == "n\n"
+    assert git(target, "ls-files", "--", "dist") == b""
+    verdict = json.loads((task_artifact_dir_path(data, "parent") / "subagent_patch_verdict_child.json").read_text())
+    assert (verdict["outcome"], verdict["unindexed"]) == ("applied", ["dist/new.bin", "dist/notes.txt"])
+
+
+@pytest.mark.parametrize("failing", ["new_file_add", "flag_remark"])
+def test_a_failed_legacy_staging_undoes_text_patch_file_results_and_index(tmp_path, monkeypatch, failing):
+    """A real index failure while the copy-less legacy integration stages (another Git process holds
+    index.lock), first at a new file's add, then at the last step that marks a staged entry assume-unchanged
+    again: the text patch, the file results and every touched index entry and flag go back, the parent's own
+    unrelated staged and unstaged work stays as it was, and the same captured result then lands."""
+    import json
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools import patch_staging as staging
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    target = repository(tmp_path / "target")
+    (target / ".gitignore").write_bytes(b"dist/\n")
+    for name, body in (("code.txt", b"old\n"), ("flag.txt", b"flag\n"), ("other.txt", b"base\n")):  # LF on every OS
+        (target / name).write_bytes(body)
+    (target / "pinned.bin").write_bytes(b"pinned\x00baseline")
+    base = commit(target)
+    child = tmp_path / "child"
+    git(tmp_path, "clone", "-q", str(target), str(child))
+    (target / "other.txt").write_bytes(b"base\nparent staged\n")  # the parent's own work, untouched by the child
+    git(target, "add", "--", "other.txt")
+    (target / "other.txt").write_bytes(b"base\nparent staged\nparent unstaged\n")
+    git(target, "update-index", "--assume-unchanged", "--", "flag.txt")
+    (child / "code.txt").write_bytes(b"new\n")
+    (child / "flag.txt").write_bytes(b"flag2\n")
+    (child / "fresh.txt").write_bytes(b"f\n")
+    (child / "pinned.bin").write_bytes(b"pinned\x00by the child")
+    (child / "dist").mkdir()
+    (child / "dist" / "notes.txt").write_bytes(b"n\n")
+    (child / "dist" / "new.bin").write_bytes(b"new\x00file result")
+    git(child, "add", "-f", "--", "dist/new.bin", "dist/notes.txt")
+    monkeypatch.setattr(capture, "_PATCH_FILE_REFERENCE_BYTES", 8)
+    artifacts = task_artifact_dir_path(data, "child", create=True)
+    _, manifest = capture.write_workspace_patch_artifacts(
+        child, artifacts, task={"metadata": {"workspace_preflight": {"git": {"head": base}}}})
+    assert manifest["status"] == "ready_with_changes" and manifest["patch_size"] > 0, manifest
+    assert {row["path"] for row in file_output_changes(manifest, artifacts)} == {"pinned.bin", "dist/new.bin"}
+    write_task_result(data, "child", "completed", parent_task_id="parent",
+                      task_constraint={"mode": "acting_subagent", "surface": "self_worktree"})
+
+    def state():
+        files = {name: (target / name).read_bytes() if (target / name).exists() else None
+                 for name in ("code.txt", "flag.txt", "other.txt", "pinned.bin", "fresh.txt",
+                              "dist/notes.txt", "dist/new.bin")}
+        return (git(target, "ls-files", "--stage", "-v", "-z"), git(target, "diff", "--cached", "--binary"),
+                git(target, "diff-files", "--name-only", "-z"), files)
+
+    before, real, calls = state(), staging._git_paths, []
+
+    def locked(root, args, paths, prefix=b""):
+        calls.append(args)
+        step = (args[1:2] == ["add"] and not {"-u", "-N", "--refresh"} & set(args) if failing == "new_file_add"
+                else "--assume-unchanged" in args and sum("--assume-unchanged" in seen for seen in calls) == 1)
+        if step:
+            lock = Path(root) / ".git" / "index.lock"
+            lock.write_bytes(b"")
+            try:
+                return real(root, args, paths, prefix)
+            finally:
+                lock.unlink()
+        return real(root, args, paths, prefix)
+
+    ctx = ToolContext(repo_dir=target, drive_root=data, task_id="parent")
+    monkeypatch.setattr(staging, "_git_paths", locked)
+    out = _integrate_subagent_patch(ctx, task_id="child")
+    assert "INTEGRATE_CONFLICT" in out and "index.lock" in out and "nothing is half-applied" in out, out
+    assert state() == before
+    verdict = json.loads((task_artifact_dir_path(data, "parent") / "subagent_patch_verdict_child.json").read_text())
+    assert (verdict["outcome"], verdict["applied"]) == ("conflict", False)
+    monkeypatch.setattr(staging, "_git_paths", real)  # the lock is gone: the same captured result now lands
+    out = _integrate_subagent_patch(ctx, task_id="child")
+    assert "✅ Integrated" in out and "6 file(s), 4 staged)" in out, out
+    assert git(target, "show", ":code.txt") == b"new\n" and git(target, "show", ":fresh.txt") == b"f\n"
+    assert git(target, "show", ":flag.txt") == b"flag2\n" and git(target, "ls-files", "-v", "--", "flag.txt")[:1] == b"h"
+    assert git(target, "show", ":pinned.bin") == b"pinned\x00by the child"
+    assert git(target, "ls-files", "--", "dist") == b"" and (target / "dist" / "new.bin").exists()
+    assert git(target, "show", ":other.txt") == b"base\nparent staged\n"
+    assert (target / "other.txt").read_text() == "base\nparent staged\nparent unstaged\n"

@@ -3,8 +3,8 @@
 The receipt proves the complete request never reached the provider and generation never started ($0, released
 custody). It takes the ordinary same-request bound that already repeats an overloaded route (``max_retries``
 attempts, pauses 4 s then 8 s) before the configured-route walk and the free wait; never a cooldown, never a
-second burst inside an open wait episode. Every other released failure keeps its one attempt: a host connect
-failure (configured routes first, #1409 case 4), an engine verdict (an undated pool), a held paid repeat.
+second burst inside an open wait episode. Typed Claudexor daemon-hop prepare failures share this bound.
+Direct-API connects, undated pool refusals, local slot refusals and held paid repeats keep one attempt.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import ouroboros.loop_transport as loop_transport
 from ouroboros import fallback_cooldown
 from ouroboros import usage_accounting as ua
 from ouroboros.llm_claudexor import ClaudexorModelNotDispatched
+from ouroboros.model_concurrency import ModelSlotTimeout
 from ouroboros.loop import run_llm_loop
 from ouroboros.loop_llm_call import (RETRY_WALL_EXHAUSTED_KEY, TRANSPORT_DEATHS_KEY, TRANSPORT_WAIT_REDIAL_KEY,
                                      call_llm_with_retry, classify_llm_exception)
@@ -27,17 +28,28 @@ from ouroboros.tools.registry import ToolRegistry
 from tests.test_loop_transport_wait import _counting_chain, _loop_kwargs, _read_network_wait_events, _typed_transport_exc
 
 
-def _receipt(code: str = "transport_not_delivered", basis: str = "incomplete_upload") -> ClaudexorModelNotDispatched:
+def _receipt(code: str = "transport_not_delivered", basis: str = "incomplete_upload", *,
+             operation_id: str = "op-nd", provider: str = "claudexor") -> ClaudexorModelNotDispatched:
     """The engine's terminal not-started receipt as the transport raises it, with its released capture."""
     context = ({"stage": "fetch", "errorCode": "EPIPE", "generationStarted": False,
                 "requestDelivery": {"state": "not_delivered", "basis": basis, "bodyBytes": 4_910_776,
                                     "handedOffBytes": 397_312, "responseReceived": False}}
                if code == "transport_not_delivered" else {})
     error = ClaudexorModelNotDispatched({"code": code, "message": "Controlled engine receipt.", "retryable": True,
-                                         "context": context}, model_role="main")
+                                         "context": context}, model_role="main", operation_id=operation_id)
     error.physical_attempt_capture = ua.PhysicalAttemptCapture(
-        attempt_id="pa-nd", model="claudexor::codex=gpt-6-astra", provider="claudexor", state="released",
+        attempt_id="pa-nd", model="claudexor::codex=gpt-6-astra", provider=provider, state="released",
         candidate_measurement_kind="opaque")
+    return error
+
+
+def _prepare_failure(code="daemon_unreachable"):
+    return _receipt(code=code, operation_id="")
+
+
+def _untyped_daemon_failure():
+    error = _typed_transport_exc(provider="claudexor")
+    error.code, error.operation_id = "daemon_unreachable", ""
     return error
 
 
@@ -91,6 +103,43 @@ def test_not_delivered_repeats_on_its_route_within_the_overload_bound(tmp_path, 
     assert all(row["retry_same_request"] and row["attempt_custody_state"] == "released" for row in errors)
 
 
+@pytest.mark.parametrize("code", ["daemon_unreachable", "daemon_not_answering", "daemon_descriptor_changed"])
+def test_typed_daemon_prepare_failure_repeats_within_same_route_bound(tmp_path, slept, code):
+    llm = _ScriptedLLM(fail_times=99, failure=lambda: _prepare_failure(code))
+    usage = {}
+    _call(llm, tmp_path, usage)
+    assert llm.calls == 3 and slept == [4.0, 8.0]
+    assert usage["_last_llm_failure"]["operation_id"] == ""
+    assert usage[RETRY_WALL_EXHAUSTED_KEY] is True
+
+
+@pytest.mark.parametrize("failure", [
+    lambda: _receipt("daemon_unreachable"),  # an accepted operation is not prepare
+    lambda: _prepare_failure("arbitrary_daemon_error"),
+    _untyped_daemon_failure,  # code, provider and empty operation alone are insufficient
+])
+def test_daemon_burst_requires_every_typed_fact(tmp_path, slept, failure):
+    llm = _ScriptedLLM(fail_times=99, failure=failure)
+    usage = {}
+    _call(llm, tmp_path, usage)
+    assert usage["_last_llm_error_kind"] == "transport_unavailable"
+    assert llm.calls == 1 and slept == []
+
+
+def test_local_slot_timeout_keeps_one_attempt(tmp_path, slept):
+    def failure():
+        error = ModelSlotTimeout("Capacity wait expired")
+        error.physical_attempt_capture = _receipt().physical_attempt_capture
+        return error
+
+    llm = _ScriptedLLM(fail_times=99, failure=failure)
+    usage = {}
+    _call(llm, tmp_path, usage)
+    assert usage["_last_llm_error_kind"] == "transport_unavailable"
+    assert usage["_last_llm_failure"]["provider_code"] == "model_capacity_unavailable"
+    assert llm.calls == 1 and slept == []
+
+
 def test_a_repeat_that_answers_ends_the_burst(tmp_path, slept):
     llm = _ScriptedLLM(fail_times=1)
     msg, _cost = _call(llm, tmp_path, {})
@@ -105,14 +154,17 @@ def test_the_transient_knob_does_not_widen_the_burst(tmp_path, slept, monkeypatc
     assert llm.calls == 3 and slept == [4.0, 8.0]
 
 
-@pytest.mark.parametrize("held", ["episode_redial", "paid_repeat_record"])
-def test_an_open_wait_or_a_held_repeat_keeps_one_attempt(tmp_path, slept, held):
+@pytest.mark.parametrize(("failure", "held"), [
+    pytest.param(_receipt, "episode_redial", id='_receipt-episode_redial'),
+    pytest.param(_prepare_failure, "paid_repeat_record", id='_prepare_failure-paid_repeat_record'),
+])
+def test_an_open_wait_or_a_held_repeat_keeps_one_attempt(tmp_path, slept, held, failure):
     usage: dict = {"execution_id": "ex"}
     if held == "episode_redial":
         usage[TRANSPORT_WAIT_REDIAL_KEY] = True
     else:
         usage[TRANSPORT_DEATHS_KEY] = {"round_id": "ex:round:1", "count": 1, "backoff_sec": 4.0}
-    llm = _ScriptedLLM(fail_times=99)
+    llm = _ScriptedLLM(fail_times=99, failure=failure)
     _call(llm, tmp_path, usage)
     assert llm.calls == 1 and slept == []
     assert RETRY_WALL_EXHAUSTED_KEY not in usage
@@ -142,11 +194,12 @@ def loop_env(monkeypatch, slept):
     fallback_cooldown.reset_for_tests()
 
 
-def test_a_recovered_repeat_never_dials_the_configured_route(tmp_path, monkeypatch, loop_env, slept):
+@pytest.mark.parametrize("failure", [_receipt, _prepare_failure])
+def test_a_recovered_repeat_never_dials_the_configured_route(tmp_path, monkeypatch, loop_env, slept, failure):
     chain, chain_calls = _counting_chain(answer_on=1)
     monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", chain)
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "other/model")
-    llm = _ScriptedLLM(fail_times=2)
+    llm = _ScriptedLLM(fail_times=2, failure=failure)
     result, _usage, _trace = run_llm_loop(
         **_loop_kwargs(tmp_path, ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path), [], llm=llm))
     assert result == "done"
@@ -155,12 +208,13 @@ def test_a_recovered_repeat_never_dials_the_configured_route(tmp_path, monkeypat
     assert _read_network_wait_events(tmp_path) == []
 
 
-def test_a_spent_burst_walks_the_configured_route(tmp_path, monkeypatch, loop_env, slept):
+@pytest.mark.parametrize("failure", [_receipt, _prepare_failure])
+def test_a_spent_burst_walks_the_configured_route(tmp_path, monkeypatch, loop_env, slept, failure):
     # No cooldown follows: `transport_unavailable` stays outside `_COOLDOWN_ERROR_KINDS` (test_loop_transport_wait).
     chain, chain_calls = _counting_chain(answer_on=1)
     monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", chain)
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "other/model")
-    llm = _ScriptedLLM(fail_times=99)
+    llm = _ScriptedLLM(fail_times=99, failure=failure)
     result, _usage, _trace = run_llm_loop(
         **_loop_kwargs(tmp_path, ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path), [], llm=llm))
     assert result == "fallback-ok"

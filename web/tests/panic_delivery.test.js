@@ -53,6 +53,7 @@ test('offline or backlogged browser Panic reports failure and never waits for a 
     }
     assert.equal(env.doc.body.querySelectorAll('.toast').length, 3);
     assert.match(env.doc.body.textContent, /Panic was not confirmed/);
+    assert.equal(env.doc.body.querySelectorAll('.toast-dismiss').length, 3, 'unconfirmed Panic stays visible but can be closed');
     assert.doesNotMatch(env.doc.body.textContent, /tray|menu bar/);
 });
 

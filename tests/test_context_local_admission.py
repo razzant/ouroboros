@@ -111,8 +111,19 @@ def test_exact_facts_are_bound_to_the_final_input_and_local_lane(lane):
     assert len(lane["measured"]) == 1  # transport of the facts never tokenizes again
 
 
-def test_exact_fit_reaches_ordinary_round_dispatch(lane):
+def test_exact_fit_reaches_ordinary_round_dispatch(lane, monkeypatch):
+    from ouroboros import llm_attempt
+    from ouroboros.context_anchor import main_input_anchor
+    from tests.test_physical_candidate_capture import _Response
+
     lane["count"] = lambda payload: 10_050
+    reply = _Response(text="local")
+    reply._payload["usage"]["prompt_tokens"] = 10_050  # the server reports the input it counted exactly
+    monkeypatch.setattr(lane["client"], "_get_local_client", lambda: SimpleNamespace(chat=SimpleNamespace(
+        completions=SimpleNamespace(create=lambda **candidate: lane["sent"].append(deepcopy(candidate)) or reply))))
+    admitted, admission = [], llm_attempt.main_context_fit_refusal
+    monkeypatch.setattr(llm_attempt, "main_context_fit_refusal",
+                        lambda request: admitted.append(request.prompt_tokens_bounded_estimate) or admission(request))
     plan = replace(_plan(preferred="nano", window=16_384), model="local-model", provider="local",
                    output_reserve_tokens=4_096, nano_projection=_projection("nano"),
                    user_content_json=json.dumps("text " * 10_000))
@@ -132,3 +143,7 @@ def test_exact_fit_reaches_ordinary_round_dispatch(lane):
     assert answer["content"] == "local"
     assert len(lane["measured"]) == len(lane["sent"]) == 1
     assert "text " * 10_000 in json.dumps(lane["sent"][0])
+    # The exact count admitted it (its receipt keeps no estimator count); the anchor still learns on the
+    # estimator count of the bytes it answered, so this route keeps its own calibration.
+    anchor, floor = main_input_anchor(ctx.accumulated_usage, plan)
+    assert (anchor.input_tokens, anchor.estimate_tokens, floor) == (10_050, admitted[-1], 10_050)

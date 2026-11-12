@@ -97,6 +97,21 @@ def test_http_and_tool_connect_are_silent_and_instances_are_distinct(client, tmp
     assert client.post("/api/places", json={"connector": "connector", "account_id": None}).status_code == 400
 
 
+def test_a_label_that_already_names_its_connector_is_not_prefixed_again(tmp_path, connector):
+    """Audit 05.11 (U015): «GitHub · GitHub · …» came from prefixing a label that already said its connector."""
+    named = projection.connect_declared_place(tmp_path, "connector", conversation_id="a/b", label="GitHub · a/b")
+    plain = projection.connect_declared_place(tmp_path, "connector", conversation_id="c/d", label="c/d")
+    assert (named.label, plain.label) == ("GitHub · a/b", "GitHub · c/d")
+    # A label stored doubled before this fix reads its word once on every place surface; the store keeps its bytes.
+    doubled = projection.connect_declared_place(tmp_path, "connector", conversation_id="e/f", label="GitHub · GitHub · e/f")
+    assert projection.place_view(tmp_path, doubled, brief=True)["label"] == "GitHub · e/f"
+    assert projection.place_view(tmp_path, doubled)["label"] == "GitHub · e/f", "the place sheet's full view too"
+    assert places.get_place(tmp_path, doubled.place_id).label == "GitHub · GitHub · e/f"
+    assert projection.place_view(tmp_path, plain, brief=True)["label"] == "GitHub · c/d"
+    # A label that only begins like the word is still prefixed: «GitHubbers» is not «GitHub · …».
+    assert projection.connect_declared_place(tmp_path, "connector", conversation_id="g/h", label="GitHubbers").label == "GitHub · GitHubbers"
+
+
 def test_tool_accepts_only_this_live_connectors_declared_signal(tmp_path, connector, monkeypatch):
     place = projection.connect_declared_place(tmp_path, "connector")
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
@@ -185,6 +200,40 @@ def test_places_endpoint_keeps_full_connector_projection(client, connector, monk
     assert row["account_candidates"] == []
 
 
+@pytest.mark.parametrize("switch", [False, True, None, "panic"])
+def test_a_place_says_it_only_hears_while_consciousness_is_off(tmp_path, monkeypatch, switch):
+    """Owner 06.11: Off left every place that was not Paused only hearing for 28 hours while each surface, the mind's
+    configure_presence included, read «active». The place's own view now says so; the switch is read once a list, and
+    a switch this read cannot know (state recovering or unreadable) is no claim, though intake stays closed on it."""
+    from ouroboros.consciousness_view import place_views
+    from supervisor.state import StateRead
+    for state in ("active", "silent", "paused"):
+        places.connect_place(tmp_path, place_id=state, connector="bridge", provider="chat", conversation_id=state,
+                             label=state, state=state)
+    checks = []
+
+    def read_state(root=None):
+        if switch is None:
+            return StateRead("unavailable", "none", {}, reason="state unreadable")
+        return StateRead("current", "primary", {"bg_consciousness_enabled": switch is not False})
+    monkeypatch.setattr("supervisor.state.read_state", read_state)
+    monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: checks.append(root) or switch == "panic")
+    monkeypatch.setattr(projection, "place_declarations", lambda _root: [])
+    monkeypatch.setattr(projection, "place_activity", lambda _root, _place: {"unanswered": 0, "last_activity_at": ""})
+    hearing = {"active", "silent"} if switch in (False, "panic") else set()
+    listed = projection.places_view(tmp_path)["places"]
+    brief = place_views(tmp_path, {})
+    assert len(checks) == 2, "one switch read for each list, never one per place"
+    for rows in (listed, brief):
+        assert {row["place_id"] for row in rows if row.get("only_hears") is True} == hearing
+        assert all("only_hears" not in row for row in rows if row["place_id"] not in hearing), "absent, never False"
+    # A single view (a write's answer, the mind's inspect) reads the switch itself; nothing is stored.
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    inspected = json.loads(_configure_presence(ctx, "inspect", "active"))["place"]
+    assert ("only_hears" in inspected) is bool(hearing)
+    assert "only_hears" not in json.loads(places.places_path(tmp_path).read_text(encoding="utf-8"))["places"]["active"]
+
+
 def test_brief_view_reads_one_index_pass_and_keeps_words_when_the_store_is_busy(tmp_path, monkeypatch):
     from ouroboros import place_projection, places
 
@@ -229,3 +278,36 @@ def test_owner_views_keep_manifest_labels_safety_and_accounts_without_identity(c
         assert "identity" not in row and "can_confirm" not in row
     revoked = client.post(path, json={"revoke_owner_account": "writer"}).json()["place"]
     assert revoked["owner_accounts"] == []
+
+
+@pytest.mark.parametrize("place_model,circle_model,consciousness_model,value,layer", [
+    ("place/model", "circle/model", "consciousness/model", "place/model", "place"),
+    ("", "circle/model", "consciousness/model", "circle/model", "circle"),
+    ("", "", "consciousness/model", "consciousness/model", "consciousness"),
+    ("", "", "", "main/model", "consciousness"),
+    ("place/model", None, "", "place/model", "place"),
+    ("", None, "consciousness/model", "consciousness/model", "consciousness"),
+    ("main", "circle/model", "consciousness/model", "main/model", "place"),
+    ("", "light", "consciousness/model", "light/model", "circle"),
+])
+def test_model_route_is_shared_by_brief_full_and_inspect(tmp_path, monkeypatch, place_model, circle_model,
+                                                       consciousness_model, value, layer):
+    monkeypatch.setattr("ouroboros.route_choice.runtime_setting", lambda key, default="": {
+        "OUROBOROS_MODEL_CONSCIOUSNESS": consciousness_model}.get(key, default))
+    monkeypatch.setattr("ouroboros.model_slots._main_model", lambda: "main/model")
+    monkeypatch.setattr("ouroboros.config.get_light_model", lambda: "light/model")
+    monkeypatch.setattr(projection, "place_declarations", lambda _root: [])
+    place = places.connect_place(tmp_path, connector="bridge", provider="chat")
+    place = places.edit_place(tmp_path, place.place_id, "set_model", author="owner", model=place_model)
+    if circle_model is not None:
+        circle = places.create_circle(tmp_path, name="Team", model=circle_model, author="owner")
+        place = places.edit_place(tmp_path, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+        assert projection.places_view(tmp_path)["circles"][0]["model"] == circle_model
+    before = places.places_path(tmp_path).read_bytes()
+    brief = projection.place_view(tmp_path, place, brief=True)
+    full = projection.place_view(tmp_path, place)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    inspected = json.loads(_configure_presence(ctx, "inspect", place.place_id))["place"]
+    assert brief["model_route"] == full["model_route"] == inspected["model_route"] == {"value": value, "layer": layer}
+    assert full["model"] == place_model
+    assert places.places_path(tmp_path).read_bytes() == before  # a projection never freezes the inherited choice

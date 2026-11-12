@@ -78,8 +78,10 @@ export function projectReference(project, { layout = 'inline', taskId = '', quiz
     targets.set(btn, target);
     if (beside) besides.set(btn, beside);
     nameProjectReference(btn, target);
-    btn.addEventListener('click', () => window.dispatchEvent(new CustomEvent('ouro:open-project', {
-        detail: { project: { ...target }, task_id: String(taskId || ''), quiz_id: String(quizId || '') },
+    // A press with a pointer (a click's detail counts it; a key's click has none) opens the room quietly.
+    btn.addEventListener('click', (event) => window.dispatchEvent(new CustomEvent('ouro:open-project', {
+        detail: { project: { ...target }, task_id: String(taskId || ''), quiz_id: String(quizId || ''),
+            pointer: event.detail > 0 },
     })));
     return btn;
 }

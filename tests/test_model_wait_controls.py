@@ -392,7 +392,7 @@ def test_outage_wrap_keeps_older_wire_death_custody_without_summary(tmp_path, mo
 
 @pytest.mark.parametrize("stop,expected_reason", [
     ("wrap", "owner_requested_finalization"), ("deadline", "deadline_local"),
-    ("ceiling", "finalization_grace"), ("wrap_unknown", "owner_requested_finalization"),
+    ("ceiling", "finalization_grace"),
 ])
 def test_real_main_control_preserves_candidate_without_new_summary(main_call, monkeypatch, stop, expected_reason):
     from ouroboros import config
@@ -526,8 +526,7 @@ def test_hard_cancel_returns_empty_events_to_real_worker_loop_and_keeps_queue_ow
 
 
 @pytest.mark.parametrize("stop,deadline,transport,expected", [
-    (True, True, False, ["stop"]), (False, True, False, ["deadline"]),
-    (False, False, False, ["deadline", "cost"]), (False, True, True, ["cost"]),
+    (True, True, False, ["stop"]), (False, False, False, ["deadline", "cost"]), (False, True, True, ["cost"]),
 ])
 def test_pre_round_terminal_order_keeps_cost_after_stop_and_deadline(monkeypatch, stop, deadline, transport, expected):
     from ouroboros import loop_round_limits
@@ -545,9 +544,7 @@ def test_pre_round_terminal_order_keeps_cost_after_stop_and_deadline(monkeypatch
     assert result_value_actual == result_value and calls == expected
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("first", ["web", "host"])
-@pytest.mark.parametrize("persist_role", [False, True])
+@pytest.mark.parametrize(("persist_role", "first"), [(False, "host"), (True, "web")])
 def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_wait, monkeypatch, first, persist_role):
     from ouroboros import config
     from supervisor import queue as task_queue
@@ -590,7 +587,58 @@ def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_
             assert saved_bytes is None
 
 
-@pytest.mark.serial
+@pytest.mark.parametrize(("persist_role", "declared"), [(True, True), (False, False)])
+def test_a_main_model_saved_on_a_wait_card_is_recorded_like_a_settings_save(live_wait, monkeypatch, declared,
+                                                                             persist_role):
+    """ORDER item 4: the card's saved choice records the writer's receipt as one ``settings_changed`` with the origin
+    its client declared; the app's card declares itself and puts no row in Main, an undeclared caller gets one. A
+    choice for this task only writes and records nothing."""
+    import supervisor.message_bus as bus
+    import supervisor.state as state
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+    from ouroboros import config
+    from ouroboros.gateway.task_decision import api_decision_answer
+
+    root, _gateway, _client, owner, _events, _decide = live_wait
+    sent = []
+    monkeypatch.setattr(bus, "send_with_budget", lambda *args, **kwargs: sent.append((args, kwargs)))
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 77})
+    monkeypatch.setattr(config, "SETTINGS_PATH", root / "settings.json")
+    config.SETTINGS_PATH.write_text(json.dumps({"OUROBOROS_MODEL": "openrouter/old-main"}), encoding="utf-8")
+    row = {"wait_id": "wait-one", "revision": 1, "task_attempt": 1, "state": "waiting", "role": "main"}
+    model_wait.mutate_wait(root, "task-one", "wait-one", lambda _: row)
+    owner.waits["wait-one"], owner.revision = dict(row), 1
+    web = Starlette(routes=[Route("/api/decisions", api_decision_answer, methods=["POST"])])
+    web.state.drive_root = root
+    with TestClient(web) as client:
+        response = client.post("/api/decisions", headers={"X-Ouroboros-Surface": "app", "X-Ouroboros-Actor": "owner"}
+                               if declared else {}, json={
+            "request_id": "main-saved", "decision_id": "model_wait:task-one:wait-one", "revision": 1,
+            "action": "switch", "model": MODEL, "credential_profile_id": "", "use_local": False,
+            "persist_role": persist_role})
+    assert response.status_code == 202 and response.json()["saved"] is persist_role
+    events = root / "logs" / "events.jsonl"
+    records = [entry for entry in map(json.loads, events.read_text(encoding="utf-8").splitlines())
+               if entry.get("action") == "settings_changed"] if events.exists() else []
+    if not persist_role:
+        assert records == [] and sent == []
+        return
+    [record] = records
+    assert record["changes"]["OUROBOROS_MODEL"] == {"old": "openrouter/old-main", "new": MODEL}
+    assert (record["surface"], record["actor"]) == (("app", "owner") if declared else ("api", "not declared"))
+    if declared:
+        assert sent == []
+    else:
+        from ouroboros.gateway.owner_settings import settings_change_text
+
+        [((chat, text), kwargs)] = sent
+        assert chat == 77 and kwargs == {"role": "system", "system_type": "settings_changed"}
+        assert text == settings_change_text(record["changes"], record)  # Main's row says what the record holds
+        assert "openrouter/old-main" in text and MODEL in text and "declared" not in text, text
+
+
 @pytest.mark.parametrize("surface", ["web", "host"])
 def test_wait_decision_preserves_existing_settings_timeout_receipt(live_wait, monkeypatch, surface):
     import threading

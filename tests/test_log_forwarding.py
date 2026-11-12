@@ -16,15 +16,13 @@ from types import SimpleNamespace
 
 import pytest
 
-REPO = pathlib.Path(__file__).resolve().parent.parent
-
 WORKER_BASELINE_TYPES = frozenset(
     {"tool_call", "llm_round", "task_checkpoint", "task_done", "llm_usage"}
 )
 # One producer publishes the SAME type twice (durable append + live
 # emit_log_event sibling); the forwarded append copy is suppressed.
 WORKER_SAME_TYPE_PAIRS = frozenset({
-    "provider_incomplete_response", "llm_empty_response", "provider_body_error",
+    "provider_incomplete_response", "llm_empty_response", "provider_body_error", "provider_content_refusal",
     "review_cycles_exhausted",
     # #1316: the durable tool-call start / wait-ended row IS the live frame's payload.
     "tool_call_started", "tool_call_timeout",
@@ -502,14 +500,15 @@ def test_turn_event_queue_stamps_by_value_at_the_producer():
     named.put_nowait({"type": "log_event", "data": {"type": "tool_call_started", "task_id": "turn2", "tool": "run_command"}})
     assert fired == [1]
 
-    # The execution half of the direct lane installs the proxy around
-    # agent.handle_task (admission registers the turn; execution runs it).
+    # The carrier's body installs the endpoint around agent.handle_task (the
+    # admission writes the turn's row; the carrier runs it with the turn's hooks).
     import inspect
 
-    from supervisor.worker_chat_lane import _execute_chat_task
+    from supervisor.worker_process import run_worker_task
 
-    src = inspect.getsource(_execute_chat_task)
-    assert "_TurnEventQueue" in src and "agent._event_queue = turn_queue" in src
+    src = inspect.getsource(run_worker_task)
+    assert "task_event_queue(out_q, task" in src and "runner._event_queue = task_queue" in src
+    assert "carrier_turn.hooks()" in src
 
 
 def test_llm_usage_explicit_zero_survives_running_row(production_sink, monkeypatch):
@@ -573,18 +572,6 @@ def test_task_metrics_carries_turn_stamped_chat(production_sink):
     )
     frames = [e for e in production_sink.frames if e.get("type") == "task_metrics_event"]
     assert len(frames) == 1 and frames[0]["chat_id"] == 42
-
-
-def test_logs_js_backfills_all_streams_and_dedupes_without_dropping_preconnect():
-    src = (REPO / "web" / "modules" / "logs.js").read_text(encoding="utf-8")
-    for stream in ("'events'", "'tools'", "'progress'", "'supervisor'"):
-        assert stream in src, f"backfill must include the {stream} log stream"
-    # Exact-duplicate guard collapses backfill/live overlap…
-    assert "renderedLogKeys" in src
-    # …and backfill reruns on reconnect…
-    assert "ws.on('open'" in src
-    # …without a load-time timestamp skip that could drop the pre-connect window.
-    assert "loadStart" not in src
 
 
 @pytest.mark.parametrize("write_succeeds", [True, False])
@@ -668,3 +655,93 @@ def test_the_suppressed_worker_types_name_only_events_a_producer_still_emits():
     assert "plan_review_advisory_open" not in WORKER_LOG_SINK_SUPPRESSED_TYPES
     assert {"provider_body_error", "tool_call", "task_done"} <= WORKER_LOG_SINK_SUPPRESSED_TYPES
     assert WORKER_LOG_SINK_SUPPRESSED_TYPES == WORKER_BASELINE_TYPES | WORKER_SAME_TYPE_PAIRS
+
+
+def _pending_finish(drive_root, task_id):
+    """A root that finished before its result review answered (``_finish_pending``'s shape), with the independent
+    ``receipt_absent`` warning, then a late PASS of exactly its delivered subject."""
+    from ouroboros.outcomes import _merge_objective_warning, _objective_axis
+
+    review = {"status": "awaiting", "source": "result_review", "author_finish": "author_finish_pending",
+              "pending_review": {"record_id": "rl-late", "subject_sha": "subject-a"},
+              "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
+                                      "reason": "author_finish_pending", "enforcement": "advisory"}}
+    objective = _objective_axis(review)
+    _merge_objective_warning(objective, "receipt_absent")
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(drive_root, task_id, "completed", chat_id=1, reason_code="final_message",
+                      outcome_axes={"execution": {"status": "ok"}, "review": review, "objective": objective})
+
+
+def _late_pass(monkeypatch):
+    from ouroboros import review_ledger
+
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": "PASS"}, "ts": "t"})
+
+
+def _late_rows(drive_root):
+    path = drive_root / "logs" / "events.jsonl"
+    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if '"review_late_result"' in ln]
+
+
+def test_a_late_pass_outcome_from_the_server_process_reaches_the_live_log_once(production_sink, monkeypatch):
+    """The server process (its maintenance sweep's owed-duty replay, or a direct turn's left wave): the production
+    sink drops the durable append of ``review_late_result``, so the resolver's own addressed push is the ONE live
+    frame, as for a queue-less caller of ``review_cycles_exhausted``."""
+    from ouroboros.late_review_marks import resolve_pending_result_review
+    from supervisor import message_bus
+
+    monkeypatch.setattr(message_bus, "_BRIDGE", production_sink.bridge)
+    root = production_sink.drive_root
+    _pending_finish(root, "late1")
+    _late_pass(monkeypatch)
+    assert resolve_pending_result_review(root, "late1", "rl-late") is True
+    frames = [e for e in production_sink.frames if e.get("type") == "review_late_result"]
+    [row] = _late_rows(root)
+    assert len(frames) == 1 and frames[0]["chat_id"] == 1 and frames[0]["current_outcome"] == row["current_outcome"]
+    assert row["current_outcome"]["outcome_phase"] == "warn", "the independent receipt_absent stays"
+
+
+def test_a_late_pass_outcome_from_a_worker_reaches_the_live_log_once_through_the_supervisor(production_sink, monkeypatch):
+    """A worker (a left wave settling in its author's process after the drain ended) has no bridge: worker_main's sink
+    forwards the durable append (not a worker-suppressed type) and the supervisor's ``_handle_log_event`` pushes the
+    ONE addressed frame, writing nothing again. A process with neither sink nor bridge keeps the durable row only."""
+    import queue
+
+    from ouroboros.late_review_marks import resolve_pending_result_review
+    from ouroboros.utils import emit_log_event, set_log_sink
+    from supervisor import events_worker_reports as handlers, message_bus
+    from supervisor.log_addressing import make_server_log_sink, stamp_recorded_row
+    from supervisor.workers import WORKER_LOG_SINK_SUPPRESSED_TYPES
+
+    assert "review_late_result" not in WORKER_LOG_SINK_SUPPRESSED_TYPES
+    monkeypatch.setattr(message_bus, "_BRIDGE", None)
+    root = production_sink.drive_root
+    _late_pass(monkeypatch)
+    out_q = queue.Queue()
+
+    def worker_sink(obj):  # worker_main's own sink, from the same parts its source names (pinned above)
+        if isinstance(obj, dict) and str(obj.get("type") or "") in WORKER_LOG_SINK_SUPPRESSED_TYPES:
+            return
+        emit_log_event(out_q, stamp_recorded_row(dict(obj)) if isinstance(obj, dict) else obj, log_label="worker log")
+
+    _pending_finish(root, "late2")
+    set_log_sink(worker_sink)
+    try:
+        assert resolve_pending_result_review(root, "late2", "rl-late") is True
+    finally:
+        set_log_sink(make_server_log_sink(production_sink.bridge, root, running=production_sink.running))
+    envelopes = [out_q.get_nowait() for _ in range(out_q.qsize())]
+    late = [e for e in envelopes if e["data"].get("type") == "review_late_result"]
+    assert len(late) == 1 and not [e for e in production_sink.frames if e.get("type") == "review_late_result"]
+    handlers._handle_log_event(late[0], _ctx(production_sink))
+    frames = [e for e in production_sink.frames if e.get("type") == "review_late_result"]
+    [row] = _late_rows(root)
+    assert len(frames) == 1 and frames[0]["chat_id"] == 1 and frames[0]["current_outcome"] == row["current_outcome"]
+
+    _pending_finish(root, "late3")  # a maintenance child or a CLI: no sink, no bridge
+    set_log_sink(None)
+    assert resolve_pending_result_review(root, "late3", "rl-late") is True
+    assert len(_late_rows(root)) == 2 and len([e for e in production_sink.frames if e.get("type") == "review_late_result"]) == 1

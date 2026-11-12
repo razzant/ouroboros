@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 
 from ouroboros import dialogue_store
-from ouroboros.places import PlaceError, get_place, is_owner_account
+from ouroboros.dialogue_provenance import reaction_action_words, reaction_fact, reaction_words
+from ouroboros.places import PlaceError, owner_confirmed_row, place_owner_accounts, row_place_id
 from ouroboros.store import StoreError
 
 
@@ -33,6 +34,11 @@ def record_facts(entry):
     for key in ('identity', 'sends_as', 'sends_as_owner'):
         if (value := transport.get(key)) is not None:
             facts[key] = value
+    reaction = reaction_fact(transport.get('message'))
+    if reaction and kind != 'place_notice':  # English host words for the act; words the row sent stay its text
+        state = delivery.get('state') if isinstance(delivery, dict) else ''
+        facts['reaction'] = {'summary': reaction_action_words(reaction, state) if kind == 'presence_delivery'
+                             else reaction_words(reaction)}
     if kind == 'place_notice':
         for key in ('held_text', 'held', 'checked'):
             if (value := entry.get(key)) is not None:
@@ -59,7 +65,7 @@ def annotate_place_history(messages, entries, root, reads):
                                          + ','.join('?' for _ in batch) + ')', batch).fetchall()
     # Decoded after the read transaction: JSON work never extends the transaction or its lock.
     heard = {row['seq']: json.loads(row['dispatch_input'] or '{}').get('place_attention', {}) for row in retained}
-    places = {}
+    accounts = None  # the places' current owner accounts, read once for the page when a person's row needs them
     for message, entry in candidates:
         facts = record_facts(entry)
         block = entry.get('source_order')
@@ -73,21 +79,17 @@ def annotate_place_history(messages, entries, root, reads):
             facts['historical_import'] = {'authorship': str(imported.get('authorship') or ''),
                                           'received_at': str(imported.get('received_at') or '')}
         elif message['role'] == 'user':
-            place_id = entry.get('place_id')
-            if place_id and place_id not in places:
+            if accounts is None:
                 try:
-                    places[place_id] = get_place(root, place_id)
-                except (PlaceError, OSError, ValueError, StoreError):
-                    places[place_id] = None
-            transport = entry.get('transport') or {}
-            actor = transport.get('actor') or {}
-            authenticated = actor.get('authenticated') if isinstance(actor, dict) else None
-            if places.get(place_id) is not None:
-                facts['owner_confirmed'] = authenticated is not False and is_owner_account(
-                    places[place_id], str(entry.get('sender_session_id') or ''), str(transport.get('account_id') or ''))
+                    accounts = place_owner_accounts(root)
+                except PlaceError:
+                    accounts = {}  # unreadable places: the confirmation stays unknown, never "not the owner"
+            if row_place_id(entry) in accounts:
+                facts['owner_confirmed'] = owner_confirmed_row(entry, accounts)
             attention = heard.get(entry.get('history_position', {}).get('offset'), {})
             if attention.get('decision') == 'heard':
-                facts['attention'] = {'decision': 'heard', 'reason': str(attention.get('reason') or '')}
+                facts['attention'] = {'decision': 'heard', 'reason': str(attention.get('reason') or ''),
+                                      **({'recipient': str(attention['recipient'])} if attention.get('recipient') else {})}
                 if attention.get('facts') is not None:
                     facts['facts'] = attention['facts']
             elif entry.get('type') == 'place_arrival' and entry.get('task_id'):

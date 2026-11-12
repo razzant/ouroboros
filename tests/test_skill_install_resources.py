@@ -22,7 +22,6 @@ from ouroboros.skill_dependencies import skill_deps_not_ready
 from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_review_state
 from tests.test_skill_runtime_commands import execute, installed_script
 
-pytestmark = pytest.mark.serial
 
 
 @contextmanager

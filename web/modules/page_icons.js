@@ -8,6 +8,8 @@ const PAGE_BODIES = {
     chat: '<path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h10"/><path d="M7 15h6"/><path d="M7 7h8"/>',
     // Projects: Lucide "layers" — distinct from the Files folder glyph (the Projects header renders it: pages.js).
     projects: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+    // Circles: Lucide "users", the people a circle gathers; its places wear their connectors' marks.
+    circles: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
     files: '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>',
     skills: '<path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/>',
     widgets: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
@@ -32,6 +34,7 @@ const CONTROL_BODIES = {
     check: '<path d="M20 6 9 17l-5-5"/>',
     book: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
     stop: '<rect width="12" height="12" x="6" y="6" rx="2"/>',
+    share: '<path d="M12 2v13"/><path d="m16 6-4-4-4 4"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>',
     // Consciousness, its own time: the header's chip and the Dashboard's wakes.
     brain: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>',
     close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
@@ -63,13 +66,21 @@ export function renderSkillIcon(spec, { size = 16, className = '' } = {}) {
     return svg.replace('<svg ', `<svg aria-hidden="true"${css ? ` class="${css}"` : ''} `);
 }
 
-// The shell's control glyphs, each once: the menu (☰), back (‹), the one close (×), the one more (⋯) and the
-// chevron. Same stroke family as the page icons; a control's accessible name says what the glyph does.
+// Lucide "pin": a Project row's Pin, and the mark of a pinned effort level (effort_chip.js) at its own stroke.
+export const PIN_BODY = '<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>';
+
+// The shell's control glyphs, each once: the menu (☰), back (‹), the one close (×), the one more (⋯), the
+// chevron, the magnifier of Find a project, a Project row's Pin and its slashed Unpin, and the move grip (⠿) of a
+// Widgets card. Same stroke family as the page icons; a control's accessible name says what the glyph does.
 export const SHELL_ICONS = {
+    search: strokeIcon('<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>', 18),
     menu: strokeIcon('<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>'),
     back: strokeIcon('<path d="m15 18-6-6 6-6"/>'),
     close: strokeIcon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),
     more: strokeIcon('<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>'),
     chevron: strokeIcon('<path d="m9 18 6-6-6-6"/>', 16),
     plus: strokeIcon('<path d="M12 5v14M5 12h14"/>', 16),
+    pin: strokeIcon(PIN_BODY, 16),
+    unpin: strokeIcon('<path d="M12 17v5"/><path d="M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89"/><path d="m2 2 20 20"/><path d="M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11"/>', 16),
+    grip: strokeIcon('<circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/>', 16),
 };

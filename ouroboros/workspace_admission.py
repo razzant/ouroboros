@@ -66,29 +66,11 @@ def validate_workspace_root(
     existing repository must resolve to its worktree root, not a subdirectory.
     Repo/data overlap and broken addresses never become workspace-less tasks.
     """
-    from ouroboros.tool_access import paths_overlap_casefold
-
     text = str(value or "").strip()
     if not text:
         return None
     root = pathlib.Path(text).expanduser().resolve(strict=False)
-    system_repo = pathlib.Path(system_repo_dir).resolve(strict=False)
-    drive = pathlib.Path(drive_root).resolve(strict=False)
-    for protected_root, label in ((system_repo, "Ouroboros system repo"), (drive, "Ouroboros data drive")):
-        overlaps = False
-        try:
-            root.relative_to(protected_root)
-            overlaps = True
-        except ValueError:
-            try:
-                protected_root.relative_to(root)
-                overlaps = True
-            except ValueError:
-                pass
-        if not overlaps and paths_overlap_casefold(root, protected_root):
-            overlaps = True
-        if overlaps:
-            raise WorkspaceRootError(f"workspace_root must not overlap the {label}")
+    _refuse_protected_overlap(root, system_repo_dir=system_repo_dir, drive_root=drive_root)
     if not root.exists() or not root.is_dir():
         raise WorkspaceRootError(f"workspace_root is not a directory: {text}")
     bootstrap_process_path()
@@ -116,6 +98,63 @@ def validate_workspace_root(
     if git_root != root:
         raise WorkspaceRootError(f"workspace_root must be the git worktree root: {git_root}")
     return root
+
+
+def _refuse_protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> None:
+    from ouroboros.tool_access import paths_overlap_casefold
+
+    system_repo = pathlib.Path(system_repo_dir).resolve(strict=False)
+    drive = pathlib.Path(drive_root).resolve(strict=False)
+    for protected_root, label in ((system_repo, "Ouroboros system repo"), (drive, "Ouroboros data drive")):
+        overlaps = False
+        try:
+            root.relative_to(protected_root)
+            overlaps = True
+        except ValueError:
+            try:
+                protected_root.relative_to(root)
+                overlaps = True
+            except ValueError:
+                pass
+        if not overlaps and paths_overlap_casefold(root, protected_root):
+            overlaps = True
+        if overlaps:
+            raise WorkspaceRootError(f"workspace_root must not overlap the {label}")
+
+
+def unavailable_workspace_address(value: Any, *, system_repo_dir: Any, drive_root: Any) -> str:
+    """The resolved address of a selected folder that is merely absent now, else ``""``.
+
+    Work that keeps a known folder (#1799, owner choice A) starts with that address
+    instead of waiting or falling back, as a direct room keeps its missing folder
+    (``room_chat_lens_dir``). Only absence qualifies: the repo/data overlap refusal of
+    ``validate_workspace_root`` still applies, and anything at the path (a file, a bare
+    or non-root Git tree) keeps its own refusal.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    root = pathlib.Path(text).expanduser().resolve(strict=False)
+    try:
+        _refuse_protected_overlap(root, system_repo_dir=system_repo_dir, drive_root=drive_root)
+    except WorkspaceRootError:
+        return ""
+    return "" if root.exists() or root.is_symlink() else str(root)
+
+
+def admitted_absent_workspace(task: Any, *, system_repo_dir: Any, drive_root: Any) -> bool:
+    """Whether ``task`` was admitted with its kept folder absent (``workspace_availability``)
+    and that exact address is still merely absent, so restore revalidation keeps the original
+    admission instead of holding the row for that folder. Anything now at the path, another
+    resolution or a protected overlap answers ``False`` and keeps the prepared-folder check."""
+    row = task if isinstance(task, dict) else {}
+    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    availability = meta.get("workspace_availability")
+    workspace = str(row.get("workspace_root") or "")
+    if not workspace or not isinstance(availability, dict) or availability.get("state") != "missing":
+        return False
+    current = unavailable_workspace_address(workspace, system_repo_dir=system_repo_dir, drive_root=drive_root)
+    return bool(current) and os.path.normcase(current) == os.path.normcase(workspace)
 
 
 # Sentinel: an explicit "no workspace" for a task born in a project room — distinct
@@ -270,29 +309,35 @@ def workspace_repair_hint(
     )
 
 
-def room_chat_lens_dir(drive_root: Any, project_id: str) -> tuple[str, str]:
+def room_chat_lens_dir(drive_root: Any, project_id: str, *, basis: Any = None) -> tuple[str, str]:
     """The selected folder for a direct conversation, with an availability note.
 
     Ordinary folders need no Git admission. A missing folder keeps its selected
     address so tools cannot fall back to the system repository; an unreadable
-    registry instead returns a note without inventing an address.
+    registry instead returns a note without inventing an address. A turn's carried
+    admission ``basis`` names the folder it was admitted with (``admitted_folder``),
+    so resumed work keeps it; without one the room's current row decides.
     """
     pid = str(project_id or "").strip()
     if not pid:
         return "", ""
-    try:
-        from ouroboros.projects_registry import get_reserved_project
+    from ouroboros.project_admission import admitted_folder
 
-        # Strict: an unreadable registry is a note, never a folderless room (#1315).
-        project = get_reserved_project(drive_root, pid, strict=True) or {}
-        if str(project.get("lifecycle") or "active") != "active":
-            project = {}
-        raw = str(project.get("working_dir") or "").strip()
-    except Exception as exc:
-        return "", (
-            f"project {pid!r} registry entry is unreadable ({type(exc).__name__}: {exc}) — "
-            "cannot determine the room's repository"
-        )
+    raw = admitted_folder(basis, pid)
+    if raw is None:
+        try:
+            from ouroboros.projects_registry import get_reserved_project
+
+            # Strict: an unreadable registry is a note, never a folderless room (#1315).
+            project = get_reserved_project(drive_root, pid, strict=True) or {}
+            if str(project.get("lifecycle") or "active") != "active":
+                project = {}
+            raw = str(project.get("working_dir") or "").strip()
+        except Exception as exc:
+            return "", (
+                f"project {pid!r} registry entry is unreadable ({type(exc).__name__}: {exc}) — "
+                "cannot determine the room's repository"
+            )
     if not raw:
         return "", ""
     try:
@@ -326,15 +371,20 @@ def compose_workspace_block(
     workspace_mode: str,
     memory_mode: str,
     workspace_preflight: dict,
+    unavailable: str = "",
 ) -> str:
     """The ``[HEADLESS_WORKSPACE]`` guidance block both admission surfaces embed in the
     task text (SSOT — previously gateway-only, so promoted room tasks ran with no
-    workspace context at all). Returns the inner lines WITHOUT the wrapper markers."""
+    workspace context at all). Returns the inner lines WITHOUT the wrapper markers.
+    ``unavailable`` names why a kept address is absent (``unavailable_workspace_address``)."""
     from ouroboros.workspace_preflight import render_workspace_preflight_summary
 
     return (
         f"workspace_root: {workspace_root}\n"
-        f"workspace_mode: {workspace_mode or 'external'}\n"
+        + (f"workspace_availability: missing when this work was admitted ({unavailable}). It is still this "
+           "work's selected folder and nothing else was substituted; commands that run inside it fail "
+           "until it exists again.\n" if unavailable else "")
+        + f"workspace_mode: {workspace_mode or 'external'}\n"
         f"memory_mode: {memory_mode}\n"
         "Use read_file, write_file, list_files, search_code, vcs_read, and run_command against this target workspace, not the Ouroboros system repo.\n"
         f"{render_workspace_preflight_summary(workspace_preflight)}\n"

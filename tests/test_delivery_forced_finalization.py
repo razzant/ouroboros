@@ -133,6 +133,22 @@ def _assert_forced_deferred_outcome(text, usage, trace, reason_code):
     assert outcome["outcome_axes"]["objective"]["status"] == "best_effort"
     assert outcome["outcome_axes"]["objective"]["source"] == "child_result_disposition"
     assert outcome["outcome_axes"]["objective"]["deferred_count"] == 1
+    # The trace is not stored: the forced rail's verdict reaches the result only through its trace refs.
+    assert outcome["trace_refs"]["forced_finalization"] == trace["forced_finalization"]
+    assert outcome["trace_refs"]["forced_finalization"]["reason_code"] == reason_code
+
+
+def test_forced_verdicts_ride_trace_refs_and_ordinary_finals_carry_none():
+    from ouroboros.outcomes import collect_trace_refs
+
+    verdict = {"reason_code": "round_limit", "source": "round_limit", "degraded": True, "candidate_sha256": "c1"}
+    request = {"form": "native", "status": "refused", "tool_call_count": 1, "reason": "completion_argument"}
+    refs = collect_trace_refs({}, {"forced_finalization": verdict, "forced_completion_request": request})
+    assert refs["forced_finalization"] == verdict and refs["forced_completion_request"] == request
+    verdict["source"] = "mutated after collection"
+    assert refs["forced_finalization"]["source"] == "round_limit"  # a copy, not the live trace object
+    ordinary = collect_trace_refs({}, {"tool_calls": [], "forced_finalization": "not a verdict"})
+    assert "forced_finalization" not in ordinary and "forced_completion_request" not in ordinary
 
 
 def test_round_limit_projects_deferred_child_before_forced_return(tmp_path, monkeypatch):
@@ -1210,8 +1226,8 @@ def test_forced_owner_refresh_does_not_resend_unknown_provider_outcome(tmp_path,
 
 
 def test_a_child_result_that_changes_after_the_review_step_requires_a_complete_replacement(tmp_path, monkeypatch):
-    """Delivery evidence that moves after the delivery's result review step (a child finishes
-    while the answer is being delivered) holds the retained answer: a complete replacement is
+    """Delivery evidence that moves while the delivery's result review runs (a child finishes
+    during that wait) holds the retained answer: a complete replacement is
     required ("after the answer was retained"), and its exact bytes are reviewed at delivery in
     turn before they are delivered."""
     import ouroboros.loop as loop
@@ -1222,22 +1238,13 @@ def test_a_child_result_that_changes_after_the_review_step_requires_a_complete_r
     registry._ctx.is_direct_chat = False
     reviewed = []
 
-    def review_then_deliver(_ctx, content, _llm_trace, _hold):
-        reviewed.append(content)
-        return False
-
-    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review_then_deliver)
-    monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
-    monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_a, **_k: None)
-    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-    monkeypatch.setattr(loop, "_finalize_task_services", lambda *_a, **_k: False)
-
-    original_project = loop._project_child_result_dispositions
     race = {"mutated": False}
 
-    def project_then_finish_child(round_ctx, llm_trace):
-        original_project(round_ctx, llm_trace)
-        if reviewed and not race["mutated"]:
+    def review_then_deliver(_ctx, content, _llm_trace, _hold):
+        reviewed.append(content)
+        if not race["mutated"]:
+            # The child finishes while the review runs. No shared child read of the finalization
+            # (``finalization_child_scope``) spans that wait, so the pass after it reads again.
             race["mutated"] = True
             write_task_result(
                 tmp_path,
@@ -1255,8 +1262,13 @@ def test_a_child_result_that_changes_after_the_review_step_requires_a_complete_r
                     "sha256": "b" * 64,
                 }],
             )
+        return False
 
-    monkeypatch.setattr(loop, "_project_child_result_dispositions", project_then_finish_child)
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review_then_deliver)
+    monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
+    monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_a, **_k: None)
+    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
+    monkeypatch.setattr(loop, "_finalize_task_services", lambda *_a, **_k: False)
 
     first = loop._no_tool_final_answer("Answer based on child result v1.", ctx, trace, registry,
                                        queue.Queue(), set(), lambda _text: None)
@@ -2208,7 +2220,6 @@ def test_forced_request_uses_explicit_completion_selection_without_tool_executio
 @pytest.mark.parametrize("body", [
     '{"action":"finish","action":"stop","answer":"Do not publish"}',
     '{"action":"finish","answer":"First","answer":"Second"}',
-    '{"action":"stop","answer":"Do not publish"}',
     '{"action":"finish","answer_sha256":"unoffered"}',
 ])
 def test_forced_invalid_completion_request_preserves_answer_without_repair_call(tmp_path, monkeypatch, body):

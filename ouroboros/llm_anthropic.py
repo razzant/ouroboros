@@ -433,7 +433,8 @@ class _AnthropicLaneMixin:
         usage["cost_final"] = bool(
             usage.get("cost") is not None and not usage.get("cost_estimated")
         )
-        # Preserve legacy compatibility disclosure; normal adaptation uses request_wire.
+        # Disclose and clear any tier note pending for this call (this lane's payload stages
+        # none); normal dispatch adaptation is disclosed through usage.request_wire.
         _clamp_note = self._pop_effort_clamp_disclosure()
         if _clamp_note:
             usage["reasoning_effort_clamped"] = _clamp_note
@@ -469,6 +470,7 @@ class _AnthropicLaneMixin:
                 temperature, tools, **remote_kwargs,
             )
         target["requested_reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
+        source_messages = messages
         system, messages = self._build_anthropic_messages(messages, target)
         payload: Dict[str, Any] = {
             "model": str(target.get("resolved_model") or ""),
@@ -496,6 +498,7 @@ class _AnthropicLaneMixin:
         if remote_kwargs.get("stream"):
             payload["stream"] = True
         apply_processing_preference(target, payload)
+        self._cache_declared_system_context(source_messages, payload)
         return payload
 
     @request_wire_scoped
@@ -682,6 +685,8 @@ def anthropic_web_search_server_tool(
         if "speed" in candidate:
             kwargs["extra_body"] = {"speed": candidate["speed"]}
         return client.messages.create(**kwargs)
+    if timeout is not None:
+        payload["timeout"] = float(timeout)  # the leg's own bound: each send narrows it, never replaces it (#572)
     scope = replace(accounting_scope or current_usage_scope() or UsageScope(), source="web_search.anthropic")
     with usage_scope(scope):
         return _recovery(send, payload, target)

@@ -76,7 +76,7 @@ test('live terminal frames add and clear the authored summary through card facts
 });
 
 // A self-started run says what it did: a schedule-born root keeps the schedule's name as its title and
-// shows its sentence as the line under it; a wake's sentence is its title. Live and replay meet in one place.
+// shows its sentence as the line under it; a wake's sentence is its title alone. Live and replay meet in one place.
 const SENTENCE = 'Checked the disk: 30 GiB free, 30 less than last night; the cause is still unknown.';
 const AT = '2026-10-28T06:39:00+00:00';
 const checkpoint = (task_id, extra = {}) => {
@@ -123,17 +123,57 @@ test('replay: a quiet schedule run is titled by its schedule and says what it di
     });
 });
 
+test('replay keeps the sentence when history stamps completion on progress before the summary', async () => {
+    for (const row of [terminal('stamped', { ...named, wake_summary: SENTENCE }),
+        evidence('stamped', { ...named, wake_summary: SENTENCE })]) {
+        const progress = checkpoint('stamped', { ...named, task_terminal_status: 'completed',
+            text: 'Checking the disk and the gateway.', outcome_phase: 'done', outcome_final: true });
+        delete progress.task_phase;
+        assert.ok(!Object.hasOwn(progress, 'wake_summary') && !Object.hasOwn(row, 'task_terminal_status'));
+        await replay({ messages: [progress, row], window: { complete: true } }, feed => {
+            assert.equal(view(feed, 'stamped').title, 'Daily check');
+            assert.equal(view(feed, 'stamped').line, SENTENCE, 'a history status stamp does not replace the task summary');
+            assert.ok(view(feed, 'stamped').facts.includes(SENTENCE));
+        });
+    }
+});
+
+test('the task own terminal carriers clear an absent sentence even in the same attempt', async () => {
+    for (const source of ['task_done', 'task_summary']) {
+        await replay({ messages: [checkpoint('cleared'), terminal('cleared', { ...named, wake_summary: SENTENCE })],
+            window: { complete: true } }, (feed, handlers) => {
+            assert.equal(view(feed, 'cleared').line, SENTENCE);
+            if (source === 'task_done') handlers.get('log')({ chat_id: 1, data: {
+                type: 'task_done', task_id: 'cleared', status: 'completed', task_terminal_status: 'completed', ts: AT } });
+            else handlers.get('chat')(terminal('cleared', named));
+            assert.notEqual(view(feed, 'cleared').line, SENTENCE);
+            assert.ok(!view(feed, 'cleared').facts.includes(SENTENCE));
+        });
+    }
+});
+
 // A wake's narration as the live path sends it and history replays it: the words after the mark are its line.
 const narration = (task_id, words, extra = {}) => ({ task_id, chat_id: 1, ts: '2026-10-28T06:30:00+00:00', role: 'assistant',
     is_progress: true, narration: true, text: `💬 ${words}`, content: `💬 ${words}`, ...extra });
 
-test('replay and live: a wake\'s sentence is its title and its last narration stays its line; origin rows name their fact or stay absent', async () => {
+test('replay and live: a wake whose sentence is its title shows that sentence alone, no older narration under it', async () => {
     const wake = narration('w1', 'Reading the rooms', { initiator: 'consciousness', suggested_name: 'Own time' });
     await replay({ messages: [wake, terminal('w1', { suggested_name: SENTENCE, wake_summary: SENTENCE, initiator: 'consciousness' })], window: { complete: true } }, (feed) => {
         const seen = view(feed, 'w1');
         assert.equal(seen.title, SENTENCE);
-        assert.equal(seen.line, 'Reading the rooms', 'the title already says the sentence; the narration keeps the line');
+        assert.equal(seen.line, '', 'the title already says the sentence; the earlier narration stays in Details');
         assert.match(seen.facts, /<dt>Started by<\/dt><dd>Consciousness<\/dd>/);
+    });
+    // The saved shape: every row names the card, the last (legacy, unmarked) narration carries the outcome and sentence.
+    const long = 'Weighing whether a body edit — "after merge" — asks anything of me; it **does not**. '.repeat(60);
+    const ended = { initiator: 'consciousness', suggested_name: SENTENCE, task_terminal_status: 'completed', outcome_phase: 'done',
+        outcome_final: true, outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } }, wake_summary: SENTENCE,
+        _is_direct_chat: true, tool_calls: 2, ts: AT };
+    const saved = [narration('w2', 'Reading the rooms', { initiator: 'consciousness', suggested_name: SENTENCE }), narration('w2', long, ended)];
+    await replay({ messages: saved, window: { complete: true } }, (feed) => {
+        const seen = view(feed, 'w2');
+        assert.equal(seen.title, SENTENCE);
+        assert.equal(seen.line, '', 'a reload does not resurrect the long narration under the summary');
     });
     await replay({ messages: [], window: { complete: true } }, (feed, handlers) => {
         handlers.get('chat')(wake);
@@ -142,7 +182,7 @@ test('replay and live: a wake\'s sentence is its title and its last narration st
         handlers.get('task_named')({ task_id: 'w1', suggested_name: SENTENCE });  // _wake_finished names the card after task_done
         const seen = view(feed, 'w1');
         assert.equal(seen.title, SENTENCE);
-        assert.equal(seen.line, 'Reading the rooms');
+        assert.equal(seen.line, '');
     });
     await replay({ messages: [checkpoint('o1'), terminal('o1', { suggested_name: 'Owner work', quiet_effective: false, wake_silent: false })], window: { complete: true } }, (feed) => {
         assert.doesNotMatch(view(feed, 'o1').facts, /Started by/);
@@ -197,5 +237,32 @@ test('live: the supervisor\'s task_done names the origin without waiting for a h
         assert.equal(seen.title, 'Daily check');
         assert.equal(seen.line, SENTENCE);
         assert.match(seen.facts, /<dt>Started by<\/dt><dd>Schedule · <span data-i18n-authored>Daily check<\/span><\/dd>/);
+    });
+});
+
+
+test('an ordinary root says its closing sentence once; a held cause keeps the sentence in Details', async () => {
+    for (const held of [false, true]) {
+        const row = terminal('o-summary', { suggested_name: 'Owner work', wake_summary: SENTENCE,
+            quiet_effective: false, ...(held ? { status: 'cancelled', outcome_phase: 'cancelled', reason_code: 'author_stop' } : {}) });
+        await replay({ messages: [checkpoint('o-summary'), row], window: { complete: true } }, feed => {
+            const seen = view(feed, 'o-summary');
+            assert.equal(seen.facts.includes('In its words'), held);
+            if (!held) assert.equal(seen.line, SENTENCE);
+            else assert.notEqual(seen.line, SENTENCE);
+        });
+    }
+});
+
+for (const [type, status] of [['task_started', 'running'], ['task_done', 'completed']]) test(`a new attempt clears its previous sentence (${type})`, async () => {
+    await replay({ messages: [checkpoint('retry'), terminal('retry', { suggested_name: 'Owner work', wake_summary: SENTENCE,
+        task_attempt: 1 })], window: { complete: true } }, (feed, handlers) => {
+        assert.equal(view(feed, 'retry').line, SENTENCE);
+        handlers.get('log')({ chat_id: 1, data: { type: 'task_metrics_event', task_id: 'retry', rounds: 2 } });
+        assert.equal(view(feed, 'retry').line, SENTENCE, 'a partial same-attempt update does not erase the sentence');
+        handlers.get('log')({ chat_id: 1, data: { type, task_id: 'retry', status,
+            task_attempt: 2, ts: '2026-10-28T07:00:00+00:00' } });
+        assert.notEqual(view(feed, 'retry').line, SENTENCE);
+        assert.ok(!view(feed, 'retry').facts.includes(SENTENCE));
     });
 });

@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { applyPayload, setMissTransport, CODE_PREFIX } from '../modules/i18n.js';
 import { taskPresentation, taskReasonPhrase } from '../modules/log_events.js';
+import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
 import { questionPresentation } from '../modules/question_presentation.js';
 import { acceptanceIncidentClauses } from '../modules/acceptance_incident_presentation.js';
 import { formatMsgTime } from '../modules/chat_activity.js';
@@ -69,7 +70,7 @@ test('in English every catalog reading is the source text and matches the twin f
         if (!row.headline) continue;
         assert.equal(taskPresentation(row.phase).headline, row.headline, row.name);
     }
-    assert.equal(en.cause, 'Ouroboros stopped with unfinished work; no review approval was granted.');
+    assert.equal(en.cause, TASK_CAUSE_PHRASES.author_stop);
     assert.equal(en.rawCode, 'no_such_cause_code');
     assert.equal(en.question, 'Waiting for your answer');
     assert.equal(en.pending, 'Choosing the right destination…');

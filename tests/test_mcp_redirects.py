@@ -3,8 +3,9 @@
 The real SDK transports (Streamable HTTP and SSE) talk to synthetic loopback
 servers. A raw socket recorder stands at every redirect target, so "stopped
 before it was sent" is observed at the socket rather than inferred from the
-returned error. Same-origin redirects and servers without saved credentials
-keep the SDK's redirect behavior.
+returned error. Same-origin redirects keep working; a server without saved
+credentials keeps the SDK's redirect behavior, which since mcp 1.30
+(CVE-2026-116685) follows no redirect to another origin either.
 """
 
 from __future__ import annotations
@@ -17,8 +18,6 @@ import pytest
 
 from ouroboros import mcp_client
 from tests.test_mcp_headers_loopback import loopback  # noqa: F401
-
-pytestmark = pytest.mark.serial  # binds real loopback ports
 
 KEY = "synthetic-redirect-key-0001"
 TOKEN = "Bearer synthetic-redirect-token-0002"
@@ -166,11 +165,13 @@ def test_same_origin_redirects_keep_working_with_saved_headers(loopback, transpo
     assert app.seen and all(headers.get("x-api-key") == KEY for headers in app.seen)
 
 
-def test_a_server_without_saved_credentials_keeps_following_cross_origin_redirects(loopback):  # noqa: F811
-    _final, final_url = loopback("http", {})
-    _app, url = loopback("http", {}, wrap=lambda app: Redirect(app, lambda scope: final_url))
-    outcome, _ = _refresh({"id": "open", "enabled": True, "url": url})
-    assert outcome["ok"] and [tool["name"] for tool in outcome["tools"]] == ["echo"], outcome
+def test_a_server_without_saved_credentials_gets_the_sdk_refusal_of_a_cross_origin_redirect(loopback, recorder):  # noqa: F811
+    target = recorder()
+    _app, url = loopback("http", {}, wrap=lambda app: Redirect(app, lambda scope: target.url("/mcp")))
+    outcome, elapsed = _refresh({"id": "open", "enabled": True, "url": url}, timeout=30)
+    assert outcome["ok"] is False and "MCP_REDIRECT_REFUSED" not in outcome["error"], outcome
+    assert "not followed" in outcome["error"] and f"127.0.0.1:{target.port}" in outcome["error"], outcome
+    assert target.connections == [] and elapsed < 15, elapsed
 
 
 def test_the_guard_is_per_connection_and_leaves_no_hook_behind(loopback):  # noqa: F811
@@ -191,7 +192,8 @@ def test_the_guard_is_per_connection_and_leaves_no_hook_behind(loopback):  # noq
     finally:
         mcp_client._CredentialOriginGuard.client = original
     assert len(seen) == 2 and seen[0] is not seen[1]
-    assert all(client.is_closed and len(client.event_hooks["request"]) == 1 for client in seen)
+    assert all(client.is_closed and len(client.event_hooks["request"]) == len(client.event_hooks["response"]) == 1
+               for client in seen)
 
 
 @pytest.fixture(autouse=True)

@@ -1,4 +1,4 @@
-"""Incident 062f199a replay, also runnable unchanged against the base revision."""
+"""Incident 062f199a replay: a wake's start beside my story, its own room and my other conversations."""
 import dataclasses
 import json
 
@@ -10,12 +10,10 @@ from tests import _memory_view_synthetic as syn
 def _incident(tmp_path, monkeypatch):
     task = {"id": "incident01", "usage_category": "consciousness", "chat_id": 1}
     spec = mv.view_spec_for_task(task, tmp_path)
-    rooms = [syn.live_room(i, words=1) for i in range(164)]
-    if spec.live_rooms == "directory":
-        rooms = [{**room, "directory": True, "words": [], "notes": []} for room in rooms]
+    rooms = [syn.conversation(i, words=1) for i in range(164)]
     snap = dataclasses.replace(syn.snapshot(role="consciousness", story=syn.pages(103, 200),
         room_facts=syn.room(lane1=[syn.spoken(i, "ouroboros", 8_000) for i in range(100)], lane2=359),
-        live=rooms), spec=spec)
+        conversations=rooms), spec=spec)
     core = cf.ContextCore("Required core", "Constitution", "b" * 1_440_000, "", "Identity",
         "f" * 500_000, '"Assignment"', False, memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0581)
@@ -31,7 +29,10 @@ def test_incident_start_keeps_story_before_old_replies(tmp_path, monkeypatch):
     print("INCIDENT_START", json.dumps({"floor": steps, "input": shown.calibrated_tokens, "mode": plan.initial_mode}))
     assert steps.get("F2", 0) > 0 and steps.get("F5", 0) < 103
     assert steps != {"F1": 359, "F5": 103}
-    assert shown.calibrated_tokens + 65_536 + 218_000 <= 872_000
+    # The start leaves the reply reserve and the wake's own work room: one eighth since the owner's 29.10 decision
+    # (a wake is one turn, as a direct chat turn is), read from the view so the replay runs on any revision.
+    work = -(-872_000 // 8) * shown.memory_facts["spec"]["work_room_levels"]
+    assert shown.calibrated_tokens + 65_536 + work <= 872_000
 
 
 def test_incident_chosen_range_survives_zero_result_room(tmp_path, monkeypatch):

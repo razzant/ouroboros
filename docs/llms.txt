@@ -14,6 +14,8 @@ Ouroboros publishes self-reported benchmark results with status labels and links
 - [Technical report](https://ouroboros-agent.ai/paper/): Paper metadata, authors, citation, code, and public evidence links.
 - [Community and research](https://ouroboros-agent.ai/community/): Projects adapting Ouroboros code and ideas, and papers that cite it.
 - [About](https://ouroboros-agent.ai/about/): What Ouroboros is and how it works.
+- [Privacy and account connections](https://ouroboros-agent.ai/privacy/): Connected data, local records, configured providers and disconnection.
+- [Terms and software license](https://ouroboros-agent.ai/terms/): The MIT license and operating a self-hosted installation.
 - [Benchmark evidence](https://ouroboros-agent.ai/benchmarks/): Scores, publication status, runs, traces, and methodology.
 - [Architecture](https://github.com/razzant/ouroboros/blob/ouroboros/docs/ARCHITECTURE.md): Runtime structure, data flow, and operating boundaries.
 - [Constitution](https://github.com/razzant/ouroboros/blob/ouroboros/BIBLE.md): Identity and governing principles.

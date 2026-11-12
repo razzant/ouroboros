@@ -6,20 +6,29 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
+from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
-from ouroboros.gateway.reference_contracts import ChatReferenceFields
+from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageCount, StorageCounting, StorageError, StoragePart, StoragePlace, StorageResponse, StorageRest,
     StorageVolume, StorageRemover,
 )
+from ouroboros.owner_keep import OwnerKeepRequest, OwnerKeepResponse  # noqa: F401 -- public re-exports
+from ouroboros.launch_custody import (  # noqa: F401 -- public re-exports
+    KeptService, KeptServiceStopRequest, KeptServiceStopResponse, KeptServicesResponse,
+)
+from ouroboros.storage_deleted import (  # noqa: F401 -- public re-exports
+    StorageActiveProject, StorageDeletedFolder, StorageDeletedProject, StorageDeletedProjects, StorageFolderPart,
+)
 from ouroboros.storage_free import (  # noqa: F401 -- public re-exports
-    StorageFree, StorageFreeGroup, StorageFreeItem, StorageFreeKept, StorageFreeRequest, StorageFreeRun,
+    StorageFree, StorageFreeEntry, StorageFreeGroup, StorageFreeItem, StorageFreeItemsResponse, StorageFreeKept, StorageFreePool,
+    StorageFreeRequest, StorageFreeRun,
 )
 from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-exports
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import WorkStateFields
+from ouroboros.gateway.work_contracts import WorkLeadFields, WorkStateFields
 from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
@@ -30,21 +39,24 @@ from ouroboros.gateway.widgets import (
     ExtensionLiveSnapshot, WidgetFaultRequest, WidgetFaultResponse, WidgetTab, WidgetsResponse,
     WidgetAssetLeaseRequest, WidgetAssetTokenRequest, WidgetAssetLeaseResponse, WidgetAssetRevokeResponse,
 )
-from ouroboros.gateway.decision_contracts import DecisionRequest, DecisionResponse  # noqa: F401 -- public re-exports
+from ouroboros.gateway.decision_contracts import (  # noqa: F401 -- public re-exports
+    DecisionRequest, DecisionResponse, SecretDecisionRequest, SecretDecisionResponse, SecretEvent, SecretOutcome,
+    SecretConsumer, SecretKeyState, SecretRequestField, SecretRequestMeta,
+)
 from ouroboros.gateway.card_contracts import CardOutbound, CardStateOutbound  # noqa: F401 -- public re-exports
+from ouroboros.gateway.cost_breakdown import TaskCostBreakdown, TaskCostSlice  # noqa: F401 -- public re-exports
 from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-exports
-    UpdateApplyErrorResponse, UpdateApplyRequest, UpdateApplySuccessResponse, UpdateMergePlan,
+    UpdateApplyErrorResponse, UpdateApplyRequest, UpdateApplySuccessResponse, UpdateDescriptionErrorResponse,
+    UpdateDescriptionRequest, UpdateDescriptionResponse, UpdateMergePlan,
     UpdatePreflightRequest, UpdatePreflightResponse, UpdateProgressChangedOutbound, UpdateStatusReadyOutbound,
 )
 from ouroboros.gateway.management_contracts import (  # noqa: F401 -- public re-exports
+    ClaudexorLoginJobProblem,
     ExtensionsIndexResponse, LocalModelStatusResponse, MarketplaceInstalledResponse, MarketplaceSearchResponse,
     McpStatusResponse, ModelCatalogResponse, SkillLifecycleQueueResponse,
 )
 from ouroboros.gateway.schedule_contracts import (  # noqa: F401 -- public re-exports
-    ScheduleActionResponse,
-    ScheduledTasksResponse,
-    ScheduleDeleteResponse,
-    ScheduleUpsertResponse,
+    ScheduleActionResponse, ScheduledTasksResponse, ScheduleDeleteResponse, ScheduleUpsertResponse,
 )
 
 try:  # Python 3.11+
@@ -87,11 +99,13 @@ class TaskConstraintInbound(TypedDict, total=False):
 
 
 class CommandInbound(TypedDict):
-    """Inbound WS command message."""
+    """Inbound WS command message. ``ui_control`` (``{name, owner_text?}``) marks a command a host-drawn
+    control composed: the press is the owner's, its words are not, so no owner row is written for it."""
 
     type: Literal["command"]
     cmd: str
     client_surface: NotRequired[dict]
+    ui_control: NotRequired[dict]
 
 
 class PanicAcceptedOutbound(TypedDict):
@@ -119,7 +133,7 @@ class TransportMetadata(TypedDict, total=False):
     sender_label: str
 
 
-class ChatOutbound(ChatReferenceFields):
+class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     """Outbound WS chat frame."""
 
     presence_contact: NotRequired[PresenceContact]
@@ -171,6 +185,10 @@ class ChatOutbound(ChatReferenceFields):
     closed_request_id: NotRequired[str]
     materials: NotRequired[List[Dict[str, Any]]]  # validated existing task artifact references
     question_delivery: NotRequired[Dict[str, Any]]  # canonical kind/state; pending stays current
+    # A mirrored secret request: its protected form, outcome and unconfirmed-save facts (no value).
+    secret_request: NotRequired[SecretRequestMeta]
+    secret_outcome: NotRequired[SecretOutcome]
+    secret_save: NotRequired[Dict[str, Any]]
     task_incident: NotRequired[str]
     # Historical rows only: the retired cancellation-fault notice named the PHYSICAL task it could not
     # settle when that differed from the logical id. Declared so stored rows keep their shape.
@@ -237,7 +255,10 @@ class ChatOutbound(ChatReferenceFields):
     cancelable: NotRequired[bool]
     _is_direct_chat: NotRequired[bool]  # lane fact stamped on a direct turn's own frames
     narration: NotRequired[bool]  # progress VOICE: the model's own round narration (true) vs a host note (false); absent = legacy
+    reasoning: NotRequired[bool]  # true only on narration that is the model's display reasoning: details, never title/line
+    spoken: NotRequired[Dict[str, Any]]  # call_id, item_id, played_ms, status: played/generated/interrupted
     initiator: NotRequired[str]  # origin label: "consciousness" on a wake-up's frames/rows (and its roots); absent on an owner's turn
+    continue_requester: NotRequired[str]  # who asked for this Continue, read from its admission: owner|ouroboros|unknown; absent elsewhere
     # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is distinct from a
     # confirmed $0. The honest names (accounted upper bounds, not settled receipts), the only outbound spellings since
     # ABI 7.0 dropped the ``cost_usd[_with_children]`` aliases; cost_projection.py is the one author.
@@ -275,6 +296,8 @@ class ChatOutbound(ChatReferenceFields):
     # dict failure_details and current source selectors. gaps name failed records;
     # review_records_omitted is 0|"1+"|"unknown", never proof of a review by itself.
     review_projection: NotRequired[Dict[str, Any]]
+    body_adoptions: NotRequired[List[Dict[str, Any]]]  # the task's settled adoptions (TaskDetailResponse), on its summary
+    review_overrides: NotRequired[Dict[str, Any]]  # the work's review-gate field (TaskDetailResponse), on its summary
     worker_saturation_warning: NotRequired[bool]
     source: NotRequired[str]
     sender_label: NotRequired[str]
@@ -291,9 +314,8 @@ class ChatOutbound(ChatReferenceFields):
     card_row_id: NotRequired[str]
     card_row_revision: NotRequired[int]  # canonical source order, independent of delivery timestamp
     terminal_receipt: NotRequired[Literal["retained_work"]]  # a placed row typed as a terminal receipt, not progress
-    late_evidence: NotRequired[Dict[str, Any]]  # late review identity/revision + exact applied source; no transcript
-    # Event-time human presentation; raw task/project ids remain machine keys.
-    target_label: NotRequired[str]
+    late_evidence: NotRequired[Dict[str, Any]]  # applied source or merge_review identity/revision + retained report; merge_review refreshes on history reads only
+    target_label: NotRequired[str]  # event-time human presentation; raw task/project ids remain machine keys
     project_id: NotRequired[str]
     project_name: NotRequired[str]
     task_name: NotRequired[str]
@@ -301,6 +323,7 @@ class ChatOutbound(ChatReferenceFields):
     terminal_time: NotRequired[Dict[str, Any]]  # host-owned occurrence, separate from publication ts
     completion_answer: NotRequired[str]  # a Project root's model-authored final answer, mirrored into Main (DESIGN)
     completion_reason: NotRequired[str]  # one recorded nonclean-outcome fact beside the answer
+    wake_summary: NotRequired[str]  # a Project root's own closing sentence, for its Main portal
     completion_notice: NotRequired[Dict[str, Any]]  # transport view: neutral/detail/phase/salvage; Main adds cause and undescribed codes
     delivery_id: NotRequired[str]  # stable logical publication identity across transport retries
     set_at: NotRequired[str]  # a `reminder` row's provenance, live frame only (its text carries the signature): when written
@@ -311,87 +334,55 @@ class ChatOutbound(ChatReferenceFields):
     project_thread: NotRequired[bool]
 
 
-class PhotoOutbound(ChatReferenceFields):
+class _MediaOutbound(ChatReferenceFields):
+    """The fields the photo, video and document frames share; each frame adds its type, payload and own keys."""
+
+    role: Literal["user", "assistant"]
+    mime: str
+    ts: str
+    caption: NotRequired[str]
+    # Canonical durable task-artifact URL of the stored media (a document's captured file), replayed by chat history:
+    # the live frame carries the bytes inline, so replay never needs to persist them.
+    download_url: NotRequired[str]
+    # Second address for the SAME bytes on the long-shipped /api/files/download route, non-empty only when the stored
+    # file resolves inside the current file-browser root. Packaged desktop launchers gate their file bridge to a URL
+    # allowlist that predates the artifact route, so the browser uses download_url and the host bridge prefers this one.
+    download_url_compat: NotRequired[str]
+    content: NotRequired[str]
+    source: NotRequired[str]
+    sender_label: NotRequired[str]
+    sender_session_id: NotRequired[str]
+    client_message_id: NotRequired[str]
+    transport: NotRequired[TransportMetadata]
+    chat_id: NotRequired[int]
+    task_id: NotRequired[str]
+    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
+    project_thread: NotRequired[bool]
+
+
+class PhotoOutbound(_MediaOutbound):
     """Outbound WS photo frame."""
 
     type: Literal["photo"]
-    role: Literal["user", "assistant"]
     image_base64: str
-    mime: str
-    ts: str
-    caption: NotRequired[str]
-    # Durable task-artifact URL for the stored media, replayed by chat history
-    # (the live frame carries the bytes inline instead).
-    download_url: NotRequired[str]
-    # Second address for the SAME bytes on the long-shipped
-    # /api/files/download route, present only when the stored file resolves
-    # inside the current file-browser root. Packaged desktop launchers gate
-    # their file bridge to a URL allowlist that predates the artifact route,
-    # so the browser uses download_url and the host bridge prefers this one.
-    download_url_compat: NotRequired[str]
-    content: NotRequired[str]
-    source: NotRequired[str]
-    sender_label: NotRequired[str]
-    sender_session_id: NotRequired[str]
-    client_message_id: NotRequired[str]
     subagents_mode: NotRequired[Literal["swarm"]]  # Accepted owner message, never a client claim.
-    transport: NotRequired[TransportMetadata]
-    chat_id: NotRequired[int]
-    task_id: NotRequired[str]
-    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
-    project_thread: NotRequired[bool]
 
 
-class VideoOutbound(ChatReferenceFields):
+class VideoOutbound(_MediaOutbound):
     """Outbound WS video frame."""
 
     type: Literal["video"]
-    role: Literal["user", "assistant"]
     video_base64: str
-    mime: str
-    ts: str
-    caption: NotRequired[str]
-    # Same as PhotoOutbound.download_url above.
-    download_url: NotRequired[str]
-    # Same dual-address contract as PhotoOutbound.download_url_compat above.
-    download_url_compat: NotRequired[str]
-    content: NotRequired[str]
-    source: NotRequired[str]
-    sender_label: NotRequired[str]
-    sender_session_id: NotRequired[str]
-    client_message_id: NotRequired[str]
-    transport: NotRequired[TransportMetadata]
-    chat_id: NotRequired[int]
-    task_id: NotRequired[str]
-    # Same Project-thread stamp contract as PhotoOutbound.project_thread.
-    project_thread: NotRequired[bool]
 
 
-class DocumentOutbound(ChatReferenceFields):
+class DocumentOutbound(_MediaOutbound):
     """Outbound WS document/file frame."""
 
     type: Literal["document"]
-    role: Literal["user", "assistant"]
     file_base64: str
-    mime: str
     filename: str
-    ts: str
-    caption: NotRequired[str]
-    # Canonical captured-file URL; replay never needs to persist inline bytes.
-    download_url: NotRequired[str]
-    download_url_compat: NotRequired[str]
     file_ref: NotRequired[Dict[str, Any]]
-    content: NotRequired[str]
-    source: NotRequired[str]
-    sender_label: NotRequired[str]
-    sender_session_id: NotRequired[str]
-    client_message_id: NotRequired[str]
-    transport: NotRequired[TransportMetadata]
-    chat_id: NotRequired[int]
-    task_id: NotRequired[str]
     size_bytes: NotRequired[int]
-    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
-    project_thread: NotRequired[bool]
 
 
 class LinkAction(TypedDict):
@@ -423,13 +414,14 @@ class QuizOption(TypedDict):
     recommended: NotRequired[bool]
 
 
-class QuizOutbound(ChatReferenceFields):
+class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     """Outbound owner quiz card: a typed question with option buttons.
 
     Optional questions continue under ``assumption``; ``wait_for_answer`` marks
     required waiting without an implied answer. ``state`` carries lifecycle.
     Replay merges the stored ``answered_index`` and verbatim ``comment``; a
-    comment without an index is the owner's whole answer, not an option choice."""
+    comment without an index is the owner's whole answer, not an option choice.
+    A private Presence question's one frame names its work's Project in ``also_rooms``."""
 
     type: Literal["quiz"]
     role: Literal["assistant"]
@@ -457,6 +449,7 @@ class QuizOutbound(ChatReferenceFields):
     task_id: NotRequired[str]
     project_thread: NotRequired[bool]
     transport: NotRequired[TransportMetadata]
+    secret_request: NotRequired[SecretRequestMeta]  # an integration-secret request: answered only by its form
 
 
 class QuizStateOutbound(TypedDict):
@@ -484,6 +477,7 @@ class QuizStateOutbound(TypedDict):
     closed_by_task_id: NotRequired[str]
     closed_actor: NotRequired[str]
     closed_request_id: NotRequired[str]
+    secret_outcome: NotRequired[SecretOutcome]  # a secret request's typed completion, metadata only
 
 
 class TypingOutbound(TypedDict):
@@ -499,9 +493,8 @@ class TypingOutbound(TypedDict):
     activity_id: NotRequired[str]
     client_message_id: NotRequired[str]
     phase: NotRequired[str]
-    # Stamped for a registry-tracked turn ("direct_chat") or a RUNNING queue
-    # root ("managed_task"); empty for children. No in-repo client reads it
-    # (wire compatibility): only the census inserts into the header live-set.
+    # Stamped for a registry-tracked turn ("direct_chat") or a RUNNING queue root ("managed_task"); empty for children.
+    # No in-repo client reads it (wire compatibility): only the census inserts into the header live-set.
     kind: NotRequired[str]
 
 
@@ -545,6 +538,14 @@ class ProjectsChangedOutbound(TypedDict):
     chat_id: NotRequired[int]
 
 
+class UiPreferencesChangedOutbound(TypedDict):
+    """Outbound notice that ``POST /api/ui/preferences`` committed a change of the named groups
+    (``contributions``); every window reads the named state again."""
+
+    type: Literal["ui_preferences_changed"]
+    keys: List[str]
+
+
 class MessageAnnotationOutbound(TypedDict):
     """Bubble-free presentation update for one owner message; ``cause``: the host's sentence for a refused act."""
 
@@ -569,7 +570,7 @@ class MessageAnnotationOutbound(TypedDict):
     routing_token: NotRequired[str]
     cause: NotRequired[str]
     reasoning_effort: NotRequired[str]  # #1539: the explicit start a New task picked from this card requests
-    # #966: this ACK is the SELECTED carrier of the act's owner notice (never delivery proof), answering reply_to.
+    # #966: the notice's SELECTED carrier (never delivery proof): this ACK, answering reply_to, or the System row.
     routing_notice_carrier: NotRequired[Literal["routing_ack", "system"]]
     reply_to: NotRequired[Dict[str, Any]]
     ts: NotRequired[str]
@@ -590,6 +591,14 @@ class ProjectCreateRequest(TypedDict, total=False):
     with_workspace: bool
 
 
+class ProjectClosure(TypedDict):
+    """A reversible decision; absent ``ProjectEntry.closed`` means open."""
+
+    at: str
+    by: str  # owner or ouroboros:<focus task id>
+    note: str
+
+
 class ProjectEntry(TypedDict, total=False):
     """A registry project row. ``provenance`` (attached|cloned|genesis|none) and ``clone_url``
     are historical facts; operational git data is read live from ``.git``. List rows are a
@@ -602,13 +611,16 @@ class ProjectEntry(TypedDict, total=False):
     working_dir: str
     pinned: bool  # absent on legacy rows means unpinned; no routing/activity effect
     cognition: ProjectCognition
+    model_choice: ChatModelChoice  # the room's own model for new owner work; never copied from Main
     provenance: str
     clone_url: str
     trusted_at: str
     origin: str
     created_at: str
-    last_active_at: str
+    last_active_at: str  # technical activity: any row, journal, binding (the agent's list order)
+    last_message_at: str  # the order a client lists by: newest message, else created_at; absent while undated
     lifecycle: Literal["active", "deleting", "tombstoned"]
+    closed: ProjectClosure  # independent of lifecycle; room, history and routing stay available
     routing_generation: int
     routing_incarnation: str
     visible_revision: int
@@ -683,7 +695,7 @@ class EvolutionStateSnapshot(TypedDict):
     # None when the remaining budget is infinite (unbudgeted): inf is not JSON
     # compliant, so the snapshot serializes it as null.
     budget_remaining_usd: Optional[float]
-    budget_reserve_usd: float
+    budget_reserve_usd: float  # always 0.0: Evolution keeps no reserve of its own (owner, 2026-11-02)
     pending_count: int
     running_count: int
     queued_task_id: str
@@ -691,12 +703,13 @@ class EvolutionStateSnapshot(TypedDict):
     campaign: NotRequired[Dict[str, Any]]
 
 
-class ActiveDirectTurn(TypedDict):
-    """An active in-process direct chat or ephemeral decision turn.
+class ActiveDirectTurn(WorkLeadFields):
+    """An active owner turn: a conversation-lane row or an inline executor's actor.
 
-    Rows of ``StateResponse.active_direct_turns``: ``DirectActivityRegistry.snapshot()``
-    always emits the seven identity/activity fields (empty string for absent values),
-    so the mirror marks them required; ``model_waits`` comes only from its live owner.
+    Rows of ``StateResponse.active_direct_turns`` (``conversation_lane.lane_turn_rows`` and
+    ``DirectActivityRegistry.snapshot()``) always emit the seven identity/activity fields
+    (empty string for absent values), so the mirror marks them required; ``model_waits``
+    comes only from its live owner.
     """
 
     activity_id: str
@@ -708,12 +721,15 @@ class ActiveDirectTurn(TypedDict):
     started_at: float
     model_waits: NotRequired[Dict[str, Any]]
     model_activity: NotRequired[Dict[str, Any]]  # content-free observation bound to the active Main call
+    context_attempt: NotRequired[ContextAttemptFact]  # latest observation; released retracts its send, previous survives
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
+    executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
+    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker; a worker-held running root: worker
 
 
-class ActiveChatActivity(ActiveDirectTurn):  # global root census; phase and control facts keep their own authority
-    last_line: NotRequired[str]  # visible model narration, never host notes
+class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also presence); phase and control facts keep their own authority
+    last_line: NotRequired[str]  # visible model narration, never host notes or display reasoning
     last_line_at: NotRequired[str]
     tool_calls: NotRequired[int]
     detached: NotRequired[bool]  # durable detached_at, independent of carrier/phase
@@ -735,6 +751,7 @@ class ActiveChatActivity(ActiveDirectTurn):  # global root census; phase and con
     late_work: NotRequired[Dict[str, Any]]  # answered root whose late work remains: title, answered_at; display only
     can_resume: NotRequired[bool]
     cancelable: NotRequired[bool]
+    presence_pause: NotRequired[bool]  # a live Presence turn moved to a Project as text (never a live call): Pause saves it, Restart returns it
 
 class EffortRange(TypedDict):  # helper min ≤ max; primary recommended is independent
     min: str
@@ -791,14 +808,16 @@ class StateResponse(WorkStateFields):
     subagents_availability: Literal["available", "disabled", "unsaved"]
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
     effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
+    main_route: ChatModelRoute  # Main itself, written by POST /api/owner/chat-model without project_id
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
     accounting: Dict[str, Any]
-    # Multi-project sidebar feed: compact registered projects [{id, name, chat_id, working_dir, last_active_at, ...}].
+    # Multi-project sidebar feed: the pins and the 50 newest others by last_message_at (ProjectEntry rows).
     projects: list
-    # COMPLETE (uncapped) registered project chat_ids — the live WS fan-out isolation SSOT, unlike `projects`.
-    project_chat_ids: list
+    project_messages_revision: Optional[str]  # moves with any Project's last_message_at; null until history is dated
+    project_listable_count: Optional[int]  # active/deleting Projects the sidebar can list; null when unavailable
+    project_chat_ids: list  # COMPLETE (uncapped) registered chat_ids; the live WS fan-out isolation SSOT
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.
     main_visible_revision: NotRequired[Optional[int]]
     # Task->project bindings ({task_id: {project_id, chat_id, project_name}}): a bound card hides the stray
@@ -808,9 +827,8 @@ class StateResponse(WorkStateFields):
     task_bindings_revision: str
     task_bindings_unchanged: bool
     active_direct_turns: NotRequired[List[ActiveDirectTurn]]
-    # Combined activity snapshot (direct/ephemeral turns + root managed queue
-    # tasks). Additive beside active_direct_turns, which stays unchanged for
-    # compatibility; new clients hydrate from this field.
+    # Combined activity snapshot (direct, root managed and live inline Presence turns). Additive beside
+    # active_direct_turns, which stays unchanged for compatibility; new clients hydrate from this field.
     active_chat_activities: NotRequired[List[ActiveChatActivity]]
     active_chat_activities_complete: NotRequired[bool]
     current_questions: NotRequired[List[Dict[str, Any]]]  # canonical forms independent of history window
@@ -858,13 +876,6 @@ class SettingsPolicyAxis(TypedDict, total=False):
     applies: Literal["restart", "next_task"]
 
 
-class SettingsPolicyState(TypedDict):
-    access: SettingsPolicyAxis
-    supervisor: SettingsPolicyAxis
-    review: SettingsPolicyAxis
-    running_task_snapshot: bool
-
-
 class SettingsMeta(SettingsNetworkMeta, total=False):
     """Complete ``GET /api/settings`` ``_meta`` block."""
 
@@ -874,6 +885,7 @@ class SettingsMeta(SettingsNetworkMeta, total=False):
     policy_state: SettingsPolicyState
     restart_state: Dict[str, Any]
     connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
+    main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
 
 
 class SettingsSaveResponse(TypedDict, total=False):
@@ -886,9 +898,8 @@ class SettingsSaveResponse(TypedDict, total=False):
     next_task_changed: bool
     warnings: list[str]
     ignored_keys: Dict[str, str]
-    # True when the save landed while an agent task was already STARTED: that
-    # task keeps its start-time reviewers, subagents, context and effort; models,
-    # accounts and keys reach work that follows them at its next call.
+    # True when the save landed while an agent task was already STARTED: that task keeps its start-time reviewers,
+    # subagents, context and effort; models, accounts and keys reach work that follows them at its next call.
     agent_task_running: bool
     connection_references: list[Dict[str, str]]  # rows naming a connection that cannot serve them (they refuse)
 
@@ -1053,6 +1064,8 @@ class ProviderTestRequest(TypedDict):
     provider_id: str
     overrides: NotRequired[Dict[str, str]]  # flat keys; with ``connection``, that row's field names
     connection: NotRequired[str]  # a named connection of ``provider_id``; absent = the built-in one
+    # The built-in compatible pair under test; absent = the historical resolution (its Clear blanks both addresses).
+    api_key_setting: NotRequired[Literal["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]]
 
 
 class ProviderTestResponse(TypedDict):
@@ -1078,9 +1091,8 @@ class _TaskCreateRequestRequired(TypedDict):
 class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     task_id: str
     type: str
-    # v6.115.0: the run's owner-facing name. Supplied, it fills both name slots
-    # like a promoted chat turn; omitted, admission derives a display-only name
-    # from the request's first line. `metadata.title` is refused (400).
+    # v6.115.0: the run's owner-facing name. Supplied, it fills both name slots like a promoted chat turn; omitted,
+    # admission derives a display-only name from the request's first line. `metadata.title` is refused (400).
     title: str
     chat_id: int
     depth: int
@@ -1097,6 +1109,8 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     # v6.60.0: "" | "final_answer_line" — adapter-declared machine-extractable answer
     # protocol; flows into task_contract.answer_protocol and inherits to subagents.
     answer_protocol: str
+    # true: task review Required reviews the whole final answer even without files (task_contract.review_answer).
+    review_answer: bool
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     disabled_tools: list[str]
@@ -1132,25 +1146,6 @@ class TaskListResponse(TypedDict, total=False):
     error: str
 
 
-class TaskCostBreakdown(TypedDict):
-    """Root-only task-detail ledger projection, computed on read, never persisted.
-    All keys appear together; ``own + children + unattributed == subtree``. Omit
-    the object for non-roots, unavailable accounting or no attributable subtree rows; never invent $0."""
-
-    own_usd: float
-    children_usd: float
-    unattributed_usd: float
-    delegated_disclosed_usd: float
-    # C2: own + children + unattributed is an accounted UPPER BOUND, not a receipt.
-    accounted_upper_bound_usd: float
-    subscription_sessions: int
-    unknown_unmetered: int
-    non_final_rows: int
-    cost_final: bool
-    cost_custody: Optional[CostCustody]
-    authority: Literal["physical_attempt_ledger"]
-
-
 class HistoryRetentionProjection(TypedDict):
     """Storage placement facts, independent of task outcome or review authority."""
 
@@ -1168,6 +1163,7 @@ class QuestionRoom(TypedDict, total=False):
     state: Required[Literal["known", "unknown"]]
     chat_id: int
     project_id: str
+    also_project_ids: List[str]  # a private Main question: the Project that shows the same row
 
 
 class TaskDetailResponse(TypedDict, total=False):
@@ -1182,8 +1178,7 @@ class TaskDetailResponse(TypedDict, total=False):
     history_retention: HistoryRetentionProjection
     model_waits: Dict[str, Any]
     question_rooms: Dict[str, QuestionRoom]
-    # Open cancel intent/teardown: "pending" drives "Cancelling…", not lifecycle status.
-    # Absent for settled or unrequested cancellation; running/scheduled status stays truthful.
+    # "pending" means "Cancelling…"; running/scheduled stays truthful. Absent when settled or unrequested.
     cancel_state: str
     # Pending intent's recorded reason (owner text or subtree cause); absent if none (GR2-11).
     cancel_reason: str
@@ -1195,6 +1190,10 @@ class TaskDetailResponse(TypedDict, total=False):
     owner_hurry_history: list[OwnerHurryProjection]
     # While the queue snapshot lists a non-final row: its hold {reason, detail, label} or {}.
     project_admission_hold: Dict[str, Any]
+    # Every adoption this task authorized, as boot settled them: {adoption_id, outcome, commit_sha, previous_sha, branch,
+    # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
+    body_adoptions: List[Dict[str, Any]]
+    review_overrides: Dict[str, Any]  # a root's decisions Blocking would have stopped: {count, latest} (review_overrides.py)
     error: str
 
 
@@ -1237,17 +1236,6 @@ class ClaudexorCredentialProfileDeleteResponse(TypedDict):
     credentialCleanup: Literal["config_dir_removed", "secret_deleted", "none"]
     cleanupWarning: NotRequired[str]
     vendorCredentialDisposition: NotRequired[ClaudexorVendorCredentialDisposition]
-
-
-class ClaudexorLoginJobProblem(TypedDict, total=False):
-    """Typed job errors preserve engine prose/status/code and bounded actions
-    (16 strings, 512 chars each). Covers absent jobs, input/reconcile conflicts,
-    setup 400/409 and marked retryable terminal-probe 503. Other daemon 5xx and
-    unmarked transport/discovery failures use the generic proxy 503."""
-
-    error: Required[str]
-    code: str
-    required_actions: List[str]
 
 
 class TaskEventCursor(TypedDict):
@@ -1490,18 +1478,15 @@ class OnboardingPresetFailureResponse(TypedDict):
 
 # Human/test-visible contract index; routers own executable Route objects.
 from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
-from ouroboros.gateway.client_contracts import FileBrowserListResponse, ServedUiState  # noqa: E402,F401
+from ouroboros.gateway.client_contracts import (  # noqa: E402,F401
+    ChatModelChoice, ChatModelRoute, FileBrowserListResponse, ServedUiState, SettingsPolicyState,
+)
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (
-    "chat",
-    "command",
+    "conversation_finished", "chat", "command",
     "panic_accepted",  # immediate acceptance only, not proof of process exit
-    "photo",
-    "video",
-    "document",
-    "links",
-    "quiz",
-    "quiz_state",
+    "photo", "video", "document", "links",
+    "quiz", "quiz_state",
     "card", "card_state",  # gateway/card_contracts.py frames
     "typing",
     "log",
@@ -1509,6 +1494,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "extension_lifecycle",
     "message_annotation",
     "projects_changed",
+    "ui_preferences_changed",
     "task_named",
     "update_status_ready",
     "update_progress_changed",
@@ -1526,19 +1512,15 @@ __all__ = [
     "QuizOption", "QuizOutbound", "QuizStateOutbound",
     "CardOutbound", "CardStateOutbound",
     "DecisionRequest", "DecisionResponse",
-    "TypingOutbound",
-    "LogOutbound",
-    "HeartbeatOutbound",
-    "ExtensionLifecycleOutbound",
-    "ProjectsChangedOutbound",
-    "MessageAnnotationOutbound",
-    "UpdateMergePlan",
-    "UpdatePreflightRequest", "UpdatePreflightResponse",
-    "UpdateApplyRequest",
+    "SecretConsumer", "SecretDecisionRequest", "SecretDecisionResponse", "SecretEvent", "SecretKeyState",
+    "SecretOutcome", "SecretRequestField", "SecretRequestMeta",
+    "TypingOutbound", "LogOutbound", "HeartbeatOutbound", "ExtensionLifecycleOutbound",
+    "ProjectsChangedOutbound", "UiPreferencesChangedOutbound", "MessageAnnotationOutbound",
+    "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
     "UpdateApplySuccessResponse", "UpdateApplyErrorResponse",
-    "UpdateStatusReadyOutbound",
-    "UpdateProgressChangedOutbound",
-    "ProjectCreateRequest", "ProjectEntry", "ProjectDeleteResponse", "ProjectCognition",
+    "UpdateDescriptionRequest", "UpdateDescriptionResponse", "UpdateDescriptionErrorResponse",
+    "UpdateStatusReadyOutbound", "UpdateProgressChangedOutbound",
+    "ProjectCreateRequest", "ProjectEntry", "ProjectClosure", "ProjectDeleteResponse", "ProjectCognition",
     "FsDirsEntry", "FsDirsResponse",
     "TaskNamedOutbound",
     "ErrorResponse", "StatusResponse", "HealthResponse", "StateResponse",
@@ -1599,7 +1581,10 @@ __all__ = [
     "EffortRange", "OwnerEffortRangeResponse", "OwnerSubagentsModeResponse", "LogTailResponse",
     "StorageCount", "StorageCounting", "StorageError", "StoragePart", "StoragePlace", "StorageResponse",
     "StorageRest", "StorageVolume", "StorageRemover",
-    "StorageFree", "StorageFreeGroup", "StorageFreeItem", "StorageFreeKept", "StorageFreeRequest", "StorageFreeRun",
+    "StorageActiveProject", "StorageDeletedFolder", "StorageDeletedProject", "StorageDeletedProjects", "StorageFolderPart",
+    "StorageFree", "StorageFreeEntry", "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept",
+    "StorageFreePool", "StorageFreeRequest", "StorageFreeRun", "OwnerKeepRequest", "OwnerKeepResponse",
+    "KeptService", "KeptServicesResponse", "KeptServiceStopRequest", "KeptServiceStopResponse",
     "HTTP_ENDPOINTS",
     "WS_MESSAGE_TYPES",
 ]

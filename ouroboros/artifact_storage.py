@@ -2,7 +2,10 @@
 can give one (macOS APFS ``clonefile(2)``, Linux ``FICLONE`` on Btrfs and reflink-enabled XFS); any
 other platform, filesystem or volume boundary answers ``False`` and the caller streams a copy as before.
 Never a hard link: an in-place write to the source would change the stored result, while a clone
-diverges at the first write to either side. Transparent compression keeps the one floor its callers share
+diverges at the first write to either side. ``clone_or_copy2`` is ``shutil.copy2`` over it, for a folder
+that is read rather than kept: APFS leaves a clone's may-share mark on the source too, even after its peer
+is gone. Where compression is supported, read-only lineage staging streams in-scope records until compressed;
+other copy callers keep their own policy. Transparent compression keeps the one floor its callers share
 (``compression_outcome``: the patch writers and the ``record_compression`` maintenance job). The platform
 calls are function-local under ``sys.platform`` guards (docs/development/10-platform-abstraction-rule.md
 names this module's exception)."""
@@ -16,7 +19,7 @@ import stat
 import subprocess
 import sys
 import zlib
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from ouroboros.temp_sweep import atomic_temp_path as temporary_sibling, is_atomic_temp
 
@@ -27,18 +30,22 @@ STAT_SKIPS = ("not_regular", "dataless", "small", "linked", "compressed_already"
 _SIBLING_TAG = "decmpfs"  # the compression sibling's own tag inside the atomic signature
 _SF_DATALESS = 0x40000000  # <sys/stat.h>: an evicted (File Provider) file; reading it would download it
 _UTILITY_DISK = ("/usr/sbin/taskpolicy", "-d", "utility")  # a program run at the utility disk tier (macOS)
+_REFUSES_TIMES = stat.UF_IMMUTABLE | stat.UF_APPEND | stat.SF_IMMUTABLE | stat.SF_APPEND
 
 
 def clone_file(source: pathlib.Path, destination: pathlib.Path) -> bool:
     """Make DESTINATION (which must not exist) a block-sharing clone of SOURCE; ``False`` when this
     platform or filesystem cannot, with nothing left at DESTINATION, so the caller copies instead.
     Only a regular file is cloned: a directory would be cloned whole and a FIFO's open would block,
-    so anything else is left to the streamed copy's own typed refusal. The clone's times are its
+    so anything else is left to the streamed copy's own typed refusal. Nor is one whose flags refuse
+    new times (immutable, append-only): ``clonefile`` carries them, and such a clone also refuses its
+    mode, its rename and its own removal. The clone's times are its
     own: ``clonefile`` copies the source's, and a temporary that looks as old as the result it copies
     would be reaped as a hard kill's orphan by the temp sweep's age guard while the copy is in flight."""
     source, destination = pathlib.Path(source), pathlib.Path(destination)
     try:
-        if not stat.S_ISREG(os.stat(source).st_mode):
+        info = os.stat(source)
+        if not stat.S_ISREG(info.st_mode) or getattr(info, "st_flags", 0) & _REFUSES_TIMES:
             return False
         if sys.platform == "darwin":
             cloned = _clonefile(source, destination)
@@ -52,6 +59,18 @@ def clone_file(source: pathlib.Path, destination: pathlib.Path) -> bool:
         with contextlib.suppress(OSError):  # the clone stands either way; the caller sets the published times
             os.utime(destination)
     return cloned
+
+
+def clone_or_copy2(source: Any, destination: Any) -> Any:
+    """``shutil.copy2`` (bytes, mode, times; a ``copytree`` copy function) as a clone where ``clone_file`` can
+    make one, ``copy2`` itself otherwise, its refusals included. Its ACL is the destination's inherited one,
+    as with ``copy2`` (the clone passes no ``CLONE_ACL``). Unlike macOS ``copy2`` it keeps the source's
+    compression and extended attributes, which no reader here looks at. A source whose flags refuse new
+    times (immutable, append-only) gets no clone (``clone_file``), so ``copy2`` answers for it."""
+    if clone_file(source, destination):
+        shutil.copystat(source, destination)
+        return destination
+    return shutil.copy2(source, destination)
 
 
 def _clonefile(source: pathlib.Path, destination: pathlib.Path) -> bool:
@@ -129,9 +148,10 @@ def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool
     cannot shrink by one allocation block is ``incompressible``; free space below the file's size is
     ``low_space``. macOS hashes, writes a ``ditto --hfsCompression`` sibling (``compression_sibling``;
     BACKGROUND, the ``record_compression`` job's, runs it at the utility disk tier through ``taskpolicy``),
-    verifies it, asks OWNED (else ``not_owned``), then re-stats the original right before the replace
-    (device, inode, size, mtime: else ``changed``); NTFS asks OWNED, compresses in place through its
-    file control and verifies the bytes after. Anything else is ``failed``."""
+    verifies and fsyncs it, asks OWNED (else ``not_owned``), then re-stats the original right before the
+    replace (device, inode, size, mtime: else ``changed``) and syncs the folder (``store.fsync_directory``); NTFS
+    asks OWNED, compresses in place through its file control and verifies the bytes after. Anything else is
+    ``failed``, the original untouched."""
     path = pathlib.Path(path)
     if not compression_supported():
         return "unsupported"
@@ -147,6 +167,12 @@ def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool
         return "failed"
 
 
+def is_compressed(info: os.stat_result) -> bool:
+    """The file's current transparent-compression flag, from one already obtained stat result."""
+    return bool(getattr(info, "st_flags", 0) & stat.UF_COMPRESSED
+                or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_COMPRESSED)
+
+
 def _floor(path: pathlib.Path, info: os.stat_result) -> str:
     """Why PATH stays as it is before any rewrite, or ``""``."""
     if not stat.S_ISREG(info.st_mode):
@@ -158,7 +184,7 @@ def _floor(path: pathlib.Path, info: os.stat_result) -> str:
     if info.st_nlink != 1:
         return "linked"
     attributes = getattr(info, "st_file_attributes", 0)
-    if getattr(info, "st_flags", 0) & stat.UF_COMPRESSED or attributes & stat.FILE_ATTRIBUTE_COMPRESSED:
+    if is_compressed(info):
         return "compressed_already"
     if sys.platform == "darwin":
         shared = _may_share(path)
@@ -205,6 +231,7 @@ def _compress_macos(path: pathlib.Path, before: os.stat_result, owned: Optional[
                     background: bool = False) -> str:
     from ouroboros.artifacts import stream_artifact_file
     from ouroboros.config import ARTIFACT_COMPRESSION_TIMEOUT_SEC
+    from ouroboros.store import fsync_directory
 
     expected = stream_artifact_file(path)
     temporary = compression_sibling(path)  # a hard kill's leftover is reaped (own tag), never a deliverable
@@ -217,6 +244,13 @@ def _compress_macos(path: pathlib.Path, before: os.stat_result, owned: Optional[
         stream_artifact_file(temporary, expected=expected)
         if not getattr(os.lstat(temporary), "st_flags", 0) & stat.UF_COMPRESSED:
             return "incompressible"
+        # A record may already be someone's synced copy (an archive whose original was let go): its verified
+        # replacement reaches the disk before it takes the name, as the record's own writer synced it.
+        reader = os.open(temporary, os.O_RDONLY)
+        try:
+            os.fsync(reader)
+        finally:
+            os.close(reader)
         if owned is not None and not owned():  # it may wait on the store: before the last look, never after
             return "not_owned"
         now = os.lstat(path)
@@ -224,6 +258,7 @@ def _compress_macos(path: pathlib.Path, before: os.stat_result, owned: Optional[
                 before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
             return "changed"  # a writer touched it since: its bytes win
         os.replace(temporary, path)
+        fsync_directory(path.parent)  # and its new entry, where the platform syncs a directory
         return "compressed"
     finally:
         try:

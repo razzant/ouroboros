@@ -31,7 +31,15 @@ def _handle_deep_self_review_request(evt: Dict[str, Any], ctx: Any) -> None:
 def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
     import subprocess as sp
 
+    from ouroboros.deployment_policy import body_replacement_refusal
     from supervisor.git_ops import promote_branch_exact
+
+    if refusal := body_replacement_refusal():  # the recovery branch a failed restart serves is the administrator's
+        st = ctx.load_state()
+        if st.get("owner_chat_id"):
+            ctx.send_with_budget(int(st["owner_chat_id"]), f"❌ Promotion to stable refused: {refusal}",
+                                 role="system", system_type="promotion_notice")
+        return
     from supervisor.update_merge import (
         acquire_update_lock,
         active_update_tx,
@@ -119,6 +127,28 @@ def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
             int(st["owner_chat_id"]),
             f"✅ Promoted: {ctx.BRANCH_DEV} → {ctx.BRANCH_STABLE} ({new_sha[:8]}){remote_status}",
             role="system", system_type="promotion_notice")
+
+
+def _handle_free_storage(evt: Dict[str, Any], ctx: Any) -> None:
+    """The mind's Storage -> Free (``free_storage``, owner Q3 = A): the same preview and run the owner's
+    press makes, through the server's one Free owner with the supervisor's probes; its receipt is the
+    ``storage_free`` job row the tool reads, and the outcome is told to the owner in Main as a system row."""
+    from ouroboros import storage_free
+    from ouroboros.config import REPO_DIR
+
+    task_id = str(evt.get("task_id") or "").strip()
+    request_id = str(evt.get("request_id") or "").strip()
+    if not request_id:
+        return
+    actor = f"mind:{task_id}" if task_id else "mind"
+
+    def notify(text: str) -> None:
+        st = ctx.load_state()
+        if st.get("owner_chat_id"):
+            ctx.send_with_budget(int(st["owner_chat_id"]), text, role="system", system_type="storage_free_notice")
+
+    storage_free.free.request(ctx.DRIVE_ROOT, REPO_DIR, actor=actor, request_id=request_id,
+                              dry_run=bool(evt.get("dry_run")), notify=notify)
 
 
 def _handle_cancel_task(evt: Dict[str, Any], ctx: Any) -> None:
@@ -391,12 +421,14 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
-    """Toggle background consciousness from LLM tool call."""
+    """Toggle background consciousness from the mind's tool: an agent-provenance switch, so a start never lifts
+    the owner's, Panic's or an unknown stop (the clock decides; owner 11.11, 5A), queued or not."""
+    from ouroboros.consciousness import AGENT_STOP
+
     action = str(evt.get("action") or "status")
     if action in ("start", "on", "stop", "off"):
         on = action in ("start", "on")
-        result = ctx.consciousness.start() if on else ctx.consciousness.stop()
-        result = f"{result}{persist_consciousness_choice(on)}"
+        result = ctx.consciousness.start(source=AGENT_STOP) if on else ctx.consciousness.stop(source=AGENT_STOP)
     else:
         # Status is answered to its caller by the tool itself; reading it is not
         # an event the owner is told about (#1324). Only start/stop publish.
@@ -404,19 +436,6 @@ def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     if st.get("owner_chat_id"):
         ctx.send_with_budget(int(st["owner_chat_id"]), f"🧠 {result}", role="system", system_type="consciousness_notice")
-
-
-def persist_consciousness_choice(enabled: bool) -> str:
-    """Persist a background-consciousness decision as a KNOWN control; "" or a
-    disclosure that it holds only in this process (#1307)."""
-    from supervisor.state import StateUnavailable, update_state
-
-    try:
-        update_state(lambda st: st.__setitem__("bg_consciousness_enabled", bool(enabled)),
-                     confirm=("bg_consciousness_enabled",))
-    except StateUnavailable as exc:
-        return f" (not persisted: runtime state unavailable, {exc.reason})"
-    return ""
 
 
 def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:

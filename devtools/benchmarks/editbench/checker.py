@@ -108,6 +108,46 @@ def grade_generic(
     return result
 
 
+def oracle_problems(
+    workspace_dir: pathlib.Path,
+    expected_dir: pathlib.Path,
+    files: list[str],
+    check_argv: list[str] | None = None,
+    check_pythonpath: bool = False,
+) -> list[str]:
+    """Why this workspace/expected pair cannot grade a run; [] when it can.
+
+    The expected tree must hold every graded file and pass its own oracle, and
+    the untouched workspace must fail it: a task its seed already passes measures
+    nothing. Grades throwaway COPIES, so a check that writes bytecode or scratch
+    never alters the fixture it validates.
+    """
+    import shutil
+    import tempfile
+
+    workspace_dir, expected_dir = pathlib.Path(workspace_dir), pathlib.Path(expected_dir)
+    problems = [f"no {side} directory {root}" for side, root in
+                (("workspace", workspace_dir), ("expected", expected_dir)) if not root.is_dir()]
+    problems += [f"expected tree lacks graded file {name}" for name in files
+                 if expected_dir.is_dir() and not (expected_dir / name).is_file()]
+    if problems:
+        return problems
+    with tempfile.TemporaryDirectory(prefix="editbench-oracle-") as tmp:
+        copies = {side: pathlib.Path(shutil.copytree(src, pathlib.Path(tmp) / side))
+                  for side, src in (("workspace", workspace_dir), ("expected", expected_dir))}
+        own = grade_generic(copies["expected"], expected_dir, files, check_argv, check_pythonpath)
+        if not own["pass"]:
+            behavior = own["behavior"]
+            problems.append(
+                "expected tree fails its own oracle: "
+                f"{own['files_matched']}/{own['files_total']} files, check exit "
+                f"{behavior.get('exit_code')} {behavior.get('stderr') or behavior.get('error') or ''}".strip()
+            )
+        if grade_generic(copies["workspace"], expected_dir, files, check_argv, check_pythonpath)["pass"]:
+            problems.append("the untouched workspace already passes the oracle")
+    return problems
+
+
 def grade(candidate_dir: pathlib.Path) -> dict:
     result: dict = {"candidate": str(candidate_dir), "files": {}, "extra_files": []}
     ok_files = 0

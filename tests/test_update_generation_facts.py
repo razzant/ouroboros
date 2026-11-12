@@ -3,10 +3,13 @@ import asyncio
 import builtins
 import concurrent.futures
 import io
+import itertools
 import json
 import os
 import queue
+import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -89,6 +92,10 @@ def test_direct_dispatch_does_no_io_until_supervisor_handles_its_frame(isolated_
 
 
 def test_update_records_before_and_after_and_events_update_only_its_generation(isolated_progress, monkeypatch):  # noqa: F811
+    # Each sample's monotonic read advances by one second, so the CPU interval is never the zero
+    # that two fast reads of a coarse clock (Windows) give; the CPU time itself stays real.
+    ticks = itertools.count(1.0)
+    monkeypatch.setattr(facts, "time", SimpleNamespace(monotonic=lambda: next(ticks), process_time=time.process_time))
     facts.observe_duty_overrun("reconcile")
     facts.observe_direct_dispatch(task_id="before", accepted_at=100, dispatched_at=102, attempt_id="attempt-before")
     _restart_requested_attempt()
@@ -154,14 +161,16 @@ def test_record_reaches_panel_api_and_real_context_builder_without_chat(isolated
                           drive_path=lambda path: tmp_path / path)
     before = state_file.read_bytes()
     text = context.build_runtime_section(env, {"id": "reader", "type": "task"})
-    runtime = json.loads(text.split("## Runtime context\n\n", 1)[1])
-    # The mind reads the samples once, as the body fact's last update; the Runtime copy of the
-    # update projection no longer repeats them (the panel keeps its own reader above).
-    assert "after_update" not in runtime["official_update"]
-    assert runtime["vitals"]["last_update"].startswith("applied " + "b" * 12 + ": first request from handler entry before ")
-    assert runtime["vitals"]["last_update"].endswith("; record state/state.json managed_update_attempt")
-    assert " → after 3.0 s; rss 512 → 512 MiB" in runtime["vitals"]["last_update"]
-    assert "cpu" not in runtime["vitals"]["last_update"]  # a share over a sub-second interval is noise, not a fact
+    for rendered in (text, text.operative_view):
+        assert isinstance(rendered, str)
+        runtime, _ = json.JSONDecoder().raw_decode(rendered.split("\n\n", 1)[1])
+        # The mind reads the samples once, as the body fact's last update; the Runtime copy of the
+        # update projection no longer repeats them (the panel keeps its own reader above).
+        assert "after_update" not in runtime["official_update"]
+        assert runtime["vitals"]["last_update"].startswith("applied " + "b" * 12 + ": first request from handler entry before ")
+        assert runtime["vitals"]["last_update"].endswith("; record state/state.json managed_update_attempt")
+        assert " → after 3.0 s; rss 512 → 512 MiB" in runtime["vitals"]["last_update"]
+        assert "cpu" not in runtime["vitals"]["last_update"]  # a share over a sub-second interval is noise, not a fact
     assert state_file.read_bytes() == before  # passive readers never resample/write
 
 
@@ -174,3 +183,40 @@ def test_unknown_rss_and_unobserved_dispatch_are_not_zero(monkeypatch):
     assert row["cpu_percent"] is None
     facts.observe_direct_dispatch(task_id="bad-clock", accepted_at=2, dispatched_at=1)
     assert facts.sample()["direct_message_first_dispatch"] is None
+
+
+# --- the memory a sample names: now where the platform says, the lifetime peak named as peak -----------------
+
+_MEASURED = facts._rss  # the real reader; the autouse fixture stands in for it in every other test
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="the POSIX platforms with an in-process measure")
+def test_memory_is_measured_now_and_an_unmapped_block_leaves_it(monkeypatch):
+    import mmap
+
+    monkeypatch.setitem(sys.modules, "psutil", None)  # the POSIX builds ship none: its import fails
+    block = mmap.mmap(-1, 128 << 20)  # a mapping of its own: unmapped on close, never kept in an allocator's cache
+    for offset in range(0, len(block), mmap.PAGESIZE):
+        block[offset] = 1  # written, so charged to the process
+    held, measure = _MEASURED()
+    block.close()
+    freed, again = _MEASURED()
+    assert measure == again == ("footprint" if sys.platform == "darwin" else "current")
+    assert held - freed >= 64 << 20  # a lifetime high-water mark never falls; this measure does
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX: Windows ships psutil")
+def test_psutil_or_the_platform_measures_now_and_otherwise_the_peak_is_named_peak(monkeypatch, tmp_path):
+    process = SimpleNamespace(memory_info=lambda: SimpleNamespace(rss=7 << 20))
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(Process=lambda: process))
+    assert _MEASURED() == (7 << 20, "current")
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    statm = tmp_path / "statm"
+    statm.write_text("9000 250 100 1 0 300 0\n", encoding="ascii")
+    monkeypatch.setattr(facts, "_STATM", str(statm))
+    monkeypatch.setattr(facts, "sys", SimpleNamespace(platform="linux"))
+    assert _MEASURED() == (250 * os.sysconf("SC_PAGE_SIZE"), "current")
+    statm.write_text("", encoding="ascii")  # a size that cannot be read: the high-water mark, named as such
+    assert _MEASURED()[1] == "peak"
+    monkeypatch.setattr(facts, "sys", SimpleNamespace(platform="sunos5"))
+    assert _MEASURED()[1] == "peak"

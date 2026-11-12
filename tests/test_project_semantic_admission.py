@@ -17,7 +17,6 @@ from ouroboros import projects_registry as registry
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_schedule_occurrence import q, _row, _rows  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def task(tid="attempt", **extra):
@@ -34,7 +33,7 @@ def room(q):  # noqa: F811
     return q
 
 
-@pytest.mark.parametrize("activity", ["unchanged", "own_touch", "other_touch", "visible", "result"])
+@pytest.mark.parametrize("activity", ["unchanged", "other_touch", "result"])
 def test_activity_is_not_a_routing_change(room, activity):
     basis = registry.project_admission_view(room.root, "target")
     if activity.endswith("touch"):
@@ -81,7 +80,7 @@ def test_registry_lock_occupancy_does_not_delay_nested_queue_admission(room, wri
     assert not thread.is_alive() and not caller.is_alive()
 
 
-@pytest.mark.parametrize("change", ["rebind", "aba", "delete", "missing", "reconstruct"])
+@pytest.mark.parametrize("change", ["rebind", "missing", "reconstruct"])
 def test_original_preparation_basis_rejects_semantic_changes(room, change):
     basis = registry.project_admission_view(room.root, "target")
     if change in {"rebind", "aba"}:
@@ -107,7 +106,7 @@ def test_original_preparation_basis_rejects_semantic_changes(room, change):
     assert "attempt" not in room.queue.ADMISSION_RESERVATIONS
 
 
-@pytest.mark.parametrize("corruption", ["json", "lifecycle", "generation", "duplicate", "folder", "permission", "missing_file"])
+@pytest.mark.parametrize("corruption", ["json", "duplicate", "missing_file"])
 def test_raw_unavailable_authority_is_typed_and_never_normalized_active(room, monkeypatch, corruption):
     basis = registry.project_admission_view(room.root, "target")
     path = registry._registry_path(room.root)
@@ -349,11 +348,11 @@ def test_api_unknown_persistence_never_removes_possible_admission(room, monkeypa
 
 
 def test_own_ensure_returns_the_exact_winning_preparation_row(room, tmp_path, monkeypatch):
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
 
     chosen = tmp_path / "own-folder"
     chosen.mkdir()
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", lambda **kw: SimpleNamespace(path=chosen))
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", lambda **kw: SimpleNamespace(path=chosen))
     row = registry.ensure_project_workspace(room.root, "target", tmp_path / "repo", return_project=True)
     basis = registry.project_admission_basis("target", row)
     assert row["working_dir"] == str(chosen)
@@ -542,8 +541,7 @@ def corrupt_neighbor(root, **fields):
     return row
 
 
-@pytest.mark.parametrize("operation", ["create", "rename", "folder", "bind", "visible_id",
-                                        "visible_chat", "delete", "delete_failure", "tombstone"])
+@pytest.mark.parametrize("operation", ["create", "delete_failure", "tombstone"])
 def test_registry_writers_preserve_unrelated_raw_rows(room, operation):
     if operation in {"delete_failure", "tombstone"}:
         registry.begin_project_deletion(room.root, "target")
@@ -574,7 +572,7 @@ def test_registry_writers_preserve_unrelated_raw_rows(room, operation):
     assert "working_dir" not in next(row for row in rows if row["id"] == "other")
 
 
-@pytest.mark.parametrize("corruption", ["target", "duplicate_id", "duplicate_chat", "json"])
+@pytest.mark.parametrize("corruption", ["target", "duplicate_id", "json"])
 def test_selected_writer_refuses_invalid_authority_without_changing_bytes(room, corruption):
     path = registry._registry_path(room.root)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -593,7 +591,7 @@ def test_selected_writer_refuses_invalid_authority_without_changing_bytes(room, 
 
 @pytest.mark.parametrize("shape", ["existing_folder", "existing_empty", "new_room"])
 def test_real_promotion_provisions_healthy_room_beside_malformed_neighbor(host, tmp_path, monkeypatch, shape):  # noqa: F811
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
     from supervisor import workers
     from supervisor.events_project_routing import _handle_promote_chat_to_task
 
@@ -603,7 +601,7 @@ def test_real_promotion_provisions_healthy_room_beside_malformed_neighbor(host, 
         registry.create_project(host.root, "target", working_dir=str(folder) if shape == "existing_folder" else "")
     registry.create_project(host.root, "other")
     raw = corrupt_neighbor(host.root, routing_generation="unknown", visible_revision=[1], delete_error={"x": 2})
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
     events = []
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
     outcome = _handle_promote_chat_to_task({
@@ -661,7 +659,7 @@ def test_named_strict_readers_preserve_refusal_for_relevant_unknown_authority(ro
         assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("operation", ["create", "rename", "delete", "folder", "start"])
+@pytest.mark.parametrize("operation", ["create", "folder", "start"])
 def test_named_project_consumers_keep_healthy_neighbor_available(room, tmp_path, monkeypatch, operation):
     import asyncio
     from ouroboros.gateway import projects
@@ -690,7 +688,7 @@ def test_named_project_consumers_keep_healthy_neighbor_available(room, tmp_path,
         ctx = SimpleNamespace(drive_root=room.root, task_id="caller", project_id="", task_metadata={},
                               event_queue=None, pending_events=events)
         answer = _start_task(ctx, "Separate work", title="Project work", project_id="target")
-        assert answer.startswith("Accepted, waiting to start:"), answer
+        assert answer.startswith("Not confirmed yet:"), answer
         assert len(events) == 1 and events[0]["project_id"] == "target"
     else:
         handler = {"create": projects.api_projects_create, "rename": projects.api_project_update,

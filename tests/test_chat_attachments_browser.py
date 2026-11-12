@@ -30,7 +30,7 @@ import pytest
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
-pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
+pytestmark = [pytest.mark.ui_browser]
 
 CAPTION = "Два кадра с объекта и файлы — сравни, где расхождения?"
 LONG_NAME = "очень-длинное-имя-файла-с-отчётом-за-третий-квартал-" + "x" * 60 + ".txt"

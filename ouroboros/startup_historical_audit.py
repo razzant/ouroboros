@@ -25,7 +25,8 @@ def spawn_maintenance_job(data_root, repo_dir, purpose, *, args=(), **popen):
     group and containment env. ARGS follow the child's standard arguments; POPEN overrides the
     stream defaults (a stdin pipe for a child that reads its input)."""
     from ouroboros.config import (SETTINGS_PATH, get_deliverables_root, get_subagent_projects_root,
-                                  get_subagent_worktree_root)
+                                  get_subagent_worktree_root, resolve_app_root)
+    from ouroboros.launch_roots import BASIS_ENV, WorkRootUnavailable
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
     from ouroboros.process_custody import current_custody_session_id, lifeline_parent_env, spawn_supervised
 
@@ -36,11 +37,20 @@ def spawn_maintenance_job(data_root, repo_dir, purpose, *, args=(), **popen):
     env.update({key: value for key, value in os.environ.items() if key.startswith(CONTAINMENT_ENV_PREFIX)})
     # The three work roots as THIS process resolved them (setting, environment or default): a child
     # that counts or retires them must see the configured ones (Docker keeps them outside HOME).
+    # An undecided one stays unset, so the child also gets this host's APP_ROOT and basis: left to
+    # its own default APP_ROOT it would pick the historical folder the host refused (#1239).
     env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(repo_dir), OUROBOROS_DATA_DIR=str(data_root),
                OUROBOROS_REPO_DIR=str(repo_dir), OUROBOROS_SETTINGS_PATH=str(SETTINGS_PATH),
-               OUROBOROS_SUBAGENT_WORKTREE_ROOT=get_subagent_worktree_root(),
-               OUROBOROS_SUBAGENT_PROJECTS_ROOT=get_subagent_projects_root(),
-               OUROBOROS_DELIVERABLES_ROOT=get_deliverables_root(), **lifeline_parent_env())
+               OUROBOROS_APP_ROOT=str(resolve_app_root()), **lifeline_parent_env())
+    for key, root in (("OUROBOROS_SUBAGENT_WORKTREE_ROOT", get_subagent_worktree_root),
+                      ("OUROBOROS_SUBAGENT_PROJECTS_ROOT", get_subagent_projects_root),
+                      ("OUROBOROS_DELIVERABLES_ROOT", get_deliverables_root)):
+        try:
+            env[key] = root()
+        except WorkRootUnavailable:  # undecided: the child meets the same refusal, never a guess
+            pass
+    if os.environ.get(BASIS_ENV):
+        env[BASIS_ENV] = os.environ[BASIS_ENV]
     # Never share the server group: custody-publication failure kills this group.
     return spawn_supervised(
         [sys.executable, "-m", "ouroboros." + purpose, "--data-root", str(data_root),

@@ -16,7 +16,7 @@ from tests import test_subscription_setup_browser as setup_browser
 from tests.test_design_system_gate_browser import rest, save_evidence, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # Every frame of a place picked in the drawer: Main's own opacity, the cover over its words, and the other room's.
 BEAT = """([other, ms]) => { window.__beat = new Promise((resolve) => {

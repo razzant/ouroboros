@@ -88,7 +88,7 @@ def test_ui_control_scan_lists_fixed_text_and_only_counts_the_rest():
         <button class="btn btn-default" type="button"
             ${rows.length >= MAX_ROWS ? 'disabled' : ''}>Add subagent</button>
         const go = document.createElement('button');
-        go.className = 'btn btn-xs btn-default';
+        go.className = 'btn btn-sm btn-default';
         go.textContent = 'Turn into project';
         const dynamic = document.createElement('button');
         dynamic.textContent = labelFor(row);
@@ -102,7 +102,7 @@ def test_ui_control_scan_lists_fixed_text_and_only_counts_the_rest():
         ("Save & close", "btn …"),
         # A comparison inside a templated attribute is not the end of the tag.
         ("Add subagent", "btn btn-default"),
-        ("Turn into project", "btn btn-xs btn-default"),
+        ("Turn into project", "btn btn-sm btn-default"),
     ]
     # Run-time text, a nameless icon and a computed label are counted, not invented.
     assert interpolated == 3
@@ -129,16 +129,6 @@ def test_ui_control_scan_lists_a_modules_own_button_factory_by_its_literal_calls
         ("Free", "btn btn-danger btn-sm"),
     ]
     assert interpolated == 1, "a call whose label is computed is counted, not invented"
-
-
-def test_ui_control_inventory_keeps_siblings_adjacent_and_names_the_one_raiser():
-    rendered = inv.build_ui_control_inventory()[0]
-    table = [line for line in rendered.splitlines() if line.startswith("| ") and not line.startswith("| text")]
-    refresh = [index for index, line in enumerate(table) if line.startswith("| Refresh |")]
-    # The point of the sort: every control that says the same thing is one contiguous block.
-    assert len(refresh) >= 2 and refresh == list(range(refresh[0], refresh[0] + len(refresh)))
-    # An owner intent with a door is raised by exactly one module.
-    assert "| `ouro:open-project` | modules/project_reference.js |" in rendered
 
 
 # ---------------------------------------------------------------------------

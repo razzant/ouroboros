@@ -1,18 +1,21 @@
-"""Owner-control addressability of the in-process direct-chat turn.
+"""Owner-control addressability of a direct-chat turn an INLINE EXECUTOR runs in the server process.
 
-The class (rc.7 QA regress, item 010): a self-modification typed into the
-chat runs as a DIRECT-CHAT TURN — minted by ``worker_chat_lane.py`` with an
-8-hex id and executed on the long-lived chat agent inside the supervisor,
-never through the queue. ``agent.py`` writes its ordinary durable
-``running`` row, so ``GET /api/tasks?status=running`` listed it while every
-queue-keyed owner control (cancel, hurry, decisions) answered 404 "task not
+The class (rc.7 QA regress, item 010): a self-modification typed into the chat ran as a
+DIRECT-CHAT TURN on an actor inside the supervisor, never through the queue. ``agent.py``
+writes its ordinary durable ``running`` row, so ``GET /api/tasks?status=running`` listed
+it while every queue-keyed owner control (cancel, hurry, decisions) answered 404 "task not
 found or not active" and the spend kept growing until ``/restart``.
 
-The contract pinned here: ``supervisor.workers.direct_chat_turn`` is the ONE
-reader every ingress, the ownership predicate and the graceful-stop episode
-resolve a live direct turn through — so a turn the task list shows as
-running is addressable, and custody stops it COOPERATIVELY (the finalize
-control on the canonical owner mailbox; there is no worker process to kill).
+Today an owner turn is carried by a conversation-lane worker and its Stop is the pooled
+custody of its RUNNING row (``tests/test_conversation_lane_laws.py``, E9). A registered
+in-process actor remains the shape of the two disclosed inline executors — a live
+realtime call (``executor=inline_call``) and the degraded carrier (``inline_degraded``) —
+which run the worker body on a thread of the server and register their actor in the
+``DirectActivityRegistry``. The contract pinned here is theirs: ``supervisor.workers.direct_chat_turn``
+is the ONE reader every ingress, the ownership predicate and the graceful-stop episode
+resolve such a turn through — so a turn the task list shows as running is addressable,
+and custody stops it COOPERATIVELY (``inline_carrier.stop_direct_chat_turn``: the finalize
+control on the canonical owner mailbox, armed under the actor's admission lock).
 
 The two ``orphan`` cases at the top pin the Stop of a durable running row
 that NOTHING owns (no queue row, no worker, no live chat turn): the intent is
@@ -23,6 +26,7 @@ as the agent's ``cancel_task`` does — never a 404 that leaves it running.
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +36,9 @@ from starlette.testclient import TestClient
 
 from ouroboros.gateway.tasks import api_task_cancel, api_tasks_list
 from ouroboros.task_results import load_task_result, write_task_result
+from tests.test_delivery_contention import sender as _delivery_sender
+
+delivery_sender = _delivery_sender
 
 TURN_ID = "40cc86d9"
 
@@ -69,15 +76,15 @@ def _write_snapshot(tmp_path, running_ids=()):
     }), encoding="utf-8")
 
 
-def _live_chat_agent(monkeypatch, task_id=TURN_ID, *, accepting=True):
-    """The chat agent mid-turn, shaped exactly as agent.py leaves it (the
-    fields steering.py and workers.chat_turn_liveness read)."""
+def _live_chat_agent(monkeypatch, task_id=TURN_ID, *, accepting=True, chat_id=0):
+    """An inline executor's actor mid-turn, shaped exactly as agent.py leaves it (the fields
+    steering.py and workers.chat_turn_liveness read), registered as ``start_inline_turn`` registers it."""
 
     import threading
 
     agent = SimpleNamespace(
         _busy=True, _accepting_owner_messages=accepting,
-        _current_task_id=task_id, _current_chat_id=0,
+        _current_task_id=task_id, _current_chat_id=chat_id,
         _current_task_metadata={"title": "Modify yourself"},
         _current_task_text="change the bubble colour and commit",
         _task_started_ts=1000.0, _last_activity_ts=1000.0,
@@ -87,6 +94,14 @@ def _live_chat_agent(monkeypatch, task_id=TURN_ID, *, accepting=True):
 
     get_direct_activity_registry().register(task_id, chat_id=agent._current_chat_id, actor=agent)
     return agent
+
+
+def _turn_released(agent, task_id=TURN_ID):
+    """The turn's end as its runner performs it: the actor stops, then releases custody."""
+    from supervisor.active_activity import get_direct_activity_registry
+
+    agent._busy = False
+    get_direct_activity_registry().unregister(task_id)
 
 
 def _mailbox_kinds(tmp_path, task_id=TURN_ID):
@@ -167,6 +182,59 @@ def test_closed_conversation_admission_is_not_owner_addressable(tmp_path, monkey
     assert task_has_live_ownership(TURN_ID) is False
 
 
+def test_stop_keeps_custody_of_activity_with_closed_message_admission(tmp_path, monkeypatch):
+    """Preparation/teardown still owns the actor after message admission closes."""
+    from ouroboros.cancel_intents import active_intent
+
+    _isolate_queue(monkeypatch, tmp_path)
+    _live_chat_agent(monkeypatch, accepting=False)
+    write_task_result(tmp_path, TURN_ID, "running", chat_id=0)
+    with _client(tmp_path) as client:
+        response = client.post(f"/api/tasks/{TURN_ID}/cancel", json={"stop_policy": "immediate"})
+    assert response.status_code == 202, response.text
+    assert response.json()["cancel_state"] == "pending"
+    assert load_task_result(tmp_path, TURN_ID)["status"] == "running"
+    assert active_intent(tmp_path, TURN_ID)
+
+
+def test_stop_keeps_custody_when_admission_closes_after_capture_until_release(tmp_path, monkeypatch):
+    """Stop captures a LIVE turn; the turn then closes message admission (its final
+    delivery, a transport turn's run) while its runner still owns execution. Custody
+    answers 202 and keeps the row and intent; once the runner releases the actor, the
+    next custody pass settles the stop as usual."""
+    import ouroboros.config as config
+    from ouroboros.cancel_intents import active_intent
+    from supervisor import task_reaper
+    from supervisor.workers import direct_chat_turn, get_direct_chat_agent
+
+    _isolate_queue(monkeypatch, tmp_path)
+    agent = _live_chat_agent(monkeypatch)
+    write_task_result(tmp_path, TURN_ID, "running", chat_id=0, description="modify yourself")
+    _write_snapshot(tmp_path, running_ids=())
+    monkeypatch.setattr(config, "get_direct_turn_stop_wait_sec", lambda: 5.0)
+    real_request = task_reaper.request_finalization_grace
+
+    def _control_then_close_admission(task_drive, task_id, reason, **kwargs):
+        msg_id = real_request(task_drive, task_id, reason, **kwargs)
+        agent._accepting_owner_messages = False  # still busy, still registered
+        return msg_id
+
+    monkeypatch.setattr(task_reaper, "request_finalization_grace", _control_then_close_admission)
+    with _client(tmp_path) as client:
+        first = client.post(f"/api/tasks/{TURN_ID}/cancel", json={"stop_policy": "immediate"})
+        assert first.status_code == 202, first.text
+        assert first.json()["cancel_state"] == "pending"
+        assert direct_chat_turn(TURN_ID) is None and get_direct_chat_agent(TURN_ID) is agent
+        assert load_task_result(tmp_path, TURN_ID)["status"] == "running"
+        assert active_intent(tmp_path, TURN_ID)["request_id"] == first.json()["request_id"]
+        assert "finalize_now" in _mailbox_kinds(tmp_path)
+        _turn_released(agent)  # its runner exits without a terminal of its own
+        second = client.post(f"/api/tasks/{TURN_ID}/cancel", json={"stop_policy": "immediate"})
+    assert second.status_code == 200, second.text
+    assert load_task_result(tmp_path, TURN_ID)["status"] == "cancelled"
+    assert not active_intent(tmp_path, TURN_ID)
+
+
 def test_stop_now_finalizes_the_direct_turn_cooperatively_and_answers_ok(tmp_path, monkeypatch):
     """Immediate stop: custody writes the finalize control to the canonical
     mailbox, the turn reaches its next round boundary and publishes its own
@@ -188,7 +256,7 @@ def test_stop_now_finalizes_the_direct_turn_cooperatively_and_answers_ok(tmp_pat
         # turn ends and the pipeline publishes its own terminal result.
         msg_id = real_request(task_drive, task_id, reason, **kwargs)
         write_task_result(tmp_path, TURN_ID, "completed", chat_id=0, description="modify yourself")
-        agent._busy = False
+        _turn_released(agent)
         return msg_id
 
     monkeypatch.setattr(task_reaper, "request_finalization_grace", _control_then_yield)
@@ -303,6 +371,97 @@ def test_direct_turn_progress_frames_carry_the_host_attested_cancelable_marker(t
     assert (sent[1].get("progress_meta") or {}).get("cancelable") is not True
 
 
+@pytest.mark.parametrize("retry", ["duplicate", "mailbox_refused", "transport_refused"])
+def test_room_final_result_reaches_only_its_live_text_turns_once(tmp_path, monkeypatch, delivery_sender, retry):
+    import queue
+
+    from ouroboros import owner_mailbox as mail, working_checkpoint
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from supervisor import events_chat_delivery as delivery, message_bus, terminal_delivery as td
+    from tests._budget_pause_exact_helpers import _loop_ctx
+    from tests._dialogue import chat_rows
+
+    supervisor, frames, _bus = delivery_sender
+    alpha = create_project(tmp_path, "alpha", name="Alpha")["chat_id"]
+    beta = create_project(tmp_path, "beta", name="Beta")["chat_id"]
+    source, answer = "finished-task", "The synthetic research result is 42."
+    bind_task_to_project(tmp_path, source, "alpha", alpha, origin={"absent": "system"})
+    task = {"id": source, "root_task_id": source, "chat_id": alpha, "project_id": "alpha"}
+    stored = write_task_result(tmp_path, source, "completed", result=answer,
+                               root_task_id=source, chat_id=alpha, project_id="alpha", terminal_origin="model_final")
+    event = td.build_completed_result_event(tmp_path, task, source, stored)
+    assert event is not None
+    # An old producer address must not override the resolved Project room.
+    event["chat_id"] = beta
+    recipients = ("text-first", "text-second")
+    for tid, room in [(tid, alpha) for tid in recipients] + [("other-room", beta), (source, alpha)]:
+        actor = _live_chat_agent(monkeypatch, tid, chat_id=room)
+        assert not hasattr(actor, "_realtime_turn"), "this is the ordinary text path"
+        if tid != source:
+            write_task_result(tmp_path, tid, "running", chat_id=room)
+    _live_chat_agent(monkeypatch, "ended-turn", chat_id=alpha, accepting=False)
+
+    write = mail.write_task_message
+    bridge = message_bus.get_bridge()
+    send = bridge.send_message
+    if retry == "mailbox_refused":
+        # One recipient accepted the result; the next write fails. The retry
+        # must complete the handoff without duplicating either mail or chat.
+        monkeypatch.setattr(mail, "write_task_message", lambda root, text, tid, **kw:
+                            False if tid == recipients[1] else write(root, text, tid, **kw))
+    elif retry == "transport_refused":
+        monkeypatch.setattr(bridge, "send_message", lambda *a, **kw: (False, "synthetic refusal"))
+    if retry != "duplicate":
+        assert not delivery._handle_send_message(dict(event), supervisor)
+        assert not td.already_delivered(tmp_path, event["delivery_id"])
+        assert td.pending_deliveries(tmp_path)
+        if retry == "mailbox_refused":
+            assert len(frames) == 1
+            assert len(mail.drain_owner_entries(tmp_path, recipients[0])) == 1
+            assert mail.drain_owner_entries(tmp_path, recipients[1]) == []
+        else:
+            assert not frames
+            assert all(not mail.drain_owner_entries(tmp_path, tid) for tid in recipients)
+        monkeypatch.setattr(mail, "write_task_message", write)
+        monkeypatch.setattr(bridge, "send_message", send)
+
+    assert delivery._handle_send_message(dict(event), supervisor)
+    assert delivery._handle_send_message(dict(event), supervisor)
+    assert len(frames) == 1 and frames[0]["chat_id"] == alpha
+    assert td.pending_deliveries(tmp_path) == []
+    assert [(row["chat_id"], row["text"]) for row in chat_rows(tmp_path)] == [(alpha, answer)]
+    for tid in ("other-room", "ended-turn", source):
+        assert mail.drain_owner_entries(tmp_path, tid) == []
+
+    for tid in recipients:
+        [entry] = mail.drain_owner_entries(tmp_path, tid)
+        assert entry["kind"] == mail.KIND_TASK_MESSAGE and entry["provenance"] == "system"
+        assert entry["source_task_id"] == source and answer in entry["text"]
+        assert entry["msg_id"] == f"room-result:{event['delivery_id']}:{tid}"
+        ctx, limit = _loop_ctx(tmp_path, tid, direct=True)
+        limit.messages, limit.owner_msg_seen = [], set()
+        injected = queue.Queue()
+        _drain_incoming_messages(limit.messages, queue.Queue(), tmp_path, tid, injected,
+                                 limit.owner_msg_seen, owner_ctx=ctx, defer_content_ack=True)
+        [row] = limit.messages
+        assert row["role"] == "user" and answer in row["content"] and source in row["content"]
+        assert row["content"].startswith("[System task message]")
+        assert row.get("_host_context_kind") != "owner_words" and ctx._owner_directives == []
+        assert not mail.mail_read_state(tmp_path, tid, entry["msg_id"])
+        working_checkpoint.save_ready(limit)
+        assert mail.mail_read_state(tmp_path, tid, entry["msg_id"]) is True
+        assert injected.get_nowait()["type"] == "task_message_injected" and injected.empty()
+        # A retry after the checkpoint also cannot recreate input, even with a
+        # fresh seen set: the durable ACK belongs to the same delivery identity.
+        assert delivery._handle_send_message(dict(event), supervisor)
+        again = []
+        _drain_incoming_messages(again, queue.Queue(), tmp_path, tid, injected, set(), owner_ctx=ctx)
+        assert again == [] and injected.empty()
+        assert len(mail._mailbox_path(tmp_path, tid).read_text(encoding="utf-8").splitlines()) == 1
+    assert len(frames) == 1
+
+
 def test_stop_now_on_a_turn_that_dies_without_a_terminal_publishes_cancelled(tmp_path, monkeypatch):
     """Adversarial finding: the lane's error path writes no task_result. If
     custody settled ``already_settled`` against a row still saying ``running``,
@@ -322,7 +481,7 @@ def test_stop_now_on_a_turn_that_dies_without_a_terminal_publishes_cancelled(tmp
 
     def _control_then_crash(task_drive, task_id, reason, **kwargs):
         msg_id = real_request(task_drive, task_id, reason, **kwargs)
-        agent._busy = False  # the turn raised past the pipeline: no terminal written
+        _turn_released(agent)  # the turn raised past the pipeline: no terminal written
         return msg_id
 
     monkeypatch.setattr(task_reaper, "request_finalization_grace", _control_then_crash)
@@ -356,7 +515,7 @@ def test_stop_now_on_a_turn_that_already_ended_arms_nothing_and_answers_already_
         reads["n"] += 1
         if reads["n"] == 2:  # custody capture, then the lane's re-check (no pre-probe: the row is unsettled)
             write_task_result(tmp_path, TURN_ID, "completed", chat_id=0, description="modify yourself")
-            agent._busy = False
+            _turn_released(agent)
         return real_reader(task_id)
 
     monkeypatch.setattr(workers, "direct_chat_turn", _turn_ends_after_custody_captured)
@@ -429,12 +588,43 @@ def test_settled_row_does_not_hide_a_still_busy_direct_turn_from_custody(tmp_pat
         assert first.json()["cancel_state"] == "pending"
         assert "finalize_now" in _mailbox_kinds(tmp_path)
         agent._busy = False                                    # the turn ends; no synthesis in flight
+        from supervisor.active_activity import get_direct_activity_registry
+        get_direct_activity_registry().unregister(TURN_ID)  # its runner has released custody
         second = client.post(f"/api/tasks/{TURN_ID}/cancel", json={"stop_policy": "immediate"})
     assert second.status_code == 404, second.text              # already settled, honestly
     assert load_task_result(tmp_path, TURN_ID)["status"] == "completed"
     from ouroboros.cancel_intents import active_intent
 
     assert not active_intent(tmp_path, TURN_ID)
+
+
+def test_text_stop_waits_for_runner_after_message_admission_closes(tmp_path, monkeypatch):
+    """Text cleanup has the same custody as a call, even after Stop captured the turn."""
+    from supervisor import cancel_publication, task_lifecycle, worker_chat_lane
+
+    queue = _isolate_queue(monkeypatch, tmp_path)
+    agent = _live_chat_agent(monkeypatch)
+    assert not hasattr(agent, "_realtime_turn")
+    write_task_result(tmp_path, TURN_ID, "running", chat_id=0)
+    released, settled = [], []
+    monkeypatch.setattr(task_lifecycle, "_release_intent_claim", lambda *a, **kw: released.append(kw))
+    monkeypatch.setattr(cancel_publication, "_finalize_cancel_intent_on_miss",
+                        lambda *a, **kw: settled.append(a[1]) or task_lifecycle.CANCEL_CANCELLED)
+
+    def close_admission(*args, **kwargs):
+        agent._accepting_owner_messages = False
+        return worker_chat_lane.DIRECT_TURN_STOP_GONE
+
+    monkeypatch.setattr(worker_chat_lane, "stop_direct_chat_turn", close_admission)
+    try:
+        result = cancel_publication._finish_captured_chat_turn(queue, TURN_ID, {"id": TURN_ID})
+        assert result == task_lifecycle.CANCEL_FAILED
+        assert released[-1]["error"] == "direct activity still owns work"
+        assert not settled and load_task_result(tmp_path, TURN_ID)["status"] == "running"
+    finally:
+        _turn_released(agent)
+    assert cancel_publication._finish_captured_chat_turn(queue, TURN_ID, None) == task_lifecycle.CANCEL_CANCELLED
+    assert settled == [TURN_ID]
 
 
 def test_arming_the_stop_holds_the_turn_admission_lock_and_a_turn_that_ended_under_it_arms_nothing(tmp_path, monkeypatch):
@@ -541,15 +731,15 @@ def _inflight_synthesis(monkeypatch, tmp_path, task_id=TURN_ID):
     def _stage(name):
         def _f(*a, **k):
             calls.append(name)
-            # The paid stage held open; memory_fallback_draft runs first and, with no journal here, makes no call.
-            if name == "scratchpad_consolidation":
+            # The first paid stage held open (the fallback draft since the scratchpad pass is retired, #918).
+            if name == "memory_fallback_draft":
                 arrived.set()
                 assert release.wait(30), "stage gate never released"
             return None
         return _f
 
     monkeypatch.setattr(llm_mod, "LLMClient", lambda *a, **k: object())
-    for name, attr in (("scratchpad_consolidation", "_run_scratchpad_consolidation"),
+    for name, attr in (("memory_fallback_draft", "_run_memory_fallback_draft"),
                        ("facts", "_record_task_facts")):
         monkeypatch.setattr(pipeline, attr, _stage(name))
     monkeypatch.setattr(pte, "maybe_promote", _stage("promotion"))
@@ -615,11 +805,13 @@ def test_stop_now_during_the_inflight_synthesis_is_accepted_and_stops_the_remain
             synthesis.release.set()
             synthesis.thread.join(30)
             assert not synthesis.thread.is_alive()
+            from supervisor.active_activity import get_direct_activity_registry
+            get_direct_activity_registry().unregister(TURN_ID)  # its runner has released custody
             second = client.post(f"/api/tasks/{TURN_ID}/cancel", json={"stop_policy": "immediate"})
     finally:
         synthesis.release.set()
     assert second.status_code == 404, second.text
-    assert synthesis.calls == ["facts", "scratchpad_consolidation"], synthesis.calls
+    assert synthesis.calls == ["facts", "memory_fallback_draft"], synthesis.calls
     stored = load_task_result(tmp_path, TURN_ID)
     assert stored["status"] == "completed"
     checkpoint = stored["root_phase_checkpoint"]
@@ -661,11 +853,11 @@ def test_cascade_stop_now_during_the_inflight_synthesis_keeps_the_intent_open_an
             assert intent.get("scope") == SCOPE_CASCADE, intent
             assert "post-task synthesis" in str(intent.get("last_error") or ""), intent
             assert _mailbox_kinds(tmp_path) == []          # no control for a loop that is gone
-            assert synthesis.calls == ["facts", "scratchpad_consolidation"], synthesis.calls
+            assert synthesis.calls == ["facts", "memory_fallback_draft"], synthesis.calls
             synthesis.release.set()
             synthesis.thread.join(30)
             assert not synthesis.thread.is_alive()
-            assert synthesis.calls == ["facts", "scratchpad_consolidation"], synthesis.calls
+            assert synthesis.calls == ["facts", "memory_fallback_draft"], synthesis.calls
             second = client.post(f"/api/tasks/{TURN_ID}/cancel", json=body)
     finally:
         synthesis.release.set()
@@ -677,3 +869,79 @@ def test_cascade_stop_now_during_the_inflight_synthesis_keeps_the_intent_open_an
     assert checkpoint["post_task_stop_reason"] == (
         "owner_stopped:skipped=promotion"), checkpoint
     assert not active_intent(tmp_path, TURN_ID)
+
+
+def _windows_shell_processes() -> list:
+    """Windows only, for the ``sh`` stimulus's failure text: every shell and sleep alive, whatever their parent chain."""
+    if os.name != "nt":
+        return []
+    import psutil
+
+    return sorted((process.info["pid"], process.info["ppid"], process.info["name"])
+                  for process in psutil.process_iter(["pid", "ppid", "name"])
+                  if process.info["name"] in {"sh.exe", "bash.exe", "sleep.exe"})
+
+
+@pytest.mark.parametrize("stimulus", ["native tree", "sh"])
+def test_stop_now_ends_a_command_the_direct_turn_is_running_through_its_open_intent(tmp_path, monkeypatch, stimulus):
+    """R4: the direct turn's Stop control is drained only at a round boundary, so a command the turn was running
+    kept its whole wait. The real public Stop now leaves the intent open for a turn still inside a step (202); the
+    turn's own command wait reads it, kills the command's process group within a poll and keeps the output so far.
+    Its boundary then ends the turn as before (the control stays in the mailbox).
+
+    ``native tree``: two interpreters on every host, the root waiting on a child that holds the same pipes, so only
+    the whole group's (Windows: tree's) kill closes them before the 5 s output bound. It says nothing about a shell.
+    ``sh``: the original stimulus. UNRESOLVED on Windows, not fixed by the other case: a Git-for-Windows ``sh`` tree
+    kept the pipes past Stop now's ``taskkill /F /T`` (CI 41634598146, job 125912568384: 5.2 s and 5.3 s, its reader
+    threads leaked), cause not established natively. Its failure there names the shells still alive."""
+    import sys
+    import threading
+    import time
+
+    import ouroboros.config as config
+    from ouroboros.cancel_intents import active_intent
+    from ouroboros.model_wait import task_model_wait_scope
+    from ouroboros.tools.shell import _run_shell
+
+    _isolate_queue(monkeypatch, tmp_path)
+    _live_chat_agent(monkeypatch)
+    write_task_result(tmp_path, TURN_ID, "running", chat_id=0, description="modify yourself")
+    _write_snapshot(tmp_path, running_ids=())
+    monkeypatch.setattr(config, "get_direct_turn_stop_wait_sec", lambda: 0.5)
+    work = tmp_path / "work"
+    work.mkdir()
+    ran = {}
+    ready = work / "tree.ready"
+    child = f"import pathlib, time; pathlib.Path({str(ready)!r}).touch(); time.sleep(25)"
+    command = ["sh", "-c", "echo started; sleep 25; echo finished"] if stimulus == "sh" else [
+        sys.executable, "-c", f"import subprocess, sys; print('started', flush=True); subprocess.run("
+        f"[sys.executable, '-c', {child!r}], stdout=sys.stdout, stderr=sys.stderr); print('finished', flush=True)"]
+
+    def turn_runs_a_command():
+        task = {"id": TURN_ID, "type": "task", "_is_direct_chat": True, "chat_id": 0, "_attempt": 1}
+        with task_model_wait_scope(task=task, drive_root=tmp_path, event_queue=None, worker_slot_held=False) as owner:
+            ctx = SimpleNamespace(repo_dir=work, drive_root=tmp_path, drive_logs=lambda: tmp_path, task_id=TURN_ID,
+                                  model_wait_context=owner)
+            ran["started"] = time.monotonic()
+            ran["text"] = _run_shell(ctx, command, timeout_sec=60)
+            ran["ended"] = time.monotonic()
+
+    turn = threading.Thread(target=turn_runs_a_command, name="direct-turn-command", daemon=True)
+    turn.start()
+    time.sleep(1.5)  # the command is inside its wait
+    ready_by = time.monotonic() + 120  # an interpreter's start on a loaded host, not the bound under test
+    while stimulus != "sh" and not ready.exists():
+        assert turn.is_alive() and time.monotonic() < ready_by, ran
+        time.sleep(0.02)
+    shells = _windows_shell_processes()
+    with _client(tmp_path) as client:
+        pressed = time.monotonic()
+        cancel = client.post(f"/api/tasks/{TURN_ID}/cancel", json={"stop_policy": "immediate"})
+    turn.join(40)
+
+    assert not turn.is_alive()
+    assert cancel.status_code == 202 and cancel.json()["cancel_state"] == "pending", cancel.text
+    assert ran["ended"] - pressed < 5, (f"the command ended {ran['ended'] - pressed:.1f}s after Stop now; "
+                                        f"shells before it {shells}, after {_windows_shell_processes()}")
+    assert "started" in ran["text"] and "finished" not in ran["text"]
+    assert "finalize_now" in _mailbox_kinds(tmp_path) and active_intent(tmp_path, TURN_ID)

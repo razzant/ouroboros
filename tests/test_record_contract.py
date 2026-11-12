@@ -8,10 +8,13 @@ fixed; a new field is optional.
 from __future__ import annotations
 
 import ast
+import contextlib
+import contextvars
 import json
 import pathlib
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +24,45 @@ from ouroboros.tools.tool_result import ToolResult
 from tests.test_tool_call_log import _Registry, _call, _rows
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(("fails", "lineage"), [
+    (False, None),
+    pytest.param(False, {"root_task_id": "root", "parent_task_id": "parent"}, id='False-lineage2'),
+    pytest.param(True, {"root_task_id": "root"}, id='True-lineage1'),
+])
+def test_round_and_error_rows_keep_only_known_scope_lineage(tmp_path, monkeypatch, lineage, fails):
+    from ouroboros import loop_llm_call as loop, usage_accounting as ua
+
+    logs, owner = tmp_path / "child" / "logs", tmp_path / "canonical"
+    monkeypatch.setattr(loop, "canonical_owner_root", lambda _root: owner)
+    monkeypatch.setattr(loop, "has_log_sink", lambda: False)
+    live = []
+    monkeypatch.setattr(loop, "emit_log_event", lambda _queue, event, **_kw: live.append(event))
+    def chat(**_kwargs):
+        if fails:
+            raise RuntimeError("recorded provider failure")
+        return {"role": "assistant", "content": "answer"}, {"cost": 0.0, "prompt_tokens": 1, "completion_tokens": 1}
+    def invoke():
+        with ua.usage_scope(ua.UsageScope(task_id="child", **lineage)) if lineage else contextlib.nullcontext():
+            return loop.call_llm_with_retry(SimpleNamespace(chat=chat), [{"role": "user", "content": "hi"}],
+                "test-model", None, "low", 1, logs, "child", 1, None, {})
+    message, _cost = contextvars.Context().run(invoke)
+    assert (message is None) is fails
+    kind = "llm_api_error" if fails else "llm_round"
+    rows = [json.loads(line) for line in (logs / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    [row] = [item for item in rows if item.get("type") == kind]
+    assert {key: row[key] for key in ("root_task_id", "parent_task_id") if key in row} == (lineage or {})
+    _assert_row(row)
+    if fails:
+        assert json.loads((owner / "logs" / "events.jsonl").read_text(encoding="utf-8")) == row
+        assert [event for event in live if event.get("type") == kind] == [row]
+
+
+def test_error_lineage_fields_are_optional():
+    lineage = {"root_task_id", "parent_task_id"}
+    assert lineage <= rc.ANCHOR_BY_TYPE["llm_api_error"].optional
+    assert not lineage.intersection(rc.ANCHOR_BY_TYPE["llm_api_error"].guaranteed)
 
 # Where each anchor row is written. Kept here, not in the protected contract, so moving a
 # writer never needs a contract edit; the parity tests below fail if a writer leaves.
@@ -145,13 +187,14 @@ def test_v2_declares_each_token_counter_nullable_and_legacy_zeros_ambiguous():
     assert "lower bound" in rc.LEGACY_RULE
 
 
-@pytest.mark.parametrize("row", [row for row in rc.ANCHOR_ROWS if row.type not in _TOOL_ROWS], ids=lambda r: r.type)
-def test_every_writer_literal_carries_the_guaranteed_fields(row):
-    literals = [keys for writer in WRITERS[row.type]
-                for keys in _literal_keys((REPO / writer).read_text(encoding="utf-8"), row.type)]
-    assert literals, f"no {row.type!r} row literal in {WRITERS[row.type]}: renamed or moved writer"
-    for keys in literals:
-        assert row.guaranteed <= keys, f"{row.type}: writer lacks {sorted(row.guaranteed - keys)}"
+def test_every_writer_literal_carries_the_guaranteed_fields(subtests):
+    for row in [row for row in rc.ANCHOR_ROWS if row.type not in _TOOL_ROWS]:
+        with subtests.test(row=row):
+            literals = [keys for writer in WRITERS[row.type]
+                        for keys in _literal_keys((REPO / writer).read_text(encoding="utf-8"), row.type)]
+            assert literals, f"no {row.type!r} row literal in {WRITERS[row.type]}: renamed or moved writer"
+            for keys in literals:
+                assert row.guaranteed <= keys, f"{row.type}: writer lacks {sorted(row.guaranteed - keys)}"
 
 
 def test_the_literal_check_sees_a_missing_field_and_a_resolved_spread():

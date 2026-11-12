@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 
 import { createStateSnapshotSequencer } from '../modules/chat_activity.js';
 
-// The reader below mirrors chat.js::refreshHeaderControlState and
-// app.js::refreshProjectsNav: admission through gate(force), then one fetch,
+// The reader below keeps the page readers' shape (chat.js::refreshHeaderControlState,
+// app.js::refreshProjectsNav): admission through gate(force), then one read,
 // then apply on success or fail on any error. The fake fetch is settled by the
-// test so overlap is deterministic.
+// test so overlap is deterministic; state_read_recovery.test.js runs the real
+// shared reader with its lifetime.
 function harness() {
     const applied = [];
     const events = [];
+    const requests = [];
     const sequencer = createStateSnapshotSequencer(
         (data, requestedAt, generation) => applied.push({ data, requestedAt, generation }),
         () => 1000 + events.length, () => events.push('unavailable'));
@@ -18,6 +20,7 @@ function harness() {
     async function refresh(force = false) {
         const request = await sequencer.gate(force);
         if (!request) return 'skipped';
+        requests.push(request);
         try {
             const resp = await fetchState();
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -28,7 +31,7 @@ function harness() {
             return 'failed';
         }
     }
-    return { sequencer, applied, events, fetches, refresh };
+    return { sequencer, applied, events, fetches, requests, refresh };
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -138,7 +141,7 @@ test('a forced caller coalesced behind a failing read still gets its follow-up',
     assert.deepEqual(h.applied.map((a) => a.data), ['after-failure']);
 });
 
-test('generation ordering is unchanged: a synthetic bump makes the in-flight read stale but still settles it', async () => {
+test('generation ordering is unchanged: a synthetic bump makes the in-flight read stale and detaches it', async () => {
     const h = harness();
     const inflight = h.refresh(false);
     await tick();
@@ -146,12 +149,15 @@ test('generation ordering is unchanged: a synthetic bump makes the in-flight rea
     h.sequencer.retire();
     assert.deepEqual(h.events, [], 'retirement fans out no unavailability');
     assert.equal(h.sequencer.latest(), null, 'the late-mount seed retires');
+    assert.equal(h.requests[0].signal.aborted, true, 'the stale read is cancelled');
+    const next = h.refresh(false);
+    await tick();
+    assert.equal(h.fetches.length, 2, 'the retired read no longer holds the gate');
     h.fetches[0].resolve({ ok: true, data: 'older' });
     assert.equal(await inflight, 'applied');
     assert.deepEqual(h.applied, [], 'the older response cannot apply after a newer generation');
-    const next = h.refresh(false);
-    await tick();
-    assert.equal(h.fetches.length, 2, 'the stale settle still released the gate');
+    const pending = await Promise.race([next.then(() => 'settled'), tick().then(() => 'pending')]);
+    assert.equal(pending, 'pending', 'nor can it settle the newer read');
     h.fetches[1].resolve({ ok: true, data: 'newer' });
     await next;
     assert.deepEqual(h.applied.map((a) => a.data), ['newer']);
@@ -160,7 +166,9 @@ test('generation ordering is unchanged: a synthetic bump makes the in-flight rea
 test('gate requests carry the same clock as begin() and settle through apply of the same object only', async () => {
     const h = harness();
     const a = await h.sequencer.gate(true);
-    assert.deepEqual(a, { generation: 1, requestedAt: 1000, path: '/api/state' });
+    const { signal, ...fields } = a;
+    assert.deepEqual(fields, { generation: 1, requestedAt: 1000, path: '/api/state' });
+    assert.equal(signal.aborted, false, 'a gated request carries the live signal of its own read');
     const pending = () => Promise.race([h.sequencer.gate(false).then(() => 'settled'), tick().then(() => 'pending')]);
     assert.equal(await pending(), 'pending');
     // A different object with the same generation does not settle the gate.
@@ -168,7 +176,9 @@ test('gate requests carry the same clock as begin() and settle through apply of 
     assert.equal(await pending(), 'pending');
     assert.equal(h.sequencer.apply(a, 'same'), false);
     // Settled: the next tick opens a fresh read instead of joining.
-    assert.deepEqual(await h.sequencer.gate(false), { generation: 2, requestedAt: 1000, path: '/api/state' });
+    const { signal: nextSignal, ...next } = await h.sequencer.gate(false);
+    assert.deepEqual(next, { generation: 2, requestedAt: 1000, path: '/api/state' });
+    assert.notEqual(nextSignal, signal, 'each read has its own signal');
 });
 
 test('only an actual failed read fans out, and a throwing fan-out still releases the gate', async () => {

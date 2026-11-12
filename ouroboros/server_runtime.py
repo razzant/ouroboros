@@ -306,17 +306,58 @@ def provider_slot_proposals(settings: dict) -> dict:
     follows Main) and blank Fallbacks (no chain onto the same runtime) — the setup contract's
     ``local`` profile proposes the same — except a lane routed local while Main is not, whose
     shipped id is then a route the install runs (for Fallbacks the only chain entry). Otherwise
-    the shipped defaults. A proposal never replaces a saved value (DEVELOPMENT: Provider Independence).
+    the shipped defaults. Each proposal names its kind's ``proposal_connection`` (the built-in key
+    first, else the only named one). Several named ones and no built-in: the key the owner's Main
+    names; before that choice the shipped spelling, which no key here runs, while Settings asks for
+    it (``main_connection_choice``). A proposal never replaces a saved value (DEVELOPMENT: Provider
+    Independence).
     """
-    provider = _exclusive_direct_remote_provider(settings)
+    from ouroboros.provider_models import route_on_connection
+
+    provider, kind, name = _proposal_connection(settings)
+    name = name or ""  # None: the owner chooses; nothing is guessed
+
+    def on_connection(value: str) -> str:  # Fallbacks is a chain: each entry on the connection
+        return _serialize_model_list([route_on_connection(model, kind, name) for model in _parse_model_list(value)])
+
     if provider:
-        return dict(_DIRECT_PROVIDER_AUTO_DEFAULTS[provider])
-    proposals = {key: _setting_text(SETTINGS_DEFAULTS, key) for key in _ALL_MODEL_SLOT_KEYS}
+        return {key: on_connection(value) for key, value in _DIRECT_PROVIDER_AUTO_DEFAULTS[provider].items()}
+    proposals = {key: on_connection(_setting_text(SETTINGS_DEFAULTS, key)) for key in _ALL_MODEL_SLOT_KEYS}
     if not has_remote_provider(settings) and _setting_text(settings, "LOCAL_MODEL_SOURCE"):
         local_main = _truthy_setting(settings.get("USE_LOCAL_MAIN"))
         proposals.update({key: "" for key, flag in _LOCAL_LANE_FLAG_FOR_SLOT.items()
                           if local_main or not _truthy_setting(settings.get(flag))})
     return proposals
+
+
+def _proposal_connection(settings) -> tuple[str, str, str | None]:
+    """``(exclusive direct provider or '', the kind proposals use, its proposal_connection)``; where
+    several named connections leave that None, the serving one Main's route names, if any."""
+    from ouroboros.provider_connections import configured_connections
+    from ouroboros.provider_models import parse_model_route, proposal_connection
+
+    provider = _exclusive_direct_remote_provider(settings)
+    kind = provider or "openrouter"
+    name = proposal_connection(kind, settings)
+    main = parse_model_route(_setting_text(settings, "OUROBOROS_MODEL"))
+    if name is None and main.valid and main.kind == kind and (kind, main.connection) in configured_connections(settings):
+        name = main.connection  # the owner's Main chose the key; its Light and Fallbacks follow it
+    return provider, kind, name
+
+
+def main_connection_choice(settings: dict, document) -> list[str]:
+    """The connections (``openai@work``, in owner order) Settings asks the owner to choose Main's
+    among: Main is unauthored (``document`` and no operator variable set it) and several named
+    connections of the proposal's kind serve, no built-in one (#2969). [] in every other case."""
+    from ouroboros.provider_connections import configured_connections
+    from ouroboros.provider_models import connection_id
+    from ouroboros.settings_integrity import operator_variables
+
+    if "OUROBOROS_MODEL" in (document or {}) or operator_variables(os.environ, ("OUROBOROS_MODEL",)):
+        return []
+    _provider, kind, name = _proposal_connection(settings)
+    return [] if name is not None else [
+        connection_id(kind, named) for served, named in configured_connections(settings) if served == kind]
 
 
 def propose_unauthored_model_slots(settings: dict, authored) -> dict:
@@ -421,8 +462,10 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
     """Every route consumer's normalization of a loaded mapping; it never replaces a model value.
 
     The retired Heavy key's shipped defaults are cleared, and with exactly one direct
-    provider a saved id is respelled onto that provider's prefix (``migrate_model_value``:
-    the same model, ``openai/x`` -> ``openai::x``). Unauthored slots already hold their
+    provider whose built-in key serves a saved id is respelled onto that provider's prefix
+    (``migrate_model_value``: the same model, ``openai/x`` -> ``openai::x``); a provider reached
+    only through named connections names no key such a respelling could pay with, so its saved
+    ids stay as written. Unauthored slots already hold their
     ``provider_slot_proposals`` (the loader); a saved value — blank, former default or a
     route without access — stays as written, honestly unavailable when unreachable."""
     normalized = dict(settings)
@@ -432,6 +475,10 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
     if not provider:
         normalized, scope_changed = _migrate_scope_review_prior_default(normalized)
         changed_keys = _unique_changed_keys(changed_keys + scope_changed)
+        return normalized, bool(changed_keys), changed_keys
+    from ouroboros.provider_models import proposal_connection
+
+    if proposal_connection(provider, normalized) != "":
         return normalized, bool(changed_keys), changed_keys
 
     for key in _ALL_MODEL_SLOT_KEYS:

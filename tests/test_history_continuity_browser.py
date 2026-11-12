@@ -8,12 +8,12 @@ import re
 import pytest
 
 from tests.test_chat_history_paging_browser import (
-    MAIN, _append, _assert_at_newest, _open, _open_project, _step, _idle, _result, _screenshot, _FRAMES,
+    MAIN, _append, _assert_at_newest, _evidence_dir, _open, _open_project, _step, _idle, _result, _screenshot, _FRAMES,
 )
 from tests.test_chat_history_recovery_browser import _click_project
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 _FAULT = """() => {
     const original = window.fetch.bind(window);
@@ -560,6 +560,228 @@ def test_wheel_inside_full_output_neither_pages_nor_follows_until_its_edge(direc
             assert page.locator(f'{feed} [data-client-message-id="nested-10"]').count() == 1
             _screenshot(page, tmp_path, f'nested-wheel-edge-{browser_engine}')
         finally:
+            browser.close()
+
+
+# #1524: a real wheel with the pointer on a named part of a card moves the feed exactly as far as the
+# same wheel moves it over plain feed in that engine and page: the engine's own step, never a constant,
+# since a Linux WebKit run has moved a feed by about half a wheel's delta. The part is first brought to
+# the middle of the feed by script (a script decides no reading intent), so the feed has room both ways.
+_AIM_AT_PART = """(part, [feedSelector, bare]) => {
+    const feed = document.querySelector(feedSelector);
+    const mid = feed.getBoundingClientRect().top + feed.getBoundingClientRect().height / 2;
+    let box = part.getBoundingClientRect();
+    feed.scrollTop += (box.top + box.height / 2) - mid;
+    box = part.getBoundingClientRect();
+    let x = box.left + Math.min(box.width - 3, Math.max(6, box.width * 0.3));
+    let y = Math.min(box.bottom - 2, Math.max(box.top + 2, mid));
+    // ``bare``: where the part's own box is hit (a gap or its padding), as the UI lane's wheel once hit a
+    // bare actions row; a part with no such point keeps the default point, and onSelf says which it was.
+    scan: for (const row of bare ? [box.top + box.height / 2, box.bottom - 2, box.top + 2] : []) {
+        for (let column = box.left + 2; column < box.right - 1; column += 3) {
+            if (document.elementFromPoint(column, row) === part) { x = column; y = row; break scan; }
+        }
+    }
+    const hit = document.elementFromPoint(x, y);
+    return {x, y, onPart: part === hit || part.contains(hit), onSelf: part === hit,
+            hit: hit && (hit.className || hit.tagName),
+            up: feed.scrollTop, down: feed.scrollHeight - feed.clientHeight - feed.scrollTop};
+}"""
+# A point of the feed with no card and no clipping or scrolling box between it and the feed.
+_PLAIN_POINT = """feedSelector => {
+    const feed = document.querySelector(feedSelector);
+    const box = feed.getBoundingClientRect();
+    const plain = node => {
+        if (!node || !(node === feed || feed.contains(node))) return false;
+        for (let el = node; el !== feed; el = el.parentElement) {
+            if (el.classList.contains('chat-live-card') || getComputedStyle(el).overflowY !== 'visible') return false;
+        }
+        return true;
+    };
+    for (let row = 0; row < 24; row++) {
+        const y = box.top + box.height / 2 + (row % 2 ? -1 : 1) * Math.ceil(row / 2) * 16;
+        for (let x = box.right - 24; x > box.left + 4; x -= 12) {
+            const hit = document.elementFromPoint(x, y);
+            if (plain(hit)) return {x, y, hit: hit.className || hit.tagName, up: feed.scrollTop,
+                                    down: feed.scrollHeight - feed.clientHeight - feed.scrollTop};
+        }
+    }
+    return null;
+}"""
+# The feed's and the probed part's scrollTop once both have stopped for six frames; after a wheel
+# (``from`` given), only once they moved or 600 ms passed, so a late-starting scroll is not read as none.
+_SETTLED_TOPS = """([feedSelector, partIsScroller, from]) => new Promise(done => {
+    const feed = document.querySelector(feedSelector);
+    const part = partIsScroller ? document.querySelector('[data-wheel-probe]') : null;
+    const read = () => [feed.scrollTop, part ? part.scrollTop : 0];
+    const start = performance.now();
+    let last = read(), still = 0;
+    const tick = () => {
+        const now = read();
+        still = now[0] === last[0] && now[1] === last[1] ? still + 1 : 0;
+        last = now;
+        const moved = !from || now[0] !== from[0] || now[1] !== from[1];
+        if (still >= 6 && (moved || performance.now() - start > 600)) done(now);
+        else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+})"""
+
+
+def _wheel_at(page, feed, x, y, dy, scroller=False):
+    """One real wheel at (x, y): how far the feed and the probed part moved, settled before and after."""
+    page.mouse.move(x, y)
+    before = page.evaluate(_SETTLED_TOPS, [feed, scroller, None])
+    page.mouse.wheel(0, dy)
+    after = page.evaluate(_SETTLED_TOPS, [feed, scroller, before])
+    return {'feed': round(after[0] - before[0], 2), 'part': round(after[1] - before[1], 2)}
+
+
+def _plain_step(page, feed, dy):
+    """How far this engine moves the feed for one wheel of ``dy`` over plain feed, from its middle."""
+    page.locator(feed).evaluate('n => { n.scrollTop = Math.round((n.scrollHeight - n.clientHeight) / 2); }')
+    page.evaluate(_FRAMES)
+    tries = []
+    for _ in range(3):  # an engine may drop a wheel; only this reference may be asked again
+        point = page.evaluate(_PLAIN_POINT, feed)
+        assert point and min(point['up'], point['down']) > 4 * abs(dy), ('no plain feed with room both ways', point)
+        tries.append(dict(_wheel_at(page, feed, point['x'], point['y'], dy), hit=point['hit']))
+        if tries[-1]['feed']:
+            break
+    assert tries[-1]['feed'] * dy > 0, ('a wheel over plain feed did not move it: nothing to compare with', tries)
+    return tries[-1]['feed'], tries
+
+
+def _wheel_over(page, feed, part, dy, scroller=False, bare=False):
+    """One real wheel over ``part``: how far the feed and (for a scroller) the part moved, and what it hit."""
+    part.evaluate("n => { document.querySelectorAll('[data-wheel-probe]').forEach(m => m.removeAttribute('data-wheel-probe'));"
+                  " n.setAttribute('data-wheel-probe', ''); }")
+    aim = part.evaluate(_AIM_AT_PART, [feed, bare])
+    assert aim['onPart'], ('the pointer is not on the named part', aim)
+    assert min(aim['up'], aim['down']) > 4 * abs(dy), ('the feed has no room both ways', aim)
+    page.evaluate(_FRAMES)
+    return dict(_wheel_at(page, feed, aim['x'], aim['y'], dy, scroller), hit=aim['hit'], on_self=aim['onSelf'])
+
+
+def _toggle_card(page, card, expanded):
+    if (card.get_attribute('data-expanded') == '1') != expanded:
+        card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
+        page.evaluate(_FRAMES)
+        assert (card.get_attribute('data-expanded') == '1') == expanded
+
+
+@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
+def test_wheel_aimed_at_a_card_moves_the_feed_unless_a_scroller_there_consumes_it(
+        direct_server_with_data, browser_engine, tmp_path):
+    """#1524: a real wheel moves the feed exactly as far as the same wheel over plain feed, on the heading
+    and summary row of a collapsed or an expanded root or child card, and on the heading, foot, actions
+    row and action button of Main's live card, whose actions row is where the UI lane's Linux WebKit once
+    saw a wheel scroll nothing.
+    A bounded scroller there takes the wheel instead, and a part that swallows it is told apart, so a
+    swallowed wheel could not pass as this. The claim is this engine run's: Linux WebKit and the system
+    WKWebView are their own runs."""
+    from playwright.sync_api import sync_playwright
+    from tests.ui_chat_viewport_smoke import _emit_ws_frame
+
+    project = _nested_full_output_history(direct_server_with_data['data_dir'], card_after=120)
+    dy = 120
+    seen = {'wheel': dy}
+
+    def check(key, moved, feed_by, part_by=0):
+        seen[key] = moved
+        assert abs(moved['feed'] - feed_by) <= 1 and abs(moved['part'] - part_by) <= 1, (key, moved, feed_by, part_by)
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        seen['browser'] = f'{browser_engine} {browser.version}'
+        try:
+            page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            feed, _child, _line, _body = _open_nested_full_output(page, direct_server_with_data['url'], project)
+            step = {}
+            for sign in (1, -1):
+                step[sign], seen[f'plain feed {sign * dy}'] = _plain_step(page, feed, sign * dy)
+
+            def card(task):
+                return page.locator(f'{feed} .chat-live-card[data-task-id="{task}"]')
+
+            def over_card_parts(task, expanded):
+                for name, selector in (('heading', ':scope > [data-live-summary-button] .chat-live-title'),
+                                       ('summary row', ':scope > [data-live-summary-button]')):
+                    for sign in (1, -1):
+                        check(f'{task} {"expanded" if expanded else "collapsed"} {name} {sign * dy}',
+                              _wheel_over(page, feed, card(task).locator(selector).first, sign * dy), step[sign])
+
+            # A child's card lives in its parent's; a collapsed parent hides it, so the child goes first.
+            for task in ('nested-child', 'nested-parent'):
+                _toggle_card(page, card(task), True)
+                over_card_parts(task, True)
+            for task in ('nested-child', 'nested-parent'):
+                _toggle_card(page, card(task), False)
+                over_card_parts(task, False)
+
+            # A bounded scroller under the pointer, at mid-range, takes the wheel and the feed stays: the
+            # child's full output, a box inside the child card inside its parent.
+            for task in ('nested-parent', 'nested-child'):
+                _toggle_card(page, card(task), True)
+            line = card('nested-child').locator(':scope > [data-live-timeline] > .chat-live-line.expandable')
+            output = line.locator(':scope > .chat-live-line-body-full')
+            if not output.is_visible():
+                line.locator('[data-live-line-toggle]').click()
+            output.get_by_text('UNIQUE_NESTED_TAIL', exact=False).wait_for(state='attached')
+            room = output.evaluate('n => { n.scrollTop = Math.round((n.scrollHeight - n.clientHeight) / 2);'
+                                   ' return Math.min(n.scrollTop, n.scrollHeight - n.clientHeight - n.scrollTop); }')
+            assert room > 2 * dy, ('the full output needs room both ways', room)
+            moved = _wheel_over(page, feed, output, dy, scroller=True)
+            seen['nested scroller'] = moved
+            assert moved['part'] > 0 and abs(moved['feed']) <= 1, moved
+
+            # The control: a box that swallows the wheel, put in the same feed. If a swallowed wheel moved
+            # anything here, the checks above could not tell a swallowed wheel from a passed one.
+            page.evaluate("""feedSelector => {
+                const box = document.createElement('div');
+                box.dataset.wheelControl = '';
+                box.style.cssText = 'height:140px;overflow:auto;flex:none;align-self:stretch';
+                box.innerHTML = '<div style="height:600px">control</div>';
+                box.addEventListener('wheel', event => event.preventDefault(), {passive: false});
+                const first = document.querySelector(feedSelector + ' .chat-live-card');
+                first.parentElement.insertBefore(box, first);
+                box.scrollTop = 200;
+            }""", feed)
+            check('swallowing control', _wheel_over(page, feed, page.locator(f'{feed} [data-wheel-control]'), dy,
+                                                    scroller=True), 0)
+
+            # Main's live card: its heading and its actions row (a run that can be stopped).
+            page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            _open(page, direct_server_with_data['url'])
+            stamp = lambda index: f'2026-11-01T10:{index // 60:02d}:{index % 60:02d}+00:00'
+            for index in range(12):
+                _emit_ws_frame(page, {'type': 'chat', 'role': 'user', 'chat_id': 1, 'content': 'Earlier message. ' * 12,
+                                      'client_message_id': f'wheel-pre-{index}', 'ts': stamp(index)})
+            for index in range(6):
+                _emit_ws_frame(page, {'type': 'chat', 'role': 'assistant', 'is_progress': True, 'narration': True,
+                                      'cancelable': True, 'chat_id': 1, 'task_id': 'wheel-live',
+                                      'content': f'Live narration {index}. ' + 'Checking each result. ' * 4,
+                                      'ts': stamp(30 + index)})
+            for index in range(12):
+                _emit_ws_frame(page, {'type': 'chat', 'role': 'user', 'chat_id': 1, 'content': 'Later message. ' * 12,
+                                      'client_message_id': f'wheel-post-{index}', 'ts': stamp(60 + index)})
+            live = page.locator(f'{MAIN} .chat-live-card[data-task-id="wheel-live"]')
+            live.wait_for(state='visible')
+            for sign in (1, -1):
+                step[sign], seen[f'main plain feed {sign * dy}'] = _plain_step(page, MAIN, sign * dy)
+            for expanded in (True, False):
+                _toggle_card(page, live, expanded)
+                for name, selector, bare in (('heading', ':scope > [data-live-summary-button] .chat-live-title', False),
+                                             ('foot', ':scope > .chat-live-foot', True),
+                                             ('actions', ':scope .chat-live-actions', True),
+                                             ('action button', ':scope .chat-live-actions .btn', False)):
+                    part = live.locator(selector).first
+                    assert part.count() == 1 and part.is_visible(), (expanded, name)
+                    for sign in (1, -1):
+                        check(f'live {"expanded" if expanded else "collapsed"} {name} {sign * dy}',
+                              _wheel_over(page, MAIN, part, sign * dy, bare=bare), step[sign])
+        finally:
+            (_evidence_dir(tmp_path) / f'card-wheel-{browser_engine}.json').write_text(json.dumps(seen, indent=2))
             browser.close()
 
 

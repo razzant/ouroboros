@@ -13,9 +13,10 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=['chromium', 'webkit'])
@@ -45,6 +46,7 @@ def _pointer(block):
 
 def _seed(page):
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [PROJECT]}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, [PROJECT]))
     page.route('**/api/state', lambda r: r.fulfill(json={
         'sha': 'browser-fixture', 'supervisor_ready': True, 'active_chat_activities': [], 'projects': [PROJECT],
         'project_chat_ids': [42], 'current_questions': [_pointer(BLOCK)], 'current_questions_complete': True,
@@ -97,7 +99,8 @@ QUESTION_GEOMETRY = """() => {
     const bubble = document.querySelector('#chat-messages .chat-bubble.project-question');
     const card = bubble.querySelector('.chat-quiz-card');
     const head = card.querySelector('.chat-quiz-head');
-    const frame = card.querySelector('.chat-quiz-comment-box');
+    const wrapper = card.querySelector('.chat-quiz-comment-box');
+    const frame = wrapper.querySelector('.chat-quiz-comment');
     // The bubble's last line is its time alone (owner, refined A 21.10): no host sentence beside it.
     const foot = bubble.querySelector(':scope > .msg-time');
     const capsule = bubble.querySelector('.chat-bubble-voice > .chat-quiz-project');
@@ -106,8 +109,8 @@ QUESTION_GEOMETRY = """() => {
         head: box(head), centres: [...head.querySelectorAll('.chat-quiz-chip, .chat-quiz-status, .chat-quiz-close')].map(el => box(el).cy),
         headOrder: [...head.children].map(el => el.className),
         toQuestion: box(card.querySelector('.chat-quiz-question')).y - box(bubble).y,
-        frame: box(frame), send: box(frame.querySelector('.chat-quiz-send')),
-        field: frame.querySelector('.chat-quiz-comment').getAttribute('aria-label'),
+        frame: box(frame), wrapper: box(wrapper), send: box(wrapper.querySelector('.chat-quiz-send')),
+        field: frame.getAttribute('aria-label'),
         parts: [...bubble.children].filter(el => !el.hidden).map(el => el.classList[0]), footText: foot.textContent.trim(),
         bubbleText: bubble.textContent.replace(/\\s+/g, ' '), factsAnywhere: !!bubble.querySelector('.chat-quiz-host-facts'),
         question: card.querySelector('.chat-quiz-question').textContent.replace(/\\s+/g, ' ').trim(),
@@ -126,7 +129,7 @@ BOXES = """() => {
 
 GROWTH = """async () => {
     const field = document.querySelector('#chat-messages .project-question-card .chat-quiz-comment');
-    const frame = field.closest('.chat-quiz-comment-box'), send = frame.querySelector('.chat-quiz-send');
+    const frame = field, wrapper = field.closest('.chat-quiz-comment-box'), send = wrapper.querySelector('.chat-quiz-send');
     const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const steps = [];
     field.focus();
@@ -134,10 +137,10 @@ GROWTH = """async () => {
         field.value = Array.from({length: lines}, (_, i) => `answer line ${i + 1}`).join('\\n');
         field.dispatchEvent(new Event('input', {bubbles: true}));
         await settle();
-        const f = frame.getBoundingClientRect(), s = send.getBoundingClientRect();
+        const f = frame.getBoundingClientRect(), s = send.getBoundingClientRect(), w = wrapper.getBoundingClientRect();
         steps.push({lines, height: Math.round(field.getBoundingClientRect().height), mode: field.dataset.sizing,
             scrolls: field.scrollHeight > field.clientHeight + 1,
-            inside: s.left >= f.left && s.right <= f.right && s.top >= f.top && s.bottom <= f.bottom});
+            below: s.top >= f.bottom - 0.5, aligned: s.right <= w.right + 0.5});
     }
     return {steps, ring: getComputedStyle(frame).boxShadow};
 }"""
@@ -145,7 +148,7 @@ GROWTH = """async () => {
 
 # The anatomy holds in both themes: the dark voices change colours and the materials inside the answer, never a size.
 @pytest.mark.parametrize('theme', ['light', 'dark'])
-@pytest.mark.parametrize('width,height', [(956, 801), (390, 844)])
+@pytest.mark.parametrize('width,height', [(1100, 750), (956, 801), (390, 844)])
 def test_question_card_voice_line_one_row_head_answer_frame_and_foot(engine_ui, width, height, theme):
     engine = engine_ui['engine']
     page = _open(engine_ui, width, height, theme)
@@ -161,9 +164,11 @@ def test_question_card_voice_line_one_row_head_answer_frame_and_foot(engine_ui, 
         assert facts['headOrder'] == ['chat-quiz-chip', 'chat-quiz-status', 'chat-quiz-head-end'], facts
         assert round(facts['head']['h']) == 28 and max(facts['centres']) - min(facts['centres']) <= 1, facts
         assert facts['toQuestion'] <= 92, 'two lines, not four, before the question'
-        # Answer: one frame holding its words and Send at its trailing bottom edge.
+        # Answer: the visible field owns its frame; Send is a separate trailing action row below it.
         assert facts['field'] == 'Your answer' and not facts['clear'], facts
-        assert facts['frame']['right'] - facts['send']['right'] <= 6 and facts['frame']['bottom'] - facts['send']['bottom'] <= 6, facts
+        assert facts['frame']['right'] <= facts['wrapper']['right'] + 0.5
+        assert facts['send']['y'] >= facts['frame']['bottom'] - 0.5
+        assert facts['send']['right'] <= facts['wrapper']['right'] + 0.5, facts
         # Foot (owner, refined A 21.10): the time alone ends the bubble; the host's sentence is gone from the bubble,
         # and everything the card says (question, the owner's answer frame, the signature line) stays as it was.
         assert facts['parts'] == ['chat-bubble-voice', 'chat-quiz-card', 'msg-time'], facts
@@ -181,11 +186,11 @@ def test_question_card_voice_line_one_row_head_answer_frame_and_foot(engine_ui, 
         growth = page.evaluate(GROWTH)
         print(json.dumps({'question_a_growth': growth, 'engine': engine}))
         heights = {step['lines']: step['height'] for step in growth['steps']}
-        assert heights[0] == heights[1] == heights[2], growth  # two lines at rest
+        assert heights[0] == heights[1] <= heights[2], growth  # the visible field owns its padding; engines may fit two lines at rest
         assert heights[2] < heights[4] < heights[12], growth   # grows with its words
         assert heights[12] == 140 and growth['steps'][4]['scrolls'], growth  # to one cap, then scrolls
         assert growth['steps'][-1]['height'] == heights[1], 'and shrinks again'
-        assert all(step['inside'] for step in growth['steps']), growth
+        assert all(step['below'] and step['aligned'] for step in growth['steps']), growth
         assert growth['ring'] not in ('', 'none'), 'the frame wears the field focus idiom'
         setup_browser.capture(page, f'question-a-{engine}-{width}-{theme}')
         # The Project's own card, opened by its reference as tests/test_ui_result_browser.py presses it: the capsule
@@ -398,6 +403,19 @@ BOARD = [dict(skill='gate_skill', tab_id='cache', title='Cache Efficiency Snapsh
             {'type': 'markdown', 'text': '11 restricted · next reset Wed 21 Oct 09:00 · +0.24 if unused.'}]})
     for index in range(10)]
 
+# A route frame mounts under a route lease (docs/WIDGET_HOST_PROTOCOL.md "Route leases"; widget_module.js): the host
+# mints one, then the skill's page loads under the lease's own URL, never at the skill's route. Same token and shape as
+# tests/test_widgets_ui_browser_identity.py.
+LEASE = 'L' * 43
+
+
+def _lease(route):
+    """Mint, renew and revoke a route lease."""
+    revoke = route.request.url.endswith('/revoke')
+    route.fulfill(json={'ok': True} if revoke else {
+        'token': LEASE, 'base_url': f'/api/widget-resources/{LEASE}/', 'expires_in': 120, 'renew_after': 40})
+
+
 BOARD_EDGES = """() => {
     const page = document.querySelector('#page-widgets'), band = page.querySelector('.app-page-header');
     const list = page.querySelector('.widgets-scroll'), style = getComputedStyle(list);
@@ -441,7 +459,8 @@ def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_
         page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
         page.unroute('**/api/widgets')
         page.route('**/api/widgets', lambda r: r.fulfill(json={'ui_tabs': BOARD}))
-        page.route('**/api/extensions/gate_skill/cache', frame_page)
+        page.route('**/api/widgets/asset-leases**', _lease)
+        page.route(f'**/api/widget-resources/{LEASE}/cache', frame_page)  # the lease's own URL of the skill's `cache` page
         _band(page)
         _goto(page, 'widgets')
         frame = page.locator('[data-widget-key="gate_skill:cache"] iframe')
@@ -464,7 +483,7 @@ def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_
         # A dragged card: the band lets the pointer through to the board's top edge, where the engine scrolls a drag
         # upward, and is the window's handle again once the card is dropped.
         through = """dragging => { const card = document.querySelector('#widgets-list .widgets-card');
-            card.classList.toggle('dragging', dragging); const l = document.querySelector('#page-widgets .widgets-scroll');
+            card.toggleAttribute('data-widget-lifted', dragging); const l = document.querySelector('#page-widgets .widgets-scroll');
             return Boolean(document.elementFromPoint(l.getBoundingClientRect().left + 40, 10)?.closest('.widgets-scroll')); }"""
         assert page.evaluate(through, True), 'a drag reaches the board under the band'
         assert not page.evaluate(through, False), 'at rest the band is the handle'
@@ -615,16 +634,29 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
         setup_browser.capture(page, f'files-sidebar-narrow-{engine}-{theme}')
         page.locator('#files-new-file').click()
         page.locator('.files-editor').fill('Draft kept while the sidebar and window change width.')
-        # Same nodes and focus when the column widens and when the window enters the phone layout.
-        page.locator('#files-new-file').focus()
-        page.set_viewport_size({'width': 1060, 'height': 801})
-        page.wait_for_function("document.querySelector('#page-files .app-page-header').hasAttribute('data-lead')")
-        page.set_viewport_size({'width': 390, 'height': 844})
-        page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
-        assert page.evaluate("""window.__filesNodes.every(el => el === document.getElementById(el.id))
-            && document.activeElement === window.__filesNodes[1]
-            && !!window.__filesNodes[0].closest('.files-browser-header')""")
+
+        def widen_then_phone():
+            page.set_viewport_size({'width': 1060, 'height': 801})
+            page.wait_for_function("document.querySelector('#page-files .app-page-header').hasAttribute('data-lead')")
+            page.set_viewport_size({'width': 390, 'height': 844})
+            page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
+
+        def kept(place):
+            return page.evaluate(f"""window.__filesNodes.every(el => el === document.getElementById(el.id))
+                && document.activeElement === {place}
+                && !!window.__filesNodes[0].closest('.files-browser-header')""")
+        # In a page this narrow a chosen file replaces the list (DESIGN "Page header"), `+ File` and the location with
+        # it: the owner's place is the draft. Same nodes and place when the column widens and when the window enters
+        # the phone layout.
+        widen_then_phone()
+        assert kept("document.querySelector('.files-editor')")
         assert page.locator('.files-editor').input_value() == 'Draft kept while the sidebar and window change width.'
+        # Back to the list, where `+ File` is shown: the same nodes and a focused action keep their place through the
+        # same two moves.
+        page.locator('[data-files-back]').click()
+        page.locator('#files-new-file').focus()
+        widen_then_phone()
+        assert kept('window.__filesNodes[1]')
     finally:
         setup_browser.capture(page, f'files-sidebar-final-{engine}-{theme}')
         page.close()

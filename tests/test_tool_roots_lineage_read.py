@@ -2,12 +2,15 @@
 
 Lineage task aliases remain useful addresses. Other parent-readable files are
 reachable through their actual runtime/home/project roots without helper filters;
-a named wrong root stays a refusal and no read alias grants a mutation.
+a named wrong root stays a refusal and no read alias grants a mutation. A lineage
+task's missing immutable source handle reads where its writer kept it (#2645).
 """
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -470,3 +473,183 @@ def test_profile_summary_names_readable_and_unreadable_roots(monkeypatch):
     assert len(acting) == 2, acting
     acting_readable, acting_unreadable = acting[1].split(" · unreadable=")
     assert "deliverables" in acting_readable and acting_unreadable == "none"
+
+
+# --- #2645: a missing immutable source handle reads where its writer kept it ---------------------
+
+def _forked_parent_sources(geo):
+    """PARENT runs on its own execution drive (memory_mode=forked). The host's plan and review writers keep
+    its sources in the CANONICAL artifact store, while its runtime facts advertise the execution-drive one."""
+    from ouroboros.plan_record import retain_revision
+    from ouroboros.review_ledger import retain_text_source
+    from ouroboros.tool_access import filesystem_affordance_map
+
+    drive = geo.canonical / "state" / "headless_tasks" / PARENT / "data"
+    drive.mkdir(parents=True)
+    ctx = ToolContext(repo_dir=geo.repo, drive_root=drive, task_id=PARENT)
+    ctx.budget_drive_root = str(geo.canonical)
+    ctx.task_metadata = {"budget_drive_root": str(geo.canonical), "root_task_id": ROOT}
+    registry = ToolRegistry(repo_dir=geo.repo, drive_root=drive)
+    registry.set_context(ctx)
+    refs = {"plan": retain_revision(geo.canonical, PARENT, {"goal": "UNIQUE_PLAN_GOAL", "plan": "exact plan"},
+                                    n=1, ts="2026-11-02T15:39:11+00:00"),
+            "reply": retain_text_source(geo.canonical, PARENT, record_id="rl2645", seat_id="critic", role="answer",
+                                        text="UNIQUE_REVIEW_REPLY\n")["ref"]}
+    advertised = pathlib.Path(filesystem_affordance_map(ctx)["root_paths"]["artifact_store"])
+    canonical = geo.canonical / "task_results" / "artifacts" / PARENT
+    for ref in refs.values():  # the reported geometry: absent where advertised, present where written
+        assert not (advertised / ref["path"]).exists() and (canonical / ref["path"]).is_file()
+    return ctx, registry, refs, advertised, canonical
+
+
+@pytest.mark.parametrize(("root", "source"), [("runtime_data", "plan"), ("", "reply"), ("artifact_store", "plan")])
+def test_a_child_reads_its_parents_advertised_source_where_its_writer_kept_it(geometry, source, root):
+    """The reported handoff: the parent gave its child the absolute path built from its advertised root.
+    The child's read delivers the writer's exact bytes and names the placement it opened."""
+    _parent, _registry, refs, advertised, canonical = _forked_parent_sources(geometry)
+    path, real = advertised / refs[source]["path"], (canonical / refs[source]["path"]).resolve()
+    registry, ctx = child_registry(geometry)
+
+    out = registry.execute("read_file", {"path": str(path), **({"root": root} if root else {})})
+
+    assert real.read_text(encoding="utf-8").strip() in out, out
+    assert ctx.last_read_view["target"] == str(real)
+
+
+def test_the_forked_parent_reads_its_own_advertised_sources_by_every_spelling(geometry):
+    ctx, registry, refs, advertised, canonical = _forked_parent_sources(geometry)
+    for ref in refs.values():
+        real = (canonical / ref["path"]).resolve()
+        for args in (ref["read"]["arguments"], {"root": "runtime_data", "path": str(advertised / ref["path"])},
+                     {"path": str(advertised / ref["path"])}, {"root": "artifact_store", "path": str(advertised / ref["path"])}):
+            out = registry.execute("read_file", args)
+            assert real.read_text(encoding="utf-8").strip() in out, (args, out)
+            assert ctx.last_read_view["target"] == str(real), args
+
+
+def test_input_files_retain_the_exact_bytes_of_an_advertised_source(geometry):
+    from ouroboros.delegate_readonly_inputs import schedule_selected_inputs
+
+    ctx, _registry, refs, advertised, canonical = _forked_parent_sources(geometry)
+    ref = refs["reply"]
+
+    [row] = schedule_selected_inputs(ctx, [{"root": "runtime_data", "path": str(advertised / ref["path"])}], CHILD)
+
+    assert row["status"] == "prepared" and row["sha256"] == ref["sha256"], row
+    assert pathlib.Path(row["local"]).read_bytes() == (canonical / ref["path"]).read_bytes()
+
+
+def test_the_source_alias_never_shadows_redirects_or_reroots(geometry):
+    """Only a genuinely missing SHA-named handle of a lineage task moves: an execution-drive file keeps its own
+    bytes, another task's handle and an ordinary artifact stay where they were asked for, a named wrong root
+    stays refused, and tampered retained bytes are refused, never delivered."""
+    from ouroboros.review_ledger import retain_text_source
+
+    _parent, _registry, refs, advertised, canonical = _forked_parent_sources(geometry)
+    registry, ctx = child_registry(geometry)
+    path = advertised / refs["reply"]["path"]
+    path.parent.mkdir(parents=True)
+    path.write_text("EXECUTION_DRIVE_BYTES\n", encoding="utf-8")
+    local = registry.execute("read_file", {"root": "runtime_data", "path": str(path)})
+    assert "EXECUTION_DRIVE_BYTES" in local and ctx.last_read_view["target"] == str(path.resolve()), local
+    path.unlink()
+
+    other = retain_text_source(geometry.canonical, STRANGER, record_id="rl2645", seat_id="critic", role="answer",
+                               text="STRANGER_REPLY\n")["ref"]
+    (canonical / "report.txt").write_text("CANONICAL_REPORT\n", encoding="utf-8")
+    stranger = (geometry.canonical / "state" / "headless_tasks" / STRANGER / "data" / "task_results" / "artifacts"
+                / STRANGER / other["path"])
+    for target in (stranger, advertised / "report.txt"):
+        out = registry.execute("read_file", {"root": "runtime_data", "path": str(target)})
+        assert out.startswith("⚠️") and "STRANGER_REPLY" not in out and "CANONICAL_REPORT" not in out, out
+
+    wrong = registry.execute("read_file", {"root": "task_drive", "path": str(path)})
+    assert "UNIQUE_REVIEW_REPLY" not in wrong and "outside selected root=task_drive" in wrong, wrong
+
+    (canonical / refs["reply"]["path"]).write_text("TAMPERED_REPLY\n", encoding="utf-8")
+    tampered = registry.execute("read_file", {"root": "runtime_data", "path": str(path)})
+    assert tampered.startswith("⚠️") and "TAMPERED_REPLY" not in tampered and "sha256" in tampered, tampered
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX links and permission bits")
+def test_a_link_or_a_denied_read_is_never_taken_for_a_missing_source(geometry):
+    _parent, _registry, refs, advertised, _canonical = _forked_parent_sources(geometry)
+    registry, _ctx = child_registry(geometry)
+    path = advertised / refs["reply"]["path"]
+    path.parent.mkdir(parents=True)
+    path.symlink_to(path.parent / "absent-target.txt")
+    dangling = registry.execute("read_file", {"root": "runtime_data", "path": str(path)})
+    assert dangling.startswith("⚠️") and "UNIQUE_REVIEW_REPLY" not in dangling, dangling
+    path.unlink()
+    if os.geteuid() == 0:
+        return  # root reads through permission bits
+    guarded = advertised / "source_handles"
+    guarded.chmod(0)
+    try:
+        denied = registry.execute("read_file", {"root": "runtime_data", "path": str(path)})
+    finally:
+        guarded.chmod(0o755)
+    assert denied.startswith("⚠️") and "UNIQUE_REVIEW_REPLY" not in denied, denied
+
+
+def test_a_protected_source_stays_protected_through_its_advertised_address(geometry):
+    _parent, _registry, refs, advertised, canonical = _forked_parent_sources(geometry)
+    registry, ctx = child_registry(geometry)
+    ctx.task_contract = {"resource_policy": {"protected_artifacts": [
+        {"id": "plan-source", "paths": [str(canonical / refs["plan"]["path"])], "allow": ["execute"]}]}}
+
+    out = registry.execute("read_file", {"root": "runtime_data", "path": str(advertised / refs["plan"]["path"])})
+
+    assert "RESOURCE_POLICY_BLOCKED" in out and "UNIQUE_PLAN_GOAL" not in out, out
+
+
+_ADVERTISED_PROTECTIONS = ("file", "category", "source_handles", "task_dir")
+
+
+def _advertised_protection(advertised, target, named):
+    """The advertised address a policy names: the source itself or one of its absent parent directories."""
+    path = {"file": target, "category": target.parent, "source_handles": advertised / "source_handles",
+            "task_dir": advertised}[named]
+    assert not path.exists(), "the #2645 geometry: nothing exists at the advertised placement"
+    return path
+
+
+@pytest.mark.parametrize("named", _ADVERTISED_PROTECTIONS)
+@pytest.mark.parametrize("root", ["runtime_data", "artifact_store", ""])
+def test_a_source_protected_by_its_advertised_address_stays_protected_where_it_is_opened(geometry, root, named):
+    """The address a child was given keeps its policy when the read opens the source's canonical placement: the
+    alias never moves a read past a protection named by the asked address (independent review, critical), the
+    source's own or an advertised directory holding it, though that directory does not exist where it was
+    advertised (independent review). A sibling directory protects nothing here."""
+    _parent, _registry, refs, advertised, _canonical = _forked_parent_sources(geometry)
+    registry, ctx = child_registry(geometry)
+    target = advertised / refs["reply"]["path"]
+    protected = _advertised_protection(advertised, target, named)
+    args = {"path": str(target), **({"root": root} if root else {})}
+    ctx.task_contract = {"resource_policy": {"protected_artifacts": [{
+        "id": "assigned-protected-source", "paths": [str(protected)], "allow": ["execute"]}]}}
+
+    out = registry.execute("read_file", args)
+
+    assert "RESOURCE_POLICY_BLOCKED" in out and "UNIQUE_REVIEW_REPLY" not in out, out
+    ctx.task_contract = {"resource_policy": {"protected_artifacts": [{
+        "id": "a-sibling", "paths": [str(protected.parent / f"{protected.name}-sibling")], "allow": ["execute"]}]}}
+    assert "UNIQUE_REVIEW_REPLY" in registry.execute("read_file", args)
+    ctx.task_contract = {}  # unrestricted, the same alias still opens the source's exact bytes
+    assert "UNIQUE_REVIEW_REPLY" in registry.execute("read_file", args)
+
+
+@pytest.mark.parametrize("named", _ADVERTISED_PROTECTIONS)
+def test_a_scheduled_input_cannot_copy_a_source_its_receiver_protects_by_its_advertised_address(geometry, named):
+    """``input_files`` judges the receiving reader on the caller's binding: a receiver policy naming the advertised
+    address, or an advertised directory holding it, refuses the copy before anything is prepared, though the
+    caller itself may read it."""
+    from ouroboros.delegate_readonly_inputs import InputSelectionError, schedule_selected_inputs
+
+    ctx, _registry, refs, advertised, _canonical = _forked_parent_sources(geometry)
+    target = advertised / refs["reply"]["path"]
+    policy = {"protected_artifacts": [{"id": "assigned-protected-source", "allow": ["execute"],
+                                       "paths": [str(_advertised_protection(advertised, target, named))]}]}
+
+    with pytest.raises(InputSelectionError, match="cannot be prepared"):
+        schedule_selected_inputs(ctx, [{"root": "runtime_data", "path": str(target)}], CHILD, resource_policy=policy)

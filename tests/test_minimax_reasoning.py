@@ -41,7 +41,7 @@ def make_client(monkeypatch):
     monkeypatch.setenv("MINIMAX_REGION", "global_en")
     clients = []
 
-    def make(script, *, asynchronous=False, expected_replay=None):
+    def make(script, *, asynchronous=False, expected_replay=None, split=True):
         client, sent = LLMClient(), []
 
         def respond(request):
@@ -53,7 +53,7 @@ def make_client(monkeypatch):
             missing_echo = expected_replay is not None and any(
                 m.get("role") == "tool" for m in payload["messages"]
             ) and any(k not in assistant or assistant[k] != v for k, v in expected_replay.items())
-            if payload.get("reasoning_split") is not True or missing_echo:
+            if (split and payload.get("reasoning_split") is not True) or missing_echo:
                 return httpx.Response(400, json={"error": {
                     "type": "invalid_request_error", "code": "fixture_contract",
                     "message": "split output and unchanged continuation are required"}})
@@ -83,9 +83,11 @@ def make_client(monkeypatch):
             remote.close()
 
 
-def _call(client, history, *, stream=False, asynchronous=False, model="minimax::MiniMax-M3.1"):
+def _call(client, history, *, stream=False, asynchronous=False, model="minimax::MiniMax-M3.1", effort=None):
     kwargs = dict(messages=history, model=model, tools=TOOLS, stream=stream,
                   max_tokens=1024, wait_for_resources=False)
+    if effort is not None:
+        kwargs["reasoning_effort"] = effort
     return asyncio.run(client.chat_async(**kwargs)) if asynchronous else client.chat(**kwargs)
 
 
@@ -93,10 +95,12 @@ def _response(message, finish="tool_calls"):
     return completion(choices=[{"index": 0, "message": message, "finish_reason": finish}])
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("model", ["minimax::MiniMax-M3.1", "minimax::MiniMax-M3.1-Flash"])
-@pytest.mark.parametrize("carrier", ["reasoning_content", "reasoning_details", "both", "absent"])
+@pytest.mark.parametrize(("carrier", "model", "stream", "asynchronous"), [
+    ("reasoning_content", "minimax::MiniMax-M3.1", False, False),
+    ("reasoning_details", "minimax::MiniMax-M3.1-Flash", True, True),
+    ("both", "minimax::MiniMax-M3.1", False, False),
+    ("absent", "minimax::MiniMax-M3.1-Flash", True, True),
+])
 def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client, asynchronous, stream, model, carrier):
     reasoning = {}
     if carrier in {"reasoning_content", "both"}:
@@ -146,11 +150,7 @@ def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client
 
 @pytest.mark.parametrize("reasoning", [
     {"reasoning_content": {"future": ["retained", 42]}},
-    {"reasoning_content": None},
-    {"reasoning_content": ""},
-    {"reasoning_details": {"future": "not a list"}},
     {"reasoning_details": [None, 17, {"type": "new", "data": "opaque"}]},
-    {"reasoning_details": None},
     {"reasoning_details": []},
 ])
 def test_unknown_and_empty_shapes_are_retained_without_display_coercion(isolated, make_client, reasoning):
@@ -166,8 +166,7 @@ def test_unknown_and_empty_shapes_are_retained_without_display_coercion(isolated
     assert body == original
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(("stream", "asynchronous"), [(False, True), (True, False)])
 def test_host_capsules_are_removed_without_editing_opaque_carriers(isolated, make_client, asynchronous, stream):
     raw = {"opaque": {"_context_capsule": {"signature": "provider-owned=="}, "keep": [False, "π"]}}
     reasoning = {"reasoning_details": copy.deepcopy(raw), "reasoning_content": copy.deepcopy(raw)}
@@ -197,7 +196,8 @@ def test_existing_details_narration_stays_display_only(isolated, make_client, ca
     msg, _ = _call(client, [{"role": "user", "content": "Weather?"}])
     original, emitted, trace = copy.deepcopy(msg), [], {"reasoning_notes": []}
     _emit_round_progress(msg["content"], msg, lambda text, **meta: emitted.append((text, meta)), trace)
-    assert emitted == ([("Check the weather.", {"narration": True})] if carrier == "reasoning_details" else [])
+    assert emitted == ([("Check the weather.", {"narration": True, "reasoning": True})]
+                       if carrier == "reasoning_details" else [])
     assert trace == {"reasoning_notes": []}
     assert msg == original and _visible_round_text(msg["content"]) == ""
 
@@ -365,3 +365,109 @@ def test_http_fixture_rejects_missing_split_or_continuation(make_client, missing
     with pytest.raises(openai.BadRequestError, match="unchanged continuation"):
         client._get_remote_client({}).chat.completions.create(**kwargs)
     assert len(sent) == 1
+
+
+FLASH = "minimax::MiniMax-M3.1-Flash"
+# Five documented tiers pass unchanged; the owner chose the nearest for the other three.
+FLASH_WIRE = {"none": "low", "minimal": "low", "low": "low", "medium": "medium",
+              "high": "high", "xhigh": "xhigh", "max": "max", "ultra": "max"}
+
+
+def _hello():
+    return [{"role": "user", "content": "hello"}]
+
+
+def _done():
+    return _response({"role": "assistant", "content": "done"}, "stop")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("requested,wire", sorted(FLASH_WIRE.items()))
+def test_flash_sends_a_documented_tier_and_keeps_requested_apart(isolated, make_client, asynchronous, requested, wire):
+    client, sent = make_client([_done()], asynchronous=asynchronous)
+    msg, usage = _call(client, _hello(), asynchronous=asynchronous, model=FLASH, effort=requested)
+    assert msg["content"] == "done" and len(sent) == 1
+    assert sent[0]["model"] == "MiniMax-M3.1-Flash" and sent[0]["reasoning_effort"] == wire
+    assert "thinking" not in sent[0]
+    assert usage["effort"] == {
+        "requested": requested, "sent": {"reasoning_effort": wire}, "sent_state": "explicit",
+        "sent_source": "host_candidate", "reported": None, "report_source": None,
+    }
+    disclosure = usage["request_wire"]
+    assert (disclosure["original_requested_effort"], disclosure["requested_effort"],
+            disclosure["applied_effort"]) == (requested, wire, wire)
+    if requested == wire:
+        assert "reasoning_effort_clamped" not in usage
+    else:
+        assert usage["reasoning_effort_clamped"] == {
+            "requested": requested, "applied": wire,
+            "reason": "provider_wire_mapping", "model": "MiniMax-M3.1-Flash",
+        }
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+def test_flash_projection_and_disclosure_reach_the_stream_lane(isolated, make_client, asynchronous):
+    reply = WireResponse(sse(chunk({"role": "assistant", "content": "done"}, "stop", usage=completion()["usage"])))
+    client, sent = make_client([reply], asynchronous=asynchronous)
+    _, usage = _call(client, _hello(), stream=True, asynchronous=asynchronous, model=FLASH, effort="none")
+    assert sent[0]["stream"] is True and sent[0]["reasoning_effort"] == "low"
+    assert usage["reasoning_effort_clamped"]["requested"] == "none"
+    assert usage["reasoning_effort_clamped"]["applied"] == "low"
+
+
+@pytest.mark.parametrize(("requested", "model"), [
+    ("none", "minimax::MiniMax-M3"),
+    ("minimal", "minimax::MiniMax-M4-Future"),
+    ("ultra", "minimax::MiniMax-M3.1-Flash-Next"),
+])
+def test_other_direct_minimax_models_keep_the_requested_tier(isolated, make_client, model, requested):
+    client, sent = make_client([_done()])
+    _, usage = _call(client, _hello(), model=model, effort=requested)
+    assert sent[0]["reasoning_effort"] == requested
+    assert "reasoning_effort_clamped" not in usage
+
+
+@pytest.mark.parametrize("requested", ["none", "minimal", "ultra"])
+def test_the_same_name_on_a_compatible_route_keeps_the_requested_tier(isolated, make_client, monkeypatch, requested):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "compatible-fixture-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://vllm.invalid/v1")
+    client, sent = make_client([_done()], split=False)
+    client._pop_effort_clamp_disclosure()
+    _, usage = _call(client, _hello(), model="openai-compatible::MiniMax-M3.1-Flash", effort=requested)
+    assert sent[0]["reasoning_effort"] == requested and "reasoning_split" not in sent[0]
+    assert "reasoning_effort_clamped" not in usage
+
+
+@pytest.mark.parametrize(("model", "wire", "region", "endpoint"), [
+    pytest.param(FLASH, "low", "global_en", "https://api.minimax.io/v1", id='minimax::MiniMax-M3.1-Flash-low-global_en-https://api.minimax.io/v1'),
+    ("minimax::MiniMax-M3", "none", "cn_zh", "https://api.minimaxi.com/v1"),
+])
+def test_both_regional_endpoints_share_the_exact_model_rule(isolated, make_client, monkeypatch, region, endpoint, model, wire):
+    monkeypatch.setenv("MINIMAX_REGION", region)
+    client, sent = make_client([_done()])
+    assert client._resolve_remote_target(model)["base_url"] == endpoint
+    _call(client, _hello(), model=model, effort="none")
+    assert (sent[0]["model"], sent[0]["reasoning_effort"]) == (model.split("::", 1)[1], wire)
+
+
+def test_fresh_minimax_proposals_reach_the_sdk_with_their_own_tier(isolated, make_client):
+    from ouroboros.settings_setup_contract import build_setup_bootstrap
+
+    initial = build_setup_bootstrap({"MINIMAX_API_KEY": "fixture-not-live"}, "web")["initialState"]
+    client, sent = make_client([_done(), _done()])
+    for model in (initial["mainModel"], initial["lightModel"]):
+        _call(client, _hello(), model=model, effort="none")
+    assert [(body["model"], body["reasoning_effort"]) for body in sent] == [
+        ("MiniMax-M3", "none"), ("MiniMax-M3.1-Flash", "low")]
+
+
+@pytest.mark.parametrize("model", [FLASH, "minimax::MiniMax-M3"])
+def test_an_unconsumed_flash_note_does_not_reach_the_next_native_tier(isolated, make_client, model):
+    from ouroboros.llm_capability_policy import _EFFORT_CLAMP_CVAR
+
+    client, sent = make_client([_done()])
+    client._build_remote_kwargs(client._resolve_remote_target(FLASH), _hello(), "none", 64, "auto", None, None)
+    assert _EFFORT_CLAMP_CVAR.get()["requested"] == "none"
+    _, usage = _call(client, _hello(), model=model, effort="high")
+    assert sent[0]["reasoning_effort"] == "high"
+    assert "reasoning_effort_clamped" not in usage

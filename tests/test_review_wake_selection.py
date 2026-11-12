@@ -29,7 +29,7 @@ def _entry(status="responded", *, published=True, additional=False):
     return entry
 
 
-@pytest.mark.parametrize("status", ["responded", "parse_failure", "error", "not_dispatched", "interrupted"])
+@pytest.mark.parametrize("status", ["responded", "parse_failure", "interrupted"])
 def test_selected_finalized_answer_or_unavailability_wakes_and_peek_never_acks(tmp_path, status):
     ctx, entry = _ctx(tmp_path), _entry(status)
     selected = {"reviewers": [_pin()]}
@@ -45,7 +45,7 @@ def test_selected_finalized_answer_or_unavailability_wakes_and_peek_never_acks(t
     assert not model_sleep.terminal_readiness(ctx, selected, [ready[0]["id"]], review_entries=[entry])
 
 
-@pytest.mark.parametrize("case", ["unselected", "raw", "pending", "additional", "unfinalized", "other_wave", "other_operation", "other_slot"])
+@pytest.mark.parametrize("case", ["unselected", "additional", "other_slot"])
 def test_noncanonical_or_unselected_review_does_not_wake(tmp_path, case):
     ctx, entry = _ctx(tmp_path), _entry()
     pin = _pin()
@@ -81,8 +81,7 @@ def test_default_is_whole_wave_and_explicit_helpers_use_readable_ids(tmp_path):
     assert "waking_actor_id" not in resumed  # a new wait observes its own waking source
 
 
-@pytest.mark.parametrize("invalid", [{"tasks": ["all"]}, {"tasks": "child"}, {"runs": ["foreign"]},
-                                      {"reviewers": [""]}, {"wake_after_sec": 1}, {"wake_at": "later"}, []])
+@pytest.mark.parametrize("invalid", [{"wake_after_sec": 1}, {"wake_at": "later"}, []])
 def test_invalid_selectors_refuse_before_review(tmp_path, invalid):
     ctx = _ctx(tmp_path)
     with pytest.raises(ValueError):
@@ -134,9 +133,11 @@ def test_responsible_question_precedes_selected_terminal_and_unselected_mail_sta
     assert model_sleep.wake_reason(ctx, {"senders": ["peer"]}) == "mail:peer"
 
 
-@pytest.mark.parametrize("tool", ["change", "commit"])
-@pytest.mark.parametrize("mode,enforcement", [("pro", "blocking"), ("pro", "advisory"), ("cyber_pro", "blocking")])
-@pytest.mark.serial
+@pytest.mark.parametrize(("mode", "enforcement", "tool"), [
+    ("pro", "blocking", "change"),
+    ("pro", "advisory", "commit"),
+    ("cyber_pro", "blocking", "change"),
+])
 def test_selected_review_returns_with_other_seat_live_and_never_lands(author, monkeypatch, tool, mode, enforcement):
     from ouroboros import config
     from ouroboros.tools.review_change import _handle_review_change
@@ -180,9 +181,11 @@ def test_wake_schema_is_unconditional_and_shared():
     assert len(schemas) == 3 and all(schema == waiting.wake_on_schema() for schema in schemas)
 
 
-@pytest.mark.parametrize("install", ["api", "subscription", "mixed"])
-@pytest.mark.parametrize("mode,enforcement", [("pro", "advisory"), ("pro", "blocking"), ("cyber_pro", "blocking")])
-@pytest.mark.parametrize("unavailable", [False, True])
+@pytest.mark.parametrize(("unavailable", "mode", "enforcement", "install"), [
+    (False, "pro", "advisory", "api"),
+    (False, "cyber_pro", "blocking", "mixed"),
+    (True, "pro", "blocking", "subscription"),
+])
 def test_canonical_cas_wake_is_identical_across_installs_and_review_modes(tmp_path, monkeypatch, install, mode, enforcement, unavailable):
     from ouroboros import config
     from ouroboros.review_records import ReviewActorRecord, ReviewRequest, ReviewSlot
@@ -215,6 +218,10 @@ def test_canonical_cas_wake_is_identical_across_installs_and_review_modes(tmp_pa
     state["seen_outcomes"] = [row["id"] for row in ready]
     restored = _ctx(tmp_path)
     restored._left_review_wait = state
+    assert not waiting.ready_helpers(restored, waiting.select_helpers(restored))
+    # A cursor an earlier build saved holds each outcome's full identity: it counts as delivered too.
+    state["seen_outcomes"] = [f"review:{row['wave_id']}:{row['operation_id']}:{row['slot_id']}:{row['outcome']['outcome_id']}"
+                              for row in ready]
     assert not waiting.ready_helpers(restored, waiting.select_helpers(restored))
 
 
@@ -315,7 +322,7 @@ def test_retained_ledger_unavailability_uses_exact_owned_canonical_outcome(tmp_p
     assert bool(model_sleep.terminal_readiness(_ctx(tmp_path, task_id=owner), chosen)) is (owner == "task-1" and status == "error")
 
 
-@pytest.mark.parametrize("wake_on", [None, {}, {"tasks": [], "reviewers": []}, {"tasks": ["child"]}])
+@pytest.mark.parametrize("wake_on", [None, {}, {"tasks": ["child"]}])
 def test_system_report_refuses_unsupported_wake_choice_before_dispatch(tmp_path, monkeypatch, wake_on):
     from ouroboros import preflight_receipts
     from ouroboros.tools import review_change

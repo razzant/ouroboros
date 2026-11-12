@@ -127,6 +127,10 @@ def _canonical_promoted_repair_constraint(value: Any) -> tuple[Optional[dict], s
         return None, "invalid_skill_repair_constraint"
     if not payload_dir.is_dir():
         return None, "skill_repair_payload_missing"
+    from ouroboros.deployment_extensions import change_refusal, payload_write_refusal
+
+    if change_refusal(canonical.skill_name, "repair") or payload_write_refusal(payload_dir, data_root=_pool().DRIVE_ROOT):
+        return None, "managed_by_deployment"  # a required package is its administrator's: no repair task starts
     # X3 (owner 11=B): the repair is admitted against ONE exact payload state.
     # An unreadable payload cannot anchor a hash chain — fail closed here, not
     # after the task has already spent rounds.
@@ -310,68 +314,6 @@ def _admit_project_scope(
     return None
 
 
-def bind_retry_to_origin_project(
-    drive_root: Any, task: dict, task_id: str, retry_task_id: str,
-) -> str:
-    """Carry a timed-out root's Project onto the retry that replaces it.
-
-    A retry is the SAME work under a new physical id, so it belongs to the room
-    the work already has (DEVELOPMENT "the captured reference is the identity of
-    the work"). Before this, the new id copied the origin ref but carried no
-    binding, and the retried work painted a Main card offering "Turn into
-    project" until some later implicit act adopted it. The predecessor's own
-    binding answers first — it is the SSOT for that task's project — and the
-    origin-keyed lookup covers a root that was never bound itself while another
-    task id of the same owner message was. The new row reuses the predecessor's
-    stored origin BY VALUE, so the retry joins that message's one convertible
-    unit instead of starting a second.
-
-    The reaper calls this INSIDE its retry admission transaction, under the same
-    ``origin_claim_lock`` every implicit claim holds, and only once cancellation
-    can no longer win the boundary: ``bind_task_to_project`` is immutable, so a
-    bound-but-never-admitted retry id would answer ``project_id_for_task``
-    forever. Creates no project and never raises — a refused bind (a project that
-    stopped accepting them after admission) or an unreadable store leaves the retry unbound and
-    is disclosed as ``project_binding_failed``. Returns the project the retry was
-    bound to, "" when there was nothing to inherit.
-    """
-    tid = str(retry_task_id or "").strip()
-    origin_id = str(task_id or "").strip()
-    admission_basis = task.get("_project_admission")
-    if (not tid or not origin_id or tid == origin_id
-            or isinstance(admission_basis, dict) and admission_basis.get("project") is None):
-        return ""  # scope-only work has no room binding to inherit
-    from ouroboros.projects_registry import (
-        bind_task_to_project,
-        project_binding_for_task,
-    )
-
-    origin = _origin_from_mapping(task, absent="mid_task_no_origin")
-    try:
-        predecessor = project_binding_for_task(drive_root, origin_id) or {}
-        pid = (str(admission_basis.get("project_id") or "") if admission_basis is not None else
-               str(predecessor.get("project_id") or ""))
-    except Exception as exc:
-        _report_binding_failure(tid, "", exc, path="timeout_retry_admission",
-                                reason="project_binding_unreadable", drive_root=drive_root)
-        return ""
-    if not pid:
-        return ""
-    if isinstance(predecessor.get("source_ref"), dict):
-        origin = {"ref": dict(predecessor["source_ref"])}
-        if isinstance(predecessor.get("source_text"), str):
-            origin["text"] = predecessor["source_text"]
-    elif predecessor.get("origin_absent"):
-        origin = {"absent": str(predecessor["origin_absent"])}
-    try:
-        bind_task_to_project(drive_root, tid, pid, origin=origin, admission_basis=admission_basis)
-    except Exception as exc:
-        _report_binding_failure(tid, pid, exc, path="timeout_retry_admission",
-                                drive_root=drive_root)
-        return ""
-    return pid
-
-
 def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     """Enqueue a first-class pooled owner task from a conversation-lane promote.
     The task carries the originating ``chat_id`` (its live card and replies
@@ -437,6 +379,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "context_requires_self_body_docs": evt.get("context_requires_self_body_docs", False),
         **({"context_requires_development": evt["context_requires_development"]}
            if isinstance(evt.get("context_requires_development"), bool) else {}),
+        **({"review_answer": True} if evt.get("review_answer") is True else {}),  # task_contract.review_answer
         **({"reasoning_effort": evt["reasoning_effort"]} if evt.get("reasoning_effort") else {}),  # explicit start only
         "objective_author": dict(evt.get("objective_author") or {}),
         "owner_corpus": list(evt.get("owner_corpus") or []),
@@ -445,13 +388,15 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "_admission_token": admission_token,
         "promotion_admission_token": admission_token,
     }
+    model_metadata = evt.get("metadata") or {}
+    task["metadata"] = {"lead": model_metadata["lead"]} if "lead" in model_metadata else {}
     origin = consciousness_origin_metadata({"origin_message_ref": evt.get("source_ref"), **evt})
     if origin:
         # A root consciousness started keeps its origin/category/level by value (В9':
         # ordinary Main flow, no presence-style project/workspace/source stripping).
         if origin.get("initiator") == "consciousness":
             task["actor_id"] = "consciousness"
-        task.setdefault("metadata", {}).update(origin)
+        task["metadata"].update(origin)
         apply_consciousness_authority(task)
     inherited_attachment_manifest = _pool()._apply_presence_promotion_authority(
         evt, task, objective=objective, expected_output=expected_output,
@@ -513,6 +458,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # top-level key — and metadata may not exist yet.
     if isinstance(evt.get("client_surface"), dict) and evt.get("client_surface"):
         task.setdefault("metadata", {})["client_surface"] = dict(evt["client_surface"])
+    if isinstance(evt.get("ui_control"), dict) and evt.get("ui_control"):
+        task.setdefault("metadata", {})["ui_control"] = dict(evt["ui_control"])  # the press that started it
     pid = str(evt.get("project_id") or "").strip()
     rejection = _admit_project_scope(evt, task, tid, pid, attachment_manifest)
     if rejection is not None:
@@ -556,6 +503,12 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             task["task_contract"].update(authority)
     # Popped BEFORE the row is built/queued so the announce fact never rides it.
     announce_project = task.pop("_announce_project", None)
+    # The direct handbook answer is this start's own, on its contract, after any Presence authority: a copied one,
+    # true or false, stays with the work that started this. The row's copy keeps its older meaning in Max.
+    if isinstance(task.get("task_contract"), dict):
+        task["task_contract"].pop("context_requires_development", None)
+    if isinstance(evt.get("context_requires_development"), bool):
+        task.setdefault("task_contract", {})["context_requires_development"] = evt["context_requires_development"]
     attach_task_contract(task)
     admitted = ctx.enqueue_task(task)
     if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
@@ -570,10 +523,13 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     if announce_project is not None:
         _pool()._announce_created_project(announce_project, tid, task=task)
     # A positive promote confirmation is allowed only after the durable queue
-    # projection exists.  The event handler writes the scheduled task result
-    # after the routing receipt; keeping that last step outside this function
-    # makes the result itself the cross-process admission receipt.
-    persist_snapshot = getattr(ctx, "persist_queue_snapshot", None)
+    # projection exists: the BARRIER, never the mark (a mark answers None while the tick
+    # publishes). The event handler writes the scheduled task result after the routing
+    # receipt; keeping that last step outside this function makes the result itself the
+    # cross-process admission receipt.
+    from supervisor.queue_publication import barrier_of
+
+    persist_snapshot = barrier_of(ctx)
     if not callable(persist_snapshot):
         return _pool()._reject_promoted_after_attachment_stage({
             "status": "needs_manual_target",
@@ -582,7 +538,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             "admission_started": True,
         }, attachment_manifest)
     try:
-        persisted = persist_snapshot(reason="promote_chat_to_task") is not False
+        persisted = persist_snapshot(reason="promote_chat_to_task") is True
     except Exception:
         log.warning("promote: queue snapshot persist failed for %s", tid, exc_info=True)
         persisted = False
@@ -600,7 +556,17 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # message seam (tests/test_heartbeat_presentation.py). While it is still
     # PENDING the Dashboard Activity row cancels it; the card action appears once
     # it starts.
-    # A project root may execute from a forked child drive.  Its budget-root
+    from ouroboros.route_choice import OWNER_LEAD_SOURCES, lead_snapshot
+
+    chosen = lead_snapshot(model_metadata.get("lead"))
+    if chosen and chosen["source"] in OWNER_LEAD_SOURCES:
+        from ouroboros.gateway.ui_preferences import record_model_recent
+
+        try:
+            record_model_recent(_pool().DRIVE_ROOT, chosen["model"], chosen["use_local"])
+        except Exception:
+            log.warning("Promoted model saved; recent suggestion could not be recorded for %s", tid, exc_info=True)
+    # A project root may execute from a forked child drive. Its budget-root
     # result therefore receives this admitted contract before worker startup.
     outcome = _pool()._promoted_scheduled_outcome(task, admitted, tid)
     outcome["_admitted_suggested_name"] = task["suggested_name"]

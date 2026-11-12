@@ -44,7 +44,7 @@ def _maintain_harness(ctx: ToolContext, action: str, harness: str = "", target: 
             return service.cancel_maintenance(operation_id, ctx=ctx)
         if action != "update" or not harness or operation_id:
             raise ValueError("Use update with a harness, or cancel with operation_id")
-        if target not in {"latest", "version", "previous", "baseline"}:
+        if target not in {"latest", "version"}:
             raise ValueError("Unknown maintenance target")
         if (target == "version") != bool(version):
             raise ValueError("Supply version only for target='version'")
@@ -58,7 +58,8 @@ def maintenance_tool_entries() -> list[ToolEntry]:
         ToolEntry("inspect_harness", {
             "name": "inspect_harness",
             "description": (
-                "Inspect the selected vendor CLI, update capabilities or one retained maintenance operation. "
+                "Inspect vendor programs or one retained maintenance operation: for every program, its installed "
+                "version, the vendor's newest version when read, and which actions exist. "
                 "Read this when a harness may need an update or a previous update has an unconfirmed result. "
                 "It never starts an engine, installs a CLI, logs in or generates model output. "
                 "check_latest explicitly asks the engine for a vendor version check; missing evidence stays unknown. "
@@ -75,11 +76,10 @@ def maintenance_tool_entries() -> list[ToolEntry]:
             "name": "maintain_harness",
             "description": (
                 "Request the engine's declared CLI update/return capability, or cancel an operation. "
-                "Inspect first: supported targets and ownership come from the engine, never the harness name. "
+                "Update with target latest also installs a program that is not installed. "
+                "Inspect first: available actions and refusal reasons come from the engine. "
                 "This changes installed program files in place; new native starts may fail, and returning a version "
-                "may require the registry. It never changes accounts or starts a login. "
-                "A packaged Update may prepare Node/npm without submitting a CLI update; "
-                "maintenance_restart_required asks the owner to use Restart in the chat header, then repeat Update. "
+                "may require vendor network access. It never changes accounts or starts a login. "
                 "A this_attempt not_submitted response does not resolve an earlier lost POST. "
                 "Update requires a stable request_id: retain it and retry the SAME body and id after a lost reply, "
                 "never generate a new id to recover it. Acceptance is not success; inspect_harness(operation_id=...) "
@@ -89,7 +89,7 @@ def maintenance_tool_entries() -> list[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["update", "cancel"]},
                 "harness": {"type": "string", "description": "Required for update: exact engine harness id."},
-                "target": {"type": "string", "enum": ["latest", "version", "previous", "baseline"], "default": "latest"},
+                "target": {"type": "string", "enum": ["latest", "version"], "default": "latest"},
                 "version": {"type": "string", "description": "Required for target=version: exact version to install. Omit for other targets."},
                 "request_id": {"type": "string", "description": "Required for update. Stable id, at most 256 printable ASCII characters; reuse with the same body after lost contact."},
                 "operation_id": {"type": "string", "description": "Required for cancel; inspect reads status separately."},

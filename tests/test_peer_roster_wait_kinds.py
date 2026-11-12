@@ -164,6 +164,8 @@ def test_a_parked_pause_keeps_the_author_its_tree_fence_declared(tmp_path):
     the declaration existed keeps its mind record), and a press that declared nobody names nobody."""
     fences = {
         "pressed": {"by": {"actor": "owner", "text": "", "at": _PAUSED_ISO}},
+        # An agent's press declared for the owner: the head is the declared author, then its recorded words.
+        "declared": {"by": {"actor": "owner", "text": "Anton asked to stop the export", "at": _PAUSED_ISO}},
         "mind": {"by": {"actor": "ouroboros", "text": "pausing for the update", "at": _PAUSED_ISO}},
         "legacy-mind": {"actor": "mind", "reason": "before the restart"},
         "anonymous": {},  # requested_by=owner alone is the door, not a declaration
@@ -178,6 +180,7 @@ def test_a_parked_pause_keeps_the_author_its_tree_fence_declared(tmp_path):
 
     waits = _waits(tmp_path)
     assert [{k: v for k, v in w.items() if k not in {"reason", "text", "release"}} for w in waits["pressed"]] == [{"kind": "owner_pause", "state": "paused", "by": "owner", "since": _PAUSED_ISO}]
+    assert waits["declared"][0]["by"] == "owner: Anton asked to stop the export"
     assert waits["mind"][0]["by"] == "Ouroboros: pausing for the update"
     assert waits["legacy-mind"][0]["by"] == "Ouroboros: before the restart"
     assert [{k: v for k, v in w.items() if k not in {"reason", "text", "release"}} for w in waits["anonymous"]] == [{"kind": "owner_pause", "state": "paused", "since": _PAUSED_ISO}]

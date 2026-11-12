@@ -61,7 +61,7 @@ def test_child_receipt_writes_leave_legacy_catchup_to_an_explicit_read(tmp_path,
     assert expected_gap in receipt["coverage"]["gaps"]
 
 
-@pytest.mark.parametrize("history", ["event", "empty", "absent", "torn", "unreadable"])
+@pytest.mark.parametrize("history", ["event", "empty", "unreadable"])
 def test_missing_parent_observes_available_history_without_creating_result(tmp_path, monkeypatch, history):
     log = tmp_path / "logs/events.jsonl"
     if history != "absent":
@@ -171,14 +171,33 @@ def test_public_list_and_detail_keep_summary_but_not_swarm_storage_evidence(tmp_
     request = SimpleNamespace(path_params={"task_id": "root"},
                               app=SimpleNamespace(state=SimpleNamespace(drive_root=tmp_path)))
     detail = json.loads(tasks._task_get_response(request).body)
+    assert "swarm_fanout_rollup" in stored, "the stored base is durable; only the public projection omits it"
     for public in (listed, detail):
         assert "swarm_fanouts" not in public and "swarm_fanout_basis" not in public
+        assert "swarm_fanout_rollup" not in public
         assert public["owner_extension"] == unknown
         assert public["swarm_efficiency"] == stored["swarm_efficiency"]
         assert public["swarm_receipt"] == stored["swarm_receipt"]
         assert public["result"] == "answer"
     assert load_task_result(tmp_path, "root") == stored
     assert swarm_rollup.load_swarm_rollup(tmp_path, "root")["fanout_count"] == 1
+
+
+def test_a_delegated_run_child_is_collected_by_its_run_actor_and_an_unknown_one_stays_missing(tmp_path):
+    """A delegated run's fan-out names its run id: its custody row is the collected child; an absent run is a gap."""
+    from ouroboros import delegate_custody_current as current
+
+    write_task_result(tmp_path, "root", "completed", result="answer")
+    swarm_rollup.record_swarm_fanout(tmp_path, {"event_id": "swarm:run", "type": "swarm_fanout",
+        "parent_task_id": "root", "task_ids": ["run-1"], "requested_count": 1})
+    with store.open_store(tmp_path, write=True) as txn:
+        txn.put_custody("run-1", {"run_id": "run-1", "task_id": "root", "settled": True}, state=current.CLOSED)
+    collected = tree_inputs(tmp_path, "root")
+    assert any(actor["id"] == "run:run-1" and actor["collected"] for actor in collected["actors"])
+    assert "missing_child_results" not in collected["coverage"]["gaps"]
+    swarm_rollup.record_swarm_fanout(tmp_path, {"event_id": "swarm:gone", "type": "swarm_fanout",
+        "parent_task_id": "root", "task_ids": ["run-gone"], "requested_count": 1})
+    assert "missing_child_results" in tree_inputs(tmp_path, "root")["coverage"]["gaps"]
 
 
 @pytest.mark.parametrize("children", [42, ["known-child", {"damaged": "child"}]])

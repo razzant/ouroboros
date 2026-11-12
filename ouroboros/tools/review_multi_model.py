@@ -105,6 +105,23 @@ def review_output_allowance(model: str, window: int = 0, **binding) -> int:
     return response_allowance(str(model or ""), _review_output_budget(), **observed_binding(window, binding))
 
 
+def triad_stable_head(layer: str, bible_text: str) -> str:
+    """The head of an api row's system text: the constitutional preamble and BIBLE (or its absence) on the body
+    layer, the bare instructions heading elsewhere."""
+    if layer != "body":
+        return "## REVIEW INSTRUCTIONS\n\n"
+    if bible_text:
+        return (_CONSTITUTIONAL_PREAMBLE + "### BIBLE.md (Full Text)\n\n" + bible_text
+                + "\n\n---\n\n## REVIEW INSTRUCTIONS\n\n")
+    return _CONSTITUTIONAL_PREAMBLE + "(BIBLE.md could not be loaded)\n\n## REVIEW INSTRUCTIONS\n\n"
+
+
+def packet_head_material(layer: str) -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): an api row's head on ``layer``,
+    BIBLE present (a placeholder: guide text) or missing, and its one user turn."""
+    return [triad_stable_head(layer, "⟨BIBLE.md⟩"), triad_stable_head(layer, ""), TRIAD_USER_TURN]
+
+
 def triad_api_messages(prompt: str, stable_prefix_len: int, content: str,
                        *, layer: str = "body") -> tuple:
     """The exact api-row message pair of a triad panel, and the BIBLE text it
@@ -118,22 +135,11 @@ def triad_api_messages(prompt: str, stable_prefix_len: int, content: str,
     anything else would admit a wave the ledger then refuses seat by seat.
     """
     bible_text = ""
-    if layer != "body":
-        stable_head = "## REVIEW INSTRUCTIONS\n\n"
-    else:
+    if layer == "body":
         bible_text = _rev().load_governance_doc(_rev()._REPO_ROOT, "BIBLE.md", on_missing="explicit")
-        if bible_text:
-            stable_head = (
-                _CONSTITUTIONAL_PREAMBLE
-                + "### BIBLE.md (Full Text)\n\n" + bible_text
-                + "\n\n---\n\n## REVIEW INSTRUCTIONS\n\n"
-            )
-        else:
+        if not bible_text:
             log.warning("Proceeding without BIBLE.md — constitutional compliance cannot be guaranteed")
-            stable_head = (
-                _CONSTITUTIONAL_PREAMBLE
-                + "(BIBLE.md could not be loaded)\n\n## REVIEW INSTRUCTIONS\n\n"
-            )
+    stable_head = triad_stable_head(layer, bible_text)
     # System content is split at the caller-declared stable/dynamic boundary so
     # the byte-stable prefix (constitutional preamble + BIBLE + the prompt's own
     # stable governance head) carries a provider cache marker; per-round evidence

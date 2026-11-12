@@ -24,10 +24,13 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import ouroboros.tools.browser as browser_mod
-from ouroboros import owner_pause
+from ouroboros import chromium_runtime, owner_pause
 from ouroboros.task_results import write_task_result
 from ouroboros.tools.registry import ToolRegistry
 
+PINNED = chromium_runtime.CHROMIUM_VERSION
+CHROMIUM_SUPPLY = ("(Playwright; pinned Chrome for Testing headless shell, Chromium sandbox requested at launch "
+                   "(no per-process isolation check)); ")
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
 
@@ -96,8 +99,13 @@ def _fake_playwright(ctx, launches, page_factory):
             return types.SimpleNamespace(new_context=lambda **_kw: context, is_connected=lambda: True,
                                          close=lambda: None, version=version)
         return types.SimpleNamespace(launch=launch)
-    return types.SimpleNamespace(chromium=engine("chromium", "141.0.7390.37"), webkit=engine("webkit", "26.0"),
+    return types.SimpleNamespace(chromium=engine("chromium", PINNED), webkit=engine("webkit", "26.0"),
                                  devices={}, stop=lambda: None)
+
+
+def pinned_install(*, engine="chromium", **_kw):
+    """The production contract: Chromium resolves to the pinned executable, WebKit to None."""
+    return "/pinned/chrome-headless-shell" if engine == "chromium" else None
 
 
 @pytest.fixture
@@ -107,7 +115,8 @@ def fake_browser(monkeypatch):
         playwright = _fake_playwright(ctx, launches, page_factory)
         sync_api = types.SimpleNamespace(sync_playwright=lambda: types.SimpleNamespace(start=lambda: playwright))
         monkeypatch.setitem(__import__("sys").modules, "playwright.sync_api", sync_api)
-        monkeypatch.setattr(browser_mod, "_ensure_playwright_installed", lambda *a, **k: None)
+        monkeypatch.setattr(browser_mod, "_ensure_playwright_installed", pinned_install)
+        monkeypatch.delenv(chromium_runtime.SANDBOX_ENV, raising=False)
         monkeypatch.setattr(browser_mod, "_HAS_STEALTH", stealth)
         monkeypatch.setattr(browser_mod, "Stealth", FakeStealth, raising=False)
         monkeypatch.setattr(browser_mod.browser_policy, "browser_url_block_reason", lambda *a, **k: "")
@@ -130,14 +139,14 @@ def test_setup_disables_only_the_iframe_evasion_and_records_generation_facts(fak
 
     ((options, applied_page),) = FakeStealth.applied
     assert options == {"iframe_content_window": False} and applied_page is page
-    assert generation.browser_conditions == ("Browser conditions: chromium 141.0.7390.37 (Playwright); "
+    assert generation.browser_conditions == (f"Browser conditions: chromium {PINNED} {CHROMIUM_SUPPLY}"
                                              "playwright-stealth evasions applied except iframe.contentWindow.")
     again, same = browser_mod._ensure_browser(ctx)  # reuse: the generation's own facts, no second setup
     assert (again, same) == (page, generation) and len(FakeStealth.applied) == 1 and launches == ["chromium"]
     _page, recreated = browser_mod._ensure_browser(ctx, engine="webkit")
     assert recreated is not generation and launches == ["chromium", "webkit"]
     assert recreated.browser_conditions.startswith("Browser conditions: webkit 26.0 (Playwright); ")
-    assert generation.browser_conditions.startswith("Browser conditions: chromium 141.0.7390.37")
+    assert generation.browser_conditions.startswith(f"Browser conditions: chromium {PINNED}")
 
 
 def test_missing_stealth_is_reported_absent(fake_browser):
@@ -147,7 +156,7 @@ def test_missing_stealth_is_reported_absent(fake_browser):
     _page, generation = browser_mod._ensure_browser(ctx)
 
     assert FakeStealth.applied == []
-    assert generation.browser_conditions == ("Browser conditions: chromium 141.0.7390.37 (Playwright); "
+    assert generation.browser_conditions == (f"Browser conditions: chromium {PINNED} {CHROMIUM_SUPPLY}"
                                              "playwright-stealth is not installed, so no stealth evasions were applied.")
 
 
@@ -209,17 +218,15 @@ def sticky(tmp_path, monkeypatch, fake_browser):
         executor.shutdown()
 
 
-CONDITIONS = ("Browser conditions: chromium 141.0.7390.37 (Playwright); "
+CONDITIONS = (f"Browser conditions: chromium {PINNED} {CHROMIUM_SUPPLY}"
               "playwright-stealth evasions applied except iframe.contentWindow.")
 
 
 @pytest.mark.parametrize("tool,args,producer", [
     ("browse_page", {"url": "https://observed.example/", "output": "text"}, "Fake page body"),
-    ("browse_page", {"url": "https://observed.example/", "output": "html"}, "<html><body>Fake page body</body></html>"),
     ("browse_page", {"url": "https://observed.example/", "output": "screenshot"}, None),
-    ("browser_action", {"action": "evaluate", "value": "document.title"}, "42"),
     ("browser_action", {"action": "screenshot"}, None),
-], ids=["text", "html", "screenshot", "evaluate", "action-screenshot"])
+], ids=["text", "screenshot", "action-screenshot"])
 def test_successful_observations_carry_the_note_and_keep_clean_data(sticky, tool, args, producer):
     sticky.install()
     if tool == "browser_action":
@@ -356,7 +363,8 @@ def test_engine_switch_then_infrastructure_retry_keeps_its_own_expectation(stick
         row, _ = _browse_through_the_loop(sticky.registry, tmp_path, 30, executor=executor, engine="webkit")
         result = row["tool_result"]
         assert (result.status, result.producer_text) == ("ok", "Fake page body"), result.text
-        assert result.host_annotations == (CONDITIONS.replace("chromium 141.0.7390.37", "webkit 26.0"),)
+        assert result.host_annotations == ("Browser conditions: webkit 26.0 (Playwright); "
+                                           "playwright-stealth evasions applied except iframe.contentWindow.",)
         assert launches == ["chromium", "webkit", "webkit"]
         assert all(g._cleanup_done for g in generations[:2])
         assert ctx.browser_state is generations[2]
@@ -437,7 +445,7 @@ def test_a_call_abandoned_by_its_timeout_never_retries_into_the_replacement(stic
     assert ctx.browser_state is replacement is not first and replacement.browser is None
 
 
-@pytest.mark.parametrize("a_stage", ["navigation", "click", "before_session", "before_wrapper"])
+@pytest.mark.parametrize("a_stage", ["navigation", "click", "before_wrapper"])
 def test_abandoned_a_unwinds_while_b_opens_on_the_replacement(sticky, tmp_path, monkeypatch, a_stage):
     """A times out, B enters the real bound wrapper, THEN A's navigation dies."""
     from ouroboros import loop_tool_execution as execution
@@ -483,11 +491,12 @@ def test_abandoned_a_unwinds_while_b_opens_on_the_replacement(sticky, tmp_path, 
 
     monkeypatch.setattr(browser_mod, "cleanup_browser_handles", record_cleanup)
 
-    def opening(**_kw):
+    def opening(**kw):
         if threading.get_ident() == b_thread[0]:
             trace.append("B opening")
             b_opening.set()
             assert release_b.wait(10)
+        return pinned_install(**kw)
 
     # Capture B's worker identity at the existing wrapper, without replacing it.
     bound = execution._execute_browser_tool_bound

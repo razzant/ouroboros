@@ -19,7 +19,7 @@ from tests.test_onboarding_complete_endpoint import (
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 
 
@@ -247,6 +247,44 @@ def capture(page, name):
         page.screenshot(path=str(target / f"{name}.png"), animations="disabled")
 
 
+def test_cursor_login_and_catalog_are_not_execution_readiness(subscription_ui):
+    """Real Accounts and onboarding consumers, no generation or live credentials."""
+    ui = subscription_ui
+    ui["fixture"]["status"]["profiles"]["profiles"] = [{
+        "profile": {"profile_id": "cursor-default", "harness_id": "cursor", "enabled": True},
+        "status": {"verification": "passed", "verification_source": "vendor", "availability": "available"},
+        "identity": {"label": "Cursor account"},
+    }]
+    ui["fixture"]["status"]["harnesses"] = [{
+        "id": "cursor", "display_name": "Cursor", "enabled": True, "status": "ok",
+        "models": [{"id": "cursor-test"}],
+    }]
+    ui["settings"]["OUROBOROS_SUBAGENTS"] = {"enabled": True, "items": []}
+    assert all(source["id"] != "cursor" for source in ui["fixture"]["catalog"]["model_sources"])
+    page = ui["page"]
+    page.goto(ui["url"])
+    page.click('[data-nav-page="settings"]')
+    page.click('[data-settings-tab="providers"]')
+    cursor = page.locator('[data-family="cursor"]')
+    cursor.get_by_text("Signed in", exact=True).wait_for()
+    assert "Login verified" in cursor.inner_text()
+    assert "Connected" not in cursor.inner_text()
+    # The section's copy opens behind its one Details, right under the lead.
+    page.locator("#harness-accounts-section > details.settings-section-details > summary").click()
+    assert "Sign-in does not verify main-chat support or agent execution" in page.locator(
+        "#harness-accounts-section").inner_text()
+    cursor.scroll_into_view_if_needed()
+    capture(page, "cursor-auth-only-settings")
+    ui["errors"].watch(page)  # leaving Settings may cut off the page's own reads (tests/ui_console_errors.py)
+    page.goto(ui["url"] + "/onboarding")
+    page.wait_for_function("() => document.querySelector('#agents-outcome')?.textContent.includes('Signed in to Cursor')")
+    outcome = page.locator("#agents-outcome").inner_text()
+    assert "Main still needs" in outcome
+    assert "Sign-in does not verify main-chat support or agent execution" in outcome
+    capture(page, "cursor-auth-only-onboarding")
+    assert not ui["posts"] or all(path == "/api/onboarding/subagents/preview" for path, _ in ui["posts"])
+
+
 def test_codex_quick_setup_computes_skipped_steps_and_finishes_once(subscription_ui, onboarding):
     ui = subscription_ui
     ui['backend']['client'] = onboarding.client
@@ -354,10 +392,10 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     for route in held_preview:
         release_preview(route)
     page.unroute(preview_pattern)
-    page.wait_for_function("() => document.querySelector('[data-model-role=light] [data-model-context-note]').textContent.includes('500,000')")
-    page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-model-context-note]').textContent.includes('872,000')")
-    assert '872,000' not in light.locator('[data-model-context-note]').inner_text()
-    assert '500,000' not in main.locator('[data-model-context-note]').inner_text()
+    page.wait_for_function("() => document.querySelector('[data-model-role=light] [data-model-context-note]').textContent.includes('Window 500k')")
+    page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-model-context-note]').textContent.includes('Window 872k')")
+    assert '872k' not in light.locator('[data-model-context-note]').inner_text()
+    assert '500k' not in main.locator('[data-model-context-note]').inner_text()
     main.locator('[data-model-role-context]').fill('1000000')
     page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-model-context-note]').textContent.includes('set in Settings')")
     page.locator('[data-model-role="vision"] [data-model-role-account]').select_option('work')
@@ -448,12 +486,13 @@ def test_cursor_only_does_not_claim_model_access_and_api_only_finishes(subscript
     }]
     page = ui['page']
     page.goto(ui['url'] + '/onboarding')
-    page.wait_for_function("() => document.querySelector('[data-agent-family=cursor]').textContent.includes('Connected')")
+    page.wait_for_function("() => document.querySelector('[data-agent-family=cursor]').textContent.includes('Signed in')")
     assert page.locator('#quick-start-btn').is_hidden()
     assert page.locator('#next-btn').is_disabled()
     assert 'Main still needs Codex' in page.locator('#agents-outcome').inner_text()
     # Removing the optional agent gives the API-only path the same five steps.
     ui['fixture']['status']['profiles']['profiles'] = []
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator('#openai-key').fill('fixture-api-credential')
@@ -606,6 +645,8 @@ def test_accounts_catalog_failure_is_visible_and_retry_keeps_the_draft(subscript
 def test_declared_source_with_failed_inventory_preserves_stored_or_owner_authored_defaults(subscription_ui, fresh_install):
     ui, page = subscription_ui, subscription_ui['page']
     ui['bootstrap']['freshInstall'] = fresh_install
+    if not fresh_install:  # a stored install's bootstrap: its document sets every slot, none is the wizard's (#2969)
+        ui['bootstrap']['initialState']['automaticModels'] = []
     initial = ui['bootstrap']['initialState']['mainModel']
     ui['backend'].update(preview_error='Agent inventory unavailable.', catalog_response={
         'items': [], 'model_sources': ui['fixture']['catalog']['model_sources'],
@@ -640,7 +681,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     assert held
     ui['fixture']['status']['profiles']['profiles'] = []
     page.evaluate("async () => (await import('/onboarding/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
-    page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Connected')")
+    page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Signed in')")
     for route in held:
         route.fulfill(content_type='application/json', body=json.dumps(ui['fixture']['catalog']))
     page.unroute('**/api/model-catalog')

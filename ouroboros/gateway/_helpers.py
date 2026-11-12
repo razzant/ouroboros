@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import pathlib
@@ -125,16 +124,18 @@ def coerce_int(value: Any, default: int = 0) -> int:
         return default
 
 
-async def request_json_or(
-    request: Request,
-    default: Any,
-    *,
-    exceptions: tuple[type[BaseException], ...] = (json.JSONDecodeError, ValueError),
-) -> Any:
+async def request_json_or(request: Request, default: Any) -> Any:
+    """The JSON object the request carries, ``default`` for an empty body, else ``None``.
+
+    The ``Content-Type`` label is not read (``curl -d`` labels JSON as a form). A present body that is
+    not a JSON object (malformed or wrongly encoded text, whitespace, ``null``, an array or a scalar)
+    is ``None``, never ``default``: a route that acts on an absent body refuses every non-dict in its
+    own response shape, so a body it cannot read never becomes its default action."""
     try:
-        return await request.json()
-    except exceptions:
-        return default
+        value = await request.json()
+    except (ValueError, RecursionError):
+        return None if await request.body() else default
+    return value if isinstance(value, dict) else None
 
 
 def json_error(message: str, status: int = 500, **extra: Any) -> JSONResponse:

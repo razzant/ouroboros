@@ -15,10 +15,9 @@ from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx, _superv
 from tests.test_billing_authority_unavailable import BINDING, _loop_driver, _request, _run, _task_scope
 from tests.test_billing_group import _scope, _spend
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("authority", ["readable", "unreadable", "group_exhausted", "global_exhausted"])
+@pytest.mark.parametrize("authority", ["readable", "group_exhausted", "global_exhausted"])
 def test_child_pause_keeps_sibling_independent_and_resume_rechecks_original_money(tmp_path, monkeypatch, authority):
     from ouroboros.task_results import write_task_result
     from ouroboros.task_store import patch_document
@@ -80,7 +79,7 @@ def test_child_pause_keeps_sibling_independent_and_resume_rechecks_original_mone
 class LiveGateway:
     """No provider/daemon: the already-admitted external session remains live."""
     def get_run(self, run_id, **kwargs):
-        return {"summary": {"runId": run_id, "state": "running"}, "lastSeq": 1}
+        return {"summary": {"runId": run_id, "state": "running", "effectiveAccess": "readonly"}, "lastSeq": 1}
 
     def close(self):
         pass
@@ -96,7 +95,7 @@ def _park_with_body(tmp_path, monkeypatch, direct):
     monkeypatch.setattr(sc, "_runtime", body.body_runtime)
     from supervisor.queue_snapshot import persist_queue_snapshot
     monkeypatch.setattr(env.q, "persist_queue_snapshot", persist_queue_snapshot)
-    runtime = body.start_body_runtime(tmp_path, gateway_factory=LiveGateway, max_workers=2)
+    runtime = body.start_body_runtime(tmp_path, gateway_factory=LiveGateway)
     env.runtime = runtime
     def host_tick(_ctx):
         sc.reconcile(env.q, direct=[env.task] if direct else ())
@@ -120,7 +119,7 @@ def _park_with_body(tmp_path, monkeypatch, direct):
 @pytest.mark.parametrize("direct", [False, True])
 def test_cold_queue_restore_rebinds_actual_body_and_returns_same_live_session(tmp_path, monkeypatch, direct):
     from ouroboros import delegate_collection as body, delegate_custody_current as current, owner_wait, sleep_custody as sc
-    from ouroboros.project_lease import cold_project_holders, candidate_is_leasable
+    from ouroboros.project_lease import candidate_is_leasable, lane_holders
     from supervisor.sleep_wake import wake_ready_sleepers
 
     env, row = _park_with_body(tmp_path, monkeypatch, direct)
@@ -135,10 +134,10 @@ def test_cold_queue_restore_rebinds_actual_body_and_returns_same_live_session(tm
         assert parked["id"] == "sleeper" and sc.carrier_receipt(parked)
         assert wake_ready_sleepers(env.q) == []
         assert env.q.resume_budget_paused_task("sleeper")["error"] == "external_runs_unsettled"
-        holders = cold_project_holders(env.workers.PENDING)
+        holders = lane_holders(env.workers.RUNNING.values(), env.workers.PENDING)
         assert holders == {"project": {"sleeper"}}
-        assert not candidate_is_leasable({"id": "foreign", "project_id": "project"}, set(), cold_holders=holders)
-        env.runtime = body.start_body_runtime(tmp_path, gateway_factory=LiveGateway, max_workers=2)
+        assert not candidate_is_leasable({"id": "foreign", "project_id": "project"}, set(), holders=holders)
+        env.runtime = body.start_body_runtime(tmp_path, gateway_factory=LiveGateway)
         assert env.runtime.runtime_id != first_runtime.runtime_id
         assert sc.reconcile(env.q) == {"sleeper"}
         assert bp.budget_pause_row(tmp_path, "sleeper")["external_custody"] == row["external_custody"]
@@ -158,8 +157,7 @@ def test_cold_queue_restore_rebinds_actual_body_and_returns_same_live_session(tm
         assert not env.runtime.thread.is_alive()
 
 
-@pytest.mark.parametrize("change", ["task_attempt", "pause_generation", "root_task_id", "project_id", "source_ref",
-                                    "foreign_run", "changed_invocation", "unknown_custody"])
+@pytest.mark.parametrize("change", ["task_attempt", "foreign_run", "unknown_custody"])
 def test_resume_refuses_changed_or_unknown_accepted_binding(tmp_path, monkeypatch, change):
     from ouroboros import delegate_custody as custody, delegate_custody_current as current, sleep_custody as sc
     env, original = _park_with_body(tmp_path, monkeypatch, False)

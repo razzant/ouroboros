@@ -11,7 +11,8 @@ carry inline and which it reaches through a navigation map. Three tiers:
    ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is byte-stable across
    commits, so the caller puts it in its cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
-   change touches ``web/``; the review-and-commit protocol chapter always; and
+   change touches ``web/``, its design bible alone for changed words elsewhere;
+   the review-and-commit protocol chapter always; and
    every DEVELOPMENT chapter whose text mentions a touched file NAME. Bounded by
    :data:`~ouroboros.runtime_limits.REVIEW_GOVERNANCE_INLINE_SHARE` of the
    reviewer's usable window, largest-relevance-first. Whenever DESIGN is not
@@ -76,8 +77,6 @@ DEVELOPMENT_BOOK_ID = "development"
 ARCHITECTURE_BOOK_ID = "architecture"
 # Always relevant: it is the protocol the reviewer is executing right now.
 REVIEW_PROTOCOL_CHAPTER = "docs/development/05-review-and-commit-protocol.md"
-# Existing whole-DESIGN inline selection; the heading map is body-wide.
-DESIGN_CHANGE_CLASS_PREFIX = "web/"
 
 PACKET_DELIVERY = "packet"
 RETRIEVING_DELIVERY = "retrieving"
@@ -103,6 +102,56 @@ CREATING_SKILLS_PATH = "docs/CREATING_SKILLS.md"
 SKILL_PLUGIN_API_FACTS = ("env_from_settings", "permissions", "subscribe_events", "companion_processes",
                          "scheduled_tasks", "plugin_api")
 SKILL_UI_FACTS = ("ui_tab", "contributes", "page_module")
+# What a seat is told about the governance it was given and owes, by layer and delivery ("every" reaches both):
+# operative words of the review contract (``commit_gate.commit_review_contract_fingerprint``), never the
+# documents they name. Each layer's navigation below is rendered from its own entry.
+NAVIGATION_WORDS = {
+    CORE_LAYER: {
+        # (heading, rule set with a supplied section, rule set without one, what the subject is and is not)
+        "every": (
+            "## Governance navigation (core layer)",
+            "The checklist section inlined above is the whole rule set for this review",
+            f"NO section of `{CHECKLISTS_PATH}` is inlined for this review (this surface supplies none); the "
+            "universal change-review rules are the whole rule set",
+            ": the subject is not the Ouroboros body, so Ouroboros's constitution, engineering handbook, design "
+            "system, architecture map and standing disclosures do not govern it and are not delivered. The "
+            "subject's own documents are evidence of what it promises, not law: use them to judge behavioural "
+            "documentation, public contracts and release metadata."),
+        PACKET_DELIVERY: (" This row has no repository tools: the documents named below were NOT delivered; state "
+                          "any resulting uncertainty rather than claim to have read them.",),
+        RETRIEVING_DELIVERY: (" Everything named below is complete on disk in the subject repository; read any "
+                              "range you need with your own tools.",),
+    },
+    BODY_LAYER: {
+        PACKET_DELIVERY: (
+            "## Governance navigation (index of sources not inlined)",
+            "The supplied rules and selected sections are the governance evidence this packet delivers. This row "
+            "has no repository tools: the map below identifies sources and ranges that were NOT delivered, not "
+            "additional evidence. State any resulting uncertainty; do not claim to have read the named sources."),
+        RETRIEVING_DELIVERY: (
+            "## Governance navigation (read on demand)",
+            "The rules above are the ones this change activates. Available sources below remain complete on disk "
+            "and untruncated; missing sources are named. Read any range with `read_file(root=\"system_repo\", "
+            "path=..., start_line=A, max_lines=N)`. Ranges are inclusive and a parent heading includes its "
+            "descendant group. A document named here and not inlined was NOT dropped — it is one read away, and "
+            "the review's governance manifest records the disposition of each one."),
+    },
+    SKILL_LAYER: {
+        PACKET_DELIVERY: (
+            "## Governance navigation (index of sources not inlined)",
+            "The checklist section, BIBLE.md and the host contracts inlined above are the governance evidence "
+            "this packet delivers. This row has no repository tools: the maps below identify sources that were "
+            "NOT delivered, not additional evidence. State any resulting uncertainty; do not claim to have read "
+            "the named sources."),
+        RETRIEVING_DELIVERY: (
+            "## Governance navigation (read on demand)",
+            "The checklist section and BIBLE.md are inlined above. The sources named REQUIRED in your manifest "
+            "({required}) bind what a skill may touch: read each in full with `read_file(root=\"system_repo\", "
+            "path=..., start_line=A, max_lines=N)` before you judge. Everything else below is one read away, "
+            "complete on disk and untruncated; a document named here and not inlined was NOT dropped, and the "
+            "review's governance manifest records the disposition of each one."),
+    },
+}
 # A body document in a core-layer manifest: named, not delivered, by rule.
 NOT_APPLICABLE_DISPOSITION = "not_applicable"
 _CORE_NOT_APPLICABLE = "core layer: governs Ouroboros's own body, not this subject"
@@ -258,22 +307,58 @@ def _subject_documents(subject_root: Path) -> list:
     return root_docs + nested
 
 
+# The core layer's frame of the subject's own documents (the documents and their maps are data).
+_SUBJECT_DOCS = {
+    "unsupplied": ("### Subject documents\n\nNo subject root was supplied: the subject's own documents were not "
+                   "indexed for this review"),
+    PACKET_DELIVERY: " and were not delivered to this packet.", RETRIEVING_DELIVERY: "; read them with your own tools.",
+    "none": "### Subject documents\n\nThe subject keeps no Markdown document at its root or under `docs/` (root: `{root}`).",
+    "listed": "### Subject documents (root: `{root}`)", "item": "- `{rel}` ({size:,} bytes)",
+    "more": "- … {count} more Markdown document(s) under the same roots, not listed",
+}
+
+
+def _checklist_pointer(rules: bool, shared: bool) -> str:
+    """The body navigation's line on the checklist book: which of its sections are inlined above."""
+    inlined = [label for label, present in (("the section that applies to this review", rules),
+                                            (f"its `{SHARED_CHECKLIST_SECTION}` section", shared)) if present]
+    pointer = (f"{' and '.join(inlined)} {'are' if len(inlined) > 1 else 'is'} inlined above."
+               if inlined else "NO section of it is inlined for this review.")
+    return f"- `{CHECKLISTS_PATH}` — the complete checklist book; {pointer}"
+
+
+def navigation_material(layer: str, delivery: str) -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a layer's governance navigation
+    as its renderer composes it for ``delivery``, over placeholders (the subject's documents, the sources a skill
+    owes). The documents it names, their maps and the guides' own text are not here."""
+    from ouroboros.tools.review_helpers import GOVERNANCE_OMISSION
+
+    words = NAVIGATION_WORDS.get(layer, {})
+    if layer != CORE_LAYER:
+        pointers = [_checklist_pointer(rules, shared) for rules in (True, False) for shared in (True, False)]
+        omissions = [text.format(rel_path="⟨path⟩", path="⟨path⟩", error="⟨error⟩") for text in GOVERNANCE_OMISSION.values()]
+        return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
+                *(pointers if layer == BODY_LAYER else ())]
+    heading, with_rules, without_rules, subject_words = words["every"]
+    (tail,) = words[delivery]
+    return [heading, *(rules + subject_words + tail for rules in (with_rules, without_rules)),
+            _SUBJECT_DOCS["unsupplied"] + _SUBJECT_DOCS[delivery], _SUBJECT_DOCS["none"].format(root="⟨root⟩"),
+            _SUBJECT_DOCS["listed"].format(root="⟨root⟩"), _SUBJECT_DOCS["item"].format(rel="⟨path⟩", size=1),
+            _SUBJECT_DOCS["more"].format(count=1)]
+
+
 def _subject_navigation(subject_root: Any, *, packet: bool) -> tuple[str, list]:
     """The core layer's index of the SUBJECT's documents, with its manifest rows."""
     from ouroboros.context_layout import generate_doc_nav_map
 
     rows: list[dict] = []
     if subject_root is None:
-        return ("### Subject documents\n\nNo subject root was supplied: the subject's own documents "
-                "were not indexed for this review" + (
-                    " and were not delivered to this packet." if packet
-                    else "; read them with your own tools."), rows)
+        return _SUBJECT_DOCS["unsupplied"] + _SUBJECT_DOCS[PACKET_DELIVERY if packet else RETRIEVING_DELIVERY], rows
     root = Path(subject_root)
     docs = _subject_documents(root)
     if not docs:
-        return (f"### Subject documents\n\nThe subject keeps no Markdown document at its root or "
-                f"under `docs/` (root: `{root}`).", rows)
-    lines = [f"### Subject documents (root: `{root}`)", ""]
+        return _SUBJECT_DOCS["none"].format(root=root), rows
+    lines = [_SUBJECT_DOCS["listed"].format(root=root), ""]
     for index, path in enumerate(docs[:SUBJECT_DOCS_MAX_LISTED]):
         rel = path.relative_to(root).as_posix()
         try:
@@ -291,10 +376,9 @@ def _subject_navigation(subject_root: Any, *, packet: bool) -> tuple[str, list]:
                 lines.append(generate_doc_nav_map(text, title=rel, rel_path=rel, instructions=False))
                 lines.append("")
                 continue
-        lines.append(f"- `{rel}` ({size:,} bytes)")
+        lines.append(_SUBJECT_DOCS["item"].format(rel=rel, size=size))
     if len(docs) > SUBJECT_DOCS_MAX_LISTED:
-        lines.append(f"- … {len(docs) - SUBJECT_DOCS_MAX_LISTED} more Markdown document(s) under "
-                     "the same roots, not listed")
+        lines.append(_SUBJECT_DOCS["more"].format(count=len(docs) - SUBJECT_DOCS_MAX_LISTED))
     return "\n".join(lines).rstrip(), rows
 
 
@@ -329,22 +413,11 @@ def _core_layer_context(*, surface: str, touched_paths: Optional[Iterable[Any]],
     # in its tail; every other surface receives the layer's statement here.
     required = (scope_required_sources(subject_root, pairs, layer=CORE_LAYER)
                 if subject_root is not None and surface != "scope" else [])
-    rule_set = ("The checklist section inlined above is the whole rule set for this review"
-                if checklist_text.strip() else
-                f"NO section of `{CHECKLISTS_PATH}` is inlined for this review (this surface "
-                "supplies none); the universal change-review rules are the whole rule set")
+    words = NAVIGATION_WORDS[CORE_LAYER]
+    heading, with_rules, without_rules, subject_words = words["every"]
+    (tail,) = words[PACKET_DELIVERY if packet else RETRIEVING_DELIVERY]
     navigation = _join([
-        "## Governance navigation (core layer)",
-        f"{rule_set}: the subject "
-        "is not the Ouroboros body, so Ouroboros's constitution, engineering handbook, design "
-        "system, architecture map and standing disclosures do not govern it and are not "
-        "delivered. The subject's own documents are evidence of what it promises, not law: use "
-        "them to judge behavioural documentation, public contracts and release metadata." + (
-            " This row has no repository tools: the documents named below were NOT delivered; "
-            "state any resulting uncertainty rather than claim to have read them." if packet else
-            " Everything named below is complete on disk in the subject repository; read any "
-            "range you need with your own tools."),
-        subject_nav,
+        heading, (with_rules if checklist_text.strip() else without_rules) + subject_words + tail, subject_nav,
         render_required_sources(required, layer=CORE_LAYER) if surface != "scope" else "",
     ])
     return GovernanceContext(navigation=navigation, manifest=rows,
@@ -434,21 +507,8 @@ def _skill_layer_context(repo_dir: Any, *, surface: str, delivery: str, checklis
     maps.append(generate_doc_nav_map(creating, title=CREATING_SKILLS_PATH.rsplit("/", 1)[-1], rel_path=CREATING_SKILLS_PATH,
                                      instructions=not packet) if not creating.startswith("[⚠️") else creating)
     required_names = [row["path"] for row in rows if row["disposition"] == "required"]
-    navigation = _join([
-        "## Governance navigation (index of sources not inlined)" if packet else
-        "## Governance navigation (read on demand)",
-        ("The checklist section, BIBLE.md and the host contracts inlined above are the governance evidence "
-         "this packet delivers. This row has no repository tools: the maps below identify sources that were "
-         "NOT delivered, not additional evidence. State any resulting uncertainty; do not claim to have read "
-         "the named sources." if packet else
-         "The checklist section and BIBLE.md are inlined above. The sources named REQUIRED in your manifest "
-         "(" + ", ".join(f"`{name}`" for name in required_names) + ") bind what a skill may touch: read each "
-         "in full with `read_file(root=\"system_repo\", path=..., start_line=A, max_lines=N)` before you judge. "
-         "Everything else below is one read away, complete on disk and untruncated; a document named here "
-         "and not inlined was NOT dropped, and the review's governance manifest records the disposition of "
-         "each one."),
-        *maps,
-    ])
+    heading, words = NAVIGATION_WORDS[SKILL_LAYER][PACKET_DELIVERY if packet else RETRIEVING_DELIVERY]
+    navigation = _join([heading, words.format(required=", ".join(f"`{name}`" for name in required_names)), *maps])
     stable_inline = _join(_render(title, text) for title, text in tier1)
     selected_inline = _join(_render(title, text) for title, text in selected)
     return GovernanceContext(
@@ -470,6 +530,7 @@ def governance_context(
     layer: str = BODY_LAYER,
     subject_root: Any = None,
     manifest_facts: Any = None,
+    review_words: Any = None,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -577,21 +638,36 @@ def governance_context(
             rows.append(_row(path, 2, "navigation", len(chapter.text),
                              "no touched file mentioned"))
 
-    design_touched = any(path.startswith(DESIGN_CHANGE_CLASS_PREFIX) for path in touched)
+    web_touched = any(path.startswith("web/") for path in touched)
+    has_words = review_words is not None and bool(review_words.changes or review_words.gaps)
     design_text = load_governance_doc(root, DESIGN_PATH, on_missing="explicit")
+    chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
+    chapter_text[DESIGN_PATH] = design_text
     design_missing = design_text.startswith("[⚠️ OMISSION") or not design_text.strip()
     if design_missing:
         rows.append(_row(DESIGN_PATH, 2, "navigation", 0,
                          design_text or "DESIGN source is empty; content not delivered"))
-    elif design_touched:
+    elif web_touched:
         candidates.append(((1, 0, DESIGN_PATH), DESIGN_PATH, DESIGN_PATH,
-                           f"a touched path is under {DESIGN_CHANGE_CLASS_PREFIX}"))
+                           "a touched path is under web/"))
+    elif has_words:
+        # The seed and component recipes follow the numbered principles inside
+        # the same Markdown section: stop where the numbered list ends, not at H2.
+        bible = re.search(r"(?ms)^## Design bible\b.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", design_text)
+        path = f"{DESIGN_PATH}#Design bible"
+        if bible:
+            last = re.findall(r"(?m)^(\d+)\. ", bible[0])[-1]
+            chapter_text[path] = bible[0].strip()
+            candidates.append(((1, 0, path), path, f"{path} (excerpt: principles 1–{last})",
+                               "changed source words; design bible excerpt only"))
+        else:
+            rows.append(_row(path, 2, "navigation", 0, "design bible excerpt unavailable; inspect the named source"))
+        rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
+                         "full DESIGN remains on demand; only its bible is selected for source words"))
     else:
         rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
-                         "heading map only; no touched path under " + DESIGN_CHANGE_CLASS_PREFIX))
+                         "heading map only; no frontend path or changed source words"))
 
-    chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
-    chapter_text[DESIGN_PATH] = design_text
     for order, path, title, reason in sorted(candidates):
         _admit(path, title, chapter_text.get(path, ""), 2, reason)
 
@@ -623,31 +699,16 @@ def governance_context(
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
 
     # --- navigation -------------------------------------------------------
-    inlined = [label for label, present in (
-        ("the section that applies to this review", bool(checklist_text.strip())),
-        (f"its `{SHARED_CHECKLIST_SECTION}` section", shared_inline)) if present]
-    checklist_pointer = (f"{' and '.join(inlined)} {'are' if len(inlined) > 1 else 'is'} inlined above."
-                         if inlined else "NO section of it is inlined for this review.")
-    pointers = [f"- `{CHECKLISTS_PATH}` — the complete checklist book; {checklist_pointer}"]
+    pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline)]
     design_map = ""
     if DESIGN_PATH not in inline_texts:
         from ouroboros.context_layout import design_navigation
 
         design_map = design_navigation(
             None if design_missing else design_text, source=str(root / DESIGN_PATH))
+    nav_heading, nav_words = NAVIGATION_WORDS[BODY_LAYER][PACKET_DELIVERY if packet else RETRIEVING_DELIVERY]
     navigation = _join([
-        "## Governance navigation (index of sources not inlined)" if packet else
-        "## Governance navigation (read on demand)",
-        ("The supplied rules and selected sections are the governance evidence this packet "
-         "delivers. This row has no repository tools: the map below identifies sources and "
-         "ranges that were NOT delivered, not additional evidence. State any resulting "
-         "uncertainty; do not claim to have read the named sources." if packet else
-        "The rules above are the ones this change activates. Available sources below remain "
-        "complete on disk and untruncated; missing sources are named. Read any range with "
-        '`read_file(root="system_repo", path=..., start_line=A, max_lines=N)`. Ranges are '
-        "inclusive and a parent heading includes its descendant group. A document named here "
-        "and not inlined was NOT dropped — it is one read away, and the review's governance "
-        "manifest records the disposition of each one."),
+        nav_heading, nav_words,
         "\n".join(pointers),
         design_map,
         _book_navigation(root, DEVELOPMENT_BOOK_ID, dev_book, load_governance_doc, instructions=not packet),

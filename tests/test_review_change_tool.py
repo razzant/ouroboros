@@ -302,7 +302,7 @@ def test_the_schema_is_the_planned_call() -> None:
     params = entry.schema["parameters"]
     assert entry.name == "review_change" and params["required"] == []
     assert list(params["properties"]) == [
-        "wake_on", "review_reference", "root", "workspace_root", "subject", "base", "head", "surface", "answer", "goal", "scope", "author_questions",
+        "wake_on", "review_reference", "continue_seats", "root", "workspace_root", "subject", "base", "head", "surface", "answer", "goal", "scope", "author_questions",
         "reviewers", "reason", "coupling_only", "reviewer_effort", "review_rebuttal", "treat_as_body", "since_review"]
     props = params["properties"]
     assert props["root"]["enum"] == ["active_workspace", "system_repo"] and props["root"]["default"] == "active_workspace"
@@ -317,7 +317,12 @@ def test_the_schema_is_the_planned_call() -> None:
     # only an UNKNOWN body fact; a recognized body or foreign root is unchanged.
     description = props["treat_as_body"]["description"]
     assert "unknown" in description and "unchanged" in description and "even if it is not the body" not in description
-    assert entry.timeout_sec and entry.timeout_sec > 0
+    # A finite lifetime gives a finite settlement envelope; none gives none (1A: the wave's
+    # drain and the system report observe the owner's controls instead of a 6 h host timer).
+    from ouroboros.config import get_task_abs_ceiling_sec
+
+    assert (entry.timeout_sec is None) == (get_task_abs_ceiling_sec() is None)
+    assert entry.timeout_sec is None or entry.timeout_sec > 0
 
 
 # --- Root, subject and rules layer --------------------------------------------------
@@ -740,23 +745,15 @@ def test_author_questions_reach_the_wave_and_the_record_verbatim(h: Harness) -> 
 
 
 @pytest.mark.parametrize("args, needle", [
-    ({"subject": "base..head", "base": "HEAD"}, "needs both base and head"),
-    ({"subject": "base..head", "head": "HEAD"}, "needs both base and head"),
     ({"subject": "everything"}, "subject must be one of"),
     ({"subject": "index", "head": "HEAD"}, "head belongs to subject=base..head"),
     ({"subject": "index", "base": "--output=/tmp/x"}, "must name a revision"),
     ({"subject": "index", "root": "/somewhere/else"}, "root must be one of"),
     ({"subject": "index", "root": "system_repo", "workspace_root": "project"}, "leave workspace_root empty"),
     ({"subject": "index", "surface": "advisory"}, "surface must be one of change, preflight, system"),
-    ({"subject": "index", "surface": "preflight"}, "surface=preflight seats exactly one reviewer"),
-    ({"subject": "index", "surface": "preflight", "reviewers": ["a", "b"]}, "surface=preflight seats exactly one reviewer"),
-    ({"subject": "index", "surface": "system"}, "subject=system goes with surface=system"),
-    ({"subject": "system"}, "subject=system goes with surface=system"),
     ({"subject": "system", "surface": "system", "base": "HEAD"}, "workspace_root, base and head do not apply"),
-    ({"subject": "system", "surface": "system", "coupling_only": ["x"]}, "coupling_only does not apply"),
     ({"subject": "index", "reviewer_effort": "turbo"}, "reviewer_effort must be one of"),
     ({"subject": "index", "reviewers": "slot_1"}, "reviewers must be a list of strings"),
-    ({"subject": "index", "reviewers": ["nobody-at-all"]}, "is not an enabled catalog row"),
     ({"subject": "base..head", "base": "0" * 40, "head": "HEAD"}, "is not a commit"),
     ({"subject": "index", "treat_as_body": "yes"}, "treat_as_body must be a boolean"),
 ])

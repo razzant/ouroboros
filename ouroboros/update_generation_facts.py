@@ -26,25 +26,53 @@ _dispatch_pending = False
 _cpu_sample: tuple[float, float] | None = None
 
 
-def _rss() -> tuple[int | None, str]:
-    """In-process observation; a portable peak fallback is labelled as such.
+_STATM = "/proc/self/statm"  # Linux: this process's sizes in pages; the second is its resident set now
 
-    No subprocess or census on a direct/duty producer. psutil is shipped on
-    Windows; POSIX's stdlib fallback explicitly reports the lifetime high-water
-    mark, never presents it as current RSS.
+
+def _rss() -> tuple[int | None, str]:
+    """This process's memory, measured in-process and named for what it is.
+
+    No subprocess or census on a direct/duty producer. psutil (shipped on Windows) gives the current
+    resident size; macOS the current physical footprint (``_footprint``: what the kernel charges the
+    process, compressed pages included, so pressure never hides it), labelled ``footprint``; Linux the
+    current resident size (``_STATM``). Elsewhere, or when that read fails, the stdlib's lifetime
+    high-water mark is labelled ``peak``, never presented as current.
     """
     try:
         import psutil
         return psutil.Process().memory_info().rss, "current"
     except ImportError:
-        try:
-            import resource
-            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            return int(peak) * (1 if sys.platform == "darwin" else 1024), "peak"
-        except (ImportError, OSError):
-            return None, "unobserved"
+        pass
     except Exception:
         return None, "unobserved"
+    try:
+        if sys.platform == "darwin":
+            return _footprint(), "footprint"
+        if sys.platform.startswith("linux"):
+            return int(pathlib.Path(_STATM).read_bytes().split()[1]) * os.sysconf("SC_PAGE_SIZE"), "current"
+    except (OSError, ValueError, IndexError, AttributeError):
+        pass
+    try:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return int(peak) * (1 if sys.platform == "darwin" else 1024), "peak"
+    except (ImportError, OSError):
+        return None, "unobserved"
+
+
+def _footprint() -> int:
+    """macOS: this process's ``ri_phys_footprint`` (``proc_pid_rusage``, ``RUSAGE_INFO_V0``), from libSystem."""
+    import ctypes
+
+    class Info(ctypes.Structure):  # struct rusage_info_v0
+        _fields_ = [("uuid", ctypes.c_uint8 * 16), *((name, ctypes.c_uint64) for name in (
+            "user_time", "system_time", "pkg_idle_wkups", "interrupt_wkups", "pageins", "wired_size",
+            "resident_size", "phys_footprint", "proc_start_abstime", "proc_exit_abstime"))]
+
+    info = Info()
+    if ctypes.CDLL(None).proc_pid_rusage(os.getpid(), 0, ctypes.byref(info)) != 0:
+        raise OSError("proc_pid_rusage refused")
+    return int(info.phys_footprint)
 
 
 def sample() -> dict:

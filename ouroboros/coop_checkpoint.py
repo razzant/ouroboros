@@ -71,11 +71,15 @@ def _task_tree_coop_roots(drive_root: pathlib.Path, root_task_id: str) -> List[p
     readonly-mode child never qualifies regardless of fields."""
     from ouroboros.config import get_subagent_projects_root
     from ouroboros.headless import task_is_readonly_subagent
+    from ouroboros.launch_roots import WorkRootUnavailable
     from ouroboros.task_status import find_child_tasks
     from ouroboros.tool_access import path_is_relative_to
 
-    projects_root = pathlib.Path(get_subagent_projects_root()).expanduser().resolve(strict=False)
     out: List[pathlib.Path] = []
+    try:
+        projects_root = pathlib.Path(get_subagent_projects_root()).expanduser().resolve(strict=False)
+    except WorkRootUnavailable:  # an undecided default root qualifies no tree for a commit
+        return out
     try:
         children = find_child_tasks(
             pathlib.Path(drive_root), parent_task_id=str(root_task_id), root_task_id=str(root_task_id)

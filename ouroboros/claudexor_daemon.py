@@ -33,9 +33,9 @@ Lifecycle belongs to the installation, not the process that first needed it:
   fallback. Never stop a live responder known only by name or by
   the descriptor port (a foreign daemon on a recycled port stays disclosed, not
   killed). A runtime pin is never hot-swapped: the live engine keeps serving
-  until a planned restart onto another pin, not a lower release, ends it
-  (``server_restart._stop_owned_daemon_for_new_pin``), the owner's Restart or
-  Panic stops it, or it exits; the next start selects the pin (PERSISTENCE.md).
+  until a restart onto another pin, not a lower release, ends it
+  (``server_restart._stop_owned_daemon_for_new_pin``), Panic or the owner's
+  Restart Claudexor stops it, or it exits; the next start selects the pin (PERSISTENCE.md).
 
 Zero auth logic lives here or anywhere in Ouroboros: login jobs, device-code
 custody, verification and rotation are the daemon's own product surface,
@@ -605,7 +605,8 @@ class OwnedClaudexorDaemon:
     def clear_start_failure_latch(self, *, cleared_by: str) -> bool:
         """Release the spawn latch; True when one was set (a durable row names who released it).
 
-        The sweep, owner Refresh and successful attach call this; Restart/Panic build a new manager.
+        The sweep, owner Refresh, the owner's Restart Claudexor and successful attach call this;
+        Restart/Panic build a new manager.
         Another caller may spawn between release and retry; the retry joins that child.
         """
         with self._lock:
@@ -734,7 +735,7 @@ class OwnedClaudexorDaemon:
         from ouroboros.process_custody import spawn_supervised
         from ouroboros.platform_layer import subprocess_new_group_kwargs
 
-        log.info("Spawning owned claudexord under %s from %s", config_dir, runtime.get("source") or "external")
+        log.info("Spawning owned claudexord under %s from %s on %s", config_dir, runtime.get("source") or "external", command[0])
         _write_ownership_marker()
         with self._lock:
             self._check_start_generation(generation)
@@ -1076,7 +1077,7 @@ class OwnedClaudexorDaemon:
         ``"nothing_to_stop"`` is the quiet empty case; ``"unconfirmed"`` has
         already been disclosed by ``_report_stop_unconfirmed`` (critical log
         plus the supervisor row) with custody retained, so a caller that must
-        proceed anyway — the owner's manual Restart — needs no private state
+        proceed anyway — a pin-changing restart's teardown — needs no private state
         to tell the two non-stops apart. Lock acquisition is bounded separately
         from HTTP connect/read phases and each root's exit wait; there is no
         promised absolute wall-clock deadline for the whole teardown. A
@@ -1260,7 +1261,10 @@ def read_owned_gateway(*, timeout_sec: Optional[float] = None) -> Any:
     endpoint = attached_endpoint(home) if home is not None else discover_daemon_at(owned_config_dir())
     gateway = ClaudexorGateway(endpoint)
     try:
-        gateway.handshake(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
+        body = gateway.handshake(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
+        if _handshake_serving_mode(body) != "recovery_only":
+            from ouroboros.harness_program_facts import engine_ready
+            engine_ready(gateway)
         if home is None:
             get_owned_daemon()._remember_stop_targets(endpoint)
     except Exception:
@@ -1394,6 +1398,8 @@ def ensure_owned_gateway(*, admission_wait_sec: Optional[float] = None,
     except Exception:
         gateway.close()
         raise
+    from ouroboros.harness_program_facts import engine_ready
+    engine_ready(gateway)
     if home is not None:  # the proven version feeds request-shape floors; host engine settings stay untouched
         daemon._proven_engine_version = str(gateway.engine_version or "")
         return gateway

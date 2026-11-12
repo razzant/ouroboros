@@ -1,24 +1,22 @@
-"""Request history deduplication preserves the blob serialization and readers."""
+"""The logical request keeps both arrays; their equal elements are one stored part."""
 
 import json
 import shutil
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import loop_llm_call, observability
+from ouroboros import evidence_packs, loop_llm_call, observability
+from ouroboros.shared_values import token_digests
 
 
-@pytest.mark.parametrize("original,sent,omitted", [
+@pytest.mark.parametrize("original,sent,equal", [
     ({"role": "user", "content": "Hello Ω"}, {"content": "Hello Ω", "role": "user"}, True),
-    ({"content": ("one", "two")}, {"content": ["one", "two"]}, True),
-    ({"content": Path("fixture.txt")}, {"content": "fixture.txt"}, True),
     ({"content": "original"}, {"content": "adapted"}, False),
     ({"content": 1}, {"content": True}, False),
     ({"content": 1}, {"content": 1.0}, False),
 ])
-def test_loop_persists_only_distinct_serialized_send_history(tmp_path, monkeypatch, original, sent, omitted):
+def test_loop_persists_both_arrays_and_stores_their_equal_elements_once(tmp_path, monkeypatch, original, sent, equal):
     messages, send_messages = [original], [sent]
 
     def send(_llm, kwargs, **_options):
@@ -34,13 +32,13 @@ def test_loop_persists_only_distinct_serialized_send_history(tmp_path, monkeypat
     call = next((tmp_path / "observability" / "calls" / "task").glob("*_request.json"))
     manifest, restored, _ = observability.read_call_payload(tmp_path, task_id="task", call_id=call.stem)
     stored = observability.read_blob_ref(tmp_path, manifest["full_payload_ref"])
-    assert ("send_messages" not in stored) is omitted
     expected = json.loads(json.dumps(send_messages, ensure_ascii=False, sort_keys=True, default=str))
-    assert json.dumps(restored["send_messages"]) == json.dumps(expected)
-    assert restored == {**stored, "send_messages": expected}
-    if omitted:
-        expanded = json.dumps(restored, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-        assert manifest["full_payload_ref"]["size"] < len(expanded)
+    assert json.dumps(stored["send_messages"]) == json.dumps(expected), "the send history is always recorded"
+    assert restored == stored
+    skeleton = evidence_packs.read_loose_gzip(evidence_packs.shared_placement_path(tmp_path, manifest["full_payload_ref"]["sha256"]))
+    digests = token_digests(skeleton)
+    assert (len(digests) == 1) is equal, "canonically equal elements of both arrays are one part"
+    assert {ref["sha256"] for ref in manifest["shared_parts"]} == set(digests)
 
 
 @pytest.mark.parametrize("sent", [[], None, [{"content": "different"}]])

@@ -5,7 +5,6 @@ import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
 import { isStoreMigrating } from './api_client.js';
-import { showToast } from './toast.js';
 import { tr } from './i18n.js';
 
 const nodePosition = node => node?.dataset?.historySource
@@ -20,13 +19,6 @@ export const feedIsEmpty = messages => Array.from(messages.children).every(node 
 
 const GAP_NOTE = 'Some saved history is not loaded. Shown messages may have gaps.';
 const gapNoticeDocs = new WeakSet();
-const defaultGapNotice = (text, messages) => {
-    if (typeof globalThis.document?.getElementById === 'function' && typeof globalThis.document?.createElement === 'function'
-        && globalThis.document?.body?.appendChild) {
-        return showToast(text, 'info', { haptic: false, dismissLabel: 'Dismiss history notice',
-            host: messages.closest('.page, .chat-instance-panel') });
-    }
-};
 
 /**
  * History chrome only; the chat instance retains navigation and reading state.
@@ -40,7 +32,9 @@ const defaultGapNotice = (text, messages) => {
  * button remains the only return-to-present control.
  */
 export function createHistoryControls(messagesDiv, statusHost = null, {
-    onGapNotice = defaultGapNotice, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
+    // The gap's fact stands at the edge of history it concerns (the note at the feed's start); a room announces nothing
+    // over its newest rows (U021). A caller with a place for a one-time announcement passes it here.
+    onGapNotice = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
 } = {}) {
     const doc = messagesDiv.ownerDocument;
     const root = doc.createElement('div');
@@ -164,8 +158,6 @@ export function createLiveCardBound(cap) {
     let raisedInFlight = false;
     return {
         isArmed: () => armed,
-        /** The offline bootstrap painted sessionStorage: the next sync must rebuild. */
-        arm() { armed = true; },
         observe(size) { if (size > floor + cap) armed = true; },
         begin() {
             inherited = armed;
@@ -327,6 +319,7 @@ export function captureLiveCardProjection(record) {
         record.phaseEl?.hidden, record.phaseEl?.className, record.phaseEl?.textContent,
         record.titleEl?.textContent, record.activityEl?.textContent,
         record.metaEl?.innerHTML, record.countEl?.hidden, record.countEl?.textContent,
+        record.summaryButtonEl?.querySelector?.('[data-live-when]')?.textContent,
         record.phaseEl?.dataset?.chipTone, record.toggleEl?.textContent,
         record.disclosureEl?.getAttribute?.('aria-expanded'),
         root.querySelector?.('.chat-live-actions')?.innerHTML || '',
@@ -511,8 +504,13 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         if (!node || !patchNode(current, node)) return false;
         return Boolean(record.timelineEl.isConnected);
     };
+    // A room away draws nothing (room_retire.js): a timeline that a late read changed meanwhile is owed, and drawn once
+    // on the room's return from what that read kept.
+    const owedAway = new Set();
     return {
         renderLiveCardTimeline: render,
+        oweTimeline: (record) => { owedAway.add(record); },
+        drawOwedTimelines: () => { const owed = [...owedAway]; owedAway.clear(); owed.forEach((record) => render(record)); },
         appendTimelineItem: append,
         patchLastTimelineItem: (item, record) => replace(
             item, record, record.timelineEl.lastElementChild,
@@ -573,6 +571,8 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
                 && !node.classList.contains('chat-load-older')
         );
         const messagesRect = messagesDiv.getBoundingClientRect();
+        // The phone drawer scales the room card. Anchors are in scroll pixels, not transformed screen pixels.
+        const scale = messagesRect.height / messagesDiv.offsetHeight || 1;
         let topNode = nodes.find((item) => {
             const rect = item.getBoundingClientRect();
             return rect.bottom > messagesRect.top && rect.top < messagesRect.bottom;
@@ -585,9 +585,9 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
         // merely the root card whose own top may be far above the viewport.
         let node = topNode;
         if (!topNode.dataset?.historyId && !topNode.classList.contains('chat-live-card')) {
-            // Media owns a layout wrapper around keyed bubbles. Save the
-            // physical child being read, not an unidentifiable wrapper.
-            node = [...topNode.querySelectorAll('[data-history-id]')]
+            // Media owns a layout wrapper around keyed bubbles, the saved preview (chat_preview.js) its rows.
+            // Save the physical child being read, not an unidentifiable wrapper.
+            node = [...topNode.querySelectorAll('[data-history-id], [data-preview-history-id]')]
                 .find(child => child.getBoundingClientRect().bottom > messagesRect.top) || topNode;
         }
         if (topNode.classList.contains('chat-live-card')) {
@@ -690,7 +690,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             cardChain.push({
                 node: card,
                 taskId: card.dataset?.taskId || '',
-                offset: card.getBoundingClientRect().top - messagesRect.top,
+                offset: (card.getBoundingClientRect().top - messagesRect.top) / scale,
             });
             card = card.parentElement?.closest?.('.chat-live-card') || null;
         }
@@ -707,7 +707,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             // lifecycle key below selects the line inside that page's mixed card.
             historyId: lineItem?.historyId || lineItem?.sourceHistoryId
                 || node.closest?.('[data-history-id]')?.dataset?.historyId
-                || topNode.dataset?.historyId || '',
+                || node.dataset?.previewHistoryId || topNode.dataset?.historyId || '',
             reviewKey: ['reviewAttemptDetail', 'reviewAttempt', 'reviewGroup', 'reviewSection']
                 .find(key => node.dataset?.[key]) || '',
             reviewValue: node.dataset?.reviewAttemptDetail || node.dataset?.reviewAttempt
@@ -725,8 +725,8 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             clientMessageId: topNode.dataset?.clientMessageId || '',
             ts,
             ordinal: ts ? nodes.filter((item) => item.dataset?.ts === ts).indexOf(topNode) : -1,
-            offset: node.getBoundingClientRect().top - messagesRect.top,
-            topOffset: topNode.getBoundingClientRect().top - messagesRect.top,
+            offset: (node.getBoundingClientRect().top - messagesRect.top) / scale,
+            topOffset: (topNode.getBoundingClientRect().top - messagesRect.top) / scale,
         };
     }
 
@@ -739,11 +739,12 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
         };
         const restoreNode = (node, offset) => {
             if (!isRendered(node)) return false;
-            const currentOffset = node.getBoundingClientRect().top
-                - messagesDiv.getBoundingClientRect().top;
+            const rect = messagesDiv.getBoundingClientRect(), scale = rect.height / messagesDiv.offsetHeight || 1;
+            const currentOffset = (node.getBoundingClientRect().top - rect.top) / scale;
             // A node still in place leaves the feed alone: even a write of the
             // same scrollTop stops a scroll the engine animates (WebKit's End).
-            if (currentOffset !== offset) messagesDiv.scrollTop += currentOffset - offset;
+            // Subpixel transform noise rounds down in WebKit's scrollTop setter; writing it every frame drifts.
+            if (Math.abs(currentOffset - offset) > 0.5) messagesDiv.scrollTop += currentOffset - offset;
             return true;
         };
 
@@ -851,6 +852,20 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
     return { captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor, serializeTimelineAnchor, anchorOwnersReady };
 }
 
+/** The row a child's live note lands in, given the frame's source occurrence. A frame a row already holds keeps that row.
+ * Otherwise the newest unsaved note is the line it replaces in place, but never across a thought: a thought is its own
+ * row, so a note that came after one stands after it, the order replay shows. A saved row is never a line, and rows loaded
+ * before the note change nothing: identity is the occurrence alone. */
+export function childProgressKey(record, occurrence) {
+    if (record.items.some((item) => item.occurrenceKey === occurrence)) return occurrence;
+    for (let index = record.items.length - 1; index >= 0; index -= 1) {
+        const { dedupeKey, occurrenceKey } = record.items[index];
+        if (dedupeKey?.startsWith('subagent-progress:')) return dedupeKey;
+        if ([dedupeKey, occurrenceKey].some((key) => key?.startsWith('reasoning:'))) break;
+    }
+    return `subagent-progress:${occurrence}`;
+}
+
 /** Update one live timeline item using the same keys the card's producer owns.
  * Historical source-addressed insertions use mergeHistoricalTimelineItem; live
  * lifecycle notes keep their existing in-place semantics and disclosure key.
@@ -889,6 +904,8 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             // Replay compares the child's current status with older pages.
             // Its source time advances with the live status, not with narration.
             ...(syntheticKey.startsWith('subagent-lifecycle:') && rawTs ? { sourceTs: rawTs } : {}),
+            // A replaced note's row now holds this frame; the saved copy of the one it replaced stands as its own row.
+            ...(summary.occurrenceKey ? { occurrenceKey: summary.occurrenceKey, sourceTs: rawTs } : {}),
         };
         if (Object.entries(patch).some(([key, value]) => it[key] !== value)) {
             Object.assign(it, patch);
@@ -936,6 +953,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             sourceTs: rawTs,
             count: 1,
             dedupeKey: syntheticKey,
+            occurrenceKey: summary.occurrenceKey,
             lineKey,
         });
         timelineUpdate = 'append';

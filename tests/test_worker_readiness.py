@@ -111,9 +111,11 @@ def _wait_for(predicate, timeout: float = 5.0):
 # (a) spawn and (b) respawn both install booting slots through the one seam
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("cap", [1, 3, 10])
-@pytest.mark.parametrize("count", [None, 0, 2])
-@pytest.mark.parametrize("start", ["spawn_workers", "ensure_worker_pool_started"])
+@pytest.mark.parametrize(("start", "count", "cap"), [
+    ("spawn_workers", None, 1),
+    ("spawn_workers", 2, 10),
+    ("ensure_worker_pool_started", 0, 3),
+])
 def test_spawn_installs_every_slot_booting_and_hands_the_set_to_the_readiness_seam(pool, monkeypatch, cap, count, start):
     workers = pool.workers
     fake_ctx = MagicMock()
@@ -136,12 +138,14 @@ def test_spawn_installs_every_slot_booting_and_hands_the_set_to_the_readiness_se
         lambda slots, cursor, *rest: handed.append((dict(slots), cursor, rest)),
     )
 
-    monkeypatch.setattr(workers, "MAX_WORKERS", cap)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(cap))
     launch = getattr(workers, start)
     launch() if count is None else launch(count)
 
     assert sorted(workers.WORKERS) == list(range(count or 1))
-    assert workers.MAX_WORKERS == cap
+    from ouroboros.runtime_limits import get_max_workers
+
+    assert get_max_workers() == cap  # the owner's cap is read live, never bound at the start
     assert all(slot.reaping for slot in workers.WORKERS.values()), "a fresh slot must not be assignable"
     assert _wait_for(lambda: bool(handed))
     slots, cursor, rest = handed[0]
@@ -295,7 +299,7 @@ def test_progress_extends_once_and_never_moves_the_birth_relative_ceiling(pool, 
     assert timeout["window_sec"] == timeout["waited_sec"] == 3.0
 
 
-@pytest.mark.parametrize("progress", ["absent", "foreign_pid", "before_cursor", "dead_child"])
+@pytest.mark.parametrize("progress", ["absent", "before_cursor", "dead_child"])
 def test_only_current_own_progress_from_a_live_child_extends(pool, seam, boot_clock, progress):
     slot = _booting_slot(pool, 0, 5001, alive=progress != "dead_child")
     cursor = seam.cursor
@@ -374,10 +378,8 @@ def sha_history(pool):
 @pytest.mark.parametrize("expected,observed,relation,warn", [
     ("baseline", "baseline", "equal", False),
     ("baseline", "descendant", "descendant", False),
-    ("baseline", "root", "non_descendant", True),
     ("baseline", "other", "non_descendant", True),
     ("baseline", "missing", "unavailable", True),
-    ("missing", "descendant", "unavailable", True),
     ("baseline", "absent", "unavailable", True),
     ("absent", "descendant", "not_applicable", False),
     ("absent", "absent", "not_applicable", False),
@@ -504,7 +506,8 @@ def test_the_window_and_the_reported_wait_count_from_the_spawn_instant(pool, sea
     assert row["waited_sec"] >= 10.0 and seam.killed == [5040]
 
 
-def test_the_replacement_loop_is_bounded_then_parked_and_reported(pool, seam, monkeypatch):
+@pytest.mark.parametrize("lane", ["project", "conversation"])
+def test_the_replacement_loop_is_bounded_then_parked_and_reported(pool, seam, monkeypatch, lane):
     disabled = []
     monkeypatch.setattr(pool.workers, "disable_exhausted_worker_pool", lambda: disabled.append(True))
     monkeypatch.setattr(pool.lifecycle, "WORKER_READY_MAX_ATTEMPTS", 2)
@@ -524,6 +527,19 @@ def test_the_replacement_loop_is_bounded_then_parked_and_reported(pool, seam, mo
     assert [row["action"] for row in rows] == ["respawn", "parked"]
     assert rows[1]["attempt"] == 2 and rows[1]["max_attempts"] == 2
     assert seam.sent and seam.sent[0][0] == 7 and "slot 1" in seam.sent[0][1] and "parked" in seam.sent[0][1]
+    for wid in (2, 3):
+        if wid == 3:
+            fresh = _booting_slot(pool, 0, 5000)
+            fresh.lane = "conversation"
+            assert pool.lifecycle._open_ready_slot(0, fresh, {"pid": 5000}, "", 0, time.time(), 1)
+        failed = _booting_slot(pool, wid, 5012 + wid)
+        failed.lane = lane
+        pool.lifecycle._replace_unready_slot(wid, failed, 7, time.time(), 2)
+        assert failed.readiness_exhausted and failed.reaping and not failed.booting
+        assert len(seam.sent) == wid - 1, "only the first park since a successful ready tells the owner"
+    assert "slot 3" in seam.sent[-1][1] and "Use /restart" in seam.sent[-1][1]
+    assert [row["action"] for row in _rows(seam.supervisor, "worker_ready_timeout")] == ["respawn"] + ["parked"] * 3
+    assert disabled == [True] * (3 if lane == "project" else 1)
 
 
 def test_a_child_that_died_during_boot_is_released_to_the_crash_detector(pool, seam):

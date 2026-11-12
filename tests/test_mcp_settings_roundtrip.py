@@ -100,6 +100,24 @@ def test_settings_round_trip_preserves_stdio_command_and_exact_args(_isolate_set
     ]
 
 
+def test_settings_round_trip_preserves_task_session_and_browser_policy(_isolate_settings):
+    from ouroboros import mcp_client
+
+    cfg = _isolate_settings
+    server = {"id": "chrome", "name": "Chrome", "enabled": True, "transport": "stdio", "command": "node",
+              "args": ["server.mjs"], "task_session": True, "browser_policy": True}
+    payload = dict(cfg.SETTINGS_DEFAULTS)
+    payload["MCP_ENABLED"] = True
+    payload["MCP_SERVERS"] = [server, {**server, "id": "plain", "task_session": False, "browser_policy": False}]
+    cfg.save_settings(payload, allow_elevation=True)
+
+    loaded = cfg.load_settings()["MCP_SERVERS"]
+    assert [(row["task_session"], row["browser_policy"]) for row in loaded] == [(True, True), (False, False)]
+    parsed = mcp_client.parse_servers(loaded)
+    assert [(row.task_session, row.browser_policy) for row in parsed] == [(True, True), (False, False)]
+    assert not any(row.configuration_warnings for row in parsed)  # recognized, applied fields
+
+
 def test_get_mcp_servers_returns_list_of_dicts(_isolate_settings):
     cfg = _isolate_settings
     payload = dict(cfg.SETTINGS_DEFAULTS)

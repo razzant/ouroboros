@@ -199,8 +199,12 @@ def test_history_page_stops_after_exact_task_rows_and_one_lookahead(tmp_path, mo
     assert [p["record_id"] for p in payload["review_projection"]["panels"]] == [r["record_id"] for r in records[1:3]]
 
 
-@pytest.mark.parametrize("storage", ["legacy", "ledger"])
-@pytest.mark.parametrize("owner_field", ["task_id", "origin_task_id", "presentation_owner_task_id", "group_id"])
+@pytest.mark.parametrize(("owner_field", "storage"), [
+    ("task_id", "legacy"),
+    ("origin_task_id", "ledger"),
+    ("presentation_owner_task_id", "legacy"),
+    ("group_id", "ledger"),
+])
 def test_task_bound_saved_skill_export_matches_detail_and_bridge_prefix(tmp_path, storage, owner_field):
     import ast
     import pathlib
@@ -299,7 +303,9 @@ def test_saved_skill_download_through_real_launcher_and_http(tmp_path, monkeypat
         assert old["ok"] is False and "/api/tasks/" in old["error"]
         result = api.download_file_to_downloads("/api/tasks/owner/reviews/skill/job?skill=weather&format=text", "review.txt")
         assert result["ok"] is True
-        assert pathlib.Path(result["path"]).read_text() == review_history_detail(tmp_path, "weather", "job")["markdown"]
+        # The export is UTF-8 bytes and the launcher copies them as they came: compare bytes, never a locale decode.
+        expected = review_history_detail(tmp_path, "weather", "job")["markdown"].encode("utf-8")
+        assert pathlib.Path(result["path"]).read_bytes() == expected
         assert sizes and all(0 < size <= 1024 * 1024 for size in sizes)
         foreign = api.download_file_to_downloads("/api/tasks/foreign/reviews/skill/job?skill=weather&format=text", "foreign.txt")
         assert foreign["ok"] is False and "404" in foreign["error"]

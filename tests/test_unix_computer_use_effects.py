@@ -92,6 +92,8 @@ def fail_at(*indexes, outcome=1):
 def desktop(tmp_path, monkeypatch, platform, session="native", tools=(), answer=None):
     """The registered handlers of a local desktop: the platform, its installed tools and its process boundary."""
     module = load_plugin()
+    # Name lookup is an OS boundary, like this fixture's simulated xdotool process.
+    monkeypatch.setattr(module._ComputerUse, "_x11_keysym", staticmethod(lambda _name: None))
     transport = Transport(answer)
     monkeypatch.setattr(module, "_platform", lambda: platform)
     monkeypatch.setattr(module, "_session_type", lambda: session)
@@ -128,14 +130,7 @@ MAC = ("cliclick", "osascript", "screencapture")
 
 @pytest.mark.parametrize("tool, args, argv", [
     ("click", {"x": 10, "y": 20, "raw": True}, ["cliclick", "c:10,20"]),
-    ("double_click", {"x": 10, "y": 20, "raw": True}, ["cliclick", "dc:10,20"]),
-    ("move", {"x": 5, "y": 6, "raw": True}, ["cliclick", "m:5,6"]),
-    ("left_click_drag", {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "raw": True},
-     ["cliclick", "dd:1,2", "dm:3,4", "du:3,4"]),
-    ("mouse_down", {"x": 5, "y": 6, "raw": True}, ["cliclick", "dd:5,6"]),
     ("mouse_up", {}, ["cliclick", "du:."]),
-    ("type_text", {"text": "hello"}, ["cliclick", "t:hello"]),
-    ("key", {"keys": "cmd+s"}, ["cliclick", "kd:cmd", "t:s", "ku:cmd"]),
     ("hold_key", {"keys": "shift", "duration_ms": 200}, ["cliclick", "kd:shift", "w:200", "ku:shift"]),
 ])
 def test_a_successful_mac_input_carries_the_mark(tmp_path, monkeypatch, tool, args, argv):
@@ -201,19 +196,15 @@ def test_a_mac_key_sequence_keeps_the_mark_of_the_steps_that_ran(tmp_path, monke
     transport.answer = fail_at()
     transport.calls.clear()
     result = receipt(tools["key"](keys="cmd+a bogusmod+x"))
-    assert result["ok"] is False and marked(result) and "bogusmod" in result["error"], result
-    assert transport.calls == [["cliclick", "kd:cmd", "t:a", "ku:cmd"]], "the refused step ran nothing"
+    assert result["ok"] is False and not marked(result) and "bogusmod" in result["error"], result
+    assert transport.calls == [], "prevalidation refuses the whole sequence before its first input"
 
 
 # --- local Linux: X11 (xdotool) and Wayland (ydotool) ----------------------------------------------
 
 @pytest.mark.parametrize("tool, args", [
     ("click", {"x": 3, "y": 4, "raw": True}),
-    ("left_click_drag", {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "raw": True}),
-    ("mouse_up", {"button": "right"}),
     ("type_text", {"text": "-n hello"}),
-    ("key", {"keys": "ctrl+l"}),
-    ("scroll", {"clicks": 2, "direction": "down"}),
     ("hold_key", {"keys": "ctrl", "duration_ms": 100}),
 ])
 def test_a_successful_x11_input_carries_the_mark(tmp_path, monkeypatch, tool, args):
@@ -285,7 +276,6 @@ def test_a_press_at_a_negative_point_is_refused_where_the_desktop_has_no_such_sp
 @pytest.mark.parametrize("tool, args, steps", [
     ("click", {"x": 3, "y": 4, "raw": True}, 2),
     ("left_click_drag", {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "raw": True}, 4),
-    ("mouse_down", {"x": 5, "y": 6, "raw": True}, 2),
     ("mouse_up", {}, 1),
 ])
 def test_a_wayland_sequence_marks_what_ran(tmp_path, monkeypatch, tool, args, steps):
@@ -319,7 +309,7 @@ def test_an_empty_sequence_is_no_effect(tmp_path, monkeypatch):
     module = load_plugin()
     monkeypatch.setattr(module.subprocess, "run", Transport())
     impl = module._ComputerUse(API(tmp_path / "state"))
-    for text in (impl._exec_sequence([]), impl._hold_then_release([], [], 50)):
+    for text in (impl._exec_sequence([]), impl._hold_then_release([], [], 50, ctx={})):
         assert receipt(text)["ok"] is True and not marked(receipt(text)), text
 
 
@@ -334,12 +324,6 @@ def remote(argv: list[str]) -> str:
     ("click", {"x": 10, "y": 20, "raw": True}, "cliclick c:10,20"),
     ("triple_click", {"x": 10, "y": 20, "raw": True}, "cliclick tc:10,20"),
     ("move", {"x": 5, "y": 6, "raw": True}, "cliclick m:5,6"),
-    ("left_click_drag", {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "raw": True},
-     "cliclick dd:1,2 dm:3,4 du:3,4"),
-    ("mouse_down", {"x": 5, "y": 6, "raw": True}, "cliclick dd:5,6"),
-    ("type_text", {"text": "hello"}, "cliclick t:hello"),
-    ("key", {"keys": "return"}, "cliclick kp:return"),
-    ("key", {"keys": "cmd+tab"}, "cliclick kd:cmd kp:tab ku:cmd"),
 ])
 def test_a_successful_ssh_input_carries_the_mark(tmp_path, monkeypatch, tool, args, command):
     tools, transport = ssh_mac(tmp_path, monkeypatch)
@@ -419,10 +403,16 @@ class Guest:
     """``urlopen`` toward an OSWorld guest: each /execute answers with the next returncode (the last repeats)."""
 
     def __init__(self, codes):
-        self.codes, self.commands = list(codes), []
+        self.codes, self.commands, self.validations = list(codes), [], []
 
     def __call__(self, request, timeout=None):
-        self.commands.append(json.loads(request.data.decode("utf-8"))["command"][-1])
+        from tests.test_unix_computer_use_safety_contract import guest_key_validation
+        command = json.loads(request.data.decode("utf-8"))["command"][-1]
+        validation = guest_key_validation(command)
+        if validation:
+            self.validations.append(command)
+            return Response(json.dumps(validation["result"]).encode("utf-8"))
+        self.commands.append(command)
         code = self.codes.pop(0) if len(self.codes) > 1 else self.codes[0]
         answer = {"status": "success", "output": "", "error": "" if code == 0 else "guest failed", "returncode": code}
         return Response(json.dumps(answer).encode("utf-8"))

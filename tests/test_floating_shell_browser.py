@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from ouroboros.consciousness_view import describe_consciousness_state
 from tests.test_room_work_browser import PROJECT, Transport, activity, progress, reading
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 from tests.test_window_chrome_browser import record
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=["chromium", "webkit"])
@@ -36,8 +38,32 @@ def _gap_history(page, transport):
     return reads
 
 
+# A room tells its history gap at the head of its loaded window and raises no notice over its newest rows (#2886, U021).
+# Every notice a room's stack ever holds is kept, so "none" covers the whole flow, not one instant.
+_ROOM_NOTICES = """window.__roomNotices = [];
+new MutationObserver(() => document.querySelectorAll('.toast-stack--room .toast').forEach(toast => {
+    if (!window.__roomNotices.includes(toast)) window.__roomNotices.push(toast);
+})).observe(document, {childList: true, subtree: true});"""
+
+
+def _room_notices(page):
+    page.wait_for_function("""() => [...document.getAnimations()].every(a =>
+        a.effect?.getTiming().iterations === Infinity || a.playState !== 'running')""")
+    page.wait_for_timeout(250)
+    return page.evaluate("window.__roomNotices.map(toast => toast.textContent)")
+
+
+def _gap_heads_history(page, host):
+    return page.evaluate("""host => {
+        const edge = document.querySelector(host + ' .chat-load-older');
+        return {heads: Boolean(edge) && edge.parentElement.firstElementChild === edge,
+                note: edge?.querySelector(':scope > .chat-load-older-note')?.textContent || ''};
+    }""", host)
+
+
 def test_hidden_main_defers_gap_notice_until_shown_without_reading_again(shell_ui):
     page = shell_ui["page"]
+    page.add_init_script(_ROOM_NOTICES)
     transport = Transport(page, history={1: reading(14)})
     reads = _gap_history(page, transport)
     page.goto(shell_ui["url"] + "/#settings")
@@ -47,24 +73,27 @@ def test_hidden_main_defers_gap_notice_until_shown_without_reading_again(shell_u
     before = len(reads)
     page.locator('[data-nav-page="chat"]').first.click()
     page.wait_for_selector("#page-chat.active")
-    shown = page.locator("#page-chat .toast").count()
+    page.wait_for_selector("#page-chat .chat-load-older-note")
+    shown = _room_notices(page)
+    edge = _gap_heads_history(page, "#page-chat")
     capture(page, f"hidden-main-shown-{shell_ui['engine']}")
     record(f"hidden-main-{shell_ui['engine']}", {"hidden_notices": hidden_notices, "shown_notices": shown,
-                                               "reads_before": before, "reads_after": len(reads)})
-    assert hidden_notices == 0, "a hidden room must not spend the document's notice"
-    page.wait_for_selector("#page-chat .toast-dismiss")
-    assert len(reads) == before, "presenting the pending notice must not request history"
-    page.click("#page-chat .toast-dismiss")
-    page.wait_for_selector("#page-chat .toast", state="detached")
+                                               "reads_before": before, "reads_after": len(reads), **edge})
+    assert hidden_notices == 0, "a hidden room raises no notice"
+    assert shown == [], "a shown room tells its gap at the head of its history, never as a notice over its newest rows"
+    assert edge["heads"] and "gaps" in edge["note"], edge
+    assert len(reads) == before, "showing the room must not request history"
     page.locator('[data-nav-page="settings"]').first.click()
     page.locator('[data-nav-page="chat"]').first.click()
-    assert page.locator(".toast-stack--room .toast").count() == 0
+    page.wait_for_selector("#page-chat.active")
+    assert _room_notices(page) == []
     assert "gaps" in page.locator("#page-chat .chat-load-older-note").inner_text()
 
 
 @pytest.mark.parametrize("chat_id", [1, 42])
 def test_delayed_gap_waits_for_drawer_close_without_another_history_read(shell_ui, chat_id):
     page = shell_ui["new_page"](viewport={"width": 390, "height": 844}, has_touch=True)
+    page.add_init_script(_ROOM_NOTICES)
     transport = Transport(page, projects=[PROJECT], history={1: reading(14), 42: reading(14, room="Project")})
     pending, reads = [], []
 
@@ -97,19 +126,21 @@ def test_delayed_gap_waits_for_drawer_close_without_another_history_read(shell_u
         guardServed: (await (await fetch('/static/modules/chat.js')).text()).includes("!messagesDiv.closest('[inert]')")})""", host)
     record(f"drawer-gap-hidden-{chat_id}-{shell_ui['engine']}", {"notices": hidden, "reads": reads, "before_drawer": before_drawer,
         "after_text": page.locator('.toast-stack--room .toast').all_text_contents(), **facts})
-    assert hidden == 0, "a drawer-covered room must not spend the document's notice"
-    page.wait_for_timeout(6200)  # longer than a mistakenly hidden notice's actual lifetime
+    assert hidden == 0, "a drawer-covered room raises no notice"
     before = len(reads)
     page.keyboard.press("Escape")
-    page.wait_for_selector(f"{host} .toast-dismiss")
-    assert len(reads) == before, "exposing the notice must not fetch or move the history"
+    page.wait_for_function("!document.body.classList.contains('nav-drawer-open')")
+    page.wait_for_selector(f"{host} .chat-load-older-note")
+    exposed = _room_notices(page)
+    edge = _gap_heads_history(page, host)
     capture(page, f"drawer-gap-shown-{chat_id}-{shell_ui['engine']}")
-    page.locator(f"{host} .toast-dismiss").click()
-    page.wait_for_selector(f"{host} .toast", state="detached")
+    assert exposed == [], "an exposed room tells its gap at the head of its history, never as a notice over its newest rows"
+    assert edge["heads"] and "gaps" in edge["note"], edge
+    assert len(reads) == before, "exposing the room must not fetch or move the history"
     page.locator(f"{host} [data-mobile-nav-toggle]").click()
     page.keyboard.press("Escape")
     page.wait_for_function("!document.body.classList.contains('nav-drawer-open')")
-    assert page.locator(".toast-stack--room .toast").count() == 0
+    assert _room_notices(page) == []
     assert len(reads) == before
 
 
@@ -150,18 +181,20 @@ def test_project_header_reserve_is_spent_once_in_each_flow_state(shell_ui):
 
 def test_hidden_main_does_not_take_visible_projects_notice(shell_ui):
     page = shell_ui["new_page"](viewport={"width": 390, "height": 844}, has_touch=True)
+    page.add_init_script(_ROOM_NOTICES)
     transport = Transport(page, projects=[PROJECT], history={1: reading(14), 42: reading(14, room="Project")})
     _gap_history(page, transport)
     page.goto(shell_ui["url"] + "/#settings")
     page.wait_for_function("document.querySelector('#page-chat .chat-load-older-note')?.textContent.includes('gaps')")
     page.evaluate("p => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project: p}}))", PROJECT)
-    page.wait_for_selector("#project-panel.open .toast-dismiss")
-    assert page.locator("#page-chat .toast").count() == 0
-    page.click("#project-panel .toast-dismiss")
-    page.wait_for_selector("#project-panel .toast", state="detached")
+    page.wait_for_selector("#project-panel.open .chat-load-older-note")
+    edge = _gap_heads_history(page, "#project-panel")
+    assert _room_notices(page) == [], "neither the hidden Main nor the shown Project raises a notice of its own"
+    assert edge["heads"] and "gaps" in edge["note"], edge
     page.click("#project-panel-close")
     page.wait_for_function("!document.body.classList.contains('project-panel-open')")
-    assert page.locator(".toast-stack--room .toast").count() == 0
+    assert _room_notices(page) == []
+    assert "gaps" in _gap_heads_history(page, "#page-chat")["note"]
 
 
 @pytest.mark.parametrize("chat_id,keyboard", [(1, False), (1, True), (42, False), (42, True)])
@@ -242,9 +275,10 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
     ], history={1: reading(14), 42: reading(14, room="Project")})
     # Consciousness sleeps until its next wake: the bar's chip says it and opens its Shade.
     census = transport.body
+    next_wake = datetime.now(timezone.utc) + timedelta(hours=1)
     transport.body = lambda **kwargs: {**census(**kwargs), "bg_consciousness_enabled": True,
-                                       "bg_consciousness_state": {"status": "sleeping", "next_wake_at": "2026-10-25T14:20:00+00:00",
-                                                                  "spent_24h_usd": 1.5, "daily_usd": 20}}
+                                       "bg_consciousness_state": describe_consciousness_state(
+                                           {"next_wake_at": next_wake.isoformat(), "spent_24h_usd": 1.5, "daily_usd": 20}, True)}
 
     def history(route):
         chat_id = int(parse_qs(urlparse(route.request.url).query).get("chat_id", ["1"])[0])
@@ -256,6 +290,14 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
     try:
         page.goto(ui["url"] + "/")
         page.wait_for_selector("#page-chat .rw-trigger")
+        page.wait_for_function("document.querySelector('#page-chat .chat-load-older-note')?.textContent.includes('gaps')")
+        assert page.locator(".toast-stack--room .toast").count() == 0, "Main tells its gap at the head of its history"
+        # A room's own notice stack (toast.js `host`) floats between the bar and the composer.
+        page.evaluate("""async () => {
+            const {showToast} = await import('/static/modules/toast.js');
+            showToast('A room notice keeps to the reading area, between the bar and the composer.', 'info',
+                {ttl: 0, haptic: false, dismissLabel: 'Dismiss room notice', host: document.querySelector('#page-chat')});
+        }""")
         page.wait_for_selector(".toast-stack--room .toast-dismiss")
         page.wait_for_function("getComputedStyle(document.querySelector('.toast-stack--room .toast')).opacity === '1'")
         facts = page.evaluate("""() => {
@@ -301,7 +343,8 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
         page.wait_for_selector("#project-panel:not([hidden]) .rw-trigger")
         page.wait_for_function("!document.body.classList.contains('nav-drawer-open')")
         assert page.locator(".shell-pill").count() == 0
-        assert page.locator(".toast-stack--room .toast").count() == 0, "room switch does not repeat the notice"
+        page.wait_for_function("document.querySelector('#project-panel .chat-load-older-note')?.textContent.includes('gaps')")
+        assert page.locator(".toast-stack--room .toast").count() == 0, "the arriving room raises no notice of its own"
         page.wait_for_function("""() => [...document.getAnimations()].every(a =>
             a.effect?.getTiming().iterations === Infinity || a.playState !== 'running')""")
         geometry = page.locator("#project-panel").evaluate("""panel => {

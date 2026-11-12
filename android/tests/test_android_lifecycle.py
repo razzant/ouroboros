@@ -6,7 +6,6 @@ import subprocess
 
 import pytest
 
-pytestmark = pytest.mark.serial
 
 STUBS = {
     "android/Manifest.java": "package android; public final class Manifest { public static final class permission { public static final String ACCESS_BACKGROUND_LOCATION=\"android.permission.ACCESS_BACKGROUND_LOCATION\", ACCESS_COARSE_LOCATION=\"android.permission.ACCESS_COARSE_LOCATION\", ACCESS_FINE_LOCATION=\"android.permission.ACCESS_FINE_LOCATION\"; }}",

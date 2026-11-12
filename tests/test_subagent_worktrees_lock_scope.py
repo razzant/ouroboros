@@ -337,17 +337,23 @@ def test_acting_worktree_add_and_remove_change_only_their_own_record(tmp_path, m
 
 def test_a_record_naming_the_snapshot_root_itself_deletes_nothing(tmp_path):
     """A record is durable state; a malformed one whose path IS the root must not
-    wipe every live sibling snapshot (the root holds them all)."""
+    wipe every live sibling snapshot (the root holds them all). Nor is it forgotten:
+    like any existing tree the root may not delete (#1239), its record stays with a
+    removal stamp, the refs it names stay pinned, and this process does not retry it."""
     target = _seed_target(tmp_path)
     snaps, data = tmp_path / "snaps", tmp_path / "data"
     keep = _provision(target, snaps, data, snapshot_id="keep")
     row = wt.find_execution_snapshot("keep", data_dir=data)
     wt._put_record({**row, "snapshot_id": "bad", "path": str(snaps.resolve()),
                     "baseline_ref": "refs/ouroboros/delegated/bad"}, data)
-    assert wt.remove_execution_snapshot("bad", worktree_root=snaps, data_dir=data)
+    _git(target, "update-ref", "refs/ouroboros/delegated/bad", keep.baseline_sha)
+    assert wt.remove_execution_snapshot("bad", worktree_root=snaps, data_dir=data) is False
     assert pathlib.Path(keep.path).is_dir() and wt.find_execution_snapshot("keep", data_dir=data) is not None
     assert _git(target, "rev-parse", keep.baseline_ref).stdout.strip() == keep.baseline_sha
-    assert wt.find_execution_snapshot("bad", data_dir=data) is None and snaps.is_dir()
+    bad = wt.find_execution_snapshot("bad", data_dir=data)
+    assert bad is not None and bad.get("removal_failed") and snaps.is_dir()
+    assert _git(target, "rev-parse", "refs/ouroboros/delegated/bad").stdout.strip() == keep.baseline_sha
+    assert wt.remove_execution_snapshot("bad", worktree_root=snaps, data_dir=data) is False  # not handled again
     assert not wt._deletable(snaps, snaps) and not wt._deletable(pathlib.Path("/"), snaps)
     assert wt._deletable(pathlib.Path(keep.path), snaps)
 

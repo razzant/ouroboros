@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Protocol, Sequence
 
-from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES
+from ouroboros.tool_capabilities import CORE_TOOL_NAMES, MCP_GATEWAY_TOOL_NAME, META_TOOL_NAMES
 from ouroboros.contracts.task_contract import canonical_tool_name
 
 
@@ -90,7 +90,8 @@ def initial_tool_schemas(
     """Return full Low/Max or selected Nano schemas from the current registry.
 
     Visibility is selected by the registry context: ordinary top-level tasks
-    expose all available first-party built-ins plus live extension/MCP schemas;
+    expose all available first-party built-ins plus live extension schemas and the
+    MCP schemas listed so far (the read never waits for an MCP listing);
     delegated-child, repair, credential, resource, and contract
     filters narrow independently. A parent suggestion is an initial Nano view,
     not an allowlist; the actor can request any other permitted schema later.
@@ -111,7 +112,7 @@ def fit_tool_schemas_to_limit(
     """Fit one request's schemas under a route's physical ceiling: ``(kept, left_out)``.
 
     Under the ceiling (or without one) the list is unchanged. Above it, core and meta
-    schemas stay first, then ``protect`` (names this task's history already called),
+    schemas and Main's MCP gateway stay first, then ``protect`` (names this task's history already called),
     then ``first`` (the load being made now), then ``keep`` (names the actor loaded on
     purpose before), then the rest in their own order; the tail beyond the ceiling is
     left out. Kept schemas retain their order, so the request's prefix is stable.
@@ -122,7 +123,7 @@ def fit_tool_schemas_to_limit(
         return list(schemas), ()
     keep, first, protect = frozenset(keep), frozenset(first), frozenset(protect)
     names = [str(schema["function"]["name"]) for schema in schemas]
-    rank = [0 if name in CORE_TOOL_NAMES or name in META_TOOL_NAMES else 1 if name in protect
+    rank = [0 if name in CORE_TOOL_NAMES or name in META_TOOL_NAMES or name == MCP_GATEWAY_TOOL_NAME else 1 if name in protect
             else 2 if name in first else 3 if name in keep else 4 for name in names]
     kept = set(sorted(range(len(names)), key=lambda index: (rank[index], index))[:max(0, limit)])
     return ([schema for index, schema in enumerate(schemas) if index in kept],

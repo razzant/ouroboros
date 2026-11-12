@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 
 import httpx
-import pytest
 
 from ouroboros.gateways.claudexor import ClaudexorGateway, DaemonEndpoint
 from ouroboros.subagents import _exhausted_window
@@ -18,24 +17,25 @@ WINDOW_FACTS = json.loads((
 ).read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("case", WINDOW_FACTS["cases"], ids=lambda case: case["name"])
-def test_legacy_partial_window_ratios_cannot_certify_scope(monkeypatch, case):
-    # A legacy raw-ratio response cannot establish exact engine availability.
-    requests = []
+def test_legacy_partial_window_ratios_cannot_certify_scope(subtests, monkeypatch):
+    for case in WINDOW_FACTS["cases"]:
+        with subtests.test(case=case), monkeypatch.context() as monkeypatch:
+            # A legacy raw-ratio response cannot establish exact engine availability.
+            requests = []
 
-    def handler(request):
-        requests.append((request.method, request.url.path))
-        return httpx.Response(200, json={"snapshots": [{
-            "subject": {"harness": "claude", "subject_id": "chosen"},
-            "freshness": "fresh", "constraints": [case["constraint"]],
-        }], "absences": []})
+            def handler(request):
+                requests.append((request.method, request.url.path))
+                return httpx.Response(200, json={"snapshots": [{
+                    "subject": {"harness": "claude", "subject_id": "chosen"},
+                    "freshness": "fresh", "constraints": [case["constraint"]],
+                }], "absences": []})
 
-    with ClaudexorGateway(DaemonEndpoint("127.0.0.1", 1, "test-token")) as gateway:
-        gateway._client.close()
-        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler))
-        assert _exhausted_window(gateway, "claude", pinned_profile="chosen") == (
-            False, "")
-    assert requests == [("GET", "/v2/quota")]
+            with ClaudexorGateway(DaemonEndpoint("127.0.0.1", 1, "test-token")) as gateway:
+                gateway._client.close()
+                gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler))
+                assert _exhausted_window(gateway, "claude", pinned_profile="chosen") == (
+                    False, "")
+            assert requests == [("GET", "/v2/quota")]
 
 
 def test_partial_sibling_preserves_rotation_but_never_rescues_a_spent_pin():
@@ -62,7 +62,9 @@ def _spent(subject_id: str) -> dict:
     }
 
 
-def test_route_health_contradictory_same_subject_absence_fails_open():
+def test_route_health_same_subject_absence_cannot_mask_a_dated_block():
+    """OB1851: a refresh gap beside the subject's own dated, unexpired block is a
+    constraint on that subject, not an alternative; the block's reset is the recheck."""
     class Gateway:
         reads = 0
 
@@ -85,7 +87,7 @@ def test_route_health_contradictory_same_subject_absence_fails_open():
             raise AssertionError("route health must not perform a second quota read")
 
     gateway = Gateway()
-    assert _exhausted_window(gateway, "claude", pinned_profile="proton4") == (False, "")
+    assert _exhausted_window(gateway, "claude", pinned_profile="proton4") == (True, "2099-01-01T00:00:00Z")
     assert gateway.reads == 1
 
 
@@ -126,7 +128,7 @@ def test_real_gateway_route_health_performs_one_physical_quota_get():
             transport=httpx.MockTransport(handler),
         )
         assert _exhausted_window(
-            gateway, "claude", pinned_profile="proton4") == (False, "")
+            gateway, "claude", pinned_profile="proton4") == (True, "2099-01-01T00:00:00Z")
 
     assert requests == ["GET /v2/quota"]
 

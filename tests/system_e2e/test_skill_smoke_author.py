@@ -214,6 +214,19 @@ def test_s41_missing_or_pending_independent_review_stays_red(tmp_path, source, k
     consume(tmp_path, source, script, verdicts, error="missing review|pending/unknown")
 
 
+@pytest.mark.parametrize("silent", ["", "not a review verdict"])
+def test_s41_a_first_review_without_any_verdict_buys_one_retry(tmp_path, source, silent):
+    """An empty or unreadable first answer is no opinion: the identical second call is a new paid cycle that asks
+    again (#2410), and the retry's verdict decides; a second silence stays red."""
+    retry = call()
+    result, model = consume(tmp_path, source, [call(), retry], [silent, verdict()])
+    assert result["review"]["status"] == "clean" and len(model.review_calls) == 2
+    evidence = json.loads((tmp_path / "author/author-evidence.json").read_text())
+    paid = [row for row in evidence["review_history"] if row.get("paid")]
+    assert [row["status"] for row in paid][1] == "clean" and paid[0]["status"] not in {"clean", "warnings", "blockers"}
+    consume(tmp_path / "twice", source, [call(), retry], [silent, silent], error="pending/unknown")
+
+
 @pytest.mark.parametrize("field", ["group_id", "content_hash", "review_contract_fingerprint"])
 def test_s41_group_material_or_panel_drift_is_red_at_actual_ci_entry(tmp_path, source, field):
     def drift(_body):

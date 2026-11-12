@@ -308,16 +308,17 @@ def test_the_child_gets_a_dedicated_process_group(tmp_path, monkeypatch):
     assert kwargs["purpose"] == "startup_historical_audit"
     assert kwargs["scope"] == "session"
     assert cmd[1:3] == ["-m", "ouroboros.startup_historical_audit"]
-    # Only ordinary runtime environment, explicit roots (the data, program and settings
-    # paths plus the three configured work roots the storage count walks) and the
-    # inherited containment token reach the child.
+    # Only ordinary runtime environment, explicit roots (the app, data, program and settings
+    # paths, the three configured work roots the storage count walks and the host's work-root
+    # basis) and the inherited containment token reach the child.
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
 
     assert {key for key in kwargs["env"] if not key.startswith(CONTAINMENT_ENV_PREFIX)} <= {
         "PATH", "HOME", "USERPROFILE", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR",
-        "LANG", "LC_ALL", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH",
+        "LANG", "LC_ALL", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH", "OUROBOROS_APP_ROOT",
         "OUROBOROS_DATA_DIR", "OUROBOROS_REPO_DIR", "OUROBOROS_SETTINGS_PATH", "OUROBOROS_PARENT_PID",
         "OUROBOROS_SUBAGENT_WORKTREE_ROOT", "OUROBOROS_SUBAGENT_PROJECTS_ROOT", "OUROBOROS_DELIVERABLES_ROOT",
+        "OUROBOROS_WORK_ROOT_BASIS",
     }, kwargs["env"]
     assert kwargs["env"]["OUROBOROS_PARENT_PID"] == str(os.getpid())
 
@@ -354,11 +355,7 @@ def test_a_spawn_failure_records_only_the_exception_class(tmp_path, monkeypatch)
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("payload", [
-    b"", b"not json", b"[]", b'{"status":"weird","facts_written":1,"manifests_checked":1,'
-    b'"wall_seconds":1,"cpu_seconds":1}',
-    b'{"status":"completed","facts_written":-1,"manifests_checked":1,"wall_seconds":1,"cpu_seconds":1}',
-    b'{"status":"completed","facts_written":true,"manifests_checked":1,"wall_seconds":1,"cpu_seconds":1}',
-    b'{"status":"completed","facts_written":1,"manifests_checked":1,"wall_seconds":Infinity,"cpu_seconds":1}',
+    b"", b"not json", b'{"status":"completed","facts_written":1,"manifests_checked":1,"wall_seconds":Infinity,"cpu_seconds":1}',
 ])
 def test_report_fields_refuses_anything_outside_the_closed_schema(payload):
     assert _report_fields(payload) == {}

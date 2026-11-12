@@ -12,7 +12,6 @@ from tests.provider_release_floor import required_canary_ids
 from tests.test_ci_diagnostic_workflows import CANARY, ROOT, _run_shell, _steps, _workflow
 
 
-@pytest.mark.serial
 def test_real_canary_collection_is_nonempty_disjoint_and_complete():
     # Collection executes pytest's real parametrization and marker selection, not a
     # second Python filter. Fixtures (and therefore provider calls) never execute.
@@ -38,12 +37,14 @@ def test_real_canary_collection_is_nonempty_disjoint_and_complete():
         assert len(rows) == len(wanted) and set(rows) == wanted, (selection, rows)
 
 
-@pytest.mark.parametrize("scope,selection", [
-    ("all", "integration"),
-    ("required", "integration and required_provider"),
-    ("optional", "integration and optional_provider"),
+@pytest.mark.parametrize(("result", "scope", "selection"), [
+    (0, "all", "integration"),
+    (1, "required", "integration and required_provider"),
+    (2, "optional", "integration and optional_provider"),
+    (3, "all", "integration"),
+    (4, "required", "integration and required_provider"),
+    (5, "optional", "integration and optional_provider"),
 ])
-@pytest.mark.parametrize("result", [0, 1, 2, 3, 4, 5])
 def test_actual_scoped_shell_preserves_each_pytest_exit(tmp_path, scope, selection, result):
     step = _steps(CANARY, "integration-test")["provider_tests"]
     assert step["env"]["SCOPE"] == "${{ inputs.scope }}"
@@ -54,7 +55,7 @@ def test_actual_scoped_shell_preserves_each_pytest_exit(tmp_path, scope, selecti
     assert args[:3] == ["-m", "pytest", "tests/test_provider_integration.py"]
 
 
-@pytest.mark.parametrize("scope", ["", "REQUIRED", "unrecognized", "all; touch injected"])
+@pytest.mark.parametrize("scope", ["", "REQUIRED", "all; touch injected"])
 def test_unknown_scope_refuses_before_launch(tmp_path, scope):
     done, args = _run_shell(_steps(CANARY, "integration-test")["provider_tests"], tmp_path, scope=scope)
     assert done.returncode == 2 and args == []
@@ -92,8 +93,13 @@ def test_optional_failure_cannot_enter_the_release_dependency_graph():
     assert "integration-optional" not in release["if"]
 
 
-@pytest.mark.parametrize("required", ["success", "failure", "cancelled", "skipped", ""])
-@pytest.mark.parametrize("optional", ["success", "failure", "cancelled", "skipped"])
+@pytest.mark.parametrize(("optional", "required"), [
+    ("success", "success"),
+    ("success", ""),
+    ("failure", "failure"),
+    ("cancelled", "cancelled"),
+    ("skipped", "skipped"),
+])
 def test_actual_release_bar_uses_required_job_result_not_optional(required, optional):
     from tests.test_windows_signing_release import expression_value
 

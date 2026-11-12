@@ -29,7 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(sys.platform != "win32", reason="native Windows consoles"),
+pytestmark = [pytest.mark.skipif(sys.platform != "win32", reason="native Windows consoles"),
               pytest.mark.skipif(os.environ.get("OUROBOROS_WINDOWS_DESKTOP_QA") != "1",
                                  reason="interactive desktop probes require OUROBOROS_WINDOWS_DESKTOP_QA=1")]
 

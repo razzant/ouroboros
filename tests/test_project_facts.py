@@ -302,6 +302,7 @@ def test_knowledge_write_project_scoped_goes_to_project_store(tmp_path, monkeypa
     from ouroboros.tools import knowledge
 
     ctx = _Ctx(tmp_path / "child", project_id="proj_abc")
+    ctx.budget_drive_root = str(tmp_path / "data")  # a split child carries its canonical root (#915)
     knowledge._knowledge_write(ctx, "facts", "project fact X", "overwrite")
 
     proj = project_knowledge_dir("proj_abc") / "facts.md"
@@ -327,10 +328,10 @@ def test_context_project_scope_adds_to_global_knowledge_index(tmp_path, monkeypa
     drive = tmp_path / "drive"
     (drive / "memory" / "knowledge").mkdir(parents=True)
     (drive / "memory" / "knowledge" / "index-full.md").write_text("# idx\n- **g**: GLOBAL stuff", encoding="utf-8")
-    px = project_knowledge_dir("proj_x")
+    px = drive / "projects" / "proj_x" / "knowledge"  # the shelf on the context's own root, not DATA_DIR (#915)
     px.mkdir(parents=True)
     (px / "index-full.md").write_text("# idx\n- **facts**: project x stuff", encoding="utf-8")
-    py = project_knowledge_dir("proj_y")
+    py = drive / "projects" / "proj_y" / "knowledge"
     py.mkdir(parents=True)
     (py / "index-full.md").write_text("# idx\n- **facts**: project y secret", encoding="utf-8")
 

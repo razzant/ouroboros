@@ -273,6 +273,12 @@ test('a harness pin the resolution refused reads `{harness} · blocked`, never d
     assert.equal(keepStickyExecutorChip(blocked, executorChip({ executor_route: 'codex' })), true);
     // A blocked API-model actor names no route: no harness chip is invented.
     assert.equal(executorChip({ reason_code: 'subagent_executor_unavailable' }), null);
+    // A helper refused for hidden or uncheckable delegate tools never started either: no "run outcome unknown".
+    for (const code of ['delegate_tools_invisible', 'delegate_visibility_unverified']) {
+        const refused = executorChip({ executor_route: 'claude', reason_code: code });
+        assert.equal(refused.label, 'Claude Code · blocked', code);
+        assert.match(refused.title, /could not start — the task was NOT run/, code);
+    }
     // Any other reason code keeps the ordinary layered truth.
     assert.equal(executorChip({ executor_route: 'codex', reason_code: 'tool_failure' }).label, 'Codex');
 });

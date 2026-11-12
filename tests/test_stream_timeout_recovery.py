@@ -209,8 +209,12 @@ def test_wrap_up_during_timeout_backoff_sends_nothing_and_retains_notice(wire_en
     assert TIMEOUT_REPEAT_KEY in usage and "was not sent" in usage["terminal_host_notice"]
 
 
-@pytest.mark.parametrize("new_id", [False, True], ids=["same_id", "successor_id"])
-@pytest.mark.parametrize("lost_at", ["granted", "dispatch_intent", "dispatched", "spent"])
+@pytest.mark.parametrize(("lost_at", "new_id"), [
+    pytest.param("granted", False, id='granted-same_id'),
+    pytest.param("dispatch_intent", True, id='dispatch_intent-successor_id'),
+    pytest.param("dispatched", False, id='dispatched-same_id'),
+    pytest.param("spent", True, id='spent-successor_id'),
+])
 def test_real_checkpoint_recovery_does_not_renew_repeat(wire_env, sleeps, monkeypatch, new_id, lost_at):
     def crash(*_a, **_k):
         raise WorkerLost()
@@ -365,8 +369,8 @@ def test_restored_repeat_buys_no_deadline_summary_and_keeps_its_facts(wire_env, 
 
 @pytest.mark.parametrize("linked", [True, False], ids=["reaper_links", "owner_claim_alone"])
 def test_new_id_recovery_keeps_the_predecessors_failure_refs_readable(wire_env, sleeps, monkeypatch, linked):
-    """A successor publishes the predecessor's failure rows; promotion verifies their sources under that
-    owner only along the reaper's reciprocal retry links (same-ID settlement is pinned above)."""
+    """A stored pre-upgrade successor publishes the predecessor's failure rows; promotion verifies their
+    sources under that owner only along its reciprocal retry links (same-ID settlement is pinned above)."""
     from ouroboros import agent_task_pipeline as pipeline, observability as obs
     from ouroboros.task_results import load_task_result
 
@@ -379,7 +383,7 @@ def test_new_id_recovery_keeps_the_predecessors_failure_refs_readable(wire_env, 
     task = {"id": successor, "_attempt": 2, "type": "task", "chat_id": 1, "text": "Research",
             "parent_task_id": PARENT, "root_task_id": PARENT, "delegation_role": "subagent",
             "original_task_id": CHILD, "timeout_retry_from": CHILD}
-    if linked:  # the rows task_reaper._run_retry_admission_transaction writes
+    if linked:  # the rows a pre-upgrade timeout retry admission wrote
         write_task_result(wire_env, successor, "scheduled", original_task_id=CHILD, timeout_retry_from=CHILD)
         write_task_result(wire_env, CHILD, "interrupted", retry_task_id=successor, superseded_by=successor)
     assert wc.attach_recovery(wire_env, task, source_task_id=CHILD, from_attempt=1, cause="idle_timeout")

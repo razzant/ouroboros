@@ -8,9 +8,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
-from ouroboros import dialogue_store, store
+from ouroboros import chat_chain, dialogue_store, store
 
 _PLACE = "json_extract(body, '$.place_id')"
 _ARRIVAL = "stream='chat' AND kind='place_arrival'"
@@ -39,12 +38,16 @@ class SourceProjection(dict):
 
 
 def project_source(record):
-    """Project a deferred source pointer without mutating the accepted source bytes."""
+    """Project a deferred source pointer without mutating the accepted source bytes: an arrival's from its dedup
+    record, and a context recorded in the row itself (``chat_chain.ROW_CONTEXT``) as the row's exact address."""
     body = dialogue_store.decode(record["body"])
-    if body.get("type") != "place_arrival" or "dispatch_input" not in record.keys():
-        return body
-    extra = json.loads(record["dispatch_input"] or "{}")
-    source = extra.get("place_context_source_ref") if isinstance(extra, dict) else None
+    if body.get("type") == "place_arrival" and "dispatch_input" in record.keys():
+        extra = json.loads(record["dispatch_input"] or "{}")
+        source = extra.get("place_context_source_ref") if isinstance(extra, dict) else None
+    else:
+        source = body.get("context_source_ref") if body.get("context_source_ref") == chat_chain.ROW_CONTEXT else None
+    if source == chat_chain.ROW_CONTEXT:
+        source = chat_chain.context_address(body)
     return SourceProjection(body, source) if isinstance(source, dict) else body
 
 
@@ -86,7 +89,7 @@ def heard_replay(root, task_id, identity="", continuation_version=0):
                               continuation_version=continuation_version)
 
 
-def record_heard(root, task, event, reason, *, captured_task_id=None):
+def record_heard(root, task, event, reason, *, captured_task_id=None, recipient=''):
     from ouroboros.presence_runner import _stored_turn, presence_result_from_stored
     from dataclasses import replace
     identity = task['metadata']['presence_event_identity']
@@ -106,36 +109,68 @@ def record_heard(root, task, event, reason, *, captured_task_id=None):
             facts = json.loads(row['dispatch_input'] or '{}')
             facts.setdefault('place_attention', {'decision': 'heard', 'reason': reason,
                              'facts': list(event.facts or ()),
-                             'delivery_reporting_version': event.delivery_reporting_version})
+                             'delivery_reporting_version': event.delivery_reporting_version,
+                             **({'recipient': recipient} if recipient else {})})
             conn.execute("UPDATE dialogue SET dispatch_input=? WHERE stream='chat' AND seq=?",
                          (json.dumps(facts), row['seq']))
         return heard_replay(root, arrival_id, identity, event.continuation_version)
 
 
-def retain_focus_source(root, task_id):
-    """Only an admitted focus needs the immutable context-source blob.
+def arrival_recipient(root, captured_task_id):
+    """Who holds this arrival (``place_recipient`` on its dedup record), else ``{}``: one source, one holder."""
+    with dialogue_store.transaction(root, write=False) as conn:
+        row = _record(conn, captured_task_id)
+    return (json.loads(row['dispatch_input'] or '{}').get('place_recipient') or {}) if row is not None else {}
 
-    Its pointer lives in the existing dedup record, so source row bytes and byte
-    coordinates stay unchanged. dialogue_store projects it for every row reader.
-    Caller holds intake_lock through this operation and the running-task write.
+
+def pin_recipient(root, captured_task_id, conversation_key, pin, *, expect, admit=None):
+    """Compare-and-set the holder after acquiring intake and dialogue locks; None means admission refused.
+
+    The caller holds its mailbox lock. Check admission after all potentially blocking acquisition,
+    before the first claim or a retry: a final close may have timed out while capture held intake.
+    A lost answer or a crash keeps the claimed holder; a pre-claim refusal changes nothing.
     """
-    from ouroboros import chat_chain
+    with intake_lock(root, conversation_key), dialogue_store.transaction(root, write=True) as conn:
+        row = _record(conn, captured_task_id)
+        if row is None:
+            raise ValueError('An arrival holder requires its captured event')
+        facts = json.loads(row['dispatch_input'] or '{}')
+        current = facts.get('place_recipient') or {}
+        if admit is not None and not admit():
+            return None
+        if current != (expect or {}) or current == pin:
+            return current
+        if pin:
+            facts['place_recipient'] = pin
+        else:
+            facts.pop('place_recipient', None)
+        conn.execute("UPDATE dialogue SET dispatch_input=? WHERE stream='chat' AND seq=?", (json.dumps(facts), row['seq']))
+        return pin or {}
+
+
+def retain_focus_source(root, task_id):
+    """The context source of an admitted focus, or of an arrival whose author's mail leaves facts out
+    (``place_intake.offer_to_author``); heard-only arrivals name none. It is the arrival's own row, by its exact
+    address (``chat_chain.context_address``); an arrival that retained a blob before keeps it. Returns the reference.
+
+    The mark lives in the existing dedup record, so source row bytes and byte coordinates stay
+    unchanged; dialogue_store projects it as the row's address for every row reader.
+    Caller holds intake_lock through this operation (and a focus's running-task write).
+    """
     with dialogue_store.transaction(root, write=False) as conn:
         row = _record(conn, task_id)
     if row is None:
         raise ValueError('Focus requires its captured event')
     body = dialogue_store.decode(row['body'])
-    facts = json.loads(row['dispatch_input'] or '{}')
-    if body.get('context_source_ref') or facts.get('place_context_source_ref'):
-        return
-    source = {'recorded_at': body['ts'], 'source_event_id': body['client_message_id'],
-              'text': body['text'], 'transport': body['transport']}
-    ref = chat_chain.retain_memory_source(SimpleNamespace(drive_root=root, task_id=task_id), 'presence-event',
-        json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode(), 'json')
-    with dialogue_store.transaction(root, write=True) as conn:
-        conn.execute("UPDATE dialogue SET dispatch_input=json_set(COALESCE(dispatch_input,'{}'), "
-                     "'$.place_context_source_ref',json(?)) WHERE stream='chat' AND seq=?",
-                     (json.dumps(ref), row['seq']))
+    held = body.get('context_source_ref') or json.loads(row['dispatch_input'] or '{}').get('place_context_source_ref')
+    if held and held != chat_chain.ROW_CONTEXT:
+        return held
+    if not held:
+        with dialogue_store.transaction(root, write=True) as conn:
+            conn.execute("UPDATE dialogue SET dispatch_input=json_set(COALESCE(dispatch_input,'{}'), "
+                         "'$.place_context_source_ref',json(?)) WHERE stream='chat' AND seq=?",
+                         (json.dumps(chat_chain.ROW_CONTEXT), row['seq']))
+    return chat_chain.context_address(body)
 
 
 def _dialogue_indexes(root):
@@ -343,7 +378,8 @@ def account_candidates(root, place_id):
 
     This is a recent UI suggestion, never owner identity evidence or a history
     scan. It uses the existing place/time index and stores no second actor list.
-    The connected account's own imported messages among them suggest no person.
+    The connected account's own imported messages among them suggest no person; nor does a reaction's
+    chat or anonymous aggregate actor.
     """
     if not _dialogue_indexes(root):
         return []
@@ -351,12 +387,14 @@ def account_candidates(root, place_id):
         rows = conn.execute(f"SELECT json_extract(body,'$.sender_session_id') AS actor, "
                             "json_extract(body,'$.sender_label') AS label, "
                             "json_extract(body,'$.transport.actor.is_bot') AS bot, "
+                            "json_extract(body,'$.transport.actor.kind') AS kind, "
                             "json_extract(body,'$.historical_import.authorship') AS authorship "
                             f"FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} "
                             f"AND {_PLACE}=? ORDER BY ts DESC LIMIT 50", (place_id,)).fetchall()
     people = {}
     for row in rows:
         actor = str(row['actor'] or '')
-        if actor and not row['bot'] and row['authorship'] != 'platform_account' and actor not in people:
+        if (actor and not row['bot'] and row['authorship'] != 'platform_account' and actor not in people
+                and row['kind'] not in {'chat', 'anonymous'}):
             people[actor] = {'platform_actor_id': actor, 'label': str(row['label'] or actor)}
     return list(people.values())[:20]

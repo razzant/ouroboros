@@ -26,7 +26,7 @@ from tests.test_subscription_setup_browser import capture, subscription_ui as _s
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # Records notifications, and replaces the socket transport with one this test
 # can push frames into. `ws.js` keeps its own dispatch, reconnect and queue.
@@ -277,6 +277,7 @@ def test_choices_survive_reload_and_reload_itself_never_notifies(subscription_ui
     pref(page, 'show_text').check()
     page.wait_for_function(SHOW_TEXT_SAVED)
 
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('#chat-input')
     page.wait_for_function(SOCKET_READY)
@@ -287,12 +288,14 @@ def test_choices_survive_reload_and_reload_itself_never_notifies(subscription_ui
     assert pref(page, 'enabled').is_checked() is True, 'the choice is client-local and persisted'
     assert pref(page, 'show_text').is_checked() is True
 
-    # With text shown, the body carries the message.
-    deliver(page, {'type': 'chat', 'role': 'system', 'system_type': 'task_summary',
-                   'task_id': 't-after-reload', 'chat_id': MAIN, 'content': 'The report is ready.'})
+    # With text shown, a finished task's body is its work's name, outcome word and the cause its record
+    # holds (DESIGN §9), said from the facts of the live event the server pushes, never a task id.
+    deliver(page, {'type': 'log', 'chat_id': MAIN,
+                   'data': {'type': 'task_done', 'task_id': 't-after-reload', 'chat_id': MAIN, 'status': 'failed',
+                            'target_label': 'Alpha', 'reason_code': 'worker_crash_signal'}})
     notes = recorded(page)
     assert len(notes) == 1
-    assert notes[0]['options']['body'] == 'The report is ready.'
+    assert notes[0]['options']['body'] == 'Alpha · Failed: The worker process running the task crashed'
     capture(page, 'notifications-after-reload')
 
 
@@ -390,7 +393,12 @@ def test_an_older_desktop_app_is_never_called_sound_on_or_off(subscription_ui):
     page.wait_for_function("() => window.__notifications.length === 1")
     assert recorded(page)[0]['options']['silent'] is True
     status = page.locator('[data-settings-panel="appearance"] [data-notify-status]')
-    assert 'predates them, so alerts fall back to a browser banner or the app' in status.inner_text()
+    said = status.inner_text()
+    # Settings names the one observed fact, the missing system-notification method, and where alerts go instead; it
+    # never infers the app's age or an update remedy (docs/DESIGN.md §9, owner decision 3A: Dashboard > Updates owns those).
+    assert 'has no system-notification method here, so alerts fall back to a browser banner or the app' in said, said
+    assert not [word for word in ('predate', 'older', 'outdated', 'update', 'upgrade') if word in said.lower()], said
+    capture_block(page.locator('[data-settings-panel="appearance"] [data-notify-settings]'), 'notifications-old-app-status-block')
 
     pref(page, 'sound').check()
     deliver(page, {'type': 'log', 'chat_id': MAIN,
@@ -503,6 +511,7 @@ def test_app_tone_volume_previews_only_on_press_and_survives_reload(subscription
     capture_block(block, 'notifications-tone-sound-off-block')
     pref(page, 'sound').check()
 
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('#chat-input')
     block = open_notifications(page)

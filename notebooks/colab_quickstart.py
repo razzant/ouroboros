@@ -227,11 +227,18 @@ clone_or_update_repo(
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", "."], check=True)
 
 secrets = collect_colab_secrets()
+# Only a variable this cell finds set is a launch choice (a blank or malformed one still fails
+# here, as before); the rest keep what Drive saved, and a first launch takes 200 / advanced / 1.
+_launch = {}
+if "TOTAL_BUDGET" in os.environ:
+    _launch["total_budget"] = float(os.environ["TOTAL_BUDGET"])
+if "OUROBOROS_RUNTIME_MODE" in os.environ:
+    _launch["runtime_mode"] = os.environ["OUROBOROS_RUNTIME_MODE"]
+if "OUROBOROS_MAX_WORKERS" in os.environ:
+    _launch["max_workers"] = int(os.environ["OUROBOROS_MAX_WORKERS"])
 settings = build_colab_settings(
     secrets,
-    total_budget=float(os.environ.get("TOTAL_BUDGET", "200")),
-    runtime_mode=os.environ.get("OUROBOROS_RUNTIME_MODE", "advanced"),
-    max_workers=int(os.environ.get("OUROBOROS_MAX_WORKERS", "1")),
+    **_launch,
     existing=_settings_seed,
     drive_document_present=bool(_existing_settings),
 )

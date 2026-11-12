@@ -14,7 +14,6 @@ import logging
 import os
 import pathlib
 import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -28,7 +27,7 @@ from ouroboros.tools.review_checklist import (  # noqa: F401 -- intentional publ
     load_checklist_layers,
     load_checklist_section,
 )
-from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact as _truncate_review_artifact, utc_now_iso  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
+from ouroboros.utils import truncate_review_artifact as _truncate_review_artifact, utc_now_iso
 
 if TYPE_CHECKING:
     # Avoid runtime registry import; this module stays tool-module independent.
@@ -309,10 +308,9 @@ def review_wave_budget_gate(
             "limit_usd": admission.get("limit_usd"),
             "known_usd": admission.get("known_usd"),
             "accounted_usd": admission.get("accounted_usd"),
-            "reserved_usd": admission.get("reserved_usd"),
             **{key: admission.get(key) for key in (
-                "binding_axis", "global_limit_usd", "global_known_usd", "global_accounted_usd",
-                "global_reserved_usd", "global_remaining_usd")},
+                "reserved_usd", "unresolved_upper_bound_usd", "binding_axis", "global_limit_usd", "global_known_usd",
+                "global_accounted_usd", "global_reserved_usd", "global_unresolved_upper_bound_usd", "global_remaining_usd")},
             "slots": admission.get("slots"),
             "slot_bounds": admission.get("slot_bounds"),
             "unpriced_slots": unpriced,
@@ -460,12 +458,17 @@ def load_governance_doc(
     except Exception as exc:
         if on_missing in ("silent", "placeholder"):
             return fallback
-        return f"[⚠️ OMISSION: {rel_path} could not be loaded ({path}): {exc}]"
+        return GOVERNANCE_OMISSION["unloadable"].format(rel_path=rel_path, path=path, error=exc)
     if on_missing == "silent":
         return fallback
     if on_missing == "placeholder":
-        return fallback if fallback else f"({rel_path} not found)"
-    return f"[⚠️ OMISSION: {rel_path} not found at {path}]"
+        return fallback if fallback else GOVERNANCE_OMISSION["placeholder"].format(rel_path=rel_path)
+    return GOVERNANCE_OMISSION["missing"].format(rel_path=rel_path, path=path)
+
+
+# What a brief says in place of a governance document it could not load.
+GOVERNANCE_OMISSION = {"unloadable": "[⚠️ OMISSION: {rel_path} could not be loaded ({path}): {error}]",
+                       "missing": "[⚠️ OMISSION: {rel_path} not found at {path}]", "placeholder": "({rel_path} not found)"}
 # File-classification constants shared by legacy pack helpers and generated atlases.
 
 
@@ -484,19 +487,14 @@ def build_blocking_findings_json_section(
     if not open_obligations and not blocking_history:
         return ""
 
-    def _sanitize_text(value: str, limit: int = 0) -> str:
-        """Redact secrets; ignore legacy ``limit`` to avoid silent truncation."""
-        text, _ = redact_prompt_secrets(str(value or ""))
-        return text
-
     payload = {"open_obligations": [
         {
             "obligation_id": getattr(ob, "obligation_id", ""),
             "item": getattr(ob, "item", ""),
             "severity": getattr(ob, "severity", ""),
-            "reason": _sanitize_text(getattr(ob, "reason", "")),
+            "reason": str(getattr(ob, "reason", "") or ""),
             "source_attempt_ts": getattr(ob, "source_attempt_ts", ""),
-            "source_attempt_msg": _sanitize_text(getattr(ob, "source_attempt_msg", ""), limit=200),
+            "source_attempt_msg": str(getattr(ob, "source_attempt_msg", "") or ""),
         }
         for ob in open_obligations
     ], "recent_blocking_attempts": []}
@@ -504,14 +502,14 @@ def build_blocking_findings_json_section(
     # Include all blocking attempts and all critical findings.
     for attempt in reversed(list(blocking_history or [])):
         critical_findings = [
-            {key: _sanitize_text(value) if isinstance(value, str) else value for key, value in finding.items()}
+            dict(finding)
             for finding in list(getattr(attempt, "critical_findings", []) or [])
             if isinstance(finding, dict)
         ]
         payload["recent_blocking_attempts"].append({
             "ts": getattr(attempt, "ts", ""),
             "tool_name": getattr(attempt, "tool_name", ""),
-            "commit_message": _sanitize_text(getattr(attempt, "commit_message", ""), limit=200),
+            "commit_message": str(getattr(attempt, "commit_message", "") or ""),
             "block_reason": getattr(attempt, "block_reason", ""),
             "critical_findings": critical_findings,
         })
@@ -581,8 +579,8 @@ def build_goal_section(
     ``## Informational context`` block and explicitly flagged as narrative
     so reviewers don't fact-check commit-message wording against the code.
 
-    ``owner_words`` is the host-attested section of the owner's words that
-    caused the work (``owner_words.owner_words_text``), placed right after the
+    ``owner_words`` is the host-attested section of my human's words for
+    the work (``owner_words.owner_words_text``), placed right after the
     intent: what was asked, beside the author's account of the change. Empty
     keeps the section byte-identical to a review without it.
     ``preflight_execution`` is the wave's frozen test execution exhibit
@@ -637,6 +635,15 @@ def review_history_with_obligations(history: Any, *, drive_root: Any, repo_root:
     return render_history_with_obligations(history, drive_root=drive_root, repo_root=repo_root, task_id=task_id)
 
 
+def intent_material() -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the intent and scope sections
+    over fixed placeholders, once per source of the intent (goal with a narrative commit body, scope, commit
+    subject, fallback). The author's words and the exhibits it carries are data."""
+    return [build_goal_section("⟨goal⟩", "", "⟨subject⟩\n\n⟨body⟩", "⟨owner words⟩", "⟨execution⟩", "⟨pulse⟩"),
+            build_goal_section("", "⟨scope⟩"), build_goal_section("", "", "⟨subject⟩"), build_goal_section(),
+            build_scope_section("⟨scope⟩")]
+
+
 def build_scope_section(scope: str = "") -> str:
     """Format the 'Scope of this change' section. Empty string if no scope."""
     if not scope.strip():
@@ -648,19 +655,6 @@ def build_scope_section(scope: str = "") -> str:
         f"Scope affects only pre-existing unchanged code outside the diff.\n"
         f"Issues in untouched legacy code outside the declared scope are advisory at most."
     )
-
-
-def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
-                                     touched_paths: list) -> dict:
-    """Best-effort advisory dispatch diagnostics; never raises. (The retired
-    Claude-SDK/CLI version probes died with that transport.)"""
-    return {
-        "model": model,
-        "prompt_chars": prompt_chars,
-        "prompt_tokens_approx": max(1, prompt_chars // 4),
-        "touched_paths": touched_paths,
-        "python": sys.executable,
-    }
 
 
 def check_worktree_readiness(
@@ -700,26 +694,7 @@ def check_worktree_readiness(
     except Exception:
         pass
 
-    # 3. Core Python changes without test changes (reuses the check-1 git status).
-    try:
-        if status_result is not None and status_result.returncode == 0:
-            has_py_in_core = False
-            has_test_change = False
-            for fpath in parse_changed_paths_from_porcelain(status_result.stdout or ""):
-                if fpath.endswith(".py") and (
-                    fpath.startswith("ouroboros/") or fpath.startswith("supervisor/")
-                ):
-                    has_py_in_core = True
-                if fpath.startswith("tests/"):
-                    has_test_change = True
-            if has_py_in_core and not has_test_change:
-                warnings.append(
-                    "Python files in ouroboros/supervisor modified without corresponding test changes."
-                )
-    except Exception:
-        pass
-
-    # 4. Size-ratchet findings. Never blocking here: the official repository's
+    # 3. Size-ratchet findings. Never blocking here: the official repository's
     # CI ``size_ratchet`` lane is the enforcing surface; this warning lets the
     # agent regenerate the manifest or shrink the debt before the official
     # line rejects the same finding. Cheap since the history replay retired
@@ -753,9 +728,9 @@ def check_worktree_readiness(
 def _run_review_preflight_tests(ctx: "Any", timeout: Optional[int] = None, *, force: bool = False) -> Optional[str]:
     """Run pytest before expensive review steps unless disabled or unavailable.
 
-    Timeout is owned by ``run_hermetic_pytest`` (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC``
-    env) so callers do not re-pin a stale literal; an explicit ``timeout`` still
-    overrides for tests."""
+    The budget is owned by ``run_hermetic_pytest``: none for the full suite (owner 5A), and for
+    a bounded run ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC`` else the default, so callers do not re-pin
+    a stale literal; an explicit ``timeout`` still bounds any tier (tests use it)."""
     if not force and os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
         return None
     repo_dir = getattr(ctx, "repo_dir", None)
@@ -780,27 +755,6 @@ def _run_review_preflight_tests(ctx: "Any", timeout: Optional[int] = None, *, fo
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR", text=(f"⚠️ Unexpected error running tests: {exc}")))
 
 
-def format_advisory_error(prefix: str, result_error: str, stderr_tail: str,
-                          session_id: str, diag: dict) -> str:
-    """Format advisory delivery diagnostics with the ADVISORY_ERROR sentinel."""
-    lines = [
-        f"⚠️ ADVISORY_ERROR: {prefix}",
-        f"  error          : {result_error}",
-        f"  model          : {diag.get('model', '?')}",
-        f"  python         : {diag.get('python', '?')}",
-        f"  prompt_chars   : {diag.get('prompt_chars', '?')}",
-        f"  prompt_tokens  : ~{diag.get('prompt_tokens_approx', '?')}",
-        f"  touched_paths  : {diag.get('touched_paths', [])}",
-    ]
-    if session_id:
-        lines.append(f"  session_id     : {session_id}")
-    if stderr_tail:
-        lines.append("  stderr_tail    :")
-        for ln in stderr_tail.strip().splitlines()[-30:]:
-            lines.append(f"    {ln}")
-    return "\n".join(lines)
-
-
 # v7next F2.3a (D06): moved spans live in their owner leaves; re-exported
 # here so this facade stays the single import surface for callers and tests.
 from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentional public re-exports
@@ -816,9 +770,7 @@ from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentio
     _ANTI_THRASHING_RULE_VERDICT,
     _CONVERGENCE_RULE_TEXT,
     _HISTORY_VERIFICATION_ONLY_RULE,
-    _JSON_SECRET_RE,
     _OBLIGATION_SUFFIX_RE,
-    _SECRET_LINE_RE,
     _make_fence,
     anti_pattern_lock_guard,
     author_questions_block,
@@ -834,7 +786,6 @@ from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentio
     normalize_reviewer_item,
     normalize_reviewer_items,
     normalize_reviewer_obligation_id,
-    redact_prompt_secrets,
     review_preamble,
     single_line,
     strip_obligation_suffix,
@@ -860,6 +811,7 @@ from ouroboros.tools.review_file_pack import (  # noqa: E402, F401 -- intentiona
     list_changed_paths_from_git_status,
     list_git_tracked_paths,
     pack_exclusion_note,
+    pack_omission_note,
     parse_changed_paths_from_porcelain,
     parse_changed_paths_from_porcelain_z,
     parse_git_name_status,

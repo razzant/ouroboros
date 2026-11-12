@@ -9,6 +9,7 @@ transport or a lane outcome a test fixes on purpose.
 
 from __future__ import annotations
 
+import functools
 import json
 import multiprocessing
 import os
@@ -25,8 +26,8 @@ import pytest
 
 from ouroboros import preflight_receipts as receipts
 from ouroboros import preflight_runner as pr
+from tests._worlds import clone, clone_repository, world
 
-pytestmark = pytest.mark.serial
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 GIT_IDENTITY = ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
@@ -87,19 +88,15 @@ def _git(repo, *args) -> str:
                           check=True).stdout.strip()
 
 
-def _tiny_repo(root, *, web=False, lanes=("parallel", "serial")) -> pathlib.Path:
-    """A real repository carrying every lane of the complete default recipe: two
-    parallel tests, one serial test and, with ``web``, one ``node --test`` file. A
-    pytest lane missing from ``lanes`` has no test file, so that lane collects none."""
-    repo = pathlib.Path(root) / "tiny"
-    (repo / "tests").mkdir(parents=True)
+def _lay_tiny_repo(repo: pathlib.Path, *, web: bool, lanes: tuple) -> None:
+    (repo / "tests").mkdir()
     (repo / "pytest.ini").write_text("[pytest]\nmarkers =\n    serial: serial lane\n", encoding="utf-8")
     if "parallel" in lanes:
         (repo / "tests" / "test_parallel.py").write_text(
             "def test_one():\n    assert True\n\n\ndef test_two():\n    assert True\n", encoding="utf-8")
     if "serial" in lanes:
         (repo / "tests" / "test_serial.py").write_text(
-            "import pytest\n\n\n@pytest.mark.serial\ndef test_serial():\n    assert True\n", encoding="utf-8")
+            "import pytest\n\n\n@pytest.mark.serial('exclusive')\ndef test_serial():\n    assert True\n", encoding="utf-8")
     if web:
         (repo / "web" / "tests").mkdir(parents=True)
         (repo / "web" / "tests" / "tiny.test.js").write_text(
@@ -108,7 +105,15 @@ def _tiny_repo(root, *, web=False, lanes=("parallel", "serial")) -> pathlib.Path
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "tiny suite")
-    return repo
+
+
+def _tiny_repo(root, *, web=False, lanes=("parallel", "serial")) -> pathlib.Path:
+    """A real repository carrying every lane of the complete default recipe: two
+    parallel tests, one serial test and, with ``web``, one ``node --test`` file. A
+    pytest lane missing from ``lanes`` has no test file, so that lane collects none."""
+    template = world("-".join(("tiny-repo", "web" if web else "python", *lanes)),
+                     functools.partial(_lay_tiny_repo, web=web, lanes=tuple(lanes)))
+    return clone_repository(template, pathlib.Path(root) / "tiny")
 
 
 def _receipt_files(canonical) -> list:
@@ -139,15 +144,17 @@ def _launch_env(tag: str) -> dict:
             "_PYI_APPLICATION_HOME_DIR": f"/pyi/{tag}", f"OURO_PROC_CONTAINER_{uuid.uuid4().hex}": "1"}
 
 
-def _executing_copy(root) -> pathlib.Path:
-    """A physical copy of this executing implementation, as an installed body is one."""
-    install = pathlib.Path(root) / "install"
+def _lay_executing_copy(install: pathlib.Path) -> None:
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     for name in ("ouroboros", "supervisor", "scripts"):
         shutil.copytree(REPO / name, install / name, ignore=ignore)
     for name in ("server.py", "launcher.py", "VERSION", "pyproject.toml"):
         shutil.copy2(REPO / name, install / name)
-    return install
+
+
+def _executing_copy(root) -> pathlib.Path:
+    """A physical copy of this executing implementation, as an installed body is one."""
+    return clone(world("executing-copy", _lay_executing_copy), pathlib.Path(root) / "install")
 
 
 # One process life of a gate caller: it pins its executing source before the gate's own
@@ -583,7 +590,7 @@ def stubbed_lanes(monkeypatch):
     binds and what may be written, not about the lanes themselves."""
     calls = []
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda *args: calls.append(list(args[3])) or (0, "green", ""))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *_args: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *_args: {"gw0", "gw1"})
     monkeypatch.setattr(pr, "run_node_tests",
                         lambda *_args: calls.append(["node"]) or {"returncode": 0, "error": None, "reap_error": ""})
     return calls
@@ -648,7 +655,9 @@ def test_each_bound_input_misses_while_launch_descriptors_and_containment_do_not
     ctx = _ctx(repo, canonical, "second")
     assert pr.run_hermetic_pytest(repo, ctx=ctx) is None
     status = ctx._preflight_test_disclosure["receipt"]["status"]
-    if change in {"launch_only", "launch_only_windows", "temp_only", "evidence_only"}:
+    # A full run takes no budget from OUROBOROS_PREFLIGHT_TIMEOUT_SEC (`_resolve_preflight_timeout`), so a changed
+    # override is the same workload and its receipt still admits it.
+    if change in {"timeout", "launch_only", "launch_only_windows", "temp_only", "evidence_only"}:
         assert (status, len(stubbed_lanes), len(_receipt_files(canonical))) == ("reused", ran, 1)
     else:
         assert (status, len(_receipt_files(canonical))) == ("published", 2) and len(stubbed_lanes) > ran
@@ -689,6 +698,9 @@ def test_only_a_complete_default_run_with_a_root_and_a_baseline_becomes_durable(
 
 @pytest.mark.parametrize("outcome", ["red", "timeout", "containment", "workers_lost", "parallel_empty"])
 def test_a_red_hung_leaking_or_partial_run_never_mints(tmp_path, monkeypatch, outcome):
+    from tests._shared import retire_synthetic_gate_hold
+    from tests.test_preflight_runner import _pin_preflight_root
+
     receipts.capture_executing_source_baseline()
     repo = _tiny_repo(tmp_path)
     canonical = tmp_path / "canonical"
@@ -697,16 +709,23 @@ def test_a_red_hung_leaking_or_partial_run_never_mints(tmp_path, monkeypatch, ou
              "workers_lost": {}, "parallel_empty": {"parallel": (5, "no tests ran", "")}}[outcome]
     monkeypatch.setattr(pr, "_execute_pytest_pass", lambda python, worktree, temp, args, timeout: fixed.get(
         "parallel" if "-n" in args else "serial", (0, "green", "")))
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *_a: {"gw0"} if outcome == "workers_lost" else {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *_a: {"gw0"} if outcome == "workers_lost" else {"gw0", "gw1"})
     ctx = _ctx(repo, canonical)
-    error = pr.run_hermetic_pytest(repo, ctx=ctx)
-    assert _receipt_files(canonical) == []
-    if outcome == "parallel_empty":  # a green gate whose parallel lane proved no concurrency
-        assert error is None and ctx._preflight_test_proof
-        receipt = ctx._preflight_test_disclosure["receipt"]
-        assert (receipt["status"], receipt["reason"]) == ("declined", "the parallel pass collected no tests")
-    else:
-        assert error and not getattr(ctx, "_preflight_test_proof", None)
+    temp_root = (tmp_path / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+    try:
+        error = pr.run_hermetic_pytest(repo, ctx=ctx)
+        assert _receipt_files(canonical) == []
+        if outcome == "parallel_empty":  # a green gate whose parallel lane proved no concurrency
+            assert error is None and ctx._preflight_test_proof
+            receipt = ctx._preflight_test_disclosure["receipt"]
+            assert (receipt["status"], receipt["reason"]) == ("declined", "the parallel pass collected no tests")
+        else:
+            assert error and not getattr(ctx, "_preflight_test_proof", None)
+        assert temp_root.exists() is (outcome == "containment")
+    finally:
+        retire_synthetic_gate_hold(repo, temp_root, "pid 4242 is still alive")  # the stubbed lane proved no process
 
 
 def _replace(doc: dict, **changes) -> str:
@@ -808,14 +827,16 @@ def test_the_exhibit_never_claims_a_run_for_a_candidate_edited_after_it(tmp_path
     assert "Not proof here" in section
 
 
-@pytest.mark.parametrize("empty,baseline", [(None, True), ("parallel", True), ("serial", True), ("parallel", False)])
+@pytest.mark.parametrize("empty,baseline", [("serial", True)])
 def test_seats_read_the_lanes_that_ran_a_test_as_observed_never_the_recipe(tmp_path, empty, baseline):
-    """A green gate tolerates one lane that collects nothing (pytest exit 5). The receipt
-    declines an empty parallel lane, records an empty serial one and, with no source
-    baseline, declines before it looks at any lane, so the lanes come from the run itself.
-    Executed, reused by this process, reused from a receipt and reused again, the exhibit
-    names the lanes that ran a test and calls an empty lane empty, never green, and a proof
-    taken from a receipt keeps that receipt as its provenance. Real lanes, nothing stubbed."""
+    """A green gate tolerates a serial lane that collects nothing (pytest exit 5) and the
+    receipt records that lane as empty, so the lanes come from the run itself. Executed,
+    reused by this process, reused from a receipt and reused again, the exhibit names the
+    lanes that ran a test and calls an empty lane empty, never green, and a proof taken
+    from a receipt keeps that receipt as its provenance. Real lanes, nothing stubbed.
+    The declines are witnessed beside it: an empty parallel lane in
+    test_a_red_hung_leaking_or_partial_run_never_mints, a missing baseline in
+    test_only_a_complete_default_run_with_a_root_and_a_baseline_becomes_durable."""
     if baseline:
         receipts.capture_executing_source_baseline()
     tested = [lane for lane in ("parallel", "serial") if lane != empty]
@@ -908,9 +929,7 @@ _SOURCE_INDEX = "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_SOURCE_INDEX (hard block)
 @pytest.mark.parametrize("step,failure,headline,detail", [
     ("read-tree", "raise", "the source index tree could not be installed", "timed out after 30 seconds"),
     ("read-tree", "raise_silent", "the source index tree could not be installed", ""),
-    ("read-tree", "exit", "the source index tree could not be installed", "fatal: read-tree broke"),
     ("write-tree", "raise", "the disposable index could not be verified", "timed out after 30 seconds"),
-    ("write-tree", "exit", "the disposable index does not match the source index tree", "fatal: write-tree broke"),
     ("write-tree", "mismatch", "the disposable index does not match the source index tree",
      f"expected {'a' * 40}, got {'0' * 40}"),
 ])

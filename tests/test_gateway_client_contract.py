@@ -30,6 +30,7 @@ from ouroboros.gateway.schema import (
     json_schema_for,
     validate_ingress,
 )
+from tests._source_scan import parse
 from tests.test_gateway_parity import _js_typedef_fields
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -67,13 +68,27 @@ def test_every_client_envelope_has_a_field_identical_browser_twin():
     assert "import('./client_contract_types.js').ServedUiState" in index
 
 
+def test_contract_exposes_calls_without_diagnostic_probe_frames():
+    from ouroboros.gateway.contracts import ChatInbound
+
+    retired = {"realtime_execute", "realtime_prepared", "realtime_authorized",
+               "realtime_refused", "realtime_finished"}
+    assert not retired.intersection(endpoint_index.WS_SHAPES)
+    assert "execution_transport" not in typing.get_type_hints(ChatInbound)
+    document = (REPO / "docs" / "CLIENT_CONTRACT.md").read_text(encoding="utf-8")
+    assert not any(frame in document for frame in retired)
+    assert "POST /api/call/open" in endpoint_index.HTTP_SHAPES
+    assert "conversation_finished" in endpoint_index.WS_SHAPES
+    assert not validate_ingress({"type": "chat", "content": "Hello"}, ChatInbound)
+
+
 def test_shapes_bind_only_indexed_routes_with_valid_bodies_that_resolve():
     assert set(endpoint_index.HTTP_SHAPES) <= set(HTTP_ENDPOINTS)
     for token, shape in _all_shapes().items():
         assert shape.responses, token
         for group in shape.responses.split():
             statuses, _, body = group.partition(":")
-            assert body and all(re.fullmatch(r"[1-5]\d\d", s) for s in statuses.split(",")), (token, group)
+            assert body and all(re.fullmatch(r"(?:[1-5]\d\d|[45]xx)", s) for s in statuses.split(",")), (token, group)
             for name in _body_names(body):
                 assert contract_typed_dict(name), (token, name)
         for name in _body_names(shape.request) if shape.request else []:
@@ -84,10 +99,11 @@ def test_auth_endpoints_are_the_gate_owned_public_paths(gated_client):
     from ouroboros import server_auth
 
     paths = {token.split(" ", 1)[1] for token in endpoint_index.AUTH_ENDPOINTS}
-    assets = '/api/widget-assets/{token}/{path:path}'
-    assert paths == {"/auth/login", "/auth/logout", assets}
-    assert paths - {assets} <= server_auth._PUBLIC_HTTP_PATHS
+    assets = {'/api/widget-assets/{token}/{path:path}', '/api/widget-resources/{token}/{path:path}'}
+    assert paths == {"/auth/login", "/auth/logout", *assets}
+    assert paths - assets <= server_auth._PUBLIC_HTTP_PATHS
     assert gated_client.get('/api/widget-assets/' + 'x' * 43 + '/main.js').status_code == 404
+    assert gated_client.get('/api/widget-resources/' + 'x' * 43 + '/page').status_code == 404
     # The inner fixture has no auth routes: these responses prove gate ownership.
     assert gated_client.get("/auth/login").status_code == 200
     logout = gated_client.get("/auth/logout", follow_redirects=False)
@@ -129,7 +145,7 @@ def test_every_literal_ws_broadcast_type_is_published():
     sites = [REPO / "server.py", *sorted((REPO / "ouroboros").rglob("*.py")), *sorted((REPO / "supervisor").rglob("*.py"))]
     produced: dict[str, str] = {}
     for path in sites:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -220,8 +236,10 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
         assert not validate_ingress(entry, client_contracts.ContractHttpEntry), entry
         token = f"{entry['method']} {entry['path']}"
         assert entry["typed"] == (token in _all_shapes()), token
-        assert entry["auth"] == ("asset_lease" if entry["path"] == '/api/widget-assets/{token}/{path:path}' else
-                                 "public" if entry["path"] in {"/api/health", "/auth/login", "/auth/logout"} else "gate")
+        assert entry["auth"] == ("asset_lease" if entry["path"] in {'/api/widget-assets/{token}/{path:path}',
+                                                                  '/api/widget-resources/{token}/{path:path}'} else
+                                 "public" if entry["path"] in {"/api/health", "/auth/login", "/auth/logout",
+                                                               "/api/widget-bridge.js"} else "gate")
         for body in [entry.get("request"), *entry.get("responses", {}).values()]:
             for name in (body or {}).get("schemas", []):
                 assert name in document["schemas"], (token, name)
@@ -243,6 +261,11 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
     assert all(entry["typed"] for entry in document["http"]), "every indexed route publishes its shapes"
     assert by_token["POST /api/reset"]["responses"]["200"]["schemas"] == ["ResetResponse"]
     assert by_token["POST /api/claudexor/account-resets"]["headers"] == ["Idempotency-Key!"]
+    login = by_token["POST /api/claudexor/login"]["responses"]
+    assert login["200"]["schemas"] == ["ClaudexorLoginJobResponse"]
+    for status in ("400", "409", "503", "4xx", "5xx"):
+        assert set(login[status]["schemas"]) == {"ClaudexorLoginJobProblem", "ErrorResponse"}
+    assert "2xx" not in login, "only refused maintenance statuses pass through"
     assert "served_ui" in document["schemas"]["StateResponse"]["properties"]
     history = document["schemas"]["ChatHistoryResponse"]["properties"]["messages"]["items"]
     assert {"text", "role", "ts", "is_progress", "system_type", "task_id"} <= set(history["required"])

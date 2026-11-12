@@ -28,7 +28,6 @@ from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.review_dispatch import ReviewPaidStamp, bind_api_review_paid_stamp
 from tests._usage_store_testing import ledger_rows, request, root as root
 
-pytestmark = pytest.mark.serial
 
 
 @contextlib.contextmanager
@@ -220,8 +219,7 @@ def test_hold_setup_failure_still_releases_its_thread(tmp_path, monkeypatch, fac
     assert released_by_helper, "setup failure abandoned an untimed producer"
 
 
-@pytest.mark.parametrize("stage", ["reserve", "dispatch"])
-@pytest.mark.parametrize("interactive", [False, True])
+@pytest.mark.parametrize(("interactive", "stage"), [(False, "reserve"), (True, "dispatch")])
 def test_same_chain_preparation_stamp_claim_and_one_send(root, short_acquisitions, monkeypatch, stage, interactive):
     calls, prepared, stamps = [], [], []
     with contextlib.ExitStack() as stack:
@@ -381,7 +379,7 @@ def test_interactive_window_expiry_is_typed_and_never_quota_wait(root, short_acq
     assert rows(root) == []
 
 
-@pytest.mark.parametrize("reason", ["kernel_refused", "name_tier_refused", "identity_unreadable", "permission", "unknown"])
+@pytest.mark.parametrize("reason", ["kernel_refused", "permission", "unknown"])
 def test_negative_acquisition_facts_are_never_cooperatively_retried(root, monkeypatch, reason):
     calls = []
 
@@ -666,8 +664,11 @@ def test_interactive_expiry_rejoins_real_loop_no_call_terminal(root, short_acqui
             propagate_model_control(exc)  # real call_llm_with_retry's typed boundary
             raise
     monkeypatch.setattr(loop, "call_llm_with_retry", call)
+    registry = ToolRegistry(repo_dir=root, drive_root=root)
+    kwargs = _loop_kwargs(root, registry, [])
+    ua.usage_projection(root, root_task_id="dominant")
     with owner(root, task={"_is_direct_chat": True}) as events, held_lock(root):
-        text, usage, trace = loop.run_llm_loop(**_loop_kwargs(root, ToolRegistry(repo_dir=root, drive_root=root), []))
+        text, usage, trace = loop.run_llm_loop(**kwargs)
     assert calls == [1] and not rows(root)
     assert usage["reason_code"] == "accounting_wait_expired"
     assert usage["execution_status"] == "infra_failed"

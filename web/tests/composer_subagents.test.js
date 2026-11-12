@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SUBAGENT_LOCKS, SUBAGENT_MEANINGS, subagentsView } from '../modules/composer_subagents.js';
-import { CHANGE_RULE } from '../modules/composer_owner_controls.js';
+import { CHANGE_RULE } from '../modules/capsule.js';
 import { hoverWindow, mountPair } from './composer_controls_fixture.js';
 
 const value = (el) => el.querySelector('.chat-capsule-value').textContent;
@@ -22,7 +22,10 @@ test('the words: one meaning per value, one rule for the three capsules, and the
     });
     assert.equal(CHANGE_RULE, 'Applies to new steps; running work finishes.');
     assert.equal(SUBAGENT_MEANINGS.off, 'Ouroboros works alone in this chat: no subagents, no Claude Code or Codex sessions. Reviews still run.');
-    assert.equal(SUBAGENT_MEANINGS.auto, 'Ouroboros decides when helpers are worth it.');
+    // The hint says the module's words for the chosen value (below); the three say different things, and Off stays the
+    // longest: tests/test_ui_hint_browser.py opens it as Subagents' longest hint.
+    assert.equal(new Set(Object.values(SUBAGENT_MEANINGS)).size, 3);
+    assert.ok(['auto', 'swarm'].every((mode) => SUBAGENT_MEANINGS[mode].length < SUBAGENT_MEANINGS.off.length));
     const locked = subagentsView('swarm', 'disabled');
     assert.deepEqual([locked.mode, locked.stored, locked.word, locked.reason], ['off', 'swarm', 'Off', 'Subagents are turned off in Settings › Agents']);
     assert.equal(subagentsView('auto', 'unsaved').reason, 'Subagents are not set up yet');

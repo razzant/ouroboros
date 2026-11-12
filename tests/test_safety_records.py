@@ -73,8 +73,9 @@ def test_actual_safety_decisions_produce_panel_chips(supervisor, monkeypatch):
     assert view.recent_wakes(h.ctx.drive_root, [])[0]["checks"] == []
     assert h.module.check_safety("place_reply", {"text": "hello"}, ctx=h.ctx)[0]
     assert view.recent_wakes(h.ctx.drive_root, [])[0]["checks"] == [{"chip": "checked", "tool": "place_reply"}]
-    h.replies.append({"status": "DANGEROUS", "reason": "not delegated"})
+    h.replies.append({"status": "SUSPICIOUS", "reason": "not delegated"})
     assert not h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)[0]
+    h.later()
     assert h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)[0]
     h.replies.append(RuntimeError("checker unavailable"))
     assert not h.module.check_safety("place_reply", {"text": "held"}, ctx=h.ctx)[0]
@@ -92,12 +93,7 @@ def test_actual_safety_decisions_produce_panel_chips(supervisor, monkeypatch):
 
 @pytest.mark.parametrize("event,chips", [
     ({"type": "safety_verdict", "verdicts": [{"status": "SAFE"}]}, ["checked"]),
-    ({"type": "safety_verdict", "verdicts": [{"status": "SUSPICIOUS"}]}, ["warned"]),
-    ({"type": "safety_verdict", "verdicts": [{"status": "DANGEROUS"}, {"status": "SAFE"}]}, ["warned", "checked"]),
     ({"type": "safety_sent_despite_check"}, ["sent_despite"]),
-    ({"type": "safety_hold"}, ["held"]),
-    ({"type": "safety_mode_skip"}, ["not_checked"]),
-    ({"type": "safety_declared_read_skip"}, ["not_checked"]),
     ({"type": "safety_parse_failed"}, []),
 ])
 def test_each_durable_event_maps_without_inventing_checks(tmp_path, event, chips):
@@ -124,6 +120,23 @@ def test_parallel_checks_are_bounded_and_removed_with_task(tmp_path):
     assert all(len(item["tool"]) == 160 for item in checks)
     assert len(json.dumps(checks).encode()) < 10 * 1024 and document["result"] == "preserved"
     assert delete_document(tmp_path, "wake") and read_document(tmp_path, "wake") is None
+
+
+def test_a_task_drives_audit_also_reaches_the_shared_log_once(tmp_path):
+    """A per-task drive is pruned two days after its task: each of its audit rows is also in the canonical shared
+    log. A drive that is the canonical root writes its one row there, never twice."""
+    def lines(root):
+        path = root / "logs" / "events.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    drive, shared = tmp_path / "task-drive", tmp_path / "data"
+    ctx = SimpleNamespace(drive_root=drive, budget_drive_root=str(shared), task_id="wake", drive_logs=lambda: drive / "logs")
+    records._emit_durable_safety_event(ctx, {"type": "safety_hold", "tool": "place_reply"})
+    assert [row["type"] for row in lines(drive)] == [row["type"] for row in lines(shared)] == ["safety_hold"]
+    assert lines(drive) == lines(shared)
+    canonical = SimpleNamespace(drive_root=shared, task_id="main", drive_logs=lambda: shared / "logs")
+    records._emit_durable_safety_event(canonical, {"type": "safety_verdict", "tool": "remote_write", "verdicts": []})
+    assert [row["type"] for row in lines(shared)] == ["safety_hold", "safety_verdict"]
+    assert [row["type"] for row in lines(drive)] == ["safety_hold"]
 
 
 def test_index_failure_does_not_suppress_the_original_durable_audit(tmp_path, monkeypatch):

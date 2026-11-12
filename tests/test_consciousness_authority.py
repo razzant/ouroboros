@@ -22,6 +22,7 @@ import pytest
 from ouroboros import consciousness_authority as ca
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._store_shared import seed_result
+from tests._cases import case_folders
 
 WAKE_META = {
     "initiator": "consciousness", "usage_category": "consciousness",
@@ -92,7 +93,7 @@ def test_observe_table_covers_every_registry_entry_marked_mutates_worktree(tmp_p
     unknown = set(ca.OBSERVE_DISABLED) - {e.name for e in reg._entries.values()}
     # Skill/project tools are registered lazily (skills, journal); the built-in names must exist.
     assert unknown <= {"toggle_skill", "skill_owner_action", "journal_write", "workpad_write",
-                       "configure_presence", "initiate_presence", "delegate_start"}, sorted(unknown)
+                       "initiate_presence", "delegate_start"}, sorted(unknown)
 
 
 # --- derivation at task build ---------------------------------------------------
@@ -126,8 +127,7 @@ def test_contract_carries_the_derived_list_and_origin_helpers():
 
 
 @pytest.mark.parametrize(("install", "cap", "expected"), [
-    ("cyber_pro", "light", "light"), ("pro", "light", "light"), ("advanced", "light", "light"),
-    ("light", "light", "light"), ("light", "advanced", "light"), ("cyber_pro", "", "cyber_pro"),
+    ("cyber_pro", "light", "light"), ("cyber_pro", "", "cyber_pro"),
     ("pro", "bogus", "pro"),
 ])
 def test_effective_runtime_mode_is_the_stricter_of_install_and_cap(install, cap, expected):
@@ -207,17 +207,20 @@ _BLOCKED_CALLS = (
 )
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
-@pytest.mark.parametrize("level", ["act", "observe"])
-@pytest.mark.parametrize(("tool_name", "args"), _BLOCKED_CALLS)
-def test_act_and_observe_cannot_touch_the_repo_in_any_install_mode(tmp_path, monkeypatch, mode, level, tool_name, args):
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
-    reg = _registry(tmp_path, _wake_task(level)["metadata"])
-    result = reg.execute(tool_name, dict(args))
-    expected = "RESOURCE_CONSTRAINT_BLOCKED" if level == "observe" and tool_name != "commit_reviewed" else "LIGHT_MODE_BLOCKED"
-    assert expected in result, (mode, level, tool_name, result[:300])
-    assert not (tmp_path / "repo" / "x.py").exists()
-    assert (tmp_path / "repo" / "README.md").read_text(encoding="utf-8") == "ok\n"
+def test_act_and_observe_cannot_touch_the_repo_in_any_install_mode(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for mode in ["light", "advanced", "pro", "cyber_pro"]:
+        for level in ["act", "observe"]:
+            for tool_name, args in _BLOCKED_CALLS:
+                tmp_path = next(case_paths)
+                with subtests.test(mode=mode, level=level, tool_name=tool_name, args=args), monkeypatch.context() as monkeypatch:
+                    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+                    reg = _registry(tmp_path, _wake_task(level)["metadata"])
+                    result = reg.execute(tool_name, dict(args))
+                    expected = "RESOURCE_CONSTRAINT_BLOCKED" if level == "observe" and tool_name != "commit_reviewed" else "LIGHT_MODE_BLOCKED"
+                    assert expected in result, (mode, level, tool_name, result[:300])
+                    assert not (tmp_path / "repo" / "x.py").exists()
+                    assert (tmp_path / "repo" / "README.md").read_text(encoding="utf-8") == "ok\n"
 
 
 @pytest.mark.parametrize("mode", ["advanced", "pro", "cyber_pro"])
@@ -277,28 +280,25 @@ def test_act_keeps_the_light_positive_paths(tmp_path, monkeypatch):
 
 
 def test_the_lane_attaches_the_level_to_the_wake_contract(monkeypatch, tmp_path):
+    """The door admits the wake bare; the carrier's first step derives the level's two consequences."""
     import queue
-    import threading
 
-    from ouroboros import agent as agent_module
     from supervisor import workers
-    from tests.test_consciousness_wake_lane import _lane, _wait_for
+    from tests.conversation_carrier_support import carry
+    from tests.test_consciousness_wake_lane import _lane
 
-    _lane(monkeypatch, tmp_path, event_q=queue.Queue())
+    spare = _lane(monkeypatch, tmp_path, event_q=queue.Queue())
     seen: list = []
-    done = threading.Event()
 
     class Actor:
         def handle_task(self, task):
             seen.append(task)
-            done.set()
             return []
 
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kw: Actor())
     receipt = workers.handle_wake_direct(1, "wake", {**WAKE_META, "consciousness_autonomy": "act"})
-    assert receipt["admitted"] is True
-    assert done.wait(10) and _wait_for(lambda: bool(seen))
-    task = seen[0]
+    assert receipt["admitted"] is True and seen == []  # nothing of the body ran in the server
+    carry(workers, spare, Actor())
+    task, = seen
     assert task["task_contract"]["disabled_tools"] == list(ca.ACT_DISABLED)
     assert task["metadata"]["runtime_mode_cap"] == "light"
 

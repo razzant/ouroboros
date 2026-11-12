@@ -6,23 +6,24 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 import {
-    AUTONOMY_LEVELS, PLACE_STATES, SAFETY_LEVELS, SILENT_CARD, durationText, placeStatusText, usdText, wakesForText,
+    AUTONOMY_LEVELS, PLACE_STATES, SAFETY_LEVELS, SILENT_CARD, durationText, usdText,
 } from '../modules/consciousness_words.js';
 import {
     SAFETY_MODEL_KEYS, connectPlace, markRecheckRow, normalizeConsciousness, normalizePlacesResponse, parseRoster,
     recheckFromSettings, saveCheckerSettings, saveSafetyLevel, saveSafetyRules, updatePlace, disconnectPlace,
 } from '../modules/consciousness_api.js';
 import {
-    agentRowHandle, applySafetySettings, checkerSaveEffect, checkerTabsText, checkerText, safetyOwnerDraft, safetySectionHtml,
+    agentRowHandle, applySafetySettings, bindSafetySettings, checkerSaveEffect, checkerTabsText, checkerText, safetyOwnerDraft,
+    safetySectionHtml, refreshSafetySkipCounter,
     saveSafetyChecker, saveSafetyOwnerChanges, secondCheckText, takeCheckerChanges,
 } from '../modules/settings_safety.js';
 import { chooseRecheckRow, recheckDraft, recheckMarkHtml, syncRecheckState } from '../modules/safety_recheck.js';
 import {
-    bindConsciousnessSettings, consciousnessModelText, consciousnessSectionHtml, migrationProblemLines, settingsPlacesHtml,
+    bindConsciousnessSettings, consciousnessModelText, consciousnessSectionHtml,
 } from '../modules/settings_consciousness.js';
 import { parseAvailableSubagentsSetting, buildAvailableSubagentsSetting } from '../modules/subagents_settings.js';
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
-import { apiClient } from '../modules/api_client.js';
+import { APP_SETTINGS_ORIGIN, apiClient } from '../modules/api_client.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
 
@@ -32,7 +33,7 @@ function stubFetch(reply) {
     const previous = globalThis.fetch;
     globalThis.fetch = async (url, init = {}) => {
         const body = init.body ? JSON.parse(init.body) : null;
-        calls.push({ url: String(url), method: init.method || 'GET', body });
+        calls.push({ url: String(url), method: init.method || 'GET', body, headers: init.headers || {} });
         const answer = reply(String(url), body, init);
         return { ok: answer.status ? answer.status < 400 : true, status: answer.status || 200, json: async () => answer.json ?? answer };
     };
@@ -50,13 +51,7 @@ test('the owner names stand with their notes; stored values never change', () =>
     assert.equal(SAFETY_LEVELS[1].note, 'A second model checks steps that reach other people and services: messages, posts, skills, connectors, starting work. Not shell commands.');
 });
 
-test('a place row says its state, what wakes it and what waits; absent money is the dash', () => {
-    const { places } = normalizePlacesResponse(FIXTURE.places);
-    assert.equal(placeStatusText(places[0]), 'active · wakes for direct messages, mentions and replies · 2 open turns');
-    assert.equal(placeStatusText(places[1]), 'silent · wakes for mentions', 'a Silent place still wakes for its list');
-    assert.equal(placeStatusText(places[2]), 'paused', 'a Paused place says only its state');
-    assert.equal(placeStatusText({ state: 'gone' }), 'state unknown');
-    assert.equal(wakesForText([]), '');
+test('absent money is the dash; a known zero and a known amount are said; durations need both ends', () => {
     assert.equal(usdText(null), '—');
     assert.equal(usdText(0), '$0.00');
     assert.equal(usdText(0.88), '$0.88');
@@ -139,7 +134,7 @@ test('Safety Supervisor: two rows of Off · Light · Full, the short copy, the r
     assert.match(html, /data-policy-state="supervisor_consciousness"/);
     assert.match(html, />Check consciousness fully</);
     assert.match(html, /Not measured yet: no replay of real checks exists\./);
-    assert.match(html, /Rules the Safety Supervisor reads on every check\. Rules for one place live in that place's notes\./);
+    assert.match(html, /Ouroboros and the Safety Supervisor read these in every task and check\. Rules for one place live in that place's notes\./);
     assert.match(html, /outside Cyber Pro, Ouroboros cannot lower its own checks/);
     assert.match(html, /id="s-safety-skip-counter"/);
 });
@@ -211,6 +206,39 @@ test('Save writes only what changed: the checker first, the levels and rules aft
     ]);
     assert.equal(result.error, '');
     assert.equal(result.saved, 'Safety Supervisor model saved as claude-opus-5.5. Safety for your work saved as Light.');
+    // Settings declares itself on every owner write, so the server records the change without a row in Main.
+    assert.ok(stub.calls.every(({ headers }) => headers['X-Ouroboros-Surface'] === 'app' && headers['X-Ouroboros-Actor'] === 'owner'));
+});
+
+test('the let-through counter says 24 h only when the events it read cover a day', async () => {
+    const now = Date.parse('2026-11-06T12:00:00Z');
+    const at = (hoursAgo) => new Date(now - hoursAgo * 3600 * 1000).toISOString();
+    const reads = [];
+    const counter = async (entries) => {
+        const el = { textContent: '' };
+        await refreshSafetySkipCounter({ querySelector: () => el }, { now, logsTail: async (...read) => { reads.push(read); return { entries }; } });
+        return el.textContent;
+    };
+    // A short log reaches past the day: it is the whole day.
+    assert.equal(await counter([{ type: 'safety_mode_skip', ts: at(2) }, { type: 'task_done', ts: at(30) }]),
+        '1 safety check let through in the last 24 h.');
+    // A full tail of 2,000 events from the last three hours never claims the day it did not read.
+    const busy = Array.from({ length: 2000 }, (_, i) => ({ type: i ? 'llm_round' : 'safety_mode_skip', ts: at(3 - i / 1000) }));
+    const said = await counter(busy);
+    assert.match(said, /^1 safety check let through since \d\d:\d\d \(the latest 2,000 events\)\.$/);
+    assert.doesNotMatch(said, /24 h/);
+    // It reads only each event's type and time: the compact view, never 2,000 whole rows.
+    assert.deepEqual(reads, [['events', 2000, 'compact'], ['events', 2000, 'compact']]);
+});
+
+test('the shared safety helpers declare no origin unless their caller does', async () => {
+    const stub = stubFetch(() => ({ ok: true }));
+    try {
+        await saveSafetyLevel('full');
+        await saveSafetyRules('Ask first.');
+        await saveCheckerSettings({ OUROBOROS_MODEL: 'openai::main' });
+    } finally { stub.restore(); }
+    assert.deepEqual(stub.calls.map(({ headers }) => headers), Array(3).fill({ 'Content-Type': 'application/json' }));
 });
 
 test('a refused lowering keeps the level and still saves the rest; an unknown server key is never written', async () => {
@@ -223,8 +251,20 @@ test('a refused lowering keeps the level and still saves the rest; an unknown se
     } finally { stub.restore(); }
     // No OUROBOROS_CONSCIOUSNESS_SAFETY_MODE in the document: that row is not written.
     assert.deepEqual(stub.calls.map(({ url }) => url), ['/api/owner/safety-rules']);
+    assert.equal(stub.calls[0].headers['X-Ouroboros-Surface'], 'app');
     assert.match(result.error, /Safety for your work was not changed: The change was not confirmed\./);
     assert.equal(result.unknown, false);
+});
+
+test('Check consciousness fully declares the app on its owner write', async () => {
+    const root = new NodeStub();
+    root.innerHTML = safetySectionHtml();
+    const saves = [];
+    const dispose = bindSafetySettings(root, { save: async (...args) => { saves.push(args); } });
+    const section = root.querySelector('[data-safety-consciousness-row]')?.closest('.form-section') || root;
+    await section.fire('click', { target: root.querySelector('[data-safety-check-fully]') });
+    dispose();
+    assert.deepEqual(saves, [['full', 'consciousness', { headers: APP_SETTINGS_ORIGIN }]]);
 });
 
 test('the second-check mark shows only on eligible rows, one row at a time, and saves as the owner chose', async () => {
@@ -432,96 +472,61 @@ test('the roster keeps the owner\'s second-check mark exactly as loaded and refu
     assert.match(bad.error, /second-check mark must be true or false/);
 });
 
-test('Consciousness: Advises · Acts · Evolves with notes, the allowance and task copy, the moved fields keep their ids', () => {
+test('Consciousness: Advises · Acts · Evolves with notes and task copy; the allowance is a door to Costs, the moved fields keep their ids', () => {
     const html = consciousnessSectionHtml();
     assert.match(html, /What Ouroboros does when nobody asked: on its own clock, and in the places you connected\./);
     assert.deepEqual([...html.matchAll(/data-effort-value="(\w+)">(\w+)</g)].map((m) => [m[1], m[2]]), [['observe', 'Advises'], ['act', 'Acts'], ['full', 'Evolves']]);
     assert.match(html, /<strong>Acts<\/strong> &mdash; Also acts on its own/);
-    assert.match(html, />Daily allowance \(USD\)</);
-    assert.match(html, /Spending cap over a rolling 24 hours: its own wakes, wakes in places, and the work they start\. Settled dollars only; a subscription shows as unmetered\./);
+    // The allowance has one editor, Costs: no field here, only the door to it.
+    assert.doesNotMatch(html, /Daily allowance|s-consciousness-daily-usd|OUROBOROS_CONSCIOUSNESS_DAILY_USD/);
+    // In the allowance's former cell: its name and the door to its one editor.
+    assert.match(html, /<label id="s-consciousness-allowance-label">Spending limit over 24 hours<\/label>/);
+    assert.match(html, /aria-labelledby="s-consciousness-allowance-label"[^>]*>\s*<span>Set beside what it spent in<\/span> <button[^>]*data-costs-open>Costs ›<\/button>/);
+    assert.ok(html.indexOf('data-costs-open') < html.indexOf('s-consciousness-max-tasks'), 'the cell the allowance had, before the task limit');
     assert.match(html, />Max concurrent tasks</);
     assert.match(html, /How many of its own tasks may run at once\. Work you asked for never counts\./);
-    for (const id of ['s-consciousness-autonomy', 's-consciousness-daily-usd', 's-consciousness-max-tasks', 's-bg-wakeup-min', 's-bg-wakeup-max', 's-presence-max-active']) {
+    for (const id of ['s-consciousness-autonomy', 's-consciousness-max-tasks', 's-bg-wakeup-min', 's-bg-wakeup-max', 's-presence-max-active']) {
         assert.equal(html.split(`id="${id}"`).length, 2, `${id} is rendered once`);
     }
     assert.match(html, /<details class="consciousness-more"[^>]*>\s*<summary>.*More<\/summary>/s);
     assert.match(html, />Concurrent conversations</);
-    assert.match(html, />Connect a place</);
+    assert.match(html, /The places it lives in, their words and their circles: <button[^>]*data-circles-open>Circles ›<\/button>/);
+    assert.doesNotMatch(html, /Connect a place|data-place-list|data-place-open/, 'the places are listed once, on Circles');
     assert.equal(consciousnessModelText({}), 'Uses Main');
     assert.equal(consciousnessModelText({ OUROBOROS_MODEL_CONSCIOUSNESS: 'openai::gpt-5.6' }), 'gpt-5.6');
 });
 
-test('the Settings places list: icon, authored label, state word, open turns, readiness; each row opens its sheet', () => {
-    const { places } = normalizePlacesResponse(FIXTURE.places);
-    const html = settingsPlacesHtml({ places });
-    assert.equal((html.match(/data-place-open=/g) || []).length, 3);
-    assert.match(html, /<span class="consciousness-place-name" data-i18n-authored>Slack · Acme<\/span>\s*<span class="consciousness-place-facts">active · 2 open turns · Connector on<\/span>/);
-    assert.doesNotMatch(html, /aria-label="[^"]*Mail · inbox/, 'authored names stay in the protected visible label');
-    assert.match(settingsPlacesHtml({ places: [] }), /No place yet\. Connect one from an installed connector\./);
-    assert.match(settingsPlacesHtml({ error: 'Places could not be read: HTTP 404' }), /data-tone="warn"/);
-});
-
-test('an old connection the places migration could not move is said once, in Settings › Consciousness › Places', () => {
-    assert.deepEqual(normalizePlacesResponse(FIXTURE.places).migrationProblems, [], 'a server without the migration says nothing');
-    const { places, migrationProblems } = normalizePlacesResponse({ ...FIXTURE.places, migration_problems: [
-        { binding_id: 'b-1', code: 'connector_missing', detail: 'the connector telegram-bot is not installed.' },
-        { binding_id: 'b-2', code: 'connector_missing', detail: 'the connector telegram-bot is not installed' },
-        { binding_id: 'b-3', code: 'binding_unreadable', detail: '' },
-        { binding_id: '', code: '', detail: '' },
-    ] });
-    assert.deepEqual(migrationProblemLines(migrationProblems), [
-        'Could not move an old connection: the connector telegram-bot is not installed. Connect it again.',
-        'Could not move an old connection: binding unreadable. Connect it again.',
-    ]);
-    const html = settingsPlacesHtml({ places, problems: migrationProblems });
-    assert.equal((html.match(/Could not move an old connection/g) || []).length, 2);
-    assert.match(html, /<p class="settings-inline-note" data-tone="warn">Could not move/);
-    assert.match(settingsPlacesHtml({ places: [], problems: migrationProblems }), /Connect it again\.<\/p><p class="settings-inline-note">No place yet/);
-});
-
-test('Settings reads Places when visible and after a change, including recovery from a failed read', async (t) => {
+test('Settings › Consciousness lists no places: its one link opens Circles and nothing is read', async (t) => {
     const { window } = setup(t);
     const root = new NodeStub();
-    root.innerHTML = '<section data-consciousness-places><div data-place-list></div></section>';
+    root.innerHTML = consciousnessSectionHtml();
     root.dataset.activeSettingsTab = 'behavior';
-    const state = { activePage: 'chat' };
-    let reads = 0;
-    const dispose = bindConsciousnessSettings(root, { state, read: async () => {
-        if (++reads === 1) throw new Error('offline');
-        return normalizePlacesResponse(FIXTURE.places);
-    } });
-    const settled = () => new Promise((resolve) => setImmediate(resolve));
-    await settled();
-    assert.equal(reads, 0, 'no boot read while Settings is hidden');
-    state.activePage = 'settings';
+    const opened = [];
+    window.addEventListener('ouro:open-circles', (event) => opened.push(event.detail));
+    const dispose = bindConsciousnessSettings(root);
     window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
-    await settled();
-    assert.equal(reads, 1);
-    assert.match(root.textContent, /Places could not be read: offline/);
     window.dispatchEvent(new CustomEvent('ouro:places-changed'));
-    await settled();
-    assert.equal(reads, 2);
-    assert.match(root.textContent, /Slack · Acme/);
-    assert.match(root.textContent, /Connector on/);
-    assert.doesNotMatch(root.textContent, /offline/);
+    await new Promise((resolve) => setImmediate(resolve));
+    const link = root.querySelector('[data-circles-open]');
+    const section = link.closest('.form-section') || root.querySelector('[data-consciousness-places]');  // where the listener is
+    await section.fire('click', { target: link });
+    assert.deepEqual(opened, [{}], 'the Circles page is asked to show itself');
     dispose();
-    window.dispatchEvent(new CustomEvent('ouro:places-changed'));
-    await settled();
-    assert.equal(reads, 2);
+    await section.fire('click', { target: link });
+    assert.equal(opened.length, 1, 'the disposer unbinds the link');
 });
 
-test('Settings reads Places on mount only in the visible Behavior tab', async (t) => {
+test('Settings › Consciousness opens Costs for its allowance, reading and writing nothing', async (t) => {
     setup(t);
-    for (const tab of ['behavior', 'models']) {
-        const root = new NodeStub();
-        root.innerHTML = '<section data-consciousness-places><div data-place-list></div></section>';
-        root.dataset.activeSettingsTab = tab;
-        let reads = 0;
-        const dispose = bindConsciousnessSettings(root, { state: { activePage: 'settings' }, read: async () => {
-            reads++; return normalizePlacesResponse(FIXTURE.places);
-        } });
-        await new Promise(resolve => setImmediate(resolve));
-        assert.equal(reads, tab === 'behavior' ? 1 : 0);
-        dispose();
-    }
+    const root = new NodeStub();
+    root.innerHTML = consciousnessSectionHtml();
+    const tabs = [];
+    const dispose = bindConsciousnessSettings(root, { openDashboardTab: async (tab) => { tabs.push(tab); } });
+    const link = root.querySelector('[data-costs-open]');
+    const section = link.closest('.form-section') || root.querySelector('[data-consciousness-costs]');
+    await section.fire('click', { target: link });
+    assert.deepEqual(tabs, ['costs'], 'Dashboard › Costs, the one editor of the allowance');
+    dispose();
+    await section.fire('click', { target: link });
+    assert.deepEqual(tabs, ['costs'], 'the disposer unbinds it too');
 });

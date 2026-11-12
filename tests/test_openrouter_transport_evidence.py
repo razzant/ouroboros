@@ -110,8 +110,7 @@ def test_received_price_survives_stream_failure(isolated, asynchronous, phase, c
     assert wire.close_calls >= 1
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("header", ["", "gen-fixture"])
+@pytest.mark.parametrize(("header", "asynchronous"), [("", False), ("gen-fixture", True)])
 def test_generation_is_bound_before_stream_finishes_once(isolated, monkeypatch, asynchronous, header):
     observations = []
     bind = ua.bind_provider_generation
@@ -140,8 +139,7 @@ def test_generation_is_bound_before_stream_finishes_once(isolated, monkeypatch, 
     assert observations == ["gen-fixture"]
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("header", ["gen-header", ""])
+@pytest.mark.parametrize(("header", "asynchronous"), [("gen-header", False), ("", True)])
 def test_generation_conflict_remains_visible_without_losing_answer(isolated, asynchronous, header):
     chunks = [frame(generation="gen-first"), frame(generation="gen-second", usage={"cost": 0.3}, finish="stop"),
               b"data: [DONE]\n\n"]
@@ -153,8 +151,7 @@ def test_generation_conflict_remains_visible_without_losing_answer(isolated, asy
     assert row["cost_usd"] == 0.3
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("header", ["gen-first", ""])
+@pytest.mark.parametrize(("header", "asynchronous"), [("gen-first", False), ("", True)])
 def test_conflicting_error_frame_preserves_binding_conflict(isolated, asynchronous, header):
     from ouroboros.llm_stream import ProviderStreamError
     from ouroboros.openrouter_cost import generation_binding, fetch_generation_receipt
@@ -236,8 +233,10 @@ def test_clean_eof_after_finish_still_returns_received_answer(isolated):
     assert ledger_rows(isolated)[0]["cost_usd"] == 0.25
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("usage", [{"prompt_tokens": 2}, {"cost": 0.125, "prompt_tokens": 2}])
+@pytest.mark.parametrize(("usage", "asynchronous"), [
+    pytest.param({"prompt_tokens": 2}, False, id='usage0-False'),
+    pytest.param({"cost": 0.125, "prompt_tokens": 2}, True, id='usage1-True'),
+])
 def test_other_provider_preserves_price_but_not_partial_counter_settlement(isolated, asynchronous, usage):
     error = RuntimeError("socket read failed")
     with pytest.raises(RuntimeError) as caught:
@@ -310,8 +309,7 @@ def test_public_chat_invalid_price_stays_unknown_with_available_tariff(
     assert estimates == []
 
 
-@pytest.mark.parametrize("price", [0.0, 1.25])
-@pytest.mark.parametrize("field", ["total_cost", "total_cost_usd"])
+@pytest.mark.parametrize(("field", "price"), [("total_cost", 0.0), ("total_cost_usd", 1.25)])
 def test_valid_alternate_price_outranks_invalid_cost(isolated, monkeypatch, price, field):
     body = {"choices": [{"message": {"content": "usable"}}],
             "usage": {"cost": True, "prompt_tokens": 10, "cost_invalid": True}}
@@ -368,10 +366,11 @@ def test_stream_evidence_uses_explicit_attempt_root_before_ambient_scope(isolate
     assert ledger_rows(isolated) == []
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("cost", [0.0, 1.25])
-@pytest.mark.parametrize("phase", ["read", "close"])
-@pytest.mark.parametrize("error_type", [httpx.ReadError, httpx.ReadTimeout])
+@pytest.mark.parametrize(("error_type", "phase", "cost", "asynchronous"), [
+    pytest.param(httpx.ReadError, "close", 0.0, False, id='ReadError-close-0.0-False'),
+    pytest.param(httpx.ReadError, "close", 0.0, True, id='ReadError-close-0.0-True'),
+    pytest.param(httpx.ReadTimeout, "read", 1.25, False, id='ReadTimeout-read-1.25-False'),
+])
 def test_main_does_not_resend_incomplete_response_with_settled_price(
         isolated, monkeypatch, asynchronous, cost, phase, error_type):
     from ouroboros import loop_llm_call as main

@@ -7,25 +7,13 @@ save of any tab wrote ``20`` back. Only a missing value may take the fallback.
 
 Source pin (the pattern of the other *_static tests) plus the typed server read
 the helper relies on. The helper itself runs in the node lane
-(``web/tests/settings_stored_zero.test.js``); the load/save/reload round trip
-runs against a real server in ``tests/test_ui_smoke_settings_drafts.py``.
+(``web/tests/settings_stored_zero.test.js``) for the INPUT_FIELDS rows that keep it; the
+allowance's own editor is Costs now, and its 0 save/reload and an unrelated Settings save
+run against a real server in ``tests/test_costs_allowance_browser.py``.
 """
 
 from __future__ import annotations
 
-import pathlib
-
-SETTINGS_JS = pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "settings.js"
-
-
-def _source() -> str:
-    return SETTINGS_JS.read_text(encoding="utf-8")
-
-
-def test_input_fields_load_through_the_helper():
-    src = _source()
-    assert "applyInputValue(id, storedOrFallback(s[key], fallback))" in src
-    assert "fallback && !s[key]" not in src
 
 
 def test_server_read_keeps_a_saved_zero_and_defaults_only_a_blank():

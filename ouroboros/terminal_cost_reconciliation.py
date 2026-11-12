@@ -180,7 +180,7 @@ def _publish_unresolved(root, observations, *, subject=ATTEMPTS, faults=None, ke
                      _ID_FIELDS[subject]: list(shown), "reasons": {key: current[key] for key in shown}}
             path.parent.mkdir(parents=True, exist_ok=True)
             data = (json.dumps(event, ensure_ascii=False) + '\n').encode('utf-8')
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, 'O_BINARY', 0), 0o644)
             try:
                 _write_fd_fully(fd, data, path)
             finally:

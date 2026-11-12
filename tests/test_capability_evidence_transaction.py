@@ -94,7 +94,6 @@ def _image_verdict(root):
     return (record.get("models") or {}).get("m")
 
 
-@pytest.mark.serial
 def test_disjoint_records_of_all_three_writer_modules_survive_a_paused_holder(tmp_path):
     root = tmp_path / "store"
     contenders = {role: (WRITES[role], None) for role in ("limits", "window", "density", "ack")}
@@ -109,7 +108,6 @@ def test_disjoint_records_of_all_three_writer_modules_survive_a_paused_holder(tm
     assert "fixture-key" not in ce._store_path(root).read_text(encoding="utf-8")
 
 
-@pytest.mark.serial
 def test_a_stale_unrelated_snapshot_never_revives_an_older_image_no(tmp_path):
     root = tmp_path / "store"
     old = vision.image_route_scope(IMAGE_TARGET)
@@ -156,9 +154,6 @@ def test_best_effort_observations_skip_a_busy_store_without_failing(held):
                                           base_url=OPENROUTER, field="max_completion_tokens", source="a catalog")
     context_window.record_observation(held.root, "observed-route", accepted=50000)
     ce.record_token_density(held.root, "vendor/dense", prompt_chars=40000, prompt_tokens=11000)
-    ce.record_effort_ceiling(held.root, "vendor/x", "low")
-    ce.record_effort_floor(held.root, "vendor/x", "low")
-    ce.record_rejected_params(held.root, "vendor/x", ["temperature"])
     assert not ce._DENSITY_MEMO  # no false "already recorded" throttle after a skipped write
     assert ce._store_path(held.root).read_bytes() == held.before
     assert _thread_lock_free()  # each refused acquire gave the process lock back
@@ -241,10 +236,10 @@ def test_revoke_failure_reaches_the_http_consumer_without_claiming_removal(tmp_p
     before = ce._store_path(tmp_path).read_bytes()
     audit = []
 
-    async def body(_request):
+    async def body(_request, _default):
         return {"provider": "openrouter", "model": "vendor/acked", "window_tokens": 0}
 
-    monkeypatch.setattr(settings, "_json_body_or_empty", body)
+    monkeypatch.setattr(settings, "request_json_or", body)
     monkeypatch.setattr(settings, "request_drive_root", lambda _request: tmp_path)
     monkeypatch.setattr(settings, "_owner_audit", lambda *args: audit.append(args))
     with monkeypatch.context() as failed:

@@ -2,7 +2,6 @@
 """Run the local test battery the fast, correct way.
 
     python scripts/run_tests.py                  full battery (node lane + every default-lane test)
-    python scripts/run_tests.py --sequential     full battery exactly as the commit gate and CI split it
     python scripts/run_tests.py --selected --base HEAD  commit/PR floor + affected tests, with both lanes
     python scripts/run_tests.py --selected --keep-going ...  the same, but a red lane does not skip the next
     python scripts/run_tests.py --node            only the complete Node lane (CI runs it as its own step)
@@ -10,15 +9,16 @@
     python scripts/run_tests.py tests/test_x.py  focused run; every argument is forwarded to pytest
 
 A bare call always means the FULL battery — it never skips a test on the
-strength of an earlier run. The default mode is one xdist run in which the
-`serial` tests are pinned to a few file-sharded groups (`--serial-shards`,
-tests/conftest.py; a file's group is a stable hash of its path) and therefore
-overlap the parallel tests instead of waiting for them; `--sequential` keeps the marker split and xdist flags of
-`ouroboros.preflight_runner` and `.github/workflows/ci.yml` in two passes.
+strength of an earlier run. It runs the two passes of `ouroboros.preflight_runner`
+and `.github/workflows/ci.yml`: one xdist pass in which `serial("<resource>")`
+tests take turns per resource beside everything else (tests/conftest.py), then the
+`serial("exclusive")` tests alone in one process.
 The reviewed-commit gate and CI stay the authority: this script is feedback.
 
 Re-executes through safe_test: isolated HOME/data, owner/provider env scrubbed,
-durable logs/source/diagnostics in <checkout>/../.test-evidence by default.
+durable logs/source/diagnostics in <checkout>/../.test-evidence by default, where
+`test-durations.json` keeps every session's file times (`OUROBOROS_TEST_DURATIONS`,
+tests/ci_evidence.py): the table the xdist groups are ordered by, longest first.
 Ctrl-C reaches each phase's runner, allowing pytest JUnit/results export before escalation.
 Marker exclusions/xdist flags come from the gate's SSOT
 (`LANE_EXCLUSION_EXPR`, `PARALLEL_PASS_FLAGS`); conftest isolates test roots.
@@ -39,128 +39,99 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-_MAX_SERIAL_SHARDS = 4
 _PYTEST_EXIT_NO_TESTS = 5
+# xdist's worker identity of a session this script may be started FROM (a test of the runner under
+# `-n`): inherited, it would make the battery's own controller take itself for a worker.
+_OUTER_WORKER_KEYS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID", "PYTEST_XDIST_WORKER_COUNT")
 _INTERRUPT_EXPORT_SEC, _INTERRUPT_TERM_SEC = 7, 2  # busy xdist workers already spend ~5 s in teardown
 
 
-def _workers() -> int:
-    """Keep xdist's CPU default within the physical and inherited allocation."""
-    from ouroboros.test_parallelism import worker_budget
-
-    try:  # xdist prefers physical cores whenever psutil is importable
+def _cpu_default() -> int:
+    """xdist's own CPU default: physical cores whenever psutil is importable, else the logical count."""
+    try:
         import psutil
         physical = psutil.cpu_count(logical=False)
     except Exception:
         physical = None
-    return worker_budget(physical or os.cpu_count() or 1)
+    return physical or os.cpu_count() or 1
 
 
-def serial_shards(workers: int, table: dict | None = None) -> int:
-    """How many serial groups may run at once.
+def _admission():
+    """xdist's CPU default within the physical and inherited allocation, minus what other runs hold."""
+    from ouroboros.test_parallelism import admission
 
-    With recorded durations that split this system's test time (``serial``,
-    tests/ci_verdicts.py), the serial tests get the share of the workers their
-    share of the time needs: at least one group, at most half the workers. Without
-    them, one group per four workers, at most four. Either way three workers or
-    fewer keep ONE serial group, i.e. serial tests never overlap each other there —
-    they only stop waiting for the parallel tests.
-    """
-    share = _serial_share(table)
-    if share is None:
-        return max(1, min(_MAX_SERIAL_SHARDS, workers // 4))
-    return max(1, min(workers // 2, round(workers * share)))
+    return admission(_cpu_default())
 
 
-def _serial_share(table: dict | None) -> float | None:
-    """The serial part of this system's recorded test time, or None when the table does not say."""
-    from tests.ci_verdicts import platform_name
+def _pass_slots(argv: list[str], workers: int) -> int:
+    """The slots one pass really uses, for its ledger row: the admitted workers for an xdist pass (`-n`), a Node
+    lane's `--test-concurrency` or the warm's `--workers` within them, one for the one-process pass."""
+    if "-n" in argv:
+        return workers
+    for index, arg in enumerate(argv):
+        if arg.startswith("--test-concurrency=") and arg.partition("=")[2].isdecimal():
+            return min(int(arg.partition("=")[2]), workers)
+        if arg == "--workers" and index + 1 < len(argv) and argv[index + 1].isdecimal():
+            return min(int(argv[index + 1]), workers)
+    return 1
 
-    system = platform_name(sys.platform)
-    total = sum(((table or {}).get("platforms") or {}).get(system, {}).values())
-    serial = ((table or {}).get("serial") or {}).get(system)
-    return sum(serial.values()) / total if total and serial is not None else None
+
+def _workers() -> int:
+    return _admission().workers
+
+
+def point_at_durations() -> None:
+    """Name the owner's durations table for this battery: beside the evidence parent (`.test-evidence/`), unless
+    the caller named one. Every session of the battery reads it for its weights and folds its whole files' seconds
+    into it at its end (tests/ci_evidence.py); without an evidence root nobody owns a table."""
+    from ouroboros.test_evidence import DURATIONS_FILE, EVIDENCE_ENV, TEST_DURATIONS_ENV
+
+    if (root := os.environ.get(EVIDENCE_ENV)) and not os.environ.get(TEST_DURATIONS_ENV):
+        os.environ[TEST_DURATIONS_ENV] = str(pathlib.Path(root).parent / DURATIONS_FILE)
 
 
 def recorded_durations() -> tuple[dict | None, str]:
-    """The table serial groups are sized by, and what it is.
+    """The table the xdist groups are ordered by, and what it is: the run's ``OUROBOROS_CI_DURATIONS`` (the
+    table tests/default_lane.py shards CI by), else the owner's persisted table (`point_at_durations`)."""
+    from tests.ci_verdicts import recorded_durations_table
 
-    The run's ``OUROBOROS_CI_DURATIONS`` (the table tests/default_lane.py shards CI
-    by), else the one the newest earlier one-run battery beside this run's evidence
-    makes (``tests/ci_evidence.py durations`` over its pass). A battery that did not
-    end (interrupted, stopped at its deadline) is passed over: its reports favour the
-    serial groups, which are handed out first.
-    """
-    from tests.ci_verdicts import collect_durations, durations_table
-
-    table, why = durations_table()
-    if table is not None or why:
-        return table, why or f"run {table['source']['run_id']}"
-    current = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")
-    ended = []
-    for run in pathlib.Path(current).parent.glob("run-*") if current else ():
-        try:
-            recorded = (run / "pytest" / "overlapped" / "results.json").stat().st_mtime
-            if json.loads((run / "result.json").read_text(encoding="utf-8")).get("returncode") in (0, 1):
-                ended.append((recorded, run))
-        except (OSError, ValueError, AttributeError):
-            continue
-    if not ended:
-        return None, "no recorded durations"
-    run = max(ended)[1]
-    return collect_durations(run / "pytest", run_id=run.name, sha=""), f"the battery of {run.name}"
+    table, why = recorded_durations_table()
+    if table is None:
+        return None, why or "no recorded durations"
+    source = table["source"]["run_id"]
+    return table, source if " " in source else f"run {source}"  # CI names a run id, a session names itself
 
 
-def serial_plan(table: dict | None, source: str, workers: int, shards: int) -> str:
-    """The shard count's reason and, from recorded durations, each serial group's predicted seconds."""
-    from tests.ci_verdicts import platform_name, serial_group
-
-    if _serial_share(table) is None:
-        return f"{shards} serial groups of {workers} workers ({source})"
-    system, groups = platform_name(sys.platform), {}
-    for path, ms in table["serial"][system].items():
-        group = serial_group(path, shards)
-        groups[group] = groups.get(group, 0) + ms
-    serial, total = sum(groups.values()), sum(table["platforms"][system].values())
-    predicted = ", ".join(f"{group} {groups[group] / 1000:.0f}" for group in sorted(groups))
-    return (f"{shards} serial groups of {workers} workers, sized by {source}: serial {serial / 1000:.0f} of "
-            f"{total / 1000:.0f} test-s; predicted seconds per group: {predicted}; the other tests about "
-            f"{(total - serial) / 1000 / max(1, workers - shards):.0f} s per remaining worker")
-
-
-def _with(flags: list[str], option: str, value: str) -> list[str]:
-    out = list(flags)
-    out[out.index(option) + 1] = value
-    return out
-
-
-def battery_commands(sequential: bool) -> list[tuple[str, list[str]]]:
-    from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR, PARALLEL_PASS_FLAGS, SERIAL_PASS_FLAGS
+def battery_commands() -> list[tuple[str, list[str]]]:
+    """The gate's two passes; the xdist pass's groups go longest-first by the table named out loud."""
+    from ouroboros.preflight_runner import EXCLUSIVE_MARKER, LANE_EXCLUSION_EXPR, PARALLEL_PASS_FLAGS, SERIAL_PASS_FLAGS
 
     base = [sys.executable, "-m", "pytest", "tests/"]
-    if sequential:
-        return [
-            ("parallel", [*base, "-m", f"not serial and {LANE_EXCLUSION_EXPR}", *PARALLEL_PASS_FLAGS]),
-            ("serial", [*base, "-m", f"serial and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS]),
-        ]
-    overlapped = _with(PARALLEL_PASS_FLAGS, "--dist", "loadgroup")
-    workers, (table, source) = _workers(), recorded_durations()
-    shards = serial_shards(workers, table)
-    print(f"=== {serial_plan(table, source, workers, shards)}", flush=True)
-    return [("overlapped", [*base, "-m", LANE_EXCLUSION_EXPR, *overlapped, f"--serial-shards={shards}"])]
+    print(f"=== xdist groups ordered by {recorded_durations()[1]}", flush=True)
+    return [
+        ("parallel", [*base, "-m", f"not {EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *PARALLEL_PASS_FLAGS]),
+        ("serial", [*base, "-m", f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS]),
+    ]
 
 
 def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
     from ouroboros.preflight_node import node_environment
     from ouroboros.process_containment import ProcessContainer
-    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, bounded_test_command
+    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, bounded_test_command, reserve
 
     started = time.monotonic()
     env = node_environment(os.environ)
-    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(_workers())
+    for key in _OUTER_WORKER_KEYS:  # a battery is a run of its own, never a worker of the session that started it
+        env.pop(key, None)
+    # One reservation under the ledger's lock: the admission, and this pass's row holding what the pass uses.
+    admitted, lease = reserve(f"run_tests.py {label}", _cpu_default(),
+                              slots=lambda admitted: _pass_slots(argv, admitted.workers))
+    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(admitted.workers)
     env[NESTED_WORKERS_ENV] = env["PYTEST_XDIST_AUTO_NUM_WORKERS"]
     argv = bounded_test_command(argv, env)
     print(f"\n=== {label}: {shlex.join(argv[2:] if argv[0] == sys.executable else argv)}", flush=True)
+    if disclosure := admitted.host.disclosure():
+        print(f"=== {label}: {admitted.workers} worker(s); {disclosure}", flush=True)
     container = ProcessContainer(lifeline=True, overload=True)
     proc = None
     try:
@@ -182,6 +153,7 @@ def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
                 print(f"=== {label}: {diagnostic}", file=sys.stderr, flush=True)
         finally:
             container.close()
+            lease.close()
     if diagnostic and code in (0, _PYTEST_EXIT_NO_TESTS):
         code = 1
     print(f"=== {label}: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
@@ -204,6 +176,20 @@ def _stop_interrupted(container, proc) -> None:
     container.terminate_tree(_INTERRUPT_TERM_SEC)
 
 
+def _warm_bytecode(files=(), evidence=None) -> None:
+    """Warm the run's bytecode prefix once before a battery (ouroboros/test_bytecode.py): compile the checkout into
+    it and collect the tree, or a selection's modules (listed beside the selection's evidence), with as many walkers
+    as the run has workers. It decides nothing: a warm that fails or is stopped leaves the passes cold and says so."""
+    from ouroboros.test_bytecode import command
+
+    files_from = None
+    if files:
+        files_from = pathlib.Path(evidence) / "warm-files.txt"
+        files_from.write_text("\n".join(files) + "\n", encoding="utf-8")
+    if code := _run("warm", command(sys.executable, REPO, workers=_workers(), files_from=files_from), REPO):
+        print(f"=== warm: exit {code} decides nothing; the passes run cold", flush=True)
+
+
 def _node_lane() -> int:
     from ouroboros.preflight_node import (
         NODE_MIN_VERSION, WEB_DIR, _version_tuple, candidate_node_tests, probe_node_version, resolve_node,
@@ -220,12 +206,14 @@ def _node_lane() -> int:
         print(f"\n=== node: NOT_RUN — {found}; the web lane needs node >= {floor}, so this is not the full "
               "battery: install node or pass focused targets", flush=True)
         return 1
-    return _run("node", [node, "--test", f"--test-concurrency={_workers()}", *files], REPO / WEB_DIR)
+    from ouroboros.preflight_node import NODE_TEST_TIMEOUT_FLAG
+
+    return _run("node", [node, "--test", NODE_TEST_TIMEOUT_FLAG, f"--test-concurrency={_workers()}", *files], REPO / WEB_DIR)
 
 
 def _selected(args, evidence) -> int:
-    from ouroboros.preflight_inventory import inventory_problem, read_inventory, selection_passes
-    from ouroboros.preflight_runner import _probe_dir, _install_worker_probe
+    from ouroboros.preflight_inventory import inventory_problem, launch_args, read_inventory, selection_passes
+    from ouroboros.preflight_probe import install_worker_probe, probe_dir
     from ouroboros.test_selection import select_tests
 
     try:
@@ -251,14 +239,16 @@ def _selected(args, evidence) -> int:
         output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     code = _node_lane()
     record["node"] = "success" if code == 0 else "failure"
+    if code == 0 or args.keep_going:
+        _warm_bytecode(selection.files, root)
     red = code  # with --keep-going a later lane runs on, but never hides an earlier red
     previous = os.environ.get("PYTHONPATH")
     completed = False
-    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (str(_probe_dir(root)), previous)))
+    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (str(probe_dir(root)), previous)))
     try:
-        probe = _install_worker_probe(root)
+        probe = install_worker_probe(root)
         for spec in selection_passes(selection, probe_module=probe, temp_root=root) if code == 0 or args.keep_going else []:
-            command = [sys.executable, "-m", "pytest", *spec.args,
+            command = [sys.executable, "-m", "pytest", *launch_args(spec.args),
                        "--ci-evidence-dir", str(root / spec.label)]
             code = _run(spec.label, command, REPO)
             inventory, problem = read_inventory(root, spec.label)
@@ -299,26 +289,38 @@ def _selected(args, evidence) -> int:
 def _defer_full(selection):
     """A full escalation this leg cannot finish (Windows runs full in eight landed shards).
 
-    The leg still runs the PR minimum, the contract floor and the Node lane, and says
-    what it left to the landed matrix.
+    The leg still runs the contract floor, the Node lane and what the changes that did not
+    escalate select by themselves (changed test modules, direct importers, widening), and
+    says what it left to the landed matrix.
     """
     import dataclasses
 
-    from ouroboros.test_selection import FLOOR_TESTS
+    from ouroboros.test_selection import FLOOR_TESTS, select_from_paths
 
+    escalating = ("verification apparatus changed", "body cutover/recovery changed")
     why = "; ".join(f"{path}: {reason}" for path, reason in selection.reasons
-                    if reason == "verification apparatus changed" or reason.startswith("author requested full"))
-    note = f"full scope deferred to the landed matrix; this leg runs the contract floor and the Node lane ({why})"
+                    if reason in escalating or reason.startswith("author requested full"))
+    rest = [path for path in selection.changed if (path, escalating[0]) not in selection.reasons
+            and (path, escalating[1]) not in selection.reasons]
+    try:
+        chosen = select_from_paths(REPO, rest, base=selection.base, extra_tests=selection.extra_tests,
+                                   test_reason=selection.test_reason) if rest else None
+        files = chosen.files if chosen is not None and chosen.tier != "full" else ()
+        if chosen is not None and chosen.tier == "full":  # an escalation not named above: the floor alone
+            why = f"{why}; the other changes escalate too ({'; '.join(r for _p, r in chosen.reasons)})"
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:  # the floor still runs
+        files, why = (), f"{why}; the other changes could not be selected: {exc}"
+    note = (f"full scope deferred to the landed matrix; this leg runs the contract floor, the Node lane and "
+            f"{len(set(files) - set(FLOOR_TESTS))} module(s) the other changes select ({why})")
     print(f"=== {note}", flush=True)
     if destination := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(destination, "a", encoding="utf-8") as stream:
             stream.write(f"**{note}**\n")
-    return dataclasses.replace(selection, tier="selected", files=tuple(sorted(FLOOR_TESTS)))
+    return dataclasses.replace(selection, tier="selected", files=tuple(sorted(set(FLOOR_TESTS) | set(files))))
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--sequential", action="store_true", help="two passes, exactly as the commit gate and CI")
     parser.add_argument("--selected", action="store_true", help="floor + affected tests and complete Node lane")
     parser.add_argument("--base", help="Git base for --selected; defaults to HEAD")
     parser.add_argument("--extra-test", action="append", default=[], help="widen selection with a test module")
@@ -341,28 +343,29 @@ def main(argv: list[str] | None = None) -> int:
     if not (REPO / "tests" / "conftest.py").is_file():
         print(f"{REPO} is not an Ouroboros checkout (no tests/conftest.py)", file=sys.stderr)
         return 2
+    point_at_durations()
+    if not args.selected and (args.base or args.extra_test or args.full_tests or args.test_reason or args.defer_full
+                              or args.keep_going):
+        parser.error("--base, --defer-full, --keep-going and widening options require --selected")
     if args.node:
-        if args.selected or args.sequential or pytest_args:
+        if args.selected or pytest_args:
             parser.error("--node runs only the Node lane")
         return _node_lane()
     if args.selected:
         if pytest_args:
             parser.error("--selected cannot be combined with arbitrary pytest arguments")
         return _selected(args, evidence)
-    if args.base or args.extra_test or args.full_tests or args.test_reason or args.defer_full or args.keep_going:
-        parser.error("--base, --defer-full, --keep-going and widening options require --selected")
     if pytest_args:
-        if args.sequential:
-            parser.error("--sequential selects the full two-pass battery; drop it or drop the pytest arguments")
         if evidence is not None:
             pytest_args = ["--ci-evidence-dir", str(evidence / "focused"), *pytest_args]
         return _run("focused", [sys.executable, "-m", "pytest", *pytest_args], REPO)
     started = time.monotonic()
     print(f"=== full: {sum(1 for _ in (REPO / 'tests').rglob('test_*.py'))} Python modules; "
           "full default suite; complete Node lane", flush=True)
-    code = _node_lane()
+    if (code := _node_lane()) == 0:
+        _warm_bytecode()
     ran = 0
-    for label, command in battery_commands(args.sequential) if code == 0 else []:
+    for label, command in battery_commands() if code == 0 else []:
         if evidence is not None:
             command = [*command, "--ci-evidence-dir", str(evidence / label)]
         code = _run(label, command, REPO)

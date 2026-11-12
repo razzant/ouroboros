@@ -87,6 +87,7 @@ class SkillReviewOutcome:
     panel: Dict[str, Any] = field(default_factory=dict)
     seats: List[Dict[str, Any]] = field(default_factory=list)
     governance: Dict[str, Any] = field(default_factory=dict)
+    continuable_seats: List[Dict[str, Any]] = field(default_factory=list)  # the record's offer (``review_continuation``)
 
 
 def _apply_auto_grant_outcome(outcome: SkillReviewOutcome, skill: Any, auto_grant: Any) -> None:
@@ -179,7 +180,7 @@ def _run_deterministic_preflight(
         skill.review = review_state
         # Record what the skill requests (transparency in the review block) but
         # NEVER auto-grant a skill that FAILED the deterministic preflight gate
-        # (invalid manifest, sensitive-shaped file, binary payload, path escape).
+        # (invalid manifest, binary payload, path escape).
         from ouroboros.skill_loader import requested_core_setting_keys, requested_skill_permissions
 
         manifest = getattr(skill, "manifest", None)
@@ -304,7 +305,8 @@ def _outcome_from_result(skill: Any, subject: Any, result: Dict[str, Any], *, re
         replayed_from_ts=str(result.get("reused_ts") or ""), rebuttal_sha256=rebuttal_sha,
         dispatch_refusal_code="LEGACY_BLOCKED" if str(refusal.get("kind") or "") == "review_cycles_exhausted" else "",
         panel=dict(result.get("panel") or {}), seats=seats,
-        governance=dict((subject.delivery or {}).get("governance") or {}))
+        governance=dict((subject.delivery or {}).get("governance") or {}),
+        continuable_seats=list(result.get("continuable_seats") or []))
 
 
 def review_skill(ctx: Any, skill_name: str, *, persist: bool = True, review_rebuttal: str = "",
@@ -378,6 +380,49 @@ def review_skill(ctx: Any, skill_name: str, *, persist: bool = True, review_rebu
     return outcome
 
 
+def continue_skill_review(ctx: Any, skill_name: str, *, reference: Any, continue_seats: Any,
+                          _resolved_binding: ResolvedResourceBinding | None = None) -> SkillReviewOutcome:
+    """Continue chosen stopped seats of ONE recorded skill review and project that record like its own wave.
+
+    The exact reference names the record and the content hash it reviewed; its frozen payload is collected,
+    never today's bytes. Only this caller's own records qualify (a Skills-page review is ``api_skill_review``'s,
+    a tool review its task's). A payload changed since gets the verdict on its record and no projection
+    (``_persist_projection``), so nothing is accepted or enabled for bytes nobody reviewed."""
+    from ouroboros.body_candidate import serving_repo_dir_for
+    from ouroboros.review_continuation import ContinuationRefused
+    from ouroboros.review_ledger import ledger_root, load_record
+    from ouroboros.skill_lifecycle_queue import lend_lifecycle_lane
+    from ouroboros.tools.review_change import ReviewChangeArgumentError
+    from ouroboros.tools.review_collection import collect_change
+    from ouroboros.tools.review_skill import skill_subject
+
+    reference = reference if isinstance(reference, dict) else {}
+    content_hash, record_id = str(reference.get("content_hash") or ""), str(reference.get("record_id") or "")
+    try:
+        binding = _resolved_binding or build_resolved_resource_binding(
+            ctx, root="skill_payload", operation="review", path=".", skill_name=skill_name)
+        skill = load_bound_skill(binding)
+        record = load_record(ledger_root(ctx), record_id) if record_id else None
+        subject = (record or {}).get("subject") or {}
+        if skill is None or not record or record.get("surface") != "skill" or subject.get("skill") != skill.name \
+                or not content_hash or subject.get("tree_sha") != content_hash:
+            raise ValueError("review_reference does not name this skill's review record at that content hash")
+        with lend_lifecycle_lane():  # as the ordinary wave: other lifecycle work runs while reviewers answer
+            result = collect_change(ctx, {"record_id": record_id, "task_id": str(record.get("task_id") or ""),
+                                          "surface": "skill"}, continue_seats)
+        frozen = skill_subject(ctx, skill, content_hash, drive_root=binding.state_drive_root,
+                               governance_root=serving_repo_dir_for(ctx))
+    except ContinuationRefused as exc:  # refused before any choice (the offer names the next one), or recorded unsent
+        return _pending(skill_name, f"{exc}. {exc.consequence()} continuable_seats: {json.dumps(exc.offers, sort_keys=True)}",
+                        content_hash=content_hash, code="TOOL_ERROR" if exc.recorded else "TOOL_ARG_ERROR")
+    except (ValueError, LookupError, OSError, ReviewChangeArgumentError) as exc:
+        return _pending(skill_name, str(exc), content_hash=content_hash, code="TOOL_ARG_ERROR")
+    outcome = _outcome_from_result(skill, frozen, result, rebuttal_sha="")
+    if not outcome.pending:
+        _persist_projection(ctx, skill, binding.state_drive_root, outcome)
+    return outcome
+
+
 def _persist_projection(ctx: Any, skill: Any, drive_root: pathlib.Path, outcome: SkillReviewOutcome) -> None:
     """The record's projection into ``review.json`` (the gate's cache) and the grants that follow.
 
@@ -444,6 +489,7 @@ def _persist_projection(ctx: Any, skill: Any, drive_root: pathlib.Path, outcome:
 
 __all__ = [
     "SkillReviewOutcome",
+    "continue_skill_review",
     "render_skill_review_block",
     "review_skill",
     "run_acceptance_preflight",

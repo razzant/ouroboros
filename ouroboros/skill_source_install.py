@@ -7,10 +7,10 @@ against the release digest (a mismatch is refused), lands it atomically with the
 snapshot and writes the install record, whose basis is the source row's trust or an explicit check. A
 built-in lands through the built-in source's own installer (``skill_builtin``), which writes the same
 record. ``trusted``, recorded ``self_check`` and owner update ``owner_skip`` keep preflight, then grant under
-the owner's auto-grant setting, install dependencies and turn it on once ready; ``review``
-lands the skill, starts its ordinary review job and returns: the review grants, installs dependencies
-and turns it on only when it leaves no blockers. Turning on is ``reconcile_turn_on_when_ready``: an
-explicit choice of the owner is never overridden. One installed skill per name: another source's skill
+the owner's auto-grant setting, install dependencies, turn it on once ready and reload an extension that
+is on; ``review`` lands the skill, starts its ordinary review job and returns: the review grants, installs
+dependencies and turns it on only when it leaves no blockers. Turning on is ``reconcile_turn_on_when_ready``:
+an explicit choice of the owner is never overridden. One installed skill per name: another source's skill
 of the same name is replaced only on an explicit confirmation, and the replaced payload is kept as the
 previous copy.
 
@@ -52,6 +52,7 @@ from ouroboros.skill_source_catalog import (
     installed_index,
     installed_release_digest,
     record_matches_row,
+    row_for_record,
     tree_release_digest,
 )
 from ouroboros.utils import utc_now_iso
@@ -83,7 +84,10 @@ def _note(progress: Optional[Callable[[str], None]], message: str) -> None:
 
 
 def _source_fields(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: row[key] for key in ("id", "kind", "name", "url", "part") if row.get(key)}
+    fields = {key: row[key] for key in ("id", "kind", "name", "url", "part") if row.get(key)}
+    if row["kind"] in {"hub", "git"}:  # the view it read: another revision or folder is another release line
+        fields.update({key: str(row.get(key) or "") for key in ("ref", "commit", "path")})
+    return fields
 
 
 def _select_check(plan: Dict[str, Any], **options: Any) -> None:
@@ -174,30 +178,60 @@ def _move_aside(skill_dir: pathlib.Path, name: str) -> pathlib.Path:
     return aside
 
 
-def _unload(name: str) -> None:
-    try:
-        from ouroboros.extension_loader import unload_extension
+def _unload(drive_root: pathlib.Path, name: str) -> bool:
+    """Unload before the payload changes; True when the extension was live (``update_skill``'s rule)."""
+    from ouroboros.extension_loader import is_extension_live, unload_extension
+    from ouroboros.extension_registry_state import _lifecycle_lock_for, realtime_load_refusal
 
+    with _lifecycle_lock_for(name):
+        if refusal := realtime_load_refusal(name):
+            raise SkillInstallError(refusal, "A live call is using this skill; retry after it ends.")
+        was_live = bool(is_extension_live(name, pathlib.Path(drive_root)))
         unload_extension(name)
-    except Exception:
-        log.debug("unload before replacing %s failed", name, exc_info=True)
+    return was_live
+
+
+def _undo_landing(drive_root: pathlib.Path, name: str, record: Dict[str, Any], rollback: Any,
+                  aside: Optional[pathlib.Path], occupant_dir: pathlib.Path, was_live: bool) -> None:
+    """Return a failed landing to the previous payload, then reconcile an extension that was live
+    against the owner's current choice and live calls. Without a snapshot nothing was replaced (its
+    owner removed an incomplete copy); a reconcile failure is logged and never replaces the error."""
+    from ouroboros.marketplace.install import restore_payload_state
+
+    if record.get("pending_update"):
+        restored = restore_update_snapshot(drive_root, name, "landing_failed")
+    else:
+        if rollback is not None:
+            restore_payload_state(rollback)
+        restored = True
+    if aside is not None and not occupant_dir.exists():
+        aside.rename(occupant_dir)
+    if restored and was_live:
+        try:
+            from ouroboros.config import load_settings
+            from ouroboros.extension_loader import reconcile_extension
+
+            reconcile_extension(name, pathlib.Path(drive_root), load_settings)
+        except Exception:
+            log.warning("%s was live before its failed landing and still needs reconciliation", name,
+                        exc_info=True)
 
 
 def _land_builtin(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[str, Any], *,
                   repo_dir: Optional[pathlib.Path], progress: Optional[Callable[[str], None]]) -> Dict[str, Any]:
     """A built-in lands through its own source's installer, inside the same rollback as every release."""
     from ouroboros.config import REPO_DIR, ensure_data_skills_dir
-    from ouroboros.marketplace.install import restore_payload_state, snapshot_payload_state
+    from ouroboros.marketplace.install import snapshot_payload_state
     from ouroboros.skill_builtin import install_builtin_skill
 
     name = plan["name"]
     target = ensure_data_skills_dir(pathlib.Path(drive_root)) / BUCKETS["builtin"] / name
     _note(progress, f"Installing {name} from the built-in skills…")
-    _unload(name)
-    rollback = snapshot_payload_state(drive_root, name, target)
     occupant_dir = pathlib.Path((plan.get("occupant") or {}).get("skill_dir") or target)
-    aside = None
+    was_live, rollback, aside = False, None, None
     try:
+        was_live = _unload(drive_root, name)
+        rollback = snapshot_payload_state(drive_root, name, target)
         if occupant_dir.exists() and occupant_dir.resolve() != target.resolve():
             aside = _move_aside(occupant_dir, name)
         if plan.get("update"):
@@ -213,12 +247,7 @@ def _land_builtin(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[s
         write_install_record(pathlib.Path(drive_root), name, {**builtin, **record,
                              "release": {**builtin.get("release", {}), **record["release"]}})
     except Exception:
-        if record.get("pending_update"):
-            restore_update_snapshot(drive_root, name, "landing_failed")
-        else:
-            restore_payload_state(rollback)
-        if aside is not None and not occupant_dir.exists():
-            aside.rename(occupant_dir)
+        _undo_landing(drive_root, name, record, rollback, aside, occupant_dir, was_live)
         raise
     if not record.get("pending_update"):
         keep_previous_payload(rollback.backup_dir, name)
@@ -230,7 +259,7 @@ def _land_release(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[s
                   repo_dir: Optional[pathlib.Path], progress: Optional[Callable[[str], None]]) -> Dict[str, Any]:
     from ouroboros.config import ensure_data_skills_dir
     from ouroboros.marketplace.fetcher import FetchError, copy_tree_checked, land_staged_tree
-    from ouroboros.marketplace.install import restore_payload_state, snapshot_payload_state
+    from ouroboros.marketplace.install import snapshot_payload_state
 
     row, item, name = plan["row"], plan["item"], plan["name"]
     if row["kind"] == "builtin":
@@ -257,11 +286,11 @@ def _land_release(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[s
         raise SkillInstallError("digest_mismatch", f"The copy of {name} does not match its release digest; "
                                                    "nothing was installed.", expected=item["digest"], actual=digest)
     _note(progress, f"Installing {name}…")
-    _unload(name)
-    rollback = snapshot_payload_state(drive_root, name, target)
-    aside = None
+    occupant_dir = pathlib.Path((plan.get("occupant") or {}).get("skill_dir") or target)
+    was_live, rollback, aside = False, None, None
     try:
-        occupant_dir = pathlib.Path((plan.get("occupant") or {}).get("skill_dir") or target)
+        was_live = _unload(drive_root, name)
+        rollback = snapshot_payload_state(drive_root, name, target)
         if occupant_dir.exists() and occupant_dir.resolve() != target.resolve():
             aside = _move_aside(occupant_dir, name)
         if plan.get("update"):
@@ -270,12 +299,7 @@ def _land_release(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[s
         written = write_install_record(pathlib.Path(drive_root), name, record)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
-        if record.get("pending_update"):
-            restore_update_snapshot(drive_root, name, "landing_failed")
-        else:
-            restore_payload_state(rollback)
-        if aside is not None and not occupant_dir.exists():
-            aside.rename(occupant_dir)
+        _undo_landing(drive_root, name, record, rollback, aside, occupant_dir, was_live)
         raise
     if not record.get("pending_update"):
         keep_previous_payload(rollback.backup_dir, name)
@@ -311,7 +335,8 @@ def _install_registry(drive_root: pathlib.Path, plan: Dict[str, Any], *, actor: 
 def accept_and_turn_on(drive_root: pathlib.Path, name: str, *, repo_path: Optional[str] = None,
                        repo_dir: Optional[pathlib.Path] = None) -> Dict[str, Any]:
     """After an accepted release landed (inside its lane job): the deterministic preflight floor, then the
-    grants the owner's auto-grant setting gives, the dependencies, and turning on when ready.
+    grants the owner's auto-grant setting gives, the dependencies, turning on when ready, and the extension's
+    reconcile to the accepted bytes (``_reload_accepted``).
 
     A failed preflight keeps the release off (a payload failure persists the pending record the gate
     honours before the install basis; an infrastructure failure persists nothing).
@@ -345,9 +370,41 @@ def accept_and_turn_on(drive_root: pathlib.Path, name: str, *, repo_path: Option
     if out["deps_status"] in {"installed", "not_required"}:  # only proven readiness permits turn-on
         out["turn_on"] = reconcile_turn_on_when_ready(drive, name, repo_path=repo_path,
                                                       reason="installed release accepted")["action"]
+        if out["turn_on"] not in {"enabled", "load_error"}:  # those two already loaded (or tried) these bytes
+            out.update(_reload_accepted(drive, loaded, repo_path))
     else:
         out["turn_on"] = "not_ready"
     return out
+
+
+def _reload_accepted(drive: pathlib.Path, skill: Any, repo_path: Optional[str]) -> Dict[str, Any]:
+    """Reconcile the extension to the bytes just accepted (issue #2785).
+
+    Landing unloaded a live extension, and ``already_on`` (or an owner's own Enable without
+    turn-on-when-ready) is the owner's intent, not a registration. The ordinary reconcile loads only
+    what the current gates permit, so an Off, a missing grant or unready packages stay as they are and
+    keep their reason. It never writes the enabled choice: a load failure is reported beside the files
+    that did land, and the next accepted release starts without a new Enable.
+    """
+    from ouroboros import extension_loader
+    from ouroboros.config import load_settings
+
+    if not skill.manifest.is_extension() and skill.name not in extension_loader.snapshot()["extensions"]:
+        return {}
+    try:
+        state = extension_loader.reconcile_extension(skill.name, drive, load_settings, repo_path=repo_path,
+                                                     retry_load_error=True)
+    except Exception as exc:
+        log.warning("%s was accepted but its extension could not be reconciled", skill.name, exc_info=True)
+        state = {"action": None, "reason": "reconcile_failed", "load_error": f"{type(exc).__name__}: {exc}"}
+    facts = {"extension_action": state.get("action"), "extension_reason": state.get("reason"),
+             # A worker loads its own copy and only asks the server to follow (the reconcile's receipt).
+             "extension_process": str(state.get("process") or ""),
+             "extension_server_reconcile": str(state.get("server_reconcile") or "")}
+    if state.get("action") == "extension_load_error" or state.get("reason") == "reconcile_failed":
+        error = str(state.get("load_error") or "it did not load")
+        facts.update(load_error=error, setup_error=f"It could not start: {error.splitlines()[0][:200]}")
+    return facts
 
 
 def run_in_lane(drive_root: pathlib.Path, kind: str, target: str, runner: Callable[[], Any], *,
@@ -439,7 +496,12 @@ def settle_pending_updates_at_startup(drive_root: pathlib.Path) -> None:
 
 def settle_before_replacement(drive_root: pathlib.Path, name: str) -> None:
     """A later explicit replacement first returns an unfinished candidate to its kept base."""
-    result = settle_pending_update(drive_root, name, force=True)
+    from ouroboros.extension_registry_state import _lifecycle_lock_for, realtime_load_refusal
+
+    with _lifecycle_lock_for(name):
+        if refusal := realtime_load_refusal(name):
+            raise SkillInstallError(refusal, "A live call is using this skill; retry after it ends.")
+        result = settle_pending_update(drive_root, name, force=True)
     if result["status"] == "restore_failed":
         raise SkillInstallError("restore_failed", f"The previous update of {name} could not be restored; "
                                                  "its payload and state evidence were kept.")
@@ -459,6 +521,10 @@ def install_item(drive_root: pathlib.Path, item_id: str, *, replace: bool = Fals
             "official": bool(item.get("official"))}
     if plan["already_installed"]:
         return {**base, "name": plan["name"], "already_installed": True, "version": item.get("version", "")}
+    from ouroboros.deployment_extensions import install_refusal
+
+    if managed := install_refusal(drive_root, plan["name"]):  # before settling, landing or replacing anything
+        raise SkillInstallError("managed_by_deployment", managed, 403)
     _select_check(plan, check=check, check_notes=check_notes, task_id=task_id)
     if plan.get("occupant"):
         settle_before_replacement(drive_root, plan["name"])
@@ -482,15 +548,10 @@ def install_item(drive_root: pathlib.Path, item_id: str, *, replace: bool = Fals
     return result
 
 
-def _row_for_record(record: Dict[str, Any], rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    exact = next((row for row in rows if row["id"] == (record.get("source") or {}).get("id")), None)
-    return exact or next((row for row in rows if record_matches_row(record, row)), None)
-
-
 def _candidate_plan(drive_root: pathlib.Path, name: str, record: Dict[str, Any], rows: List[Dict[str, Any]],
                     repo_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
     """The update candidate of an install: its source's current entry (any part of the same hub)."""
-    row = _row_for_record(record, rows)
+    row = row_for_record(record, rows)
     if row is None:
         raise SkillInstallError("source_gone", f"The source {name} came from is no longer connected.")
     for candidate_row in [row, *[r for r in rows if r is not row and record_matches_row(record, r)]]:
@@ -595,6 +656,10 @@ def update_installed(drive_root: pathlib.Path, name: str, *, mode: str, digest: 
         raise SkillInstallError("bad_mode", "mode is replace, keep or merge.", 400)
     if skip_review and mode != "replace":
         raise SkillInstallError("bad_mode", "skip_review applies only to mode replace.", 400)
+    from ouroboros.deployment_extensions import change_refusal
+
+    if mode != "keep" and (managed := change_refusal(name, "update")):  # Keep only records a skipped release
+        raise SkillInstallError("managed_by_deployment", managed, 403)
     record = read_install_record(pathlib.Path(drive_root), name)
     loaded = find_skill(pathlib.Path(drive_root), name, repo_path=get_skills_repo_path())
     if record is None or loaded is None:
@@ -671,10 +736,13 @@ def _update_registry(drive_root: pathlib.Path, name: str, *, mode: str, digest: 
 def uninstall_installed(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
     """One uninstall for every source (inside the lane). Grants and the publication receipt survive."""
     from ouroboros.config import get_skills_repo_path
+    from ouroboros.deployment_extensions import change_refusal
     from ouroboros.marketplace.isolated_deps import DEPS_STATE_FILENAME
     from ouroboros.skill_loader import find_skill, skill_state_dir_path
     from ouroboros.skill_uninstall_state import removal_action, write_uninstall_tombstone
 
+    if managed := change_refusal(name, "uninstall"):  # before the unload and the removal
+        raise SkillInstallError("managed_by_deployment", managed, 403)
     loaded = find_skill(pathlib.Path(drive_root), name, repo_path=get_skills_repo_path())
     if loaded is None:
         raise SkillInstallError("not_installed", f"{name} is not installed.", 404)
@@ -693,7 +761,9 @@ def uninstall_installed(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
         if not result.ok:
             raise SkillInstallError("uninstall_failed", result.error)
         return {"ok": True, "name": name, "source": "clawhub"}
-    _unload(name)
+    from ouroboros.extension_loader import unload_extension
+
+    unload_extension(name)  # an explicit owner removal keeps ordinary cancellation
     shutil.rmtree(skill_dir)  # nothing seeds built-ins at startup, so a removed one stays removed
     discard_update_snapshot(pathlib.Path(drive_root), name)
     (skill_state_dir_path(pathlib.Path(drive_root), name) / DEPS_STATE_FILENAME).unlink(missing_ok=True)

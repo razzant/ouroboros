@@ -163,7 +163,7 @@ test('a current engine keeps its normal Accounts surface', async () => {
     }));
     const groups = accounts.accountGroups(instance.snapshot, { accountsRead: 'ok', catalogKnown: true });
     assert.deepEqual(groups.map((group) => [group.harness, group.rows.map((row) => row.profile_id), group.status.label]), [
-        ['claude', ['claude-default'], 'Connected'], ['codex', ['codex-default'], 'Connected'], ['cursor', [], 'No account connected']]);
+        ['claude', ['claude-default'], 'Signed in'], ['codex', ['codex-default'], 'Signed in'], ['cursor', [], 'No account connected']]);
     const html = accounts.harnessFamilyMarkup(groups[0], instance.snapshot, { accountsRead: 'ok', quotaRead: 'ok', store: instance });
     assert.match(html, /data-family-add>Add account</);
     assert.match(html, /data-harness-remove/);

@@ -120,8 +120,8 @@ def test_unknown_with_live_leaf_holds_and_resumes_with_wake(tmp_path, monkeypatc
     monkeypatch.setattr(transport, "upstream_transport_reachable",
                         lambda *a, **kw: pytest.fail("live hold must precede provider recovery"))
     wake_payload = {"status": "succeeded", "run_id": "run-leaf", "supervision_wake_id": "w1"}
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
-                        lambda _ctx, _run: _wake(wake_payload))
+    monkeypatch.setattr(delegate_hold, "hold_wake",
+                        lambda _ctx, _runs, **_k: _wake(wake_payload))
     acks = []
     monkeypatch.setattr(delegate_hold, "acknowledge_pending_wake",
                         lambda _ctx, delivered=None: acks.append(delivered) or True)
@@ -163,7 +163,7 @@ def test_terminal_leaf_never_enters_hold(tmp_path, monkeypatch, _quiet_probe):
         progress_mod, "bounded_poll",
         lambda _gw, _run, _sec, **_k: {"summary": {"state": "succeeded"}},
     )
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
+    monkeypatch.setattr(delegate_hold, "hold_wake",
                         lambda *_a, **_k: pytest.fail("terminal leaf must not hold"))
     fake_call, calls = _unknown_then_check_call(_recover_model(monkeypatch))
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
@@ -181,8 +181,8 @@ def test_terminal_leaf_never_enters_hold(tmp_path, monkeypatch, _quiet_probe):
 
 def test_control_wake_exits_through_no_call_terminal(tmp_path, monkeypatch, _quiet_probe):
     monkeypatch.setattr(
-        delegate_hold, "supervised_wait",
-        lambda _ctx, _run: _wake({
+        delegate_hold, "hold_wake",
+        lambda _ctx, _runs, **_k: _wake({
             "status": "progress",
             "wake_events": [{"type": "cancellation_intent"}],
             "supervision_wake_id": "w2",
@@ -208,13 +208,13 @@ def test_control_wake_exits_through_no_call_terminal(tmp_path, monkeypatch, _qui
 def test_finalize_now_mid_hold_takes_no_call_terminal(tmp_path, monkeypatch, _quiet_probe):
     from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
 
-    def waiting_forever(_ctx, _run):
+    def waiting_forever(_ctx, _runs, **_k):
         time.sleep(30)
-        pytest.fail("supervised_wait should have been pre-empted by finalize_now")
+        pytest.fail("the hold's wake should have been pre-empted by finalize_now")
 
     # finalize_now lands BETWEEN the failing round and the next round top, so
     # the latched hold sees it in controls before any wait starts.
-    monkeypatch.setattr(delegate_hold, "supervised_wait", waiting_forever)
+    monkeypatch.setattr(delegate_hold, "hold_wake", waiting_forever)
 
     def check(_messages, _usage):
         pytest.fail("no dial")
@@ -243,7 +243,7 @@ def test_finalize_now_mid_hold_takes_no_call_terminal(tmp_path, monkeypatch, _qu
 
 
 def test_generic_task_does_not_hold_but_configured_multiple_runs_do(tmp_path, monkeypatch, _quiet_probe):
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
+    monkeypatch.setattr(delegate_hold, "hold_wake",
                         lambda *_a, **_k: pytest.fail("ineligible shapes must not hold"))
     fake_call, calls = _unknown_then_check_call(_recover_model(monkeypatch))
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
@@ -272,8 +272,8 @@ def test_recovered_latch_reenters_hold_before_any_dispatch(tmp_path, monkeypatch
     wake_payload = {"status": "attention", "run_id": "run-leaf", "supervision_wake_id": "w3"}
     order = []
     monkeypatch.setattr(
-        delegate_hold, "supervised_wait",
-        lambda _ctx, _run: order.append("wait") or _wake(wake_payload),
+        delegate_hold, "hold_wake",
+        lambda _ctx, _runs, **_k: order.append("wait") or _wake(wake_payload),
     )
     monkeypatch.setattr(delegate_hold, "acknowledge_pending_wake", lambda *_a, **_k: True)
 
@@ -300,8 +300,8 @@ def test_recovered_latch_reenters_hold_before_any_dispatch(tmp_path, monkeypatch
 
 def test_repeated_unknown_reholds_with_backoff_floor(tmp_path, monkeypatch, _quiet_probe):
     wake_payload = {"status": "progress_report", "run_id": "run-leaf", "supervision_wake_id": "w4"}
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
-                        lambda _ctx, _run: _wake(wake_payload))
+    monkeypatch.setattr(delegate_hold, "hold_wake",
+                        lambda _ctx, _runs, **_k: _wake(wake_payload))
     monkeypatch.setattr(delegate_hold, "acknowledge_pending_wake", lambda *_a, **_k: True)
     sleeps = []
     monkeypatch.setattr(delegate_hold.time, "sleep", lambda sec: sleeps.append(sec))
@@ -340,7 +340,7 @@ def test_refused_probe_and_state_less_payload_never_hold(tmp_path, monkeypatch, 
     and does not prohibit recovery of the supervising model."""
     import ouroboros.delegate_progress as progress_mod
 
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
+    monkeypatch.setattr(delegate_hold, "hold_wake",
                         lambda *_a, **_k: pytest.fail("refused probe must not hold"))
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
@@ -370,9 +370,9 @@ def test_refused_probe_and_state_less_payload_never_hold(tmp_path, monkeypatch, 
 def test_refused_wait_takes_terminal_not_paid_resume(tmp_path, monkeypatch, _quiet_probe):
     """A refused/fault wait status is a daemon statement, not a leaf wake
     (fable F3): no paid resume round is bought on it."""
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
-                        lambda _ctx, _run: _fail("delegate_wait", "daemon_unreachable",
-                                                 "the daemon answered nothing"))
+    monkeypatch.setattr(delegate_hold, "hold_wake",
+                        lambda _ctx, _runs, **_k: _fail("delegate_wait", "daemon_unreachable",
+                                                        "the daemon answered nothing"))
     fake_call, calls = _unknown_then_check_call(lambda *_: pytest.fail("no dial on refusal"))
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
@@ -387,13 +387,34 @@ def test_refused_wait_takes_terminal_not_paid_resume(tmp_path, monkeypatch, _qui
     assert "wait_refused" in details
 
 
+def test_an_unreadable_tick_through_the_real_wait_takes_the_fault_terminal(tmp_path, monkeypatch, _quiet_probe):
+    """#947 through the real wake publication: the host's unreadable read of the run a wake speaks for
+    is a typed failure that still says ``fault``, so the hold buys no paid resume on it and ends with
+    ``wait_fault``."""
+    from tests._run_wait_shared import wake_now
+
+    monkeypatch.setattr(delegate_hold, "hold_wake", lambda ctx, runs, **_k: wake_now(
+        ctx, runs, wait_once=lambda *_a, **_k: "<html>proxy</html>"))
+    fake_call, calls = _unknown_then_check_call(lambda *_: pytest.fail("no dial on an unreadable tick"))
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    registry = _configured_registry(tmp_path)
+    _start_leaf(tmp_path)
+    _r, _usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
+
+    assert calls["n"] == 1
+    assert trace.get("forced_finalization", {}).get("source") == "provider_outcome_unknown_no_resend"
+    assert "wait_fault" in [row.get("detail") for row in _read_hold_events(tmp_path) if row["phase"] == "ended"]
+
+
 def test_ack_failure_fails_closed_without_dispatch(tmp_path, monkeypatch, _quiet_probe):
     """One wake = one dispatch (sol CRITICAL #1): a wake that cannot be durably
     acknowledged is never dispatched — the appended receipt is removed and the
     task takes the honest no-resend terminal."""
     wake_payload = {"status": "succeeded", "run_id": "run-leaf", "supervision_wake_id": "w5"}
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
-                        lambda _ctx, _run: _wake(wake_payload))
+    monkeypatch.setattr(delegate_hold, "hold_wake",
+                        lambda _ctx, _runs, **_k: _wake(wake_payload))
     monkeypatch.setattr(delegate_hold, "acknowledge_pending_wake", lambda *_a, **_k: False)
     monkeypatch.setattr(delegate_hold.time, "sleep", lambda _s: None)
     seen_messages = []
@@ -420,8 +441,8 @@ def test_ack_failure_fails_closed_without_dispatch(tmp_path, monkeypatch, _quiet
 
 def test_owner_input_resumes_without_wait(tmp_path, monkeypatch, _quiet_probe):
     """An owner message drained at the round top IS material new input (sol
-    HIGH #4): the hold resumes on it without entering supervised_wait."""
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
+    HIGH #4): the hold resumes on it without reading its wake."""
+    monkeypatch.setattr(delegate_hold, "hold_wake",
                         lambda *_a, **_k: pytest.fail("owner input must resume without waiting"))
 
     def fake_call(_llm, messages, *_a, **_k):
@@ -456,8 +477,8 @@ def test_recovered_latch_control_wake_stays_no_call(tmp_path, monkeypatch, _quie
     wake must still exit through the no-call unknown terminal, never a paid
     [PROVIDER_UNAVAILABLE] forced final."""
     monkeypatch.setattr(
-        delegate_hold, "supervised_wait",
-        lambda _ctx, _run: _wake({
+        delegate_hold, "hold_wake",
+        lambda _ctx, _runs, **_k: _wake({
             "status": "progress", "wake_events": [{"type": "cancellation_intent"}],
         }),
     )
@@ -478,7 +499,7 @@ def test_round_limit_with_live_hold_takes_no_call_terminal(tmp_path, monkeypatch
     """Sol CRITICAL #2 / fable F2: an unknown on the last legal round must not
     buy a paid [ROUND_LIMIT] dial — the hold closes into the no-call unknown
     terminal and the latch does not dangle."""
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
+    monkeypatch.setattr(delegate_hold, "hold_wake",
                         lambda *_a, **_k: pytest.fail("round-limit hold must not wait"))
     calls = {"n": 0}
 
@@ -504,11 +525,12 @@ def test_round_limit_with_live_hold_takes_no_call_terminal(tmp_path, monkeypatch
     assert not read_unknown_hold(registry._ctx)  # no stale latch left behind
 
 
-def test_latch_survives_real_supervised_wait_state_reset(tmp_path, monkeypatch, _quiet_probe):
-    """Final-pair CRITICAL (sol #1 / fable F2): the REAL supervised_wait's
-    _load_state rebuild for a new run id must carry the durable latch — a
-    worker crash mid-wait must find it, or the successor resends."""
+def test_latch_survives_the_real_wake_publication_state_write(tmp_path, monkeypatch, _quiet_probe):
+    """Final-pair CRITICAL (sol #1 / fable F2): the REAL wake publication's
+    state write for a run must carry the durable latch — a worker crash
+    after it must find it, or the successor resends."""
     import ouroboros.delegate_supervision as sup
+    from tests._run_wait_shared import wake_now
 
     registry = _configured_registry(tmp_path, task_id="t-reset")
     _start_leaf(tmp_path, task_id="t-reset", run_id="run-reset")
@@ -517,13 +539,14 @@ def test_latch_survives_real_supervised_wait_state_reset(tmp_path, monkeypatch, 
     })
 
     def wait_once(_ctx, _run, _sec, _seq):
-        # Mid-wait crash shape: the durable file must STILL carry the latch
-        # after supervised_wait's entry persisted its (rebuilt) state.
         data = json.loads(sup._state_path(registry._ctx).read_text())
         assert data.get("unknown_provider_hold", {}).get("run_id") == "run-reset"
         return json.dumps({"status": "succeeded", "run_id": "run-reset", "last_seq": 2})
 
-    raw = sup.supervised_wait(registry._ctx, "run-reset", wait_once=wait_once)
+    raw = wake_now(registry._ctx, "run-reset", wait_once=wait_once)
+    data = json.loads(sup._state_path(registry._ctx).read_text())  # the publication persisted its wake
+    assert sup._load_state(registry._ctx, "run-reset")["pending_wake"]
+    assert data.get("unknown_provider_hold", {}).get("run_id") == "run-reset"
     assert json.loads(raw.text).get("status") == "succeeded"
     assert (raw.status, raw.code) == ("ok", "OK")  # a leaf wake is a successful observation
     assert read_unknown_hold(registry._ctx).get("run_id") == "run-reset"
@@ -539,7 +562,7 @@ def test_unreadable_latch_fails_closed_to_terminal(tmp_path, monkeypatch, _quiet
     path = sup._state_path(registry._ctx)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{corrupt json", encoding="utf-8")
-    monkeypatch.setattr(delegate_hold, "supervised_wait",
+    monkeypatch.setattr(delegate_hold, "hold_wake",
                         lambda *_a, **_k: pytest.fail("corrupt latch must not wait"))
     monkeypatch.setattr(loop_mod, "call_llm_with_retry",
                         lambda *_a, **_k: pytest.fail("corrupt latch must not dispatch"))
@@ -594,27 +617,27 @@ def test_review_panel_work_is_not_a_leaf_this_nanny_may_hold_on(tmp_path, _quiet
 def test_transport_dead_observation_keeps_the_hold_instead_of_a_refused_exit(
     tmp_path, monkeypatch, _quiet_probe,
 ):
-    """A dead socket during the hold is a quiet renewal with the typed reason
-    ``daemon_unreachable`` (never a ``refused`` wait), so ``_NON_WAKE_STATUSES``
-    must not take the no-resend terminal: the hold rides out the outage and resumes
-    on the leaf's real wake. Drives the REAL supervising wait over a scripted daemon."""
+    """A dead socket at the one read a hold's wake makes is a quiet observation with the typed reason
+    ``daemon_unreachable`` (never a ``refused`` wait), so ``_NON_WAKE_STATUSES`` must not take the
+    no-resend terminal: the hold keeps holding while nothing is ready and resumes on the leaf's
+    terminal the body recorded in custody. Drives the REAL hold wake over a scripted daemon."""
     import ouroboros.delegate_progress as progress_mod
-    import ouroboros.delegate_supervision as supervision_mod
     from ouroboros.gateways import claudexor as gateway_module
+    from tests._run_wait_shared import held_run
 
-    monkeypatch.setattr(supervision_mod.time, "sleep", lambda _sec: None)
-    polls = []
+    polls, beats = [], []
 
     def scripted_poll(_gw, _run, _sec, **_k):
         polls.append(1)
         if len(polls) == 1:  # the hold's own liveness probe: the leaf is alive
             return {"summary": {"state": "running", "effectiveAccess": "readonly"}, "lastSeq": 1}
-        if len(polls) == 2:  # first supervised tick: the daemon socket is dead
-            raise gateway_module.ClaudexorUnavailable(
-                "daemon_unreachable", "ConnectError: [Errno 61]", observation_timeout=True)
-        return {"lastSeq": 2, "summary": {
-            "state": "succeeded", "effectiveAccess": "readonly", "runDir": str(tmp_path / "run"),
-        }, "primaryOutput": {"kind": "answer", "text": "leaf result", "truncated": False}}
+        raise gateway_module.ClaudexorUnavailable(  # the wake's one read: the daemon socket is dead
+            "daemon_unreachable", "ConnectError: [Errno 61]", observation_timeout=True)
+
+    def body_beat(_sec):  # no continuation owner: the hold holds in place while the body observes
+        beats.append(_sec)
+        if len(beats) == 2:
+            held_run(tmp_path, "run-dead-socket", "t-dead-socket", ended="succeeded")
 
     class _Gateway:
         engine_version = ""
@@ -628,9 +651,11 @@ def test_transport_dead_observation_keeps_the_hold_instead_of_a_refused_exit(
 
     monkeypatch.setattr(progress_mod, "bounded_poll", scripted_poll)
     monkeypatch.setattr(gateway_module, "ClaudexorGateway", lambda: _Gateway())
+    monkeypatch.setattr(delegate_hold.time, "sleep", body_beat)
 
     def check(messages, accumulated_usage):
-        assert "[DELEGATED LEAF WAKE / UNKNOWN-HOLD RESUME]" in _without_context_facts(messages)[-1]["content"]
+        receipt = _without_context_facts(messages)[-1]["content"]
+        assert "[DELEGATED LEAF WAKE / UNKNOWN-HOLD RESUME]" in receipt and "terminal_custody" in receipt
         accumulated_usage.pop("_last_llm_error_kind", None)
         return {"role": "assistant", "content": "integrated"}, 0.0
 
@@ -644,7 +669,85 @@ def test_transport_dead_observation_keeps_the_hold_instead_of_a_refused_exit(
     result, _usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, notes))
 
     assert result == "integrated" and calls["n"] == 2
-    assert len(polls) == 3
+    assert len(polls) == 2 and len(beats) >= 2  # held with no read until the terminal was recorded
     details = [row.get("detail") for row in _read_hold_events(tmp_path) if row["phase"] == "ended"]
     assert "wait_refused" not in details and "wait_observation_pending" not in details
     assert [row["phase"] for row in _read_hold_events(tmp_path)] == ["entered", "resumed"]
+
+
+# --- #2992: a spilled wake the hold delivers ------------------------------------------------------------------
+
+_HOLD_TAIL = "OWNER-MAIL-TAIL-hold"
+
+
+def _spilling_hold(tmp_path, monkeypatch):
+    """The real wake publication under the hold; its one read posts owner mail too long to inline, so the wake spills."""
+    from ouroboros.owner_mailbox import write_owner_message
+    from tests._run_wait_shared import wake_now
+
+    def observe(_ctx, rid, *_a, **_k):
+        assert write_owner_message(tmp_path, "Owner instruction: " + "one exact long line; " * 1200 + _HOLD_TAIL,
+                                   "t-hold", msg_id="owner-mail")
+        return json.dumps({"status": "succeeded", "run_id": rid, "last_seq": 2})
+
+    monkeypatch.setattr(delegate_hold, "hold_wake", lambda ctx, runs, **_k: wake_now(ctx, runs, wait_once=observe))
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    registry = _configured_registry(tmp_path)
+    _start_leaf(tmp_path)
+    return registry
+
+
+def _hold_wake_facts(tmp_path, registry):
+    import ouroboros.delegate_supervision as sup
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    state = sup._load_state(registry._ctx, "run-leaf")
+    return (bool(state.get("pending_wake")),
+            [entry["msg_id"] for entry in drain_owner_entries(tmp_path, "t-hold", set(), "1")])
+
+
+def test_a_spilled_wake_reaches_the_hold_receipt_whole_before_its_acknowledgement(tmp_path, monkeypatch, _quiet_probe):
+    """The hold appends its receipt and ACKs at once; a spilled wake's summary would acknowledge the owner mail
+    it cut. The receipt carries the wake's exact source instead, then the ACK covers what it showed."""
+    registry = _spilling_hold(tmp_path, monkeypatch)
+    seen = []
+
+    def check(messages, accumulated_usage):
+        seen.append(_without_context_facts(messages)[-1]["content"])
+        accumulated_usage.pop("_last_llm_error_kind", None)
+        return {"role": "assistant", "content": "integrated"}, 0.0
+
+    fake_call, calls = _unknown_then_check_call(check)
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+    result, _usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
+
+    assert result == "integrated" and calls["n"] == 2
+    assert seen[0].startswith("[DELEGATED LEAF WAKE / UNKNOWN-HOLD RESUME]")
+    assert _HOLD_TAIL in seen[0] and '"wake_delivery"' not in seen[0], "the whole wake, not its summary"
+    assert _hold_wake_facts(tmp_path, registry) == (False, [])
+
+
+def test_an_unreadable_spilled_wake_source_takes_the_no_resend_exit_and_acknowledges_nothing(
+        tmp_path, monkeypatch, _quiet_probe):
+    """No fallback to the summary: the hold cannot show the whole wake, so it takes its honest no-resend terminal;
+    the wake and its mail stay unacknowledged for the next attempt."""
+    import ouroboros.artifacts as artifacts
+
+    registry = _spilling_hold(tmp_path, monkeypatch)
+    real = artifacts.read_actor_source_bytes
+
+    def unreadable(drive_root, task_id, ref, **kwargs):
+        if "delegate-wake-" in str((ref or {}).get("path") or ""):
+            raise OSError("controlled unreadable wake source")
+        return real(drive_root, task_id, ref, **kwargs)
+
+    monkeypatch.setattr(artifacts, "read_actor_source_bytes", unreadable)
+    fake_call, calls = _unknown_then_check_call(lambda *_a: pytest.fail("no paid round without the whole wake"))
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+    _r, _u, trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
+
+    assert calls["n"] == 1
+    assert trace.get("forced_finalization", {}).get("source") == "provider_outcome_unknown_no_resend"
+    assert "wake_source_unreadable" in [row.get("detail") for row in _read_hold_events(tmp_path) if row["phase"] == "ended"]
+    assert _hold_wake_facts(tmp_path, registry) == (True, ["owner-mail"])

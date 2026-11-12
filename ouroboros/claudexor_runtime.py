@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
 
+from ouroboros.claudexor_node_seed import bundled_node, is_seed_record, seed_node
 from ouroboros.utils import replace_atomic
 from ouroboros.verified_download import fetch_exact_file as _fetch_exact_file
 from ouroboros.verified_download import verify_exact_file as _verify_exact_file
@@ -525,18 +526,6 @@ class ClaudexorRuntimeManager:
                 self._last_error = f"{exc.code}: {exc}"
                 raise
 
-    def prepare_node_toolchain(self) -> str:
-        """Explicit maintenance preparation, without replacing an engine tree or process."""
-        with self._lock:
-            if self._pin_error or self._pin is None:
-                raise ClaudexorRuntimeError("runtime_cli_unavailable", self._pin_error or "no reviewed runtime pin")
-            self._cli_node_artifact(self._pin)
-            self._install(self._pin, require_npm=True, node_only=True)
-            node = self._resolve_node_toolchain(self._pin)
-            if not node:
-                raise ClaudexorRuntimeError("runtime_node_install_failed", "prepared Node/npm is not selectable")
-            return node
-
     def ensure(self) -> list[str]:
         """Foreground install/repair/update intent, returning the next command."""
         with self._lock:
@@ -550,7 +539,8 @@ class ClaudexorRuntimeManager:
             if self._pin is not None:
                 try:
                     command = self._managed_command()
-                    if command:
+                    # The daemon outlives the app: a bundled Node goes through the install owner, which keeps a copy.
+                    if command and command[0] != bundled_node(self._pin.node_version):
                         try:
                             self._probe(command, self._pin)
                         except ClaudexorRuntimeError:
@@ -897,13 +887,8 @@ class ClaudexorRuntimeManager:
 
     @classmethod
     def _resolve_preserved_node(cls, node_version: str) -> str:
-        """Find an already-admitted Node without consulting the next pin."""
-        from ouroboros.platform_layer import (
-            bundled_resource_bases,
-            embedded_node_candidates,
-            node_distribution_platform,
-            probe_node_version,
-        )
+        """Find an already-admitted Node without consulting the next pin; managed before bundled."""
+        from ouroboros.platform_layer import embedded_node_candidates, node_distribution_platform, probe_node_version
 
         version = str(node_version or "").strip()
         if not _SEMVER.fullmatch(version):
@@ -925,43 +910,22 @@ class ClaudexorRuntimeManager:
                 node_only.append(candidate)
             except (OSError, RuntimeError):
                 continue
-        for base in bundled_resource_bases():
-            for candidate in embedded_node_candidates(base):
-                try:
-                    if candidate.is_file() and probe_node_version(str(candidate)) == version:
-                        return str(candidate.resolve())
-                except (OSError, RuntimeError):
-                    continue
-        if node_only:
-            return str(node_only[0].resolve())
+        kept = node_only[0] if node_only else bundled_node(version)
+        if kept:
+            return str(pathlib.Path(kept).resolve())
         if invalid:
             raise ClaudexorRuntimeError(
                 "runtime_serving_node_metadata_invalid", "the preserved Node metadata is malformed")
         return ""
 
-    def _resolve_node(self, pin: ClaudexorRuntimePin) -> str:
-        """Prefer a ready exact full runtime, then bundled Node, then Node-only."""
-        from ouroboros.platform_layer import (
-            bundled_resource_bases,
-            embedded_node_candidates,
-            node_distribution_platform,
-            probe_node_version,
-        )
+    def _resolve_node(self, pin: ClaudexorRuntimePin, *, bundled: bool = True) -> str:
+        """An exact managed Node, complete then Node-only, before the bundled one the daemon would outlive."""
+        from ouroboros.platform_layer import node_distribution_platform
 
         platform_key = node_distribution_platform()
-        complete = self._resolve_managed_node(pin, platform_key, require_npm=True) if platform_key else ""
-        if complete:
-            return complete
-        for base in bundled_resource_bases():
-            for candidate in embedded_node_candidates(base):
-                try:
-                    if candidate.is_file() and probe_node_version(str(candidate)) == pin.node_version:
-                        return str(candidate)
-                except OSError:
-                    continue
-        if not platform_key:
-            return ""
-        return self._resolve_managed_node(pin, platform_key)
+        managed = platform_key and (self._resolve_managed_node(pin, platform_key, require_npm=True)
+                                    or self._resolve_managed_node(pin, platform_key))
+        return managed or (bundled_node(pin.node_version) if bundled else "")
 
     @staticmethod
     def _archive_npm_cli(artifact: NodeRuntimeArtifact, platform_key: str) -> str:
@@ -999,8 +963,9 @@ class ClaudexorRuntimeManager:
         }
         for root in self._node_roots(pin.node_version, platform_key):
             raw = self._node_metadata(root)
-            if any(raw.get(key) != value for key, value in expected.items()):
-                continue
+            if any(raw.get(key) != value for key, value in expected.items()) and (
+                    require_npm or not is_seed_record(raw, pin.node_version, platform_key)):
+                continue  # a seed serves the daemon, never npm, and never claims the archive's fields
             if require_npm and (raw["schema_version"] != _NODE_META_SCHEMA_VERSION or not archive_npm_cli
                                 or raw.get("archive_npm_cli") != archive_npm_cli):
                 continue
@@ -1042,13 +1007,14 @@ class ClaudexorRuntimeManager:
         return platform_key, artifact
 
     def _ensure_node(self, pin: ClaudexorRuntimePin) -> str:
-        """Provision the pin's exact Node only when no exact packaged copy exists."""
-        node = self._resolve_node(pin)
-        if node:
-            return node
+        """A managed exact Node; else the bundled one copied in once (kept as is if that fails); else a download."""
         from ouroboros.platform_layer import node_distribution_platform
 
         platform_key = node_distribution_platform()
+        node = self._resolve_node(pin, bundled=False) or seed_node(
+            managed_node_dir(pin, platform_key), pin.node_version, platform_key, _NODE_META_FILENAME)
+        if node:
+            return node
         artifact = pin.node_artifacts.get(platform_key)
         if not platform_key or artifact is None:
             raise ClaudexorRuntimeError(
@@ -1325,7 +1291,7 @@ class ClaudexorRuntimeManager:
             return []
 
     def _install(
-        self, pin: ClaudexorRuntimePin, *, require_npm: bool = False, node_only: bool = False
+        self, pin: ClaudexorRuntimePin, *, require_npm: bool = False
     ) -> None:
         from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
@@ -1338,8 +1304,7 @@ class ClaudexorRuntimeManager:
             metadata=f"pid={os.getpid()} version={pin.version} build_sha={pin.build_sha}\n",
         )
         if lock_fd is None:
-            command = (self._resolve_node_toolchain(pin) if node_only else
-                       self._managed_cli_command() if require_npm else self._managed_command())
+            command = self._managed_cli_command() if require_npm else self._managed_command()
             if command:
                 return
             raise ClaudexorRuntimeError(
@@ -1351,8 +1316,6 @@ class ClaudexorRuntimeManager:
                 self._ensure_node_toolchain(pin)
             else:
                 self._ensure_node(pin)
-            if node_only:
-                return
             try:
                 command = (
                     self._managed_cli_command()

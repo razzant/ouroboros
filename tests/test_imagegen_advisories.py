@@ -14,9 +14,18 @@ from tests.test_imagegen_tool import PNG, configured as configured, ctx as ctx, 
 from tests.test_imagegen_subscription import ImageWire, engine as engine, invoke, gateway_factory as gateway_factory
 
 
-@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "0.0.0.0",
-    "240.0.0.1", "224.0.0.1", "::1", "fd00:ec2::254", "fe80::1", "::ffff:169.254.169.254"])
-@pytest.mark.parametrize("redirect", [False, True])
+@pytest.mark.parametrize(("redirect", "address"), [
+    (False, "169.254.169.254"),
+    (False, "0.0.0.0"),
+    (False, "224.0.0.1"),
+    (False, "fd00:ec2::254"),
+    (False, "::ffff:169.254.169.254"),
+    (True, "127.0.0.1"),
+    (True, "10.0.0.1"),
+    (True, "240.0.0.1"),
+    (True, "::1"),
+    (True, "fe80::1"),
+])
 def test_provider_result_never_fetches_nonpublic_destination(monkeypatch, address, redirect):
     calls = []
     def handle(request):

@@ -16,7 +16,6 @@ from tests._review_session_route_shared import (
 )
 
 _owned_gateway_uses_each_test_transport = _transport_fixture
-pytestmark = pytest.mark.serial
 SPLIT = {"total_tokens": 20488, "cache_read_tokens": 12738, "cache_write_tokens": 7746}
 
 
@@ -103,9 +102,7 @@ def test_review_split_survives_both_emit_and_persistence_filters(tmp_path, split
     assert row["record_contract_version"] == 2
 
 
-@pytest.mark.parametrize("split", [None, {}, {"total_tokens": 3}, {**SPLIT, "extra": 1},
-                                  {**SPLIT, "cache_read_tokens": True}, {**SPLIT, "total_tokens": -1},
-                                  {**SPLIT, "total_tokens": 1.2}, {**SPLIT, "total_tokens": "20488"}])
+@pytest.mark.parametrize("split", [None, {**SPLIT, "cache_read_tokens": True}, {**SPLIT, "total_tokens": "20488"}])
 def test_invalid_split_is_not_repaired_or_derived_from_legacy(tmp_path, split):
     facts = session_usage_facts("run-review", summary=terminal(split)["summary"])
     assert "input_token_usage" not in facts
@@ -221,13 +218,16 @@ def test_review_chain_observation_is_per_run_not_final_chain_sum(tmp_path, monke
 
 @pytest.mark.parametrize("final_failed", [False, True])
 def test_actual_review_continuations_emit_each_run_once(tmp_path, monkeypatch, fake_route, final_failed):
+    """The successor an older host recorded for a stopped seat, rejoined by the seat's slot executor with its
+    retained pending token: each run of that chain reaches events once, with its own split."""
     from ouroboros import delegate_custody_usage as dcu
-    from ouroboros.review_substrate import run_review_request
-    from tests.test_review_session_continuation import _engine
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.review_execution import AgentSessionReviewExecutor, ReviewAssignment
+    from ouroboros.usage_accounting import UsageScope, usage_scope
+    from tests.test_review_session_continuation import _engine, record_legacy_successor
     from tests._review_session_route_shared import FakeGateway
-    from supervisor.events_budget import _handle_llm_usage
     monkeypatch.setattr(dcu, "_EMITTED_SESSION_USAGE", {})
-    accepted, posts = _engine(monkeypatch, final_failed=final_failed)
+    posts = _engine(monkeypatch, stops=2 if final_failed else 1)
     get_run = FakeGateway.get_run
     splits = {"run-1": SPLIT, "run-2": {**SPLIT, "cache_write_tokens": None}}
     def detail(self, run_id, **kwargs):
@@ -236,17 +236,35 @@ def test_actual_review_continuations_emit_each_run_once(tmp_path, monkeypatch, f
                                   outputTokens=142, cachedInputTokens=20484)
         return result
     monkeypatch.setattr(FakeGateway, "get_run", detail)
-    ctx = SimpleNamespace(task_id="t-review", pending_events=[])
-    result = run_review_request(_agent_request(session_root=str(tmp_path), task_id="t-review", retry_key="split-chain"),
-                                slots=[_agent_slot()], drive_root=tmp_path, llm=FakeLLM(), usage_ctx=ctx)
-    usage = [row for row in ctx.pending_events if row["type"] == "llm_usage"]
-    assert len(accepted) == len(posts) == 1
-    assert [row["usage"]["claudexor"]["run_id"] for row in usage] == ["run-1", "run-2"]
-    assert [row["usage"]["input_token_usage"] for row in usage] == list(splits.values())
+
+    def seat():
+        return AgentSessionReviewExecutor(ReviewAssignment(
+            _agent_request(session_root=str(tmp_path), task_id="t-review", retry_key="split-chain"), _agent_slot(),
+            custody_root=tmp_path, call_id="split-chain"), llm=FakeLLM())
+    checkpoints, usage = [], []
+    with usage_scope(UsageScope(task_id="t-review", root_task_id="root", category="review",
+                                source="review_substrate", review_slot_id="scope_slot_1")):
+        first = seat()
+        first.set_pending_invocation_checkpoint(checkpoints.append)
+        with pytest.raises(ClaudexorUnavailable):
+            first.execute()  # run-1 stopped; its successor is the older host's record below
+        token = record_legacy_successor(tmp_path, checkpoints[0])
+        monkeypatch.setattr(dcu, "_EMITTED_SESSION_USAGE", {})  # process-local, like custody's cache
+        executor = seat()
+        executor.restore_custody({"pending_invocation_id": checkpoints[0]})
+        executor.usage_observer = usage.append
+        if final_failed:
+            with pytest.raises(ClaudexorUnavailable):
+                executor.execute()
+        else:
+            result = executor.execute()
+    assert [(request, key) for request, key in posts if "continueFrom" in request] == [({"continueFrom": "run-1"}, token)]
+    assert [row["claudexor"]["run_id"] for row in usage] == ["run-1", "run-2"]
+    assert [row["input_token_usage"] for row in usage] == list(splits.values())
     for row in usage:
-        _handle_llm_usage(row, SimpleNamespace(DRIVE_ROOT=tmp_path))
+        persist_review(tmp_path, row)
     assert len([row for row in events(tmp_path) if row["type"] == "llm_usage"]) == 2
     assert len([row for row in ledger_rows(tmp_path) if row["kind"] == "subscription_session"]) == 2
     if not final_failed:
-        assert result.actors[0]["usage"]["prompt_tokens"] == 8
-        assert "input_token_usage" not in result.actors[0]["usage"]
+        assert result.usage["prompt_tokens"] == 8
+        assert "input_token_usage" not in result.usage

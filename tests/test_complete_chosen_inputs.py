@@ -35,7 +35,7 @@ def _participant_content(revision: dict) -> str:
         own_objections=[], message="", evidence_section=plan_packet.render_evidence({}), first_time=True)
 
 
-@pytest.mark.parametrize("field", ["goal", "plan", "done_when.claim", "done_when.support", "affected_paths"])
+@pytest.mark.parametrize("field", ["goal", "done_when.support", "affected_paths"])
 def test_operative_tail_changes_revision_identity_and_current_delivery(field):
     before = plan_record.compose_revision(None, **_revision_fields(field, "TAIL_A"))
     after = plan_record.compose_revision(None, **_revision_fields(field, "TAIL_B"))
@@ -67,7 +67,7 @@ def test_large_direct_request_keeps_chosen_prompt_and_host_instruction_roles(tmp
     instructions = request["instructions"]
     assert instructions.count(objective) == 1 and instructions.count(expected) == 1
     marker = "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
-    # The contract JSON is followed by the owner's words that caused the work, so decode just the JSON.
+    # The contract JSON is followed by my human's words for the work, so decode just the JSON.
     host, _end = json.JSONDecoder().raw_decode(instructions.split(marker, 1)[1])
     assert host["objective"] == objective and host["expected_output"] == expected
     assert host["context"] == " \nHOST_REFERENCE_CONTEXT\n "

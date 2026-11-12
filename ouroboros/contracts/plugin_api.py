@@ -15,8 +15,10 @@ import json
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, TypedDict, runtime_checkable
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, TypedDict, runtime_checkable
 
+from ouroboros.contracts.live_conversation import CallTool, LiveConfig, SessionFactory
+from ouroboros.contracts.realtime import ProviderCatalog, RealtimeRoute
 from ouroboros.contracts.skill_manifest import VALID_SKILL_PERMISSIONS
 from ouroboros.skill_token import SkillToken
 
@@ -27,7 +29,12 @@ from ouroboros.skill_token import SkillToken
 # refused a NEW PASS at issuance (``extension_new_pass_admission_error``).
 # 2.0 absorbs 1.4's presence capability (reviewed transport skills may submit
 # authenticated non-owner presence events through the Host Service ceiling).
-PLUGIN_API_VERSION = "2.0"
+# 2.1: target memory reader and branch realtime registration (independent additions).
+# 2.2: conversation frames declare their initial ordinary tool schemas.
+# 2.3: additive union of memory reading and realtime/conversation registration.
+# 2.4: settings state (value/missing/unknown) and a settings refresh of a declared companion; every declared
+#      2.x minimum negotiates them, a field-less legacy payload is refused them.
+PLUGIN_API_VERSION = "2.4"
 # The generation an extension WITHOUT the manifest field binds against —
 # "absent ≡ 1.3 by construction" (owner-ratified §6.1-Δ; deliberately NOT 1.4).
 LEGACY_PLUGIN_API_GENERATION = "1.3"
@@ -55,8 +62,8 @@ class ExecutionMode(enum.Enum):
 
     ``OUT_OF_PROCESS`` is the short-lived, per-call child used for isolated-dep /
     native-marker extensions (``OUROBOROS_EXTENSION_PROCESS_CHILD == "1"``). Such a
-    child cannot host a persistent in-process subscription or asyncio task, so two
-    capabilities are unavailable there; a manifest-declared ``companion_process``
+    child cannot host a persistent in-process subscription, asyncio task or
+    realtime provider. A manifest-declared ``companion_process``
     (host-spawned and supervised) is the supported alternative for long-running
     work and host-event subscription.
     """
@@ -73,23 +80,26 @@ class ExecutionMode(enum.Enum):
 MATRIX_CAPABILITIES: frozenset[str] = frozenset({
     "register_tool", "register_route", "register_ws_handler", "register_ui_tab",
     "register_settings_section", "send_ws_message", "register_companion_process",
-    "register_supervised_task", "subscribe_event", "on_unload",
+    "register_supervised_task", "subscribe_event", "on_unload", "register_realtime_provider", "register_live_conversation",
+    "refresh_companion_process",
 })
 
 # Runtime-access/introspection methods always available in every execution mode
 # (the complement of MATRIX_CAPABILITIES over the PluginAPI surface).
 ALWAYS_AVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
     "log", "get_settings", "get_state_dir", "skill_job_dir",
-    "get_skill_token", "get_runtime_info",
+    "get_skill_token", "get_runtime_info", "read_memory", "get_settings_state",
 })
 
 # Capabilities a short-lived OUT_OF_PROCESS child cannot use directly: a persistent
-# host-event subscription and an in-process supervised asyncio task have no meaning
-# in a per-call child. Long-running work, host events, and supervised loops belong
-# in a manifest-declared companion_process.
+# host-event subscription, in-process supervised task and realtime provider have
+# no lifetime in a per-call child. Long-running general work and host events can
+# use a companion_process; realtime providers and the live conversation feature are in-process only.
 OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
     "subscribe_event",
     "register_supervised_task",
+    "register_realtime_provider", "register_live_conversation",
+    "refresh_companion_process",
 })
 
 
@@ -198,7 +208,11 @@ def plugin_api_surface_fingerprint() -> str:
 # change without a version bump) refuses negotiation until the version is
 # bumped and the new fingerprint recorded here.
 PLUGIN_API_SURFACE_FINGERPRINTS: Dict[str, str] = {
+    "2.4": "c472950639f4467a21f4407d9416871e8f744f27392f1a8d5f711ade39579d7c",
+    "2.3": "bd1062f96b99607b4651ba319e74f9620a5bae08ad1aa0d5dcb106d8ad542d12",
+    "2.2": "46ee2d134ca3c3957adef9366b326b97a84abaae757e8e9d18030a7838329506",
     "2.0": "03fabdf4334e6b2bde217b4cb83a80faaebc773ddce870546dd2108b75de17ca",
+    "2.1": "7e288212fd5bcaaa5de961bde9180ca8669e45c00bbfa8d59ffbccccf9442cdb",
 }
 
 
@@ -331,6 +345,41 @@ class PluginAPI(Protocol):
 
     # registration
 
+    def register_realtime_provider(
+        self,
+        name: str,
+        *,
+        route: RealtimeRoute,
+        session: SessionFactory,
+        catalog: ProviderCatalog,
+    ) -> None:
+        """Register an in-process realtime voice provider as ``<skill>:<name>``.
+
+        Requires ``realtime_provider``. ``session(selected, options, *, observe)``
+        returns a duplex LiveSession (contracts/live_conversation.py) over the
+        host-selected input; it speaks the provider's wire and reports each
+        response's usage in host axes (``USAGE_AXES``). ``route`` declares the
+        accounting provider, endpoint and model prefix; ``catalog`` the models,
+        voices, honoured call settings, credential setting names and each model's
+        route facts. Selection, fitting, tools, history, spending and Stop remain
+        host-owned.
+        """
+        ...
+
+    def register_live_conversation(self, name: str, handler: Callable[..., Awaitable[Any]],
+                                   *, configure: Callable[[], LiveConfig],
+                                   call_tools: Sequence[CallTool] = (), initial_tools: Sequence[str] = ()) -> None:
+        """Register the Live Conversation feature. Requires live_conversation, in-process.
+
+        ``configure()`` returns the owner's LiveConfig for the next call;
+        ``handler(host)`` runs an admitted call over its LiveHost port.
+        ``call_tools`` exist only inside this feature's calls. ``initial_tools``
+        names ordinary permitted schemas the feature's frame needs from its first send.
+        Residency grants no additional authority. No serializable
+        request grants the port.
+        """
+        ...
+
     def register_tool(
         self,
         name: str,
@@ -445,6 +494,32 @@ class PluginAPI(Protocol):
         """Register a companion subprocess declared in the reviewed manifest."""
         ...
 
+    def refresh_companion_process(self, name: str, expected: Optional[Mapping[str, Any]] = None, *,
+                                  only_if_differs: bool = False) -> str:
+        """Apply saved settings to one companion this skill registered (2.4, server process, off the event loop).
+
+        Blocking for the old process's stop (up to about 6 s) and one spawn. Only the companion's
+        ``env_from_settings`` values decide: ``unchanged`` changes nothing, nor does ``not_running`` (a crash left
+        none running: restarting is the crash monitor's); otherwise the old process's death is observed, the
+        environment is built from the settings as they read then, and the companion starts again
+        (``restarted``/``started``). One a refresh stopped and could not replace is started by the next, even
+        when Settings read as before. ``expected`` binds those four to the caller's own read: the
+        ``env_from_settings`` values it read, named as ``get_settings_state`` names them (empty means missing;
+        another key raises ``ExtensionRegistrationError``). When the environment kept or started carries others,
+        Settings changed after that read: ``settings_changed`` (the newer values are the ones applied; read again).
+        With ``only_if_differs`` (``expected`` naming every ``env_from_settings`` key), a companion that already
+        carries those values answers ``unchanged`` or ``not_running`` from memory, with no Settings read or token
+        mint, so a skill can confirm at each of its reads that a companion started elsewhere (recovery) still
+        carries them. ``retained``/``stop_unconfirmed`` never start a second copy; ``settings_unknown``
+        (unreadable settings) starts nothing, keeping a process this refresh has not stopped yet. Disable, a
+        revoked grant, unload/reload and Panic win, also when saved during the stop: ``disabled``,
+        ``missing_grants``, ``not_desired`` (any other reason the skill may not run), ``access_closed``,
+        ``panic``. ``not_server``/``no_supervisor``: no supervisor here, nothing to apply. Worth asking again
+        later: ``not_started`` (not spawned yet), ``retained``, ``stop_unconfirmed``, ``settings_unknown``,
+        ``settings_changed``. A spawn the system refuses raises ``OSError``. Restart budgets are not reset.
+        """
+        ...
+
     def subscribe_event(
         self,
         topic: str,
@@ -471,6 +546,17 @@ class PluginAPI(Protocol):
         """Return allowlisted settings; core keys require owner grants."""
         ...
 
+    def get_settings_state(self, keys: Sequence[str]) -> Dict[str, Any]:
+        """Strict form of ``get_settings`` (2.4): ``{"status", "values", "missing"}``.
+
+        ``status`` is ``ok`` (``values`` holds the non-empty readable keys, ``missing`` the empty or absent
+        ones), ``unknown`` (the saved settings document exists but cannot be read; neither list says
+        anything) or ``access_closed`` (unloading, or no ``read_settings``). Keys the skill may not read
+        appear in neither list. With nothing readable asked (``[]``) no settings are read and only the access
+        answers (``ok`` or ``access_closed``): cheap enough to check before each outbound request.
+        """
+        ...
+
     def get_state_dir(self) -> str:
         """Return the canonical private state dir for reviewed extension state."""
         ...
@@ -483,9 +569,31 @@ class PluginAPI(Protocol):
         """Return a read-only runtime snapshot; additive within schema v1."""
         ...
 
+    def read_memory(self, operation: str, parameters: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        """Read this installation's whole memory (2.1) with host authority, never a calling task's view; contract
+        ``ouroboros.memory/1`` (``ouroboros/memory_reader.py``).
+
+        ``catalog`` pages one ``area`` (``rooms``, ``records``, ``story``, ``marks``, ``shelves``, ``shelf``,
+        ``documents``, ``history``, ``relations``) by an opaque ``cursor``; ``document`` reads one ``address``
+        (``record``, ``note``, ``file``, ``entry``) by code-point ``start``/``length`` bound to a ``revision``;
+        ``changes`` returns chronicle records after a ``position``. The host names the data root; no memory
+        source is written, activated or created, though the chronicle's derived index may catch up. Synchronous
+        I/O: call it off the event loop (a sync handler or ``asyncio.to_thread``). A refusal raises ``MemoryReadError``.
+        """
+        ...
+
 
 class ExtensionRegistrationError(Exception):
     """Raised when a registration violates namespace, permission, or schema."""
+
+
+class MemoryReadError(Exception):
+    """A refused ``read_memory`` call: ``code`` is ``invalid_parameter``, ``not_found``, ``revision_mismatch``,
+    ``position_mismatch`` or ``unavailable``; a mismatch names the source's ``current_revision``."""
+
+    def __init__(self, code: str, message: str, *, current_revision: Optional[str] = None) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code, self.message, self.current_revision = code, message, current_revision
 
 
 def normalize_extension_route_methods(methods: Any, *, subject: str) -> tuple[str, ...]:
@@ -513,7 +621,7 @@ def normalize_extension_route_methods(methods: Any, *, subject: str) -> tuple[st
 
 
 __all__ = [
-    "PluginAPI", "ExtensionRegistrationError", "FORBIDDEN_SKILL_SETTINGS",
+    "PluginAPI", "ExtensionRegistrationError", "MemoryReadError", "FORBIDDEN_SKILL_SETTINGS",
     "PLUGIN_API_VERSION", "LEGACY_PLUGIN_API_GENERATION",
     "PLUGIN_API_SURFACE_FINGERPRINTS", "PluginAPINegotiation", "RuntimeInfo",
     "VALID_EXTENSION_PERMISSIONS", "VALID_EXTENSION_ROUTE_METHODS",

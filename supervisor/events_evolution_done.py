@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.utils import utc_now_iso
+from supervisor.evolution_cleanup import carry_cleanup_fact
 
 
 def _events():
@@ -119,6 +120,8 @@ def _handle_evolution_task_done(
         # GR4-6: the settling task is excluded from the liveness gate — its
         # RUNNING row is popped only later by _finish_task_done_dispatch.
         _events()._close_campaign_after_owner_stop(exclude_task_id=str(task_id or ""))
+        # Either cleanup above may have moved work: the terminal event the dispatcher pushes next says it live.
+        carry_cleanup_fact(getattr(ctx, "DRIVE_ROOT", None), str(task_id or ""), task_done_event)
 
     axes = normalize_outcome_axes({
         "status": task_done_event.get("status"),

@@ -3,8 +3,8 @@
 The real pool fixture (``tests/test_owner_wait_pool.py``) with a real preparation generation. Both
 directions: a contended grant retries at the lane without a storage acquisition under Q and lands
 once when the store frees; a stack whose worker is gone between the durable write and the grant is
-rolled back to ``waiting`` and keeps its capacity lent; a refused authority writes nothing; and with
-nothing contending the same tick grants at once.
+rolled back to ``waiting``; a refused authority writes nothing; and with nothing contending the same
+tick grants at once. No grant waits for capacity: the return continues on its own process (D8).
 """
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ from tests.test_admission_contention import database_reader
 from tests.test_owner_wait_pool import maintain_capacity, park, pool as pool
 from tests.test_workspace_preparation import _WAIT_SEC
 
-pytestmark = pytest.mark.serial
 _REAL_THREAD = threading.Thread  # the pool fixture stubs the global Thread; the lane needs the real one
 
 
@@ -104,9 +103,9 @@ def test_contended_grant_retries_at_the_lane_and_lands_once(pool, generation, mo
         wait_for(lambda: len(failures) >= 2, "the grant retried at the lane")
         assert set(attempts) == {prep.ADMISSION_LANE} and set(failures) == {"contention"}
         assert pool.meta.get("_resume_claim") and not pool.original.active_capacity
-        assert pool.original.in_q.empty() and pool.original.resume_hold == "owner"  # the slot hold stands
-        maintain_capacity()  # a second tick finds the claim in flight: no second grant, the hold stays
-        assert len(set(attempts)) == 1 and pool.original.resume_hold == "owner"
+        assert pool.original.in_q.empty()
+        maintain_capacity()  # a second tick finds the claim in flight: no second grant
+        assert len(set(attempts)) == 1
         held[0]()
         assert generation.wait_idle(_WAIT_SEC)
     grant = pool.original.in_q.get_nowait()
@@ -170,7 +169,7 @@ def test_refused_authority_writes_nothing(pool, generation, monkeypatch):
 
 
 def second_parked_stack(pool):
-    """A second warm park on its own lent slot, both asking to resume with MAX_WORKERS=1 and no slot active."""
+    """A second warm park on its own slot, both asking to resume under the owner's cap of one acting task."""
     from ouroboros.task_results import write_task_result
     from tests.test_owner_wait_pool import InputQueue, Process
     from tests.worker_pool_support import affirm_ready
@@ -207,34 +206,36 @@ def busy_lane(generation):
     assert generation.wait_idle(_WAIT_SEC)
 
 
-def test_a_grant_on_the_lane_counts_as_the_slot_it_will_take(pool, generation):
+def test_two_warm_returns_past_the_cap_are_both_granted_on_their_own_processes(pool, generation):
+    """The one return rule: under a cap of one acting task, two parked stacks asking to resume in one tick both take
+    their claim and both are granted on their own workers when the lane frees; the overshoot is visible."""
+    from supervisor.queue_publication import _pool_counts
+
     park(pool)
-    _, second_meta = second_parked_stack(pool)
+    second, second_meta = second_parked_stack(pool)
     with busy_lane(generation):
-        worker_owner_wait.maintain_owner_wait_capacity()  # both ask in one tick; one free slot
-        assert [bool(m.get("_resume_claim")) for m in (pool.meta, second_meta)].count(True) == 1
-    assert sum(bool(w.active_capacity) for w in workers.WORKERS.values()) == workers.MAX_WORKERS == 1
-    parked = [m for m in (pool.meta, second_meta) if m["owner_wait"]["state"] == "waiting"]
-    assert len(parked) == 1 and parked[0].get("owner_wait_resume_requested")  # still asked, not refused
+        worker_owner_wait.grant_warm_returns()  # both ask in one tick: neither waits for a slot
+        assert all(m.get("_resume_claim") for m in (pool.meta, second_meta))
+    assert pool.original.active_capacity and second.active_capacity
+    assert all(m["owner_wait"]["state"] == "resumed" for m in (pool.meta, second_meta))
+    assert (_pool_counts()["max_workers"], _pool_counts()["acting_worker_count"]) == (1, 2)
 
 
-def test_a_slot_taken_between_the_grant_and_the_put_rolls_the_wait_back(pool, generation, monkeypatch):
+def test_the_cap_lowered_between_the_grant_and_the_put_never_undoes_the_return(pool, generation, monkeypatch):
     request_resume(pool)
     original = worker_owner_wait.set_owner_wait
 
     def resumed_write(root, task_id, wait, **kwargs):
         result = original(root, task_id, wait, **kwargs)
         if wait.get("state") == "resumed":  # durable grant written, put not yet entered
-            monkeypatch.setattr(workers, "MAX_WORKERS", 0)  # the owner shrank the pool meanwhile
+            monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "1")  # the owner set a cap meanwhile
         return result
 
     monkeypatch.setattr(worker_owner_wait, "set_owner_wait", resumed_write)
     maintain_capacity()
     assert generation.wait_idle(_WAIT_SEC)
-    assert pool.original.in_q.empty() and not pool.original.active_capacity
-    assert pool.meta["owner_wait"]["state"] == "waiting" and "_resume_claim" not in pool.meta
-    assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"  # rolled back outside Q
-    assert pool.meta.get("owner_wait_resume_requested")
+    assert pool.original.in_q.get_nowait()["phase"] == "resume_granted" and pool.original.active_capacity
+    assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "resumed"
 
 
 def test_a_generation_closed_before_the_grant_writes_nothing(pool, generation, monkeypatch):

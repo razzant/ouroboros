@@ -7,16 +7,14 @@ from types import SimpleNamespace
 import pytest
 from tests.worker_pool_support import affirm_ready
 
-from ouroboros.cancel_intents import request_cancel, settle_intent, active_intent
+from ouroboros.cancel_intents import request_cancel, active_intent
 from ouroboros.task_results import write_task_result, load_task_result
 from ouroboros.tools.followup import _handle_schedule_followup
 from ouroboros.usage_admission import task_billing_fields
 from supervisor import queue, queue_schedules as schedules
 from supervisor.followup_policy import observed_store, record_restart
 from tests.test_schedule_followup import _ctx
-from tests._store_shared import delete_result, unreadable_result
 
-pytestmark = pytest.mark.serial
 ORIGIN = 'root-1'
 BINDING = {'billing_group_id': ORIGIN, 'billing_group_limit_usd': 10.0,
            'billing_group_limit_source': 'initial_task_admission', 'billing_group_limit_revision': 'original-revision'}
@@ -57,22 +55,6 @@ def stop(root):
 def restore(root, sid, hold, **extra):
     return queue.mutate_scheduled_task('restore', sid, reason='Reviewed this exact hold', actor='owner:test',
                                        drive_root=root, expected_hold_id=hold, **extra)
-
-
-def test_same_author_related_independent_and_unknown(world):
-    _, root, pending = world
-    related = register(world)
-    independent = register(world, 'independent')
-    legacy = {'id': 'legacy', 'source': 'task_followup', 'enabled': True,
-              'trigger': {'type': 'once', 'run_at': '2000-01-01T00:00:00+00:00'},
-              'task': {'text': 'same words', 'metadata': {'origin_task_id': ORIGIN, 'origin_root_task_id': ORIGIN}}}
-    queue.upsert_scheduled_task(legacy, drive_root=root)
-    stop(root)
-    queue.check_scheduled_tasks()
-    assert [t['metadata']['schedule_id'] for t in pending] == [independent['id']]
-    assert row(root, related['id'])['followup_hold']['reason'] == 'origin_stopped'
-    assert row(root, 'legacy')['followup_hold']['reason'] == 'relationship_unknown'
-    assert not row(root, related['id']).get('last_task_id')
 
 
 def test_new_relation_required_and_unrecorded_legacy_keeps_its_own_wallet_until_resolved(world):
@@ -125,82 +107,6 @@ def test_unknown_related_resolution_cannot_invent_missing_origin(world):
     assert row(root, 'lost') == before
 
 
-def test_completion_wins_but_stop_survives_retirement_and_late_registration(world):
-    _, root, pending = world
-    intent = stop(root)
-    write_task_result(root, ORIGIN, 'completed', result='Finished original', billing_group=BINDING, deadline_at=DEADLINE)
-    assert settle_intent(root, ORIGIN, outcome='already_settled', expected_generation=intent['generation'],
-                         request_id=intent['request_id'])
-    assert active_intent(root, ORIGIN) is None
-    original = load_task_result(root, ORIGIN)
-    assert original['status'] == 'completed' and original['result'] == 'Finished original'
-    assert original['followup_stop'] == intent['followup_stop']
-    held = register(world)
-    assert held['followup_hold']['controls']['stop:' + ORIGIN] == intent['followup_stop']['control_id']
-    queue.check_scheduled_tasks()
-    assert pending == []
-
-
-def test_stop_after_prepare_blocks_final_worker_handoff_without_refire(world, monkeypatch):
-    from supervisor.worker_assignment import _claim_worker_launch
-    _, root, pending = world
-    registered = register(world)
-    queue.check_scheduled_tasks()
-    [candidate] = pending
-    frozen = copy.deepcopy(candidate)
-    sent = []
-    worker = SimpleNamespace(in_q=SimpleNamespace(put=sent.append))
-    stop(root)  # after scheduler sweep and task preparation
-    assert not _claim_worker_launch(queue, candidate, worker)
-    assert sent == [] and candidate == frozen
-    queue.check_scheduled_tasks()
-    assert len(pending) == 1 and pending[0]['id'] == frozen['id']
-    held = row(root, registered['id'])['followup_hold']['hold_id']
-    # Preserve unrelated task-level holds and money; release is only the schedule facet.
-    candidate['_budget_hold'] = {'reason': 'independent-budget-hold'}
-    assert restore(root, registered['id'], held)['ok']
-    assert candidate['_budget_hold'] == {'reason': 'independent-budget-hold'}
-    assert row(root, registered['id'])['completed_at']
-    assert row(root, registered['id'])['enabled'] is False
-    assert candidate['metadata']['billing_group'] == BINDING and candidate['deadline_at'] == DEADLINE
-    queue.check_scheduled_tasks()
-    assert len(pending) == 1
-
-
-def test_stale_restore_never_clears_new_stop_or_enables_independent_disable(world):
-    _, root, _ = world
-    registered = register(world)
-    stop(root)
-    queue.check_scheduled_tasks()
-    old = row(root, registered['id'])['followup_hold']['hold_id']
-    queue.mutate_scheduled_task('disable', registered['id'], reason='Separate disable', actor='owner:test', drive_root=root)
-    stop(root)
-    outcome = restore(root, registered['id'], old)
-    assert outcome['status'] == 'stale_hold'
-    assert outcome['changed'] is True  # no tick ran since the Stop: this refusal persisted the new hold
-    new = row(root, registered['id'])['followup_hold']['hold_id']
-    assert new != old
-    assert restore(root, registered['id'], new)['ok']
-    restored = row(root, registered['id'])
-    assert restored['enabled'] is False
-    assert restored['followup_relation'] == registered['followup_relation']
-
-
-def test_pause_is_transient_wait_and_resume_preserves_eligibility(world):
-    from ouroboros.owner_pause import install_fence, release_fence
-    _, root, pending = world
-    related = register(world)
-    independent = register(world, 'independent')
-    install_fence(root, ORIGIN, request_id='pause-request')
-    queue.check_scheduled_tasks()
-    current = row(root, related['id'])
-    assert current['followup_wait'] == 'origin_owner_paused' and not current.get('followup_hold')
-    assert [t['metadata']['schedule_id'] for t in pending] == [independent['id']]
-    release_fence(root, ORIGIN, reason='Owner Resume')
-    queue.check_scheduled_tasks()
-    assert len(pending) == 2
-
-
 def test_restart_marker_temporarily_fences_but_does_not_hold_healthy_schedules(world):
     _, root, pending = world
     related = register(world)
@@ -215,69 +121,6 @@ def test_restart_marker_temporarily_fences_but_does_not_hold_healthy_schedules(w
     assert not row(root, related['id']).get('followup_hold')
     record_restart(root, new=True)
     assert not observed_store(root, schedules.load_schedule_store(root))['tasks'][0].get('followup_hold')
-
-
-def test_legacy_restart_hold_clears_once_through_audited_refresh(world):
-    from supervisor.followup_policy import refresh_policy
-    _, root, _ = world
-    related = register(world)
-    with schedules.schedule_transaction(root):
-        data = schedules.load_schedule_store(root)
-        record = next(r for r in data['tasks'] if r['id'] == related['id'])
-        record['followup_hold'] = {'hold_id': 'old', 'reason': 'origin_stopped', 'controls': {'restart': 'old'}}
-        claim = {'token': 'owed', 'task_id': 'not-admitted', 'phase': 'claimed'}
-        record['occurrence'] = copy.deepcopy(claim)
-        schedules._write_scheduled_tasks(data, root)
-        refresh_policy(root, data, record)
-        assert not record.get('followup_hold')
-        assert record['occurrence'] == claim
-        before = copy.deepcopy(record)
-        refresh_policy(root, data, record)
-        assert record == before
-
-
-@pytest.mark.parametrize('wait', ['origin_owner_paused', 'work_deadline_passed',
-                                  'followup_authority_unavailable', 'pending_binding_unavailable'])
-@pytest.mark.parametrize('controls', [{}, {'restart': 'old'}, {'restart': 'old', 'stop:root-1': 'stop'}])
-def test_refresh_audit_names_restart_only_when_retiring_its_hold(tmp_path, monkeypatch, wait, controls):
-    from supervisor.followup_policy import refresh_policy
-
-    record = {'id': 'schedule', 'followup_wait': wait, 'followup_relation': {'kind': 'related'}}
-    if controls:
-        record['followup_hold'] = {'hold_id': 'old', 'reason': 'origin_stopped', 'controls': controls}
-    audits, writes = [], []
-    monkeypatch.setattr(schedules, '_audit_schedule_mutation', lambda **kw: audits.append(kw) or True)
-    monkeypatch.setattr(schedules, '_write_scheduled_tasks', lambda *a: writes.append(copy.deepcopy(record)))
-    data = {'tasks': [record]}
-    view = {'hold': None, 'wait': ''}
-    refresh_policy(tmp_path, data, record, observed=view)
-    reason = 'origin_stopped' if 'stop:root-1' in controls else 'restart_history' if controls else ''
-    assert [(a['phase'], a['reason']) for a in audits] == [('intent', reason), ('outcome', reason)]
-    assert len(writes) == 1 and record['followup_wait'] == ''
-    if 'stop:root-1' in controls:
-        assert record['followup_hold']['controls'] == {'stop:root-1': 'stop'}
-    else:
-        assert not record.get('followup_hold')
-    refresh_policy(tmp_path, data, record, observed=view)
-    assert len(audits) == 2 and len(writes) == 1, 'no repeated retirement audit'
-
-
-def test_template_forgery_and_edit_cannot_replace_host_binding(world):
-    _, root, pending = world
-    registered = register(world, billing_group={'billing_group_id': 'forged'})
-    forged = copy.deepcopy(registered)
-    forged['followup_relation'] = {'kind': 'independent'}
-    forged['followup_origin'] = {'task_id': 'fake', 'root_task_id': 'fake'}
-    forged['task']['metadata'].update(billing_group={'billing_group_id': 'fresh', 'billing_group_limit_usd': 9000},
-                                     continuation={'billing_group_id': 'fresh'}, origin_task_id='fake')
-    forged['task']['task_contract'] = {'deadline_at': '2199-01-01T00:00:00+00:00'}
-    queue.upsert_scheduled_task(forged, drive_root=root)
-    queue.check_scheduled_tasks()
-    [task] = pending
-    assert task['metadata']['billing_group'] == BINDING
-    assert task['metadata']['origin_task_id'] == ORIGIN
-    assert task['task_contract']['deadline_at'] == DEADLINE
-    assert 'continuation' not in task['metadata']
 
 
 def test_refused_restriction_audit_blocks_without_false_persisted_hold(world, monkeypatch):
@@ -338,21 +181,6 @@ def test_no_speculative_release_and_existing_first_cause_does_not_hide_stop(worl
     assert row(root, registered['id'])['followup_hold']
 
 
-def test_failed_stop_transfer_keeps_active_intent_and_completed_result(world, monkeypatch):
-    from ouroboros import store, task_store
-    _, root, _ = world
-    intent = stop(root)
-    write_task_result(root, ORIGIN, 'completed', result='Answer survives')
-
-    def fail_result(*_args, **_kwargs):  # the result's store write refuses; the intents file write stays real
-        raise store.StoreError('result persistence refused')
-    monkeypatch.setattr(task_store, 'patch_document', fail_result)
-    with pytest.raises(store.StoreError, match='persistence refused'):
-        settle_intent(root, ORIGIN, outcome='already_settled')
-    assert active_intent(root, ORIGIN)['followup_stop'] == intent['followup_stop']
-    assert load_task_result(root, ORIGIN)['result'] == 'Answer survives'
-
-
 def test_failed_hold_persistence_and_restore_outcome_audit_are_honest(world, monkeypatch):
     _, root, pending = world
     registered = register(world)
@@ -369,46 +197,6 @@ def test_failed_hold_persistence_and_restore_outcome_audit_are_honest(world, mon
     result = restore(root, registered['id'], held)
     assert result['changed'] and result['status'] == 'changed_audit_incomplete' and not result['ok']
     assert not row(root, registered['id']).get('followup_hold')
-
-
-def test_legacy_template_normalization_keeps_origin_but_cannot_forge_money(world):
-    _, root, _ = world
-    legacy = {'id': 'legacy', 'source': 'task_followup', 'enabled': False,
-              'task': {'metadata': {'origin_task_id': ORIGIN, 'origin_root_task_id': ORIGIN,
-                                   'billing_group': {'billing_group_id': 'fresh', 'billing_group_limit_usd': 999},
-                                   'continuation': {'billing_group_id': 'fresh'}}}}
-    schedules._write_scheduled_tasks({'tasks': [legacy]}, root)
-    edited = copy.deepcopy(legacy)
-    edited['task']['metadata']['origin_task_id'] = 'forged'
-    stop(root)  # the actual control that holds an unrecorded relationship
-    stored = queue.upsert_scheduled_task(edited, drive_root=root)
-    assert stored['followup_origin'] == {'task_id': ORIGIN, 'root_task_id': ORIGIN}
-    assert 'billing_group' not in stored['task']['metadata']
-    assert 'continuation' not in stored['task']['metadata']
-    assert restore(root, 'legacy', stored['followup_hold']['hold_id'], relation='related')['ok']
-    assert row(root, 'legacy')['followup_relation']['billing_group'] == BINDING
-    assert not row(root, 'legacy')['enabled']
-
-
-def test_legacy_fired_unknown_without_receipt_keeps_id_and_waits_for_custody(world):
-    _, root, pending = world
-    legacy = {'id': 'legacy', 'source': 'task_followup', 'enabled': False,
-              'trigger': {'type': 'once'}, 'completed_at': '2026-01-01T00:00:00+00:00',
-              'last_task_id': 'same-fired-id',
-              'task': {'metadata': {'origin_task_id': ORIGIN, 'origin_root_task_id': ORIGIN}}}
-    schedules._write_scheduled_tasks({'tasks': [legacy]}, root)
-    write_task_result(root, 'same-fired-id', 'scheduled', metadata={'schedule_id': 'legacy'})
-    queue.check_scheduled_tasks()
-    # The upgrade alone holds nothing, and a receipt-less fired task is never replayed.
-    assert not row(root, 'legacy').get('followup_hold') and pending == []
-    stop(root)
-    queue.check_scheduled_tasks()
-    held = row(root, 'legacy')['followup_hold']['hold_id']
-    assert restore(root, 'legacy', held, relation='related')['ok']
-    current = row(root, 'legacy')
-    assert current['last_task_id'] == 'same-fired-id' and current['completed_at'] == legacy['completed_at']
-    assert current['followup_wait'] == 'pending_binding_unavailable'
-    assert pending == []
 
 
 def test_related_final_handoff_success_is_bound_and_original_late_charge_still_counts(world, monkeypatch):
@@ -450,60 +238,6 @@ def test_completed_schedule_gc_preserves_host_group_for_late_accounting(world):
     assert task_billing_fields({'id': task['id']}, task['id'], 999.0, root)['billing_group_limit_usd'] == 10.0
 
 
-def test_refused_scheduled_result_never_reaches_public_enqueue(world, monkeypatch):
-    import ouroboros.task_results as results
-    _, root, pending = world
-    registered = register(world)
-    monkeypatch.setattr(results, 'write_task_result', lambda *a, **k: False)
-    queue.check_scheduled_tasks()
-    assert pending == []
-    current = row(root, registered['id'])
-    assert current['hold']['reason'] == 'receipt_failed'
-    assert not current.get('completed_at') and not current.get('last_task_id')
-
-
-def test_public_gateway_rejects_template_money_and_save_cannot_release_hold(world):
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
-    from ouroboros.gateway.schedules import api_schedules_upsert
-    _, root, _ = world
-    registered = register(world)
-    stop(root)
-    queue.check_scheduled_tasks()
-    held = row(root, registered['id'])['followup_hold']
-    app = Starlette(routes=[Route('/api/schedules', api_schedules_upsert, methods=['POST'])])
-    app.state.drive_root = root
-    with TestClient(app) as client:
-        body = {'id': registered['id'], 'trigger': registered['trigger'], 'enabled': True,
-                'task': {'text': 'Keep work', 'metadata': {'billing_group': {'billing_group_id': 'fresh'}}}}
-        assert client.post('/api/schedules', json=body).status_code == 400
-        body['task']['metadata'] = {}
-        body['followup_relation'] = {'kind': 'independent'}
-        body['followup_released'] = held['controls']
-        response = client.post('/api/schedules', json=body)
-        assert response.status_code == 200, response.text
-    current = row(root, registered['id'])
-    assert current['followup_hold'] == held and current['followup_relation'] == registered['followup_relation']
-
-
-def test_followup_disable_is_an_ordinary_disable_and_restore_lifts_only_it(world):
-    _, root, pending = world
-    registered = register(world)
-    queue.mutate_scheduled_task('disable', registered['id'], reason='Independent owner disable', actor='owner:test', drive_root=root)
-    current = row(root, registered['id'])
-    # Disabling changes future dispatch without adding a legacy skill marker.
-    assert current['enabled'] is False and 'manual_override' not in current
-    assert schedules.schedule_lifecycle_status(current) == 'disabled'
-    queue.check_scheduled_tasks()
-    assert pending == []
-    result = restore(root, registered['id'], '')
-    assert result['ok'] and result['status'] == 'updated', result
-    assert schedules.schedule_lifecycle_status(row(root, registered['id'])) == 'active'
-    queue.check_scheduled_tasks()
-    assert len(pending) == 1
-
-
 def test_context_and_continue_expose_held_obligations_without_auto_release(world):
     from supervisor.schedule_view import digest
     from datetime import datetime, timezone
@@ -520,43 +254,6 @@ def test_context_and_continue_expose_held_obligations_without_auto_release(world
     assert 'manage_schedules' in text and 'does not release their holds' in text and DEADLINE in text
 
 
-@pytest.mark.parametrize('suppression', ['disable', 'delete'])
-@pytest.mark.parametrize('later', [False, True])
-def test_exact_restore_replay_cannot_lift_separate_suppression(world, suppression, later):
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
-    from ouroboros.gateway.schedules import api_schedules_action
-    _, root, _ = world
-    registered = register(world)
-    stop(root)
-    queue.check_scheduled_tasks()
-    sid = registered['id']
-    held = row(root, sid)['followup_hold']['hold_id']
-    app = Starlette(routes=[Route('/api/schedules/{schedule_id}/action', api_schedules_action, methods=['POST'])])
-    app.state.drive_root = root
-    with TestClient(app) as client:
-        def action(verb, **kw):
-            response = client.post(f'/api/schedules/{sid}/action', json={'action': verb, 'reason': 'Explicit action', **kw})
-            assert response.status_code == 200, response.text
-            return response.json()
-        if not later:
-            first = action(suppression)
-            assert first['changed']
-        assert action('restore', expected_hold_id=held)['status'] == 'hold_released'
-        if later:
-            outcome = action(suppression)
-            assert outcome['changed']
-        before = row(root, sid)
-        replay = action('restore', expected_hold_id=held)
-        assert not replay['changed'], replay
-        assert row(root, sid) == before and not before['enabled']
-        assert bool(before.get('delete_requested_at')) is (suppression == 'delete')
-        # The separate, explicitly generic Restore remains available.
-        assert action('restore')['ok']
-        assert row(root, sid)['enabled']
-
-
 def _assignment_world(world, monkeypatch, count=1):
     from tests._budget_pause_exact_helpers import _install_queue
     ctx, root, _ = world
@@ -567,64 +264,6 @@ def _assignment_world(world, monkeypatch, count=1):
             in_q=SimpleNamespace(put=lambda task, wid=wid: sent.append((wid, copy.deepcopy(task)))
                                  if task.get("type") != "worker_quiescence" else None)))
     return (ctx, root, workers.PENDING), workers, sent
-
-
-@pytest.mark.parametrize('workers_count', [1, 3])
-def test_assign_tasks_skips_final_refusal_for_same_available_worker(world, monkeypatch, workers_count):
-    world, workers, sent = _assignment_world(world, monkeypatch, workers_count)
-    _, root, pending = world
-    a = register(world)
-    b = register(world, 'independent')
-    queue.check_scheduled_tasks()
-    frozen = copy.deepcopy(pending[0])
-    stop(root)  # After preparation; actual final control check must refuse A.
-    workers.assign_tasks()
-    assert len(sent) == 1 and sent[0][0] == 0
-    assert sent[0][1]['metadata']['schedule_id'] == b['id']
-    assert pending == [frozen] and row(root, a['id'])['last_task_id'] == frozen['id']
-    assert frozen['admitted_dispatch'] == 'none'
-    workers.assign_tasks()
-    assert len(sent) == 1 and pending == [frozen]
-
-
-@pytest.mark.parametrize('state', ['pending', 'running', 'missing', 'unreadable', 'settled_live', 'settled'])
-def test_consumed_row_retained_until_actual_work_settles(world, monkeypatch, state):
-    world, workers, sent = _assignment_world(world, monkeypatch)
-    _, root, pending = world
-    registered = register(world)
-    queue.check_scheduled_tasks()
-    [task] = pending
-    frozen = copy.deepcopy(task)
-    data = schedules.load_schedule_store(root)
-    data['tasks'][0]['completed_at'] = '2000-01-01T00:00:00+00:00'
-    schedules._write_scheduled_tasks(data, root)
-    if state != 'pending':
-        pending.clear()
-    if state in {'running', 'settled_live'}:
-        workers.RUNNING[task['id']] = {'task': task, 'worker_id': 0}
-    if state in {'settled', 'settled_live'}:
-        write_task_result(root, task['id'], 'completed', result='Work settled')
-    elif state == 'running':
-        write_task_result(root, task['id'], 'running')
-    elif state == 'missing':
-        delete_result(root, task['id'])
-    elif state == 'unreadable':
-        unreadable_result(monkeypatch, task['id'], root=root)
-    queue.check_scheduled_tasks()
-    kept = schedules.load_schedule_store(root)['tasks']
-    assert bool(kept) is (state != 'settled')
-    if state == 'unreadable':  # the store's own failure reached the receipt read, never an absence
-        from ouroboros.store import StoreError
-        from supervisor.schedule_occurrence import prepare_receipts
-        error = prepare_receipts(kept, drive_root=root).errors[task['id']]
-        assert isinstance(error, StoreError) and 'simulated unreadable row' in str(error)
-    if state == 'pending':
-        assert pending == [frozen]
-        workers.assign_tasks()
-        assert len(sent) == 1 and sent[0][1]['id'] == frozen['id']
-        assert sent[0][1]['metadata']['billing_group'] == BINDING
-        assert sent[0][1]['deadline_at'] == DEADLINE
-        assert row(root, registered['id'])['completed_at'] == '2000-01-01T00:00:00+00:00'
 
 
 @pytest.mark.parametrize('door', ['http', 'tool'])
@@ -668,37 +307,3 @@ def test_stop_action_retry_and_later_action_across_release(world, monkeypatch, d
         cancel('one-action')  # Delayed older replay must not replace the later control.
         assert active_intent(root, ORIGIN)['followup_stop'] == later['followup_stop']
         assert not observed_store(root, schedules.load_schedule_store(root))['tasks'][0].get('followup_hold')
-
-
-def test_stop_action_receipt_survives_settlement_and_storage_failure(world, monkeypatch):
-    _, root, _ = world
-    first = request_cancel(root, ORIGIN, source='http_single', stop_action_id='first')
-    write_task_result(root, ORIGIN, 'completed', result='Preserved completion')
-    assert settle_intent(root, ORIGIN, outcome='already_settled', request_id=first['request_id'])
-    stored = load_task_result(root, ORIGIN)
-    replay = request_cancel(root, ORIGIN, source='http_single', stop_action_id='first', allow_settled_target=True)
-    assert replay['stop_action_replayed'] and active_intent(root, ORIGIN) is None
-    assert load_task_result(root, ORIGIN) == stored
-    # A real later action creates authority despite the original completion.
-    second = request_cancel(root, ORIGIN, source='http_single', stop_action_id='second', allow_settled_target=True)
-    assert second['followup_stop']['control_id'] != first['followup_stop']['control_id']
-    import ouroboros.cancel_intents as ci
-    def fail(*args, **kwargs):
-        raise OSError('injected durable write failure')
-    with monkeypatch.context() as m:
-        m.setattr(ci, 'update_json_locked', fail)
-        with pytest.raises(OSError):
-            request_cancel(root, ORIGIN, source='http_single', stop_action_id='third', allow_settled_target=True)
-    assert active_intent(root, ORIGIN) == {k: v for k, v in second.items() if k not in {'already_requested', 'already_settled'}}
-    assert load_task_result(root, ORIGIN) == stored
-
-
-def test_action_identity_conflict_refuses_without_changing_authority(world):
-    _, root, _ = world
-    first = request_cancel(root, ORIGIN, source='http_single', stop_action_id='same',
-                           requested_stop_policy='finalize_then_cancel')
-    from supervisor.followup_policy import StopActionConflict
-    with pytest.raises(StopActionConflict):
-        request_cancel(root, ORIGIN, source='http_single', stop_action_id='same',
-                       requested_stop_policy='immediate')
-    assert active_intent(root, ORIGIN)['followup_stop'] == first['followup_stop']

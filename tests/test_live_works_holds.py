@@ -12,7 +12,6 @@ from tests._shared import write_queue_document
 def _snapshot(root, *, running=(), pending=()):
     stamp = utc_now_iso()
     write_queue_document(root / "state/queue_snapshot.json", {"ts": stamp, "running": list(running), "pending": list(pending)})
-    write_queue_document(root / "state/direct_roots.json", {"ts": stamp, "incomplete": False, "roots": []})
 
 
 def test_a_writer_held_continue_reads_as_held_for_the_earlier_attempt(tmp_path):
@@ -49,7 +48,7 @@ def test_an_owner_pause_names_the_author_its_fence_declared(tmp_path, declared, 
     assert {k: v for k, v in wait.items() if k not in {"text", "reason", "release"}} == {"kind": "owner_pause", "state": "paused", "since": "2026-10-13T12:40:00Z",
                     **({"by": by} if by else {})}
     note = render_roster_note(independent_roots(tmp_path))
-    assert "owner Pause (" in note and "release=resume" in note
+    assert "Pause (" in note and "owner Pause" not in note and "release=resume" in note  # who declared it is by=
     if by:
         assert f"by={by}" in note
     assert wait["release"] == "resume"

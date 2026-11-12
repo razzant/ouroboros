@@ -7,7 +7,6 @@ machine and the transport run in the ordinary CI matrix.
 from __future__ import annotations
 
 import json
-import pathlib
 import sys
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -164,25 +163,6 @@ def test_a_sign_in_start_keeps_a_panic_stop(packaged, tmp_path):
     assert automatic_launch_allowed(parse_launch_options([]).launch_intent, data_dir, log) is True
 
 
-def test_the_toggle_never_enters_the_settings_draft():
-    """Like the notification block: no `s-` field, and edits never mark the server draft dirty."""
-    root = pathlib.Path(__file__).resolve().parents[1]
-    markup = (root / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
-    panel = markup[markup.index('data-settings-panel="behavior"'):]
-    panel = panel[:panel.index("</section>")]
-    assert "data-autostart-settings" in panel, "the block lives on the Behavior tab"
-    start = panel.index("data-autostart-settings")
-    end = panel.find('<div class="form-section"', start)
-    block = panel[start:end if end > 0 else len(panel)]
-    assert "host computer" in block
-    assert "Startup &amp; background" in block
-    assert "data-autostart-settings" not in markup.split('data-settings-panel="appearance"')[1]
-    for attribute in ('id="s-', 'name="s-'):
-        assert attribute not in block
-    settings = (root / "web" / "modules" / "settings.js").read_text(encoding="utf-8")
-    assert "closest?.('[data-notify-settings], [data-autostart-settings], [data-interface-size]')" in settings
-
-
 @pytest.fixture
 def client(tmp_path):
     from starlette.testclient import TestClient
@@ -200,7 +180,7 @@ def test_endpoints_report_unavailable_outside_the_packaged_desktop(registry, cli
     assert registry.keys == {}
 
 
-@pytest.mark.parametrize("body", ["not json", [], {}, {"enabled": "yes"}, {"enabled": 1}, {"enabled": True, "extra": 1}])
+@pytest.mark.parametrize("body", ["not json", [], {"enabled": True, "extra": 1}])
 def test_post_accepts_only_one_boolean(packaged, registry, client, body):
     if isinstance(body, str):
         response = client.post("/api/desktop/autostart", content=body)
@@ -232,3 +212,20 @@ def test_registry_refusals_are_reported_not_hidden(packaged, client, monkeypatch
     response = client.get("/api/desktop/autostart")
     assert response.status_code == 500
     assert "could not be read" in response.json()["error"]
+
+
+def test_a_run_entry_whose_copy_is_gone_follows_this_one_and_keeps_the_startup_apps_switch(packaged, registry, tmp_path):
+    other = tmp_path / "Old" / "Ouroboros.exe"
+    other.parent.mkdir()
+    other.write_bytes(b"MZ")
+    registry.keys[autostart.RUN_KEY] = {autostart.VALUE_NAME: (f'"{other}" --launch-intent automatic', 1)}
+    registry.keys[autostart.APPROVED_KEY] = {autostart.VALUE_NAME: _approved(0x03)}
+    assert desktop_autostart.follow_moved_app() is False and autostart.autostart_state() == "other_copy"
+    other.unlink()  # an update removed the old folder and extracted the new one elsewhere
+    registry.keys[autostart.RUN_KEY][autostart.VALUE_NAME] = (f'"{other}" /hand-written', 1)
+    assert desktop_autostart.follow_moved_app() is False, "a value of another shape is not this app's entry"
+    registry.keys[autostart.RUN_KEY][autostart.VALUE_NAME] = (f'"{other}" --launch-intent automatic', 1)
+    assert desktop_autostart.follow_moved_app() is True
+    assert registry.value(autostart.RUN_KEY) == (f'"{packaged}" --launch-intent automatic', _FakeWinreg.REG_SZ)
+    assert autostart.autostart_state() == "disabled_by_os", "set_autostart would have cleared the owner's switch"
+    assert desktop_autostart.follow_moved_app() is False

@@ -29,12 +29,13 @@ ACQUISITION_SLICE_SEC = 0.25
 class _PresendWait:
     """One caller's local admission episode. Nothing here repeats a provider or tool body."""
 
-    def __init__(self, check=True, *, before_task_start=False):
+    def __init__(self, check=True, *, before_task_start=False, controls=None):
         from ouroboros.model_wait import current_model_wait, dispatch_deadline_remaining_sec
         from ouroboros.config import get_task_idle_timeout_sec
 
         self.check = check
         self.before_task_start = before_task_start
+        self.controls = controls  # a caller context whose bounds this wait's own control check reads
         self.owner = current_model_wait()
         self.owned = self.owner is not None or dispatch_deadline_remaining_sec() is not None
         self.interactive_bound = (float(get_task_idle_timeout_sec()) if self.owner is not None
@@ -69,8 +70,9 @@ class _PresendWait:
                     _check()
                 elif self.owner is not None:
                     from ouroboros.model_wait import dispatch_control_reason
-                    reason = (dispatch_control_reason(self.owner, before_task_start=True)
-                              if self.before_task_start else self.owner.control_reason())
+                    reason = (dispatch_control_reason(self.owner, before_task_start=True) if self.before_task_start
+                              else self.controls.copy().run(self.owner.control_reason) if self.controls is not None
+                              else self.owner.control_reason())
                     if reason:
                         from ouroboros.llm_attempt import PhysicalDispatchInterrupted
                         raise PhysicalDispatchInterrupted(reason)
@@ -116,7 +118,7 @@ class _PresendWait:
             _hold(self.owner, "ended", self.started, self.episode_id)
 
 
-def retry_presend(function, *, check=True, before_task_start=False):
+def retry_presend(function, *, check=True, before_task_start=False, controls=None):
     """Retry only a supplied unsent preparation/transaction AFTER it unwound its locks.
 
     The caller must keep invocation identity outside the callback and must stop using
@@ -126,11 +128,13 @@ def retry_presend(function, *, check=True, before_task_start=False):
     2026-10-21, A: an unstarted message waits for storage and starts once): no direct-turn
     idle window ends it; Stop, Panic, deadlines and the execution ceiling still do. A readable
     accepted Pause ends preparation before the body, for its existing zero-dispatch park.
+    ``controls``: the context whose bounds the waits' own control checks read (a nested start's caller); the
+    function, its locks and this loop stay in the current one.
     """
     from ouroboros.store import admission_acquisition
     from ouroboros import queue_observation
 
-    episode = _PresendWait(check, before_task_start=before_task_start)
+    episode = _PresendWait(check, before_task_start=before_task_start, controls=controls)
     try:
         while True:
             try:
@@ -472,12 +476,23 @@ def retain_unadopted(request, reservation, **facts):
     return lambda response, capture: retain_cancelled_response(target, response, capture, **facts)
 
 
+def _observe_late_outcome(capture) -> None:
+    """Tell the sender's bound observer how an abandoned attempt ended: settled or unresolved is still a send, and the
+    host's record of the work would otherwise never hear it. A release has already published itself."""
+    from ouroboros.physical_attempt_context import dispatched
+
+    if getattr(capture, "state", "") in {"settled", "unresolved"}:
+        dispatched(capture)
+
+
 def late_settler(reservation, request, extractor, manifest_ref, capture, late_owner):
     """``model_send``'s ``settle_late``: the SENDER's settlement of an answer its receiver abandoned.
 
-    The late answer or error goes through the SAME accounting as a taken one; a received
+    The late answer or error goes through the SAME accounting and capture as a taken one (so a
+    late proof that it never started publishes its release, like the async sender's); a received
     answer is retained as evidence (never adopted); the transport's ``late_owner`` then
-    acknowledges or closes it. The receiver recorded the attempt as still dispatched.
+    acknowledges or closes it. The receiver recorded the attempt as still dispatched, so a
+    send's own outcome is published too (``_observe_late_outcome``), even after its call closed.
     """
     from ouroboros import usage_accounting as ua
 
@@ -486,9 +501,12 @@ def late_settler(reservation, request, extractor, manifest_ref, capture, late_ow
     def settle_late(*, result=None, error=None) -> None:
         try:
             if error is not None:
-                ua._terminalize_failed_attempt(reservation, error)
+                state = ua._terminalize_failed_attempt(reservation, error)
+                _observe_late_outcome(ua._record_attempt_capture(
+                    reservation, request, state, candidate_manifest_ref=manifest_ref, exc=error))
             else:
                 ua._account_response(reservation, request, result, extractor, manifest_ref)
+                _observe_late_outcome(ua.last_physical_attempt_capture())
                 retain(result, ua.last_physical_attempt_capture() or capture)
         except Exception:
             log.exception("Late settlement or retention of abandoned attempt %s failed; inspect durable attempt state",
@@ -537,6 +555,7 @@ async def model_send_async(reservation, complete, *, retain_on_cancel, retain_on
         # No await separates completion from its handover. Only the event loop
         # changes this state, so Pause cannot also take a completed outcome.
         if outcome.get("abandoned"):
+            _observe_late_outcome(outcome.get("capture"))
             try:
                 if "error" not in outcome:
                     await asyncio.to_thread(retain_on_abandon, outcome["response"], outcome["capture"])

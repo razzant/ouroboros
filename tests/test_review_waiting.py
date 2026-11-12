@@ -79,6 +79,144 @@ def test_delivery_cursor_waits_for_transcript_and_checkpoint(tmp_path, monkeypat
     assert waiting.select_helpers(restored)["selection"] == {}, "legacy waits mean the whole wave"
 
 
+def _result_record(root, settled=("a", "b")):
+    """A result wave's record (seats a and b), with ``settled`` seats answered, as its unread duty names it."""
+    record = ledger.revise_record(root, _record(root)["record_id"], lambda current: {**current, "surface": "result"})
+    for seat in settled:
+        record = ledger.settle_from_collected(root, record["record_id"], [_raw(seat, seat, parts=BOTH, operation_id=seat)])
+    return record
+
+
+def _owes(ctx, record, left="unread"):
+    from ouroboros.review_pause import owe_unwaited_review
+
+    assert owe_unwaited_review(ctx, surface="result", retry_key=f"key-{record['record_id']}",
+                               record_id=record["record_id"], left=left)
+
+
+def _duties(root):
+    from ouroboros.late_review_marks import OWED_SET
+    from ouroboros.store import open_store
+
+    with open_store(root, write=False) as txn:
+        return sorted((row["left_review"]["record_id"], row["left_review"]["left"]) for row in txn.set_rows(OWED_SET).values())
+
+
+def _receipt(ctx, record, rendered_rows=None):
+    """The receipt the real publication carries for a response rendering ``rendered_rows``."""
+    from ouroboros.tools.tool_result import _install_tool_result_sidecar, _published_tool_result, _restore_tool_result_sidecar
+
+    token = _install_tool_result_sidecar(ctx, object())
+    try:
+        waiting.publish_delivery(ctx, "answer", record, rendered_rows=rendered_rows)
+        return _published_tool_result(ctx, None).meta["review_delivery"]
+    finally:
+        _restore_tool_result_sidecar(token)
+
+
+def _author(root, task_id="task-1"):
+    return SimpleNamespace(task_id=task_id, drive_root=root, budget_drive_root=None)
+
+
+def test_a_saved_whole_receipt_ends_its_own_records_unread_duty_and_nothing_else(tmp_path):
+    from ouroboros.working_checkpoint import flush_content_acks
+
+    ctx = _author(tmp_path)
+    own, other, unwaited = _result_record(tmp_path), _result_record(tmp_path), _result_record(tmp_path)
+    _owes(ctx, own), _owes(ctx, other), _owes(ctx, unwaited, "unwaited")
+    everything = sorted([(own["record_id"], "unread"), (other["record_id"], "unread"), (unwaited["record_id"], "unwaited")])
+    waiting.acknowledge_delivery(ctx, _receipt(ctx, own, own["rows"]))
+    assert _duties(tmp_path) == everything, "a transcript insertion alone ends nothing: no saved state holds it yet"
+    flush_content_acks(ctx)
+    assert _duties(tmp_path) == sorted(row for row in everything if row[0] != own["record_id"])
+    kept = ledger.load_record(tmp_path, own["record_id"])
+    assert (kept["state"], kept["rows"], kept["verdict"]) == ("settled", own["rows"], own["verdict"])  # evidence stays
+    assert kept["waiting"]["seen_outcomes"]
+    # Another kind of duty keeps its own lifetime, even under a whole receipt of its own record.
+    waiting.acknowledge_delivery(ctx, _receipt(ctx, unwaited, unwaited["rows"]))
+    flush_content_acks(ctx)
+    assert (unwaited["record_id"], "unwaited") in _duties(tmp_path)
+    # Delivered again: nothing left to end, and nothing recreated.
+    waiting.acknowledge_delivery(ctx, _receipt(ctx, own, own["rows"]))
+    flush_content_acks(ctx)
+    assert _duties(tmp_path) == sorted(row for row in everything if row[0] != own["record_id"])
+
+
+@pytest.mark.parametrize("short", ["helper_notice", "report_without_rows", "another_records_receipt"])
+def test_a_receipt_short_of_whole_ends_no_unread_duty(tmp_path, short):
+    """Cursor ids prove nothing: a helper notice and a report that renders no rows advance them all the same."""
+    from ouroboros.working_checkpoint import flush_content_acks
+
+    ctx = _author(tmp_path)
+    record, before = _result_record(tmp_path), None
+    if short == "a_seat_settled_after_the_render":
+        record = _result_record(tmp_path, settled=("a",))
+        before = record["rows"]
+        record = ledger.settle_from_collected(tmp_path, record["record_id"], [_raw("b", "b", parts=BOTH, operation_id="b")])
+    elif short == "wave_still_pending":
+        record = _result_record(tmp_path, settled=("a",))
+    _owes(ctx, record)
+    tokens = [waiting._outcome_token(identity) for identity in waiting.outcome_ids(record)]
+    receipt = {
+        "helper_notice": {"record_id": record["record_id"], "helpers": [], "outcomes": tokens},
+        "report_without_rows": _receipt(ctx, record),
+        "a_seat_settled_after_the_render": _receipt(ctx, record, before),
+        "wave_still_pending": _receipt(ctx, record, record["rows"]),
+        "another_author": _receipt(ctx, record, record["rows"]),
+    }.get(short)
+    author = _author(tmp_path, "foreign-author") if short == "another_author" else ctx
+    if short == "another_records_receipt":
+        other = _result_record(tmp_path)
+        receipt = _receipt(ctx, other, other["rows"])
+    waiting.acknowledge_delivery(author, receipt)
+    flush_content_acks(author)
+    assert _duties(tmp_path) == [(record["record_id"], "unread")]
+    if short in {"helper_notice", "report_without_rows"}:
+        assert set(tokens) <= set(ledger.load_record(tmp_path, record["record_id"])["waiting"]["seen_outcomes"])
+
+
+def test_an_outcome_that_changes_before_the_checkpoint_keeps_the_unread_duty(tmp_path):
+    """Whole when acknowledged, short when saved: the check reads the record as the checkpoint finds it."""
+    from ouroboros.working_checkpoint import flush_content_acks
+
+    ctx = _author(tmp_path)
+    record = _result_record(tmp_path)
+    _owes(ctx, record)
+    waiting.acknowledge_delivery(ctx, _receipt(ctx, record, record["rows"]))
+
+    def later_answer(current):
+        rows = [dict(row) for row in current["rows"]]
+        rows[0]["status"] = "continued"  # a new state of that seat's outcome (``outcome_states``)
+        return {**current, "rows": rows}
+
+    ledger.revise_record(tmp_path, record["record_id"], later_answer)
+    flush_content_acks(ctx)
+    assert _duties(tmp_path) == [(record["record_id"], "unread")]
+
+
+def test_only_a_saved_state_makes_a_whole_receipt_end_the_unread_duty(tmp_path, monkeypatch):
+    """The existing owner decides: a failed ready save keeps the acknowledgement pending, a failure exit acknowledges
+    nothing, and the next save that holds it ends the duty."""
+    from ouroboros import working_checkpoint
+
+    ctx = _author(tmp_path)
+    record = _result_record(tmp_path)
+    _owes(ctx, record)
+    waiting.acknowledge_delivery(ctx, _receipt(ctx, record, record["rows"]))
+    limit = SimpleNamespace(tools=SimpleNamespace(_ctx=ctx), messages=[{"role": "tool"}], round_idx=1, owner_msg_seen=set())
+    monkeypatch.setattr(working_checkpoint, "save_or_log", lambda *_a: False)  # the write failed; it logged why
+    working_checkpoint.save_ready(limit)
+    assert _duties(tmp_path) == [(record["record_id"], "unread")] and ctx._pending_content_acks
+    monkeypatch.setattr(working_checkpoint, "save_or_log", lambda *_a: True)
+    try:
+        raise RuntimeError("the loop's failure exit")
+    except RuntimeError:
+        working_checkpoint.save_terminal(limit)  # as its ``finally`` runs: saves and acknowledges nothing
+    assert _duties(tmp_path) == [(record["record_id"], "unread")] and ctx._pending_content_acks
+    working_checkpoint.save_terminal(limit)  # a returned result: saved, then acknowledged
+    assert _duties(tmp_path) == [] and not ctx._pending_content_acks
+
+
 def test_unreadable_record_cannot_acknowledge_delivery(tmp_path):
     record = _record(tmp_path)
     ctx = SimpleNamespace(task_id="task-1", drive_root=tmp_path, budget_drive_root=None)

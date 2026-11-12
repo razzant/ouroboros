@@ -20,7 +20,7 @@ from tests.test_shell_interactions_browser import DRAWER, UNDER, boot, chromium_
 from tests.test_ui_smoke_playwright import _install_controlled_visual_viewport
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 __all__ = ['chromium_ui', 'shell_ui', 'subscription_ui']
 
 
@@ -365,7 +365,13 @@ def test_a_pull_past_fully_open_shows_the_drawer_at_the_edge_not_the_room(chromi
         page.locator('#page-chat .chat-toolbar-row [data-mobile-nav-toggle]').click()
         page.wait_for_function("() => document.getElementById('primary-sidebar').classList.contains('open')")
         page.wait_for_timeout(500)
-        y = height // 2
+        if height <= 400:
+            # The A1 Projects search field occupies the old midpoint on a short landscape viewport and intentionally
+            # refuses drawer drags that start on an input; begin on the first visible Project row instead.
+            box = page.locator('#nav-projects-list > .nav-project-item:not([hidden]) .nav-project-row').first.bounding_box()
+            y = box['y'] + box['height'] / 2
+        else:
+            y = height // 2
         cdp = page.context.new_cdp_session(page)
         try:
             # Left first (the close direction locks the axis), then right to the screen's far edge, past fully open.
@@ -503,6 +509,17 @@ PINCH_FACTS = """() => ({scale: visualViewport.scale, vvWidth: visualViewport.wi
     app: Math.round(document.getElementById('app').getBoundingClientRect().height)})"""
 
 
+def pinch(page):
+    """Chromium's synthetic two-finger pinch to x2 at the room's centre."""
+    cdp = page.context.new_cdp_session(page)
+    try:
+        cdp.send('Input.synthesizePinchGesture', {'x': 195, 'y': 420, 'scaleFactor': 2, 'relativeSpeed': 800,
+                                                  'gestureSourceType': 'touch'})
+    finally:
+        cdp.detach()
+    page.wait_for_timeout(600)
+
+
 def test_a_pinch_magnifies_the_room_and_never_shrinks_it_or_moves_the_drawer(chromium_ui, tmp_path):
     """A two-finger pinch only magnifies (docs/DESIGN.md "Touch and containment"): the room keeps its height, where
     the stack layout's height once followed the shrinking visual viewport and halved at ×2 with the composer adrift,
@@ -514,13 +531,7 @@ def test_a_pinch_magnifies_the_room_and_never_shrinks_it_or_moves_the_drawer(chr
         boot(page, chromium_ui)
         page.wait_for_timeout(300)
         facts['before'] = page.evaluate(PINCH_FACTS)
-        cdp = page.context.new_cdp_session(page)
-        try:
-            cdp.send('Input.synthesizePinchGesture', {'x': 195, 'y': 420, 'scaleFactor': 2, 'relativeSpeed': 800,
-                                                      'gestureSourceType': 'touch'})
-        finally:
-            cdp.detach()
-        page.wait_for_timeout(600)
+        pinch(page)
         facts['pinched'] = page.evaluate(PINCH_FACTS)
         swipe_with(page, (60, 420), (320, 428))
         facts['drawer'] = page.evaluate(DRAWER)
@@ -528,6 +539,19 @@ def test_a_pinch_magnifies_the_room_and_never_shrinks_it_or_moves_the_drawer(chr
         evidence(tmp_path, 'shell-pinch', facts)
         page.close()
     before, pinched = facts['before'], facts['pinched']
+    if pinched['scale'] == 1:
+        # Linux headless Chromium applied no synthetic touch pinch at all (CI 40682936207); a plain page tells an engine
+        # that cannot pinch from a room that refuses to be magnified.
+        probe = chromium_ui['new_page'](viewport={'width': 390, 'height': 844}, has_touch=True)
+        try:
+            probe.set_content('<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+                              '<div style="height:3000px"></div>')
+            pinch(probe)
+            plain = probe.evaluate('visualViewport.scale')
+        finally:
+            probe.close()
+        if plain == 1:
+            pytest.skip('this Chromium applies no synthetic touch pinch, not even to a plain page')
     assert pinched['scale'] > 1.5 and pinched['vvWidth'] < pinched['innerWidth'] - 1, facts  # the pinch took
     assert before['app'] == before['innerHeight'] and pinched['app'] == before['app'], facts
     assert pinched['vvh'] == before['vvh'], facts

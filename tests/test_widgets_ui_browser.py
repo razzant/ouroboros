@@ -107,18 +107,6 @@ def _write_module_widget_smoke_extension(data_dir: pathlib.Path) -> str:
     return name
 
 
-def test_module_widget_smoke_fixture_has_deterministic_fault(tmp_path):
-    name = _write_module_widget_smoke_extension(tmp_path)
-    skill_dir = tmp_path / "skills" / "external" / name
-    plugin = (skill_dir / "plugin.py").read_text(encoding="utf-8")
-    fault = (skill_dir / "fault.js").read_text(encoding="utf-8")
-
-    assert 'register_ui_tab("fault", "Fault module"' in plugin
-    assert '"entry": "fault.js", "max_height": 640, "start": "auto"' in plugin
-    assert "height: 900px" in fault
-    assert "throw new Error('Deterministic module widget fault: ' + 'x'.repeat(320));" in fault
-
-
 def _write_temporal_module_widget_extension(data_dir: pathlib.Path) -> str:
     """Install a Cache-derived width/height feedback fixture."""
     from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_review_state
@@ -316,16 +304,31 @@ _WIDGET_TEMPORAL_TRACE_SCRIPT = r"""
             if (!frames.has(frame)) { frames.add(frame); frameObserver.observe(frame); }
         });
     };
+    const frameOf = (source) => [...document.querySelectorAll('[data-widget-key] iframe')]
+        .find((candidate) => candidate.contentWindow === source);
+    // Resize reports travel on each frame's bridge channel: its hello names the frame that owns the port.
+    const portFrames = new WeakMap();
     addEventListener('message', (event) => {
         const message = event.data || {};
-        if (!['ouro-widget-resize', 'fixture-geometry'].includes(message.type)) return;
-        const frame = [...document.querySelectorAll('[data-widget-key] iframe')]
-            .find((candidate) => candidate.contentWindow === event.source);
-        record(message.type === 'ouro-widget-resize' ? 'message' : 'child', frame, {
-            heightValue: message.height,
-            child: message.sample || null,
-        });
+        if (message.type === 'ouro-widget-hello' && event.ports?.[0]) portFrames.set(event.ports[0], frameOf(event.source));
+        if (message.type !== 'fixture-geometry') return;
+        record('child', frameOf(event.source), { heightValue: message.height, child: message.sample || null });
     }, true);
+    const handler = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage');
+    Object.defineProperty(MessagePort.prototype, 'onmessage', {
+        configurable: true,
+        get() { return handler.get.call(this); },
+        set(fn) {
+            const port = this;
+            handler.set.call(this, fn && function (event) {
+                const message = event.data || {};
+                if (message.type === 'ouro-widget-resize') {
+                    record('message', portFrames.get(port), { heightValue: message.height, child: null });
+                }
+                return fn.call(this, event);
+            });
+        },
+    });
     const start = () => {
         const observer = new MutationObserver((records) => {
             records.forEach((row) => {
@@ -611,7 +614,11 @@ def test_ui_smoke_module_widgets_geometry_lifecycle(direct_server_with_data):
                 capped_height = capped_frame.evaluate("frame => frame.getBoundingClientRect().height")
                 assert capped_height == 640, capped_height
                 small_height = small_frame.evaluate("frame => frame.getBoundingClientRect().height")
-                assert 320 <= small_height < 700, small_height
+                # Measured short content: the board's frame is as tall as its document (320 px is a loading height
+                # only, docs/DESIGN.md "Widgets board"), and nothing of it is cut.
+                assert 0 < small_height < 320, small_height
+                assert small_frame.element_handle().content_frame().evaluate(
+                    "() => document.documentElement.scrollHeight <= innerHeight + 1"), "short content is cut"
 
                 page.screenshot(path=str(evidence_dir / "module-widgets-desktop.png"), full_page=True)
                 page.set_viewport_size({"width": 430, "height": 932})
@@ -801,8 +808,9 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                 assert 320 < initial_heights["auto"] < 1000, initial_heights
                 assert 320 < initial_heights["capped"] < 1000, initial_heights
                 assert initial_heights["fixed"] == 480, initial_heights
-                assert initial_heights["floor"] == 320, initial_heights
-                assert 320 <= initial_heights["wide"] < 700, initial_heights
+                # Short content under its author's 320 px ceiling, and the wide strip: as tall as their documents.
+                assert 0 < initial_heights["floor"] < 320, initial_heights
+                assert 0 < initial_heights["wide"] < 700, initial_heights
                 for tab_id in frames:
                     assert page.locator(frame_selector(tab_id)).get_attribute("scrolling") is None
                 auto_initial = child_metrics(frames["auto"])
@@ -812,9 +820,11 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                 assert auto_initial["htmlOverflowX"] != "hidden", auto_initial
                 assert auto_initial["bodyOverflowX"] == "hidden", auto_initial
 
+                # It fits under its ceiling, so the frame shows all of it and the document's scrollbar stays hidden.
                 floor_initial = child_metrics(frames["floor"])
-                assert floor_initial["htmlOverflowY"] != "hidden", floor_initial
-                assert floor_initial["bodyOverflowY"] != "hidden", floor_initial
+                assert floor_initial["htmlOverflowY"] == "hidden", floor_initial
+                assert floor_initial["bodyOverflowY"] == "hidden", floor_initial
+                assert floor_initial["scrollHeight"] <= floor_initial["height"] + 1, ("short content is cut", floor_initial)
 
                 fixed_initial = child_metrics(frames["fixed"])
                 assert fixed_initial["htmlOverflowY"] != "hidden", fixed_initial

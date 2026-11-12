@@ -37,6 +37,20 @@ SUBAGENT_MESSAGE_FIELDS: tuple[str, ...] = (
 
 # The host's two named placements of a task-keyed row inside its task's card.
 CARD_ROW_PLACEMENTS: tuple[str, ...] = ("timeline", "reviews")
+DELIVERY_KINDS = ("document", "links", "photo", "video", "quiz", "card")
+
+
+def is_conversation_card_content(row, kind, child=lambda _row: False):
+    """A host placement or a child's words, including lineage recovered from its task.
+
+    Delivered media/questions stand alone; a routing notice names its subject, not its speaker.
+    History and message dating use this same rule, with their own bounded lineage reader.
+    """
+    from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES
+
+    return row.get("card_row") in CARD_ROW_PLACEMENTS or (
+        kind not in DELIVERY_KINDS and kind not in ORIGIN_ADDRESSED_NOTICE_TYPES
+        and (is_task_card_message(row) or child(row)))
 
 
 def is_task_card_message(meta: Mapping[str, Any] | None) -> bool:
@@ -119,7 +133,18 @@ def initiator_meta(record: Mapping[str, Any] | None) -> Dict[str, Any]:
     nested = source.get("metadata")
     metadata = nested if isinstance(nested, Mapping) else {}
     value = str(source.get("initiator") or metadata.get("initiator") or "").strip()
-    return {"initiator": value} if value else {}
+    continuation = metadata.get("continuation") or source.get("continuation")
+    admission = continuation.get("admission") if isinstance(continuation, Mapping) else None
+    # Who asked for a Continue, apart from the origin it inherits: read here, kept only on the admission that recorded it.
+    requester = {} if not isinstance(admission, Mapping) else {"continue_requester": _requester_of(admission)}
+    return {**({"initiator": value} if value else {}), **requester}
+
+
+def _requester_of(admission: Mapping[str, Any]) -> str:
+    """``owner`` or ``ouroboros`` as the admission recorded it; an undeclared or older admission stays ``unknown``."""
+    by = admission.get("by")
+    actor = str(by.get("actor") or "") if isinstance(by, Mapping) else ""
+    return actor if actor in ("owner", "ouroboros") else "unknown"
 
 
 def subagent_message_meta(

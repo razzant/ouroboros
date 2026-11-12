@@ -3,7 +3,7 @@
 // target works by title, CONTRACTS K4) — and the line steps aside only for the act its portal already shows.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { renderRoutingAnnotation } from '../modules/routing_receipt.js';
+import { renderRoutingAnnotation, routingAnnotationText } from '../modules/routing_receipt.js';
 import { reconcilePortalNotes } from '../modules/work_portal.js';
 import { installDomDouble } from './dom_double.js';
 
@@ -127,5 +127,23 @@ test('the portal stands for the act that moved its work; words passed on later k
         portal.remove();
         reconcilePortalNotes(feed);
         assert.equal(moved.hidden, false, 'the receipt returns when its portal leaves the feed');
+    } finally { env.restore(); }
+});
+
+test('words saved for a Main turn say saved, by its name when it has one, never by a placeholder name', () => {
+    const env = installDomDouble();
+    try {
+        const saved = { action: 'mailbox_delivery', status: 'delivered', target: 't-main' };
+        const bubble = owner(env);
+        renderRoutingAnnotation(bubble, saved, 1);
+        assert.equal(note(bubble).textContent, 'Message saved for task', 'an unnamed turn: saved, nothing more');
+        assert.equal(note(bubble).classList.contains('has-reference'), false, 'Main is no other room');
+        renderRoutingAnnotation(bubble, { ...saved, target_label: 'Release note for the reverse chat' }, 1);
+        assert.equal(note(bubble).textContent, 'Message saved for task · Release note for the reverse chat');
+        assert.equal(routingAnnotationText({ action: 'steer_task', status: 'delivered', target: 't-1' }), 'Steered task · Task',
+            'other acts keep their generic name');
+        const room = owner(env);
+        renderRoutingAnnotation(room, { ...saved, project_id: 'p-1', project_chat_id: 7, target_titles: ['Audit'] }, 1);
+        assert.equal(note(room).children[0].textContent, 'Passed on to «Audit» in', 'another Project keeps its reference');
     } finally { env.restore(); }
 });

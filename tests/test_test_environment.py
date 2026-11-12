@@ -1,5 +1,4 @@
 """Real parent/child writes and concurrent runs stay on disposable roots."""
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -15,9 +14,9 @@ from ouroboros.preflight_runner import _preflight_env
 from ouroboros.settings_defaults import settings_env_keys
 from ouroboros.test_environment import isolated_environment, settings_keys
 from tests.group_run import kill_survivors, run_in_group
+from concurrent.futures import ThreadPoolExecutor
 
 REPO = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.serial
 
 
 def test_pytest_cache_belongs_to_session_boundary(pytestconfig):
@@ -199,9 +198,40 @@ def test_safe_test_retains_its_new_root_and_keeps_the_command_status(tmp_path):
     assert len(retained) == 1, result.stderr
     root = Path(retained[0])
     assert root.parent == tmp_path.resolve() and root.name.startswith("ob-")
+    # Spotlight skips everything below it (fake app bundles among the fixtures), and it stays short:
+    # nested in a session's /tmp/obs-* scratch, a pool listener below it still fits AF_UNIX's 104 bytes.
+    assert root.name.endswith(".noindex") and len(root.name) == len("ob-12345678.noindex")
     assert (root / "home" / "probe").read_text() == "kept"
     # Handed down so each pytest controller claims its own basetemp beneath it.
     assert Path(result.stdout.splitlines()[-1]) == root
+
+
+def test_a_session_under_an_owner_keeps_the_runs_prefix_and_collects_with_gc_paused(tmp_path):
+    """Under an owner root (safe_test, the gate) every session reads and hands on the OWNER's warmed bytecode
+    prefix (a prefix of its own would start cold), while bare pytest keeps one under its own session root; and
+    the conftest collects with the cyclic collector paused, freezing the collected tree afterwards."""
+    owner = tmp_path / "owner"
+    env = isolated_environment(owner, REPO)
+    script = "import json, os, sys, tests.conftest; print(json.dumps([sys.pycache_prefix, os.environ['PYTHONPYCACHEPREFIX']]))"
+    owned = subprocess.run([sys.executable, "-c", script], cwd=REPO, env={**env, "OUROBOROS_TEST_TEMP_ROOT": str(owner)},
+                           text=True, capture_output=True, timeout=120)
+    assert owned.returncode == 0, owned.stderr
+    assert json.loads(owned.stdout.splitlines()[-1]) == [env["PYTHONPYCACHEPREFIX"]] * 2
+    bare = subprocess.run([sys.executable, "-c", script], cwd=REPO, env=env, text=True, capture_output=True, timeout=120)
+    assert bare.returncode == 0, bare.stderr
+    prefix, handed = json.loads(bare.stdout.splitlines()[-1])
+    assert prefix == handed and prefix != env["PYTHONPYCACHEPREFIX"] and prefix.endswith("pycache.noindex")
+    suite, witness = tmp_path / "suite", tmp_path / "gc-at-collection.txt"
+    (suite / "tests").mkdir(parents=True)
+    (suite / "tests" / "test_gc.py").write_text(
+        f"import gc, pathlib\npathlib.Path({str(witness)!r}).write_text(str(gc.isenabled()))\n"
+        "def test_after_collection():\n    assert gc.isenabled() and gc.get_freeze_count() > 0\n", encoding="utf-8")
+    run = subprocess.run([sys.executable, "-m", "pytest", "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir",
+                          str(suite), "-o", "addopts=", "-q", "-p", "no:cacheprovider", str(suite / "tests")],
+                         cwd=REPO, env={**env, "OUROBOROS_TEST_TEMP_ROOT": str(owner)}, text=True, capture_output=True,
+                         timeout=180)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert witness.read_text(encoding="utf-8") == "False"
 
 
 # The command keeps a child in a session of its own, as tests/group_run.py keeps node's runner.
@@ -378,12 +408,13 @@ def test_two_sequential_pytest_sessions_under_one_launcher_root_never_share_a_ba
         line = next(row for row in result.stdout.splitlines() if row.startswith("test session trees retained"))
         basetemps.append(Path(line.rsplit(", ", 1)[-1]))
     assert basetemps == [launcher_root / "b0" / "t", launcher_root / "b1" / "t"]
-    # The second session neither reused nor emptied the first one's tree.
+    # The second session neither reused nor removed the first one's tree.
     for basetemp in basetemps:
-        assert any(basetemp.iterdir()), basetemp
+        assert basetemp.is_dir(), basetemp
 
 
 _NODE = "tests/test_test_environment.py::test_git_discovery_cannot_escape_to_an_ancestor_checkout"
+
 
 _SESSION_PROBE = """
 import json, os, pathlib, tempfile
@@ -444,8 +475,7 @@ def test_bare_pytest_with_zero_retention_count_keeps_its_session_tree(tmp_path):
     line = next(row for row in result.stdout.splitlines() if row.startswith("test session trees retained"))
     root = Path(line.split(": ", 1)[1].split(", ")[0])
     assert root.parent == tmp_path, line
-    kept = root / "b0" / "t"
-    assert kept.is_dir() and any(kept.iterdir()), sorted(root.rglob("*"))[:20]
+    assert (root / "b0" / "t").is_dir(), sorted(root.rglob("*"))[:20]
 
 
 def test_session_finish_retains_the_session_tree(tmp_path, monkeypatch):
@@ -479,16 +509,18 @@ def _manufactured_retention(tmp_path):
 """
 
 
-@pytest.mark.parametrize("mode", ["leave", "retire"])
+@pytest.mark.parametrize("mode", ["leave", "retire", "bare"])
 def test_a_marker_left_in_a_tests_tmp_path_fails_that_test_under_a_releasing_owner(tmp_path, mode):
-    """#1908: one forgotten synthetic marker kept every green battery's whole root."""
+    """#1908: one forgotten synthetic marker kept every green battery's whole root. Without an owner
+    nobody fails it, and the marker still keeps its folder."""
     from tests._shared import retire_synthetic_retention
 
     probe, launcher_root = tmp_path / "probe", tmp_path / "launcher-root"
     probe.mkdir()
     launcher_root.mkdir()
     (probe / "retention_probe.py").write_text(_RETENTION_PROBE, encoding="utf-8")
-    env = _nested_env(PYTHONPATH=str(probe), RETENTION_PROBE=mode, OUROBOROS_TEST_TEMP_ROOT=str(launcher_root))
+    owner = {"TMPDIR": str(launcher_root)} if mode == "bare" else {"OUROBOROS_TEST_TEMP_ROOT": str(launcher_root)}
+    env = _nested_env(PYTHONPATH=str(probe), RETENTION_PROBE=mode, **owner)
     try:
         result = subprocess.run([sys.executable, "-m", "pytest", _NODE, "-o", "addopts=", "-q",
                                  "-p", "retention_probe"],
@@ -499,8 +531,104 @@ def test_a_marker_left_in_a_tests_tmp_path_fails_that_test_under_a_releasing_own
             assert "ERROR at teardown of test_git_discovery_cannot_escape_to_an_ancestor_checkout" in output, output
             assert "left retention in its tmp_path" in output and "held (probe: stubbed reap)" in output, output
             assert "retire_synthetic_retention" in output, output
+            assert len(list(launcher_root.glob("b*/t/*/held"))) == 1, "a marker keeps its test's folder"
         else:
             assert result.returncode == 0, output
+            assert len(list(launcher_root.glob("**/t/*/held"))) == (mode == "bare"), "a retired marker holds nothing"
     finally:
-        for held in launcher_root.glob("b*/t/*/held"):
+        for held in launcher_root.glob("**/t/*/held"):
             retire_synthetic_retention(held, "probe: stubbed reap")  # the nested run's manufactured marker
+
+
+_RELEASE_PROBE = """
+import json, multiprocessing, os, pathlib, subprocess, sys, time
+import pytest
+
+PYTHON, PIDS = sys.executable, pathlib.Path(os.environ["RELEASE_PROBE_OUT"]).with_suffix(".pids")
+LEAVE_A_DESCENDANT = ("import pathlib, subprocess, sys; child = subprocess.Popen([sys.executable, '-c', "
+                      "'import time; time.sleep(300)']); pathlib.Path(sys.argv[1]).write_text(str(child.pid))")
+seen, session_folders = {}, []
+
+
+@pytest.fixture(autouse=True)
+def _a_folder_with_bytes(request, tmp_path):
+    seen[request.node.name] = tmp_path
+    (tmp_path / "work").write_text("scratch")
+
+
+@pytest.fixture(scope="session")
+def session_folder(tmp_path_factory):
+    session_folders.append(tmp_path_factory.mktemp("session"))
+    return session_folders[0]
+
+
+def test_passed(session_folder):
+    assert session_folder.is_dir()
+
+
+def test_failed():
+    assert False
+
+
+def test_skipped():
+    pytest.skip("skipped is not failed")
+
+
+def test_exited_child():
+    subprocess.run([PYTHON, "-c", "pass"], check=True)
+
+
+def test_live_child():
+    subprocess.Popen([PYTHON, "-c", "import time; time.sleep(300)"])
+
+
+def test_live_multiprocessing_child():
+    multiprocessing.get_context("spawn").Process(target=time.sleep, args=(300,), daemon=True).start()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="no census there: a detached child's folder waits for the run")
+def test_detached_child_left_nothing():
+    subprocess.run([PYTHON, "-c", "pass"], start_new_session=True, check=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="no census there: a detached child's folder waits for the run")
+def test_detached_child_left_a_descendant():
+    subprocess.run([PYTHON, "-c", LEAVE_A_DESCENDANT, str(PIDS)], start_new_session=True, check=True)
+
+
+@pytest.mark.parametrize("case", ["first", "second"])
+def test_one_basename_for_two_cases_cut_at_thirty(case):
+    pass
+
+
+def test_zz_witness():
+    seen.pop("test_zz_witness")
+    cut = {path for name, path in seen.items() if name.startswith("test_one_basename")}
+    pathlib.Path(os.environ["RELEASE_PROBE_OUT"]).write_text(json.dumps(
+        {**{name: path.exists() for name, path in seen.items()}, "session": session_folders[0].is_dir(),
+         "a released number stays spent": len(cut) == 2}))
+"""
+
+
+def test_a_passed_tests_folder_goes_with_its_processes_and_all_others_wait_for_the_runs_proof(tmp_path):
+    """Live inside the run: what went, what waits. After it the owner's reap and release take the rest."""
+    probe, out = tmp_path / "probe", tmp_path / "out.json"
+    probe.mkdir()
+    (probe / "test_release_probe.py").write_text(_RELEASE_PROBE, encoding="utf-8")
+    env = {**os.environ, "RELEASE_PROBE_OUT": str(out)}
+    result = run_in_group(_LAUNCHER + ["--temp-parent", str(tmp_path), "--", sys.executable, "-m", "pytest",
+                                       "-p", "tests.conftest", "--rootdir", str(probe), "--confcutdir", str(probe),
+                                       "-o", "addopts=", "-q", str(probe)], cwd=REPO, env=env, timeout=120)
+    pids = out.with_suffix(".pids")
+    survivors = kill_survivors([int(pids.read_text())]) if pids.exists() else []
+    assert "1 failed" in result.stdout, result.stdout + result.stderr
+    gone = {"test_passed", "test_skipped", "test_exited_child", "test_one_basename_for_two_cases_cut_at_thirty[first]"}
+    waiting = {"test_failed", "test_live_child", "test_live_multiprocessing_child", "session", "a released number stays spent"}
+    if os.name != "nt":
+        gone, waiting = gone | {"test_detached_child_left_nothing"}, waiting | {"test_detached_child_left_a_descendant"}
+    present = json.loads(out.read_text(encoding="utf-8"))
+    assert {name for name, there in present.items() if there} >= waiting, present
+    assert not {name for name, there in present.items() if there} & gone, present
+    assert _final_root(result.stderr)[0] == "SAFE_TEST_RELEASED", result.stderr
+    assert not survivors
+    assert f"{len(gone) + 2} released" in result.stdout, result.stdout  # the second cut name and the witness too

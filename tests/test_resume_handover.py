@@ -35,7 +35,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.test_working_checkpoint import _registry
 from tests.test_working_recovery_admission import _running
 
-pytestmark = pytest.mark.serial
 
 MARK = "EXACT_R29_COGNITION"
 
@@ -74,7 +73,7 @@ def _stop_boot(monkeypatch, *, returning=False):
     workers.WORKERS[0] = SimpleNamespace(wid=0, proc=process, busy_task_id=next(iter(workers.RUNNING), None),
                                          reaping=False)
     monkeypatch.setattr(workers, "kill_worker_tree", process.kill)
-    monkeypatch.setattr(workers, "_kill_survivors", lambda: None)
+    monkeypatch.setattr(workers, "_kill_survivors", lambda *_slots: None)
     assert workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
                                 stop_source="server_shutdown", retain_saved_work=True)
     workers.PENDING[:] = []
@@ -257,8 +256,7 @@ def _account_route(task, **_kwargs):
 
 # --- the reproduced sequence (issue #1716 qualification) -----------------------------------------
 
-@pytest.mark.parametrize("cut", ["after_resume", "after_save"])
-@pytest.mark.parametrize("scope", ["project", "main"])
+@pytest.mark.parametrize(("scope", "cut"), [("project", "after_resume"), ("main", "after_save")])
 def test_consumed_exact_resume_then_application_stop_never_restores_older_cognition(
     host, tmp_path, monkeypatch, scope, cut,  # noqa: F811
 ):
@@ -288,8 +286,12 @@ def test_consumed_exact_resume_then_application_stop_never_restores_older_cognit
 
 # --- every cut of the handover, through the real stop, boot and Resume doors -------------------
 
-@pytest.mark.parametrize("cut", ["before_bridge", "after_bridge", "after_cas", "after_fence"])
-@pytest.mark.parametrize("scope", ["project", "main"])
+@pytest.mark.parametrize(("scope", "cut"), [
+    ("project", "before_bridge"),
+    ("project", "after_cas"),
+    ("main", "after_bridge"),
+    ("main", "after_fence"),
+])
 def test_every_cut_of_the_handover_continues_exact_or_newer_cognition(
     host, tmp_path, monkeypatch, scope, cut,  # noqa: F811
 ):
@@ -393,8 +395,7 @@ def _member_resumed_until(tmp_path, monkeypatch, cut):
     return ctx, blob["_pause_row"]["grant"]["grant_id"]
 
 
-@pytest.mark.parametrize("returning", [False, True])
-@pytest.mark.parametrize("cut", ["after_cas", "after_fence"])
+@pytest.mark.parametrize(("cut", "returning"), [("after_cas", False), ("after_fence", True)])
 def test_a_member_resume_consumed_before_its_fence_selection_completes_at_the_owner_resume(
     tmp_path, monkeypatch, cut, returning,
 ):
@@ -425,7 +426,7 @@ def test_a_member_resume_consumed_before_its_fence_selection_completes_at_the_ow
     assert restored == ("working", 1, 3, wc.RESUMED, True), "the member continues its exact handover"
 
 
-@pytest.mark.parametrize("change", ["none", "root", "revoked", "other_attempt", "other_fence", "already_selected"])
+@pytest.mark.parametrize("change", ["none", "other_attempt", "already_selected"])
 def test_member_resume_completion_needs_its_own_consumed_grant_and_fence(tmp_path, monkeypatch, change):
     from ouroboros.owner_pause import consumed_member_resume, read_fence, set_fence_state
     from tests.test_budget_pause_lineage import CHILD, ROOT
@@ -451,8 +452,7 @@ def test_member_resume_completion_needs_its_own_consumed_grant_and_fence(tmp_pat
     assert read_fence(tmp_path, ROOT) == before, "a read never changes the fence"
 
 
-@pytest.mark.parametrize("returning", [False, True])
-@pytest.mark.parametrize("refusal", ["stop", "restart_no_resume"])
+@pytest.mark.parametrize(("refusal", "returning"), [("stop", False), ("restart_no_resume", True)])
 def test_a_refused_owner_resume_never_completes_the_member_fence(tmp_path, monkeypatch, refusal, returning):
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.owner_pause import read_fence

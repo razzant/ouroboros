@@ -68,12 +68,12 @@ def _owned(proc: subprocess.Popen):
         proc.stdout.close()
 
 
-def test_a_ceiling_inside_an_isolated_server_stop_fails_the_test_only_after_the_kill():
+def test_a_ceiling_inside_an_isolated_server_stop_fails_the_test_only_after_the_kill(tmp_path):
     proc = subprocess.Popen([sys.executable, "-I", "-c", _STUBBORN], start_new_session=True,
                             stdout=subprocess.PIPE, text=True)
     with _owned(proc):
         server = object.__new__(IsolatedServer)
-        server.proc, server.stop_grace_sec = proc, 1.0
+        server.proc, server.stop_grace_sec, server.data_root = proc, 1.0, tmp_path
         with _scenario_ceiling(0.2), pytest.raises(pytest.fail.Exception, match="Timeout"):
             server.stop()  # the alarm lands in the SIGTERM grace wait
         assert proc.poll() is not None  # force-killed and reaped before the timeout propagated
@@ -82,7 +82,7 @@ def test_a_ceiling_inside_an_isolated_server_stop_fails_the_test_only_after_the_
                              stdout=subprocess.PIPE, text=True)
     with _owned(quiet):
         server = object.__new__(IsolatedServer)
-        server.proc, server.stop_grace_sec = quiet, 0.2
+        server.proc, server.stop_grace_sec, server.data_root = quiet, 0.2, tmp_path
         server.stop()  # no alarm: an ordinary stop, nothing raised
         assert quiet.poll() is not None
 

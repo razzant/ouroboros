@@ -1,8 +1,8 @@
 """The chat rows after the legacy frontier keep their facts beside the chronicle (``memory_inventory._tail``).
 
 Every reader decoded, hashed and projected every row after the frontier on every call (about 22,000 rows
-for each Main view on the owner's install). A row's address, metadata and position never change, so the
-chronicle index keeps them (``tail_rows``): a reader reads live only the rows appended since and stores
+for each Main view on the owner's install). The chronicle index keeps row addresses, metadata and
+positions (``tail_rows``), invalidating them on a text revision; a reader otherwise reads only new rows and stores
 them, and the maintenance job fills the history once, so no turn pays it. Membership and seals stay
 applied at read. Each test holds the stored answer equal to the rows read live.
 """
@@ -18,6 +18,7 @@ from ouroboros import chat_chain as cc, dialogue_store as ds, maintenance, memor
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from tests import _memory_inventory_shared as shared
+from tests._store_shared import independent_writer
 
 ROW_META = mi.row_meta
 LIGHT = {"kind": "helper", "route": "configured-light"}
@@ -202,7 +203,7 @@ def test_a_stored_prefix_whose_last_row_no_longer_answers_is_read_live(tmp_path,
     shared.world(tmp_path)
     _fill(tmp_path)
     anchor = ChronicleStore(tmp_path).tail_state()["anchor"]
-    with sqlite3.connect(ds.path(tmp_path)) as db:  # the file keeps its identity, its last stored row does not
+    with independent_writer(ds.path(tmp_path)) as db:  # the file keeps its identity, its last stored row does not
         body = json.loads(db.execute("SELECT body FROM dialogue WHERE stream='chat' AND seq=?", (anchor[0],)).fetchone()[0])
         db.execute("UPDATE dialogue SET body=? WHERE stream='chat' AND seq=?",
                    (json.dumps({**body, "text": "another history"}), anchor[0]))
@@ -248,7 +249,7 @@ def test_each_focus_holds_in_its_one_capture_the_stored_rows_its_view_shows(tmp_
     entered, index = [], ChronicleStore._index
     monkeypatch.setattr(ChronicleStore, "_index", lambda self: entered.append(1) or index(self))
     task, scoped = {"id": "turn0001", "chat_id": 1}, mv.capture
-    for role, room, scope in (("integrator", "1", "all"), ("presence", "1", "terminal"),
+    for role, room, scope in (("integrator", "1", "all"), ("presence", "1", "all"),  # every integrating focus: all
                               ("child", str(rooms["alpha"]), "terminal"), ("nanny", "1", "terminal")):
         spec = dataclasses.replace(mv.ROLE_DEFAULTS[role], room_id=room)
         monkeypatch.setattr(mv, "capture", scoped)
@@ -269,7 +270,7 @@ def test_a_place_arrival_whose_source_pointer_lands_after_it_was_stored_reads_as
     arrival = ds.append(tmp_path, "chat", shared.msg("2026-09-04T00:00:00+00:00", "a guest wrote", chat_id=4242,
                                                      type="place_arrival", place_id="p1"))
     _fill(tmp_path)
-    with sqlite3.connect(ds.path(tmp_path)) as db:  # the intake points at the place's context after the append
+    with independent_writer(ds.path(tmp_path)) as db:  # the intake points at the place's context after the append
         db.execute("UPDATE dialogue SET dispatch_input=? WHERE stream='chat' AND seq=?",
                    (json.dumps({"place_context_source_ref": {"kind": "place_context", "id": "c1"}}), arrival.seq))
     assert isinstance(ds.row_at(tmp_path, "chat", arrival.seq).row, SourceProjection)
@@ -286,3 +287,213 @@ def test_an_unreadable_tail_fact_never_holds_back_the_other_maintenance_jobs(tmp
     assert "memory_tail" not in maintenance.due(tmp_path)  # deferred to the next look; the other jobs still answer
     monkeypatch.undo()
     assert "memory_tail" in maintenance.due(tmp_path)
+
+
+# --- a transport's facts: what its readers read, never the provider's thread copy ---------------------
+
+PLACE = ("slack", "T1", "C42", "1700000000.0001")  # provider, account, conversation, thread
+
+
+def place_rows(root):
+    """One Slack thread's rows after the frontier, shaped as the place connectors write them: every transport
+    carries the provider's thread copy (200 messages), the delivered message's details, the event identity and
+    the actor's profile. An arrival, a wordless reaction, words beside a reaction, my reply and its receipts
+    (delivered with an older receipt's place facts, a failed one, a reaction receipt) and an imported earlier
+    message (the room reads by time). Returns the room's chat id."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    key = conversation_key(*PLACE)
+    chat = presence_chat_id(key)
+    thread = {"data": {"messages": [{"ts": f"1700000{n:03d}.0001", "user": f"U{n}", "text": f"thread line {n} " * 8}
+                                    for n in range(200)]}}
+    actor = {"platform": "slack", "platform_actor_id": "U7", "username": "ann", "display_name": "Ann", "kind": "human",
+             "is_bot": False, "profile": {"title": "Engineer", "image_512": "https://example.invalid/a.png"},
+             "tz": "Europe/Berlin"}
+    base = {**dict(zip(("provider", "account_id", "conversation_id", "thread_id"), PLACE)), "conversation_key": key,
+            "actor": actor, "conversation": {"title": "general", "thread_history": thread},
+            "identity": {"sends_as": {"id": "B1", "kind": "bot"}}}
+    provenance = {"binding_id": "p1", "place_id": "p1", "conversation_key": key, "source_event_id": "ev1",
+                  "provider": "slack"}
+    reaction = {"schema_version": 1, "change": "add", "new": [{"value": "thumbsup"}],
+                "target": {"message_id": "M1", "author": {"display_name": "Bob", "is_self": True}}}
+    action = {"schema_version": 1, "operation": "add", "new": [{"value": "eyes"}], "effect": "applied",
+              "target": {"message_id": "M1"}}
+    details = {"message_id": "M1", "raw": {"blocks": [{"text": "hi there"}] * 20}, "attachments": [{"name": "a.txt"}]}
+
+    def row(minute, text, direction="in", **extra):
+        return shared.msg(f"2026-09-05T00:{minute:02d}:00+00:00", text, chat_id=chat, direction=direction,
+                          source="presence:slack", **extra)
+
+    arrival = {"type": "place_arrival", "place_id": "p1"}
+    for item in (
+        row(0, "hi there", **arrival, client_message_id="ev1", transport={**base, "message": details},
+            presence_provenance=provenance),
+        row(1, "", **arrival, client_message_id="ev2", transport={**base, "message": {**details, "reaction": reaction}}),
+        row(2, "nice one", **arrival, client_message_id="ev3", transport={**base, "message": {"reaction": reaction}}),
+        row(3, "Hello Ann", "out", task_id="pturn1", transport={**base, "message": details,
+                                                                "delivery": {"state": "authored"}}),
+        row(4, "Hello Ann", "out", type="presence_delivery", task_id="pturn1", transport={
+            **base, "message": {"provider_message_id": "M9", "raw": details["raw"]},
+            "delivery": {"state": "delivered", "delivery_id": "d1", "part_id": "1", "presence_provenance": provenance}}),
+        row(5, "Hello again", "system", type="presence_delivery", task_id="pturn1",
+            transport={**base, "delivery": {"state": "failed", "delivery_id": "d2"}}),
+        row(6, "", "out", type="presence_delivery", task_id="pturn1",
+            transport={**base, "message": {"reaction": action}, "delivery": {"state": "delivered"}}),
+        row(7, "an earlier message", **arrival, client_message_id="ev0", transport={**base, "message": details},
+            historical_import={"authorship": "platform_account"},
+            source_order={"time": "2026-09-04T23:00:00+00:00", "order": 1}),
+    ):
+        ds.append(root, "chat", item)
+    return chat
+
+
+def _place_facts(row):
+    from ouroboros.dialogue_provenance import place_row_facts
+
+    facts = place_row_facts(row)
+    return {key: facts.get(key) for key in ("source_event_id", "place_id", "conversation_key")}
+
+
+def _tail_meta(root):
+    with sqlite3.connect(ChronicleStore(root).index_path) as db:
+        return [meta for (meta,) in db.execute("SELECT meta FROM tail_rows ORDER BY pos")]
+
+
+def test_a_transport_keeps_the_facts_its_readers_read_and_never_the_thread_copy(tmp_path):
+    from ouroboros import memory_view as mv
+    from ouroboros.dialogue_provenance import (RoomLabelResolver, dialogue_provenance, reaction_note, row_class,
+                                               wordless_reaction)
+
+    shared.world(tmp_path)
+    chat = place_rows(tmp_path)
+    labels = RoomLabelResolver(tmp_path)
+    readers = (row_class, dialogue_provenance, reaction_note, wordless_reaction, labels.label, mv._typed_fact, _place_facts)
+    rows = [row for _address, row, _pos in cc.iter_rows(tmp_path) if row.get("chat_id") == chat]
+    assert len(rows) == 8 and labels.label(rows[0]).startswith("Place slack general · thread ")
+    for row in rows:
+        meta = ROW_META(row)
+        assert [read(meta) for read in readers] == [read(row) for read in readers], row["ts"]
+        held = json.dumps(meta["transport"])
+        assert "thread line" not in held and "blocks" not in held and "profile" not in held
+        assert len(held) * 20 < len(json.dumps(row["transport"]))  # a row's facts stay small whatever its thread
+    assert ROW_META(rows[0])["transport"]["conversation"] == {"title": "general"}  # its name, never its thread copy
+    sent = {"origin": {"kind": "tool", "task_id": "t1", "source_event_id": "ev9"},
+            "conversation": {"name": "ml", "is_private": False, "thread_history": {"m": 1}, "purpose": {"value": "x"}}}
+    assert ROW_META({"transport": sent})["transport"] == {"origin": {"kind": "tool", "task_id": "t1"},
+                                                         "conversation": {"name": "ml", "is_private": False}}
+    assert ROW_META({"transport": {}})["transport"] == {}  # an owner's own row stays without transport facts
+    flat = {"kind": "telegram", "conversation_id": "5", "sender_label": "Ann"}  # a bridge's flat transport: all scalars
+    assert ROW_META({"transport": flat})["transport"] == flat and "transport" not in ROW_META({"text": "x"})
+
+
+def test_a_view_reads_the_same_from_whole_transports_and_from_their_facts_stored_or_live(tmp_path, monkeypatch):
+    """Byte for byte: the views of an integrating focus (Main and the place room), a wake, Presence and a child,
+    from the facts stored in the old form (whole transports, metadata version 4), read live once the version
+    names another source, and from the facts the existing ``memory_tail`` job refills, which hold no thread copy."""
+    from ouroboros import memory_view as mv
+
+    rooms = shared.world(tmp_path)
+    with monkeypatch.context() as earlier:  # rows an earlier body wrote: each holds its thread whole, and stays so
+        earlier.setattr(ds, "_by_reference", lambda row, body: (body, {}))
+        place = str(place_rows(tmp_path))
+    task = {"id": "turn0001", "chat_id": 1}
+    specs = {"main": ("integrator", "1"), "place": ("integrator", place), "wake": ("consciousness", "1"),
+             "presence": ("presence", place), "child": ("child", str(rooms["alpha"]))}
+
+    def views():
+        captured = {}
+        for name, (role, room) in specs.items():
+            view = mv.capture_memory_view(tmp_path, task, dataclasses.replace(mv.ROLE_DEFAULTS[role], room_id=room))
+            assert view.active, name
+            captured[name] = (mv.snapshot_json(dataclasses.replace(view, store_status={})),
+                              mv.render_story(view), mv.render_room(view))
+        return captured
+
+    with monkeypatch.context() as old:
+        old.setattr(mi, "_transport_facts", dict)  # the form before: every transport whole
+        old.setattr(mi, "_META_VERSION", 4)
+        assert _fill(tmp_path)["state"] == "done" and not mi.tail_owed(tmp_path)
+        before, whole = views(), _tail_meta(tmp_path)
+    assert "Place slack general · thread " in before["main"][0] and "thumbsup" in before["place"][2] and "delivery failed" in before["place"][2]
+    assert mi.tail_owed(tmp_path) and "memory_tail" in maintenance.due(tmp_path)  # the old form is another source
+    assert views() == before  # read live meanwhile
+    assert maintenance.run_job(tmp_path, "memory_tail")["state"] == "done" and not mi.tail_owed(tmp_path)
+    assert views() == before  # from the refilled facts
+    facts = _tail_meta(tmp_path)
+    assert len(facts) == len(whole) and sum(map(len, facts)) * 5 < sum(map(len, whole))
+    assert any("thread line" in meta for meta in whole) and not any("thread line" in meta for meta in facts)
+
+
+def _forget_lineage(root):
+    """A fresh process's lineage: nothing remembered for this root (``projects_registry``'s per-process memos)."""
+    from ouroboros import projects_registry as registry
+
+    for key in [key for key in registry._TASK_LINEAGE if key[0] == str(root)]:
+        del registry._TASK_LINEAGE[key]
+    registry._ROOM_ANSWERS.clear()
+
+
+def test_a_focus_start_sees_the_same_reading_no_thread_copy_no_task_body_and_no_whole_tail(tmp_path, monkeypatch):
+    """The three read repairs against the reads before them (whole transports, every admitted chat from its task's
+    body, the whole tail in one answer), over Presence-shaped rows, an imported earlier message, a room converted
+    after its rows were written, a task admitted in a Project's chat whose rows were written in Main, and rows whose
+    task the store does not know: byte-identical integrator, wake, Presence and child views. The cost contract: no
+    stored row holds a thread copy, the tail arrives in pages, and the room rule parses no derived task's body (each
+    is malformed then, failing any parse of it; a wake's directory reads each shown room's latest focus from its
+    tasks' documents by design, so that read is left out of the damaged pass)."""
+    from ouroboros import chronicle_store, memory_view as mv, store_hot_facts as hot
+    from ouroboros.projects_registry import bind_task_to_project
+    from ouroboros.task_results import write_task_result
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    rooms = shared.world(tmp_path)
+    place, beta = str(place_rows(tmp_path)), str(rooms["beta"])
+    ds.append(tmp_path, "chat", shared.msg("2026-09-06T00:00:00+00:00", "beta's work, said in Main", direction="out",
+                                           task_id="conv1"))
+    for task_id, chat in (("t2", 1), ("pturn1", int(place)), ("conv1", rooms["beta"])):
+        write_task_result(tmp_path, task_id, "completed", result="done", chat_id=chat)
+    bind_task_to_project(tmp_path, "t2", "alpha", origin={"absent": "post_hoc_unresolved"})  # converted after its rows
+    task = {"id": "turn0001", "chat_id": 1}
+    specs = {"main": ("integrator", "1"), "beta": ("integrator", beta), "place": ("integrator", place),
+             "wake": ("consciousness", "1"), "presence": ("presence", place), "child": ("child", beta)}
+
+    def views():
+        _forget_lineage(tmp_path)
+        captured = {}
+        for name, (role, room) in specs.items():
+            view = mv.capture_memory_view(tmp_path, task, dataclasses.replace(mv.ROLE_DEFAULTS[role], room_id=room))
+            assert view.active and "tail_facts" not in view.store_status, name
+            captured[name] = (mv.snapshot_json(view), mv.render_story(view), mv.render_room(view))
+        return captured
+
+    with monkeypatch.context() as before:
+        before.setattr(mi, "_transport_facts", dict)
+        before.setattr(mi, "_META_VERSION", 4)
+        before.setattr(chronicle_store, "_TAIL_PAGE", 1 << 30)
+        with store.open_store(tmp_path, write=True) as txn:
+            txn.conn.execute("UPDATE tasks SET chat_id=NULL")  # each admitted chat read from its task's body
+        assert _fill(tmp_path)["state"] == "done"
+        reference = views()
+    assert "beta's work, said in Main" in reference["beta"][2] and "Place slack general · thread " in reference["main"][0]
+    assert hot.run_hot_facts(tmp_path)["state"] == "done" and _fill(tmp_path)["state"] == "done"
+    monkeypatch.setattr(chronicle_store, "_TAIL_PAGE", 4)  # the stored tail in many pages
+    assert views() == reference
+    assert not any("thread line" in meta for meta in _tail_meta(tmp_path))
+    with store.open_store(tmp_path, write=True) as txn:
+        assert txn.row("conv1", "chat_id") == beta
+        txn.conn.execute("UPDATE task_bodies SET body='{' WHERE task_id IN ('t2', 'pturn1', 'conv1')")
+    del specs["wake"]
+    assert views() == {name: reference[name] for name in specs}
+
+
+def test_a_finished_roots_sentence_and_its_fold_are_tail_facts_and_its_body_is_not():
+    """Task lines and silent lines read a root's closing sentence, and the block its fold, from the stored facts."""
+    finish = {"ts": "2026-09-05T10:00:00+00:00", "direction": "system", "type": "task_summary", "task_id": "r1",
+              "status": "completed", "text": "A long host summary body " * 20, "wake_summary": "Closed the issue.",
+              "fold_read": True}
+    meta = ROW_META(finish)
+    assert (meta["wake_summary"], meta["fold_read"]) == ("Closed the issue.", True)
+    assert "text" not in meta and "A long host summary body" not in json.dumps(meta)
+    plain = ROW_META({key: value for key, value in finish.items() if key not in ("wake_summary", "fold_read")})
+    assert "wake_summary" not in plain and "fold_read" not in plain

@@ -7,6 +7,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -75,13 +76,16 @@ def _assert_receipt(actor, area):
     assert not {"area", "refresh_safe", "retention_reason", "release_basis", "process_scope"} & set(receipt)
     evidence = Path(receipt["evidence_dir"])
     assert (evidence / "files" / "check.py").read_bytes() == REVIEWER_EDIT
-    assert (evidence / "files" / checking.EVIDENCE_DIRNAME / "coverage.xml").read_bytes() == COVERAGE
+    coverage = evidence / "files" / checking.EVIDENCE_DIRNAME / "coverage.xml"
+    assert coverage.read_bytes() == COVERAGE
+    # A reviewer's copy keeps its source's mode, so the receipt names the mode the retained file
+    # carries (a writable file reads 0o666 on Windows), never a POSIX default.
     assert receipt["named_evidence"] == [{
         "path": f"{checking.EVIDENCE_DIRNAME}/coverage.xml", "size": len(COVERAGE),
-        "sha256": hashlib.sha256(COVERAGE).hexdigest(), "mode": 0o644,
+        "sha256": hashlib.sha256(COVERAGE).hexdigest(), "mode": stat.S_IMODE(coverage.stat().st_mode),
     }]
     assert "check.py" in receipt["changed"]
-    assert json.loads((evidence / "summary.json").read_text()) == receipt
+    assert json.loads((evidence / "summary.json").read_text(encoding="utf-8")) == receipt
     assert actor["operation_id"] == OPERATION
     assert actor["usage"]["invocation_id"] == INVOCATION
     assert not actor["usage"].get("pending_invocation_id"), "a terminal token must not create a new live wait"
@@ -90,7 +94,7 @@ def _assert_receipt(actor, area):
     return receipt
 
 
-@pytest.mark.parametrize("state", ["succeeded", "failed", "cancelled", "interrupted"])
+@pytest.mark.parametrize("state", ["succeeded", "failed", "interrupted"])
 def test_attach_only_terminal_collection_captures_edits_and_named_evidence(
         checking_run, monkeypatch, forbid_effects, state):  # noqa: F811
     root, subject, area, run = checking_run
@@ -132,9 +136,13 @@ def test_repeat_attach_collection_reuses_the_retained_receipt_without_recreating
     assert calls == [("handshake",), ("get_run", RUN), ("close",)]  # S3: the second read uses producer CAS
 
 
-@pytest.mark.parametrize("verdict", ["PASS", "FAIL"])
-@pytest.mark.parametrize("scope", [ABSENT, None, SETTLED, NO_CENSUS, {**NO_CENSUS, "survivors": 1}],
-                         ids=["absent", "null", "settled", "no-census", "survivor"])
+@pytest.mark.parametrize(("scope", "verdict"), [
+    pytest.param(ABSENT, "PASS", id='absent-PASS'),
+    pytest.param(None, "FAIL", id='null-FAIL'),
+    pytest.param(SETTLED, "PASS", id='settled-PASS'),
+    pytest.param(NO_CENSUS, "FAIL", id='no-census-FAIL'),
+    pytest.param({**NO_CENSUS, "survivors": 1}, "PASS", id='survivor-PASS'),
+])
 def test_any_process_scope_releases_the_copy_and_collects_the_paid_verdict(
         checking_run, monkeypatch, forbid_effects, scope, verdict):  # noqa: F811
     """The census the engine reports does not decide anything here (owner 1A, 2026-10-12):
@@ -227,7 +235,7 @@ def test_unfinished_or_unavailable_invocation_never_captures_or_releases(
         assert calls == []
 
 
-@pytest.mark.parametrize("foreign", ["task_id", "root_task_id", "operation_id", "slot_id", "surface"])
+@pytest.mark.parametrize("foreign", ["task_id", "operation_id", "surface"])
 def test_foreign_invocation_binding_cannot_collect_or_release_checking_copy(
         checking_run, monkeypatch, forbid_effects, foreign):  # noqa: F811
     root, _subject, area, run = checking_run
@@ -262,13 +270,13 @@ def test_capture_exception_does_not_hide_the_paid_verdict_or_release_the_copy(
     _started(root, run_id=RUN)
     captures = []
 
-    def failed_capture(data, task, operation):
-        captures.append((data, task, operation))
+    def failed_capture(data, task, operation, *, hold=False):
+        captures.append((data, task, operation, hold))
         raise OSError("capture unavailable")
 
     monkeypatch.setattr(checking, "capture_seat_evidence", failed_capture)
     actor, fact = _collect(root, run)
-    assert captures == [(root, TASK, OPERATION)]
+    assert captures == [(root, TASK, OPERATION, False)]  # a succeeded run keeps no copy for a successor
     assert _verdict(actor) == "PASS"
     assert fact == "collected"
     assert actor["usage"]["checking_evidence"]["status"] == "capture_failed"

@@ -16,7 +16,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 VOICE_URL = "/api/extensions/voice/ui/r1/ui/tts.js"
 BROKEN_URL = "/api/extensions/broken/ui/r1/ui/panel.js"
@@ -121,11 +121,12 @@ def test_a_saved_reply_offers_the_skill_action_and_a_failing_page_module_costs_o
     answer = page.locator(".chat-bubble.assistant").first
     action = answer.locator(".chat-message-actions > [data-message-action='contribution:lists:save']")
     action.wait_for()
-    # The host's Read aloud (the voice module registered a device engine) comes first, the skill's action after it.
+    # The host's own actions (Read aloud: the voice module registered a device engine; Share) come first, the skill's
+    # action after them.
     answer.locator("[data-message-action='read-aloud']").wait_for()
     controls = answer.locator(".chat-message-actions > *").evaluate_all(
         "nodes => nodes.map(node => node.dataset.messageAction || node.className.split(' ')[0])")
-    assert controls == ["chat-message-reply", "read-aloud", "contribution:lists:save", "chat-message-copy"], controls
+    assert controls == ["chat-message-reply", "read-aloud", "share", "contribution:lists:save", "chat-message-copy"], controls
     targets = answer.locator(".chat-message-actions > *").evaluate_all(
         "nodes => nodes.every(node => node.classList.contains('ui-hit-area'))")
     assert targets, "under a finger every control of the row has the same hit area"
@@ -176,9 +177,9 @@ def test_plus_lists_skill_sections_then_host_items_and_each_does_its_verb(subscr
     menu.wait_for()
     items = menu.locator("[role=menuitem]").all_inner_texts()
     assert [text.strip() for text in items] == [
-        "Attach file", "Explain simpler", "Add to list", "Add dictation…", "Make a button with Ouroboros…"], items
-    assert menu.locator(".chat-plus-label").all_inner_texts() == ["Templates", "Lists", "Ouroboros"], \
-        "each skill under its label, the host's own items last under Ouroboros's"
+        "Attach file", "Explain simpler", "Add to list", "Add dictation…", "Make a button…"], items
+    assert menu.locator(".chat-plus-label").all_inner_texts() == ["Templates", "Lists", "Add to composer"], \
+        "each skill under its label, the host's own items last under what they do"
     assert menu.locator("[data-plus-item='templates:simpler'] svg").count() == 1, "a skill's glyph from the host set"
     box = menu.bounding_box()
     assert box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5, box
@@ -247,6 +248,7 @@ def test_chips_take_the_room_the_capsules_leave_and_fold_into_one_more_chip(subs
     state = {"chips": 0}
     page, _loaded, _posted = open_app(subscription_ui, state=state)
     evidence = {}
+    subscription_ui["errors"].watch(page)  # each reopen may cut off the page's own reads (tests/ui_console_errors.py)
     for scheme in ("light", "dark"):
         for width in (320, 360, 1280):
             page.set_viewport_size({"width": width, "height": 800})
@@ -322,7 +324,7 @@ def test_hold_all_starts_without_page_code_and_start_it_mounts_it_in_place(subsc
     page, loaded, _posted = open_app(subscription_ui, "/?hold=all#chat")
     notice = toast(page, "did not start: this page was opened with everything held.")
     notice.wait_for()
-    page.locator(".chat-bubble.assistant .chat-message-action").wait_for()
+    page.locator(".chat-bubble.assistant .chat-message-action[data-message-action^='contribution:']").wait_for()
     assert loaded == [], "no page module is even fetched"
     assert page.evaluate("window.voiceContext") is None
     assert urlparse(page.url).query == "", "the flag leaves the address once read: a reload starts as usual"
@@ -342,6 +344,7 @@ def test_a_start_the_page_did_not_outlive_is_held_next_time_and_the_bar_offers_n
     page.evaluate("""() => localStorage.setItem('ouroboros.holds', JSON.stringify({v: 1, entries: {
         'module:voice:tts': {reason: 'start', rev: 'r1', at: Date.now()}}}))""")
     loaded.clear()
+    subscription_ui["errors"].watch(page)  # the reopen may cut off the page's own reads (tests/ui_console_errors.py)
     page.goto(subscription_ui["url"] + "/")
     held = toast(page, "Device voice did not start: the page stopped while it was starting last time.")
     held.wait_for()

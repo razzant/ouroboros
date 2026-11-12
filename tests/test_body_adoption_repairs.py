@@ -147,7 +147,6 @@ def test_boot_settles_an_adoption_as_unready_when_the_bootstrap_failed(body, mon
     assert seen == [True, False, False]
 
 
-@pytest.mark.serial  # real cold entries
 @pytest.mark.parametrize("fails", ["pointer", "armed_record"])
 def test_arming_interrupted_on_either_side_of_the_pointer_settles_unapplied_and_never_holds_the_checkout(
         body, monkeypatch, fails):
@@ -378,11 +377,11 @@ def test_live_lineage_processes_reads_the_ownership_set_and_treats_unreadable_as
     serving, data = body
     records = [{"host_pid": 11, "owner_task": "root-a", "ledger_entry": {"pid": 11}},
                {"host_pid": 12, "owner_task": "root-b", "ledger_entry": {"pid": 12}}]
-    monkeypatch.setattr("ouroboros.owned_shutdown.owned_records", lambda root, *, strict=False: records)
+    monkeypatch.setattr("ouroboros.owned_shutdown.owned_records", lambda root, **_read: records)
     monkeypatch.setattr("ouroboros.process_custody._fingerprint_matches", lambda entry: entry["pid"] == 11)
     assert body_candidate.live_lineage_processes(data, "root-a") == [11]
     assert body_candidate.live_lineage_processes(data, "root-b") == []
-    monkeypatch.setattr("ouroboros.owned_shutdown.owned_records", lambda root, *, strict=False: (_ for _ in ()).throw(OSError("x")))
+    monkeypatch.setattr("ouroboros.owned_shutdown.owned_records", lambda root, **_read: (_ for _ in ()).throw(OSError("x")))
     assert body_candidate.live_lineage_processes(data, "root-a") == [-1]
 
 
@@ -404,7 +403,8 @@ def test_candidate_custody_reads_real_owned_records_and_child_lineage(body, monk
     ledger = {"pid": 4322, "purpose": "service:child", "scope": "task", "owner_task": child,
               "fingerprint": {"start_time": "today"}}
     entries = {}
-    monkeypatch.setattr(owned_shutdown, "_publish", lambda root, entry: entries.update({entry["record_id"]: entry}) or True)
+    monkeypatch.setattr(owned_shutdown, "_publish",
+                        lambda root, entry, **_kw: entries.update({entry["record_id"]: entry}) or True)
     assert owned_shutdown.record_executor_process(record_path, executor)
     assert owned_shutdown.record_ledgered_process(data, ledger)
     document = {"schema_version": 1, "records": entries}

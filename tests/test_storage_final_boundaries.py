@@ -107,6 +107,7 @@ def test_ctrl_c_exports_real_pytest_terminal_results(tmp_path, entry, workers, r
             container.close()
     [run] = [path for path in evidence.glob('run-*') if (path / 'result.json').exists()]
     record = json.loads((run / 'result.json').read_bytes())
+    command = json.loads(next(run.glob('command-*/result.json')).read_bytes())
     raw = next(run.glob('command-*/stdout.bin')).read_bytes()
     facts = {
         'exit': code, 'keyboard_interrupt': b'KeyboardInterrupt' in raw,
@@ -114,13 +115,39 @@ def test_ctrl_c_exports_real_pytest_terminal_results(tmp_path, entry, workers, r
         # safe_test's own export, or run_tests' explicit --ci-evidence-dir.
         'terminal_exits': [json.loads(path.read_bytes())['session_exit_code'] for path in run.rglob('results.json')],
         'survivors': [p.read_text() if p.exists() else 'no TERM before the forced reap' for p in survivors],
-        # Observed here: run_tests reaped and reported before safe_test escalated.
-        'runner_reported': entry != 'run_tests' or b'=== focused: exit 130' in raw,
+        'runner_reported': entry != 'run_tests' or _reported_or_cut(raw, b'=== focused: exit 130', record, command),
         'containment_error': record['containment_error'], 'scratch_released': not Path(record['scratch']).exists(),
     }
     assert facts == {'exit': 130, 'keyboard_interrupt': True, 'junit_complete': True, 'terminal_exits': [2],
                      'survivors': ['SIGTERM'] * len(survivors), 'runner_reported': True, 'containment_error': '',
-                     'scratch_released': True}, raw.decode(errors='replace')[-4000:]
+                     'scratch_released': True}, (f"{record['interrupt_escalation']!r}, command rc {command['returncode']}\n"
+                                                 + raw.decode(errors='replace')[-4000:])
+
+
+def _reported_or_cut(raw, line, record, command):
+    """The command's own final line, or an outer cut both recorded and ended by a signal (#2110).
+
+    The recorded escalation only says the INT-window wait timed out: the root can still exit
+    normally after it, and that ordinary exit must not excuse a lost final line. run_tests
+    installs no TERM handler, so its cut ends by SIGTERM, or SIGKILL from the forced reap."""
+    if line in raw:
+        return True
+    return bool(record['interrupt_escalation']) and command['returncode'] in (-signal.SIGTERM, -signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX signal exits')
+@pytest.mark.parametrize('line,escalation,end,accepted', [
+    (True, '', 130, True),  # the runner's own report
+    (False, 'recorded', 130, False),  # the wait timed out, then an ordinary exit lost its line
+    (False, 'recorded', 0, False),
+    (False, '', 'SIGTERM', False),  # a signal end the owner never recorded as its cut
+    (False, '', 130, False),
+])
+def test_a_lost_final_line_needs_a_recorded_cut_and_a_signal_end(line, escalation, end, accepted):
+    returncode = -getattr(signal, end) if isinstance(end, str) else end
+    raw = b'KeyboardInterrupt\n' + (b'=== focused: exit 130 in 9s\n' if line else b'')
+    assert _reported_or_cut(raw, b'=== focused: exit 130', {'interrupt_escalation': escalation},
+                            {'returncode': returncode}) is accepted
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='symlink creation may require Windows privileges')

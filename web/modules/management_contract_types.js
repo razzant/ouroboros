@@ -39,7 +39,8 @@
  * @property {Object=} health_observations
  * @property {boolean=} dispatch_live
  * @property {Object[]=} review_findings
- * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review
+ * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review  // a history row of a Skills-page review may carry `continuable_seats`
+ * @property {?{fields: {id: string, key: string, state: ('configured'|'missing'|'unknown')}[]}=} secret_config  // declared secret fields and whether each is set now (never a value); null when none are declared
  * @property {Object=} grants
  * @property {?{slug: string, version: string, content_hash: string, repository: string, pr_number: number, pr_url: string, published_at: string}=} published
  * @property {boolean=} published_malformed
@@ -48,6 +49,8 @@
  * @property {boolean=} identity_collision
  * @property {?Object=} install  // source, official (exact endorsed bytes), release, basis, base_known, modified, update_available, withdrawn ({reason, version} for a withdrawn release), left_source, turn_on_when_ready, installed_by, installed_at, reason?, task_id?, check?: {by, notes, at}, pending_update?: {version, digest}, update_rejected?: {version, digest, reason: review_blockers|review_unfinished|preflight_failed, at}
  * @property {string[]=} category
+ * @property {Object=} deployment  // a policy requires this name: the server's requirement row with its when_unmet
+ * @property {{state: ("trusted"|"untrusted"), reason: (string|undefined), detail: (string|undefined), administered: boolean}=} trust  // an extension under an execution domain
  */
 
 /**
@@ -85,6 +88,14 @@
 /**
  * @typedef {Object} SkillRevisionRequest
  * @property {string=} expected_content_hash
+ */
+
+/**
+ * No body (or `{}`) reviews the current bytes; both fields continue stopped seats of one earlier
+ * Skills-page review on its recorded bytes, each named as its history row's `continuable_seats` does.
+ * @typedef {Object} SkillReviewRequest
+ * @property {{record_id: string, content_hash: string}=} review_reference
+ * @property {Array<{seat_id: string, operation_id: string}>=} continue_seats
  */
 
 /**
@@ -239,6 +250,7 @@
  * @property {boolean=} paid
  * @property {Object[]=} seats
  * @property {Object=} governance
+ * @property {Object[]=} continuable_seats  // this review's stopped seats its own author may continue
  * @property {string=} job_id
  * @property {string=} job_status
  * @property {string=} group_id
@@ -392,12 +404,8 @@
  */
 
 /**
- * Engine or host preparation problem. POST may prepare Node/npm:
- * 409 maintenance_restart_required asks for chat-header Restart;
- * 409/503 maintenance_preparation_failed reports failure. Both carry
- * context.acceptance=not_submitted, scope=this_attempt. Optional inspection failure still
- * permits POST. After 503 acceptance=unknown, keep the same body and Idempotency-Key,
- * even after a later preparation-only reply, then resend both.
+ * Engine or host problem. A pre-submit not_submitted covers this attempt only.
+ * After acceptance=unknown, retain the original body and Idempotency-Key until resolved.
  * @typedef {Object} ClaudexorMaintenanceProblem
  * @property {Object} error  // {code, message, retryable?, requiredActions?, context?}
  */
@@ -408,39 +416,170 @@
  * @property {string} profile_id
  */
 
+// Engine program observations and receipts pass through unchanged. Plans are display-only.
 /**
- * Sent with a required Idempotency-Key header.
+ * @typedef {Object} ClaudexorSelectedProgram
+ * @property {?string} path
+ * @property {?string} realPath
+ * @property {?string} version
+ * @property {?string} versionOutput
+ * @property {?string} overrideEnv
+ * @property {?string} overrideValue
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramExecCommand
+ * @property {'exec'} kind
+ * @property {string} command
+ * @property {string[]} args
+ * @property {Object<string, string>=} env
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramScriptCommand
+ * @property {'script'} kind
+ * @property {string} url
+ * @property {string} interpreter
+ * @property {string[]} interpreterArgs
+ * @property {string[]} args
+ * @property {Object<string, string>=} env
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramAction
+ * @property {boolean} available
+ * @property {?string} reason
+ * @property {Array<ClaudexorProgramExecCommand|ClaudexorProgramScriptCommand>} commands
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramActions
+ * @property {ClaudexorProgramAction} install
+ * @property {ClaudexorProgramAction} update
+ * @property {ClaudexorProgramAction} exactVersion
+ */
+
+/**
+ * @typedef {Object} ClaudexorNewestNotRead
+ * @property {'not_read'} status
+ * @property {?string} source
+ */
+
+/**
+ * @typedef {Object} ClaudexorNewestAvailable
+ * @property {'available'} status
+ * @property {string} source
+ * @property {string} version
+ * @property {string} observedAt
+ */
+
+/**
+ * @typedef {Object} ClaudexorNewestUnavailable
+ * @property {'unavailable'} status
+ * @property {?string} source
+ * @property {string} observedAt
+ * @property {Object} problem
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceLatestTarget
+ * @property {'latest'} kind
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceVersionTarget
+ * @property {'version'} kind
+ * @property {string} version
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceLatestReceiptTarget
+ * @property {'latest'} kind
+ * @property {null} version
+ */
+
+/**
  * @typedef {Object} ClaudexorMaintenanceRequest
  * @property {string} harness
- * @property {Object} target
+ * @property {(ClaudexorMaintenanceLatestTarget|ClaudexorMaintenanceVersionTarget)} target
  */
 
 /**
- * Engine ControlHarnessMaintenanceOperation, passed through.
+ * @typedef {Object} ClaudexorMaintenanceRequester
+ * @property {string} source
+ * @property {?string} requestId
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceScript
+ * @property {string} url
+ * @property {number} size
+ * @property {string} sha256
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceCommand
+ * @property {string} binary
+ * @property {string[]} args
+ * @property {Object<string, string>} env
+ * @property {?ClaudexorMaintenanceScript} script
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceElsewhere
+ * @property {ClaudexorSelectedProgram} before
+ * @property {ClaudexorSelectedProgram} after
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceProfileCleanup
+ * @property {string[]} plannedPaths
+ * @property {string[]} removedPaths
+ */
+
+/**
  * @typedef {Object} ClaudexorMaintenanceOperation
  * @property {string} id
- * @property {string} state
- * @property {string=} harness
- * @property {string=} phase
- * @property {string=} mechanism
- * @property {Object=} target
- * @property {*=} before
- * @property {*=} after
- * @property {string=} mutation
- * @property {string=} termination
- * @property {*=} limitations
- * @property {*=} progress
- * @property {*=} problem
- * @property {string=} createdAt
- * @property {?string=} startedAt
- * @property {?string=} finishedAt
+ * @property {string} harness
+ * @property {('queued'|'running'|'succeeded'|'failed'|'cancelled'|'interrupted')} state
+ * @property {('accepted'|'preparing'|'installing'|'settled')} phase
+ * @property {(ClaudexorMaintenanceLatestReceiptTarget|ClaudexorMaintenanceVersionTarget)} target
+ * @property {ClaudexorMaintenanceRequester} requester
+ * @property {?string} installationHome
+ * @property {ClaudexorMaintenanceCommand[]} commands
+ * @property {ClaudexorMaintenanceProfileCleanup=} profileCleanup
+ * @property {?ClaudexorSelectedProgram} before
+ * @property {?ClaudexorSelectedProgram} after
+ * @property {?ClaudexorMaintenanceElsewhere} elsewhere
+ * @property {?number} activeRunsAtStart
+ * @property {?number} exitCode
+ * @property {('changed'|'not_changed'|'changed_elsewhere'|'unknown')} outcome
+ * @property {('none'|'applied'|'unknown')} mutation
+ * @property {('not_applicable'|'confirmed'|'unconfirmed')} termination
+ * @property {string[]} limitations
+ * @property {string[]} progress
+ * @property {?Object} problem
+ * @property {string} createdAt
+ * @property {?string} startedAt
+ * @property {?string} finishedAt
  */
 
 /**
- * Engine ControlHarnessMaintenanceInventory, passed through.
+ * @typedef {Object} ClaudexorMaintenanceEntry
+ * @property {string} harness
+ * @property {ClaudexorSelectedProgram} selection
+ * @property {(ClaudexorNewestNotRead|ClaudexorNewestAvailable|ClaudexorNewestUnavailable)} newest
+ * @property {ClaudexorProgramActions} actions
+ * @property {('yes'|'no'|'cannot_tell')} updateAvailable
+ * @property {?string} releaseNotesUrl
+ * @property {?ClaudexorMaintenanceOperation} operation
+ * @property {string} observedAt
+ */
+
+/**
  * @typedef {Object} ClaudexorMaintenanceInventory
  * @property {string} observedAt
- * @property {Object[]} harnesses
+ * @property {ClaudexorMaintenanceEntry[]} harnesses
  */
 
 /**
@@ -516,7 +655,8 @@
  */
 
 /**
- * One selectable model; `value` is what a model setting stores.
+ * One selectable model; `value` is what a model setting stores. The local model's row says `use_local`: `id` names
+ * it and its `value` is a label, never a route.
  * @typedef {Object} ModelCatalogItem
  * @property {string} provider_id
  * @property {string} provider
@@ -542,12 +682,16 @@
  * @property {*=} availability
  * @property {*=} problem
  * @property {*=} processing
+ * @property {boolean=} use_local
  */
 
 /**
  * @typedef {Object} OpenAICompatibleModelsRequest
+ * @property {string=} connection Named compatible row; omitted uses the built-in pair.
  * @property {string} baseUrl
  * @property {string=} apiKey
+ * @property {('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=} apiKeySetting Which built-in pair a kept apiKey belongs to;
+ *   omitted uses the saved effective pair.
  */
 
 /**
@@ -591,6 +735,17 @@
  */
 
 /**
+ * A remote server's sign-in, present once it asked for one.
+ * @typedef {Object} McpSignIn
+ * @property {string} state  // signed_in | sign_in_required
+ * @property {string=} reason
+ * @property {?string=} since
+ * @property {string=} issuer
+ * @property {boolean=} pending
+ * @property {string=} required_scope
+ */
+
+/**
  * One configured MCP server (a configuration error row carries only id, enabled, tool_count, last_error, code).
  * @typedef {Object} McpServerStatus
  * @property {string} id
@@ -606,6 +761,8 @@
  * @property {*=} env_from_settings
  * @property {string[]=} configuration_warnings
  * @property {boolean=} schemas_at_start
+ * @property {boolean=} task_session
+ * @property {boolean=} browser_policy
  * @property {string=} instructions
  * @property {number=} map_tokens
  * @property {number=} schema_tokens
@@ -620,6 +777,7 @@
  * @property {boolean=} complete
  * @property {string=} publication_error
  * @property {string=} code
+ * @property {McpSignIn=} sign_in
  */
 
 /**
@@ -644,6 +802,35 @@
  */
 
 /**
+ * `POST /api/mcp/sign-in`: begin, complete (state with code or error, or returned_url) or sign_out.
+ * @typedef {Object} McpSignInRequest
+ * @property {string} action
+ * @property {string=} server_id
+ * @property {string=} state
+ * @property {string=} code
+ * @property {string=} iss
+ * @property {string=} error
+ * @property {string=} error_description
+ * @property {string=} returned_url
+ * @property {string=} client_id
+ * @property {string=} client_secret
+ */
+
+/**
+ * @typedef {Object} McpSignInResponse
+ * @property {boolean} ok
+ * @property {string=} server
+ * @property {string=} url
+ * @property {string=} redirect_uri
+ * @property {string=} scope
+ * @property {?boolean=} revoked
+ * @property {Object=} listing
+ * @property {string=} code
+ * @property {string=} reason
+ * @property {string=} error
+ */
+
+/**
  * @typedef {Object} McpTestRequest
  * @property {string=} server_id
  * @property {Object=} server
@@ -663,7 +850,8 @@
 
 /**
  * The last apply attempt on /api/update/status (`{}` when none), kept across restarts; never authority.
- * `outcome` is empty until concluded; `applied` only after a later server's startup checks; `unknown` names missing evidence.
+ * `outcome` is empty until concluded; `applied` only after a later server's startup checks; `unknown` names missing evidence;
+ * a boot `failed` names `rollback_incomplete`.
  * @typedef {Object} UpdateProgress
  * @property {string=} operation_id
  * @property {string=} generation
@@ -695,6 +883,7 @@
  * @property {boolean} active
  * @property {string=} phase
  * @property {string=} task_id
+ * @property {string=} attempt_id
  * @property {boolean=} restart_required
  * @property {boolean=} local_work_recovery
  */
@@ -738,15 +927,18 @@
  * @property {string=} checked_at
  * @property {string=} checked_target_sha
  * @property {boolean=} from_cache
+ * @property {string=} managed_by_deployment - its administrator replaces the serving program: why in-app updates refuse
  */
 
 /**
  * @typedef {Object} CommandRequest
  * @property {string} cmd
+ * @property {string=} if_boot // optional boot.since precondition; Panic ignores it
  * @property {Object=} client_surface
  * @property {string=} visible_text
  * @property {string=} visible_task_id
  * @property {Object=} task_constraint
+ * @property {Object=} ui_control
  */
 
 /**
@@ -755,6 +947,14 @@
  * @property {boolean=} ok
  * @property {boolean=} deduped
  * @property {string=} task_id
+ */
+
+/**
+ * `POST /api/command` 400/409. `accepted: false` only when refused before queueing; without it the outcome is unknown.
+ * @typedef {Object} CommandRefusal
+ * @property {string} error
+ * @property {boolean=} accepted // always false when present
+ * @property {string=} reason_code // boot_changed: `if_boot` named an earlier server
  */
 
 /**
@@ -813,6 +1013,7 @@
  * @property {Object.<string,string[]>} problems
  * @property {InstalledSkill[]} skills
  * @property {ExtensionLiveSnapshot} live
+ * @property {Object=} deployment  // {when_unmet, required}: every requirement as the server observes it
  */
 
 /**

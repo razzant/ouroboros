@@ -34,7 +34,6 @@ from tests.test_review_local_accounts import (
 from tests.test_review_view_integration import _capture, harness as _harness
 
 harness = _harness
-pytestmark = pytest.mark.serial  # Continue installs the supervisor's module globals.
 
 
 OWNER = "Finish the authorized chart export without deploying a service."
@@ -281,7 +280,7 @@ def test_owner_continue_sends_selected_corrected_account_and_retains_old_source_
     assert _journal(root) == journal and successor.task_id == task["id"]
 
 
-def test_physical_floor_addresses_large_pending_correction_without_claiming_incorporation(tmp_path):
+def test_physical_floor_keeps_account_and_pending_correction_without_claiming_incorporation(tmp_path):
     _, _, _, page, other, _ = _rooms(tmp_path)
     account_text = "I had treated the rehearsal as delivery, while the garden result had independent evidence."
     account = _write(tmp_path, kind="account", text=account_text, sources=[page, other])["node_id"]
@@ -290,19 +289,21 @@ def test_physical_floor_addresses_large_pending_correction_without_claiming_inco
                   + "The garden's independent measurement remains valid. Final exception Ω.")
     fix = _write(tmp_path, kind="correction", target_id=page, text=correction)["node_id"]
     snapshot, journal = _snapshot(tmp_path), _journal(tmp_path)
-    full, _, facts = memory_floor.render_view_for_mode(snapshot, mode="max", owner_mode="max",
+    fit = memory_floor.render_view_for_mode(snapshot, mode="max", owner_mode="max",
         window_tokens=1_000_000, known_window=True, output_reserve=512, ratio=1.0, non_memory_tokens=0)
+    full, facts = fit.story, fit.facts
     assert account_text in full and "Final exception Ω." in full
     assert f"later correction of its source {page} (not in this account)" in full
     assert facts["floor"]["pointer_records"] == []
-    short, room, facts = memory_floor.render_view_for_mode(snapshot, mode="max", owner_mode="max",
+    fit = memory_floor.render_view_for_mode(snapshot, mode="max", owner_mode="max",
         window_tokens=4096, known_window=True, output_reserve=512, ratio=1.0, non_memory_tokens=0)
-    assert account in facts["floor"]["pointer_records"] and facts["floor"]["steps"]["F5"]
-    assert account_text not in short and "Final exception Ω." not in short
-    assert f"account {account}; memory_read(node_id='{account}')" in short
-    assert "### Physical floor" in room and "only by address" in room
+    short, room, facts = fit.story, fit.room, fit.facts
+    assert account not in facts["floor"]["pointer_records"]
+    assert account_text in short and "Final exception Ω." in short
+    assert memory_floor.view_tokens(short) + memory_floor.view_tokens(room) > 4096 - 512  # its last view cannot fit
+    assert "### Physical floor" in room and "reduced forms" in room
     assert "2026-09-03 00:00 → 2026-09-03 00:03" in short
-    assert "incorporated" not in short and "not in this account" not in short
+    assert "incorporated" not in short and "not in this account" in short
     exact, _ = _read_all(tmp_path, account)
     assert f"revision {page} used; later corrections not in this account: {fix}" in exact
     exact_correction, windows = _read_all(tmp_path, fix)

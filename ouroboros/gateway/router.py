@@ -14,6 +14,13 @@ from typing import Any
 from starlette.routing import BaseRoute, Route, WebSocketRoute
 
 
+def _kept_service_routes() -> list[BaseRoute]:
+    """Activity › Background: the services tasks kept running and the owner's Stop of one launch."""
+    from ouroboros.gateway.kept_services import kept_service_routes
+
+    return kept_service_routes()
+
+
 def _ui_client_routes() -> list[BaseRoute]:
     """Installation-wide owner UI preferences and the install's
     interface language with its translation memory (``/api/ui/*``)."""
@@ -44,12 +51,16 @@ def _ui_client_routes() -> list[BaseRoute]:
 
 
 def _owner_answer_routes() -> list[BaseRoute]:
-    """The owner's answers: decision cards (``/api/decisions``, every family) and the
-    living cards Ouroboros shows in its messages (``/api/cards/*``: reads, pins)."""
+    """The owner's answers: decision cards (``/api/decisions``, every family), the protected
+    form of an integration-secret request whose values never pass through that ingress
+    (``/api/decisions/secret``), and the living cards Ouroboros shows in its messages
+    (``/api/cards/*``: reads, pins)."""
     from ouroboros.gateway.cards import card_routes
+    from ouroboros.gateway.secret_decision import api_secret_decision
     from ouroboros.gateway.task_decision import api_decision_answer
 
-    return [Route("/api/decisions", endpoint=api_decision_answer, methods=["POST"]), *card_routes()]
+    return [Route("/api/decisions", endpoint=api_decision_answer, methods=["POST"]),
+            Route("/api/decisions/secret", endpoint=api_secret_decision, methods=["POST"]), *card_routes()]
 
 
 def collect_routes(
@@ -79,7 +90,7 @@ def collect_routes(
         api_skill_toggle,
     )
     from ouroboros.gateway.widgets import api_widget_fault_post, api_widgets
-    from ouroboros.gateway.widget_assets import api_widget_asset_lease
+    from ouroboros.gateway.widget_assets import api_widget_asset_lease, api_widget_bridge_script
     from ouroboros.gateway.contributions import api_extension_host_asset
     from ouroboros.gateway.files import (
         api_chat_upload,
@@ -87,7 +98,7 @@ def collect_routes(
         file_browser_routes,
     )
     from ouroboros.gateway.history import make_chat_history_endpoint, make_cost_breakdown_endpoint
-    from ouroboros.gateway.logs import api_logs_tail
+    from ouroboros.gateway.logs import api_logs_raw, api_logs_tail
     from ouroboros.gateway.storage import storage_routes
     from ouroboros.gateway.marketplace import (
         api_hub_installed,
@@ -106,6 +117,7 @@ def collect_routes(
         api_claudexor_login,
         api_claudexor_login_job,
         api_claudexor_login_job_reconcile,
+        api_claudexor_restart,
         api_claudexor_status,
         api_claudexor_wake,
     )
@@ -139,6 +151,7 @@ def collect_routes(
         api_reset,
         api_update_apply,
         api_update_check,
+        api_update_description,
         api_update_preflight,
         api_update_status,
     )
@@ -153,6 +166,7 @@ def collect_routes(
     from ouroboros.gateway.state import api_consciousness, api_contract, api_health, api_state
     from ouroboros.gateway.skill_publish import skill_publish_routes
     from ouroboros.gateway.task_reviews import task_review_routes
+    from ouroboros.gateway.task_model import api_task_model
     from ouroboros.gateway.tasks import (
         api_task_artifact,
         api_task_cancel,
@@ -165,13 +179,12 @@ def collect_routes(
     )
     from ouroboros.gateway import desktop_autostart as desktop_host
     from ouroboros.gateway.onboarding_host import api_onboarding_attempt, api_onboarding_bootstrap, onboarding_page
-    from ouroboros.gateway.owner_effort import api_owner_effort_range, api_owner_subagents_mode
+    from ouroboros.gateway.owner_effort import owner_composer_routes
     from ouroboros.gateway.safety_settings import api_owner_safety_rules, api_owner_safety_model, api_owner_safety_mode
     from ouroboros.gateway.settings import (
         api_acknowledge_capability,
         api_onboarding,
         api_owner_auto_grant,
-        api_owner_context_mode,
         api_owner_runtime_mode,
         api_settings_get,
         api_settings_post,
@@ -179,18 +192,21 @@ def collect_routes(
     from ouroboros.gateway.settings_secrets import api_settings_secret
     from ouroboros.gateway.places_api import places_routes
     from ouroboros.gateway.ws import ws_endpoint
+    from ouroboros.gateway.call_ws import call_routes
     settings_handlers = settings_handlers or {}
     settings_get = settings_handlers.get("api_settings_get", api_settings_get)
     settings_post = settings_handlers.get("api_settings_post", api_settings_post)
     onboarding = settings_handlers.get("api_onboarding", api_onboarding)
 
     routes: list[BaseRoute] = [
+        *call_routes(),
         Route("/api/health", endpoint=api_health),
         Route("/api/contract", endpoint=api_contract, methods=["GET"]),
         Route("/api/state", endpoint=api_state),
         Route("/api/consciousness", endpoint=api_consciousness, methods=["GET"]),
         Route("/api/widgets", endpoint=api_widgets, methods=["GET"]),
         Route("/api/widgets/fault", endpoint=api_widget_fault_post, methods=["POST"]),
+        Route("/api/widget-bridge.js", endpoint=api_widget_bridge_script, methods=["GET"]),
         Route("/api/widgets/asset-leases", endpoint=api_widget_asset_lease, methods=["POST"]),
         Route("/api/widgets/asset-leases/{op}", endpoint=api_widget_asset_lease, methods=["POST"]),
         Route("/api/extensions", endpoint=api_extensions_index, methods=["GET"]),
@@ -251,9 +267,7 @@ def collect_routes(
         Route("/api/desktop/background", endpoint=desktop_host.api_desktop_background_post, methods=["POST"]),
         Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"]),
         Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"]),
-        Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"]),
-        Route("/api/owner/effort-range", endpoint=api_owner_effort_range, methods=["POST"]),
-        Route("/api/owner/subagents-mode", endpoint=api_owner_subagents_mode, methods=["POST"]),
+        *owner_composer_routes(),
         Route("/api/owner/safety-mode", endpoint=api_owner_safety_mode, methods=["POST"]),
         Route("/api/owner/safety-rules", endpoint=api_owner_safety_rules, methods=["POST"]),
         Route("/api/owner/safety-model", endpoint=api_owner_safety_model, methods=["POST"]),
@@ -272,6 +286,7 @@ def collect_routes(
         Route("/api/tasks/{task_id}/events", endpoint=api_task_events, methods=["GET", "POST"]),
         Route("/api/tasks/{task_id}/cancel", endpoint=api_task_cancel, methods=["POST"]),
         Route("/api/tasks/{task_id}/hurry", endpoint=api_task_hurry, methods=["POST"]),
+        Route("/api/tasks/{task_id}/model", endpoint=api_task_model, methods=["POST"]),
         *owner_tree_control_routes(),
         *task_review_routes(),
         Route("/api/tasks/{task_id}/resume", endpoint=api_task_resume, methods=["POST"]),
@@ -288,12 +303,14 @@ def collect_routes(
         Route("/api/update/status", endpoint=api_update_status),
         Route("/api/update/check", endpoint=api_update_check, methods=["POST"]),
         Route("/api/update/preflight", endpoint=api_update_preflight, methods=["POST"]),
+        Route("/api/update/description", endpoint=api_update_description, methods=["POST"]),
         Route("/api/update/apply", endpoint=api_update_apply, methods=["POST"]),
         Route("/api/cost-breakdown", endpoint=make_cost_breakdown_endpoint(data_dir)),
-        *storage_routes(data_dir),
+        *storage_routes(data_dir), *_kept_service_routes(),
         Route("/api/evolution-data", endpoint=api_evolution_data),
         Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
         Route("/api/logs/{name}", endpoint=api_logs_tail, methods=["GET"]),
+        Route("/api/logs/{name}/raw", endpoint=api_logs_raw, methods=["GET"]),
         Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),
         Route("/api/chat/upload", endpoint=api_chat_upload_delete, methods=["DELETE"]),
         Route("/api/openai-compatible/models", endpoint=api_openai_compatible_models, methods=["POST"]),
@@ -317,6 +334,7 @@ def collect_routes(
         *harness_maintenance_routes(),
         Route("/api/claudexor/quota/refresh", endpoint=api_claudexor_quota_refresh, methods=["POST"]),
         Route("/api/claudexor/wake", endpoint=api_claudexor_wake, methods=["POST"]),
+        Route("/api/claudexor/restart", endpoint=api_claudexor_restart, methods=["GET", "POST"]),
         Route("/api/claudexor/login", endpoint=api_claudexor_login, methods=["POST"]),
         Route(
             "/api/claudexor/login/{job_id}",

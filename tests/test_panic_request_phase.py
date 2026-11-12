@@ -20,7 +20,6 @@ from ouroboros import platform_layer as platform
 from tests.test_daemon_stop_diagnostics import authenticated_home  # noqa: F401
 from tests.test_panic_owned_requests import owners  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _child(root, purpose):

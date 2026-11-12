@@ -498,16 +498,19 @@ def _run_line(row: dict) -> str:
               "observation_only": "saved terminal observation only", "none_reported": "none reported",
               "not_captured": "not captured", "retained_earlier_observation": "saved earlier payload"}.get(
                   row.get("output_state"), "unknown")
+    decided = "disposition " + str(patch.get("disposition") or "unknown") + (
+        ", result lost" + (f", {_kept(capture)}" if _kept(capture) else "") if capture.get("result_lost") else "") + (
+        f", disposed by {capture['disposed_by']}" if capture.get("disposed_by") else "")
     parts = [f"run {row.get('run_id')}: {row.get('state') or 'unknown'}",
              f"output {output}",
              "patch " + str(capture.get("status") or ("captured" if patch.get("captured") else "not confirmed")),
-             "disposition " + str(patch.get("disposition") or "unknown"),
+             decided,
              "cost unknown" if amount is None else f"cost USD {amount}"]
     if money.get("settled") is False:
         parts.append("accounting not settled")
     if amount is not None and not money.get("cost_final"):
         parts.append("cost not final")
-    if capture and not patch.get("captured"):
+    if capture and not patch.get("captured") and not capture.get("result_lost"):
         parts.append("capture receipt unconfirmed")
     if patch.get("apply_pending"):
         parts.append("apply outcome unknown")
@@ -648,6 +651,7 @@ _CAPTURE_WORDS = {"ready_with_changes": "file changes captured", "ready_no_chang
                   "failed": "capturing file changes failed", "missing": "captured file changes are missing",
                   "pending": "file changes not captured yet"}
 _DISPOSITION_WORDS = {"applied": "applied", "rejected": "rejected", "superseded": "continued by a later run"}
+_LOST_WORDS = "file changes lost: the private copy was gone and nothing was saved"
 _GAP_WORDS = {"terminal_observation_unavailable": "the engine's last report could not be read",
               "custody_snapshot_unavailable": "these saved facts could not be rechecked",
               "retained_output_unavailable": "the saved output was not found",
@@ -673,6 +677,14 @@ _KEPT_COPY = "The full copy Ouroboros kept of its last unreviewed message (not a
 _SALVAGE_COPY_AT = re.compile(r"; full copy preserved at [^\n]+?\):\n")
 
 
+def _kept(capture: Mapping[str, Any]) -> str:
+    """The file changes a failed capture saved before a recorded loss (#1651), from its own count."""
+    if capture.get("file_output_count") is None:
+        return "saved file changes unknown"
+    kept = int(capture.get("file_output_count") or 0)
+    return f"{kept} saved file change{'s' * (kept != 1)} kept" if kept else ""
+
+
 def _usd(amount: float) -> str:
     return f"${amount:.4f}" if 0 < amount < 0.01 else f"${amount:.2f}"
 
@@ -683,9 +695,14 @@ def _owner_run(run: Mapping[str, Any], prefix: str) -> str:
     words = [_OUTPUT_WORDS.get(run.get("output_state"), "output unknown")]
     if capture or patch.get("captured"):
         status = capture.get("status")
-        change = _CAPTURE_WORDS.get(status, "file changes captured" if patch.get("captured") else "file changes unknown")
-        if status == "ready_with_changes" or not capture:
-            change += ", " + _DISPOSITION_WORDS.get(patch.get("disposition"), "not applied")
+        kept = _kept(capture)
+        change = (f"file changes lost: the private copy was gone; {kept}" if kept else _LOST_WORDS) if capture.get(
+            "result_lost") else _CAPTURE_WORDS.get(status, "file changes captured" if patch.get("captured") else
+                                                   "file changes unknown")
+        if status == "ready_with_changes" or not capture or capture.get("disposition") in _DISPOSITION_WORDS:
+            by = str(capture.get("disposed_by") or "")  # a recorded decision by another task names it
+            change += ", " + _DISPOSITION_WORDS.get(patch.get("disposition"), "not applied") + (
+                f" by task {by}" if by not in ("", "not_recorded", str(run.get("owner_task_id") or "")) else "")
         words.append(change + (" (whether applying finished is unknown)" if patch.get("apply_pending") else ""))
     money = run.get("accounting") or {}
     amount = money.get("cost_usd")

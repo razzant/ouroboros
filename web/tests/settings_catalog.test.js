@@ -1,12 +1,69 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { catalogReadNote, catalogReadState, mergeModelCatalog, refreshModelCatalog, summarizeReadErrors } from '../modules/settings_catalog.js';
+import { catalogReadNote, catalogReadState, mergeModelCatalog, refreshMaintenanceCatalogs, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
+import { claudexorStatus } from '../modules/claudexor_status_store.js';
 
 const first = {
     items: [{ value: 'claudexor::opaque=owner-model', source_id: 'opaque', credential_profile_id: 'personal', observed_at: 'earlier' }],
     model_sources: [{ id: 'opaque', label: 'Model service', credentialHarness: 'codex' }],
     observed_at: 'earlier', errors: [],
 };
+
+test('failed settlement reads stay retryable; successful receipts refresh once', async (t) => {
+    const previousDocument = globalThis.document, previousFetch = globalThis.fetch;
+    t.after(() => { globalThis.document = previousDocument; globalThis.fetch = previousFetch; });
+    const doc = new EventTarget(); doc.getElementById = () => null; globalThis.document = doc;
+    const events = [], native = []; let raw = 0;
+    doc.addEventListener('harness-maintenance:settled', event => events.push(event.detail));
+    t.mock.method(claudexorStatus, 'refresh', async options => { native.push(options); return {harnesses: [{id: 'future', model_catalog: {partial: false}}]}; });
+    globalThis.fetch = async () => { raw++; throw new Error('general catalog unavailable'); };
+    const receipt = {id: 'one', finishedAt: '2026-11-10'};
+    await refreshMaintenanceCatalogs('future', receipt);
+    await refreshMaintenanceCatalogs('future', {...receipt});
+    assert.deepEqual(events, [{harness: 'future'}, {harness: 'future'}]);
+    assert.ok(native.every(options => options.includeModels && options.afterCurrent));
+    assert.equal(raw, 2);
+    globalThis.fetch = async () => { raw++; return {ok: true, json: async () => ({items: []})}; };
+    await refreshMaintenanceCatalogs('future', receipt);
+    await refreshMaintenanceCatalogs('future', receipt);
+    assert.equal(events.length, 3); assert.equal(raw, 3);
+    await refreshMaintenanceCatalogs('future', {...receipt, id: 'two'});
+    assert.equal(events.length, 4); assert.equal(raw, 4);
+});
+
+test('connection discovery replaces only the exact source and preserves general refresh provenance', () => {
+    const general = mergeModelCatalog({}, { ...first, coverage: { complete: true },
+        account_catalogs: [{ source: 'opaque', accounts: [] }], items: [...first.items,
+            { value: 'openai::same-model' }, { value: 'openai-compatible::same-model' },
+            { value: 'openai-compatible@alpha::old' }, { value: 'openai-compatible@beta::same-model' }] });
+    const connections = { 'openai-compatible@alpha': [{ value: 'openai-compatible@alpha::same-model' }] };
+    const composed = withConnectionCatalogs(general, connections);
+    assert.deepEqual(composed.items.map((item) => item.value), [first.items[0].value,
+        'openai::same-model', 'openai-compatible::same-model', 'openai-compatible@beta::same-model',
+        'openai-compatible@alpha::same-model']);
+    const { items: _items, ...provenance } = composed;
+    const { items: _generalItems, ...originalProvenance } = general;
+    assert.deepEqual(provenance, originalProvenance);
+    for (const incoming of [
+        { read_state: 'transport', errors: [{ error: 'offline' }] },
+        { items: [], model_sources: [], errors: [{ error: 'source failed' }] },
+        { items: [{ value: 'openai::new' }], model_sources: [], partial: true },
+        { items: [{ value: 'openai::new' }], model_sources: [], errors: [] },
+        { items: [], model_sources: [], errors: [] },
+    ]) {
+        const refreshed = mergeModelCatalog(general, incoming);
+        const after = withConnectionCatalogs(refreshed, connections);
+        assert.deepEqual(after, { ...refreshed, items: [...refreshed.items.filter((item) =>
+            item.value !== 'openai-compatible@alpha::old'), ...connections['openai-compatible@alpha']] });
+        assert.deepEqual(withConnectionCatalogs(refreshed, { 'openai-compatible@alpha': [] }).items,
+            refreshed.items.filter((item) => item.value !== 'openai-compatible@alpha::old'));
+    }
+    assert.ok(general.items.some((item) => item.value === 'openai-compatible@alpha::old'), 'composition does not mutate the general store');
+    assert.deepEqual(withConnectionCatalogs({ items: [
+        { value: 'openai-compatible@default::old' }, { value: 'openai-compatible@beta::old' },
+    ] }, { 'openai-compatible': [] }).items, [{ value: 'openai-compatible@beta::old' }],
+    'source identity uses the existing parser, including the built-in default alias');
+});
 
 test('unread, failed, and stale discovery preserve last-known entries with their provenance', () => {
     const before = mergeModelCatalog({}, first);
@@ -56,7 +113,7 @@ test('one unreachable source is partial, not a failed catalog: the API models th
     assert.match(note, /2 API models loaded/, 'the subscription entry is not an API model');
     assert.doesNotMatch(note, /^Model catalog could not be read/);
     assert.match(note, /selection are kept/);
-    assert.match(note, /Refresh Model Catalog/);
+    assert.match(note, /Refresh model catalog/);
     // One API model reads as one.
     assert.match(catalogReadNote(mergeModelCatalog({}, { items: [{ value: 'openai::only' }],
         errors: [{ error: 'daemon unreachable' }] })), /1 API model loaded/);
@@ -201,7 +258,7 @@ test('accounts sharing one cause are one clause with the profiles named, not one
         + ' The account has an active quota limit; proton4: The selected managed Codex account requires'
         + ' sign-in; gptopro6: The account has no verified current catalog credential.'
         + ' 2 API models loaded. Existing suggestions and your selection are kept.'
-        + ' Refresh Model Catalog in Models to retry.');
+        + ' Refresh model catalog in Models to retry.');
     // Every cause is still named: only the repeated subjects are counted.
     for (const cause of [QUOTA_LIMIT, 'requires sign-in', 'no verified current catalog credential']) {
         assert.ok(note.includes(cause), cause);

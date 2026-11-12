@@ -17,7 +17,7 @@ from tests._work_projection_shared import work_fields
 from tests.test_design_system_gate_browser import rest
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WORK = '.nav-project-row[data-project-id="p-work"]'
 FRAMES = '() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))'
 OBSERVE = """() => {
@@ -27,8 +27,14 @@ OBSERVE = """() => {
         constructor(...args) { super(...args); sidebarSockets.push(this); }
     };
     window.sidebarReads = [];
+    // A state read the page itself retires (a socket change aborts the read in flight, state_snapshots.js `retire()`)
+    // never consumes its body: it settles by this abort, so it is counted apart from the bodies read above.
+    window.sidebarRetired = 0;
     const nativeFetch = window.fetch.bind(window);
     window.fetch = async (...args) => {
+        if (new URL(args[0], location.href).pathname === '/api/state') {
+            args[1]?.signal?.addEventListener('abort', () => { sidebarRetired += 1; }, { once: true });
+        }
         const response = await nativeFetch(...args);
         if (new URL(args[0], location.href).pathname === '/api/state') {
             const nativeJson = response.json.bind(response);
@@ -307,11 +313,14 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
 
     # One page-wide state read is in flight at a time: a forced refresh that
     # lands while an absence response is held starts no second read and
-    # coalesces into one follow-up that begins once the held read settles. The
-    # only thing that outruns a held read is the socket's own generation bump,
-    # so make the held absence stale with a real close and reconnect and prove
-    # it can neither clear the row nor hide the marker once it is released; the
-    # follow-up, sequenced after it, is what carries the current census.
+    # coalesces into one follow-up. The only thing that outruns a held read is
+    # the socket's own generation bump, which retires it: the read is aborted at
+    # the transport, its body is never read and the follow-up starts at once
+    # (state_snapshots.js `retire()`). So make the held absence stale with a real
+    # close and reconnect, and prove its late answer can neither clear the row nor
+    # hide the marker while the new generation's own reads are still held. The
+    # census is current again before the socket changes, so every read after the
+    # change asks for it and only the held read keeps the absence it was answered with.
     refresh(active_chat_activities=initial)
     mode['fault'] = 'hold'
     body['active_chat_activities'] = []
@@ -323,25 +332,23 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     sockets[-1].send(json.dumps({'type': 'projects_changed'}))
     page.wait_for_timeout(300)
     assert page.evaluate('() => sidebarHeldCount()') == 1, 'a forced refresh behind a held read starts no second read'
-    connections = len(sockets)
-    sockets[-1].close()
-    observe('p-work', 'ring', 'unread')
-    page.wait_for_function('n => sidebarSockets.length > n && sidebarSockets.at(-1).readyState === WebSocket.OPEN', arg=connections)
     body['active_chat_activities'] = initial
     body['_testRevision'] += 1
     fresh_revision = body['_testRevision']
-    stale_reads, held[:] = list(held), []
-    for route, old in stale_reads:
-        route.fulfill(json=old)
-    # Every released read (the gated one and the socket's own SHA reads) consumes
-    # its body, so this pins the gated read's settle, not merely the first body.
-    page.wait_for_function('([rev, n]) => sidebarReads.filter(r => r === rev).length >= n',
-                           arg=[stale_revision, len(stale_reads)])
-    # The coalesced follow-up starts only now, behind the settled stale read,
-    # and captures the census as it is now: it is held so the stale absence
-    # stands alone when the row is judged.
+    stale_route, stale_body = held.pop()
+    retired = page.evaluate('() => sidebarRetired')
+    connections = len(sockets)
+    sockets[-1].close()
+    observe('p-work', 'ring', 'unread')
+    # The close retires the read it held: the page aborts it itself, so nothing is left to be consumed.
+    page.wait_for_function('n => sidebarRetired > n', arg=retired)
+    page.wait_for_function('n => sidebarSockets.length > n && sidebarSockets.at(-1).readyState === WebSocket.OPEN', arg=connections)
+    stale_route.fulfill(json=stale_body)
+    # The reconnect asks for the census again (after retiring the follow-up the close started), and that read is
+    # held: the retired absence stands alone when the row is judged.
     page.wait_for_function('() => sidebarHeldCount().then(n => n > 0)')
     page.evaluate(FRAMES)
+    assert stale_revision not in page.evaluate('() => sidebarReads'), 'no consumer read the retired absence'
     observe('p-work', 'ring', 'unread')
     assert marker('p-work').is_visible()
     mode['fault'] = ''
@@ -450,7 +457,7 @@ def horizontal(rect):
     return rect and {key: rect[key] for key in ('left', 'right', 'width')}
 
 
-def assert_rail(page, rows, states, *, lit=()):
+def assert_rail(page, rows, states):
     """Every drawn mark shares one 18px column, its shape and hue as the room and the row's unread fact say."""
     live = [row for row in rows.values() if not row['deleting']]
     marker = next(row['marker'] for row in live if row['drawn'])
@@ -479,10 +486,9 @@ def assert_rail(page, rows, states, *, lit=()):
         if row['hue'] in tokens:
             assert row['dotColor'] == tokens[row['hue']], (row['id'], row['dotColor'])
         else:
-            # The row's own ink, hovered, lit or not (a chosen row's ink included); never a project colour of its own.
+            # The row's own ink, hovered, chosen or not (a chosen row's ink included); never a project colour of its own.
             assert row['dotColor'] == row['rowColor'], (row['id'], row['dotColor'], row['rowColor'])
-            if row['id'] not in lit:
-                assert row['dotColor'] != project, row['id']
+            assert row['dotColor'] != project, row['id']
     for row in rows.values():
         if not row['deleting']:
             continue
@@ -588,15 +594,16 @@ def test_sidebar_activity_rail_geometry(subscription_ui, width, theme, reduced):
     capture('read')
 
     if width >= 700:
-        # The open room's title takes the project ink, and its working dots with it (the row's own ink); slots stay put.
+        # The open room is the chosen place, one recipe for Main and a Project row (#2886 7426e9fbf, U005): its title
+        # takes the chosen ink and its working dots with it (the row's own ink), never a project colour; slots stay put.
         page.locator('[data-project-id="p-w"]').click()
         page.locator('#project-panel').wait_for(state='visible')
         page.mouse.move(width / 2, 600)
-        settled('p-w', '--project')
+        settled('p-w', '--tone-crimson-ink')
         lit = rail_rows(page)
-        assert lit['p-w']['active'] and lit['p-w']['rowColor'] == token_color(page, 'p-w', '--project')
+        assert lit['p-w']['active'] and lit['p-w']['rowColor'] == token_color(page, 'p-w', '--tone-crimson-ink')
         assert lit['p-w']['dotColor'] == lit['p-w']['rowColor']
-        same_rail(reference, assert_rail(page, lit, states, lit=('p-w',)))
+        same_rail(reference, assert_rail(page, lit, states))
         capture('active')
         page.locator('#project-panel-close').click()
         page.locator('#project-panel').wait_for(state='hidden')

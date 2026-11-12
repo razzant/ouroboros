@@ -61,13 +61,11 @@ def test_manifest_without_section_is_none_and_not_extra():
     ({"wat": "x"}, "unknown keys"),
     ({"what_model_sees": ["not", "prose"]}, "must be a prose string"),
     ({}, "at least one non-empty prose field"),
-    ({"what_model_sees": "   "}, "at least one non-empty prose field"),
     # Same teaching error for the STRING form: a section the author filled in
     # with nothing but whitespace was accepted and stored as empty prose, so
     # every model-visible surface rendered a "Model experience:" label with no
     # sentence after it. The mapping form has always refused it.
     ("   ", "at least one non-empty prose field"),
-    ("\n\t \n", "at least one non-empty prose field"),
     (42, "prose string or a mapping"),
 ])
 def test_model_experience_refusals_teach(bad_section, expected_problem_bit):

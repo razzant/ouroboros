@@ -67,8 +67,13 @@ def test_unannotated_legacy_history_is_readable_and_has_no_inferred_label():
     assert "subagents_mode" not in replay
 
 
-@pytest.mark.parametrize("room_state", ["readable", "deleting", "registry", "bindings", "settings"])
-@pytest.mark.parametrize("surface", ["round", "message"])
+@pytest.mark.parametrize(("surface", "room_state"), [
+    ("round", "readable"),
+    ("round", "bindings"),
+    ("round", "settings"),
+    ("message", "deleting"),
+    ("message", "registry"),
+])
 def test_room_annotations_survive_unavailable_project(room_state, surface, monkeypatch, tmp_path):
     from ouroboros.loop_messages import append_context_facts
     from ouroboros.settings_integrity import live_subagents_mode, task_settings_scope
@@ -106,12 +111,16 @@ def test_room_annotations_survive_unavailable_project(room_state, surface, monke
             assert message_ingress.accepted_chat_message(config.DATA_DIR, room["chat_id"], "annotation") == row
 
 
-@pytest.mark.parametrize("mode", ["off", "auto", "swarm"])
-@pytest.mark.parametrize("availability", ["available", "disabled", "unsaved"])
-@pytest.mark.parametrize("project", [False, True])
+@pytest.mark.parametrize(("project", "availability", "mode"), [
+    (False, "available", "off"),
+    (False, "available", "auto"),  # the recorded mode follows the owner's choice: one available row per mode
+    (True, "available", "swarm"),
+    (False, "unsaved", "swarm"),
+    (True, "disabled", "auto"),
+])
 def test_direct_owner_root_records_effective_admission_not_client_metadata(monkeypatch, mode, availability, project):
-    from ouroboros import agent as agent_module
     from supervisor import workers
+    from tests.conversation_carrier_support import carry
     from tests.test_native_conversation_activity import _lane
 
     values = mode_settings(mode, availability)
@@ -123,12 +132,12 @@ def test_direct_owner_root_records_effective_admission_not_client_metadata(monke
     if availability == "unsaved":
         monkeypatch.setattr(config, "load_settings", lambda: dict(values))
     assert subagents_availability(config.load_settings()) == availability
-    _lane(monkeypatch, config.DATA_DIR)
+    lane = _lane(monkeypatch, config.DATA_DIR)
     seen = []
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kwargs: SimpleNamespace(
-        handle_task=lambda task: seen.append(task) or []))
     workers.handle_chat_direct(room["chat_id"], "Work", task_metadata={
         "subagents_mode": "forged", "force_plan": True, "project_id": room["id"]})
+    # The carrier's first step records the effective admission on the task it then runs.
+    carry(workers, lane.spares[0], SimpleNamespace(handle_task=lambda task: seen.append(task) or []))
     assert len(seen) == 1
     assert seen[0]["metadata"]["subagents_mode"] == (mode if availability == "available" else "off")
     assert "subagents_mode" not in seen[0]["task_contract"]

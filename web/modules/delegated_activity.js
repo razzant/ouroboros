@@ -313,6 +313,7 @@ function signature(view) {
     const technical = view.stretch || view.technical;
     const origin = (from, part) => (from ? [from.after_seq, from.source?.read_through ?? from.through_seq, part.last_seq ?? null] : null);
     return JSON.stringify([view.hidden, view.silent, view.superseded, view.fullyShown,
+        typeof view.journalRetryable === 'boolean' ? view.journalRetryable : null,
         view.parts.map((shown) => [shown.part.seq ?? null, shown.text.length, Boolean(shown.continued || shown.repeats || shown.beyondPreview),
             origin(shown.from, shown.part), Boolean(shown.updated), Boolean(shown.abandoned), shown.answer ? shown.answer.folded : null,
             (shown.pieces || []).map((piece) => [origin(piece.from, piece.part), piece.text.length,
@@ -340,6 +341,20 @@ export function reconcileDelegatedItems(record) {
     }
     const speech = speechIndex((record?.items || []).map((item) => item.activity)
         .filter((activity) => activity && !isSuperseded(activity, observed.get(activity.run_id) || [])));
+    // A later permanent journal refusal changes the truth of earlier rows too.
+    // Keep raw row metadata intact, but project one current retryability fact per
+    // run so live and replay views repaint consistently without another read.
+    const journalRetryability = new Map();
+    for (const item of record?.items || []) {
+        const activity = item.activity;
+        if (!activity?.run_id) continue;
+        const facts = [activity.source?.retryable,
+            ...(activity.gaps || []).map((gap) => gap?.retryable)];
+        if (facts.includes(false)) journalRetryability.set(activity.run_id, false);
+        else if (facts.includes(true) && !journalRetryability.has(activity.run_id)) {
+            journalRetryability.set(activity.run_id, true);
+        }
+    }
     const claimed = new Map();
     const views = [];
     let stretch = null;
@@ -348,6 +363,7 @@ export function reconcileDelegatedItems(record) {
         if (!activity) { stretch = null; continue; }
         const run = activity.run_id;
         const view = project(activity, claimed.get(run) || [], observed.get(run) || [], coverage.get(run) || [], speech);
+        view.journalRetryable = journalRetryability.get(run);
         if (isExact(activity)) claimed.set(run, claimRead(claimed.get(run) || [], activity));
         view.hidden = view.empty;
         if (view.silent && stretch?.run === run && (stretch.view.stretch?.members.length || 1) < STRETCH_MEMBERS) {
@@ -388,13 +404,22 @@ function countsLine(technical) {
     return [head + note, ...kinds].join(' · ');
 }
 
-function gapLine(gap, activity) {
+function gapLine(gap, activity, journalRetryable) {
     const run = activity.run_id;
     if (NOT_READ_WHOLE.has(gap.reason)) {
         return `Not read whole: ${spanText(gap.after_seq, gap.through_seq)} (${gap.reason}). An utterance around it may lack words; the retained source keeps every line served.`;
     }
     if (gap.reason === 'stream_end_before_fence') {
         return `Not shown: ${spanText(gap.after_seq, gap.through_seq)} (stream ended before the observed cursor); coverage unresolved on run ${run}.`;
+    }
+    // After the engine refused the run's event stream its own `retryable` says whether a later wait can read
+    // the rest, and a refusal for good since then (the run's current fact) answers every earlier promise of a read;
+    // the range and the engine's code stay quiet in the row's Expand.
+    if (gap.retryable === false || journalRetryable === false) {
+        return "Not all of this run's events are shown: its journal can no longer be read, so waiting again will not show the rest. The run's result is reported separately.";
+    }
+    if (gap.retryable === true) {
+        return `Not all of this run's events are shown yet: the engine could not read its journal. ${gap.final ? 'Another wait on the run tries again.' : "The rest is read at the run's next advance or its end."}`;
     }
     const span = spanText(gap.after_seq, gap.through_seq);
     if (gap.final) {
@@ -425,16 +450,33 @@ function sourceFacts(activity) {
     return `${source.events || 0} events · ${Number(source.ref?.size || 0)} bytes (JSONL)`;
 }
 
-function sourceHtml(activity, { compact = false } = {}) {
+// Where an original this row cannot link stands: on the run's journal, unless the engine refused that journal.
+// Its own `retryable` rides the record's source or a gap: false for good, true this time.
+function unlinked(activity, onJournal, forGood, thisTime, journalRetryable) {
+    const refused = typeof journalRetryable === 'boolean' ? journalRetryable
+        : typeof activity.source?.retryable === 'boolean' ? activity.source.retryable
+        : (activity.gaps || []).find((gap) => typeof gap?.retryable === 'boolean')?.retryable;
+    return refused === false ? forGood : refused === true ? thisTime : onJournal;
+}
+
+function sourceHtml(activity, { compact = false, journalRetryable } = {}) {
     const source = activity.source || {};
     const range = spanText(activity.after_seq, source.read_through ?? activity.through_seq);
     if (source.kind === 'timeline_window') {
-        return escapeHtml(`Bounded timeline window of run ${activity.run_id} (${source.reason || 'exact event stream unavailable'}); exact originals stay on the run's journal.`);
+        const originals = unlinked(activity, "exact originals stay on the run's journal",
+            "the run's journal can no longer be read", "the engine could not read the run's journal",
+            journalRetryable);
+        return escapeHtml(`Bounded timeline window of run ${activity.run_id} (${source.reason || 'exact event stream unavailable'}); ${originals}.`);
     }
     const link = compact ? sourceLink(activity, range, sourceFacts(activity))
         : sourceLink(activity, `Full source · ${range} · ${sourceFacts(activity)}`);
     if (link) return link;
-    return escapeHtml(`${compact ? range : `Source: run ${activity.run_id} ${range}`}${source.retained === false ? ' (retention failed; originals stay on the run\'s journal)' : ''}`);
+    const lost = unlinked(activity, "originals stay on the run's journal", 'originals can no longer be read',
+        "the engine could not read the run's journal", journalRetryable);
+    const availability = source.retained === false
+        ? ` (retention failed; ${lost})`
+        : typeof journalRetryable === 'boolean' ? ` (${lost})` : '';
+    return escapeHtml(`${compact ? range : `Source: run ${activity.run_id} ${range}`}${availability}`);
 }
 
 /** Headline of one projected row. */
@@ -467,9 +509,11 @@ export function delegatedActivityBodyHtml(view, { expanded = false } = {}) {
             const whole = piece.part.truncated || piece.beyondPreview;
             const from = piece.from || shown.from;
             const own = from && from !== activity ? sourceLink(from, 'open the full source') : full;
-            const where = whole ? (own ? `Read it whole: ${own}.` : escapeHtml("The run's journal holds it whole.")) : '';
+            const where = whole ? (own ? `Read it whole: ${own}.` : escapeHtml(unlinked(activity, "The run's journal holds it whole.",
+                'The rest of it can no longer be read.', 'The rest of it was not read yet.', view.journalRetryable))) : '';
             return out.length || whole ? `<div class="chat-delegated-note">${[escapeHtml(out.join(' ')), where].filter(Boolean).join(' ')}</div>` : '';
-        }), shown.updated ? `<div class="chat-delegated-note">Updated. ${draft ? `The streamed draft is in ${draft}.` : escapeHtml("The streamed draft stays on the run's journal.")}</div>` : '',
+        }), shown.updated ? `<div class="chat-delegated-note">Updated. ${draft ? `The streamed draft is in ${draft}.` : escapeHtml(unlinked(activity,
+            "The streamed draft stays on the run's journal.", 'The streamed draft can no longer be read.', 'The streamed draft was not read yet.', view.journalRetryable))}</div>` : '',
         ].join('');
     };
     const text = (shown) => (shown.text ? renderMarkdown(shown.text, { inlineHeadingBreaks: true }) : '');
@@ -497,13 +541,15 @@ export function delegatedActivityBodyHtml(view, { expanded = false } = {}) {
     if (counts) html.push(`<div class="chat-delegated-technical">${escapeHtml(counts)}</div>`);
     if (view.omitted.length && !view.fullyShown) {
         const omitted = view.omitted.map(([kind, n]) => `${n} ${kind}`).join(', ');
-        html.push(`<div class="chat-delegated-gap">Not in this row: ${escapeHtml(omitted)}${full ? ` — ${full}` : " (on the run's journal)"}.</div>`);
+        html.push(`<div class="chat-delegated-gap">Not in this row: ${escapeHtml(omitted)}${full ? ` — ${full}`
+            : escapeHtml(unlinked(activity, " (on the run's journal)", ' (they can no longer be read)', ' (not read yet)', view.journalRetryable))}.</div>`);
     }
-    if (activity.source?.provisional && !view.superseded) {
+    // A window the engine's refusal left provisional says so in its gap line; the window itself is in Expand.
+    if (activity.source?.provisional && !view.superseded && typeof activity.source.retryable !== 'boolean') {
         html.push(`<div class="chat-delegated-gap">${escapeHtml(`Bounded timeline window shown meanwhile: the exact read failed (${activity.source.reason}).`)}</div>`);
     }
     for (const gap of view.gaps) {
-        html.push(`<div class="chat-delegated-gap${gap.final ? ' chat-delegated-final' : ''}">${escapeHtml(gapLine(gap, activity))}</div>`);
+        html.push(`<div class="chat-delegated-gap${gap.final ? ' chat-delegated-final' : ''}">${escapeHtml(gapLine(gap, activity, view.journalRetryable))}</div>`);
     }
     const rowsOmitted = Number(activity.source?.rows_omitted || 0);
     if (rowsOmitted) html.push(`<div class="chat-delegated-gap">${escapeHtml(`+${rowsOmitted} earlier timeline rows not shown (bounded window; the run's own timeline has them).`)}</div>`);
@@ -516,13 +562,18 @@ export function delegatedActivityBodyHtml(view, { expanded = false } = {}) {
         if (technical?.recentOmitted) {
             html.push(`<div class="chat-delegated-note">${escapeHtml(`${Number(technical.recentOmitted)} earlier technical events are listed in the full source${members.length > 1 ? 's' : ''}.`)}</div>`);
         }
+        // The range and code of a refused journal, quiet here beside the source (which may already name the code).
+        for (const gap of view.gaps.filter((row) => typeof row.retryable === 'boolean')) {
+            const code = gap.reason === activity.source?.reason ? '' : ` (${gap.reason})`;
+            html.push(`<div class="chat-delegated-note">${escapeHtml(`Not read: ${spanText(gap.after_seq, gap.through_seq)}${code}.`)}</div>`);
+        }
         // Words shown here from later records (joined draft pieces; a complete text and the draft it
         // replaced) keep those records' sources one click away, though their own rows folded.
         const sources = [...new Set([...members, ...view.parts.flatMap((shown) => [...(shown.sources || []),
             ...(shown.pieces || []).map((piece) => piece.from)])])];
         html.push(`<div class="chat-delegated-note chat-delegated-sources">${sources.length > 1
-            ? `Full sources: ${sources.map((member) => sourceHtml(member, { compact: true })).join(' · ')}`
-            : sourceHtml(activity)}</div>`);
+            ? `Full sources: ${sources.map((member) => sourceHtml(member, { compact: true, journalRetryable: view.journalRetryable })).join(' · ')}`
+            : sourceHtml(activity, { journalRetryable: view.journalRetryable })}</div>`);
     }
     return html.join('');
 }

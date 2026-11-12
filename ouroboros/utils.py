@@ -8,11 +8,9 @@ import hashlib
 import io
 import json
 import logging
-import math
 import os
 import pathlib
 import re as _re
-import subprocess
 import threading
 import time
 import uuid
@@ -35,8 +33,8 @@ def has_log_sink() -> bool:
     return _log_sink is not None
 
 
-def utc_now_iso() -> str:
-    return _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
+def utc_now_iso(timespec: str = "auto") -> str:
+    return _dt.datetime.now(tz=_dt.timezone.utc).isoformat(timespec=timespec)
 
 
 # Worker processes set OUROBOROS_IN_WORKER=1 before importing the agent stack.
@@ -44,16 +42,26 @@ WORKER_PROCESS_ENV = "OUROBOROS_IN_WORKER"
 
 
 def in_worker_process() -> bool:
-    """Return True inside a supervisor worker process.
-
-    Worker processes disable system proxy resolution (``trust_env=False`` /
-    ``ProxyHandler({})``) on every HTTP client they create. This is the central
-    network-transport policy that keeps workers fork-safe: the macOS
-    ``_scproxy.get_proxies`` -> ``SCDynamicStoreCopyProxies`` lookup crashes
-    (SIGSEGV) on the child side of a multi-threaded fork. It is also a clean,
-    proxy-free default for spawned workers on every platform.
-    """
+    """Return True inside a supervisor worker process (a process fact: ownership, lifelines, custody)."""
     return os.environ.get(WORKER_PROCESS_ENV) == "1"
+
+
+# The spawner's transport policy for a child: "1" forbids OS proxy resolution (``trust_env=False`` /
+# ``ProxyHandler({})``) on every HTTP client the child creates. It is the fork-safety rule — the macOS
+# ``_scproxy.get_proxies`` -> ``SCDynamicStoreCopyProxies`` lookup crashes (SIGSEGV) on the child side
+# of a multi-threaded fork — stated by the parent for the start method it used; a spawned or
+# forkserver child keeps the server's own policy, so a conversation carried by a worker reaches the
+# model the way the server would (owner decision 1A, trap 1).
+TRANSPORT_NO_PROXY_ENV = "OUROBOROS_TRANSPORT_NO_PROXY"
+
+
+def transport_no_proxy() -> bool:
+    """Whether this process must avoid OS proxy lookup: the spawner's explicit fact, else the legacy
+    worker default for a child that received none."""
+    stated = os.environ.get(TRANSPORT_NO_PROXY_ENV)
+    if stated in ("0", "1"):
+        return stated == "1"
+    return in_worker_process()
 
 
 def emit_log_event(
@@ -521,7 +529,7 @@ def assert_test_data_path(path: pathlib.Path) -> None:
 
 def append_jsonl(
     path: pathlib.Path, obj: Dict[str, Any], *, ensure_record_boundary: bool = False,
-    require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True,
+    require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True, lock_held: bool = False,
 ) -> bool:
     """Append a JSON object as a line to a JSONL file (concurrent-safe).
 
@@ -533,6 +541,8 @@ def append_jsonl(
     shared owner-aware lock primitive, so a live holder is never displaced.
     ``lock_timeout_sec=0`` takes one attempt without a contention wait, for
     shutdown callers whose grace has expired; unlocked fallback is unchanged.
+    ``lock_held``: the caller already holds this file's append lock (a read of
+    the stream and this append under one hold), so none is taken again.
     Runtime ``logs/*.jsonl`` rows are streamed to the ``set_log_sink`` sink, minus
     types with a dedicated live owner (``WORKER_LOG_SINK_SUPPRESSED_TYPES``, server
     superset ``SERVER_LOG_SINK_SUPPRESSED_TYPES``): one event, one live frame, so a
@@ -565,7 +575,7 @@ def append_jsonl(
     try:
         # Both lanes wait out a live lock holder, never displacing it;
         # the non-required lane then appends unlocked.
-        lock_fd = acquire_exclusive_file_lock(
+        lock_fd = None if lock_held else acquire_exclusive_file_lock(
             lock_path,
             timeout_sec=lock_timeout_sec,
             stale_sec=10.0,
@@ -573,7 +583,7 @@ def append_jsonl(
             owner_aware_stale=True,
         )
 
-        if require_lock and lock_fd is None:
+        if require_lock and lock_fd is None and not lock_held:
             log.warning("append_jsonl: required lock unavailable for %s", path)
             return False
 
@@ -605,7 +615,8 @@ def append_jsonl(
 
         for attempt in range(write_retries):
             try:
-                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                # Byte-exact: a Windows descriptor is text mode without O_BINARY and would write CRLF.
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o644)
             except Exception:
                 if attempt < write_retries - 1:
                     time.sleep(retry_sleep_base_sec * (2 ** attempt))
@@ -630,8 +641,8 @@ def append_jsonl(
 
         for attempt in range(write_retries):
             try:
-                with path.open("a", encoding="utf-8") as f:
-                    f.write(append_data.decode("utf-8"))
+                with path.open("ab") as f:
+                    f.write(append_data)
                 _written = True
                 return True
             except Exception:
@@ -778,37 +789,46 @@ def jsonl_archive_segments(
     return sorted(found)
 
 
-_CLOSED_SEGMENTS: Dict[str, tuple] = {}  # chain path -> (live identity, archive/ mtime, closed segments)
+_CLOSED_SEGMENTS: Dict[Any, tuple] = {}  # chain path + IO policy -> (live/directory identity, closed segments)
 
 
-def _closed_segments(path: pathlib.Path, live_stat: Any, *, strict: bool) -> List[Tuple[pathlib.Path, Any]]:
+def _closed_segments(path: pathlib.Path, live_stat: Any, *, strict: bool,
+                     listing: Optional[Callable] = None, stat: Optional[Callable] = None,
+                     directory_revision: Optional[tuple] = None) -> List[Tuple[pathlib.Path, Any]]:
     """A chain's rotated segments with their stats, oldest first, without the live file's alias; a complete
-    listing is reused while the live inode and ``archive/``'s mtime hold, the newest archive re-stat'ed."""
-    try:
-        key = (live_stat.st_dev, live_stat.st_ino, os.stat(path.parent.parent / "archive").st_mtime_ns)
+    listing is reused while the live inode and ``archive/``'s mtime hold, the newest archive re-stat'ed.
+    Confined readers supply the held directory's revision and IO seams; their cache key cannot reuse
+    an ordinary path-based capture. Both use this existing per-chain metadata cache, never a body cache."""
+    inspect = stat or pathlib.Path.stat
+    cache_name = str(path) if directory_revision is None else (str(path), "confined")
+    try:  # the live identity first: without a live file the archive is not stat'ed (the boot's cost contract)
+        live = (live_stat.st_dev, live_stat.st_ino)
+        revision = (os.stat(path.parent.parent / "archive").st_mtime_ns if directory_revision is None
+                    else ("confined", *directory_revision))
+        key = (*live, revision)
     except (AttributeError, OSError):
         key = None
-    if key is not None and (cached := _CLOSED_SEGMENTS.get(str(path))) is not None and cached[0] == key:
+    if key is not None and (cached := _CLOSED_SEGMENTS.get(cache_name)) is not None and cached[0] == key:
         with contextlib.suppress(OSError):
-            return [*cached[1][:-1], *((segment, segment.stat()) for segment, _stat in cached[1][-1:])]
+            return [*cached[1][:-1], *((segment, inspect(segment)) for segment, _stat in cached[1][-1:])]
     try:  # a listing that skipped anything is never reused
-        segments, complete, closed = jsonl_archive_segments(path, strict=True), True, []
+        segments, complete, closed = (listing or jsonl_archive_segments)(path, strict=True), True, []
     except JsonlChainUnreadable:
         if strict:
             raise
         segments, complete, closed = [], False, []
     for segment in segments:
         try:
-            stat = segment.stat()
+            observed = inspect(segment)
         except OSError as exc:
             if strict and not isinstance(exc, FileNotFoundError):
                 raise JsonlChainUnreadable(f"cannot stat {segment}: {exc}") from exc
             complete = False
             continue
-        if key is None or (stat.st_dev, stat.st_ino) != key[:2]:
-            closed.append((segment, stat))
+        if key is None or (observed.st_dev, observed.st_ino) != key[:2]:
+            closed.append((segment, observed))
     if key is not None and complete:
-        _CLOSED_SEGMENTS[str(path)] = (key, tuple(closed))
+        _CLOSED_SEGMENTS[cache_name] = (key, tuple(closed))
     return closed
 
 
@@ -818,6 +838,8 @@ def jsonl_chain_handles(
     start_offset: Optional[int] = None,
     snapshot: Optional[Dict[str, Any]] = None,
     sequential: bool = False,
+    open_file: Optional[Callable] = None,
+    closed_segments: Optional[Callable] = None,
 ) -> Iterator[Iterable[Tuple[pathlib.Path, Any]]]:
     """Open binary handles for a rotated JSONL chain; the context owns closing.
 
@@ -848,6 +870,10 @@ def jsonl_chain_handles(
     If the captured live generation rotated between calls, locate its inode
     in the archive and retain that path in the same snapshot.
 
+    ``open_file`` and ``closed_segments`` are server-owned confined IO seams
+    (binary handle; oldest-first path/stat pairs). They must be supplied together
+    on every read of that snapshot; neither accepts client paths as authority.
+
     Snapshot metadata does NOT cap the returned handle's reads: an appending
     file can expose bytes beyond the captured total. The caller must limit
     reads to that total and start a fresh snapshot for the next pass; the
@@ -864,19 +890,21 @@ def jsonl_chain_handles(
     from bisect import bisect_right
 
     path = pathlib.Path(path)
+    opener = open_file or (lambda member: member.open("rb"))
+    segments = closed_segments or _closed_segments
     state = snapshot if snapshot is not None else {}
     with contextlib.ExitStack() as stack:
         live_handle = None
         if not state:
             try:
-                live_handle = stack.enter_context(path.open("rb"))
+                live_handle = stack.enter_context(opener(path))
                 live_stat = os.fstat(live_handle.fileno())
             except OSError as exc:
                 if strict and not isinstance(exc, FileNotFoundError):
                     raise JsonlChainUnreadable(f"cannot open or stat {path}: {exc}") from exc
                 live_stat = None
             entries, ends, total = [], [], 0
-            for segment, stat in [*_closed_segments(path, live_stat, strict=strict), (path, live_stat)]:
+            for segment, stat in [*segments(path, live_stat, strict=strict), (path, live_stat)]:
                 if stat is None:
                     continue
                 total += stat.st_size
@@ -898,23 +926,25 @@ def jsonl_chain_handles(
                     handle = live_handle
                     if handle is None:
                         with contextlib.suppress(FileNotFoundError):
-                            handle = owner.enter_context(segment.open("rb"))
+                            handle = owner.enter_context(opener(segment))
                     identity = (expected.st_dev, expected.st_ino)
                     actual = os.fstat(handle.fileno()) if handle is not None else None
                     if actual is None or (actual.st_dev, actual.st_ino) != identity:
                         if handle is not None:
                             handle.close()
-                        for candidate in jsonl_archive_segments(path, strict=strict):
+                        candidates = (segments(path, None, strict=strict) if closed_segments else
+                                      ((candidate, None) for candidate in jsonl_archive_segments(path, strict=strict)))
+                        for candidate, stat in candidates:
                             with contextlib.suppress(FileNotFoundError):
-                                stat = candidate.stat()
+                                stat = stat or candidate.stat()
                                 if (stat.st_dev, stat.st_ino) == identity:
                                     segment = entries[index][0] = candidate
                                     break
                         else:
                             raise JsonlChainUnreadable(f"original live generation missing at {path}")
-                        handle = owner.enter_context(segment.open("rb"))
+                        handle = owner.enter_context(opener(segment))
                 else:
-                    handle = owner.enter_context(segment.open("rb"))
+                    handle = owner.enter_context(opener(segment))
                 if start_offset is not None:
                     if os.fstat(handle.fileno()).st_size < expected.st_size:
                         raise JsonlChainUnreadable(f"shortened chain segment {segment}")
@@ -950,28 +980,6 @@ def iter_jsonl_chain_objects(
     with jsonl_chain_handles(pathlib.Path(path)) as handles:
         for segment, handle in handles:
             yield from iter_jsonl_objects(segment, dict_only=dict_only, _handle=handle)
-
-
-def iter_llm_usage_events(
-    path: pathlib.Path,
-    *,
-    max_entries: Optional[int] = None,
-    tail_bytes: Optional[int] = None,
-) -> Iterator[Dict[str, Any]]:
-    yield from (event for event in iter_jsonl_objects(path, max_entries=max_entries, tail_bytes=tail_bytes)
-                if event.get("type") == "llm_usage")
-
-
-def llm_usage_cost(event: Dict[str, Any]) -> float:
-    usage = event.get("usage")
-    value = event.get("cost")
-    if value is None and isinstance(usage, dict):
-        value = usage.get("cost")
-    try:
-        cost = float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    return cost if math.isfinite(cost) else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1191,9 +1199,10 @@ def run_cmd(
     # depend on the operator's locale: a Russian-locale git answers «метка … уже
     # существует» where the code and its tests match "already exists".
     from ouroboros.git_observation import host_git_env
+    from ouroboros.work_domain import run  # a command in a work folder runs as the work domain, never here
 
     env = host_git_env()
-    res = subprocess.run(
+    res = run(
         cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, env=env,
         timeout=timeout,
     )
@@ -1247,6 +1256,16 @@ def sanitize_task_for_event(
                 metadata = dict(metadata)
                 metadata["origin_message_text"] = truncate_for_log(nested, threshold)
                 sanitized["metadata"] = metadata
+
+        # A wake's delivery forms and row addresses (``consciousness_wake.bind_wake_observation``) grow with its
+        # window; the task document and the stored source keep them, an event copy keeps only their sizes.
+        wake = metadata.get("wake_observation") if isinstance(metadata, dict) else None
+        if isinstance(wake, dict):
+            bodies = {key for key, value in wake.items()
+                      if key.endswith(("_text", "_rows", "_in_fallback")) and isinstance(value, (str, list))}
+            kept = {key: value for key, value in wake.items() if key not in bodies}
+            metadata = {**metadata, "wake_observation": {**kept, **{f"{key}_len": len(wake[key]) for key in bodies}}}
+            sanitized["metadata"] = metadata
 
         # The event needs one contract; the live task keeps both mirrors.
         contract = sanitized.get("task_contract")

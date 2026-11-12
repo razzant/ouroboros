@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from tests.test_composer_capsules_browser import LONG_VALUES, _record
+from tests.test_composer_capsules_browser import LONG_VALUES, _observe_context, _record, _sent
 from tests.test_effort_range_browser import _launch, _open_chat, _shot
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 PROBE = """() => {
     const seen = new WeakSet(), rows = [], observers = [];
@@ -41,7 +41,7 @@ PROBE = """() => {
     probe.sampleAll = () => rows.filter(r => r.isConnected).forEach(probe.sample);
     const mount = new MutationObserver(() => {
         for (const row of document.querySelectorAll('.chat-toolbar-row')) {
-            if (seen.has(row) || row.querySelectorAll('.chat-capsule').length !== 3) continue;  // Subagents, Context, Effort
+            if (seen.has(row) || row.querySelectorAll('.chat-capsule').length !== 4) continue;  // Model, Subagents, Context, Effort
             seen.add(row); rows.push(row);
             const observer = new ResizeObserver(() => probe.sample(row));
             observer.observe(row); observers.push(observer);
@@ -72,7 +72,7 @@ def _assert_phase(page, room, *, names=None):
     assert rows, (room, facts)
     assert all(row["oneLine"] and row["contained"] for row in rows), rows
     if names is not None:
-        assert all(row["names"] == [names] * 3 for row in rows), rows
+        assert all(row["names"] == [names] * 4 for row in rows), rows
     assert page.evaluate("__composerPaint.errors") == []
     return rows
 
@@ -113,6 +113,7 @@ def test_width_show_and_translation_do_not_wait_a_painted_frame(direct_server_wi
             language = {"payload": {"language": "en", "english": True, "entries": {}, "revision": 0}}
             page.route("**/api/ui/i18n", lambda route: route.fulfill(json=language["payload"]))
             page.route("**/api/ui/i18n/missing", lambda route: route.fulfill(json={"ok": True}))
+            _observe_context(page, [_sent("max")])  # Context's closed word is an observed mode; this one agrees with Max
             _open_chat(page, direct_server_with_data["url"], width=1440)
             for width in (360, 600, 340, 1440):
                 _phase(page, f"viewport-{width}")
@@ -183,7 +184,7 @@ def test_restored_project_width_and_real_splitter_fit_before_paint(direct_server
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 @pytest.mark.parametrize("kind", ["context", "effort"])
-def test_value_change_preserves_owner_selection_motion(direct_server_with_data, engine, kind, tmp_path):  # noqa: F811
+def test_value_refresh_preserves_owner_selection_motion(direct_server_with_data, engine, kind, tmp_path):  # noqa: F811
     """A final position alone passes when the text observer cancels the owner's transition."""
     from playwright.sync_api import sync_playwright
 
@@ -208,6 +209,9 @@ def test_value_change_preserves_owner_selection_motion(direct_server_with_data, 
                 const observer = new MutationObserver(() => {
                     if (started) return;
                     started = true;
+                    // Context keeps the observed word when its saved choice moves. Refresh that same
+                    // word during the move: its text observer must still leave the transition alone.
+                    if (kind === 'context') value.replaceChildren(document.createTextNode(value.textContent));
                     // Registered after the product observer; sample after its whole microtask turn.
                     queueMicrotask(() => {
                         probe.samples.push(sample());
@@ -219,7 +223,8 @@ def test_value_change_preserves_owner_selection_motion(direct_server_with_data, 
                         requestAnimationFrame(tick);
                     });
                 });
-                observer.observe(value, {childList: true, characterData: true, subtree: true});
+                if (kind === 'context') observer.observe(mark, {attributes: true, attributeFilter: ['style']});
+                else observer.observe(value, {childList: true, characterData: true, subtree: true});
             }""", {"selector": selector, "kind": kind})
             if kind == "context":
                 page.locator(selector + ' .chat-seg[data-mode="nano"]').click()
@@ -228,6 +233,9 @@ def test_value_change_preserves_owner_selection_motion(direct_server_with_data, 
                 page.keyboard.press("ArrowLeft")
             page.wait_for_function("window.__selectionMotion?.done")
             facts = page.evaluate("__selectionMotion")
+            if kind == "context":
+                assert page.locator(selector + ' .chat-seg[aria-checked="true"]').get_attribute("data-mode") == "nano"
+                assert page.locator(selector + " .chat-capsule-value").text_content() == "—"
             assert facts["start"]["animations"] == 0, facts
             assert abs(facts["start"]["left"] - facts["samples"][-1]["left"]) > 1, facts
             assert any(s["animations"] > 0 and abs(s["left"] - facts["samples"][-1]["left"]) > 0.5 for s in facts["samples"]), facts

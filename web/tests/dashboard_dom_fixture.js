@@ -61,10 +61,12 @@ export class NodeStub {
             if (!tag) continue;
             const node = new NodeStub(tag);
             for (const attr of token.slice(tag.length + 1, -1).matchAll(/([\w-]+)(?:="([^"]*)")?/g)) {
-                node.setAttribute(attr[1], attr[2] ?? '');
+                const value = (attr[2] ?? '').replace(/&quot;|&#39;|&lt;|&gt;|&amp;/g,
+                    (entity) => ({ '&quot;': '"', '&#39;': "'", '&lt;': '<', '&gt;': '>', '&amp;': '&' })[entity]);
+                node.setAttribute(attr[1], value);
             }
             stack.at(-1).appendChild(node);
-            if (!['input', 'br', 'hr', 'img', 'meta', 'link'].includes(tag)) stack.push(node);
+            if (!['input', 'br', 'hr', 'img', 'meta', 'link', 'wbr'].includes(tag)) stack.push(node);
         }
     }
     appendChild(node) { node.remove(); node.parentElement = this; this.children.push(node); return node; }
@@ -82,6 +84,8 @@ export class NodeStub {
     contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
     matches(selector) {
         if (selector.includes(',')) return selector.split(',').some((part) => this.matches(part.trim()));
+        const tagged = selector.match(/^([a-z][\w-]*)(\[.+\])$/);  // `details[data-key="…"]`: the tag, then its brackets
+        if (tagged) return this.tagName === tagged[1] && this.matches(tagged[2]);
         if (selector.includes('][')) return (selector.match(/\[[^\]]+\]/g) || []).every((part) => this.matches(part));
         if (selector.startsWith('#')) return this.id === selector.slice(1);
         if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
@@ -111,7 +115,8 @@ export function setup(t) {
         body,
         hidden: false,
         activeElement: null,
-        defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+        // A window a bound control may listen to (a model chooser closes its list on the window's blur).
+        defaultView: { getComputedStyle: () => ({ visibility: 'visible' }), addEventListener() {}, removeEventListener() {} },
         createElement: (tag) => new NodeStub(tag),
         createTextNode: (data) => new TextStub(data),
         getElementById: (id) => mount.querySelector(`#${id}`) || body.querySelector(`#${id}`),

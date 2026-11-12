@@ -127,6 +127,14 @@ def density_probe_before_size_refusal(ctx: Any, model: str, sample: str, *, surf
     return outcome
 
 
+def triad_fit_note(touched_paths: Sequence[str]) -> str:
+    """What a packet says in place of the full snapshots it dropped to fit the strictest reviewer."""
+    return ("TRIAD FIT NOTE: Full post-change snapshots were omitted because they duplicate the complete staged diff "
+            "and would exceed the strictest configured reviewer's input limit. Every touched path is listed below; "
+            "all added/deleted lines remain in the staged diff.\n\n"
+            + ("\n".join(f"- {path}" for path in touched_paths) or "(no paths reported)"))
+
+
 def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
                      diff_text: str, changed: str, target_repo, ctx=None,
                      subject=None, slots: Optional[list] = None, compact_diff=None) -> tuple:
@@ -210,13 +218,7 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
             input_limit = _rv._quorum_input_token_limit(keys, slot_limits)
     if input_limit and estimate_tokens(prompt) > input_limit:
         touched_paths = [line.strip() for line in changed.splitlines() if line.strip()]
-        fit_note = (
-            "TRIAD FIT NOTE: Full post-change snapshots were omitted because they "
-            "duplicate the complete staged diff and would exceed the strictest "
-            "configured reviewer's input limit. Every touched path is listed below; "
-            "all added/deleted lines remain in the staged diff.\n\n"
-            + ("\n".join(f"- {path}" for path in touched_paths) or "(no paths reported)")
-        )
+        fit_note = triad_fit_note(touched_paths)
         prompt, stable_prefix_len = assemble(fit_note, diff_text)
         if input_limit and estimate_tokens(prompt) > input_limit:
             from ouroboros.tools.review_binary_context import StagedDiffUnavailable
@@ -414,7 +416,7 @@ PACKET_TEMPLATE_DYNAMIC = """\
 def assemble_packet_prompt(*, layer: str, checklist_section: str, governance: Any, goal_section: str,
                            scope_section: str, files_section: str, diff_text: str, changed_files: str,
                            rebuttal_section: str = "", review_history_section: str = "",
-                           task_evidence_section: str = "") -> Tuple[str, int]:
+                           task_evidence_section: str = "", words_section: str = "") -> Tuple[str, int]:
     """The packet seat's Part-1 prompt: ``(prompt, stable_prefix_len)``. The stable
     governance prefix is byte-identical across rounds and becomes the cache-marked
     block; the change-class governance block opens the dynamic half."""
@@ -430,11 +432,88 @@ def assemble_packet_prompt(*, layer: str, checklist_section: str, governance: An
         checklist_section=checklist_section,
     ) + (f"\n{stable_inline}\n" if stable_inline.strip() else "")
     dynamic = (f"{tail}\n\n" if tail else "") + PACKET_TEMPLATE_DYNAMIC.format(
-        goal_section=goal_section, scope_section=scope_section, current_files_section=files_section,
+        goal_section=goal_section, scope_section=scope_section,
+        current_files_section=files_section + ("\n\n" + words_section if words_section else ""),
         rebuttal_section=rebuttal_section, review_history_section=review_history_section,
         diff_text=diff_text, changed_files=changed_files, task_evidence_section=task_evidence_section,
     )
     return stable + "\n" + dynamic, len(stable) + 1
+
+
+def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = True) -> Tuple[list, list, list]:
+    """``(every seat, packet, retrieving)``: what the review contract (``commit_gate.commit_review_contract_fingerprint``)
+    counts of the change brief on ``layer``, a delivery's part built only when ``packet`` / ``retrieving`` seats sit:
+    each owner's seat-visible text rendered over fixed placeholder data in its branches, a round-dependent section in
+    every round, and on the body the diff pulse's judgment question and growth rule. The subject, the author's words,
+    host records (the pulse's counts and paths too) and guide bodies are data; the session and native wrappers are
+    their owners' (``seat_brief_material``)."""
+    from types import SimpleNamespace
+
+    from ouroboros.owner_words import reviewer_words_material
+    from ouroboros.review_words import words_material
+    from ouroboros.preflight_receipts import execution_material
+    from ouroboros.reference_books import BOOK_GROWTH_RULE
+    from ouroboros.review import DIFF_PULSE_QUESTION
+    from ouroboros.review_evidence import evidence_material
+    from ouroboros.review_history import history_material
+    from ouroboros.tools.review_brief_coupling import retrieving_material
+    from ouroboros.tools.review_change import wave_label_material
+    from ouroboros.tools.review_file_pack import pack_exclusion_note, pack_omission_note
+    from ouroboros.tools.review_helpers import intent_material
+    from ouroboros.tools.review_multi_model import packet_head_material
+    from ouroboros.tools.review_prompt_text import round_material
+    from ouroboros.tools.review_subject import managed_material
+
+    every = [*intent_material(), *wave_label_material(), *round_material(), *history_material(), *words_material(),
+             *reviewer_words_material(), *execution_material(), *managed_material((True,)),
+             *((DIFF_PULSE_QUESTION, BOOK_GROWTH_RULE) if layer == "body" else ())]
+    if not packet:
+        return every, [], [*retrieving_material(layer), *evidence_material(("session", "native")),
+                           *managed_material((False,))] if retrieving else []
+    governance = SimpleNamespace(stable_inline="⟨governance⟩", selected_inline="⟨governance⟩", navigation="⟨navigation⟩")
+    prompt, _stable = assemble_packet_prompt(
+        layer=layer, checklist_section="⟨checklist⟩", governance=governance, goal_section="⟨goal⟩", scope_section="⟨scope⟩",
+        files_section="⟨files⟩", diff_text="⟨diff⟩", changed_files="⟨paths⟩", rebuttal_section="⟨rebuttal⟩",
+        review_history_section="⟨history⟩", task_evidence_section="⟨evidence⟩")
+    packet_words = [prompt, *packet_head_material(layer), triad_fit_note(["⟨path⟩"]), triad_fit_note([]),
+                    pack_omission_note(["⟨path⟩"]), pack_exclusion_note(["⟨path⟩"], ["⟨path⟩"]),
+                    *evidence_material(("packet",))]
+    return every, packet_words, [*retrieving_material(layer), *evidence_material(("session", "native")),
+                                 *managed_material((False,))] if retrieving else []
+
+
+def seat_brief_material(row_plan: dict, *, layer: str, surface: str, shape: str, own: Sequence[str] = (),
+                        packet: Optional[Sequence[str]] = None, retrieving: Sequence[str] = ()) -> list:
+    """The seats' requests as the review contract counts them: the surface's own words (``own`` every seat,
+    ``packet`` / ``retrieving`` only while a seat of that delivery sits; no ``packet``: the change brief), the
+    layer's governance navigation, and the wrapper of each seated delivery with the answer contract of ``shape``
+    (``triad_review.default_output_contract``): an agent session per access, a native episode."""
+    from ouroboros.review_execution import review_session_output_schema
+    from ouroboros.review_native_episode import native_material
+    from ouroboros.review_session_preparation import session_material
+    from ouroboros.reviewer_slot_config import row_plan_retrieves
+    from ouroboros.tools.governance_context import PACKET_DELIVERY, RETRIEVING_DELIVERY, navigation_material
+    from ouroboros.tools.review_multi_model import TRIAD_ROLE_HINT
+    from ouroboros.triad_review import default_output_contract
+
+    count = len(row_plan.get("models") or [])
+    routes = [str(getattr(route, "value", route) or "") for route in row_plan.get("routes") or []]
+    accesses = [str(access or "readonly") for access in [*(row_plan.get("session_accesses") or []), *[""] * count]]
+    retrieves = [row_plan_retrieves(row_plan, index) for index in range(count)]
+    sessions = [accesses[index] for index in range(count) if retrieves[index] and routes[index] == "agent_session"]
+    if packet is None:  # the change brief, its seated deliveries' parts only
+        every, packet, triad_retrieving = change_brief_words(layer, packet=not all(retrieves), retrieving=any(retrieves))
+        own, retrieving = [*own, *every], [*retrieving, *triad_retrieving]
+    contract, brief = default_output_contract(shape), list(own)
+    if not all(retrieves):
+        brief += [*packet, *navigation_material(layer, PACKET_DELIVERY)]
+    if any(retrieves):
+        brief += [TRIAD_ROLE_HINT, *retrieving, *navigation_material(layer, RETRIEVING_DELIVERY)]
+    if sessions:
+        brief += session_material(surface, contract, review_session_output_schema(surface, shape), sessions)
+    if len(sessions) < sum(retrieves):
+        brief += native_material(surface, contract)
+    return brief
 
 
 def source_root_for(ctx: Any, task_evidence: dict) -> str:
@@ -478,7 +557,7 @@ def retrieving_brief_for_seat(*, review_root: Any, governance_root: Any, path_su
                               intent: Any, parts: Sequence[str], delegated: bool, model: str, slot_id: str,
                               session_profile: str = "", use_local: Optional[bool] = None,
                               task_evidence_section: str = "", drive_root: Any = None, task_id: str = "",
-                              source_root: str = "") -> Tuple[str, dict]:
+                              source_root: str = "", review_words: Any = None) -> Tuple[str, dict]:
     """ONE retrieving seat's two-part brief and its manifest, from the subject's
     frozen trees: the touched paths, the candidate tree identity and the
     change-relative required-source manifest are computed here, the text by
@@ -496,7 +575,8 @@ def retrieving_brief_for_seat(*, review_root: Any, governance_root: Any, path_su
         commit_message=commit_message, intent=intent,
         drive_root=pathlib.Path(drive_root) if drive_root else None,
         governance_repo_dir=pathlib.Path(governance_root) if governance_root else None,
-        managed_subject=managed_subject, diff_text=diff_text, task_evidence_section=task_evidence_section,
+        managed_subject=managed_subject, diff_text=diff_text, review_words=review_words,
+        task_evidence_section=task_evidence_section,
         required_sources=rows, required_sources_ref=required_sources_ref(rows, staged_tree_sha=tree_sha),
         touched_manifest=touched_manifest(repo_dir, touched), touched_paths=tuple(path for _s, path in touched),
         layer=layer, checklist_section=checklist_section, parts=tuple(parts), delegated=delegated, model=model,
@@ -530,7 +610,7 @@ def prepare_retrieving_seats(ctx: Any, row_plan: dict, models: list, row_routes:
                              target_repo, governance_root, subject, frozen, diff_text: str, layer: str,
                              checklist_section: str, commit_message: str, goal: str, scope: str,
                              review_rebuttal: str, owner_words: str, task_evidence: dict,
-                             preflight_execution: Optional[dict] = None, diff_pulse: str = "") -> tuple:
+                             preflight_execution: Optional[dict] = None, diff_pulse: str = "", review_words: Any = None) -> tuple:
     """Every retrieving seat receives ITS OWN two-part brief (Part 1 the change,
     Part 2 the coupling questions; a coupling-only seat answers Part 2 alone),
     sized to the seat's own first-send bound. Returns ``(row_plan,
@@ -574,7 +654,7 @@ def prepare_retrieving_seats(ctx: Any, row_plan: dict, models: list, row_routes:
                 session_profile=str(row_plan["session_profiles"][i] or ""), use_local=row_plan["use_local"][i],
                 drive_root=getattr(ctx, "drive_root", None),
                 task_id=str(getattr(ctx, "task_id", "") or "") or "commit_review",
-                source_root=source_root_for(ctx, task_evidence))
+                source_root=source_root_for(ctx, task_evidence), review_words=review_words)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
             from ouroboros.llm_claudexor import propagate_model_error
             propagate_model_error(exc)
@@ -675,19 +755,23 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
             checklist_section=checklist_section, commit_message=commit_message, intent=intent, parts=parts,
             delegated=delegated, model=model, slot_id=slot_id, session_profile=str(_field("session_profile") or ""),
             use_local=_field("use_local", None), task_evidence_section=task_evidence_section, drive_root=drive_root,
-            task_id=task_id, source_root=source_root)
+            task_id=task_id, source_root=source_root, review_words=frozen_subject.review_words)
         return {"system": text, "user": TRIAD_USER_TURN, "parts": list(parts), "sha": manifest["sha"],
                 "delivery": "retrieving", "manifest": manifest, "stable_prefix_len": 0}
     # A packet seat: the assembled change evidence, fit to the seat's window.
-    from ouroboros.tools.review_file_pack import build_touched_file_pack, triad_pack_exclusions
+    from ouroboros.tools.review_file_pack import build_touched_file_pack, pack_omission_note, triad_pack_exclusions
+    from ouroboros.review_words import section_budget
+
+    words = frozen_subject.review_words
 
     touched_paths = [path for _status, path in frozen_subject.name_status] if frozen_subject.name_status else [
         p.strip() for p in str(_rv.run_cmd(["git", "diff", "--cached", "--name-only"], cwd=review_root) or "").splitlines() if p.strip()]
     slot = ReviewSlot(slot_id=slot_id, model=model, session_profile=str(_field("session_profile") or ""),
                       use_local=_field("use_local", None))
+    words_section = words.render(section_budget(_rv._triad_governance_usable_window([model], [slot])))
     governance = _rv._triad_governance_context(
         None, touched_paths, checklist_section, [model], [slot], governance_root=governance_root, layer=layer,
-        subject_root=review_root if layer != "body" else None)
+        subject_root=review_root if layer != "body" else None, review_words=words)
     managed = frozen_subject.managed
     exclude_paths, exclusion_note = (set(), "") if managed is not None else triad_pack_exclusions(
         review_root, touched_paths, prefix_texts=dict(governance.inline_whole_documents))
@@ -696,7 +780,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
         m0_tree=getattr(managed, "m0_tree", "") or "", staged_tree=getattr(managed, "staged_tree", "") or "",
         exclude_paths=exclude_paths)
     if omitted:
-        files_section += f"\n\n⚠️ OMISSION NOTE: {len(omitted)} file(s) omitted from direct context: {', '.join(omitted)}"
+        files_section += f"\n\n{pack_omission_note(omitted)}"
     if exclusion_note:
         files_section += f"\n\n{exclusion_note}"
     changed = "\n".join(touched_paths)
@@ -706,7 +790,13 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
             layer=layer, checklist_section=checklist_section, governance=governance, goal_section=goal_section,
             scope_section=scope_section, files_section=files or "(no touched files could be read)", diff_text=diff,
             changed_files=changed, rebuttal_section=rebuttal_section, review_history_section=history_section,
-            task_evidence_section=task_evidence_section)
+            task_evidence_section=task_evidence_section, words_section=words_section)
+
+    def _compact_words():
+        nonlocal words_section
+        words_section = words.omission()
+    if words_section:
+        _assemble.compact_optional_evidence = _compact_words
 
     prompt, stable_len, fit_error = fit_triad_prompt(
         [model], _assemble, files_section, frozen_subject.diff_text, changed, str(review_root), ctx=None,
@@ -812,6 +902,8 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
     if admission is None:
         return None
     usd = lambda value: "unknown" if value is None else f"${float(value):.6f}"  # noqa: E731
+    from ouroboros.cost_projection import uncounted_money_text  # each uncounted part by its ledger name (P8)
+    _beside = lambda facts, prefix="": f" ({text}; not counted)" if (text := uncounted_money_text(facts, decimals=6, prefix=prefix)) else ""  # noqa: E731,E501
     bounds = list(admission.get("slot_bounds") or []) + [None] * len(seats)
     wave, remaining = admission.get("estimated_wave_usd"), admission.get("remaining_usd")
     limit, known = admission.get("limit_usd"), admission.get("known_usd")
@@ -821,16 +913,14 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
         # a per-task fence the wave would have fit.
         fence = (
             f"the global budget TOTAL_BUDGET {usd(admission.get('global_limit_usd'))}: "
-            f"known spend={usd(admission.get('global_known_usd'))} across every task (plus "
-            f"{usd(admission.get('global_reserved_usd'))} of open holds, not counted), "
+            f"known spend={usd(admission.get('global_known_usd'))} across every task{_beside(admission, 'global_')}, "
             f"remaining={usd(remaining)}; the per-task budget fence "
             f"{usd(limit)} alone would leave {usd(root_remaining)}"
         )
     else:
         label = "whole-work billing-group budget fence" if admission.get("binding_axis") == "group" else "per-task budget fence"
         fence = (
-            f"the {label} {usd(limit)}: known spend={usd(known)} (plus "
-            f"{usd(admission.get('reserved_usd'))} of open holds, not counted), "
+            f"the {label} {usd(limit)}: known spend={usd(known)}{_beside(admission)}, "
             f"remaining={usd(remaining)}; the global budget "
             f"{usd(admission.get('global_limit_usd'))} alone would leave {usd(admission.get('global_remaining_usd'))}"
         )

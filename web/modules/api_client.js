@@ -1,4 +1,5 @@
 import './api_types.js';
+import { clearChatPreviews } from './chat_preview.js';
 
 /**
  * Single browser-side gateway client. Keep backend calls here so UI modules
@@ -8,13 +9,84 @@ export async function apiFetch(url, init = {}) {
     return fetch(url, init);
 }
 
+/** Owner admission uses the ordinary authenticated gateway and canonical ingress. */
+export function openLiveConversation(payload) {
+    return fetchJson('/api/call/open', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+        { rejectOkFalse: true });
+}
+
+export function liveConversationSocket(path) {
+    if (!/^\/ws\/call\/[a-f0-9]+$/.test(path)) throw new Error('Invalid call address');
+    const url = new URL(path, window.location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new WebSocket(url.href);
+}
+
+/** How long one `/api/state` read may take, request and body together: an engineering tolerance, not a target. */
+export const STATE_READ_LIFETIME_MS = 60_000;
+
+const stateReadEnded = (reason) => Object.assign(new Error(`state read ${reason}`), { name: 'StateReadEnded', reason });
+
+/** Run `read(transportSignal)`, request and body, within one lifetime: the caller's `signal` ends it with
+ * `aborted()` (an already aborted one sends nothing), the lifetime with a `StateReadEnded` `expired`. Either end
+ * cancels the transport and settles the caller even when transport ignores cancellation. This never undoes
+ * an effect a write may already have sent; its caller must retain an unknown outcome. */
+export function withinRequestLifetime(read, { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS,
+    aborted = () => stateReadEnded('aborted') } = {}) {
+    if (signal?.aborted) return Promise.reject(aborted());
+    const transport = new AbortController();
+    let end;
+    const ended = new Promise((_, reject) => {
+        end = (error) => { transport.abort(); reject(error); };
+    });
+    const onAbort = () => end(aborted());
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => end(stateReadEnded('expired')), lifetimeMs);
+    return Promise.race([read(transport.signal), ended]).finally(() => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+    });
+}
+
+/**
+ * One `/api/state` read that settles within its lifetime: `{response, state}`, where `state` is the parsed body
+ * of an OK answer and `undefined` for a non-OK answer or a body that does not parse. It rejects with the
+ * transport's own error, or with a `StateReadEnded` whose `reason` is `expired` (the lifetime ran out, request or
+ * body) or `aborted` (the caller's `signal`; an already aborted one sends nothing).
+ */
+export function readState(path = '/api/state', { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS } = {}) {
+    return withinRequestLifetime(async (transport) => {
+        const response = await apiFetch(path, { cache: 'no-store', signal: transport });
+        if (!response.ok) return { response, state: undefined };
+        try {
+            return { response, state: await response.json() };
+        } catch (error) {
+            if (transport.aborted) throw error;
+            return { response, state: undefined };
+        }
+    }, { signal, lifetimeMs });
+}
+
+/**
+ * `fetchJson('/api/state')` within the same lifetime, for readers that keep its contract: the body, or its typed
+ * error (`status`, `body`, `payload`; `isStoreMigrating`) for a non-OK answer. The caller's `init.signal` ends it
+ * as fetch would (its abort reason, an `AbortError`); a read that outlives the lifetime is a `StateReadEnded`.
+ */
+export function readStateJson(init = {}) {
+    const { signal = null, ...rest } = init;
+    return withinRequestLifetime((transport) => fetchJson('/api/state', { cache: 'no-store', ...rest, signal: transport }),
+        { signal, aborted: () => signal.reason ?? new DOMException('This operation was aborted', 'AbortError') });
+}
+
 /**
  * The core's own same-origin sign-in, returning to this page. Only its network
  * gate answers 401 on the readiness and state reads that send a page here: a
  * separately hosted interface never passes through the gate's login page at load,
  * and a page whose session expired keeps showing until such a read is refused.
  * Every other failure keeps its own presentation, and nothing the page had queued
- * or failed to save is resent after signing in — the return is a fresh load.
+ * or failed to save is resent after signing in — the return is a fresh load. A
+ * refused session takes this browser's saved conversation text with it (chat_preview.js).
  */
 export function signInUrl(href = window.location.href) {
     const here = new URL(href);
@@ -24,6 +96,7 @@ export function signInUrl(href = window.location.href) {
 }
 
 export function openSignIn() {
+    clearChatPreviews();
     window.location.replace(signInUrl());
 }
 
@@ -60,6 +133,12 @@ export async function fetchJson(url, init = {}, options = {}) {
         // Widgets list into a resolved "error object" that a consumer read as
         // an EMPTY authoritative list and stopped kept-running frames on.
         if (error?.name === 'AbortError' || init?.signal?.aborted) throw error;
+        // A caller whose action may already have started on the server (Storage) asks for the truth: an OK
+        // answer it cannot read is an unknown outcome with no HTTP status, never a reply carrying a placeholder.
+        if (options.requireBody && response.ok) {
+            // Its sentence stays empty: the consumer says it in its own words (and language).
+            throw Object.assign(new Error(''), { unreadable: true, responseStatus: response.status });
+        }
         data = { error: `non-json response (HTTP ${response.status})` };
     }
     if (!response.ok || (options.rejectOkFalse && data && data.ok === false)) {
@@ -72,6 +151,10 @@ export async function fetchJson(url, init = {}, options = {}) {
     }
     return data;
 }
+
+/** What the app's own pages declare on a settings write (CLIENT_CONTRACT "Declared settings origin"): the server
+ *  records it and posts no Main row for the owner's own Save. Never a default of the shared fetch helpers. */
+export const APP_SETTINGS_ORIGIN = Object.freeze({ 'X-Ouroboros-Surface': 'app', 'X-Ouroboros-Actor': 'owner' });
 
 export function jsonPost(url, payload = {}, options = {}) {
     return fetchJson(url, {
@@ -259,6 +342,23 @@ export function hurryTask(taskId, requestId) {
 }
 
 /**
+ * One act on a work's model: `set` a model for it, `follow` Main again, or leave a fallback by `return`, `wait` or
+ * `keep`. The answer says when it applies (`applied`) and carries the work's fact (`lead`); a refusal rejects with
+ * the server's `reason_code` and status on the error (card_model.js says it in the owner's words).
+ * @param {string} taskId
+ * @param {string} requestId  // a retry of the same act carries the same id
+ * @param {Omit<import('./work_types.js').TaskModelRequest, 'request_id'>} act
+ * @returns {Promise<import('./work_types.js').TaskModelResponse>}
+ */
+export function taskModel(taskId, requestId, act) {
+    return jsonPost(
+        `/api/tasks/${encodeURIComponent(taskId)}/model`,
+        { request_id: String(requestId || ''), ...act },
+        { rejectOkFalse: true },
+    );
+}
+
+/**
  * Owner Pause of a whole task tree (Batch4): the body is the stable request_id
  * (the same id on retry is idempotent) and this client's declaration that the
  * owner pressed it (`actor: "owner"`, no text), which the card words as "You
@@ -291,7 +391,7 @@ export function continueTask(taskId, actionNonce) {
     return jsonPost(
         `/api/tasks/${encodeURIComponent(taskId)}/continue`,
         { action_nonce: String(actionNonce || '') },
-        { rejectOkFalse: true },
+        { rejectOkFalse: true, headers: APP_SETTINGS_ORIGIN },
     );
 }
 
@@ -385,7 +485,7 @@ export const skillSourcesApi = {
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogResponse>} */
     catalog: ({ refresh = false } = {}) => fetchJson(`/api/skill-catalog${refresh ? '?refresh=1' : ''}`, { cache: 'no-store' }),
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogSearchResponse>} */
-    search: ({ q = '', source = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}) })}`, { cache: 'no-store', ...init }),
+    search: ({ q = '', source = '', sort = '', cursor = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}), ...(sort ? { sort } : {}), ...(cursor ? { cursor } : {}) })}`, { cache: 'no-store', ...init }),
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogItemDetailResponse>} */
     item: (sourceId, name, init = {}) => fetchJson(`/api/skill-catalog/item/${encodeURIComponent(sourceId)}/${encodeURIComponent(name)}`, { cache: 'no-store', ...init }),
     /**
@@ -415,6 +515,9 @@ export function updateStrategyForPlan(plan = {}) {
     return kind === 'clean' ? 'auto_merge' : 'assisted';
 }
 
+/** Storage actions may have started when the answer is cut: an unreadable OK body is an error, not a reply. */
+const STORAGE_READ = { requireBody: true };
+
 export const apiClient = {
     harnessMaintenanceInventory,
     startHarnessMaintenance,
@@ -432,7 +535,7 @@ export const apiClient = {
     /** @returns {Promise<import('./api_types.js').HealthResponse>} */
     health: () => fetchJson('/api/health', { cache: 'no-store' }),
     /** @returns {Promise<import('./api_types.js').StateResponse>} */
-    state: () => fetchJson('/api/state', { cache: 'no-store' }),
+    state: () => readStateJson(),
     /** One composer file into the upload store. @returns {Promise<import('./api_types.js').UploadResponse>} */
     uploadChatAttachment: (file) => {
         const body = new FormData();
@@ -449,6 +552,20 @@ export const apiClient = {
         { cache: 'no-store' }),
     /** @param {{key: string}|{mcp_server_id: string, header_name?: string}} selector @returns {Promise<{value: string}>} */
     revealSettingsSecret: (selector) => jsonPost('/api/settings/secret', selector),
+    /**
+     * The integration-secret form's save (showSecretHitl's form): the owner's values go in this one
+     * body to Settings and nowhere else, with `observed` (whether the form showed each key as set).
+     * Reuse `request_id` only for unchanged values; an OK reply it cannot read is an unknown outcome.
+     * @param {import('./decision_types.js').SecretDecisionRequest} payload
+     * @returns {Promise<import('./decision_types.js').SecretDecisionResponse>}
+     */
+    saveSecretToken: (payload, options = {}) => jsonPost('/api/decisions/secret', payload, { requireBody: true, ...options }),
+    /** Cancel the request: this request saves nothing and the waiting task learns secret_cancelled. */
+    cancelSecretRequest: ({ request_id, decision_id }, options = {}) => jsonPost('/api/decisions/secret',
+        { request_id, decision_id, action: 'cancel' }, options),
+    /** What the form shows: whether each asked key is set (never a value), its readers and the request's state. */
+    secretRequestStatus: ({ decision_id }, options = {}) => jsonPost('/api/decisions/secret',
+        { decision_id, action: 'status' }, options),
     /** @returns {Promise<import('./api_types.js').UiPreferencesResponse>} */
     uiPreferences: (init = {}) => fetchJson('/api/ui/preferences', { cache: 'no-store', ...init }),
     saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload),
@@ -475,9 +592,10 @@ export const apiClient = {
     desktopBackground: () => fetchJson('/api/desktop/background', { cache: 'no-store' }),
     /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
     setDesktopBackground: (enabled) => jsonPost('/api/desktop/background', { enabled: Boolean(enabled) }),
-    saveSettings: (payload) => fetchJson('/api/settings', {
+    /** `headers`: the caller's declared origin (`APP_SETTINGS_ORIGIN` from the app's own pages). */
+    saveSettings: (payload, { headers = {} } = {}) => fetchJson('/api/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(payload),
     }),
     /**
@@ -504,9 +622,13 @@ export const apiClient = {
     /** @param {import('./client_contract_types.js').OwnerSubagentsModeRequest} choice
      * @returns {Promise<import('./api_types.js').OwnerSubagentsModeResponse>} */
     ownerSubagentsMode: (choice) => jsonPost('/api/owner/subagents-mode', choice),
+    /** The room's model for new owner work. @param {import('./client_contract_types.js').OwnerChatModelRequest} choice
+     * @returns {Promise<import('./client_contract_types.js').OwnerChatModelResponse>} */
+    ownerChatModel: (choice) => jsonPost('/api/owner/chat-model', choice),
     /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
     ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
-    logsTail: (name, limit = 2000) => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
+    /** A log's newest rows; `view` 'compact' bounds each row and keeps its `ts` and `type` (ouroboros/gateway/logs.py). */
+    logsTail: (name, limit = 2000, view = '') => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}${view ? `&view=${encodeURIComponent(view)}` : ''}`, { cache: 'no-store' }),
     /** @returns {Promise<import('./model_route_types.js').ResponseLimitAckResponse|Object>} */
     ownerCapabilityAck: (payload) => jsonPost('/api/owner/capability-ack', payload),
     /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */
@@ -536,6 +658,12 @@ export const apiClient = {
         items, ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
         ...(enableAfterGrant ? { enable_after_grant: true } : {}),
     }, { headers: { Prefer: 'respond-async' } }),
+    /** Every active and deleting Project, uncapped (the sidebar reads it only when asked to look beyond its feed).
+     *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
+    projectList: ({ signal } = {}) => fetchJson('/api/projects?all=1', { cache: 'no-store', signal }),
+    /** One Project by its id while active or deleting; an empty list when it is neither.
+     *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
+    projectById: (projectId) => fetchJson(`/api/projects?id=${encodeURIComponent(projectId)}`, { cache: 'no-store' }),
     projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task', { task_id: taskId, id, name }),
     /** @param {import('./api_types.js').ProjectCreateRequest} payload */
     projectCreate: (payload) => jsonPost('/api/projects', payload),
@@ -551,41 +679,73 @@ export const apiClient = {
      * @returns {Promise<import('./storage_types.js').StorageResponse>}
      */
     storage: ({ count = '', ...init } = {}) => fetchJson(
-        `/api/storage${count ? `?count=${encodeURIComponent(count)}` : ''}`, { cache: 'no-store', ...init },
+        `/api/storage${count ? `?count=${encodeURIComponent(count)}` : ''}`, { cache: 'no-store', ...init }, STORAGE_READ,
     ),
     /**
      * Start one complete count in the server's child, or join the running one (202 either way).
      * @returns {Promise<import('./storage_types.js').StorageResponse>}
      */
-    measureStorage: () => jsonPost('/api/storage/measure', {}),
+    measureStorage: () => jsonPost('/api/storage/measure', {}, STORAGE_READ),
     /**
      * Stop the running count; the saved count stays.
      * @returns {Promise<import('./storage_types.js').StorageResponse>}
      */
-    cancelStorageMeasure: () => jsonPost('/api/storage/measure/cancel', {}),
+    cancelStorageMeasure: () => jsonPost('/api/storage/measure/cancel', {}, STORAGE_READ),
     /**
      * List, without side effects, the finished work the app's own retirers would remove now (202; a second
      * preview joins the running one).
      * @returns {Promise<import('./storage_types.js').StorageResponse>}
      */
-    previewStorageFree: () => jsonPost('/api/storage/free/preview', {}),
+    previewStorageFree: () => jsonPost('/api/storage/free/preview', {}, STORAGE_READ),
     /**
-     * Free exactly the previewed items of the chosen groups under the named plan (202; `started` and
+     * Free exactly the previewed items of the chosen whole groups under the named plan (202; `started` and
      * `reason` say whether it ran).
      * @returns {Promise<import('./storage_types.js').StorageResponse>}
      */
-    freeStorage: (plan, groups) => jsonPost('/api/storage/free', { plan, groups }),
+    freeStorage: (plan, groups) => jsonPost('/api/storage/free', { plan, groups }, STORAGE_READ),
+    /**
+     * Free exactly these items of the plan's ordinary pool, by their ids (202; `started` and `reason` say whether
+     * it ran; one bad id refuses the whole request). Never resent after a dropped connection.
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    freeStorageItems: (plan, items) => jsonPost('/api/storage/free', { plan, items }, STORAGE_READ),
+    /**
+     * Discard, whole, exactly these finished copies of the plan's `view=manual` list, each chosen by the owner (202;
+     * `started` and `reason` say whether it ran). The form is its own: it carries no `items` or `groups`. `acceptLoss`
+     * is `true` only after the owner was told the whole copy goes with whatever is not proven saved in it; the server
+     * refuses anything else as `loss_not_accepted`. Never resent after a dropped connection.
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    freeStorageManual: (plan, manual, acceptLoss) => jsonPost('/api/storage/free', { plan, manual, accept_loss: acceptLoss === true }, STORAGE_READ),
+    /**
+     * One page of a plan's list: the pool, what it leaves out, the finished copies discarded by hand, or the outcomes of its run. `version` comes from
+     * the first page and goes on every next one; a 409 `view_changed` means start again from `cursor=0`.
+     * @returns {Promise<import('./storage_types.js').StorageFreeItemsResponse>}
+     */
+    storageFreeItems: ({ plan, view, cursor = 0, limit = 100, version = '', ...init }) => {
+        const query = new URLSearchParams({ plan, view, cursor: String(cursor), limit: String(limit) });
+        if (version) query.set('version', version);
+        return fetchJson(`/api/storage/free/items?${query}`, { cache: 'no-store', ...init }, STORAGE_READ);
+    },
     /**
      * Stop the listing or the run; what was freed stays freed.
      * @returns {Promise<import('./storage_types.js').StorageResponse>}
      */
-    cancelStorageFree: () => jsonPost('/api/storage/free/cancel', {}),
+    cancelStorageFree: () => jsonPost('/api/storage/free/cancel', {}, STORAGE_READ),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
     updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
     updateCheck: () => jsonPost('/api/update/check', {}),
     /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
     updatePreflight: () => jsonPost('/api/update/preflight', {}),
+    /**
+     * The owner's Write/Rewrite: one ordinary Main task describes this exact range.
+     * @param {'write'|'rewrite'} mode
+     * @returns {Promise<import('./api_types.js').UpdateDescriptionResponse>}
+     */
+    updateDescription: (mode, key = {}) => jsonPost('/api/update/description', {
+        mode, base_sha: String(key.base_sha || ''), target_sha: String(key.target_sha || ''),
+    }),
     /** @returns {Promise<import('./api_types.js').UpdateApplySuccessResponse>} */
     updateApply: (strategy, plan = {}, { confirmRecovery = false } = {}) => jsonPost('/api/update/apply', {
         strategy,

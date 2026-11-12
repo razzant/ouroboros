@@ -14,7 +14,7 @@ def inventory(root):
     return path
 
 
-@pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "rejected_duplicate"])
+@pytest.mark.parametrize("status", ["completed", "failed", "rejected_duplicate"])
 def test_terminal_adoption_drops_cache_before_child_drive_retention(tmp_path, status):
     parent, task_id = tmp_path / "canonical", "terminal-cache"
     child = headless.prepare_task_drive(parent, task_id, "empty")

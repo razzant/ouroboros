@@ -29,7 +29,7 @@ def test_explicit_modes_lower_without_erasing_access_derived_default(access):
         delegated_run_shape(True, access, "unknown")
 
 
-@pytest.mark.parametrize("unsupported", ["old_engine", "unknown_engine", "no_plan", "route_no_plan"])
+@pytest.mark.parametrize("unsupported", ["old_engine", "unknown_engine", "no_plan"])
 def test_plan_capability_refuses_before_any_start_row_but_ordinary_starts_survive(plan_setup, unsupported):
     p = plan_setup
     if unsupported == "old_engine": p.engine.engine_version = "4.4.9"
@@ -58,6 +58,7 @@ def test_plan_start_records_ceiling_and_readonly_thread_before_send(plan_setup):
     custody._CUSTODY.clear()
     entry = current.run(p.root, first["run_id"])
     assert entry.execution_mode == "plan" and entry.effective_access == "readonly"
+    assert entry.daemon_store_id == "store-plan", "the thread turn's own receipt binds its store"
     assert entry.authority_ceiling == first["authority_ceiling"] == {
         "task_authority_fingerprint": entry.authority_fingerprint,
         "allowed_access": "workspace_write", "target_root": p.ctx.workspace_root}

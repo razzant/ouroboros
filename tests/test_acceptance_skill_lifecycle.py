@@ -205,4 +205,3 @@ def test_bounded_history_projection_discloses_both_omission_limits(tmp_path):
     hot.write_text(carried + hot.read_text(encoding="utf-8"), encoding="utf-8")
     spanning = _skill_names_from_review_history(drive_root, "root-1", task_started_at="2026-06-01T00:00:00+00:00")
     assert spanning["coverage"]["truncated"] is True and spanning["coverage"]["complete"] is False
-

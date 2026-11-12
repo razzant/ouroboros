@@ -9,8 +9,10 @@ never named this way. Real Git, real copies.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +21,7 @@ from ouroboros import body_candidate, review_checking as rc, review_checking_pru
 from ouroboros import subagent_worktrees as trees
 from ouroboros.startup_migrations import prepare_startup_state
 from ouroboros.tools.review_subject import ReviewSubjectSpec, checkout_token, isolated_checkout, round_checkout_repo
-from ouroboros.unindexed import COPIES, SUFFIX, copy_path, unindexed
+from ouroboros.unindexed import BYTECODE, COPIES, SUFFIX, bytecode_prefix, copy_path, unindexed
 from tests.body_candidate_support import isolate, make_ctx, make_serving
 from tests.test_review_checking_prune import _custody
 from tests.test_review_checkout_lifecycle import EDIT, TASK, _frozen, _seat, _thread, _work
@@ -40,6 +42,36 @@ def test_a_new_entry_is_born_unindexed_and_an_existing_one_keeps_its_name(tmp_pa
     (tmp_path / "dlg_x").mkdir()
     assert copy_path(tmp_path, "dlg_x") == tmp_path / "dlg_x"
 
+
+
+def test_the_bytecode_prefix_is_born_unindexed_and_takes_over_the_legacy_tree_once(tmp_path):
+    """The prefix mirrors the app's own path (``…/Ouroboros.app/…``), which Spotlight lists as an app."""
+    data, warm = tmp_path / "data", pathlib.Path("Applications", "Ouroboros.app", "m.cpython-310.pyc")
+    state = data / "state"
+    (state / "pycache" / warm).parent.mkdir(parents=True)
+    (state / "pycache" / warm).write_bytes(b"warm")
+    assert BYTECODE == "pycache" + SUFFIX and bytecode_prefix(data) == str(state / BYTECODE)
+    assert not (state / "pycache").exists() and (state / BYTECODE / warm).read_bytes() == b"warm", "renamed, still warm"
+    (state / "pycache" / warm).parent.mkdir(parents=True)  # an older body wrote the legacy tree again
+    (state / "pycache" / warm).write_bytes(b"again")
+    assert bytecode_prefix(data) == str(state / BYTECODE)
+    assert (state / BYTECODE / warm).read_bytes() == b"warm", "the new tree is never replaced; the pruner retires the old"
+    assert bytecode_prefix(data, str(state / "pycache")) == str(state / BYTECODE), "an old launcher's default is replaced"
+    assert bytecode_prefix(data, str(tmp_path / "mine")) == str(tmp_path / "mine"), "any other prefix is honoured"
+
+
+def test_the_launcher_takes_over_an_inherited_legacy_prefix_before_anything_runs(tmp_path):
+    data = tmp_path / "data"
+    legacy = data / "state" / "pycache"
+    legacy.mkdir(parents=True)
+    (legacy / "warm.pyc").write_bytes(b"warm")
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    env = {**os.environ, "OUROBOROS_DATA_DIR": str(data), "PYTHONPYCACHEPREFIX": str(legacy), "PYTHONPATH": str(repo)}
+    done = subprocess.run([sys.executable, "-B", "-c", "import os, launcher; print(os.environ['PYTHONPYCACHEPREFIX'])"],
+                          cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip().splitlines()[-1] == str(data / "state" / BYTECODE), "the old setdefault kept the legacy one"
+    assert not legacy.exists() and (data / "state" / BYTECODE / "warm.pyc").read_bytes() == b"warm"
 
 @pytest.fixture
 def review(tmp_path):
@@ -195,4 +227,5 @@ def test_owner_projects_are_never_born_unindexed(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
     project = trees.provision_genesis_project(repo_dir=system, task_id="genesis", projects_root=projects,
                                               data_dir=data)
-    assert _same(pathlib.Path(project.path).parent, projects) and SUFFIX not in project.path
+    # The name it is born with: the test's own root may itself be unindexed (scripts/safe_test.py).
+    assert _same(pathlib.Path(project.path).parent, projects) and SUFFIX not in pathlib.Path(project.path).name

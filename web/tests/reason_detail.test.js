@@ -8,8 +8,11 @@ import {
     reasonCodesNote, taskDoneIsTerminal, taskPresentation, taskReasonCodes, taskReasonDetail, taskReasonPhrase, taskTerminalPhase,
     summarizeChatLiveEvent,
 } from '../modules/log_events.js';
+import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
 
 const UNDESCRIBED = 'The recorded reason has no description yet.';
+// The author's stop sentence as a clause (the table's words are review's; the place is pinned here).
+const STOPPED = TASK_CAUSE_PHRASES.author_stop.replace(/\.$/, '');
 
 // A degraded delivery used to name one generic cause on every card. The record
 // keeps the machine code; the card says what actually happened.
@@ -49,8 +52,7 @@ test('a typed cause with no sentence yet says so; its exact code is the details\
     const stop = { status: 'completed', reason_code: 'final_message', outcome_axes: {
         execution: { status: 'ok', task_completion: { action: 'stop', rationale: 'The export still fails on empty input.' } },
         objective: { status: 'fail', source: 'task_completion', reason: 'author_stop', warnings: ['partial coverage'] } } };
-    assert.equal(taskReasonDetail(stop), 'Ouroboros stopped with unfinished work; no review approval was granted'
-        + ' · partial coverage · The export still fails on empty input.');
+    assert.equal(taskReasonDetail(stop), `${STOPPED} · partial coverage · The export still fails on empty input.`);
     assert.deepEqual(taskReasonCodes(stop), [], 'a legacy warning may be authored prose, not a typed reason code');
     // The card's collapsed line says the sentence; its details name the code.
     const summary = summarizeChatLiveEvent({ type: 'task_done', task_id: 't', status: 'failed', reason_code: 'example_new_reason' });
@@ -112,6 +114,10 @@ test('every typed cause the loop can record has a sentence', () => {
     const literals = new Set(
         [...loop.matchAll(/degraded_reason\s*=\s*"([a-z_]+)"/g)].map((m) => m[1]),
     );
+    // A normal exit's own suffix marks are declared once (loop_delivery._SUFFIX_MARKS).
+    for (const [, members] of loop.matchAll(/_SUFFIX_MARKS\s*=\s*frozenset\(\{([^}]*)\}\)/g)) {
+        for (const [, code] of members.matchAll(/"([a-z_]+)"/g)) literals.add(code);
+    }
     assert.ok(literals.size >= 3, `expected the known typed causes, saw ${[...literals]}`);
     for (const code of literals) {
         assert.notEqual(
@@ -458,6 +464,20 @@ test('the plan review class picks the owner sentence for an open plan review', (
     }), 'The task ran out of budget before it could finish cleanly');
 });
 
+// Owner 04.11, 1A: a cause says what changes the reader's next step. An author's stop is unfinished work, whatever
+// the reviewers said (that is the record's and the Reviews door's); an answer delivered as finished says that the
+// reviewers did not sign it off, because that changes how far the owner can trust it.
+test("an author's stop names the stop alone; an answer it delivered says the reviewers did not sign it off", () => {
+    const stop = { status: 'completed', reason_code: 'final_message', outcome_axes: {
+        execution: { status: 'ok', task_completion: { action: 'stop', rationale: 'Not ready.' } },
+        objective: { status: 'fail', source: 'task_completion', reason: 'author_stop' }, review: { status: 'skipped' } } };
+    const delivered = { status: 'completed', outcome_axes: { review: {
+        acceptance_decision: { status: 'finalized_unaccepted', reason: 'author_finish' } } } };
+    assert.ok(taskReasonDetail(stop).startsWith(STOPPED) && !/review/i.test(taskReasonDetail(stop)), taskReasonDetail(stop));
+    assert.equal(taskReasonDetail(delivered), TASK_CAUSE_PHRASES.author_finish);
+    assert.match(taskReasonDetail(delivered), /review/i);
+});
+
 test('a held task states why it was held and never that the work went on', () => {
     const held = (source, reason) => taskReasonDetail({
         status: 'completed', reason_code: 'final_message',
@@ -468,13 +488,56 @@ test('a held task states why it was held and never that the work went on', () =>
         'Too few plan reviewers could answer, so the work was held.');
     assert.equal(held('plan_review_cycles_exhausted', 'review_cycles_exhausted'),
         'The task used up its review rounds before the answer was signed off.');
-    assert.equal(held('plan_review_author_stop', 'author_stop'),
-        'Ouroboros stopped with unfinished work; no review approval was granted.');
+    assert.equal(held('plan_review_author_stop', 'author_stop'), TASK_CAUSE_PHRASES.author_stop);
     for (const line of [held('plan_review_quorum_unreachable', 'plan_review_quorum_unreachable')]) {
         assert.doesNotMatch(line, /went on/);
     }
     // A Failed card held by anything else keeps stating nothing on a neutral final_message.
     assert.equal(held('task_acceptance_review', 'review_fail'), '');
+});
+
+// An exit as the loop records it (tests/test_terminal_provenance.py): the plan class, the reason its notice stamped,
+// and the author's stop when it ended the work. A stop is the primary cause and no plan sentence says the work went
+// on; an unreadable record stays unknown beside a stop, a rail or a clean finish.
+const UNKNOWN = 'The plan record could not be read, so the state of the plan review is unknown.';
+const planExit = (plan_review, { reason = 'plan_review_advisory', status = 'degraded', stop = '' } = {}) => ({
+    status: 'completed', reason_code: reason,
+    outcome_axes: {
+        execution: { status, reason_code: reason, plan_review,
+            ...(stop ? { task_completion: { action: 'stop', rationale: stop } } : {}) },
+        objective: stop ? { status: 'fail', source: 'task_completion', reason: 'author_stop' } : { status: 'not_evaluated' },
+        review: { status: 'skipped' },
+    },
+});
+
+test("an author's stop never says the work went on, and an unreadable plan record stays unknown", () => {
+    const held = 'The objection stands; stopping with the draft.';
+    // Blocking held the answer over an open objection and the author stopped: the stop, its reason, the open review.
+    assert.equal(taskReasonDetail(planExit('objections_open', { stop: held })),
+        `${STOPPED} · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered.`);
+    // The same objection over an ordinary delivery: the work went on with it.
+    assert.equal(taskReasonDetail(planExit('objections_open')),
+        'Objections to the plan were still open when this answer was delivered; the work went on with them disclosed.');
+    // An unreadable record ended by the author's stop: unknown, on the live frame and on the row with its flag.
+    const unread = planExit('unreadable', { stop: 'The plan record cannot be read; stopping with the draft.' });
+    for (const record of [unread, { ...unread, terminal_plan_review_open: true }]) {
+        assert.equal(taskReasonDetail(record), `${STOPPED} · The plan record cannot be read; stopping with the draft · ${UNKNOWN}`);
+    }
+    // Cyber Pro stopped over it without a notice (no advisory reason): the class alone keeps it unknown.
+    assert.equal(taskReasonDetail(planExit('unreadable', { reason: 'final_message', status: 'ok', stop: 'Stopping.' })),
+        `${STOPPED} · Stopping · ${UNKNOWN}`);
+    // A rail keeps its own cause, and a clean finish its silence, beside the unknown record.
+    assert.equal(taskReasonDetail(planExit('unreadable', { reason: 'round_limit', status: 'best_effort' })),
+        `The task hit its round limit before it could finish cleanly · ${UNKNOWN}`);
+    assert.equal(taskReasonDetail(planExit('unreadable', { reason: 'final_message', status: 'ok' })), UNKNOWN);
+    // An older stop over a class whose sentence says the work went on, or over none, reads the stop and the open review.
+    for (const plan_review of ['unanswered', '']) {
+        assert.equal(taskReasonDetail({ ...planExit(plan_review, { stop: held }), terminal_plan_review_open: true }),
+            `${STOPPED} · The objection stands; stopping with the draft · The plan review was still open when this answer was delivered.`);
+    }
+    for (const line of [taskReasonDetail(planExit('objections_open', { stop: held })), taskReasonDetail(unread)]) {
+        assert.doesNotMatch(line, /went on|proceeded/);
+    }
 });
 
 test('standing limitations are stated beside the primary cause, each once', () => {
@@ -505,6 +568,22 @@ test('standing limitations are stated beside the primary cause, each once', () =
 });
 
 
+test('a child report keeps the typed plan state in its expanded detail without replacing its authored preview', () => {
+    const result = 'Complete selected child answer.';
+    for (const record of [planExit('unreadable'), planExit('unreadable', { reason: 'final_message', status: 'ok' }),
+        planExit('unreadable', { reason: 'round_limit', status: 'best_effort' }), planExit('objections_open')]) {
+        const view = summarizeChatLiveEvent({ ...record, type: 'send_message', is_progress: true,
+            delegation_role: 'subagent', subagent_task_id: 'child', parent_task_id: 'root',
+            subagent_event: 'completed', result });
+        assert.equal(view.activityPreview, result);
+        assert.ok(view.fullBody.endsWith(taskReasonDetail(record)), view.fullBody);
+        if (record.outcome_axes.execution.plan_review === 'unreadable') {
+            assert.ok(view.fullBody.includes(UNKNOWN));
+            assert.doesNotMatch(view.fullBody, /went on|proceeded/);
+        }
+    }
+});
+
 test('an unfinished child keeps the complete authored result and its stop cause on the collapsed line', () => {
     const result = 'Complete selected answer, including what has already been done.';
     const outcome_axes = { execution: { status: 'ok', task_completion: {
@@ -513,7 +592,16 @@ test('an unfinished child keeps the complete authored result and its stop cause 
     const view = summarizeChatLiveEvent({ type: 'send_message', is_progress: true, delegation_role: 'subagent',
         subagent_task_id: 'child', parent_task_id: 'root', subagent_event: 'completed',
         status: 'completed', reason_code: 'final_message', outcome_axes, result });
-    assert.equal(view.phase, 'error');
-    assert.equal(view.activityPreview, 'Ouroboros stopped with unfinished work; no review approval was granted · The export still fails on empty input.');
+    assert.equal(view.phase, 'cancelled');
+    assert.equal(view.activityPreview, `${STOPPED} · The export still fails on empty input.`);
     assert.ok(view.fullBody.includes(result));
+});
+
+test('an owner stop over a held plan objective keeps the open-plan sentence beside its cause', () => {
+    // Historical rows only (no live writer of plan_review_* objectives remains): the stop is phase cancelled, so the
+    // plan hold that silences the sentence for an error does not apply; the sentence is the record's own fact.
+    const record = { status: 'cancelled', cancel_origin: { actor: 'owner', reason: 'old stop' }, terminal_plan_review_open: true,
+        outcome_axes: { objective: { status: 'fail', source: 'plan_review_cycles_exhausted', reason: 'plan_review_cycles_exhausted' },
+            execution: { status: 'ok', plan_review: 'objections_open' } } };
+    assert.ok(taskReasonDetail(record).includes('Objections to the plan were still open'), taskReasonDetail(record));
 });

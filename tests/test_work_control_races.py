@@ -15,7 +15,6 @@ from tests.test_owner_relay import context, source
 from tests import _dialogue as dialogue_test
 from tests.test_swarm_host_admission import host, rows  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("winner", ["owner", "mind"])
@@ -34,13 +33,13 @@ def test_continue_button_and_tool_capture_then_claim_once(host, monkeypatch, win
     ready, claimed = Barrier(2), Event()
     real_claim = owner_continue.claim_on_predecessor
 
-    def claim(root, predecessor, nonce, binding):
+    def claim(root, predecessor, nonce, binding, **declared):
         actor = "owner" if nonce == "owner-press" else "mind"
         ready.wait(timeout=10)
         if actor != winner:
             assert claimed.wait(10)
         try:
-            return real_claim(root, predecessor, nonce, binding)
+            return real_claim(root, predecessor, nonce, binding, **declared)
         finally:
             if actor == winner:
                 claimed.set()

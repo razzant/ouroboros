@@ -1,12 +1,13 @@
 """Product-management envelopes beside ``contracts.py`` (skills, marketplaces, agent accounts, local model,
 MCP, model catalog, updates, core control): descriptive TypedDicts, the twin of ``web/modules/management_contract_types.js``
-(twins older tests read stay in ``api_types.js``). Account routes relay the bundled Claudexor engine's own API v2 objects
+(twins older tests read stay in ``api_types.js``; the Restart Claudexor shapes' in ``claudexor_restart_types.js``). Account routes relay the bundled Claudexor engine's own API v2 objects
 (protocol major 3, release pinned in ``ouroboros/claudexor_runtime_pin.json``, source https://github.com/razzant/claudexor), named by their engine schema type."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
+from ouroboros.gateway.claudexor_contracts import ClaudexorStatusResponse
 from ouroboros.gateway.widgets import ExtensionLiveSnapshot
 from ouroboros.gateway.contributions import UiContributionsResponse
 
@@ -57,27 +58,39 @@ class InstalledSkill(TypedDict, total=False):
     dispatch_live: bool
     review_findings: List[Dict[str, Any]]
     skill_review: Dict[str, Any]  # {} or {current, history, history_omitted}
+    # Declared secret fields (manifest ``secret_fields``) and whether each holds a value now, never the value:
+    # {fields: [{id, key, state: configured | missing | unknown}]}; null for a skill that declares none.
+    secret_config: Optional[Dict[str, List[Dict[str, str]]]]
     grants: Dict[str, Any]  # requested/granted/missing keys and permissions, all_granted, usable
     published: Optional[Dict[str, Any]]
     published_malformed: bool
     presence_runtime: Dict[str, Any]  # a reviewed presence profile's runtime choice
     provenance: Dict[str, Any]  # a ClawHub install record
     identity_collision: bool
-    # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id, name, kind, part}, official (exact endorsed bytes),
+    # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id (the connected source it
+    # matches now, whatever id it was installed under; absent when none does), name, kind, part (as recorded)}, official (exact endorsed bytes),
     # release, basis, base_known, modified (null: base unknown), update_available {version, digest} | null, withdrawn ({reason, version} for a withdrawn release), left_source,
     # turn_on_when_ready, installed_by, installed_at, and reason and task_id when the record has them (an install Ouroboros made says why and in which task); check {by, notes,
     # at}, pending_update {version, digest}, and update_rejected {version, digest, reason: review_blockers|review_unfinished|preflight_failed, at}. null: not installed from a
     # source (made here, a local folder, a built-in seed).
     install: Optional[Dict[str, Any]]
     category: List[str]  # the source's category ids for this skill, [] when it has none
+    # A deployment policy requires this name: the server's requirement row with its when_unmet (client
+    # SettingsDeploymentRequirement); the switch is the organization's and no removal, update or repair is offered.
+    deployment: Dict[str, Any]
+    # An extension under an execution domain (deployment_extensions.trust_state): {state: trusted | untrusted,
+    # reason: not_delivered | elsewhere | changed, detail, administered}; administered: its doors refuse all but Off.
+    trust: Dict[str, Any]
 
 
-class ExtensionsIndexResponse(UiContributionsResponse):
+class ExtensionsIndexResponse(UiContributionsResponse, total=False):
     """``GET /api/extensions``: every installed skill and what the extension loader has live.
-    A passive read: no network, no repair."""
+    A passive read: no network, no repair. ``deployment`` (managed, with required extensions only) is
+    ``{when_unmet, required}``: every requirement as the server observes it, a missing package included."""
 
-    skills: List[InstalledSkill]
-    live: ExtensionLiveSnapshot
+    skills: Required[List[InstalledSkill]]
+    live: Required[ExtensionLiveSnapshot]
+    deployment: Dict[str, Any]
 
 
 class ExtensionManifestResponse(TypedDict, total=False):
@@ -119,6 +132,16 @@ class SkillRevisionRequest(TypedDict, total=False):
     """A body naming the skill revision the owner saw (``POST /api/owner/skills/{skill}/attest-review``)."""
 
     expected_content_hash: str
+
+
+class SkillReviewRequest(TypedDict, total=False):
+    """``POST /api/skills/{skill}/review``: no body (or ``{}``) reviews the current bytes. Both fields
+    together continue stopped seats of one earlier Skills-page review on that review's recorded bytes,
+    each ``{seat_id, operation_id}`` exactly as its history row's ``continuable_seats`` names it; any
+    other body answers 400 before a job or a send. A changed payload gains no verdict from it."""
+
+    review_reference: Dict[str, Any]  # {record_id, content_hash} of that review
+    continue_seats: List[Dict[str, str]]
 
 
 class SkillGrantRequest(TypedDict, total=False):
@@ -279,6 +302,7 @@ class SkillReviewResponse(TypedDict, total=False):
     paid: bool
     seats: List[Dict[str, Any]]
     governance: Dict[str, Any]
+    continuable_seats: List[Dict[str, Any]]  # this review's stopped seats its own author may continue
     job_id: str
     job_status: str
     group_id: str
@@ -471,14 +495,112 @@ class ClaudexorProblem(TypedDict):
 
 
 class ClaudexorMaintenanceProblem(TypedDict):
-    """Engine or host preparation problem: ``{code, message, retryable?, requiredActions?, context?}``.
-    POST may prepare Node/npm: 409 ``maintenance_restart_required`` asks for chat-header Restart;
-    409/503 ``maintenance_preparation_failed`` reports failure. Both use
-    ``context.acceptance=not_submitted, scope=this_attempt``. Optional inspection failure still
-    permits POST. A 503 ``acceptance=unknown`` may have been accepted: retain its body and
-    Idempotency-Key even after a later preparation-only reply, then resend both."""
+    """Engine or host problem: ``{code, message, retryable?, requiredActions?, context?}``.
+    A pre-submit ``not_submitted`` covers this attempt only. After ``acceptance=unknown``,
+    retain the original body and Idempotency-Key until the engine resolves that request."""
 
     error: Dict[str, Any]
+
+
+class ClaudexorLoginJobProblem(TypedDict, total=False):
+    """Typed job errors preserve engine prose/status/code and bounded actions
+    (16 strings, 512 chars each). Covers absent jobs, input/reconcile conflicts,
+    setup 400/409, terminal-probe 503 and Connect maintenance problems/context.
+    Other unmarked transport/discovery failures use the generic proxy 503."""
+
+    error: Required[str]
+    code: str
+    required_actions: List[str]
+    context: Dict[str, Any]
+    retryable: bool
+
+
+class ClaudexorRestartRun(TypedDict):
+    """One live engine run a restart ends. ``owner`` is ``ouroboros`` when this installation's
+    own delegated-run records hold the run (or the run the engine started it for), else ``other``:
+    another program's. ``task_id`` and ``kind`` are that record's task and category, "" for ``other``."""
+
+    run_id: str
+    state: Literal["queued", "running"]
+    owner: Literal["ouroboros", "other"]
+    task_id: str
+    kind: str
+    harness: str
+    project: str
+    started_at: str
+
+
+class ClaudexorRestartRuns(TypedDict):
+    """``known``: every count is exact. ``unattributed``: the engine listed ``total`` live runs and the
+    own run records could not be read. ``unknown``: the engine did not list its runs (``error`` says
+    why); ``ouroboros`` is then what the own records hold open and ``other`` is null. Null is a gap,
+    never zero. ``items`` holds at most 50 rows, oldest first; ``items_omitted`` counts the rest."""
+
+    status: Literal["known", "unattributed", "unknown"]
+    total: Optional[int]
+    ouroboros: Optional[int]
+    other: Optional[int]
+    error: Optional[str]
+    items: List[ClaudexorRestartRun]
+    items_omitted: int
+
+
+class ClaudexorRestartWarning(TypedDict):
+    """``engine_pin_below_serving``: this checkout pins an older engine than the one serving. Engine
+    data only moves forward, so the pinned engine may refuse it and not start after the restart."""
+
+    code: str
+    message: str
+    pin_version: str
+    serving_version: str
+
+
+class ClaudexorRestartPreview(TypedDict):
+    """``GET /api/claudexor/restart``: what Restart Claudexor would end and start, read now.
+    ``engine``: ``{state: serving|not_answering|not_started, serving: {version, build_sha}|null,
+    pin: {version, build_sha}|null, direction}``. ``model_calls``: ``{status: known|unknown, active,
+    queued}``, the engine's model calls in flight; they end too and are not part of ``token``.
+    ``token`` names the engine, the pin and exactly which runs end and whose they are."""
+
+    engine: Dict[str, Any]
+    runs: ClaudexorRestartRuns
+    model_calls: Dict[str, Any]
+    warnings: List[ClaudexorRestartWarning]
+    token: str
+
+
+class ClaudexorRestartRequest(TypedDict):
+    """``POST /api/claudexor/restart``: the ``token`` of the preview the owner confirmed."""
+
+    token: str
+
+
+class ClaudexorRestartReceipt(TypedDict):
+    """``stop`` is the engine stop's own outcome; ``unconfirmed`` means the old process may still run.
+    ``serving`` says whether an engine answers after the start; false carries the start's ``error``.
+    ``runs`` are the confirmed preview's counts ``{status, total, ouroboros, other}``."""
+
+    stop: Literal["stopped", "nothing_to_stop", "unconfirmed"]
+    serving: bool
+    error: Optional[str]
+    runs: Dict[str, Any]
+
+
+class ClaudexorRestartResponse(TypedDict):
+    """The restart happened: its receipt and the status read after it."""
+
+    status: ClaudexorStatusResponse
+    restart: ClaudexorRestartReceipt
+
+
+class ClaudexorRestartProblem(TypedDict):
+    """Nothing was stopped. 409 ``restart_preview_stale`` carries the fresh ``preview`` to confirm
+    again; 409 ``restart_in_progress``; 503 carries the engine's typed code (``owner_restart``,
+    ``attach_only_engine``)."""
+
+    error: str
+    code: str
+    preview: NotRequired[ClaudexorRestartPreview]
 
 
 class ClaudexorAccountTarget(TypedDict):
@@ -486,44 +608,162 @@ class ClaudexorAccountTarget(TypedDict):
     profile_id: str
 
 
+class ClaudexorSelectedProgram(TypedDict):
+    """The selected invocation and its own version answer; never package metadata."""
+
+    path: Optional[str]
+    realPath: Optional[str]
+    version: Optional[str]
+    versionOutput: Optional[str]
+    overrideEnv: Optional[str]
+    overrideValue: Optional[str]
+
+
+class ClaudexorProgramExecCommand(TypedDict):
+    kind: Literal["exec"]
+    command: str
+    args: List[str]
+    env: NotRequired[Dict[str, str]]
+
+
+class ClaudexorProgramScriptCommand(TypedDict):
+    kind: Literal["script"]
+    url: str
+    interpreter: str
+    interpreterArgs: List[str]
+    args: List[str]
+    env: NotRequired[Dict[str, str]]
+
+
+class ClaudexorProgramAction(TypedDict):
+    """Engine capability and display-only plans; unavailable actions carry a reason."""
+
+    available: bool
+    reason: Optional[str]
+    commands: List[ClaudexorProgramExecCommand | ClaudexorProgramScriptCommand]
+
+
+class ClaudexorProgramActions(TypedDict):
+    install: ClaudexorProgramAction
+    update: ClaudexorProgramAction
+    exactVersion: ClaudexorProgramAction
+
+
+class ClaudexorNewestNotRead(TypedDict):
+    status: Literal["not_read"]
+    source: Optional[str]
+
+
+class ClaudexorNewestAvailable(TypedDict):
+    status: Literal["available"]
+    source: str
+    version: str
+    observedAt: str
+
+
+class ClaudexorNewestUnavailable(TypedDict):
+    status: Literal["unavailable"]
+    source: Optional[str]
+    observedAt: str
+    problem: Dict[str, Any]  # Engine ControlProblem, passed through.
+
+
+class ClaudexorMaintenanceLatestTarget(TypedDict):
+    kind: Literal["latest"]
+
+
+class ClaudexorMaintenanceVersionTarget(TypedDict):
+    kind: Literal["version"]
+    version: str  # One exact vendor version; the engine validates its spelling.
+
+
+class ClaudexorMaintenanceLatestReceiptTarget(ClaudexorMaintenanceLatestTarget):
+    version: None
+
+
 class ClaudexorMaintenanceRequest(TypedDict):
-    """``POST /api/claudexor/maintenance/operations`` (engine ControlHarnessMaintenanceCreateRequest),
-    sent with a required ``Idempotency-Key`` header (1-256 printable ASCII characters): the same key
-    and body join the same operation."""
+    """Latest runs the selected updater or installs when missing; version uses the vendor's
+    exact-version command. The same Idempotency-Key (1–256 printable ASCII) and body rejoin."""
 
     harness: str
-    target: Dict[str, Any]  # {kind: latest} | {kind: version, version} | {kind: previous} | {kind: baseline}
+    target: ClaudexorMaintenanceLatestTarget | ClaudexorMaintenanceVersionTarget
 
 
-class ClaudexorMaintenanceOperation(TypedDict, total=False):
-    """Engine ControlHarnessMaintenanceOperation, passed through. ``state``: queued, running,
-    succeeded, failed, cancelled or interrupted; poll while queued or running, and while
-    ``termination`` is ``unconfirmed``."""
+class ClaudexorMaintenanceRequester(TypedDict):
+    source: str
+    requestId: Optional[str]
 
-    id: Required[str]
-    state: Required[str]
+
+class ClaudexorMaintenanceScript(TypedDict):
+    url: str
+    size: int
+    sha256: str
+
+
+class ClaudexorMaintenanceCommand(TypedDict):
+    binary: str
+    args: List[str]
+    env: Dict[str, str]
+    script: Optional[ClaudexorMaintenanceScript]
+
+
+class ClaudexorMaintenanceElsewhere(TypedDict):
+    before: ClaudexorSelectedProgram
+    after: ClaudexorSelectedProgram
+
+
+class ClaudexorMaintenanceProfileCleanup(TypedDict):
+    plannedPaths: List[str]
+    removedPaths: List[str]
+
+
+class ClaudexorMaintenanceOperation(TypedDict):
+    """Full engine receipt, passed through. Acceptance is not completion; unconfirmed
+    termination retains custody even when state is terminal. Outcome compares selected programs."""
+
+    id: str
     harness: str
-    phase: str
-    mechanism: str
-    target: Dict[str, Any]
-    before: Any
-    after: Any
-    mutation: str  # none | applied | unknown
-    termination: str  # not_applicable | confirmed | unconfirmed
-    limitations: Any
-    progress: Any
-    problem: Any
+    state: Literal["queued", "running", "succeeded", "failed", "cancelled", "interrupted"]
+    phase: Literal["accepted", "preparing", "installing", "settled"]
+    target: ClaudexorMaintenanceLatestReceiptTarget | ClaudexorMaintenanceVersionTarget
+    requester: ClaudexorMaintenanceRequester
+    installationHome: Optional[str]
+    commands: List[ClaudexorMaintenanceCommand]
+    profileCleanup: NotRequired[ClaudexorMaintenanceProfileCleanup]
+    before: Optional[ClaudexorSelectedProgram]
+    after: Optional[ClaudexorSelectedProgram]
+    elsewhere: Optional[ClaudexorMaintenanceElsewhere]
+    activeRunsAtStart: Optional[int]
+    exitCode: Optional[int]
+    outcome: Literal["changed", "not_changed", "changed_elsewhere", "unknown"]
+    mutation: Literal["none", "applied", "unknown"]
+    termination: Literal["not_applicable", "confirmed", "unconfirmed"]
+    limitations: List[str]
+    progress: List[str]
+    problem: Optional[Dict[str, Any]]
     createdAt: str
     startedAt: Optional[str]
     finishedAt: Optional[str]
 
 
+class ClaudexorMaintenanceEntry(TypedDict):
+    """No host version ordering or ownership inference: the engine supplies every action."""
+
+    harness: str
+    selection: ClaudexorSelectedProgram
+    newest: ClaudexorNewestNotRead | ClaudexorNewestAvailable | ClaudexorNewestUnavailable
+    actions: ClaudexorProgramActions
+    updateAvailable: Literal["yes", "no", "cannot_tell"]
+    releaseNotesUrl: Optional[str]
+    operation: Optional[ClaudexorMaintenanceOperation]
+    observedAt: str
+
+
 class ClaudexorMaintenanceInventory(TypedDict):
-    """Engine ControlHarnessMaintenanceInventory, passed through: per harness what is installed,
-    tested and available, and its current ``operation`` (rejoin it after a reload)."""
+    """Engine inventory, unchanged: selected program, newest observation, actions and receipt."""
 
     observedAt: str
-    harnesses: List[Dict[str, Any]]
+    harnesses: List[ClaudexorMaintenanceEntry]
 
 
 class ClaudexorQuotaRefreshRequest(TypedDict, total=False):
@@ -615,7 +855,7 @@ class ModelCatalogItem(TypedDict, total=False):
     ``<provider_id>::<id>`` for another API provider, ``<kind>@<name>::<id>`` for a named API
     connection (its ``provider``/``provider_id`` = ``<kind>@<name>``, ``provider_label`` its
     picker label), ``claudexor::<source>=<model>`` for an agent account's model, which adds
-    that account's facts."""
+    that account's facts. The local model's row says ``use_local``; its ``value`` is a label."""
 
     provider_id: Required[str]
     provider: Required[str]
@@ -641,6 +881,7 @@ class ModelCatalogItem(TypedDict, total=False):
     availability: Any
     problem: Any
     processing: Any
+    use_local: bool
 
 
 class ModelCatalogResponse(TypedDict, total=False):
@@ -663,6 +904,9 @@ class OpenAICompatibleModelsRequest(TypedDict):
 
     baseUrl: str
     apiKey: NotRequired[str]
+    connection: NotRequired[str]  # named compatible row; omitted = the built-in pair
+    # which built-in pair a kept apiKey belongs to; omitted = the saved effective pair
+    apiKeySetting: NotRequired[Literal["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]]
 
 
 class LocalModelStartRequest(TypedDict):
@@ -727,6 +971,17 @@ class McpListingAttempt(TypedDict):
     partial: bool
 
 
+class McpSignIn(TypedDict, total=False):
+    """A remote server's sign-in (``mcp_oauth.status``), present once it asked for one."""
+
+    state: Required[str]  # signed_in | sign_in_required
+    reason: str  # not_signed_in | refresh_rejected | token_rejected | expired | insufficient_scope | signed_out ...
+    since: Optional[str]
+    issuer: str
+    pending: bool  # a sign-in was begun and not completed
+    required_scope: str  # with insufficient_scope: what a new sign-in asks for
+
+
 class McpServerStatus(TypedDict, total=False):
     """One configured MCP server. A configuration error row has only ``id``, ``enabled``,
     ``tool_count``, ``last_error`` and ``code`` (MCP_CONFIG_ERROR or MCP_ID_AMBIGUOUS)."""
@@ -744,6 +999,8 @@ class McpServerStatus(TypedDict, total=False):
     env_from_settings: Any
     configuration_warnings: List[str]
     schemas_at_start: bool  # the owner's pin: call schemas in every request from task start
+    task_session: bool  # stdio: one task loop's calls share one session (listings stay per call)
+    browser_policy: bool  # that session's process may ask the host's browser policy per request
     instructions: str  # the server's own usage text from initialize, untrusted
     map_tokens: int  # this server's part of the connections map (Main, Low/Max)
     schema_tokens: int  # all its call schemas, loaded or not
@@ -758,6 +1015,7 @@ class McpServerStatus(TypedDict, total=False):
     complete: bool
     publication_error: str
     code: str
+    sign_in: McpSignIn
 
 
 class McpStatusResponse(TypedDict):
@@ -796,6 +1054,38 @@ class McpRefreshResponse(TypedDict, total=False):
     refreshed: Dict[str, Any]
 
 
+class McpSignInRequest(TypedDict, total=False):
+    """``POST /api/mcp/sign-in``: ``begin`` (answers the provider page to open), ``complete`` (the provider's
+    return: ``state`` with ``code`` or ``error``, or the address the browser stopped on as ``returned_url``) or
+    ``sign_out``. ``client_id``/``client_secret``: the owner's own registration where a provider has no other."""
+
+    action: Required[str]
+    server_id: str
+    state: str
+    code: str
+    iss: str
+    error: str
+    error_description: str
+    returned_url: str
+    client_id: str
+    client_secret: str
+
+
+class McpSignInResponse(TypedDict, total=False):
+    """``ok: false`` carries ``code`` (``MCP_AUTH_REQUIRED`` with its ``reason``) and ``error``."""
+
+    ok: Required[bool]
+    server: str
+    url: str
+    redirect_uri: str
+    scope: str
+    revoked: Optional[bool]
+    listing: Dict[str, Any]
+    code: str
+    reason: str
+    error: str
+
+
 class McpTestRequest(TypedDict, total=False):
     """``POST /api/mcp/test``: connect once and list tools; saves nothing. ``server`` is a draft
     server entry; with ``server_id`` its masked secrets are filled from that saved server."""
@@ -824,9 +1114,9 @@ class UpdateProgress(TypedDict, total=False):
     when it cannot be read. An observation, never authority. ``active`` is true only while THIS server
     executes it. ``outcome`` stays empty until concluded: ``applied`` only after a later server's startup
     checks passed while serving the landed commit; ``not_applied``, ``rolled_back``, ``failed`` or
-    ``unknown`` (``reason`` names the missing evidence). ``work_stop`` appears only on the executor's own
-    conclusion; ``none`` means it reached no worker or service teardown. A version, SHA or reconnect
-    alone proves nothing."""
+    ``unknown`` (``reason`` names the missing evidence; a boot ``failed`` names ``rollback_incomplete``).
+    ``work_stop`` appears only on the executor's own conclusion; ``none`` means it reached no worker or
+    service teardown. A version, SHA or reconnect alone proves nothing."""
 
     operation_id: str
     generation: str
@@ -855,10 +1145,11 @@ class UpdateProgress(TypedDict, total=False):
 
 
 class UpdateLetter(TypedDict):
-    """The written description of an update, kept through a failed rewrite (``has_last_good``).
-    ``relation``: pending, applied, superseded or other."""
+    """The update description, written by Ouroboros as ordinary work and never by a check.
+    ``relation``: pending, applied, superseded, other, or '' without text. ``state`` none: nothing
+    saved yet (the projection still carries the offered range and the owner's request)."""
 
-    state: str  # ready | failed
+    state: str  # ready | failed (old records only) | none
     relation: str
     text: str
     author_version: str
@@ -872,21 +1163,28 @@ class UpdateLetter(TypedDict):
     failed_at: str
     latest_failed_key: Optional[Dict[str, Any]]
     qualification: NotRequired[Optional[Dict[str, Any]]]
+    revision: int
+    author: Dict[str, Any]  # {task_id, model, requested} — host-derived
+    checked_key: Optional[Dict[str, Any]]
+    material: Optional[Dict[str, Any]]  # {key, collected_at, text_bytes (query_data's count), commits, bodies_read, bodies_omitted}
+    request: Optional[Dict[str, Any]]  # {task_id, current_task_id, mode, key, requested_at, status (retry/Continue), saved}
 
 
 class UpdateTransactionState(TypedDict, total=False):
-    """An update in progress: ``{active: false}``, or active with its phase and assisted task."""
+    """An update in progress: ``{active: false}``, or active with its phase, assisted task and the
+    ``attempt_id`` a retained attempt's ``tx_attempt_id`` binds to."""
 
     active: Required[bool]
     phase: str
     task_id: str
+    attempt_id: str
     restart_required: bool
     local_work_recovery: bool
 
 
 class UpdateStatusResponse(TypedDict, total=False):
-    """``GET /api/update/status`` (no network) and ``POST /api/update/check`` (fetches first, may write
-    the update letter and broadcasts ``update_progress_changed``). ``running_sha`` is the commit the
+    """``GET /api/update/status`` (no network) and ``POST /api/update/check`` (fetches first, records range
+    facts but never prose, and broadcasts ``update_progress_changed``). ``running_sha`` is the commit the
     running core started from; ``current_sha`` is the checkout's. ``check_ok`` is null on status.
     ``ahead``/``behind`` count commits (history); ``local_changes`` says whether the checkout holds
     content of its own, omitted when no comparison was attempted: ``present`` is a tree delta since
@@ -927,18 +1225,23 @@ class UpdateStatusResponse(TypedDict, total=False):
     checked_at: str
     checked_target_sha: str
     from_cache: bool
+    managed_by_deployment: str  # its administrator replaces the serving program: why in-app updates refuse
 
 
 class CommandRequest(TypedDict):
     """``POST /api/command``: a slash command (``/restart``, ``/panic``, ``/review``, ``/evolve``,
     ``/bg``, ``/status``) or any other text, which becomes an owner message in Main. ``visible_text``
-    adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped."""
+    adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped.
+    ``ui_control`` (``{name, owner_text?}``) says a host-drawn control composed ``cmd``: no owner
+    message is written for it, only ``owner_text`` (words typed into the control) is theirs; malformed: 400."""
 
     cmd: str
+    if_boot: NotRequired[str]  # optional boot.since precondition, before queueing; Panic ignores it
     client_surface: NotRequired[Dict[str, Any]]
     visible_text: NotRequired[str]
     visible_task_id: NotRequired[str]
     task_constraint: NotRequired[Dict[str, Any]]
+    ui_control: NotRequired[Dict[str, Any]]
 
 
 class CommandResponse(TypedDict, total=False):
@@ -948,6 +1251,16 @@ class CommandResponse(TypedDict, total=False):
     ok: bool
     deduped: bool
     task_id: str
+
+
+class CommandRefusal(TypedDict):
+    """``POST /api/command`` 400/409: ``accepted: false`` is present only when the door refused before queueing
+    (an invalid ``reply_to`` or ``if_boot``, a changed boot, no command queue yet), so nothing was queued.
+    Without it the outcome stays unknown: an error raised after enqueue does not undo the command."""
+
+    error: str
+    accepted: NotRequired[bool]  # always false when present
+    reason_code: NotRequired[str]  # boot_changed: ``if_boot`` named an earlier server
 
 
 class GitRollbackRequest(TypedDict):
@@ -1003,7 +1316,7 @@ class CostBreakdownResponse(TypedDict, total=False):
 
 __all__ = [
     "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
-    "SkillToggleRequest", "SkillRevisionRequest", "SkillGrantRequest", "SkillDeleteRequest",
+    "SkillToggleRequest", "SkillRevisionRequest", "SkillReviewRequest", "SkillGrantRequest", "SkillDeleteRequest",
     "SkillToggleResponse", "SkillActionRefusal", "SkillDaemonsResponse", "SkillLifecycleJob",
     "SkillLifecycleQueueResponse",
     "SkillReviewResponse", "SkillReviewHistoryDetailResponse", "SkillReconcileResponse",
@@ -1012,15 +1325,19 @@ __all__ = [
     "MarketplaceUninstallResponse", "MarketplaceSearchResponse", "MarketplaceInstalledResponse",
     "HubPublicationClearRequest", "HubPublicationClearResponse",
     "ClaudexorProblem", "ClaudexorMaintenanceProblem", "ClaudexorAccountTarget",
+    "ClaudexorLoginJobProblem",
+    "ClaudexorRestartRun", "ClaudexorRestartRuns", "ClaudexorRestartWarning", "ClaudexorRestartPreview",
+    "ClaudexorRestartRequest", "ClaudexorRestartReceipt", "ClaudexorRestartResponse", "ClaudexorRestartProblem",
     "ClaudexorMaintenanceRequest", "ClaudexorMaintenanceOperation", "ClaudexorMaintenanceInventory",
     "ClaudexorQuotaRefreshRequest", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
     "ClaudexorAccountResetReceipt", "ClaudexorLoginRequest", "ClaudexorLoginInputRequest",
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
     "ModelCatalogItem", "ModelCatalogResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
-    "LocalModelTestResponse", "McpListingAttempt", "McpServerStatus", "McpStatusResponse", "McpRefreshRequest",
-    "McpRefreshResponse", "McpTestRequest", "McpTestResponse",
+    "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",
+    "McpRefreshRequest", "McpRefreshResponse", "McpSignInRequest", "McpSignInResponse", "McpTestRequest",
+    "McpTestResponse",
     "UpdateProgress", "UpdateLetter", "UpdateTransactionState", "UpdateStatusResponse",
-    "CommandRequest", "CommandResponse", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
+    "CommandRequest", "CommandResponse", "CommandRefusal", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
     "ResetResponse", "CostBreakdownResponse",
 ]

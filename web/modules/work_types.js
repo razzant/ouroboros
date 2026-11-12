@@ -3,6 +3,50 @@
 // Words come from the server's codes through tr(); a client never derives a state, mark or control.
 
 /**
+ * The owner's cited words, bounded for publication (CLIENT_CONTRACT §5); text stays authored.
+ * @typedef {Object} CitedModelWords
+ * @property {string} text
+ * @property {boolean} clipped  // the durable citation is longer than this published span
+ */
+/**
+ * A work's primary route and whose choice it is.
+ * @typedef {Object} WorkPrimaryRoute
+ * @property {string} model
+ * @property {boolean} use_local
+ * @property {CitedModelWords=} cited
+ * @property {string} basis  // main | a role it follows | room | owner | owner_words | mind | fallback | place | circle
+ */
+/**
+ * The route a work acts on and its chooser (`lead` on a work and on its activity row). A departure names the
+ * primary it left: `basis` is then `fallback` or `mind`, with when (`since`) and why (`cause`).
+ * @typedef {Object} WorkLead
+ * @property {string} model
+ * @property {boolean} use_local
+ * @property {CitedModelWords=} cited
+ * @property {string} basis
+ * @property {string=} role  // a fallback's chain row (`fallback:<n>`, n from 0): tells apart two rows of one model
+ * @property {WorkPrimaryRoute=} primary  // only when the acting route is not the primary
+ * @property {string=} since  // an ISO instant in UTC
+ * @property {string=} cause  // a short code or phrase: `switch_model`, a failure's code, `configured fallback`
+ * @property {import('./client_contract_types.js').ChatModelRoute=} pending  // the route the next step uses, when it differs
+ */
+/**
+ * One act on a work's model (POST /api/tasks/{task_id}/model): `set` gives it a model, `follow` returns it to Main;
+ * `return`, `wait` and `keep` leave a fallback.
+ * @typedef {Object} TaskModelRequest
+ * @property {string} request_id  // a retry of the same act carries the same id
+ * @property {"set"|"follow"|"return"|"wait"|"keep"} action
+ * @property {string=} model  // `set` only
+ * @property {boolean=} use_local  // `set` only
+ */
+/**
+ * @typedef {Object} TaskModelResponse
+ * @property {true} ok
+ * @property {string} task_id
+ * @property {"next_step"|"at_start"} applied  // a running work switches at its next step, a queued one starts on it
+ * @property {WorkLead} lead
+ */
+/**
  * @typedef {Object} WorkReason
  * @property {string} code  // closed per release; an unknown code renders its text
  * @property {string} text  // the English sentence for this code
@@ -10,17 +54,32 @@
  * @property {Array<string>=} ids
  * @property {*=} since
  * @property {PauseAuthor=} by  // the declared author of a decided Pause
+ * @property {Array<SleepWake>=} wake  // what a `sleeping` reason waits for: its clauses, joined by "or", time last
  */
 /**
  * @typedef {Object} PauseAuthor
  * @property {string} actor  // owner | ouroboros
- * @property {string} text  // Ouroboros's own sentence; '' for the owner's press
+ * @property {string} text  // the words the press recorded, said verbatim; '' for a press without words
  * @property {*} at  // the press time
+ */
+/**
+ * @typedef {Object} SleepWake
+ * @property {string} kind  // task | task_or_writes | tasks | all_tasks | runs | service | reviewer | sender | mail | time
+ * @property {string=} name  // a chosen task's or sender's work name, as the census holds it
+ * @property {number=} count
+ * @property {string=} at  // the chosen wake instant, said in the viewer's clock
+ */
+/**
+ * @typedef {Object} LastResume
+ * @property {*} at  // when it was asked
+ * @property {{actor: string}} by  // owner | ouroboros | host (a Continue's own start), as its door bound it
+ * @property {string} error  // the door's typed refusal
+ * @property {string} text  // the door's own words after "Resume refused: "
  */
 /**
  * @typedef {Object} WorkTail
  * @property {string} kind  // helper | run | review | model
- * @property {string} state  // live | unknown
+ * @property {string} state  // live | unknown | held (a helper a sleeping episode chose, paused until its Resume)
  * @property {string} code
  * @property {string} text  // its English sentence, said beside the work's word, never as it
  * @property {number=} count
@@ -36,7 +95,7 @@
  */
 /**
  * @typedef {Object} WorkControl
- * @property {string} action  // stop | stop_earlier | pause | resume | hurry | wrap_up
+ * @property {string} action  // stop | stop_earlier | pause | resume | hurry | wrap_up | model
  * @property {string} target  // the exact task id the door acts on
  * @property {string=} scope  // single | cascade | work
  */
@@ -78,10 +137,12 @@
  * @property {string} mark  // moving | still | pause | ring | none (docs/DESIGN.md "Status marks")
  * @property {Object=} stop  // current stop and any independent member stop
  * @property {Object=} refusal  // the continuation's last refusal, rechecked by Resume
+ * @property {LastResume=} last_resume  // the latest refused Resume about its current control (also a member's)
  * @property {string=} outcome
  * @property {WorkFocus=} focus
  * @property {Array<Object>=} gaps
  * @property {string=} client_message_id
+ * @property {WorkLead=} lead  // the model it runs on and whose choice that is
  */
 /**
  * @typedef {Object} RoomStatus

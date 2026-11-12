@@ -101,19 +101,24 @@ def _plan_gate_disclosure(
     llm_trace: Dict[str, Any],
     *,
     forced_reason: str = "",
+    author_stop: bool = False,
 ) -> str:
     # Normal finalization reuses the reducer projection that decided this
     # exact candidate. The trace copy is presentation-only, granting no
-    # permission; forced rails recompute with their explicit rail input.
+    # permission; forced rails (and a stop, which no gate decided) recompute,
+    # and the decision they disclose replaces the projection the outcome reads
+    # (none when no plan is engaged now: an earlier hold's view never outlives
+    # it). Only the stop's own call says it stopped (``author_stop``).
     from ouroboros.owner_hurry import plan_review_disclosure
 
-    projected = llm_trace.get("plan_gate", llm_trace.get("force_plan_decision"))
-    decision = (
-        projected
-        if not forced_reason and isinstance(projected, dict)
-        else _loop()._plan_gate_decision(ctx, llm_trace, hard_rail=forced_reason)
-    )
-    return plan_review_disclosure(decision, forced_reason)
+    decision = llm_trace.get("plan_gate", llm_trace.get("force_plan_decision"))
+    if forced_reason or author_stop or not isinstance(decision, dict):
+        for stale in ("plan_gate", "force_plan_decision"):
+            llm_trace.pop(stale, None)
+        decision = _loop()._plan_gate_decision(ctx, llm_trace, hard_rail=forced_reason)
+        if decision.get("required"):
+            llm_trace["plan_gate"] = decision
+    return plan_review_disclosure(decision, forced_reason, author_stop=author_stop)
 
 
 def _inject_note(note: Optional["task_pacing.PacingNote"], messages: List[Dict[str, Any]], tools: ToolRegistry,
@@ -296,8 +301,9 @@ def _nanny_finalization_message(
     """The honest nanny reminder for a harness-dispatched child at finalization —
     or '' when no reminder is deserved.
 
-    A nanny with no durable delegated start gets NANNY_DID_NOT_DELEGATE; an unsettled
-    start gets NANNY_DELEGATED_RUN_PENDING (the custody fact a duplicate start would
+    A configured actor with no durable delegated start gets its charter fact
+    (``configured_actor_finalization_message``); an unsettled start gets
+    NANNY_DELEGATED_RUN_PENDING (the custody fact a duplicate start would
     contradict); runs that all ended without success get NANNY_DELEGATED_RUN_FAILED.
     Each is a one-shot fact with the available verbs, not a gate. A succeeded run gets
     nothing here: the nanny's own burn rides the facts line every round.
@@ -310,7 +316,7 @@ def _nanny_finalization_message(
     resets on continuation. `trace_attempted` is the third fact: a
     delegate_start in THIS execution's trace; it must not suppress the failure
     message (triad, e84475f2: delegate, run dies, finish by hand, finalize —
-    one execution), only the accusation when custody has no rows yet (a
+    one execution), only the zero-start fact when custody has no rows yet (a
     pending/uncustodied start is an attempt, not a choice)."""
     try:
         from ouroboros.tools import registry_guards
@@ -341,16 +347,17 @@ def _nanny_finalization_message(
         # (``nanny_pacing.nanny_burn_fact``), stated, not judged.
         return ""
     started = int(evidence.get("delegated_runs_started") or 0)
-    if not started and (evidence.get("evidence_read_failed") or not evidence):
-        # Unreadable custody (a5e59bdf): configured -> unknown message; legacy -> silence.
-        from ouroboros.subagent_bootstrap import configured_actor_finalization_message
-
-        _actor = configured_actor_finalization_message(
-            tools._ctx, task_id=str(task_id or ""), fallback_root=drive_root)
-        return _actor or ""
-    if not started and (trace_attempted or evidence.get("delegate_start_attempted")):
+    readable = bool(evidence) and not evidence.get("evidence_read_failed")
+    if not started and readable and (trace_attempted or evidence.get("delegate_start_attempted")):
         # Pending, refused or uncustodied starts are still real attempts.
         return ""
+    if not started:
+        # The charter fact of a configured actor, also over unreadable custody
+        # (a5e59bdf, as unknown); any other nanny has nothing honest to add.
+        from ouroboros.subagent_bootstrap import configured_actor_finalization_message
+
+        return configured_actor_finalization_message(
+            tools._ctx, task_id=str(task_id or ""), fallback_root=drive_root) or ""
     settled = int(evidence.get("delegated_runs_settled") or 0)
     failure_states = [str(s) for s in (evidence.get("delegated_run_failure_states") or [])]
     pending = max(0, started - settled)
@@ -369,26 +376,11 @@ def _nanny_finalization_message(
             "them. Available: delegate_wait to check or wait, delegate_cancel to stop one."
             + failed_note
         )
-    if started:
-        states = ", ".join(failure_states) or "settled without a recorded terminal state"
-        return (
-            f"⚠️ NANNY_DELEGATED_RUN_FAILED: this task started {started} delegated run(s) "
-            f"and none succeeded; they ended: {states}. Available: delegate_start for "
-            "another run."
-        )
-    from ouroboros.subagent_bootstrap import configured_actor_finalization_message
-
-    _actor = configured_actor_finalization_message(
-        tools._ctx, task_id=str(task_id or ""), fallback_root=drive_root)
-    if _actor is not None:
-        return _actor
+    states = ", ".join(failure_states) or "settled without a recorded terminal state"
     return (
-        "⚠️ NANNY_DID_NOT_DELEGATE: this task was dispatched onto the delegated "
-        "substrate (executor=harness) and made zero delegate_start calls; its work "
-        "ran on this task's own model calls. If it completes this way, its "
-        "result discloses delegated_substrate_unused to the parent, together with the "
-        "fact that it finalized after this notice. Available: delegate_start, "
-        "delegate_wait."
+        f"⚠️ NANNY_DELEGATED_RUN_FAILED: this task started {started} delegated run(s) "
+        f"and none succeeded; they ended: {states}. Available: delegate_start for "
+        "another run."
     )
 
 
@@ -416,15 +408,17 @@ def _maybe_inject_finalization_nudges(
 
         receipt_rows = read_verification_receipts(drive_root, task_id)
 
-    def _inject(reminder: str, note: str) -> bool:
+    def _inject(reminder: str, note: str, cause: str) -> bool:
         # The one nudge protocol every advisory injection below follows: land
         # the model's pending text, append the reminder, record the note once
-        # (live progress AND the durable trail), re-loop.
+        # (live progress AND the durable trail), name the hold's typed cause
+        # for the delivery owner's observation, re-loop.
         if content and content.strip():
             messages.append({"role": "assistant", "content": content})
         _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{reminder}")
         emit_progress(note)
         llm_trace["reasoning_notes"].append(note)
+        tools._ctx._completion_hold_cause = cause
         return True
 
     # A host-driven route change hands an already-active authoring turn to a
@@ -460,7 +454,7 @@ def _maybe_inject_finalization_nudges(
                     "call has run since the handover. If the turn ends without one, the host "
                     "records this handover as incomplete (execution degraded); later tool "
                     "work clears that record.",
-                    "Authoring handover recovery nudge injected before final response.",
+                    "Authoring handover recovery nudge injected before final response.", "authoring_handover",
                 )
             tools._ctx._authoring_handover = None
             handover["status"] = "incomplete"
@@ -508,13 +502,14 @@ def _maybe_inject_finalization_nudges(
 
             record_nanny_nudge_stamp(tools._ctx, task_id, _code)
             llm_trace["reasoning_notes"].append(_nanny_msg)
+            tools._ctx._completion_hold_cause = _code  # the producer's own typed code, as its rows carry it
             return True
     from ouroboros.tool_access import canonical_data_root
 
     finalization_msg = _loop()._skill_finalization_message(canonical_data_root(tools._ctx), llm_trace)
     if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
         tools._ctx._skill_finalization_injected = True
-        return _inject(finalization_msg, finalization_msg)
+        return _inject(finalization_msg, finalization_msg, "skill_not_finalized")
     if not getattr(tools._ctx, "_verify_red_nudged", False):
         # Red-verification one-shot nudge: the latest host-attested verify
         # receipt is RED and unreconciled (distinct from receipt_absent below).
@@ -534,7 +529,7 @@ def _maybe_inject_finalization_nudges(
                 ", and no later receipt reconciles it. Available: re-check it, fix and re-run "
                 "verification, or state why this check is not the task's acceptance contract. "
                 "This notice is advisory, not a gate.",
-                "Red-verification nudge injected before final response.",
+                "Red-verification nudge injected before final response.", "verification_red",
             )
     if not getattr(tools._ctx, "_verify_masked_nudged", False):
         # Exit-masking one-shot ADVISORY nudge (v6.52.2): a passing verify can
@@ -554,7 +549,7 @@ def _maybe_inject_finalization_nudges(
                 " that can hide the real command's exit code, so a failing run could read as exit 0. "
                 "Available: re-run it without the masking pipe or with the runner's own pass marker, "
                 "or state why the result is reliable. This notice is advisory, not a gate.",
-                "Masked-verification nudge injected before final response.",
+                "Masked-verification nudge injected before final response.", "verification_masked",
             )
     if not getattr(tools._ctx, "_criterion_source_nudged", False):
         # Criterion-provenance one-shot ADVISORY nudge (v6.54.4): a green check on
@@ -572,7 +567,7 @@ def _maybe_inject_finalization_nudges(
                 "(criterion_source agent_defined, no criterion_basis), not one the task states; the "
                 "receipt carries that provenance to acceptance. Available: verify_and_record with a "
                 "criterion_basis, or a check of the task's own stated criterion. This notice is advisory, not a gate.",
-                "Criterion-provenance nudge injected before final response.",
+                "Criterion-provenance nudge injected before final response.", "criterion_agent_defined",
             )
     suppress_unavailable_zero_run_verify = False
     try:
@@ -603,11 +598,11 @@ def _maybe_inject_finalization_nudges(
             "verify_and_record kinds: explicit_command / explicit_metric / visible_verifier (run a "
             "check), artifact_observation (confirm an artifact exists), no_visible_machine_contract "
             "(declare that none exists).",
-            "Verify-before-done nudge injected before final response.",
+            "Verify-before-done nudge injected before final response.", "verification_absent",
         )
     # No "expected output but nothing attempted" re-loop (A3, removed for #1748): plain
     # prose can itself be the requested deliverable, and the transcript already shows
-    # the model its own calls; the outcome keeps its expected_output_ungrounded signal.
+    # the model its own calls.
     from ouroboros.tool_capabilities import substantive_tool_calls
     work_calls = substantive_tool_calls(llm_trace.get("tool_calls"))
     # P2 one-shot final-answer-marker nudge: real work + prose, no FINAL ANSWER
@@ -626,7 +621,7 @@ def _maybe_inject_finalization_nudges(
             "exactly `FINAL ANSWER: <answer>` — the bare deliverable (a number / a few words / a "
             "short list) — and the response above has none. The latest such line remains eligible "
             "for interrupted-run delivery only while no later tool call has made it stale.",
-            "Final-answer marker nudge injected before final response.",
+            "Final-answer marker nudge injected before final response.", "final_answer_marker",
         )
     return False
 

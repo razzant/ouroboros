@@ -78,6 +78,8 @@ MagicMock/
 # Claudexor external-review tooling run artifacts (operator-side, never tracked)
 .claudexor/
 .review-evidence-iter2/
+# A delegated worker's evidence folder: generated diagnostics, never source (the candidate capture skips it)
+.review-evidence/
 
 # GAIA benchmark scratch: the in-repo solver/agent downloads task attachments and
 # writes OCR / extracted-image output into cwd (= repo root) during gaia runs.
@@ -97,10 +99,11 @@ MagicMock/
 # Sprint-local convergence census pins (private SHAs; never tracked)
 .convergence-parents
 
-# editbench v2 fixtures are GENERATED from the current working tree by
-# make_fixtures_v2.py; committing them would pin a snapshot the benchmark
-# deliberately does not measure, and leaving them untracked dirties the seed gate.
-devtools/benchmarks/editbench/fixtures_v2/
+# editbench v2 fixtures are MATERIALIZED by make_fixtures_v2.py from the tracked,
+# sha256-pinned seeds in seeds_v2/. The published tree, its staging dirs and the
+# one previous set it keeps are generated data; ignoring them keeps the benchmark
+# seed gate clean.
+devtools/benchmarks/editbench/fixtures_v2*/
 
 # Other
 # Anchored to the repo root, like /logs/ and /ocr_pages/ above.

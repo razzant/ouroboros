@@ -6,8 +6,9 @@ initialization is now positive: ``state/state.initialized.json`` records ONE
 initialization identity (``pending`` before the first state is written,
 ``complete`` after), written by supervisor boot (or an isolated benchmark's
 explicit seed before boot) before admission, and by an owner Reset (``pending``,
-``origin=owner_reset``). It holds identity and phase only — no permissions,
-no history.
+``origin=owner_reset``). It holds identity, phase and the work-root basis
+(``launch_roots``: a first initialization records ``app_root``, Reset and
+adoption carry theirs) — no permissions, no history.
 
 With both copies absent the decision is:
 
@@ -35,51 +36,23 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import pathlib
 import uuid
 from typing import Any, Dict, Tuple
 
+# The witness reader and its fixed evidence vocabulary live in the stdlib leaf, so a direct entry
+# can read them before its first path-freezing import (#1239); this module owns the writes.
+from ouroboros.launch_roots import (
+    APP_ROOT_BASIS,
+    BASIS_KEY,
+    adopted_basis,
+    history_evidence,
+    read_witness,
+    witness_path,
+)
 from ouroboros.utils import utc_now_iso, write_bytes_atomic
 
 log = logging.getLogger(__name__)
-
-WITNESS_REL = pathlib.Path("state") / "state.initialized.json"
-# Each is written only by a running supervisor or its tasks, never by bootstrap.
-_EVIDENCE_FILES = (
-    pathlib.Path("state") / "queue_snapshot.json",        # every supervisor start, after init
-    pathlib.Path("state") / "evolution_campaign.json",    # owner/agent evolution control
-    pathlib.Path("state") / "project_task_bindings.json",  # task -> project binding
-)
-_EVIDENCE_NONEMPTY_FILES = (pathlib.Path("logs") / "chat.jsonl",)
-_EVIDENCE_DIRS = (pathlib.Path("task_results"),)
-
-
-def witness_path(drive_root: Any) -> pathlib.Path:
-    return pathlib.Path(drive_root) / WITNESS_REL
-
-
-from ouroboros.installation_stop import confirm_absent  # shared stdlib absence reader
-
-
-def read_witness(drive_root: Any) -> Tuple[str, Dict[str, Any]]:
-    """``("missing"|"ok"|"invalid"|"unreadable", witness)``; only proven absence is missing."""
-    try:
-        try:
-            raw = witness_path(drive_root).read_bytes()
-        except FileNotFoundError:
-            confirm_absent(witness_path(drive_root))
-            return "missing", {}
-    except OSError:  # NotADirectoryError included: a file where ``state/`` belongs is not absence
-        return "unreadable", {}
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return "invalid", {}
-    if (not isinstance(data, dict) or data.get("phase") not in {"pending", "complete"}
-            or not str(data.get("initialization_id") or "")):
-        return "invalid", {}
-    return "ok", data
 
 
 def _write(drive_root: Any, witness: Dict[str, Any]) -> None:
@@ -89,48 +62,23 @@ def _write(drive_root: Any, witness: Dict[str, Any]) -> None:
                               + "\n").encode("utf-8"), fsync=True)
 
 
-def mark_pending(drive_root: Any, *, origin: str) -> str:
-    """Record an explicit fresh start (owner Reset) before the restart that runs init."""
+def mark_pending(drive_root: Any, *, origin: str, work_root_basis: str = "") -> str:
+    """Record an explicit fresh start (owner Reset) before the restart that runs init;
+    the caller passes the basis it read before wiping ``state/`` so the root keeps it."""
     initialization_id = uuid.uuid4().hex
     _write(drive_root, {"initialization_id": initialization_id, "phase": "pending",
-                        "origin": str(origin), "created_at": utc_now_iso()})
+                        "origin": str(origin), "created_at": utc_now_iso(),
+                        **({BASIS_KEY: work_root_basis} if work_root_basis else {})})
     return initialization_id
 
 
 def supervisor_evidence(drive_root: Any) -> Tuple[str, str]:
-    """``("none"|"present"|"unknown", path)``: did a supervisor already run here?"""
+    """``("none"|"present"|"unknown", path)``: did a supervisor already run here? The fixed
+    walk is ``launch_roots.history_evidence``; only this reader can count the store's chat rows."""
     from ouroboros import dialogue_store as ds
 
-    root = pathlib.Path(drive_root)
-    try:  # only proven absence is absence; a file where a directory belongs is unknown
-        for rel in _EVIDENCE_FILES:
-            try:
-                os.lstat(root / rel)
-                return "present", str(rel)
-            except FileNotFoundError:
-                confirm_absent(root / rel)
-        if ds.present(root) and ds.stream_end(root, "chat") > 0:
-            return "present", str(ds.STORE_REL)
-        # Before the first cutover an older body's nonempty live file is also
-        # evidence. This is a stat only; initialization never imports history.
-        for rel in _EVIDENCE_NONEMPTY_FILES:
-            try:
-                if os.lstat(root / rel).st_size > 0:
-                    return "present", str(rel)
-            except FileNotFoundError:
-                confirm_absent(root / rel)
-        for rel in _EVIDENCE_DIRS:
-            try:
-                with os.scandir(root / rel) as entries:
-                    if next(entries, None) is not None:
-                        return "present", str(rel)
-            except FileNotFoundError:
-                confirm_absent(root / rel)
-    except OSError as exc:
-        return "unknown", f"{type(exc).__name__} errno={exc.errno}"
-    except ds.StoreError as exc:
-        return "unknown", str(exc)
-    return "none", ""
+    return history_evidence(drive_root, store_chat=lambda root: ds.present(root) and ds.stream_end(root, "chat") > 0,
+                            store_errors=(ds.StoreError,))
 
 
 def initialization_decision(drive_root: Any, *, origin: str = "first_boot") -> Dict[str, Any]:
@@ -153,9 +101,10 @@ def initialization_decision(drive_root: Any, *, origin: str = "first_boot") -> D
         return {"create": False, "reason": "prior_history_without_state", "detail": where}
     if status == "ok":
         return {"create": True, "initialization_id": str(witness["initialization_id"])}
-    initialization_id = uuid.uuid4().hex
+    initialization_id = uuid.uuid4().hex  # a genuinely new root: its work roots follow APP_ROOT
     _write(drive_root, {"initialization_id": initialization_id, "phase": "pending",
-                        "origin": str(origin or "first_boot"), "created_at": utc_now_iso()})
+                        "origin": str(origin or "first_boot"), "created_at": utc_now_iso(),
+                        BASIS_KEY: APP_ROOT_BASIS})
     return {"create": True, "initialization_id": initialization_id}
 
 
@@ -192,10 +141,11 @@ def prepare_adoption(drive_root: Any, state: Dict[str, Any]) -> str:
         raise ValueError(f"initialization_witness_{status}")
     if not identity and not (state.get("session_id") and state.get("created_at")):
         raise ValueError("legacy_initialization_evidence_missing")
+    basis = adopted_basis(identity)  # predates the witness: home; lost its witness: unknown
     identity = identity or uuid.uuid4().hex
     _write(drive_root, {"initialization_id": identity, "phase": "pending",
                         "origin": "legacy_adopted", "created_at": utc_now_iso(),
-                        "legacy_source_sha256": source_digest})
+                        "legacy_source_sha256": source_digest, BASIS_KEY: basis})
     return identity
 
 

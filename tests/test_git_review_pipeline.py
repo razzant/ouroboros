@@ -35,6 +35,7 @@ from tests._git_review_pipeline_shared import (
     _get_registry_module,
     _make_ctx,
 )
+from tests.test_commit_index import _advisory_review, _baseline, _committed, _continue, _git, task  # noqa: F401 - fixture
 
 
 @pytest.fixture
@@ -70,6 +71,183 @@ def test_managed_resolver_stages_tracked_binary_from_official_merge(tmp_path, mo
     ).stdout.splitlines()
     assert error is None
     assert "native.so" in staged
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+def test_an_unreadable_staged_binding_blocks_before_any_reviewer(git_ctx, monkeypatch, resumed):
+    """The staged subject's binding cannot be read: a resumed wave refuses with its own fact and records nothing, any
+    other call records the revalidation failure; both return the one blocked shape and buy no reviewer."""
+    from ouroboros.tools import git_review_cycle
+
+    git_mod, ctx = git_ctx
+    (pathlib.Path(ctx.repo_dir) / "change.txt").write_text("product change\n", encoding="utf-8")
+    unreadable, recorded = {"ok": False, "fingerprint": "", "status": "unavailable", "reason": "probe"}, []
+    monkeypatch.setattr(git_mod, "_fingerprint_staged_diff", lambda repo: unreadable)
+    monkeypatch.setattr(git_mod, "_handle_revalidation_failure", lambda *a, **kw: recorded.append(kw) or "RECORDED_FAILURE")
+    monkeypatch.setattr(git_mod, "_run_parallel_review", lambda *a, **kw: pytest.fail("an unbound subject buys no reviewer"))
+    ctx._review_resume_pending = resumed
+
+    outcome = git_review_cycle._reviewed_stage_cycle(ctx, "candidate", 0.0, paths=["change.txt"])
+
+    message = outcome.pop("message")
+    assert outcome == {"status": "blocked", "block_reason": "fingerprint_unavailable", "pre_fingerprint": unreadable,
+                       "post_fingerprint": {}}
+    if resumed:
+        assert message.startswith("⚠️ REVIEW_BINDING_UNAVAILABLE") and recorded == [], message
+    else:
+        assert message == "RECORDED_FAILURE" and recorded == [{"pre_fingerprint": unreadable, "kind": "fingerprint_unavailable"}]
+
+
+# --- #2680: an author continuation stages its reviewed subject's exact entries, by Git's own evidence ----------------
+
+def _nested_repository(path):
+    for args in (("init", "-q"), ("config", "user.name", "Test"), ("config", "user.email", "test@example.invalid"),
+                 ("add", "-A"), ("commit", "-qm", "nested")):
+        _git(path, *args)
+
+
+@pytest.mark.parametrize("shape", ["marker_file", "empty_gitdir", "dangling_gitfile"])
+def test_a_reviewed_file_replaced_by_a_directory_lands_by_gits_evidence_never_its_marker(task, monkeypatch, shape):  # noqa: F811
+    """Independent review: the reviewed file own.txt is replaced by a directory of local QA holding a ``.git`` entry.
+    Its shape decides nothing; Git's evidence does. A marker file, an empty directory or a gitfile that resolves
+    nowhere is no repository, so omitted paths land the reviewed file's deletion and nothing the directory holds. A
+    real nested repository is the one entry Git stages there (a gitlink), never its files."""
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("reviewed change\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["own.txt"])
+    (repo / "own.txt").unlink()
+    (repo / "own.txt").mkdir()
+    (repo / "own.txt" / "local-qa.txt").write_text("unreviewed local evidence\n", encoding="utf-8")
+    marker = repo / "own.txt" / ".git"
+    {"marker_file": lambda: marker.write_text("", encoding="utf-8"), "empty_gitdir": marker.mkdir,
+     "dangling_gitfile": lambda: marker.write_text("gitdir: ../nowhere\n", encoding="utf-8"),
+     "nested_repository": lambda: _nested_repository(repo / "own.txt")}[shape]()
+
+    _fresh, result, _notes = _continue(task, monkeypatch, reference)
+
+    assert _committed(repo) == {"own.txt": "T" if shape == "nested_repository" else "D"}, result
+    assert (repo / "own.txt" / "local-qa.txt").is_file() and "local-qa" not in _git(repo, "ls-files"), result
+
+
+def test_a_reviewed_gitlink_whose_checkout_lost_its_repository_lands_its_pointer(task, monkeypatch):  # noqa: F811
+    """Entry evidence: the reviewed submodule pointer is staged again as reviewed, and its checkout then loses its
+    repository. The index's gitlink is still the one entry Git stages there, so omitted paths land that pointer,
+    never its deletion, and nothing the plain directory holds."""
+    from ouroboros.force_remove import force_rmtree
+
+    repo, sub = task.repo_dir, task.repo_dir / "sub"
+    sub.mkdir()
+    (sub / "f.txt").write_text("one\n", encoding="utf-8")
+    _nested_repository(sub)
+    _git(repo, "add", "sub")
+    _git(repo, "commit", "-qm", "track sub")
+    _baseline(task)
+    (sub / "f.txt").write_text("two\n", encoding="utf-8")
+    _git(sub, "commit", "-qam", "two")
+    reference = _advisory_review(task, monkeypatch, ["sub"])
+    _git(repo, "add", "sub")
+    pointer = _git(repo, "ls-files", "-s", "sub").split()[1]
+    force_rmtree(sub / ".git")
+    assert not (sub / ".git").exists()
+
+    _fresh, result, _notes = _continue(task, monkeypatch, reference)
+
+    assert _committed(repo) == {"sub": "M"}, result
+    assert _git(repo, "ls-tree", "HEAD", "sub").split()[:3] == ["160000", "commit", pointer], result
+
+
+def test_unreadable_entry_evidence_refuses_the_continuation_before_staging(task, monkeypatch):  # noqa: F811
+    """Git's entry evidence for a reviewed name that now holds a directory cannot be read at staging: the call
+    refuses with the staging error before anything is staged, never guessing a removal or a recursive add."""
+    from ouroboros.tools import review_collection
+
+    repo = task.repo_dir
+    _baseline(task)
+    (repo / "own.txt").write_text("reviewed change\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["own.txt"])
+    (repo / "own.txt").unlink()
+    (repo / "own.txt").mkdir()
+    (repo / "own.txt" / "local-qa.txt").write_text("unreviewed local evidence\n", encoding="utf-8")
+
+    def unreadable(_repo, names):
+        if names:
+            raise RuntimeError("index unreadable")
+        return []
+    monkeypatch.setattr(review_collection, "_directories_without_entry", unreadable)
+    head = _git(repo, "rev-parse", "HEAD")
+
+    _fresh, result, _notes = _continue(task, monkeypatch, reference)
+
+    assert "GIT_ERROR (staged-status)" in result and "index unreadable" in result, result
+    assert _git(repo, "rev-parse", "HEAD") == head and _git(repo, "diff", "--cached", "--name-only") == "", result
+
+
+@pytest.mark.parametrize("baseline", [True, False])
+def test_a_reviewed_file_over_a_tracked_directory_now_a_nested_repository_stages_nothing_below(task, monkeypatch,  # noqa: F811
+                                                                                               baseline):
+    """The review turned the tracked directory pkg into a file. pkg is a directory again, its tracked file restored
+    beside local QA, inside a repository. The index still holds pkg as a directory, so Git would walk into it: the
+    reviewed name is no entry there and nothing reviewed differs from HEAD, with or without task attribution."""
+    import shutil
+
+    repo = task.repo_dir
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "x.txt").write_text("tracked\n", encoding="utf-8")
+    _git(repo, "add", "pkg")
+    _git(repo, "commit", "-qm", "track pkg")
+    if baseline:
+        _baseline(task)
+    shutil.rmtree(repo / "pkg")
+    (repo / "pkg").write_text("reviewed file\n", encoding="utf-8")
+    reference = _advisory_review(task, monkeypatch, ["pkg", "pkg/x.txt"])
+    (repo / "pkg").unlink()
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "x.txt").write_text("tracked\n", encoding="utf-8")
+    (repo / "pkg" / "qa.txt").write_text("unreviewed local evidence\n", encoding="utf-8")
+    _nested_repository(repo / "pkg")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    _fresh, result, _notes = _continue(task, monkeypatch, reference)
+
+    assert "GIT_NO_CHANGES" in result and "pkg, pkg/x.txt" in result, result
+    assert _git(repo, "rev-parse", "HEAD") == head and "qa.txt" not in _git(repo, "ls-files"), result
+
+
+@pytest.mark.parametrize("operation", ["status", "resolve", "settle"])
+def test_a_blocked_review_does_not_offer_author_continuation_or_rewrite_on_read(task, monkeypatch, operation):  # noqa: F811
+    """A real Blocking rejection followed by an Advisory choice is not an author handback. Reading its status or
+    refusing its reference must not offer an unusable continuation or rewrite its closed seats just to tag them."""
+    import json
+
+    from ouroboros import review_state
+    from ouroboros.review_ledger import ledger_root, load_record
+    from ouroboros.tools.commit_gate import resolve_commit_review_reference
+    from ouroboros.tools.preflight_review import _handle_review_status
+    from ouroboros.tools.review_collection import reference_for
+    from ouroboros.tools.review_change_custody import repair_settled_attempt
+    from tests.test_commit_index import _rejected_review
+    from tests.test_unwaited_review_settlement import _state_writes
+
+    _baseline(task)
+    (task.repo_dir / "own.txt").write_text("change\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    _rejected_review(task, monkeypatch)
+    before = review_state.load_state(task.drive_root).attempts[-1]
+    assert (before.status, before.phase) == ("blocked", "blocking_review")
+    record = load_record(ledger_root(task), before.review_record_id)
+    reference = reference_for(record, before)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    writes = _state_writes(monkeypatch)
+
+    if operation == "status":
+        assert "review_reference" not in json.loads(_handle_review_status(task, task_id=task.task_id))
+    elif operation == "resolve":
+        with pytest.raises(ValueError, match="missing or no longer"):
+            resolve_commit_review_reference(task, reference)
+    else:
+        repair_settled_attempt(task.drive_root, ledger_root(task), before)
+    assert writes == [] and review_state.load_state(task.drive_root).attempts[-1] == before
 
 
 # --- repo_write tool registration ---
@@ -181,12 +359,20 @@ class TestReviewInCommitPipeline:
     # which additionally verifies the one wave (assembly → admission → dispatch)
     # is reached and the ``ThreadPoolExecutor`` parallelism contract holds.
 
-    def test_blocked_review_unstages(self):
-        """When review blocks, git reset HEAD must be called."""
-        from ouroboros.tools import git_review_cycle
+    def test_blocked_review_unstages(self, git_ctx, monkeypatch):
+        """A refused cycle unstages what it staged (real Git; a protected path under Advanced)."""
+        git_mod, ctx = git_ctx
+        repo = pathlib.Path(ctx.repo_dir)
+        (repo / "BIBLE.md").write_text("protected change\n", encoding="utf-8")
+        monkeypatch.setattr(git_mod, "_current_runtime_mode", lambda: "advanced")
+        git_mod._reset_commit_review_state(ctx)
 
-        source = inspect.getsource(git_review_cycle._reviewed_stage_cycle)  # the cycle body under the panel
-        assert 'git", "reset", "HEAD"' in source
+        result = git_mod._run_reviewed_stage_cycle(ctx, "protected change", 0.0, paths=["BIBLE.md"])
+
+        assert result["block_reason"] == "core_protection_blocked", result
+        staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=repo,
+                                check=True, capture_output=True, text=True).stdout
+        assert staged == ""
 
     def test_review_rebuttal_forwarded(self):
         git_mod = _get_git_module()
@@ -306,9 +492,6 @@ class TestSandboxCoversRepoWrite:
 
 # ---------------------------------------------------------------------------
 # Check 7: P9 history limits in _preflight_check (v4.41.0)
-# ---------------------------------------------------------------------------
-
-
 # ---------------------------------------------------------------------------
 # Advisory skip_tests parameter (v4.41.0)
 # ---------------------------------------------------------------------------

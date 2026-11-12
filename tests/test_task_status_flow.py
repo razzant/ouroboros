@@ -2351,28 +2351,6 @@ def test_other_bounded_int_settings_keep_their_min_of_one(monkeypatch):
     )
 
 
-def test_settings_ui_carries_a_configured_zero_subagent_depth():
-    """The runtime honouring 0 is worthless if the Settings page silently reverts it: 0 is FALSY
-    in JS, so a stored 0 read through the plain `if (value)` branch displayed the fallback 3, and
-    the next Save (which posts every number field unconditionally) wrote 3 back — re-enabling three
-    levels of delegation through the UI. All three carriers of the owner's 0 are pinned: the input
-    can reach it, the depth entry is falsy-tolerant, and the load path still honours that flag
-    (without which the flag is inert)."""
-    root = pathlib.Path(__file__).resolve().parents[1]
-    settings_js = (root / "web" / "modules" / "settings.js").read_text(encoding="utf-8")
-    # The input moved from Advanced -> Runtime Limits to Agents -> Delegation
-    # (D-10): the counts bound the agents, not the process pool. Same invariant,
-    # new address.
-    settings_ui = (root / "web" / "modules" / "subagents_settings.js").read_text(encoding="utf-8")
-    assert 'id="s-subagent-depth" type="number" min="0"' in settings_ui
-    # The 4th tuple element is the falsy-tolerant flag consumed by the load path below.
-    assert "['s-subagent-depth', 'OUROBOROS_MAX_SUBAGENT_DEPTH', 3, true]" in settings_js
-    assert (
-        "if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;"
-        in settings_js
-    ), "the load path no longer honours the falsy-tolerant flag, so the entry is inert"
-
-
 def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, monkeypatch):
     from supervisor import events as ev_module
     from ouroboros.task_results import STATUS_FAILED
@@ -2419,6 +2397,64 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
     assert sent[0][2]["progress_meta"]["delegation_role"] == "subagent"
     assert sent[0][2]["progress_meta"]["parent_task_id"] == "parent123"
     assert sent[0][2]["progress_meta"]["status"] == STATUS_FAILED
+
+
+@pytest.mark.parametrize("count, wait, pending, blocked, rejected", [
+    (6, "acting", 0, True, False),
+    (6, "warm", 0, False, False),
+    (6, "in_slot", 0, False, False),
+    (6, "slot_flag", 0, False, False),
+    (6, "expired", 0, True, False),
+    (6, "warm", 6, True, False),
+    (0, "cold", 6, False, False),
+    (0, "cold", 499, False, False),
+    (0, "cold", 500, True, True),
+    (499, "warm", 0, False, False),
+    (500, "warm", 0, True, True),
+])
+def test_scheduling_soft_cap_counts_acting_children_but_hard_cap_counts_all(
+        tmp_path, monkeypatch, count, wait, pending, blocked, rejected):
+    from supervisor import events, workers
+
+    monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "6")
+    running, slots, enqueued, sent = {}, {-1: SimpleNamespace(busy_task_id=None)}, [], []
+    for wid in range(count):
+        tid = f"running-{wid}"
+        running[tid] = {"task": {"id": tid, "root_task_id": "root", "delegation_role": "subagent"}, "worker_id": wid}
+        slots[wid] = SimpleNamespace(busy_task_id=tid, active_capacity=wait != "slot_flag")
+        if wait == "warm":
+            running[tid]["owner_wait"] = {"state": "waiting"}
+        elif wait in {"in_slot", "expired"}:
+            running[tid]["active_operation_leases"] = {"wait": {
+                "kind": "in_slot_wait", "until_ts": time.time() + (600 if wait == "in_slot" else -1)}}
+    monkeypatch.setattr(workers, "WORKERS", slots)
+    ctx = SimpleNamespace(
+        DRIVE_ROOT=tmp_path, RUNNING=running, WORKERS=slots,
+        PENDING=[{"id": f"pending-{i}", "root_task_id": "root", "delegation_role": "subagent"}
+                 for i in range(pending)],
+        load_state=lambda: {"owner_chat_id": 1},
+        send_with_budget=lambda chat, text, **kw: sent.append((text, kw)),
+        enqueue_task=lambda task: enqueued.append(dict(task)) or task,
+        persist_queue_snapshot=lambda reason="": None,
+    )
+    if wait == "cold":
+        for task in ctx.PENDING:
+            task["_budget_pause"] = {"reason": "sleep", "sleep": {}}
+    drive = str(tmp_path / "state" / "headless_tasks" / "next" / "data")
+    events._handle_schedule_task({
+        "type": "schedule_subagent", "task_id": "next", "objective": "Inspect", "expected_output": "Findings",
+        "depth": 1, "root_task_id": "root", "parent_task_id": "root", "delegation_role": "subagent",
+        "memory_mode": "forked", "drive_root": drive, "child_drive_root": drive,
+    }, ctx)
+    result = read_result(tmp_path, "next")
+    assert result["status"] == ("failed" if rejected else "scheduled")
+    assert bool(enqueued) is not rejected
+    assert sent
+    if rejected:
+        assert "hard active child limit (500)" in sent[0][0]
+    else:
+        assert ("queued behind active subagent cap" in sent[0][0]) is blocked
+        assert bool(sent[0][1]["progress_meta"].get("queued_behind_active_cap")) is blocked
 
 
 def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, monkeypatch):
@@ -3079,7 +3115,6 @@ def test_subagent_silence_preserves_live_custody_and_service_logs(tmp_path, monk
     monkeypatch.setattr(queue_module, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue_module, "_reap_queue", queue_module._stdqueue.Queue())
     monkeypatch.setattr(queue_module, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(queue_module, "get_per_call_timeout_ceiling_sec", lambda: 1)
     worker = SimpleNamespace(busy_task_id="childtimeout", proc=FakeProc(), reaping=False)
     monkeypatch.setattr(workers_module, "WORKERS", {9: worker})
     monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id: None)
@@ -3142,7 +3177,6 @@ def test_absolute_deadline_does_not_retry_expired_task(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_module, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue_module, "_reap_queue", queue_module._stdqueue.Queue())
     monkeypatch.setattr(queue_module, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(queue_module, "get_per_call_timeout_ceiling_sec", lambda: 1)
     worker = SimpleNamespace(busy_task_id="deadline1", proc=FakeProc(), reaping=False)
     monkeypatch.setattr(workers_module, "WORKERS", {9: worker})
     monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id: None)

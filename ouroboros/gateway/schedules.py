@@ -7,8 +7,11 @@ import asyncio
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or
-from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, cron_error, schedule_id_error, timezone_error
+from ouroboros.schedule_contract import (
+    HOST_ATTESTED_TEMPLATE_FIELDS, RESERVED_TEMPLATE_FIELDS, cron_error, schedule_id_error, timezone_error,
+)
 
 
 def _enabled_value(payload: dict) -> bool | str:
@@ -71,7 +74,8 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
         if "metadata" in task and not isinstance(task.get("metadata"), dict):
             return json_error("scheduled task template metadata must be an object", 400)
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-        if RESERVED_TEMPLATE_FIELDS & set(metadata):
+        # The relation is this door's refusal, not a reserved template field: the host's own follow-ups keep it.
+        if (RESERVED_TEMPLATE_FIELDS | {PRESENCE_BINDING_RELATION_KEY}) & set(metadata):
             return json_error("scheduled task template metadata cannot include reserved lineage/workspace fields", 400)
         if str(task.get("type") or "task") != "task":
             return json_error("scheduled task templates must use type='task'", 400)
@@ -90,6 +94,11 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
         # This owner door creates Main self-work or the named room's default.
         # Existing followups retain their recorded explicit resource/none intent.
         task = {**task, "metadata": dict(task.get("metadata") or {})}
+        # Who supplied the text and the words a run carried are the host's facts: a GET's copy (or any
+        # caller's) is set aside here and named in the answer; the write derives them from the CURRENT row.
+        ignored = sorted(f"task.metadata.{key}" for key in HOST_ATTESTED_TEMPLATE_FIELDS & set(task["metadata"]))
+        for key in HOST_ATTESTED_TEMPLATE_FIELDS:
+            task["metadata"].pop(key, None)
         project_id = str(task.get("project_id") or "").strip()
         new_intent = {"kind": "room_default", "project_id": project_id} if project_id else {"kind": "system_repo"}
         enabled = _enabled_value(body)
@@ -113,14 +122,16 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
         try:
             stored = upsert_scheduled_task(
                 record, drive_root=request_drive_root(request), actor="owner:gateway", writer_kind="owner",
-                reason=str(body.get("reason") or "").strip(), new_resource_intent=new_intent)
+                reason=str(body.get("reason") or "").strip(), new_resource_intent=new_intent,
+                text_supplier={"kind": "schedule_api"})
         except ScheduleRefused as refusal:
             # 409 when the write could not be made SAFELY (its audit is down);
             # 400 when the request itself asks for something this door cannot do.
             return json_error(refusal.message, 409 if refusal.status == "audit_unavailable" else 400)
         except ScheduleStoreUnreadable as exc:
             return json_error(str(exc), 409)
-        return JSONResponse({"ok": stored.get("audit") == "recorded", "schedule": stored})
+        return JSONResponse({"ok": stored.get("audit") == "recorded", "schedule": stored,
+                             **({"ignored_fields": ignored} if ignored else {})})
     except Exception as exc:
         return json_exception(exc)
 

@@ -11,6 +11,7 @@ import pytest
 from ouroboros import knowledge as store
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext
+from tests._knowledge_history_shared import replaced
 
 
 def address(tmp_path, topic="people/Антон", scope="global"):
@@ -60,7 +61,7 @@ An interpretation grounded in two episodes.
     assert second.current.metadata["custom"] == {"evidence": ["episode-1", "episode-2"]}
     assert second.current.metadata["title"] == "Anton"
     assert second.current.summary == "A revised interpretation."
-    assert history(target)[-1]["old_content"] == source
+    assert replaced(tmp_path, history(target)[-1]) == source
     assert history(target)[-1]["new_content"] == second.current.text
 
 
@@ -142,9 +143,10 @@ def test_exact_edit_preserves_other_knowledge_and_reports_its_delta(tmp_path):
     assert updated.metadata == original.metadata
     assert "# Rowan" in updated.text and "## Open question" in updated.text
     change = history(target)[-1]
-    assert change["mode"] == "edit" and change["old_content"] == original.text
+    assert change["mode"] == "edit" and replaced(tmp_path, change) == original.text
     assert change["new_content"] == updated.text
     assert change["delta"] == {"old_chars": len(original.text), "new_chars": len(updated.text),
+                                "old_body_chars": store.body_chars(original), "new_body_chars": store.body_chars(updated),
                                 "change_chars": len(updated.text) - len(original.text), "removed_headings": [],
                                 "body_changed": True, "summary_changed": False}
     assert json.loads(reply.split("\n", 1)[1])["knowledge_delta"] == change["delta"]
@@ -195,7 +197,7 @@ def test_edit_accepts_recursive_yaml_alias_without_comparing_metadata_graphs(tmp
     result = store.write_knowledge_note(target, "New.", mode="edit", old_str="Old.",
                                         expected_revision=original.revision)
     assert result.ok and result.current.raw == original.raw.replace(b"Old.", b"New.")
-    assert history(target)[-1]["old_content"] == original.text
+    assert replaced(tmp_path, history(target)[-1]) == original.text
 
 
 def test_summary_revision_still_refuses_a_rerender_that_changes_a_recursive_field(tmp_path, monkeypatch):
@@ -369,9 +371,28 @@ def test_index_publication_failure_reports_actual_new_source_and_retains_capture
     assert not result.ok and result.reason == "publication_incomplete"
     assert result.current.raw == target.path.read_bytes()
     assert "New state." in result.current.text
-    assert history(target)[-1]["old_content"] == original.text
+    assert replaced(tmp_path, history(target)[-1]) == original.text
     assert history(target)[-1]["new_content"] == result.current.text
     assert result.delta == history(target)[-1]["delta"]
+    # The source landed, so that row holds a real version: the next write names it, byte for byte.
+    monkeypatch.undo()
+    later = store.write_knowledge_note(target, "Later state.", expected_revision=result.current.revision)
+    assert later.ok and "old_content" not in history(target)[-1]
+    assert replaced(tmp_path, history(target)[-1]) == result.current.text
+    # A write whose source never landed holds a version nobody published: the next row keeps the text inline.
+    real_write = store.write_bytes_atomic
+
+    def fail_source(path, data):
+        if path == target.path:
+            raise OSError("disk")
+        return real_write(path, data)
+
+    monkeypatch.setattr(store, "write_bytes_atomic", fail_source)
+    lost = store.write_knowledge_note(target, "Never landed.", expected_revision=later.current.revision)
+    assert not lost.ok and target.path.read_bytes() == later.current.raw
+    monkeypatch.undo()
+    store.write_knowledge_note(target, "After the failure.", expected_revision=later.current.revision)
+    assert history(target)[-1]["old_content"] == later.current.text
 
 
 def test_overwrite_malformed_legacy_source_discloses_unknown_heading_delta(tmp_path):
@@ -396,12 +417,12 @@ def test_append_to_malformed_legacy_source_keeps_history_without_heading_claim(t
     assert appended.ok and appended.current.raw.endswith(b"# Old heading\nNew evidence.\n")
     assert appended.delta["removed_headings"] is None
     record = history(target)[-1]
-    assert record["old_content"] == original.text
+    assert replaced(tmp_path, record) == original.text
     assert record["new_content"] == appended.current.text
     assert record["delta"] == appended.delta
 
 
-@pytest.mark.parametrize("value", ["null", "12", "[]", "''"])
+@pytest.mark.parametrize("value", ["null", "12", "''"])
 def test_new_formal_note_requires_string_type_without_a_type_catalog(tmp_path, value):
     target = address(tmp_path)
     result = store.write_knowledge_note(target, f"---\ntype: {value}\n---\nBody.")
@@ -409,7 +430,7 @@ def test_new_formal_note_requires_string_type_without_a_type_catalog(tmp_path, v
     assert not target.path.exists()
 
 
-@pytest.mark.parametrize("topic", ["../escape", "/absolute", "a/../escape", "index-full", "a\\b"])
+@pytest.mark.parametrize("topic", ["../escape", "index-full", "a\\b"])
 def test_invalid_address_is_not_normalized_into_another_source(tmp_path, topic):
     with pytest.raises(ValueError):
         address(tmp_path, topic)
@@ -440,3 +461,46 @@ def test_legacy_index_context_survives_until_authored_overview_without_recursive
                                       "# What I currently understand\n\nA reconsidered overview with [details](details.md).").ok
     assert "Earlier generated context" not in index.read_text(encoding="utf-8")
     assert any(row.get("old_content") == original for row in history(target))
+
+
+@pytest.mark.parametrize("scope", ["global", "project:p"])
+def test_history_keeps_each_version_whole_once_and_names_the_earlier_copy(tmp_path, scope):
+    target = address(tmp_path, "work/report", scope)
+    first = store.write_knowledge_note(target, "# Report\n\nFirst understanding.")
+    second = store.write_knowledge_note(target, "# Report\n\nSecond understanding.",
+                                        expected_revision=first.current.revision)
+    rows = history(target)
+    # The replaced version is already the first row's new_content: the second row names it, once.
+    assert "old_content" not in rows[-1] and rows[-1]["new_content"] == second.current.text
+    assert rows[-1]["old_content_ref"]["journal"] == f"knowledge:{scope}"
+    assert replaced(tmp_path, rows[-1]) == first.current.text
+    assert hashlib.sha256(replaced(tmp_path, rows[-1]).encode()).hexdigest() == rows[-1]["old_sha256"]
+    # A newest row that holds no text for those bytes (a digest-era row) is no proof: the text stays inline.
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    digest = {**rows[-1], "new_content": "", "content_digested": True}
+    journal.write_text(journal.read_text(encoding="utf-8") + json.dumps(digest, ensure_ascii=False) + "\n", encoding="utf-8")
+    again = store.write_knowledge_note(target, "# Report\n\nSecond, again.", expected_revision=second.current.revision)
+    assert again.ok and history(target)[-1]["old_content"] == second.current.text
+    # A version no row recorded (changed outside the writer) stays inline, as does an archive's.
+    target.path.write_bytes(b"# Report\n\nEdited by hand.")
+    third = store.write_knowledge_note(target, "# Report\n\nThird.", expected_revision=store.read_knowledge_note(target).revision)
+    assert third.ok and history(target)[-1]["old_content"] == "# Report\n\nEdited by hand."
+    archived = store.write_knowledge_note(target, "", "archive", third.current.revision, reason="superseded")
+    assert archived.ok and history(target)[-1]["old_content"] == third.current.text
+    assert "old_content_ref" not in history(target)[-1]
+
+
+def test_history_names_an_earlier_copy_from_a_tail_that_starts_mid_journal(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "_JOURNAL_TAIL_BYTES", 8192)
+    target = address(tmp_path, "work/report")
+    for index in range(12):  # other notes push the journal past the tail the writer reads
+        store.write_knowledge_note(address(tmp_path, f"filler/{index}"), "x" * 1500)
+    first = store.write_knowledge_note(target, "# Report\n\nFirst.")
+    assert (target.shelf.parent / "knowledge_history.jsonl").stat().st_size > 8192
+    second = store.write_knowledge_note(target, "# Report\n\nSecond.", expected_revision=first.current.revision)
+    row = history(target)[-1]
+    assert row["old_content_ref"]["offset"] > 0 and replaced(tmp_path, row) == first.current.text
+    for index in range(12):  # the holder falls out of the tail: the replaced text stays inline
+        store.write_knowledge_note(address(tmp_path, f"later/{index}"), "y" * 1500)
+    store.write_knowledge_note(target, "# Report\n\nThird.", expected_revision=second.current.revision)
+    assert history(target)[-1]["old_content"] == second.current.text

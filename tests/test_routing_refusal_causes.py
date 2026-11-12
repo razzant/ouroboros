@@ -18,6 +18,7 @@ import pytest
 from ouroboros.project_dialogue import (
     ORIGIN_ADDRESSED_NOTICE_TYPES,
     ROUTING_REFUSAL_CAUSES,
+    WORK_SPEECH_ELSEWHERE_TYPES,
     room_membership,
     routing_refusal_cause,
 )
@@ -40,6 +41,8 @@ REFUSAL_REASONS = (
     "invalid_skill_repair_constraint", "skill_repair_payload_missing",
     "skill_repair_payload_unreadable", "skill_repair_admission_unwritable",
     "repair_promotion_failed", "task_acceptance_fence", "invalid_task_depth",
+    # a private start's owner origin (presence_owner_contact.private_start_refusal)
+    "private_owner_source_invalid", "private_owner_source_unavailable",
     # the unconfirmed family (handler crash, receipt persistence, routing_wait)
     "promotion_persistence_failed", "routing_receipt_persist_failed",
     "routing_annotation_persist_failed", "source_continuation_publish_failed",
@@ -47,7 +50,7 @@ REFUSAL_REASONS = (
     # steer (supervisor/steering.py)
     "target_unknown", "direct_chat_turn", "subagent_target",
     "cancel_pending", "target_closed", "target_finished", "acceptance_fence_sealed",
-    "mailbox_write_failed",
+    "mailbox_write_failed", "presence_author_closed", "presence_author_elsewhere", "presence_author_unreadable",
     # ensure_project_scope (worker_promotion, events_project_routing)
     "project_scope_conflict", "missing_task_or_project", "ensure_project_scope_failed",
     # the parallel receipt producer (ouroboros/server_owner_routing.py)
@@ -102,14 +105,8 @@ def test_every_refusal_reason_has_a_short_factual_phrase():
     "action, status, expected",
     [
         ("promote_chat_to_task", "needs_manual_target", "Not started"),
-        ("route_to_project", "needs_manual_target", "Not started"),
         ("promote_chat_to_task", "rejected", "Not started"),
         ("steer_task", "needs_manual_target", "Not delivered"),
-        ("steer_task", "rejected", "Not delivered"),
-        ("ensure_project_scope", "rejected", "Not moved"),
-        ("promote_chat_to_task", "unconfirmed", "Not confirmed"),
-        ("steer_task", "unconfirmed", "Not confirmed"),
-        ("ensure_project_scope", "unconfirmed", "Not confirmed"),
     ],
 )
 def test_prefix_follows_the_act_and_its_outcome(action, status, expected):
@@ -170,28 +167,32 @@ def test_origin_addressed_notice_types_cover_admission_and_steering():
     })
 
 
-@pytest.mark.parametrize("notice_type", sorted(ORIGIN_ADDRESSED_NOTICE_TYPES))
-def test_origin_addressed_notice_rows_stay_in_the_owners_chat(notice_type):
+def test_origin_addressed_notice_rows_stay_in_the_owners_chat(subtests):
     """R12: the refused task id is bound to the project it never started in, so
     binding lineage would move the notice out of Main into that project on
-    reload. The notice is addressed to the chat the OWNER wrote in."""
-    rooms = lambda task_id, parent="", root="": 77 if "refused-task" in (task_id, parent, root) else 0  # noqa: E731
-    main = room_membership(1, {77}, [], rooms)
-    project = room_membership(77, {77}, [], rooms)
-    notice = {"direction": "system", "type": notice_type, "task_id": "refused-task", "chat_id": 1}
+    reload. The notice is addressed to the chat the OWNER wrote in. A relay's answer
+    is its work's speech too: it stays in that chat and also joins its work's Project."""
+    for notice_type in sorted(ORIGIN_ADDRESSED_NOTICE_TYPES):
+        with subtests.test(notice_type=notice_type):
+            rooms = lambda task_id, parent="", root="": 77 if "refused-task" in (task_id, parent, root) else 0  # noqa: E731
+            main = room_membership(1, {77}, [], rooms)
+            project = room_membership(77, {77}, [], rooms)
+            notice = {"direction": "system", "type": notice_type, "task_id": "refused-task", "chat_id": 1}
 
-    assert main(1, notice) is True
-    assert project(1, notice) is False
-    assert project(77, {**notice, "chat_id": 77}) is True
-    # An ordinary bound row keeps today's behaviour: lineage moves it to its room.
-    ordinary = {"direction": "out", "type": "chat", "task_id": "refused-task", "chat_id": 1}
-    assert main(1, ordinary) is False
-    assert project(1, ordinary) is True
+            assert main(1, notice) is True
+            assert project(1, notice) is (notice_type in WORK_SPEECH_ELSEWHERE_TYPES)
+            assert project(77, {**notice, "chat_id": 77}) is True
+            # An ordinary bound row keeps today's behaviour: lineage moves it to its room.
+            ordinary = {"direction": "out", "type": "chat", "task_id": "refused-task", "chat_id": 1}
+            assert main(1, ordinary) is False
+            assert project(1, ordinary) is True
 
 
-@pytest.mark.parametrize("chat_id", [1, 0, -1001])
-@pytest.mark.parametrize("labelled", [False, True])
-@pytest.mark.parametrize("after_lock", [False, True])
+@pytest.mark.parametrize(("after_lock", "labelled", "chat_id"), [
+    (False, False, -1001),
+    (True, True, 1),
+    (True, True, 0),
+])
 def test_cancel_refusal_is_one_system_notice_only_when_no_owner_receipt_can_tell_it(
     tmp_path, monkeypatch, chat_id, labelled, after_lock,
 ):

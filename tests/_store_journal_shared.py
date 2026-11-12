@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
+import os
 import pathlib
 import sqlite3
 import time
@@ -54,6 +55,37 @@ def use_journal(monkeypatch, mode: str) -> None:
     for path, tier in idle:
         if path.is_file():
             configure_journal(path, tier)
+            _CONVERTED.append((path, tier))
+
+
+# The stores ``use_journal`` brought to a forced mode, given this interpreter's own journal back once the test's
+# monkeypatch is undone (tests/conftest.py): a WAL file never outlives its test on a SQLite that must not share WAL.
+_CONVERTED: list = []
+
+
+def give_back_converted_journals() -> None:
+    """A store an earlier test's late thread still leases keeps its forced mode until a later teardown:
+    the lease is that thread's (``use_journal``), and the test ending now broke nothing."""
+    from ouroboros.store_journal import configure_journal
+
+    waiting = []
+    while _CONVERTED:
+        path, tier = _CONVERTED.pop()
+        if not path.is_file():
+            continue
+        key = str(pathlib.Path(os.path.abspath(path)))
+        with store._CONNECTION_GUARD:
+            leased = any(entry.active for pool in list(store._CONNECTION_POOLS)
+                         for name, entry in pool.entries.items() if name == key)
+        try:
+            if not leased:
+                store.close_connections(path)
+                configure_journal(path, tier, wait_sec=0)  # a busy file waits for a later teardown, not here
+                continue
+        except store.StoreBusy:  # a lease taken since, or another process holding the file at the handoff
+            pass
+        waiting.append((path, tier))
+    _CONVERTED.extend(waiting)
 
 
 def exclusive_hold(path: Any, *, wait_sec: float = 5.0) -> sqlite3.Connection:

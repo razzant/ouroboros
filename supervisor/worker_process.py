@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import json
 import pathlib
+import time
 from typing import Any
 from ouroboros.observability import stamp_finalization_enqueue
 from ouroboros.utils import utc_now_iso
@@ -35,7 +36,7 @@ WORKER_LOG_SINK_SUPPRESSED_TYPES = frozenset({
     # The durable start/wait-ended rows share the live frame's payload (#1316).
     "tool_call", "tool_call_started", "tool_call_timeout",
     "llm_round", "task_checkpoint", "task_done", "llm_usage",
-    "provider_incomplete_response", "llm_empty_response", "provider_body_error",
+    "provider_incomplete_response", "llm_empty_response", "provider_body_error", "provider_content_refusal",
     "review_cycles_exhausted",
 })
 
@@ -78,17 +79,25 @@ def _bind_worker_repo_root(repo_dir: str, drive_root: str = "") -> None:
 def write_bytecode_to_prefix_only(drive_root: str) -> None:
     """Let this worker cache its bytecode, only into a prefix inside its data dir.
 
-    The launcher points the prefix at ``data/state/pycache``, and with a prefix Python
+    The launcher points the prefix at ``data/state/pycache.noindex``, and with a prefix Python
     writes bytecode only there, never beside a source and so never into a signed bundle
     (WA6, the reason the launcher sets ``PYTHONDONTWRITEBYTECODE``); the next worker then
     loads its import graph instead of recompiling it on every boot. No prefix, or one
     outside the data dir (a developer's, a test harness's), changes nothing, and the
     inherited environment still keeps every other child this process starts from writing.
+    An older launcher's legacy ``state/pycache`` (this prefix, and the one children inherit)
+    moves to the unindexed tree before any write (``unindexed.bytecode_prefix``).
     """
+    import os
     import sys
+
+    from ouroboros.unindexed import bytecode_prefix
 
     if not sys.pycache_prefix:
         return
+    sys.pycache_prefix = bytecode_prefix(drive_root, sys.pycache_prefix)
+    if os.environ.get("PYTHONPYCACHEPREFIX"):
+        os.environ["PYTHONPYCACHEPREFIX"] = bytecode_prefix(drive_root, os.environ["PYTHONPYCACHEPREFIX"])
     try:
         inside = pathlib.Path(sys.pycache_prefix).resolve().is_relative_to(pathlib.Path(drive_root).resolve())
     except (OSError, RuntimeError, ValueError):
@@ -172,8 +181,16 @@ def spawn_worker_process(ctx, wid, in_q, out_q, repo_dir, drive_root):
     parent, child = socket.socketpair()
     try:
         parent.setblocking(False)
+        # The transport policy is the spawner's explicit fact, stated to EVERY child: a forked child
+        # avoids OS proxy lookup (the fork-safety rule); a spawned or forkserver child keeps the
+        # server's own policy, so a carried conversation reaches the model as the server would. An
+        # unstated child falls back to the legacy worker default (no proxy) in ``transport_no_proxy``.
+        from ouroboros.utils import transport_no_proxy
+
+        start_method = getattr(ctx, "get_start_method", None)
+        no_proxy = str(start_method() if callable(start_method) else "") == "fork" or transport_no_proxy()
         proc = ctx.Process(target=worker_main, args=(wid, in_q, out_q, str(repo_dir), str(drive_root),
-                                                   _current_custody_session_id(), child))
+                                                   _current_custody_session_id(), child, no_proxy))
         proc.daemon = True
         proc.start()
     except BaseException:
@@ -320,15 +337,27 @@ def _configure_worker_logging() -> None:
 
 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
-                custody_session_id: str = "", stop_socket=None) -> None:
+                custody_session_id: str = "", stop_socket=None, transport_no_proxy: Any = None) -> None:
     import os as _os
-    # Mark this process as a worker BEFORE importing the agent/LLM stack so the
-    # central network-transport policy disables system proxy resolution
-    # (trust_env=False) for every HTTP client created here. This is the
-    # fork-safety guard (no _scproxy/SCDynamicStoreCopyProxies on the child side
-    # of fork) and a clean default for spawned workers too.
+    # Mark this process as a worker BEFORE importing the agent/LLM stack (a process fact:
+    # ownership, lifelines, custody), and state the spawner's transport policy beside it
+    # (``utils.transport_no_proxy``): a forked child avoids OS proxy resolution (the
+    # fork-safety guard: no _scproxy/SCDynamicStoreCopyProxies on the child side of fork);
+    # a spawned or forkserver carrier keeps the server's own policy (``spawn_worker_process``
+    # states it to every child). An entry called without it keeps the legacy worker default.
     _os.environ["OUROBOROS_IN_WORKER"] = "1"
+    if transport_no_proxy is not None:
+        _os.environ["OUROBOROS_TRANSPORT_NO_PROXY"] = "1" if transport_no_proxy else "0"
     write_bytecode_to_prefix_only(drive_root)  # before the agent's import graph
+    # The birth's own receipt on ``worker_ready``: wall and thread CPU of its steps (``import``,
+    # ``reload_all``, ``make_agent``) and the work they counted (``context_timing``).
+    import contextlib
+    import importlib
+
+    from ouroboros.context_timing import measured_sections, section_spans, timed
+
+    birth_window = contextlib.ExitStack()
+    birth_window.enter_context(measured_sections())
     # Pin the executing source before this process loads the agent, and so before
     # worker_ready lets an assisted update land another generation (preflight_receipts).
     from ouroboros.preflight_receipts import capture_executing_source_baseline
@@ -402,6 +431,12 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
         set_log_sink(_worker_log_sink)
     except Exception:
         pass
+    try:
+        from supervisor.worker_chat_lane import bind_worker_bus
+
+        bind_worker_bus(out_q)  # a carrier's title broadcasts travel as frames of this bus
+    except Exception:
+        pass
     import sys as _sys
     import traceback as _tb
     import pathlib as _pathlib
@@ -426,8 +461,8 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
     extensions_owned = True
     try:
         from ouroboros.config import get_skills_repo_path, load_settings as _load_settings
-        from ouroboros.extension_loader import reload_all as _reload_extensions
 
+        _reload_extensions = timed("import", importlib.import_module, "ouroboros.extension_loader").reload_all
         pytest_default_real_data_dir = (
             "pytest" in _sys.modules
             and not _os.environ.get("OUROBOROS_DATA_DIR")
@@ -446,28 +481,32 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                 pass
         else:
             _repo_path = get_skills_repo_path()
-            _reload_extensions(_drive, _load_settings, repo_path=_repo_path or None)
+            timed("reload_all", lambda: _reload_extensions(_drive, _load_settings, repo_path=_repo_path or None))
     except Exception as _e:
         try:
             _log_worker_crash(wid, _drive, "extension_reload", _e, _tb.format_exc())
         except Exception:
             pass
     try:
-        from ouroboros.agent import make_agent
         from functools import partial
+
+        make_agent = timed("import", importlib.import_module, "ouroboros.agent").make_agent
         from ouroboros.owner_wait import worker_owner_wait
-        agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
+        agent = timed("make_agent", lambda: make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q))
         agent.owner_wait_callback = partial(worker_owner_wait, wid, in_q, out_q)
     except Exception as _e:
+        birth_window.close()
         _log_worker_crash(wid, _drive, "make_agent", _e, _tb.format_exc())
         return
-    # The birth is measured first, in its own try: a failing checkout read must
-    # neither leave it unbound for the idle probe nor suppress readiness. An empty
+    # The births are measured first, in their own try: a failing checkout read must
+    # neither leave them unbound for the idle probe nor suppress readiness. An empty
     # birth is honest; the parent then matches this child by its own Process pid.
-    birth = ""
+    birth = kernel_birth = ""
     try:
         from ouroboros.platform_layer import process_start_time
+        from ouroboros.process_identity import process_kernel_birth
 
+        kernel_birth = process_kernel_birth(_os.getpid()) or ""  # never raises
         birth = str(process_start_time(_os.getpid()) or "")
     except Exception:
         log.warning("Worker %s could not measure its own process birth", wid, exc_info=True)
@@ -477,13 +516,20 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
         from ouroboros.utils import get_git_info as _get_git_info
         from ouroboros.utils import utc_now_iso as _utc_now_iso
 
+        from supervisor.conversation_lane import carrier_rss
+
         _branch, _sha = _get_git_info(_pathlib.Path(repo_dir))  # best-effort, diagnostic only
         _append_jsonl(_drive / "logs" / "events.jsonl", {
             "ts": _utc_now_iso(), "type": "worker_ready", "worker_id": wid,
-            "pid": _os.getpid(), "process_birth": birth, "git_branch": _branch, "git_sha": _sha,
+            "pid": _os.getpid(), "process_birth": birth, "kernel_birth": kernel_birth,
+            "git_branch": _branch, "git_sha": _sha,
+            **carrier_rss(),  # a fresh worker's own size, on every install (the plan's per-install measurement)
+            **section_spans(),  # the birth: sections_ms / sections_cpu_ms of its steps and their counted work
         })
     except Exception as _e:
         _log_worker_crash(wid, _drive, "worker_ready", _e, _tb.format_exc())
+    finally:
+        birth_window.close()  # a task's own windows are its own
     import queue as _queue
     from ouroboros.budget_pause import _HOLD_POLL_SEC
 
@@ -516,63 +562,164 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                     log.warning("Idle probe could not prove local quiescence", exc_info=True)
                 if probe is None:
                     out_q.put({"type": "worker_quiescent", "worker_id": wid, "pid": _os.getpid(),
-                               "process_birth": birth, "token": str(task.get("token") or ""),
+                               "process_birth": birth, "kernel_birth": kernel_birth,
+                               "token": str(task.get("token") or ""),
                                "retained_rows": _retained_rows_after_drain()})
                 continue
             probe = None
-            task_drive_root = str(task.get("drive_root") or drive_root)
             if extensions_owned:
                 _adopt_published_extensions(drive_root)
-            runner = agent
-            if task_drive_root != str(drive_root):
-                runner = make_agent(
-                    repo_dir=repo_dir,
-                    drive_root=task_drive_root,
-                    event_queue=out_q,
-                    budget_drive_root=str(task.get("budget_drive_root") or drive_root),
-                )
-                runner.owner_wait_callback = agent.owner_wait_callback
-            # The task's own endpoint (the direct lane's TurnEventQueue shape): every
-            # telemetry frame this task emits — live, or from a callback that
-            # outlives it — carries its chat and lineage by value, so the
-            # supervisor can handle it after task_done without a RUNNING row.
-            task_queue = task_event_queue(out_q, task)
-            pool_queue = getattr(runner, "_event_queue", None)
-            runner._event_queue = task_queue
-            try:
-                events = runner.handle_task(task)
-            except Exception as task_error:
-                _record_task_exception(runner, task, task_error, drive_root)
-                raise
-            finally:
-                runner._event_queue = pool_queue
-            for e in events:
-                e2 = dict(e)
-                e2["worker_id"] = wid
-                if (
-                    e2.get("type") == "task_done"
-                    and e2.get("task_id") == task.get("id")
-                    and not task.get("_is_direct_chat")
-                ):
-                    # Earlier frames (including the answer) keep their order.
-                    # Do not release this slot until its first save attempt ends.
-                    try:
-                        from ouroboros.headless import prepare_terminal_task_files
-
-                        prepared = prepare_terminal_task_files(_drive, task)
-                        if prepared.get("error"):
-                            log.warning("Terminal file preparation for %s: %s", task.get("id"), prepared["error"])
-                    except Exception:
-                        # File publication must not enter the model's crash-retry rail.
-                        log.exception("Terminal file preparation failed for %s", task.get("id"))
-                    e2["_files_prepared_attempt"] = int(task.get("_attempt") or 1)
-                task_queue.put(stamp_finalization_enqueue(e2))
-            _drain_dialogue_retry()
-            if task_drive_root != str(drive_root):
-                _release_drive_stores(task_drive_root)
+            run_worker_task(agent, task, wid=wid, out_q=out_q, repo_dir=repo_dir, drive_root=drive_root)
         except Exception as _e:
             _log_worker_crash(wid, _drive, "handle_task", _e, _tb.format_exc())
             return
+
+
+def run_worker_task(agent: Any, task: dict, *, wid: int, out_q: Any, repo_dir: str, drive_root: str,
+                    on_failure: Any = None) -> None:
+    """One task's body, in whichever process carries it: a conversation turn's first step
+    (``worker_chat_lane.prepare_conversation_task``), the agent's ``handle_task`` and the returned
+    frames. The inline executors run this same body on a thread of the server process;
+    ``on_failure(runner, error)`` may claim a failure (a live call's own close and refusal) by
+    returning True before the ordinary exception terminal is recorded."""
+    from ouroboros import store_timing
+    from ouroboros.agent import make_agent
+
+    _drive = pathlib.Path(drive_root)
+    task_drive_root = str(task.get("drive_root") or drive_root)
+    runner = agent
+    if task_drive_root != str(drive_root):
+        runner = make_agent(
+            repo_dir=repo_dir,
+            drive_root=task_drive_root,
+            event_queue=out_q,
+            budget_drive_root=str(task.get("budget_drive_root") or drive_root),
+        )
+        runner.owner_wait_callback = agent.owner_wait_callback
+    # A conversation turn's execution facts: its receipt, its endpoint hooks (the Stop
+    # marker, the namer, the phase observer) and this thread's store meter. Any other
+    # task's endpoint observes only its start phases (#2862), through the same producer.
+    carrier_turn = None
+    if task.get("_conversation_prepare"):
+        from supervisor.worker_chat_lane import CarrierTurn
+
+        carrier_turn = CarrierTurn(task, task_drive_root, out_q, worker_id=wid)
+        hooks = carrier_turn.hooks()
+    else:
+        from supervisor.worker_chat_lane import pooled_turn_phases
+
+        hooks = {"on_frame": pooled_turn_phases(task, out_q, worker_id=wid).observe}
+    # The task's own endpoint (the direct lane's TurnEventQueue shape): every
+    # telemetry frame this task emits — live, or from a callback that
+    # outlives it — carries its chat and lineage by value, so the
+    # supervisor can handle it after task_done without a RUNNING row.
+    task_queue = task_event_queue(out_q, task, **hooks)
+    pool_queue = getattr(runner, "_event_queue", None)
+    runner._event_queue = task_queue
+    try:
+        try:
+            with store_timing.metered() as meter:
+                if carrier_turn is not None:
+                    carrier_turn.execution.meter = meter
+                events = _run_task_body(runner, task, task_drive_root, task_queue, repo_dir, wid)
+        except Exception as task_error:
+            if on_failure is not None and on_failure(runner, task_error):
+                return
+            if carrier_turn is not None and not task.get("_presence_run"):
+                # A conversation turn's failure is its own terminal, with the owner's keyed final (the old
+                # lane's words); a saved pause or unreadable evidence is left to recovery, as below.
+                from supervisor.worker_chat_lane import conversation_exception_terminal
+
+                conversation_exception_terminal(runner, task, task_error, task_queue, drive_root,
+                                                quiet=carrier_turn.quiet)
+            else:
+                _record_task_exception(runner, task, task_error, drive_root)
+            raise
+        finally:
+            runner._event_queue = pool_queue
+            if carrier_turn is not None:
+                carrier_turn.ended()
+        for e in events:
+            e2 = dict(e)
+            e2["worker_id"] = wid
+            if (
+                e2.get("type") == "task_done"
+                and e2.get("task_id") == task.get("id")
+                and not task.get("_is_direct_chat")
+            ):
+                # Earlier frames (including the answer) keep their order.
+                # Do not release this slot until its first save attempt ends.
+                try:
+                    from ouroboros.headless import prepare_terminal_task_files
+
+                    prepared = prepare_terminal_task_files(_drive, task)
+                    if prepared.get("error"):
+                        log.warning("Terminal file preparation for %s: %s", task.get("id"), prepared["error"])
+                except Exception:
+                    # File publication must not enter the model's crash-retry rail.
+                    log.exception("Terminal file preparation failed for %s", task.get("id"))
+                e2["_files_prepared_attempt"] = int(task.get("_attempt") or 1)
+            task_queue.put(stamp_finalization_enqueue(e2))
+    finally:
+        task_queue.end_turn()  # after its returned events are stamped: late rows keep the address, the hooks go
+    _drain_dialogue_retry()
+    if task_drive_root != str(drive_root):
+        _release_drive_stores(task_drive_root)
+
+
+def _run_task_body(runner: Any, task: dict, task_drive_root: str, task_queue: Any, repo_dir: str = "",
+                   wid: Any = None) -> list:
+    """The carrier's first step for a conversation turn, then the agent's loop; a refusal is the turn's own terminal
+    (an exception is too: ``run_worker_task`` routes it to ``conversation_exception_terminal``).
+
+    A Presence turn is its own runner, never the pool's generic ``handle_task``: a Host-admitted one
+    (``presence_runner.PRESENCE_RUN_KEY``) re-admits from durable facts, takes the gate, runs and reports its
+    settlement as a frame; a moved turn's saved record (a Resume, a restart's return) continues there too.
+    Its gate, allowance, autonomy and cost cap are read before its agent starts, so it takes the task start's
+    settings here, as ``handle_task`` does: a worker's own environment is the one it was born with (a forkserver
+    child keeps the server's from the forkserver's start), and a saved change would never reach a fresh carrier.
+    A failed reload is disclosed on the turn's own endpoint, which names its chat (the pooled agent may still
+    carry its previous task's)."""
+    if task.get("_presence_run") or task.get("_presence_turn"):
+        from ouroboros.config import task_settings_scope
+        from ouroboros.presence_carrier import carry_presence_turn
+        from ouroboros.subagent_runtime import apply_task_start_settings_or_disclose
+        from ouroboros.utils import emit_log_event
+
+        task.pop("_conversation_prepare", None)
+        start = apply_task_start_settings_or_disclose(str(task.get("id") or ""), lambda kind, **facts: emit_log_event(
+            task_queue, {"type": kind, "ts": utc_now_iso(), **facts}, blocking=True, log_label="carrier settings"))
+        with task_settings_scope(start):
+            return carry_presence_turn(task, task_queue, repo_dir, task_drive_root, worker_id=wid,
+                                       owner_wait_callback=getattr(runner, "owner_wait_callback", None)) or []
+    from ouroboros.deployment_extensions import HOLD_REASON, hold_reason
+
+    if task.get("_conversation_prepare"):
+        from supervisor.worker_chat_lane import ConversationRefusal, prepare_conversation_task, refusal_terminal
+
+        try:
+            prepare_conversation_task(runner, task, task_drive_root, broadcast=lambda msg: task_queue.put(dict(msg)))
+        except ConversationRefusal as refusal:
+            return refusal_terminal(runner, task, refusal, task_queue)
+    if hold_reason() == HOLD_REASON:  # a required extension not running in THIS process: the task's own end
+        return _held_terminal(runner, task, task_queue)
+    return runner.handle_task(task)
+
+
+def _held_terminal(runner: Any, task: dict, task_queue: Any) -> list:
+    """A deployment's hold before any body (``deployment_extensions.hold_reason``): the task's typed host notice,
+    returned like a carrier refusal, so the slot stays alive; no model call, no tool, no other task's facts.
+    A Presence turn meets the same check in ``handle_task`` inside its own settlement."""
+    from ouroboros.agent_task_pipeline import emit_task_results
+    from ouroboros.deployment_extensions import HOLD_REASON, hold_text
+
+    events: list = []
+    emit_task_results(
+        runner.env, runner.memory, runner.llm, events, task, hold_text(),
+        {"terminal_origin": "host_notice", "execution_status": "infra_failed", "reason_code": HOLD_REASON},
+        {"reasoning_notes": [], "tool_calls": []}, time.time(), runner.env.drive_path("logs"),
+        ctx=None, event_queue=task_queue)
+    return events
 
 
 def _drain_dialogue_retry() -> None:
@@ -625,7 +772,11 @@ def _record_task_exception(runner: Any, task: dict, exc: Exception, pool_drive_r
         return
     try:
         from ouroboros.agent import _task_exception_terminal
+        from ouroboros.deployment_extensions import HOLD_REASON, hold_text, record_held_task
 
+        if getattr(exc, "before_task_start", False) and getattr(exc, "control_reason", "") == HOLD_REASON:
+            record_held_task(runner.env.drive_root, task, hold_text())  # held before its body: typed, no traceback
+            return
         _task_exception_terminal(runner.env, task, exc, runner.env.drive_path("logs"), keep_terminal=True)
     except Exception:
         log.warning("Exception terminal of task %s was not recorded", task.get("id"), exc_info=True)

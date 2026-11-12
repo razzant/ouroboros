@@ -87,7 +87,7 @@ async def _start_job(kind: str, target: str, message: str, work: Any, after: Any
 def _sources_payload(drive_root: pathlib.Path, repo_dir: pathlib.Path) -> Dict[str, Any]:
     from ouroboros.config import load_settings
     from ouroboros.skill_source_catalog import snapshot_for
-    from ouroboros.skill_sources import SOURCES_SETTING, load_sources, sources_problem
+    from ouroboros.skill_sources import SOURCES_SETTING, load_sources, source_suggestions, sources_problem
 
     settings = load_settings()
     rows = load_sources(settings)
@@ -96,7 +96,12 @@ def _sources_payload(drive_root: pathlib.Path, repo_dir: pathlib.Path) -> Dict[s
         _snapshot, status = snapshot_for(drive_root, row, repo_dir=repo_dir)
         out.append({**row, **status})
     return {"sources": out, "materialized": settings.get(SOURCES_SETTING) not in (None, "", []),
-            "problem": sources_problem(settings)}
+            "problem": sources_problem(settings), "suggestions": source_suggestions(settings, rows)}
+
+
+def _location(body: Dict[str, Any]) -> Dict[str, str]:
+    """An address (``url``, with its optional ``revision`` and ``subfolder``) or a folder (``path``)."""
+    return {key: str(body.get(key) or "").strip() for key in ("url", "path", "revision", "subfolder")}
 
 
 async def api_skill_sources(request: Request) -> JSONResponse:
@@ -110,12 +115,11 @@ async def api_skill_sources(request: Request) -> JSONResponse:
 async def api_skill_source_probe(request: Request) -> JSONResponse:
     from ouroboros.skill_source_catalog import probe_source
 
-    body = await request_json_or(request, {}, exceptions=(Exception,))
-    body = body if isinstance(body, dict) else {}
-    url, path = str(body.get("url") or "").strip(), str(body.get("path") or "").strip()
-    if bool(url) == bool(path):
+    body = await request_json_or(request, {})
+    location = _location(body if isinstance(body, dict) else {})
+    if bool(location["url"]) == bool(location["path"]):
         return json_error("send either url or path", 400)
-    return JSONResponse(await asyncio.to_thread(probe_source, request_drive_root(request), url=url, path=path))
+    return JSONResponse(await asyncio.to_thread(probe_source, request_drive_root(request), **location))
 
 
 def _write_sources(request: Request, change: Any, audit: Dict[str, Any]) -> JSONResponse:
@@ -144,20 +148,20 @@ async def api_skill_source_add(request: Request) -> JSONResponse:
     from ouroboros.skill_source_catalog import probe_source
     from ouroboros.skill_sources import with_added_source
 
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     body = body if isinstance(body, dict) else {}
-    url, path = str(body.get("url") or "").strip(), str(body.get("path") or "").strip()
+    location = _location(body)
     name, trust = str(body.get("name") or "").strip(), str(body.get("trust") or "").strip()
-    if bool(url) == bool(path) or not name or trust not in {"trusted", "review"}:
+    if bool(location["url"]) == bool(location["path"]) or not name or trust not in {"trusted", "review"}:
         return json_error("send url or path, a name and trust (trusted or review)", 400)
     drive_root = request_drive_root(request)
-    probe = await asyncio.to_thread(probe_source, drive_root, url=url, path=path)
+    probe = await asyncio.to_thread(probe_source, drive_root, **location)
     if probe.get("error"):
         return JSONResponse({"ok": False, "code": "unreadable_source", "error": probe["error"]}, status_code=400)
     kind = str(probe["kind"])
 
     def change(rows: Any) -> Any:
-        rows, row = with_added_source(rows, kind=kind, url=url, path=path, name=name, trust=trust)
+        rows, row = with_added_source(rows, kind=kind, name=name, trust=trust, **location)
         return rows, row["id"]
 
     response = await _settings_write(request, lambda req: _write_sources(
@@ -185,8 +189,9 @@ async def api_skill_source_change(request: Request) -> JSONResponse:
     from ouroboros.skill_sources import with_changed_source
 
     source_id = str(request.path_params.get("source_id") or "")
-    body = await request_json_or(request, {}, exceptions=(Exception,))
-    body = body if isinstance(body, dict) else {}
+    body = await request_json_or(request, {})
+    if not isinstance(body, dict):
+        return json_error("request body must be a JSON object", 400)
     trust = body.get("trust")
     if trust is not None and trust not in {"trusted", "review"}:
         return json_error("trust is trusted or review", 400)
@@ -241,11 +246,19 @@ async def api_skill_catalog(request: Request) -> JSONResponse:
         return json_exception(exc, context="skill catalog read failed")
 
 
-def _search(drive_root: pathlib.Path, repo_dir: pathlib.Path, query: str, source: str) -> Dict[str, Any]:
-    from ouroboros.skill_source_catalog import catalog_view, registry_items
+def _search(drive_root: pathlib.Path, repo_dir: pathlib.Path, query: str, source: str, *, sort: str = "",
+            cursor: str = "") -> Dict[str, Any]:
+    from ouroboros.skill_source_catalog import catalog_view, registry_browse, registry_items
     from ouroboros.skill_sources import load_sources
 
     rows = load_sources()
+    named_registry = next((row for row in rows if row["kind"] == "registry" and row["id"] == source), None)
+    if named_registry is not None and not query.strip():  # a registry has no local list: its own page is the answer
+        try:
+            page = registry_browse(named_registry, sort=sort, cursor=cursor)
+        except Exception as exc:
+            return {"items": [], "registry_error": f"{named_registry['name']}: {exc}"[:300]}
+        return {"items": page["items"], **({"next_cursor": page["next_cursor"]} if page["next_cursor"] else {})}
     view = catalog_view(drive_root, rows=rows, refresh=True, repo_dir=repo_dir)
     words = [word for word in query.lower().split() if word]
     items = [item for item in view["items"] if (not source or item["source_id"] == source) and all(
@@ -263,9 +276,11 @@ def _search(drive_root: pathlib.Path, repo_dir: pathlib.Path, query: str, source
 async def api_skill_catalog_search(request: Request) -> JSONResponse:
     query = str(request.query_params.get("q") or "")
     source = str(request.query_params.get("source") or "")
+    sort = str(request.query_params.get("sort") or "")
+    cursor = str(request.query_params.get("cursor") or "")
     try:
         return JSONResponse(await asyncio.to_thread(_search, request_drive_root(request), request_repo_dir(request),
-                                                    query, source))
+                                                    query, source, sort=sort, cursor=cursor))
     except Exception as exc:
         return json_exception(exc, context="skill catalog search failed")
 
@@ -296,7 +311,7 @@ def _after_install(drive_root: pathlib.Path, repo_dir: pathlib.Path) -> Any:
 async def api_skill_catalog_install(request: Request) -> JSONResponse:
     from ouroboros.skill_source_install import install_item, plan_install
 
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     body = body if isinstance(body, dict) else {}
     item_id = str(body.get("id") or "").strip()
     if "/" not in item_id:
@@ -311,6 +326,10 @@ async def api_skill_catalog_install(request: Request) -> JSONResponse:
     name = plan["name"] or item_id.partition("/")[2]
     if plan["already_installed"]:
         return JSONResponse({"ok": True, "job_id": "", "name": name, "basis": plan["basis"], "already_installed": True})
+    from ouroboros.deployment_extensions import install_refusal
+
+    if managed := await asyncio.to_thread(install_refusal, drive_root, name):  # the lane refuses it again
+        return _refusal(SkillInstallError("managed_by_deployment", managed, 403))
     job_id = await _start_job(
         "install", name, f"Installing {name} from {plan['row']['name']}",
         lambda progress: install_item(drive_root, item_id, replace=replace, actor="owner",
@@ -323,7 +342,7 @@ async def api_skill_update(request: Request) -> JSONResponse:
     from ouroboros.skill_source_install import update_installed
 
     name = str(request.path_params.get("skill") or "").strip()
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     body = body if isinstance(body, dict) else {}
     mode = str(body.get("mode") or "")
     if mode not in {"replace", "keep", "merge"}:
@@ -356,12 +375,15 @@ async def api_skill_update(request: Request) -> JSONResponse:
 def _precheck_update(drive_root: pathlib.Path, name: str, kwargs: Dict[str, Any]) -> None:
     """Refuse a stale dialog before queueing (the lane re-checks everything)."""
     from ouroboros.config import get_skills_repo_path
+    from ouroboros.deployment_extensions import change_refusal
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import find_skill
     from ouroboros.skill_source_catalog import installed_release_digest
     from ouroboros.skill_source_install import _candidate_plan
     from ouroboros.skill_sources import load_sources
 
+    if managed := change_refusal(name, "update"):
+        raise SkillInstallError("managed_by_deployment", managed, 403)
     record = read_install_record(drive_root, name)
     loaded = find_skill(drive_root, name, repo_path=get_skills_repo_path())
     if record is None or loaded is None:

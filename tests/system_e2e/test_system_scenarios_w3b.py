@@ -17,15 +17,17 @@ DURABLE artifact or a recorded WIRE fact (never an HTTP 200 alone):
   capability_delta disclosure), and two TYPED START refusals (a scripted 400 and
   the pinned-profile 409) landing as definite START_FAILED rows that retire
   their invocations — three POSTs, three DISTINCT logical invocation ids.
-* S12 — NO-ORPHANS RESTART RECOVERY: the nanny sits in ``delegate_wait`` on a
-  hung run; the WHOLE server tree is SIGKILLed (hard crash, no cleanup), a new
-  generation boots on the same clone + data root, and its startup custody sweep
-  records ``left_live`` from DURABLE custody while saved parent work stays held
-  for Resume (#1689; ARCHITECTURE §6 "Saved working state and application stops").
-  The original run then finishes; another boot verifies one settlement and
-  ledger receipt, matching SQLite custody, with EXACTLY ONE physical
-  ``POST /v2/runs`` across all generations, no unsolicited cancellation or
-  parent redispatch, and no process outside the live server tree.
+* S12 — NO-ORPHANS RESTART RECOVERY: the nanny's ``delegate_wait`` on a hung run
+  is a COLD sleep (owner Q2 = A): its process is released once the body accepted
+  the run's custody, and it parks as a sleeper. The WHOLE server tree is then
+  SIGKILLed (hard crash, no cleanup) and a new generation boots on the same clone
+  + data root: the sleeper is still parked, its run still open and observed by the
+  new body, never cancelled or settled (a boot sweep that reads it leaves it live),
+  and nothing wakes the nanny. The original run then finishes; another boot settles
+  it once (one settlement and ledger receipt, matching SQLite custody) and its
+  terminal wakes the sleeper, which finishes with the owed wake, with EXACTLY ONE
+  physical ``POST /v2/runs`` across all generations, no unsolicited cancellation,
+  and no process outside the live server tree.
 * S13 — SKILLS LIFECYCLE E2E over the same HTTP surface the UI drives: a local
   extension payload lands in ``skills/external/``, the review endpoint runs the
   REAL triad panel against the loopback stub (canned all-PASS skill verdict →
@@ -57,6 +59,7 @@ import pathlib
 import re
 import signal
 import sys
+import uuid
 
 import pytest
 
@@ -79,6 +82,7 @@ from tests.system_e2e.harness import (
     submit_running,
     wait_durable_result,
     wait_until,
+    ws_url,
 )
 from tests.system_e2e.interfaces import (
     FAKE_HANG_MARKER,
@@ -274,7 +278,6 @@ S11_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s11_delegated_transport_wire_custody_and_typed_refusals(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -434,13 +437,11 @@ S12_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "linux",
                     reason="process-group SIGKILL + /proc scans are Linux-only")
 def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
         e2e_clone, tmp_path_factory):
     from ouroboros.delegate_custody import open_runs, replay
-    from ouroboros.working_checkpoint import read_working
 
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s12")
@@ -456,15 +457,18 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
             killed = False
             try:
                 task_id = submit_running(server, "Delegate a long survey and babysit it until stopped.")
-                # The physical run is LIVE: durable STARTED row, and the nanny is
-                # actually polling the daemon (wire GETs observed).
+                # The physical run is LIVE: durable STARTED row, and the body is actually
+                # observing it on the daemon (wire GETs observed).
                 assert wait_until(lambda: _custody_rows(oracle, "delegate_run_started"), 180), (
                     "delegated run never reached a durable STARTED row")
                 run_id = str(_custody_rows(oracle, "delegate_run_started")[-1]["run_id"])
                 assert wait_until(lambda: daemon.calls("GET", f"/v2/runs/{run_id}"), 60)
-                assert wait_until(lambda: _custody_rows(
+                entered = wait_until(lambda: _custody_rows(
                     oracle, "delegate_supervision_wait_entered", run_id), 60)
-                assert read_working(data_root, task_id, 1)[0], "the crash must interrupt saved work"
+                assert entered and entered[-1].get("mode") == "cold", entered
+                # The wait with no named mode sleeps cold: the nanny is parked, its process released.
+                assert wait_until(lambda: oracle.task_result(task_id).get("reason_code") == "model_sleeping", 120), (
+                    oracle.task_result(task_id))
                 assert len(daemon.run_start_posts()) == 1
 
                 # HARD CRASH: SIGKILL the whole server tree mid-wait, no cleanup.
@@ -484,19 +488,20 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
                 if not killed:
                     server.stop()
 
-        # A crash is not an owner Stop. #1689 retains the saved parent for Resume;
-        # ARCHITECTURE §6 "Durable custody" leaves its healthy leaf live.
+        # A crash is not an owner Stop and no wake: the sleeper stays parked and its
+        # healthy leaf live (ARCHITECTURE §6 "Durable custody"), observed by the new body.
+        observed_before = len(daemon.calls("GET", f"/v2/runs/{run_id}"))
         with ScriptedStubModel([]) as stub_b:
             server_b = start_server(e2e_clone, root, keyless_settings(
                 stub_b, OUROBOROS_SUBAGENTS=roster))
             try:
                 oracle = ArtifactOracle(server_b.data_root)
-                reconciled = wait_until(lambda: _custody_rows(
-                    oracle, "delegate_run_reconciled", run_id), 240)
-                assert reconciled and reconciled[-1].get("action") == "left_live", reconciled
-                assert reconciled[-1].get("state") == "running", reconciled
+                assert wait_until(lambda: len(daemon.calls("GET", f"/v2/runs/{run_id}")) > observed_before, 240), (
+                    "the new body never observed the sleeper's run")
+                reconciled = _custody_rows(oracle, "delegate_run_reconciled", run_id)
+                assert all(row.get("action") == "left_live" for row in reconciled), reconciled
                 held = oracle.task_result(task_id)
-                assert held.get("status") == "scheduled" and held.get("reason_code") == "saved_work_hold", held
+                assert held.get("status") == "scheduled" and held.get("reason_code") == "model_sleeping", held
                 assert {run.run_id for run in open_runs(data_root)} == {run_id}
                 assert replay(data_root)[run_id].task_id == task_id
                 assert not _custody_rows(oracle, "delegate_run_cancel_outcome", run_id)
@@ -504,7 +509,7 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
                 assert not daemon.calls("POST", f"/v2/runs/{run_id}/control")
                 assert len(daemon.run_start_posts()) == 1, (
                     "restart recovery re-POSTed a run that already had a STARTED row")
-                assert not stub_b.calls, "a crash must not grant the parent a Resume"
+                assert not stub_b.calls, "a crash wakes no sleeper: its run has not ended"
 
                 # No orphans: every live pid carrying this data root sits inside
                 # the gen-B server tree.
@@ -515,8 +520,8 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
             finally:
                 server_b.stop()
 
-        # The engine completes the ORIGINAL run. A further boot exercises durable
-        # settlement without waiting for the production 600-second sweep cadence.
+        # The engine completes the ORIGINAL run. A further boot's body settles it, and its
+        # terminal wakes the sleeper, which finishes with the owed wake in its next request.
         with daemon._lock:
             daemon.runs[run_id]["hang"] = False
         with ScriptedStubModel([]) as stub_c:
@@ -524,9 +529,10 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
                 stub_c, OUROBOROS_SUBAGENTS=roster))
             try:
                 oracle = ArtifactOracle(data_root)
-                assert wait_until(lambda: any(
-                    row.get("action") == "settle_attempted" and row.get("settled") is True
-                    for row in _custody_rows(oracle, "delegate_run_reconciled", run_id)), 240)
+                assert wait_until(lambda: _custody_rows(oracle, "delegate_run_settled", run_id), 240)
+                result = server_c.wait_task(task_id, timeout=600)
+                assert result.get("status") == "completed", result
+                assert stub_c.calls, "the run's terminal woke the sleeping nanny"
                 settled = _custody_rows(oracle, "delegate_run_settled", run_id)
                 assert len(settled) == 1 and settled[0].get("state") == "succeeded", settled
                 assert len(_custody_rows(oracle, "delegate_run_ledger_recorded", run_id)) == 1
@@ -537,10 +543,9 @@ def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
                 custody = replay(data_root)[run_id]
                 assert custody.settled and custody.ledger_recorded and custody.terminal_state == "succeeded"
                 assert not open_runs(data_root)
-                assert oracle.task_result(task_id).get("reason_code") == "saved_work_hold"
                 assert not _custody_rows(oracle, "delegate_run_cancel_outcome", run_id)
                 assert not daemon.calls("POST", f"/v2/runs/{run_id}/control")
-                assert len(daemon.run_start_posts()) == 1 and not stub_c.calls
+                assert len(daemon.run_start_posts()) == 1
                 assert wait_until(
                     lambda: set(pids_with_env_value(str(data_root)))
                     <= set(process_tree_pids(server_c.proc.pid)), 45)
@@ -593,7 +598,6 @@ def _skill_entry(server, name: str) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s13_skills_lifecycle_review_grants_enable_dispatch_disable_delete(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -741,14 +745,42 @@ permissions: ["tool"]
 E2E hot-adoption probe extension body.
 """
 S13H_DISPATCH_MARKER = "S13H_HOT_DISPATCH_DONE_e2e_w3b"
+# The probe's echo names the process that ran it: an extension handler runs in-process in
+# the worker carrying the task (``ouroboros/tools/extension_dispatch.py``), so the durable
+# tools row itself says which process adopted the skill.
+S13H_PLUGIN = (
+    "import os\n"
+    "\n"
+    "def _echo(ctx, message='hi'):\n"
+    "    return f'echo: {message} pid={os.getpid()}'\n"
+    "\n"
+    "def register(api):\n"
+    "    api.register_tool(\n"
+    "        'echo', _echo, description='echo probe',\n"
+    "        schema={'type': 'object', 'properties': {'message': {'type': 'string'}}},\n"
+    "    )\n"
+)
+_S13H_PID_RE = re.compile(r"echo: hot-ping pid=(\d+)")
 
 
 def _worker_boot_pids(oracle: ArtifactOracle) -> set:
     return {int(row.get("pid") or 0) for row in oracle.events("worker_ready")}
 
 
+def _worker_ready_count(oracle: ArtifactOracle, pid: int) -> int:
+    return sum(1 for row in oracle.events("worker_ready") if int(row.get("pid") or 0) == pid)
+
+
+def _owner_turn_id(oracle: ArtifactOracle, client_message_id: str) -> str:
+    for row in oracle.events("task_received"):
+        task = row.get("task") or {}
+        origin = (task.get("metadata") or {}).get("origin_message_ref") or {}
+        if origin.get("client_message_id") == client_message_id:
+            return str(task.get("id") or "")
+    return ""
+
+
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s13_hot_enable_reaches_an_already_spawned_worker_without_a_restart(
         e2e_clone, tmp_path_factory):
     """The W3B-F1 defect, at the product surface: enable AFTER boot must reach the
@@ -761,6 +793,15 @@ def test_s13_hot_enable_reaches_an_already_spawned_worker_without_a_restart(
     it live. Here the pool spawned BEFORE the payload existed and no process is
     replaced, so the tool call can only succeed by the worker noticing the
     server's published generation and adopting it.
+
+    Since #2654 the pool at rest is the conversation lane's one ready spare: project
+    workers are bought on demand and retired when idle, so a pooled task dispatched
+    after the enable always cold-starts a worker that loads the skill at spawn and
+    proves nothing. The probe is therefore the owner's Main turn over the SAME /ws the
+    SPA opens: it takes the spare that booted before the payload existed. The lane
+    replenishes its spare at once, so a NEW worker appears; the proof is not "no new
+    PID" but the tools row naming the process that ran the echo — a worker that booted
+    once, before the payload — together with that worker's recorded adoption.
     """
     require_lane(LANE_MOCK)
     from ouroboros.extension_loader import extension_surface_name
@@ -793,7 +834,7 @@ def test_s13_hot_enable_reaches_an_already_spawned_worker_without_a_restart(
             payload_dir = data_root / "skills" / "external" / S13H_SKILL
             payload_dir.mkdir(parents=True)
             (payload_dir / "SKILL.md").write_text(S13H_SKILL_MD, encoding="utf-8")
-            (payload_dir / "plugin.py").write_text(S13_PLUGIN, encoding="utf-8")
+            (payload_dir / "plugin.py").write_text(S13H_PLUGIN, encoding="utf-8")
             review = _api(server.base_url, "POST",
                           f"/api/skills/{S13H_SKILL}/review", {}, timeout=600)
             assert review.get("status") == "clean", review
@@ -811,26 +852,40 @@ def test_s13_hot_enable_reaches_an_already_spawned_worker_without_a_restart(
                 (data_root / "state" / "extension_generation.json").read_text(encoding="utf-8"))
             assert generation.get("generation"), generation
 
-            # DISPATCH into one of those very workers — no restart anywhere.
-            task_id = submit_running(server, "Call the probe echo tool once, then finish.")
-            result = server.wait_task(task_id, timeout=300)
-            assert result.get("status") == "completed", result
-            stored = wait_durable_result(oracle, task_id)
+            # DISPATCH into one of those very workers — no restart anywhere: the owner's
+            # Main turn takes the lane's ready spare, which booted before the payload.
+            from websockets.sync.client import connect as ws_connect
+
+            client_message_id = f"e2e-s13h-{uuid.uuid4().hex[:12]}"
+            with ws_connect(ws_url(server), open_timeout=30, proxy=None) as ws:
+                ws.send(json.dumps({"type": "chat", "chat_id": 1, "client_message_id": client_message_id,
+                                    "content": "Call the probe echo tool once, then finish."}))
+                task_id = wait_until(lambda: _owner_turn_id(oracle, client_message_id), 120)
+                assert task_id, "the owner's turn never wrote its task_received row"
+                stored = wait_durable_result(oracle, task_id, timeout=300)
+            assert stored.get("status") == "completed", stored
             assert S13H_DISPATCH_MARKER in str(stored.get("result") or ""), stored
             assert stub.script_consumed(), "the hot-adoption dispatch script was not consumed"
             rows = [row for row in oracle.task_drive(task_id).tools_rows()
                     if str(row.get("tool") or "") == surface]
             assert rows, "the extension tool call never reached the tools log"
-            assert "echo: hot-ping" in json.dumps(rows), rows
+            ran_in = {int(pid) for pid in _S13H_PID_RE.findall(json.dumps(rows))}
+            assert len(ran_in) == 1, rows
 
-            # ...and it really was an EXISTING worker: no process was replaced
-            # between the enable and the dispatch.
-            assert _worker_boot_pids(oracle) == boot_workers, (
-                "the pool respawned, so this proves nothing about hot adoption")
+            # ...and it really was an EXISTING worker: the process that ran the echo
+            # booted once, before the payload existed. The lane's replenished spare (a
+            # worker_ready after the enable) never ran it.
+            (carrier,) = ran_in
+            assert carrier in boot_workers, {
+                "echo_ran_in": carrier, "booted_before_the_payload": sorted(boot_workers),
+                "booted_since": sorted(_worker_boot_pids(oracle) - boot_workers)}
+            assert _worker_ready_count(oracle, carrier) == 1, "the carrier re-announced readiness"
             adoptions = [row for row in oracle.events("extension_generation_adopted")
                          if S13H_SKILL in (row.get("skills") or [])]
             assert adoptions, "no worker recorded adopting the published generation"
-            assert any(row.get("converged") is True for row in adoptions), adoptions
+            assert any(row.get("converged") is True
+                       and row.get("published_generation") == generation["generation"] for row in adoptions), (
+                adoptions, generation)
 
             # DISABLE symmetry: the owner's disable republishes at once, so the
             # same channel carries the retraction (a worker adopting it unloads —

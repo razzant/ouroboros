@@ -396,31 +396,6 @@ class _RecoveryLadderMixin:
             )
         return stripped
 
-    def _param_retry_kwargs_for_body_error(
-        self,
-        resp: Any,
-        kwargs: Dict[str, Any],
-        usage_model: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Apply exception-path parameter recovery to a non-overflow body 400."""
-        try:
-            resp_dict = resp.model_dump()
-        except Exception:
-            return None
-        body_err = self._provider_body_error(resp_dict)
-        if not isinstance(body_err, dict) or _is_structured_context_overflow_body(body_err):
-            return None
-        try:
-            code = int(body_err.get("code") or 0)
-        except (TypeError, ValueError):
-            code = 0
-        if code != 400:
-            return None
-        message = str(body_err.get("message") or "")
-        if not message:
-            return None
-        return self._retry_without_optional_sampling(kwargs, usage_model, RuntimeError(message))
-
     @request_wire_scoped
     def _create_chat_completion_with_retries(
         self,
@@ -527,11 +502,9 @@ class _RecoveryLadderMixin:
                 return current_response
             except Exception:
                 # The recovery ladder died terminally: discard any pending
-                # effort-clamp note (e.g. the floored learning retry's
-                # learned_floor disclosure) so it cannot misattach to a later,
-                # unrelated response on this thread (plan-review r3; lanes that
-                # never call _clamp_effort_for_model at build time would not
-                # reset it).
+                # effort-clamp note (a lane's build-time tier note) so it cannot
+                # misattach to a later, unrelated response on this thread
+                # (plan-review r3; lanes that never stage one would not reset it).
                 self._pop_effort_clamp_disclosure()
                 raise
 

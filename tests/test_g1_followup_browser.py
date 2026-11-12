@@ -10,7 +10,7 @@ import pytest
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, monkeypatch):  # noqa: F811 - pytest fixture
@@ -67,6 +67,9 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
             button = section.get_by_role('button', name='Restore hold')
             button.wait_for(state='visible')
             assert button.get_attribute('data-hold-id') == old_id
+            # The relation, the work and its cap, the ids and the deadline are the row's Details.
+            section.locator('.activity-schedule', has=page.get_by_role('button', name='Restore hold')).locator(
+                'details.activity-details > summary').click()
             visible = section.inner_text()
             assert 'related' in visible and 'cap $10' in visible and 'deadline' in visible
             assert 'Original work stopped or restarted' in visible and 'root-1' in visible and '2099' in visible
@@ -109,7 +112,7 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
             # Refused without changing anything (activity.js scheduleOutcomeToast; the policy suite covers
             # the request that itself persisted the new hold, which reads "refused").
             assert page.locator('#toast-stack .toast-danger').filter(
-                has_text='restore did not change anything: stale_hold').count() == 1, toasts
+                has_text='restore hold did not change anything: stale_hold').count() == 1, toasts
             assert 'restored' not in toasts.lower() and 'applied' not in toasts.lower(), toasts
             # The backend's real audit-failure path is covered in the policy
             # suite. Here adapt a REAL applied release response to that wire

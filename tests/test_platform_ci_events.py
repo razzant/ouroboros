@@ -16,26 +16,67 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
 
 
-def _value(expression, *, event, ref, base="", schedule="", cancelled=False, attempt=1, repository="razzant/ouroboros", e2e_live="false"):
-    """Evaluate the workflow's small expression vocabulary against real event shapes."""
+THREE_SYSTEMS = ["ubuntu-latest", "macos-latest", "windows-latest"]
+# The jobs a `scope=tests` dispatch runs: the operators' battery before a PR's review freeze. `ci-durations`
+# is not among them: a run without macOS and the UI lane must not replace the complete table of the last
+# release run, which the next release run's `shard-plan` packs by.
+# (owner 6A/7A, 2026-11-05). Every other job keeps the release graph a tag or a plain dispatch runs.
+BATTERY = ("shard-plan", "lint", "full-test-runs", "journal-persist", "full-test", "test-verdict")
+DISPATCH_ONLY = ("quick-test", "sqlite-floor", "betterleaks-platform-smoke")
+TAG_ONLY = ("android-build", "release-preflight", "build", "windows-proof", "vendor-package-smoke", "release")
+
+
+class _Needs(dict):
+    """Every upstream job as if it ran green with a valid tag and no Android change: a job's own predicate decides."""
+
+    def __missing__(self, name):
+        return SimpleNamespace(result="success", outputs=SimpleNamespace(android_changed="", tag_valid="true"))
+
+
+def _value(expression, *, event, ref, base="", schedule="", cancelled=False, attempt=1, repository="razzant/ouroboros",
+           e2e_live="false", scope="", macos=False):
+    """Evaluate the workflow's small expression vocabulary against real event shapes.
+
+    ``scope``/``macos`` are the dispatch inputs; a tag push carries none (``inputs`` is empty there)."""
     expression = expression.strip()
     if expression.startswith("$" + "{{"):
         expression = expression[3:-2]
     expression = " ".join(expression.split()).replace("&&", " and ").replace("||", " or ")
     expression = re.sub(r"!(?!=)", "not ", expression)
+    expression = re.sub(r"needs\.([\w-]+)", lambda match: f"needs[{match[1]!r}]", expression)  # hyphenated job ids
+    inputs = SimpleNamespace(e2e_live=e2e_live, scope=scope, macos=macos)
     github = SimpleNamespace(
         event_name=event, ref=ref, base_ref=base, run_id=77, run_attempt=attempt, repository=repository,
         event=SimpleNamespace(
-            schedule=schedule, inputs=SimpleNamespace(e2e_live=e2e_live), before="previous-tip",
+            schedule=schedule, inputs=inputs, before="previous-tip",
             pull_request=SimpleNamespace(number=42, base=SimpleNamespace(sha="pr-base")),
         ),
     )
     return eval(expression, {"__builtins__": {}}, {
-        "github": github, "fromJSON": json.loads,
+        "github": github, "inputs": inputs, "needs": _Needs(), "vars": SimpleNamespace(ESIGNER_CERT_SHA1=""),
+        "fromJSON": json.loads,
         "startsWith": lambda value, prefix: value.startswith(prefix),
         "always": lambda: True, "cancelled": lambda: cancelled,
         "format": lambda template, *values: template.format(*values),
     })
+
+
+def _plan(monkeypatch, tmp_path, *, scope="", macos=""):
+    """(legs, systems, persist) `shard-plan` names for a run, by running its own step with the inputs it reads.
+
+    The step's env strings are the rendered inputs: empty on a tag push, `true`/`false` for the boolean."""
+    step = next(step for step in WORKFLOW["jobs"]["shard-plan"]["steps"] if step.get("id") == "legs")
+    assert step["shell"] == "python" and "if" not in step
+    assert step["env"]["SCOPE"] == "${{ inputs.scope }}" and step["env"]["MACOS"] == "${{ inputs.macos }}"
+    assert WORKFLOW["jobs"]["shard-plan"]["outputs"] == {
+        name: f"${{{{ steps.legs.outputs.{name} }}}}" for name in ("legs", "systems", "persist")}
+    output = tmp_path / "github-output"
+    for key, value in {"SCOPE": scope, "MACOS": macos, "SYSTEMS": step["env"]["SYSTEMS"],
+                       "GITHUB_OUTPUT": str(output)}.items():
+        monkeypatch.setenv(key, value)
+    exec(step["run"], {"__name__": "shard_plan"})  # noqa: S102 - the workflow's own step, as written
+    facts = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    return json.loads(facts["legs"]), facts["systems"], json.loads(facts["persist"])
 
 
 def _triggered(workflow, event, ref):
@@ -75,35 +116,67 @@ def test_ordinary_ci_triggers_only_on_request_or_release(name, event, ref):
     assert _triggered(workflow, event, ref) is expected
 
 
-@pytest.mark.parametrize("event,ref,base,quick,platforms", [
-    ("pull_request", "refs/pull/42/merge", "ouroboros", False, []),
-    ("pull_request", "refs/pull/42/merge", "main", False, []),
+@pytest.mark.parametrize("event,ref,base,scope,macos,quick,platforms", [
+    ("pull_request", "refs/pull/42/merge", "ouroboros", "", "", False, []),
+    ("pull_request", "refs/pull/42/merge", "main", "", "", False, []),
     # Retained job predicates cannot bypass the removed workflow triggers.
-    ("push", "refs/heads/ouroboros", "", False, []),
-    ("push", "refs/heads/main", "", False, []),
-    ("push", "refs/heads/ouroboros-stable", "", False, []),
-    ("push", "refs/tags/v7.0.0", "", False, ["ubuntu-latest", "windows-latest", "macos-latest"]),
-    ("workflow_dispatch", "refs/heads/candidate", "", True, ["ubuntu-latest", "windows-latest", "macos-latest"]),
-    ("schedule", "refs/heads/main", "", False, []),
+    ("push", "refs/heads/ouroboros", "", "", "", False, []),
+    ("push", "refs/heads/main", "", "", "", False, []),
+    ("push", "refs/heads/ouroboros-stable", "", "", "", False, []),
+    ("push", "refs/tags/v7.0.0", "", "", "", False, THREE_SYSTEMS),
+    ("workflow_dispatch", "refs/heads/candidate", "", "release", "false", True, THREE_SYSTEMS),
+    # The operators' battery: Ubuntu + Windows (their post-merge red lists are disjoint), macOS on request.
+    ("workflow_dispatch", "refs/heads/candidate", "", "tests", "false", False, ["ubuntu-latest", "windows-latest"]),
+    ("workflow_dispatch", "refs/heads/candidate", "", "tests", "true", False, THREE_SYSTEMS),
+    ("schedule", "refs/heads/main", "", "", "", False, []),
 ])
-def test_ordinary_matrix_requires_admitted_manual_or_tag_event(event, ref, base, quick, platforms):
-    facts = {"event": event, "ref": ref, "base": base}
+def test_ordinary_matrix_requires_admitted_manual_or_tag_event(monkeypatch, tmp_path, event, ref, base, scope, macos,
+                                                               quick, platforms):
+    facts = {"event": event, "ref": ref, "base": base, "scope": scope, "macos": macos == "true"}
     triggered = _triggered(WORKFLOW, event, ref)
     assert (triggered and bool(_value(WORKFLOW["jobs"]["quick-test"]["if"], **facts))) is quick
     job = WORKFLOW["jobs"]["full-test-runs"]
     admitted = triggered and _value(job["if"], **facts)
-    rows = job["strategy"]["matrix"]["include"]
-    actual = [row["os"] for row in rows] if admitted else []
+    # The matrix, the PERSIST legs and the reconciliation read the legs `shard-plan` named for the run.
+    assert job["needs"] == "shard-plan"
+    assert job["strategy"]["matrix"] == {"include": "${{ fromJSON(needs.shard-plan.outputs.legs) }}"}
+    assert WORKFLOW["jobs"]["journal-persist"]["needs"] == "shard-plan"
+    assert WORKFLOW["jobs"]["journal-persist"]["strategy"]["matrix"] == {"os": "${{ fromJSON(needs.shard-plan.outputs.persist) }}"}
+    assert "shard-plan" in WORKFLOW["jobs"]["full-test"]["needs"]
+    rows, systems, persist = _plan(monkeypatch, tmp_path, scope=scope, macos=macos) if admitted else ([], "", [])
+    actual = [row["os"] for row in rows]
     assert sorted(set(actual)) == sorted(platforms)
     # Every OS runs whole-file duration shards 1..N; macOS stays within the free plan's five slots.
     shards = {"ubuntu-latest": 4, "macos-latest": 4, "windows-latest": 8}
     for os, count in shards.items():
         assert actual.count(os) == (count if os in platforms else 0)
         mine = [row for row in rows if row["os"] == os]
-        assert sorted(row["shard"] for row in mine) == list(range(1, count + 1))
-        assert {row["shards"] for row in mine} == {count}
+        assert sorted(row["shard"] for row in mine) == (list(range(1, count + 1)) if os in platforms else [])
+        assert {row["shards"] for row in mine} == ({count} if os in platforms else set())
+    names = {"ubuntu-latest": "Linux", "macos-latest": "macOS", "windows-latest": "Windows"}
+    assert systems == " ".join(f"{names[os]}:{shards[os]}" for os in THREE_SYSTEMS if os in platforms)
+    # The PERSIST legs: every system of a release run, Ubuntu alone in the battery.
+    assert persist == (["ubuntu-latest"] if scope == "tests" else [os for os in THREE_SYSTEMS if os in platforms])
     assert job["strategy"]["fail-fast"] is False
     assert job["runs-on"] == "$" + "{{ matrix.os }}"
+
+
+@pytest.mark.parametrize("event,ref,scope,macos,expected", [
+    ("workflow_dispatch", "refs/heads/candidate", "tests", False, set(BATTERY)),
+    ("workflow_dispatch", "refs/heads/candidate", "tests", True, set(BATTERY)),  # macOS adds legs, never jobs
+    # The release graph of a plain dispatch (here with the paid stand's opt-in) and of a tag is unchanged:
+    # the emulator smoke needs an Android change, `windows-sign` configured signing, `e2e-live` a dispatch.
+    ("workflow_dispatch", "refs/heads/candidate", "release", False,
+     set(WORKFLOW["jobs"]) - set(TAG_ONLY) - {"windows-sign", "android-emulator-smoke"}),
+    ("push", "refs/tags/v7.7.0", "", False, set(WORKFLOW["jobs"]) - set(DISPATCH_ONLY) - {"windows-sign", "e2e-live"}),
+])
+def test_the_tests_scope_runs_the_battery_and_nothing_else(event, ref, scope, macos, expected):
+    """`scope=tests` runs the default battery and `lint`: no provider, skill, smoke, docker, Android or release
+    job, not even the paid stand its dispatch opts into; every other run keeps the whole graph."""
+    assert _triggered(WORKFLOW, event, ref)
+    admitted = {name for name, job in WORKFLOW["jobs"].items()
+                if _value(job["if"], event=event, ref=ref, scope=scope, macos=macos, e2e_live="true")}
+    assert admitted == expected
 
 
 @pytest.mark.parametrize("name", ["quick-test", "sqlite-floor", "betterleaks-platform-smoke"])
@@ -150,7 +223,6 @@ def test_scheduled_main_runs_do_not_enter_the_ordinary_matrix(cron):
 
 @pytest.mark.parametrize("event,ref,schedule,e2e_live,admitted", [
     ("workflow_dispatch", "refs/heads/ouroboros", "", "true", True),
-    ("workflow_dispatch", "refs/heads/candidate", "", "true", True),
     ("workflow_dispatch", "refs/heads/ouroboros", "", "false", False),
     ("schedule", "refs/heads/main", "37 4 * * *", "false", False),
     ("schedule", "refs/heads/main", "17 3 * * *", "false", False),
@@ -167,9 +239,7 @@ def test_the_paid_live_stand_runs_only_on_a_dispatch_that_opts_in(event, ref, sc
 
 
 @pytest.mark.parametrize("name", [
-    "integration-test", "integration-optional", "skill-smoke", "system-e2e-mock", "e2e-live",
-    "marker-guards", "docker-ui-smoke", "docker-portable-test",
-    "release-preflight", "build", "release", "vendor-package-smoke",
+    "integration-test", "build", "vendor-package-smoke",
 ])
 def test_desktop_pr_coverage_does_not_admit_provider_or_release_jobs(name):
     job = WORKFLOW["jobs"][name]
@@ -181,7 +251,6 @@ def test_desktop_pr_coverage_does_not_admit_provider_or_release_jobs(name):
     ("push", "refs/heads/ouroboros", "", False),
     ("push", "refs/heads/ouroboros-stable", "", False),
     ("push", "refs/tags/v7.0.0", "", True),
-    ("workflow_dispatch", "refs/heads/candidate", "", True),
     ("pull_request", "refs/pull/42/merge", "", False),
     ("schedule", "refs/heads/main", "37 4 * * *", False),
     ("schedule", "refs/heads/main", "17 3 * * *", False),
@@ -233,6 +302,7 @@ def test_manual_and_tag_desktop_matrix_remains_available_to_forks():
 @pytest.mark.parametrize("run_id,module", [
     ("attachment_browser", "tests/test_chat_attachments_browser.py"),
     ("composer_browser", "tests/test_chat_input_sizing_browser.py"),
+    ("tracked_chromium", "tests/test_tracked_chromium_smoke.py"),
 ])
 def test_the_windows_leg_runs_its_browser_modules_and_refuses_a_skip(tmp_path, run_id, module):
     """Real Windows browser cases in THIS matrix (no second one): the owner-attachment route's confined
@@ -260,27 +330,41 @@ def test_the_windows_leg_runs_its_browser_modules_and_refuses_a_skip(tmp_path, r
     env_root = install["env"]["UV_PROJECT_ENVIRONMENT"]
     assert env_root.startswith("${{ runner.temp }}/"), "outside the checkout the fixture copies"
     assert run["env"]["ATTACHMENT_PYTHON"] == f"{env_root}/Scripts/python.exe"
-    base, sync, playwright = install["run"].strip().splitlines()
+    base, sync, playwright, pinned = install["run"].strip().splitlines()
     # No trailing newline to capture: Git Bash keeps a Windows CR inside $(...).
     assert base == 'base="$(python -c ' + "'import sys; print(sys._base_executable, end=\"\")'" + ')"'
     assert sync == f'{profile} --no-install-project --python "$base"'
     assert playwright == '"$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m playwright install chromium'
+    assert pinned == '"$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m ouroboros.chromium_runtime install'
     assert run["env"]["OUROBOROS_RUN_UI_SMOKE"] == "1"
     assert install["env"]["PLAYWRIGHT_BROWSERS_PATH"] == run["env"]["PLAYWRIGHT_BROWSERS_PATH"]
     command, check, *evidence = run["run"].strip().splitlines()
     assert command.startswith('"$ATTACHMENT_PYTHON" -I -S scripts/safe_test.py -- "$ATTACHMENT_PYTHON" -m pytest '
                               + module)
-    assert " -m ui_browser -k chromium " in command and "--require-ui-browser" not in command
+    assert (" -m browser " if run_id == "tracked_chromium" else " -m ui_browser -k chromium ") in command
+    assert "--require-ui-browser" not in command
     assert "matrix" not in run["run"]
     assert "matrix.shard == 1" in install["if"] and "matrix.shard == 1" in run["if"]
     assert job["strategy"]["matrix"].keys() == {"include"}
     # The skip guard, run as written against a junit report of each shape.
-    for tests, skipped, ok in ((3, 0, True), (3, 1, False), (0, 0, False)):
+    shapes = [(3, 0, 0, 0, True), (3, 1, 0, 0, False), (0, 0, 0, 0, False)]
+    if run_id == "tracked_chromium":
+        shapes += [(3, 0, 1, 0, False), (3, 0, 0, 1, False), (2, 0, 0, 0, False)]
+    for tests, skipped, failed, errors, ok in shapes:
         report = tmp_path / "attachment-browser.xml"
-        report.write_text(f'<testsuites><testsuite tests="{tests}" skipped="{skipped}"/></testsuites>', encoding="utf-8")
+        report.write_text(f'<testsuites><testsuite tests="{tests}" skipped="{skipped}" failures="{failed}" '
+                          f'errors="{errors}"/></testsuites>', encoding="utf-8")
         script = check.split('python -c "', 1)[1].rsplit('" "$RUNNER_TEMP', 1)[0]
         result = subprocess.run([sys.executable, "-c", script, str(report)], capture_output=True, text=True)
-        assert (result.returncode == 0) is ok, (tests, skipped, result.stdout, result.stderr)
+        assert (result.returncode == 0) is ok, (tests, skipped, failed, errors, result.stdout, result.stderr)
+    if run_id == "tracked_chromium":
+        assert run["env"]["OUROBOROS_EXPECT_BROWSER_ENGINES"] == "chromium"
+        upload = next(step for step in job["steps"] if step.get("name") == "Preserve the Windows tracked Chromium evidence")
+        assert upload["with"]["path"] == "${{ runner.temp }}/ci-evidence/tracked-chromium/"
+        assert upload["with"]["if-no-files-found"] == "error" and "continue-on-error" not in upload
+        assert "steps.tracked_chromium.outcome != 'skipped'" in upload["if"]
+        assert job["steps"].index(upload) == job["steps"].index(run) + 1
+        assert "--ci-evidence-dir=" in command
     if run_id != "composer_browser":
         assert not evidence
         return

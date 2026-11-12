@@ -33,7 +33,7 @@ from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 from tests.ui_console_errors import PageErrors
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
+pytestmark = [pytest.mark.ui_browser]
 
 ANSWER = "The converted turn finished its work.\n\n" + "\n\n".join(
     f"Verified section {i}: the complete answer remains readable in the Project and selectable in Main."
@@ -60,6 +60,31 @@ _MAIN_CARD_FACTS = """id => {
         convert_buttons: document.querySelectorAll('#page-chat [data-turn-into-project]').length,
     };
 }"""
+
+
+def _lane_facts(data_root, task_id):
+    """What the published queue says of this turn (ARCHITECTURE "Conversation lane"): an owner turn owns a RUNNING
+    row published at admission, never a PENDING one, carried by a conversation-lane slot beside the project pool
+    that MAX_WORKERS bounds."""
+    from ouroboros.queue_observation import load_queue_document
+
+    document = load_queue_document(data_root)
+    rows = {part: [row for row in document.get(part) or [] if isinstance(row, dict) and row.get("id") == task_id]
+            for part in ("running", "pending")}
+    owner = ((rows["running"] or [{}])[0].get("task") or {}).get("_execution_owner") or {}
+    return {"running": len(rows["running"]), "pending": len(rows["pending"]), "kind": owner.get("kind"),
+            "lane": owner.get("lane"), "project_workers": document.get("worker_total"),
+            "project_workers_idle": document.get("assignable_idle_workers")}
+
+
+def _lane_violation(lane):
+    """Why these queue facts are not a direct turn carried by the conversation lane ('' when they are)."""
+    if (lane["running"], lane["pending"]) != (1, 0):
+        return (f"the queue lists the turn {lane['running']}x RUNNING and {lane['pending']}x PENDING, "
+                "not once RUNNING and never PENDING")
+    if (lane["kind"], lane["lane"]) != ("direct", "conversation"):
+        return f"the turn is carried by {lane['kind']}/{lane['lane']}, not by the conversation lane"
+    return ""
 
 
 def _task_rows(oracle, task_id):
@@ -137,12 +162,14 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                         f'.chat-live-card[data-task-id="{task_id}"][data-finished="0"]'
                     ).count() == 1, "the conversion control is not on a RUNNING card"
                     assert convert.count() == 1
-                    assert task_id not in oracle.running_ids(), "a direct turn must not take a pool worker"
+                    lane = _lane_facts(server.data_root, task_id)
+                    assert not (why := _lane_violation(lane)), \
+                        f"a direct turn is carried by the conversation lane, not a project pool worker: {why}: {lane}"
                     at_click = {
                         "stored_status": str(oracle.task_result(task_id).get("status") or ""),
                         "gate_held": gate.held, "gate_released": gate.release.is_set(),
                         "binding": project_id_for_task(server.data_root, task_id),
-                        "card_finished": card.get_attribute("data-finished"),
+                        "card_finished": card.get_attribute("data-finished"), "lane": lane,
                         "title": card.locator("[data-live-title]").inner_text().strip(),
                     }
                     assert at_click["stored_status"] == "running", at_click

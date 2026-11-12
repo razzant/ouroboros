@@ -13,7 +13,11 @@ change what an attempt costs.
 
 The shared store core defaults to `journal_mode=PERSIST`, `synchronous=FULL`
 and a 64 MiB idle journal size limit. A retained rollback journal avoids file
-creation/deletion on every commit; DELETE-mode older writers can interleave.
+creation/deletion on every commit; DELETE-mode older writers can interleave
+only in turns: on Windows a live PERSIST connection keeps the journal open, so
+a DELETE-mode commit beside it fails (SQLITE_IOERR_DELETE) and the next reader
+rolls it back. Every connection that may write opens through `store.connect`;
+the `query_data` SQL child's read-only reader never commits.
 WAL keeps FULL and requires all three facts: SQLite >= 3.51.3 (or the 3.50
 branch >= 3.50.7 / 3.44 branch >= 3.44.6, which carry the WAL-reset fix: a race
 between two connections, in threads or processes, writing or checkpointing the
@@ -92,7 +96,11 @@ network-bound runs inside it.
   that attempt or replace an already final price. This exception leaves the
   open-set/continuation ownership predicate unchanged.
 - `mark_dispatched` re-checks known spend against the global, root and group
-  limits and the owner Pause/admission fences in the same transaction.
+  limits and the owner Pause/admission fences in the same transaction. A
+  reached global limit refuses there, as at the reservation, only paid
+  admission (`usage_accounting.paid_admission`): the evidence that a
+  subscription route bills is its own `model` summary's settled cash, read in
+  that transaction only when it could decide.
 - Recovery that raced a settlement passes `expected_revision`; the UPDATE
   matches it in its WHERE, and zero rows updated leaves the settlement
   authoritative.
@@ -107,7 +115,7 @@ network-bound runs inside it.
   column/index migration on an existing database. The original physical failure,
   HTTP-200 body errors included, is retained in private CAS before retry. Failure, administrative
   closure, answer completeness and monetary finality remain independent.
-- One-shot kinds compare identity, not payload: a subscription session's later
+- One-shot kinds compare identity, not payload (`extra.run_id` names new subscription sessions): a later
   observation replays the stored row. New partial session receipts retain known
   cash and `cost_partial`, with no reservation bound; an exact subtotal remains
   exact while `unknown_unmetered` counts its unpriced remainder once per row.
@@ -137,9 +145,9 @@ amount-only admission, wave fit and pacing never read custody. The coverage owne
 run's receipt once in the SAME money read as the amounts. Own/tree/sibling scopes
 and split execution/ledger roots retain their identities. Custody roots share one
 display wait allowance; the subsequent money read has its own allowance. Contention
-reports unavailable at debug level. Pending/live/unrecorded or unreadable custody
-keeps `cost_custody` open; cleanup holds do not. Counts stay ledger-derived; later
-starts are not atomically fenced. Exact partial cash is confirmed, estimated
+reports unavailable at debug level. Pending/live/uncollected or unreadable custody
+keeps `cost_custody` open; settled without a receipt means unknown, not open.
+Cleanup holds affect neither. Counts stay ledger-derived; later starts are not atomically fenced. Exact partial cash is confirmed, estimated
 partial cash is estimated; both carry an unpriced remainder and no total bound.
 
 Custody changes owe task/root `cost_revision` in the existing `delegated_runs`
@@ -402,10 +410,9 @@ uncertainty grants no continuation rights. Applying a price to an unresolved att
 
 Standalone command custody uses the selected data root's existing current queue
 snapshot, never the imported process's empty maps. Missing or stale ownership
-evidence refuses task-backed mutation. The existing direct-root projection
-also protects listed owners; incomplete or unreadable projections retain
-custody. Absent/empty direct-root projections carry no proof that every direct
-stack ended. Explicit `system:<source>` accounting
+evidence refuses task-backed mutation. Every live focus, a direct turn included,
+is a row of that snapshot (the retired direct-roots fragment is read by nothing);
+its absence or staleness carries no proof that every stack ended. Explicit `system:<source>` accounting
 scopes from one-shot provider/capability probes are not task-backed review
 owners; real review task IDs still require review-operation custody. The final
 ownership recheck and monetary revision CAS cannot atomically fence a task

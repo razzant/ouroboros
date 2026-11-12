@@ -164,14 +164,14 @@ def test_real_loop_records_initial_request_before_the_first_fallback(tmp_path, m
     monkeypatch.setenv("USE_LOCAL_FALLBACK", "false")
     monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *a, **k: None)
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **k: (None, "max"))
-    observed = []
-    monkeypatch.setattr("ouroboros.memory_max.observe_task_start", lambda _ctx, _plan, mode, **kw: observed.append((kw["task_id"], mode)))
+    noted = []
+    monkeypatch.setattr(loop, "_note_low_start", lambda _ctx, _plan, mode, task_id, _queue: noted.append((task_id, mode)))
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     kwargs = _loop_kwargs(tmp_path, registry, [], FallbackModel({"role": "assistant", "content": "Fallback result"}, {}))
     kwargs["drive_logs"] = tmp_path / "logs"
     text, usage, trace = loop.run_llm_loop(**kwargs)
     assert text == "Fallback result"
-    assert observed == [(kwargs["task_id"], "max")]  # a fresh start measures its Max room once
+    assert noted == [(kwargs["task_id"], "max")]  # a fresh start is weighed for its Low-start line once
     assert usage["initial_model_request"] == {"model": "primary", "use_local": False}
     assert model_execution_projection(usage)["used_model"] == "fallback"
     assert registry._ctx.active_model == "fallback"

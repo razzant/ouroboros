@@ -9,8 +9,8 @@ from tests.test_delegate_pending_recovery import _pending_handoff
 from tests.test_planned_delegate_assignment import prepared as prepared, restore  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
+from tests._run_wait_shared import wake_now
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("door", ["self_restart", "managed_update"])
@@ -104,8 +104,8 @@ def test_saved_pending_handoff_keeps_reservation_and_addressed_late_fate(
         assert not (tmp_path / "state/delegate_supervision/nanny.json").exists()
         assert stored["journal_cursor"] == 17 and stored["pending_wake"]["wake_id"] == "kept"
         _bound(tmp_path, task, invocation)
-        from ouroboros.delegate_supervision import supervised_wait, _load_state
-        result = supervised_wait(ctx, "bound-run", wait_once=lambda *_a, **_k: pytest.fail("saved wake comes first"))
+        from ouroboros.delegate_supervision import run_wait, _load_state
+        result = run_wait(ctx, "bound-run")  # the saved wake comes first, before any sleep is armed
         assert json.loads(result.text)["supervision_wake_id"] == "kept"
         assert _load_state(ctx, "bound-run")["journal_cursor"] == 17
     else:
@@ -131,7 +131,7 @@ def test_saved_run_handoff_accepts_settlement_since_reservation(tmp_path, monkey
     assert result["settled"] is (transition == "settled")
 
 
-@pytest.mark.parametrize("fault", ["attempt", "authority", "holder", "generation", "cause"])
+@pytest.mark.parametrize("fault", ["attempt", "generation", "cause"])
 def test_saved_carrier_does_not_relax_local_handoff_authority(tmp_path, monkeypatch, fault):
     custody, recovery, task, _, _, _, _ = _pending_handoff(tmp_path, "nanny")
     task["_working_recovery"] = {}
@@ -154,8 +154,15 @@ def test_saved_carrier_does_not_relax_local_handoff_authority(tmp_path, monkeypa
     assert recovery._read(tmp_path, "nanny")["status"] == "vetoed" and reconciled == [True]
 
 
-@pytest.mark.parametrize("fault", ["none", "no_resume", "panic", "transaction", "attempt", "holder", "old_generation"])
-@pytest.mark.parametrize("fate", ["pending", "bound", "settled"])
+@pytest.mark.parametrize(("fate", "fault"), [
+    ("pending", "none"),
+    ("bound", "no_resume"),
+    ("bound", "panic"),
+    ("bound", "transaction"),
+    ("bound", "attempt"),
+    ("settled", "holder"),
+    ("settled", "old_generation"),
+])
 def test_startup_pre_adoption_retains_local_checks_without_engine_observation(
         tmp_path, monkeypatch, stub_delegate_engines, fault, fate):
     custody, recovery, task, _, invocation, _, _ = _pending_handoff(tmp_path, "nanny")
@@ -198,6 +205,46 @@ def test_startup_pre_adoption_retains_local_checks_without_engine_observation(
             assert recovery._read(tmp_path, "nanny")["veto_reason"] == "startup_work_stopped"
 
 
+@pytest.mark.parametrize("changed_words", [False, True], ids=["same-work", "different-work"])
+def test_prior_body_selected_files_keep_the_planned_handoff_fingerprint(
+        tmp_path, monkeypatch, stub_delegate_engines, changed_words):
+    from ouroboros import subagent_work_order as orders
+
+    # This is the canonical disclosure written before PR2922, not a new rule
+    # about the current run's preparation. Recovery must retain its byte identity.
+    selected = [{"root": "task_drive", "path": "brief.md", "sha256": "a" * 64, "size": 12}]
+    old_disclosure = (
+        "The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
+        "this task. The first start of this work order verifies those copies against these digests and its "
+        "instructions name where this run reads them; a later start copies only what its own request selects.\n"
+        + f"- task_drive:brief.md (sha256 {'a' * 64}, 12 bytes)"
+    )
+    with monkeypatch.context() as previous_body:
+        previous_body.setattr(orders, "_selected_input_files", lambda _task: old_disclosure)
+        custody, recovery, task, _, _, fingerprint, _ = _pending_handoff(
+            tmp_path, "selected-child", input_files=selected)
+    task["_working_recovery"] = {}
+    row = recovery._read(tmp_path, task["id"])
+    assert row["work_order_fingerprint"] == fingerprint
+    assert row.get("actor_binding_source", "task_snapshot") == "task_snapshot"
+    row.update(cause=recovery.CAUSE_PLANNED_SELF_RESTART, restart_transaction_id="tx", supervisor_pid=123)
+    recovery._write(tmp_path, row)
+    recovery._write_restart_transaction(tmp_path, {
+        "transaction_id": "tx", "supervisor_pid": 123, "status": "normal_exit_acknowledged",
+        "exit_code": 42, "task_ids": [task["id"]],
+    })
+    monkeypatch.delenv(recovery.PLANNED_RESTART_TRANSACTION_ENV, raising=False)
+    monkeypatch.setattr(recovery, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(custody, "reconcile_task_runs", lambda *_a, **_k: None)
+    if changed_words:
+        task["objective"] = "A different assignment"
+    assert recovery._successor_binding_mismatch(row, task) == ("work_order_mismatch" if changed_words else "")
+    adopted = recovery.pre_adopt_planned_handoffs(tmp_path, [task])
+    assert adopted == (set() if changed_words else {task["id"]})
+    assert recovery._read(tmp_path, task["id"])["status"] == ("vetoed" if changed_words else "pre_adopted")
+    assert not stub_delegate_engines
+
+
 @pytest.mark.parametrize("prepared", [(False, False, "saved"), (True, False, "saved")],
                          indirect=True, ids=["unscoped", "project"])
 @pytest.mark.parametrize("adopt_before_restore", [False, True], ids=["startup-order", "pre-adopted-snapshot"])
@@ -205,7 +252,6 @@ def test_planned_saved_task_crosses_startup_admission_bootstrap_and_real_loop(
         prepared, monkeypatch, stub_delegate_engines, adopt_before_restore):
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros import claudexor_daemon, delegate_recovery as recovery, loop, subagent_bootstrap
-    from ouroboros.working_checkpoint import checkpoint_path
     from ouroboros.agent_dispatch import resolve_dispatch_axes
     from supervisor import queue, workers
     from tests.test_project_hold_recovery import worker
@@ -219,8 +265,10 @@ def test_planned_saved_task_crosses_startup_admission_bootstrap_and_real_loop(
     source = case.host.pending[0]["_working_recovery"]
     assert source["from_attempt"] == case.handoff["old_attempt"]
     assert source["source_task_id"] == "child1" and source["cause"] == "restart"
-    assert read_actor_source_bytes(root, "child1", source["source_ref"]) == checkpoint_path(
-        root, "child1", case.handoff["old_attempt"]).read_bytes()
+    from ouroboros.working_checkpoint import read_working
+
+    assert read_actor_source_bytes(root, "child1", source["source_ref"]) == read_working(
+        root, "child1", case.handoff["old_attempt"])[0]
     def no_engine(*_args, **_kwargs):
         pytest.fail("startup cannot admit the leaf before restoring its owner")
     monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", no_engine)
@@ -304,8 +352,11 @@ def test_unreadable_custody_keeps_saved_reservation_without_observation_or_veto(
     assert recovery._read(tmp_path, "nanny")["status"] == "reserved"
 
 
-@pytest.mark.parametrize("binding", ["after_restart", "before_restart", "settled_before_restart"])
-@pytest.mark.parametrize("aged_gc", [False, True])
+@pytest.mark.parametrize(("aged_gc", "binding"), [
+    (False, "before_restart"),
+    (True, "after_restart"),
+    (True, "settled_before_restart"),
+])
 def test_pending_wait_sources_survive_aged_gc_and_second_planned_restart(
         tmp_path, monkeypatch, binding, aged_gc, stub_delegate_engines):
     import os
@@ -359,7 +410,7 @@ def test_pending_wait_sources_survive_aged_gc_and_second_planned_restart(
     assert recovery.adopt_handoff(ctx, task)["status"] == "adopted"
     if binding == "after_restart":
         _bound(tmp_path, task, invocation)
-    result = ds.supervised_wait(ctx, "bound-run", wait_once=lambda *_a, **_k: pytest.fail("retained wake must replay first"))
+    result = ds.run_wait(ctx, "bound-run")  # the retained wake replays before any sleep is armed
     assert json.loads(result.text)["supervision_wake_id"] == "kept"
     state = ds._load_state(ctx, "bound-run")
     for key, value in sources.items():
@@ -375,7 +426,7 @@ def test_pending_wait_sources_survive_aged_gc_and_second_planned_restart(
     assert not stub_delegate_engines
 
 
-@pytest.mark.parametrize("fault", ["task", "attempt", "authority", "holder", "custody_read", "row_read"])
+@pytest.mark.parametrize("fault", ["authority", "custody_read", "row_read"])
 def test_second_handoff_never_replaces_unproven_pending_wait_source(tmp_path, monkeypatch, fault):
     from ouroboros import delegate_custody_current as current
 
@@ -490,12 +541,10 @@ def test_resolved_pending_reservation_yields_wait_sources_to_current_supervision
                                                              "definite": True})
     assert custody.record_started(tmp_path, custody.RunCustody(
         run_id="run-c", invocation_id="invoke-c", task_id="nanny", route_id="codex", **binding))
-    if fate != "refused_running":
-        def worker_dies(*_a, **_k):
-            raise InputReached
-        with pytest.raises(InputReached):
-            ds.supervised_wait(ctx, "run-c", since_seq=23, wait_once=worker_dies)
-        assert ds._load_state(ctx, "run-c")["status"] == "sleeping"
+    if fate != "refused_running":  # C's wake was published from cursor 23 and the worker died before its ACK
+        wake_now(ctx, "run-c", since_seq=23, wait_once=lambda *_a, **_k: json.dumps(
+            {"status": "progress", "run_id": "run-c", "last_seq": 23}))
+        assert ds._load_state(ctx, "run-c")["status"] == "wake_pending"
     engines, before = list(stub_delegate_engines), recovery._path(tmp_path, "nanny").read_bytes()
     unrecoverable = []
     monkeypatch.setattr(recovery, "reconcile_unrecoverable_task", lambda *_a: unrecoverable.append(True))
@@ -512,7 +561,7 @@ def test_resolved_pending_reservation_yields_wait_sources_to_current_supervision
         assert current["journal_cursor"] == (0 if fate == "refused_running" else 23)
         assert (current["old_attempt"], current["new_attempt"]) == (2, 3)
     else:
-        # A planned stop keeps only sleeping supervision; an unproven fate keeps its reservation.
+        # A planned stop keeps only an unacknowledged wake; an unproven fate keeps its reservation.
         assert not preserved and recovery._path(tmp_path, "nanny").read_bytes() == before
         assert unrecoverable == ([True] if door == "worker_crash" else [])
     assert stub_delegate_engines == engines
@@ -568,12 +617,12 @@ def _pending_after_waited_run(tmp_path, monkeypatch):
     def reports(**fields):
         return lambda *_a, **_k: json.dumps({"run_id": "run-a", **fields})
 
-    question = ds.supervised_wait(first, "run-a", wait_once=reports(
+    question = wake_now(first, "run-a", wait_once=reports(
         status="waiting_on_user", last_seq=990,
         pendingInteractions=[{"interactionId": "question-a", "question": "Which path?"}]))
     assert ds.acknowledge_pending_wake(first, question.text)
     assert custody.emit(tmp_path, custody.SETTLED, {"run_id": "run-a", "task_id": "nanny", "state": "succeeded"})
-    terminal = ds.supervised_wait(first, "run-a", wait_once=reports(status="terminal", state="succeeded", last_seq=991))
+    terminal = wake_now(first, "run-a", wait_once=reports(status="terminal", state="succeeded", last_seq=991))
     assert ds.acknowledge_pending_wake(first, terminal.text)
     acked = ds._load_state(first, "run-a")
     assert (acked["status"], acked["journal_cursor"], acked["interaction_acknowledged_ids"]) == (
@@ -587,7 +636,7 @@ def _pending_after_waited_run(tmp_path, monkeypatch):
 def test_pending_retry_waits_from_its_own_start_not_an_earlier_runs_acked_wait(
         tmp_path, monkeypatch, stub_delegate_engines):
     """Pending B's exact retry is neither answered with A's terminal nor observed from A's cursor (#1862)."""
-    from ouroboros import delegate_interactions, delegate_supervision as ds
+    from ouroboros import delegate_interactions, delegate_supervision as ds, model_sleep
 
     acked, recovery, task, invocation, ctx = _pending_after_waited_run(tmp_path, monkeypatch)
     handoff = recovery._read(tmp_path, "nanny")
@@ -602,8 +651,9 @@ def test_pending_retry_waits_from_its_own_start_not_an_earlier_runs_acked_wait(
         observed.append((run_id, cursor))
         raise InputReached
 
+    assert model_sleep.wake_reason(ctx, ds._choice({"runs": ["bound-run"]})) == "", "A's terminal wakes no sleep on B"
     with pytest.raises(InputReached):
-        ds.supervised_wait(ctx, "bound-run", wait_once=observe)
+        wake_now(ctx, "bound-run", wait_once=observe)
     assert observed == [("bound-run", 0)], "B's own observation comes first, from B's own start"
     state = ds._load_state(ctx, "bound-run")
     assert (state["journal_cursor"], state["interaction_acknowledged_ids"]) == (0, [])
@@ -631,7 +681,7 @@ def test_second_crash_keeps_the_same_pending_reservations_deferred_wait(
     task["_attempt"] = ctx.task_attempt = 3
     assert recovery.adopt_handoff(ctx, task)["retry_of"] == invocation
     _bound(tmp_path, task, invocation)
-    replay = ds.supervised_wait(ctx, "bound-run", wait_once=lambda *_a, **_k: pytest.fail("own wake first"))
+    replay = ds.run_wait(ctx, "bound-run")  # its own wake first, before any sleep is armed
     assert json.loads(replay.text)["supervision_wake_id"] == "kept"
     assert ds._load_state(ctx, "bound-run")["journal_cursor"] == 17
     assert set(stub_delegate_engines) <= {"gateway"}

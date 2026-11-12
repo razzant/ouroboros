@@ -43,6 +43,32 @@ KEEP_RUNNING = "OUROBOROS_DESKTOP_KEEP_RUNNING"
 BACKGROUND_ENV = "OUROBOROS_DESKTOP_BACKGROUND"  # "1": this launcher can keep running with its window hidden
 
 
+def app_copy(path: Path) -> Path:
+    """The app copy a bundle directory or launcher executable belongs to: its ``.app``, the folder beside
+    ``_internal`` or holding the executable, else the path itself."""
+    app = next((parent for parent in (path, *path.parents) if parent.suffix == ".app"), None)
+    return app or (path.parent if path.name == "_internal" or path.is_file() else path)
+
+
+def inside_appdir(bundle: object = "") -> bool:
+    """Whether this bundle (default ``OUROBOROS_BUNDLE_DIR``) lies under ``$APPDIR``. An AppImage runtime exports
+    ``APPDIR`` and ``APPIMAGE`` to every descendant, so a copy started from another AppImage app's terminal
+    inherits them; they describe this app only when its bundle is inside that AppDir."""
+    appdir, bundle = os.environ.get("APPDIR", "").strip(), str(bundle or os.environ.get(BUNDLE_DIR_ENV, "")).strip()
+    if not (appdir and bundle):
+        return False
+    for inner, outer in ((bundle, appdir), (os.path.realpath(bundle), os.path.realpath(appdir))):
+        inner, outer = os.path.normcase(os.path.abspath(inner)), os.path.normcase(os.path.abspath(outer))
+        if inner == outer or inner.startswith(outer.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def own_appimage(bundle: object = "") -> str:
+    """``$APPIMAGE`` when it is this app's own (``inside_appdir``), else ``""``."""
+    return os.environ.get("APPIMAGE", "").strip() if inside_appdir(bundle) else ""
+
+
 def launcher_target() -> tuple[Path | None, str]:
     """The launcher's immutable build facts, not the managed repo's version."""
     presentation = os.environ.get("OUROBOROS_PRESENTATION")
@@ -61,10 +87,10 @@ def launcher_target() -> tuple[Path | None, str]:
         exe = app / "Contents/MacOS/Ouroboros" if app else None
     else:
         exe = bundle.parent / "Ouroboros" if bundle.name == "_internal" else None
-        appimage = os.environ.get("APPIMAGE", "")
+        appimage = own_appimage(bundle)  # one inherited from another AppImage app's terminal is not this app's
         if appimage:
             exe = Path(appimage)
-        elif os.environ.get("APPDIR"):
+        elif inside_appdir(bundle):
             return None, "Open Ouroboros from its stable AppImage file first."
     if exe is None or not exe.is_absolute() or not exe.is_file():
         return None, "Available only when the host runs the packaged desktop app."
@@ -204,6 +230,60 @@ def _linux(exe: Path, enabled: bool | None) -> str:
 
 
 ADAPTERS = {"win32": _windows, "darwin": _macos, "linux": _linux}
+
+
+def _vanished(program: object, exe: Path) -> bool:
+    """A registered program that is gone and is not this copy: its app moved or was removed."""
+    return isinstance(program, str) and Path(program).is_absolute() and Path(program) != exe and not Path(program).exists()
+
+
+def _desktop_argv(command: str) -> list[str]:
+    """The argv an XDG ``Exec`` runs: string unescaping, then argument quoting (``_desktop_command``)."""
+    escapes = {"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+    try:
+        return [arg.replace("%%", "%") for arg in shlex.split(re.sub(r"\\(.)", lambda m: escapes.get(m.group(1), m.group(0)), command))]
+    except ValueError:
+        return []
+
+
+def follow_moved_app() -> bool:
+    """At a packaged start, a sign-in entry whose program is gone names this copy instead (True when rewritten).
+
+    Only an entry of this app's own shape (its label or file, the automatic-intent arguments) is touched,
+    and only its program changes: an OS switch-off (launchctl override, StartupApproved, Hidden) and the
+    owner's choice stay, nothing is enabled, and an entry naming a copy that still exists stays
+    ``other_copy``. The native unit names a fixed path. Fail-soft: a boot step never fails here."""
+    exe, _reason = launcher_target()
+    if exe is None or exe == NATIVE_LAUNCHER:
+        return False
+    try:
+        if sys.platform == "win32":
+            if not windows_autostart.follow_moved_app(exe):
+                return False
+        elif sys.platform == "darwin":
+            path = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
+            entry = plistlib.loads(path.read_bytes())
+            argv = entry.get("ProgramArguments") if isinstance(entry, dict) and entry.get("Label") == LABEL else None
+            if not (isinstance(argv, list) and argv[1:] == AUTOMATIC_ARGS and _vanished(argv[0], exe)):
+                return False
+            write_bytes_atomic(path, plistlib.dumps({**entry, "ProgramArguments": [str(exe), *argv[1:]]}))
+        else:
+            path = _desktop_path()
+            text = path.read_text(encoding="utf-8")
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read_string(text)
+            argv = _desktop_argv(parser["Desktop Entry"].get("Exec", ""))
+            if not (argv[-2:] == AUTOMATIC_ARGS and _vanished(argv[0], exe)):
+                return False
+            # The current command keeps an AppImage's extract-and-run mode; Hidden and the GNOME switch stay.
+            write_text_atomic(path, re.sub(r"(?m)^Exec=.*$", lambda _m: f"Exec={_desktop_command(exe)}", text, count=1))
+    except FileNotFoundError:
+        return False
+    except Exception:  # a malformed foreign entry or an OS refusal stays as it was
+        logging.getLogger(__name__).warning("Sign-in entry not re-pointed at %s", exe, exc_info=True)
+        return False
+    logging.getLogger(__name__).info("Sign-in startup now opens %s: the registered copy is gone", exe)
+    return True
 
 
 def autostart_status(enabled: bool | None = None) -> dict[str, str]:

@@ -2,21 +2,56 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
+import { clock, observe } from './state_read_fixture.js';
+import * as api from '../modules/api_client.js';
 
 import { normalizeConsciousness, normalizePlacesResponse, normalizeWake } from '../modules/consciousness_api.js';
 import { createContributionsStore } from '../modules/contributions.js';
 import {
-    countedRootsText, dashboardPlaceRowHtml, factsLineParts, headlineView, initConsciousnessDashboard, liveWake,
-    paintWakeRows, placesCardHtml, summaryHtml, wakeRowHtml, wakesCardHtml,
+    countedRootsText, headlineView, initConsciousnessDashboard, liveWake,
+    paintWakeRows, spendDetails, summaryHtml, wakeRowHtml, wakesCardHtml,
 } from '../modules/consciousness_dashboard.js';
-import { noteLeadText, wakeCheckText, wakeCostText } from '../modules/consciousness_words.js';
+import { consciousnessMark, wakeCheckChip, wakeCheckText, wakeCostText } from '../modules/consciousness_words.js';
 import { applyPayload, setMissTransport } from '../modules/i18n.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
+const STATE_LIFETIME = api.STATE_READ_LIFETIME_MS ?? 60_000;  // a namespace read keeps base trees loadable
 const full = () => normalizeConsciousness(FIXTURE.consciousness);
 const fromState = () => normalizeConsciousness(FIXTURE.state.bg_consciousness_state, { enabled: true });
 const wake = (id) => full().recentWakes.find((row) => row.taskId === id);
 const strip = (html) => html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+
+test('Dashboard keeps two titled wake lists and their separate empty sentences', () => {
+    for (const rows of [full().recentWakes, [], [wake('214a31b6')], [wake('w-focus-user')]]) {
+        const html = wakesCardHtml(rows, full().coverage);
+        assert.equal(html.split(full().coverage).length - 1, 1);
+        assert.ok(html.indexOf(full().coverage) > html.lastIndexOf('</section>'), 'the lists come first, their scope is their caption');
+        const groups = html.split('<section ').slice(1);
+        assert.deepEqual(groups.map((group) => group.match(/<h3[^>]*>([^<]+)</)[1]), ['Its own wakes', 'Wakes in places']);
+        for (const [n, cause, empty] of [[0, 'own', 'No own wakes with a recorded model call in the last 48 h.'],
+            [1, 'focus', 'No wakes in places in the last 48 h.']]) {
+            const expected = rows.filter((row) => row.cause === cause).map((row) => row.taskId);
+            assert.deepEqual([...groups[n].matchAll(/data-wake="([^"]+)"/g)].map((match) => match[1]), expected);
+            assert.equal(groups[n].includes(empty), expected.length === 0);
+        }
+    }
+});
+
+test('Dashboard keeps the host headline as its only clock', (t) => {
+    t.mock.method(Date, 'now', () => Date.parse('2027-01-15T12:00:00Z'));
+    for (const [status, detail, next_wake_at] of [
+        ['due', 'Due since 11:00; the wake-up has not started yet.', '2027-01-15T11:30:00Z'],
+        ['sleeping', 'Sleeping until 13:00.', '2027-01-15T13:00:00Z'],
+        ['wake_paused', 'Wake-up own is paused or waiting in the queue; its card shows why. The next wake-up follows it.', '2027-01-15T11:30:00Z'],
+    ]) {
+        const snapshot = normalizeConsciousness({ enabled: true, status, detail, next_wake_at,
+            appointment_at: '2027-01-15T11:00:00Z' });
+        const text = strip(summaryHtml(snapshot));
+        assert.equal(text.split(detail).length - 1, 1);
+        assert.doesNotMatch(text.replace(detail, ''), /\d\d:\d\d|[Dd]ue|since|[Nn]ext wake/);
+        assert.deepEqual(headlineView(snapshot), { text: detail, moving: false });
+    }
+});
 
 test('focus account stamps cross normalization and preserve the wake anatomy and authored note lead', () => {
     const raw = { ...FIXTURE.consciousness.recent_wakes.find((row) => row.task_id === '214a31b6'),
@@ -54,22 +89,84 @@ test('server status alone owns the headline even with finished or active rows in
     assert.equal(headlineView(full()).moving, false);
     assert.ok(liveWake(full()).live);
     assert.equal(liveWake({ recentWakes: [wake('214a31b6')] }), null);
-    for (const [status, detail] of [['due', 'Due; waiting for current work.'],
+    for (const [status, detail] of [['due', 'Due; the wake-up has not started yet.'],
         ['wake_failed', 'The last wake-up failed.'], ['wake_rejected', 'The last wake-up was refused.'],
-        ['wake_paused', 'The last wake-up returned while paused.'], ['disabled', 'Background consciousness is off.'],
+        ['wake_paused', 'The last wake-up returned while paused.'], ['disabled', 'Off: no own wakes; 2 places only hear.'],
         ['waiting_for_first_conversation', 'No owner chat is bound yet; the first conversation binds it.']]) {
         assert.deepEqual(headlineView({ ...full(), status, detail }), { text: detail, moving: false });
     }
     assert.equal(headlineView({ ...full(), status: 'thinking' }).moving, true);
 });
 
-test('facts keep money with its cause and say when some calls have no price', () => {
-    assert.deepEqual(factsLineParts(fromState(), 3).map(strip),
-        ['on its own clock', '3 places', 'own $0.62', 'Slack · Acme $0.88', 'started work $0.48', 'Some calls have no price']);
-    assert.deepEqual(factsLineParts({ ...fromState(), enabled: false, spendByCause: [] }, 1).map(strip), ['off', '1 place']);
-    assert.equal(countedRootsText(fromState()), 'Its own tasks: 1 of 2 · Release notes draft (Slack · Acme)');
-    assert.match(summaryHtml(fromState()), /data-cx-act="toggle" data-enabled="1">Stop</);
+test('the headline card says the money of the last 24 hours alone; where it went is the card\'s Details', () => {
+    const snapshot = fromState();
+    const html = summaryHtml(snapshot);
+    const [main, details] = [html.split('<details')[0], html.slice(html.indexOf('<details'))];
+    assert.match(strip(main), /\$\d[\d,]*\.\d\d of \$\d[\d,]*\.\d\d in the last 24 hours/, 'one money line, grouped like Costs');
+    assert.doesNotMatch(main, /Slack · Acme \$|Started work|Some calls have no price|on its own clock/, 'no run-on of causes on the card');
+    assert.match(main, /class="dashboard-hero"/);
+    // Each cause that spent something, every place's included (no place row shows its own spend any more); the
+    // caveat once, at the end.
+    assert.deepEqual(spendDetails(snapshot).rows.map((row) => `${row.words} ${row.amount}`),
+        ['Own time $0.62', 'Slack · Acme $0.88', 'Started work $0.48']);
+    assert.equal(spendDetails(snapshot).unpriced, true);
+    assert.deepEqual(spendDetails({ ...snapshot, spendByCause: [{ cause: 'own', label: '', usd: 0, unmeteredCalls: 0 }] }),
+        { rows: [], unpriced: false }, 'a zero is not listed');
+    // Where the places live, where the allowance is set (Costs, its one editor) and where the rest is: pointers, no list.
+    assert.match(strip(html), /The places it lives in, their words and their circles: Circles ›/);
+    assert.match(html, /data-cx-act="circles"/);
+    assert.match(strip(html), /Its spending limit over 24 hours and what it spent: Costs ›/);
+    assert.match(html, /data-cx-act="costs">Costs ›</);
+    assert.match(strip(html), /Its own tasks and concurrent conversations: Settings ›/);
+    assert.doesNotMatch(strip(html), /Allowance, own tasks/, 'Settings no longer holds the allowance');
+    assert.match(details, /^<details class="ui-disclosure consciousness-details"><summary>Details<\/summary>/);
+    assert.match(strip(details), /Own time\s*\$0\.62.*Some calls have no price\..*Release notes draft \(Slack · Acme\)/);
+    assert.equal(countedRootsText(snapshot), 'Its own tasks: 1 of 2 · Release notes draft (Slack · Acme)');
+    assert.match(strip(main), /Its own tasks: 1 of 2/);
+    assert.match(summaryHtml(snapshot), /data-cx-act="toggle" data-enabled="1">Stop</);
     assert.doesNotMatch(summaryHtml(normalizeConsciousness({})), /data-cx-act="toggle"/);
+    assert.match(summaryHtml(snapshot, { detailsOpen: true }), /consciousness-details" open>/, 'an opened Details stays open');
+});
+
+test('a state that cannot wake wears its failure mark and offers Restart; starting is said without alarm', () => {
+    const stopped = normalizeConsciousness({ enabled: true, status: 'stopped',
+        detail: 'Cannot wake: Ouroboros did not finish starting. Restart Ouroboros.' });
+    const html = summaryHtml(stopped);
+    assert.match(html, /data-shape="dot" data-hue="failed"/);
+    assert.match(html, /data-cx-act="restart">Restart</);
+    assert.ok(html.indexOf('data-cx-act="restart"') < html.indexOf('data-cx-act="toggle"'), 'the next step leads the actions');
+    const starting = summaryHtml(normalizeConsciousness({ enabled: true, status: 'starting',
+        detail: 'Waits for Ouroboros to finish starting.' }));
+    assert.doesNotMatch(starting, /data-hue="failed"|data-cx-act="restart"/);
+    assert.doesNotMatch(summaryHtml(normalizeConsciousness({ enabled: false, status: 'stopped', detail: 'Off.' })), /data-cx-act="restart"/);
+    // One mark per state for the bar's chip and this headline (consciousness_words.consciousnessMark).
+    assert.deepEqual(consciousnessMark(stopped), { shape: 'dot', hue: 'failed' });
+    assert.deepEqual(consciousnessMark({ ...stopped, status: 'allowance_exhausted' }), { shape: 'dot', hue: 'owner' });
+    assert.deepEqual(consciousnessMark({ ...stopped, status: 'thinking' }), { shape: 'moving', hue: 'ink' });
+    assert.deepEqual(consciousnessMark({ ...stopped, enabled: false }), { shape: 'none', hue: 'ink' });
+    // A held wake keeps the word `wake_paused`; only a proven allowance hold is the owner's move (amber), every other
+    // or unproven cause keeps the pause bars.
+    const held = normalizeConsciousness({ enabled: true, status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true,
+        detail: 'Wake-up w1 stopped at the allowance it had left when it started ($2.99).', live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } });
+    for (const cause of ['allowance', 'allowance_and_cap']) {
+        assert.deepEqual(consciousnessMark({ ...held, holdCause: cause }), { shape: 'dot', hue: 'owner' }, cause);
+    }
+    for (const cause of ['per_task_cap', 'launch_ceiling', 'per_task_fence', 'total_budget', 'owner', 'sleep', 'technical', '']) {
+        assert.deepEqual(consciousnessMark({ ...held, holdCause: cause }), { shape: 'pause', hue: 'ink' }, cause);
+    }
+    assert.deepEqual(consciousnessMark({ ...held, enabled: false }), { shape: 'none', hue: 'ink' }, 'Off wins');
+    assert.deepEqual(consciousnessMark({ ...held, liveWakeHeld: false }), { shape: 'pause', hue: 'ink' }, 'a hold needs the held wake');
+    assert.match(summaryHtml(held), /consciousness-headline">Wake-up w1 stopped at the allowance.*data-hue="owner"/);
+    // What follows from the hold is said beneath the headline, quieter; no other state has a note.
+    const noted = normalizeConsciousness({ ...held, detail_note: 'Resume keeps that limit.' });
+    assert.match(summaryHtml(noted), /<p class="dashboard-hero-meta consciousness-headline-note">Resume keeps that limit\.<\/p>/);
+    assert.doesNotMatch(summaryHtml(held), /consciousness-headline-note/);
+    assert.equal(headlineView(noted).note, 'Resume keeps that limit.');
+    assert.ok(!('note' in headlineView(held)), 'a state without a note keeps the headline shape it had');
+    // A Start/Stop on its way says so and waits; nothing else on the card changes.
+    assert.match(summaryHtml(fromState(), { toggling: 'stop' }), /data-cx-act="toggle" data-enabled="1" disabled>Stopping…</);
+    assert.match(summaryHtml({ ...fromState(), enabled: false }, { toggling: 'start' }), /disabled>Starting…</);
+    assert.match(summaryHtml(fromState()), /class="btn btn-default btn-sm" data-cx-act="toggle"/, 'the neutral small capsule');
 });
 
 test('producer rows retain terminal truth and all five active phases', () => {
@@ -103,203 +200,76 @@ test('summary is authored, note is whole and disclosed, only flagged checks get 
     assert.match(oldHtml, /Safety Supervisor checked run_command/);
     assert.match(namedHtml, /Not checked \(update_memory\)/);
     assert.doesNotMatch(namedHtml, /Safety Supervisor checked update_memory|unmetered|omitted/);
-    assert.match(namedHtml, /data-cx-open-task="w-summary" data-chat-id="1">Open in Main ↗/);
-    assert.doesNotMatch(wakeRowHtml({ ...named, cause: 'focus', chatId: 1099511627777, placeLabel: 'Slack' }), /data-cx-open-task/);
+    assert.match(namedHtml, /data-open-task="w-summary">Open in Main ↗/);
+    assert.doesNotMatch(wakeRowHtml({ ...named, cause: 'focus', chatId: 1099511627777, placeLabel: 'Slack' }), /data-open-task/);
     const focusRow = wakeRowHtml({ ...named, cause: 'focus', chatId: 1099511627777, placeLabel: 'Slack' });
     assert.match(focusRow, /data-cx-open-room="1099511627777"/, 'a focus row opens its captured conversation');
     assert.match(focusRow, /Open the conversation/);
     assert.doesNotMatch(wakeRowHtml({ ...named, cause: 'focus', chatId: 0, placeLabel: 'Slack' }), /data-cx-open-room/, 'no room, no door');
-    assert.match(wakesCardHtml(full().recentWakes, full().coverage), /wakes that reached a model call in the last 48 h/);
+    assert.match(wakesCardHtml(full().recentWakes, full().coverage), /Wakes that reached a model call in the last 48 h/);
+    // The details of a row are the one shared disclosure, its words "Details", no own marker and no indent.
+    assert.match(oldHtml, /<details class="ui-disclosure consciousness-wake-more"><summary>Details<\/summary>/);
+});
+
+test('a warning chip says what the Safety Supervisor did; a raw tool id waits in the row\'s Details', () => {
+    assert.equal(wakeCheckChip({ chip: 'warned', tool: 'ext_8_r_github_github_place_message' }), 'Safety Supervisor warned about a step');
+    assert.equal(wakeCheckChip({ chip: 'held', tool: 'run_command' }), 'Safety Supervisor held a step');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'slack_send' }), 'A step was let through despite the check');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'run_command' }), 'A step was let through despite the check');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'place_reply' }), 'The reply sent despite the check');
+    assert.equal(wakeCheckChip({ chip: 'warned', tool: 'place_reply' }), 'Safety Supervisor warned about the reply', 'a tool it names in words stays');
+    const row = wakeRowHtml({ ...wake('w-summary'), checks: [{ chip: 'warned', tool: 'ext_8_r_github_github_place_message' }] });
+    const [main, details] = [row.split('<details')[0], row.slice(row.indexOf('<details'))];
+    assert.doesNotMatch(main, /ext_8_r_github/, 'no raw id on the row');
+    assert.match(main, /Safety Supervisor warned about a step/);
+    assert.match(details, /Safety Supervisor warned about ext_8_r_github_github_place_message/, 'the exact tool is one click away');
 });
 
 test('unknown, zero, known, open and mixed costs stay distinct in visible and accessible words', () => {
-    assert.equal(wakeCostText(wake('214a31b6')), 'spend unknown');
+    // An unknown cost leaves the row's money column empty and is said in the row's Details, never as a zero.
+    assert.equal(wakeCostText(wake('214a31b6')), '');
+    assert.match(wakeRowHtml(wake('214a31b6')), /<span class="consciousness-wake-cost"><\/span>/);
+    assert.match(wakeRowHtml(wake('214a31b6')).slice(wakeRowHtml(wake('214a31b6')).indexOf('<details')), /Cost unknown/);
+    assert.doesNotMatch(wakeRowHtml(wake('w-running')), /Cost unknown/);
     assert.equal(wakeCostText(wake('w-running')), 'up to $0.02 so far');
     const priced = (amount, extra = {}) => normalizeWake({ cost_presentation: {
         has_rows: true, tracked_amount: amount, tracked_final: true, has_unpriced: false, accounting_open: false, ...extra } });
     assert.equal(wakeCostText(priced(0)), '$0.00');
     assert.equal(wakeCostText(priced(1.23)), '$1.23');
-    assert.equal(wakeCostText(priced(null)), 'spend unknown');
+    // No amount — unknown, still pending, or settled without a price — leaves the column empty for the row's Details.
+    assert.equal(wakeCostText(priced(null)), '');
+    assert.equal(wakeCostText(priced(null, { has_unpriced: true })), '');
+    assert.equal(wakeCostText(priced(null, { has_unpriced: true, accounting_open: true, tracked_final: false })), '');
     assert.equal(wakeCostText(priced(1.23, { tracked_final: false, accounting_open: true })), 'up to $1.23 so far');
     assert.equal(wakeCostText(priced(1.23, { has_unpriced: true })), 'Tracked: $1.23');
-    const { places } = normalizePlacesResponse(FIXTURE.places);
-    const slack = dashboardPlaceRowHtml(places[0], { awake: true });
-    assert.match(strip(slack), /Slack · Acme active · wakes for direct messages, mentions and replies · 2 open turns · Connector on \$0\.88/);
-    assert.match(slack, /class="status-mark consciousness-mark"/);
-    assert.match(slack, /aria-label="Open Slack · Acme, awake here now: /);
-    assert.match(slack, /aria-label="[^"]*Connector on/);
-    const off = dashboardPlaceRowHtml({ ...places[0], readiness: { text: 'Off in Skills', tone: 'warn' } });
-    assert.match(off, /aria-label="[^"]*Off in Skills/);
-    assert.doesNotMatch(off, /Connector on/);
-    assert.match(dashboardPlaceRowHtml(places[1]), /class="consciousness-spend is-none">unknown</);
-    assert.match(dashboardPlaceRowHtml(places[1]), /spend unknown/);
-    assert.doesNotMatch(dashboardPlaceRowHtml(places[1]), /nothing spent|\$0\.00 spent/);
-    assert.match(strip(dashboardPlaceRowHtml(places[1])), /^Telegram · Ouroboros community silent · wakes for mentions unknown$/, 'Silent still wakes for its list');
-    assert.match(strip(dashboardPlaceRowHtml(places[2])), /^Mail · inbox paused \$0\.00$/);
-    assert.match(dashboardPlaceRowHtml(places[2]), />\$0\.00</);
-    assert.match(dashboardPlaceRowHtml(places[2]), /\$0\.00 spent/);
-    assert.doesNotMatch(dashboardPlaceRowHtml(places[2]), /spend unknown/);
-    assert.match(placesCardHtml(places), /data-place-connect>Connect a place</, "the one Connect control");
-    assert.match(placesCardHtml([]), /No place yet\. Connect one from an installed connector\./);
-    assert.match(placesCardHtml([]), /A connector you install can connect a place here: Connect a place\./);
-    assert.doesNotMatch(placesCardHtml(places), /Each connector you install adds/);
-    assert.match(placesCardHtml(null, { error: 'Places could not be read: HTTP 404' }), /data-tone="warn"/);
+    // Custody facts ride with the wake: an unreadable view without a known amount says
+    // unknown and gives no pending explanation; a known subtotal keeps its qualified money.
+    const custody = (amount) => normalizeWake({ task_id: `w-custody-${amount}`, cost_custody: { status: 'unavailable' },
+        cost_presentation: { has_rows: true, tracked_amount: amount, tracked_final: false, has_unpriced: true, accounting_open: true } });
+    assert.equal(custody(null).cost.cost_custody.status, 'unavailable');
+    assert.equal(wakeCostText(custody(null)), '');
+    assert.doesNotMatch(wakeRowHtml(custody(null), { open: true }), /accounting is still open/);
+    assert.equal(wakeCostText(custody(2)), 'Tracked: up to $2.00 so far');
+    assert.match(wakeRowHtml(custody(2), { open: true }), /Tracked counts only the priced steps/);
 });
 
-test('the Dashboard always reads the Places projection, even with an empty snapshot list or a failed snapshot', async (t) => {
-    const { window } = setup(t);
-    const mount = fakeMount();
-    let reads = 0, offline = false, placesOffline = false;
-    const controller = initConsciousnessDashboard({ mount, state: { activePage: 'chat' },
-        read: async () => { if (offline) throw new Error('snapshot offline'); return { ...full(), places: [] }; },
-        readFallback: async () => { throw new Error('state offline'); },
-        readPlacesFn: async () => {
-            ++reads;
-            if (placesOffline) throw new Error('places offline');
-            return normalizePlacesResponse(FIXTURE.places);
-        },
-    });
-    const settled = () => new Promise((resolve) => setImmediate(resolve));
-    const placesHtml = () => mount.regions.get('[data-cx-places]').innerHTML;
-    await settled();
-    assert.equal(reads, 1, 'mount reads Places even when the Dashboard is hidden');
-    await controller.refresh();
-    assert.match(placesHtml(), /Slack · Acme/);
-    assert.match(placesHtml(), /Connector on/);
-    offline = true;
-    await controller.refresh();
-    assert.match(placesHtml(), /Slack · Acme/);
-    placesOffline = true;
-    window.dispatchEvent(new CustomEvent('ouro:places-changed')); await settled();
-    assert.match(placesHtml(), /Places could not be read: places offline/);
-    assert.doesNotMatch(placesHtml(), /No place yet/);
-    placesOffline = false;
-    window.dispatchEvent(new CustomEvent('ouro:places-changed')); await settled();
-    assert.match(placesHtml(), /Slack · Acme/);
-    assert.doesNotMatch(placesHtml(), /places offline/);
-    const before = reads;
-    controller.destroy();
-    window.dispatchEvent(new CustomEvent('ouro:places-changed')); await settled();
-    assert.equal(reads, before);
-});
-
-test('showing the tab reads Places again, so an updated skill\'s place icon is the one Settings shows', async (t) => {
+test('the Dashboard lists no places: no card and no place read at mount, show, poll, change or lifecycle', async (t) => {
     const { window } = setup(t);
     const mount = fakeMount();
     const state = { activePage: 'dashboard', dashboardActiveSubtab: 'consciousness' };
-    const mark = (path) => ({ kind: 'svg', svg: `<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="${path}" /></svg>` });
-    const response = normalizePlacesResponse(FIXTURE.places);
-    // The installed connector's mark before and after a skill update on the server; no places-changed event.
-    let icon = mark('M9 3v12M15 9v12M3 9h12M9 15h12');
     let reads = 0;
     const controller = initConsciousnessDashboard({ mount, state, read: async () => full(),
-        readPlacesFn: async () => { ++reads; return { ...response, places: response.places.map((place, index) => (index ? place : { ...place, icon })) }; } });
+        readPlacesFn: async () => { ++reads; return normalizePlacesResponse(FIXTURE.places); } });
     const settled = () => new Promise((resolve) => setImmediate(resolve));
-    const placesHtml = () => mount.regions.get('[data-cx-places]').innerHTML;
     await settled();
-    assert.match(placesHtml(), /M9 3v12/);
-    icon = mark('M19 8.5V10h1.5A1.5 1.5 0 1 0 19 8.5');
     await controller.refresh();
-    assert.equal(reads, 1, 'the poll leaves Places to their own reads');
     window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'consciousness' } })); await settled();
-    assert.equal(reads, 2);
-    assert.match(placesHtml(), /M19 8\.5V10h1\.5/);
-    assert.doesNotMatch(placesHtml(), /M9 3v12/);
-    icon = mark('M4 4h16');
-    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'dashboard' } })); await settled();
-    assert.equal(reads, 3, 'returning to the Dashboard on this tab reads them too');
-    assert.match(placesHtml(), /M4 4h16/);
-    state.dashboardActiveSubtab = 'logs';
-    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'dashboard' } })); await settled();
-    assert.equal(reads, 3, 'another tab of the Dashboard reads nothing here');
+    window.dispatchEvent(new CustomEvent('ouro:places-changed')); await settled();
+    window.dispatchEvent(new Event('ouro:skill-lifecycle')); await settled();
+    assert.equal(reads, 0, 'the places are listed on Circles; a wake\'s door reads them when pressed');
+    assert.equal(mount.regions.has('[data-cx-places]'), false, 'no Places card region');
+    assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /data-cx-act="circles"/);
     controller.destroy();
-});
-
-test('a skill lifecycle end reads Places at once while shown and at the next show while hidden; the newest read paints', async (t) => {
-    const { window, document } = setup(t);
-    const mount = fakeMount();
-    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'consciousness' };
-    // The page's own contributions store on a stub socket: its lifecycle triggers are the ones the panel hears.
-    const socket = new Map();
-    const ws = { on(type, fn) { socket.set(type, fn); return () => socket.delete(type); }, send() {} };
-    const store = createContributionsStore({ client: { uiContributions: async () => ({}) } });
-    const detach = store.attach({ ws, target: window });
-    const mark = (path) => ({ kind: 'svg', svg: `<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="${path}" /></svg>` });
-    const response = normalizePlacesResponse(FIXTURE.places);
-    // The first place's mark on the server now: an off connector, which the contributions projection leaves out.
-    let served = mark('M9 3v12M15 9v12M3 9h12M9 15h12');
-    const held = [];  // each Places read answers what the server held when it started, when the test says
-    const controller = initConsciousnessDashboard({ mount, state, ws, contributions: store, read: async () => full(),
-        readPlacesFn: () => {
-            const answer = { ...response, places: response.places.map((place, index) => (index ? place : { ...place, icon: served })) };
-            return new Promise((resolve) => held.push(() => resolve(answer)));
-        } });
-    const settled = () => new Promise((resolve) => setImmediate(resolve));
-    const placesHtml = () => mount.regions.get('[data-cx-places]').innerHTML;
-    const answerAll = async () => { held.splice(0).forEach((answer) => answer()); await settled(); };
-    const ended = (phase = 'completed') => socket.get('chat')({ type: 'chat', role: 'system', is_progress: true,
-        system_type: 'skill_lifecycle', lifecycle: { kind: 'update', target: 'slack-bridge', phase } });
-    await settled();
-    await answerAll();
-    assert.match(placesHtml(), /M9 3v12/);
-
-    await controller.refresh();
-    socket.get('open')();
-    ended('running');
-    await settled();
-    assert.equal(held.length, 0, 'the poll, a socket open and a running job read no Places');
-
-    served = mark('M19 8.5V10h1.5A1.5 1.5 0 1 0 19 8.5');
-    ended();
-    assert.equal(held.length, 1, 'shown: the end of the update reads Places at once');
-    await answerAll();
-    assert.match(placesHtml(), /M19 8\.5V10h1\.5/);
-    assert.doesNotMatch(placesHtml(), /M9 3v12/);
-
-    // A show's read was already in flight when the next update ended: its older answer arrives last and loses.
-    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'consciousness' } }));
-    served = mark('M2 2h20');
-    ended();
-    assert.equal(held.length, 2);
-    const [older, newer] = held.splice(0);
-    newer(); await settled();
-    older(); await settled();
-    assert.match(placesHtml(), /M2 2h20/);
-    assert.doesNotMatch(placesHtml(), /M19 8\.5/);
-
-    state.activePage = 'chat';
-    served = mark('M3 3h18');
-    ended();
-    socket.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'slack-bridge', action: 'reload' });
-    document.dispatchEvent(new Event('visibilitychange'));
-    assert.equal(held.length, 0, 'hidden on another page: nothing is read yet');
-    state.activePage = 'dashboard';
-    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'dashboard' } }));
-    assert.equal(held.length, 1, 'its next show reads once');
-    await answerAll();
-    assert.match(placesHtml(), /M3 3h18/);
-    document.dispatchEvent(new Event('visibilitychange'));
-    assert.equal(held.length, 0, 'that show already caught up');
-
-    document.hidden = true;
-    served = mark('M4 4h16');
-    window.dispatchEvent(new Event('ouro:skill-lifecycle'));
-    document.dispatchEvent(new Event('visibilitychange'));
-    assert.equal(held.length, 0, 'a document out of view waits too');
-    document.hidden = false;
-    document.dispatchEvent(new Event('visibilitychange'));
-    assert.equal(held.length, 1, 'and reads once when it comes back');
-    await answerAll();
-    assert.match(placesHtml(), /M4 4h16/);
-    document.dispatchEvent(new Event('visibilitychange'));
-    assert.equal(held.length, 0);
-
-    controller.destroy();
-    ended();
-    window.dispatchEvent(new Event('ouro:skill-lifecycle'));
-    document.dispatchEvent(new Event('visibilitychange'));
-    assert.equal(held.length, 0, 'destroy unsubscribes');
-    detach();
 });
 
 function fakeMount() {
@@ -308,30 +278,32 @@ function fakeMount() {
         innerHTML: '',
         regions,
         querySelector(selector) {
-            if (!regions.has(selector)) regions.set(selector, { innerHTML: '', textContent: '', dataset: {}, querySelector: () => null, closest: () => null });
+            if (!regions.has(selector)) regions.set(selector, { innerHTML: '', textContent: '', dataset: {}, querySelector: () => null, querySelectorAll: () => [], closest: () => null });
             return regions.get(selector);
         },
         addEventListener() {}, removeEventListener() {},
     };
 }
 
-test('while the full snapshot is not served, /api/state and /api/places still give status and places', async () => {
+test('while the full snapshot is not served, /api/state still gives the status; no place list is painted', async () => {
     const priorWindow = globalThis.window;
     const priorDocument = globalThis.document;
     globalThis.window = { addEventListener() {}, removeEventListener() {}, dispatchEvent() {} };
     globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
     const mount = fakeMount();
     const notServed = Object.assign(new Error('HTTP 404'), { status: 404 });
+    let reads = 0;
     const controller = initConsciousnessDashboard({
         mount, ws: { send() {} }, state: { activePage: 'dashboard', dashboardActiveSubtab: 'other' },
         read: async () => { throw notServed; },
         readFallback: async () => fromState(),
-        readPlacesFn: async () => normalizePlacesResponse(FIXTURE.places),
+        readPlacesFn: async () => { ++reads; return normalizePlacesResponse(FIXTURE.places); },
     });
     try {
         await controller.refresh();
         assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /Consciousness · on/);
-        assert.equal((mount.regions.get('[data-cx-places]').innerHTML.match(/data-place-open=/g) || []).length, 3);
+        assert.equal(reads, 0);
+        assert.equal(mount.regions.has('[data-cx-places]'), false);
         assert.match(mount.regions.get('[data-cx-wakes]').innerHTML, /does not report its recent wakes yet/);
         assert.equal(mount.regions.get('[data-cx-status]').textContent, '');
     } finally {
@@ -340,6 +312,41 @@ test('while the full snapshot is not served, /api/state and /api/places still gi
         globalThis.document = priorDocument;
     }
 });
+
+for (const hang of ['fetch', 'body']) {
+    test(`a /api/state fallback whose ${hang} never answers ends the Dashboard's read at its lifetime and says so`, async (t) => {
+        const advance = clock(t);
+        const priorWindow = globalThis.window;
+        const priorDocument = globalThis.document;
+        const priorFetch = globalThis.fetch;
+        const signals = [];
+        globalThis.window = { addEventListener() {}, removeEventListener() {}, dispatchEvent() {} };
+        globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
+        globalThis.fetch = async (_url, init = {}) => {  // the real fallback reads /api/state; it never answers here
+            signals.push(init.signal);
+            return hang === 'fetch' ? new Promise(() => {}) : { ok: true, status: 200, json: () => new Promise(() => {}) };
+        };
+        const mount = fakeMount();
+        const controller = initConsciousnessDashboard({
+            mount, ws: { send() {} }, state: { activePage: 'dashboard', dashboardActiveSubtab: 'other' },
+            read: async () => { throw Object.assign(new Error('HTTP 404'), { status: 404 }); },
+            readPlacesFn: async () => normalizePlacesResponse(FIXTURE.places),
+        });
+        try {
+            const refreshed = observe(controller.refresh());
+            await advance(STATE_LIFETIME - 1000);
+            assert.equal(refreshed.settled, false);
+            assert.equal(mount.regions.get('[data-cx-status]').textContent, 'Reading…');
+            await advance(1000);
+            assert.equal(refreshed.settled, true, 'the expired fallback ends the read');
+            assert.match(mount.regions.get('[data-cx-status]').textContent, /^Could not read consciousness: state read expired\./);
+            assert.equal(signals[0].aborted, true);
+        } finally {
+            controller.destroy();
+            Object.assign(globalThis, { window: priorWindow, document: priorDocument, fetch: priorFetch });
+        }
+    });
+}
 
 test('a failed read keeps the earlier values and says so', async () => {
     const priorWindow = globalThis.window;
@@ -369,12 +376,18 @@ test('a failed read keeps the earlier values and says so', async () => {
     }
 });
 
-test('the relay note lead keeps every word and only trims its edges', () => {
-    assert.equal(noteLeadText('  First words\n\nThen the whole note.  '), 'First words\n\nThen the whole note.');
-    assert.equal(noteLeadText(null), '');
-    assert.equal(noteLeadText(wake('214a31b6').note), wake('214a31b6').note);
-    const relay = fs.readFileSync(new URL('../modules/chat_relay_deck.js', import.meta.url), 'utf8');
-    assert.match(relay, /words: noteLeadText\(/, 'the relay and Dashboard share the lead implementation');
+test('a wake without a summary leads with its whole note, edges trimmed; a summary leads instead; more holds the note', () => {
+    // A short first paragraph, then the part that matters: the lead holds every word; CSS alone cuts it to one line.
+    const note = '\n  Swept the stale ports.\n\nThe tail that matters: the Slack token expires on Friday.  \n';
+    const lead = wakeRowHtml({ ...wake('214a31b6'), note });
+    const [collapsed, disclosed] = [lead.split('<details')[0], lead.slice(lead.indexOf('<details'))];
+    assert.ok(collapsed.includes(`<p class="consciousness-wake-lead" data-i18n-authored>${note.trim()}</p>`), collapsed);
+    assert.ok(disclosed.includes(`data-i18n-authored>${note}</div>`), 'more holds the note as stored');
+    const named = wakeRowHtml({ ...wake('214a31b6'), note, summary: 'Ports swept; one token to renew.' });
+    const summary = '<p class="consciousness-wake-summary" data-i18n-authored>Ports swept; one token to renew.</p>';
+    assert.ok(named.split('<details')[0].includes(summary), 'the summary leads, whole');
+    assert.doesNotMatch(named, /consciousness-wake-lead/, 'a summary leads instead of the note');
+    assert.ok(named.includes(`data-i18n-authored>${note}</div>`), 'and more still holds the whole note');
 });
 
 test('unavailable wakes keep the authored reason and painted rows, unlike an absent key or empty window', (t) => {
@@ -391,27 +404,29 @@ test('unavailable wakes keep the authored reason and painted rows, unlike an abs
     assert.equal(legacy.coverage, '');
     applyPayload({ language: 'ru', english: false, revision: 1, entries: {
         ['code:' + reason]: { text: 'Must not translate authored text' },
-        'code:consciousness.no_wakes_48h': { text: 'За последние 48 ч пробуждений нет.' },
+        'code:consciousness.no_own_wakes': { text: 'За последние 48 ч пробуждений нет.' },
     } });
     t.after(() => applyPayload({ language: '', english: true, revision: 0, entries: {} }));
     const unavailable = wakesCardHtml(snapshot.recentWakes, snapshot.coverage);
     assert.match(unavailable, /role="status" data-tone="warn" data-i18n-authored/);
-    assert.ok(unavailable.includes(reason));
+    assert.equal(unavailable.split(reason).length - 1, 1);
+    assert.equal((unavailable.match(/role="status"/g) || []).length, 1);
+    assert.ok(unavailable.indexOf(reason) < unavailable.indexOf('<section '));
     assert.doesNotMatch(unavailable, /Must not translate|does not report|No wakes/);
     assert.match(wakesCardHtml(legacy.recentWakes, legacy.coverage), /does not report its recent wakes yet/);
     assert.match(wakesCardHtml([]), /За последние 48 ч пробуждений нет/);
     const region = new NodeStub();
-    region.innerHTML = wakesCardHtml([wake('214a31b6')], full().coverage);
+    region.innerHTML = wakesCardHtml([wake('214a31b6')], full().coverage, 'own');
     const row = region.querySelector('[data-wake]');
     const put = (node, html) => { node.innerHTML = html; };
     paintWakeRows(region, null, reason, new Set(), put);
     assert.equal(region.querySelector('[data-wake]'), row, 'closed rows survive a failed read too');
-    assert.ok(region.querySelector('[role="status"]').textContent.includes(reason));
+    assert.equal(region.querySelector('[role="status"]'), null, 'the card owns the warning, not either list');
     paintWakeRows(region, [], full().coverage, new Set(), put);
     assert.equal(region.querySelector('[data-wake]'), null);
     assert.equal(region.querySelector('[role="status"]'), null, 'success clears the warning');
     applyPayload({ language: '', english: true, revision: 0, entries: {} });
-    assert.match(wakesCardHtml([]), /No wakes in the last 48 h\./);
+    assert.match(wakesCardHtml([]), /No own wakes with a recorded model call in the last 48 h\./);
     assert.doesNotMatch(wakesCardHtml([]), /No wakes yet/);
 });
 
@@ -462,7 +477,7 @@ for (const rich of [true, false]) test(`opened ${rich ? 'fenced code' : 'plain'}
     assert.equal(mount.querySelector('[data-wake]'), null);
     next = { ...next, recentWakes: [wake('214a31b6')] };
     await controller.refresh();
-    const last = mount.querySelector('details');
+    const last = mount.querySelector('[data-wake]').querySelector('details');
     last.open = true;
     await mount.fire('toggle', { target: last });
     controller.destroy(); controller = null;
@@ -493,17 +508,17 @@ test('a focus row door opens the place sheet on that conversation; an unknown ro
     let reads = 0;
     controller = initConsciousnessDashboard({ mount, state: { activePage: 'chat' },
         read: async () => snapshot,
-        // The first read predates the second room's capture; the door's own re-read finds it.
+        // Each press reads the places as they stand: the second press's read already holds the later room.
         readPlacesFn: async () => ({ places: [++reads === 1 ? slack : { ...slack, rooms: [...slack.rooms, { chatId: 1099511627778 }] }], connectors: [], migrationProblems: [] }),
         openSheet: (place, options) => opened.push([place.id, options.openRoomChatId]) });
     await controller.refresh();
     const [known, later] = mount.querySelectorAll('[data-cx-open-room]');
     await mount.fire('click', { target: known });
     assert.deepEqual(opened, [[slack.id, 1099511627777]], 'the sheet opens on the row\'s conversation');
-    assert.equal(reads, 1, 'an indexed room needs no second read');
+    assert.equal(reads, 1, 'nothing is read before a press; one read for it');
     await mount.fire('click', { target: later });
-    assert.equal(reads, 2, 'an unknown room reads Places once more before saying anything');
-    assert.deepEqual(opened[1], [slack.id, 1099511627778], 'a room captured after the mount-time read opens');
+    assert.equal(reads, 2, 'each press reads the places as they stand');
+    assert.deepEqual(opened[1], [slack.id, 1099511627778], 'a room captured after an earlier press opens');
     assert.equal(later.disabled, false);
     const orphan = { ...wake('214a31b6'), taskId: 'focus-orphan', cause: 'focus', chatId: 1099511627779, placeLabel: 'Gone' };
     snapshot.recentWakes = [...snapshot.recentWakes, orphan];
@@ -544,7 +559,7 @@ test('a served panel failure keeps the painted rows and says so; only a 404 read
     assert.equal(mount.querySelector('[data-cx-status]').textContent, '');
 });
 
-test('a second press during the door\'s Places re-read is ignored; a failed re-read leaves the door alone', async (t) => {
+test('a second press during the door\'s read is ignored; a failed read leaves the door and says so in the tab', async (t) => {
     const cleanups = [];
     const { mount } = setup({ after: cleanup => cleanups.push(cleanup) });
     let controller;
@@ -553,7 +568,7 @@ test('a second press during the door\'s Places re-read is ignored; a failed re-r
     t.after(() => { delete NodeStub.prototype.content; });
     NodeStub.prototype.getBoundingClientRect = () => ({ top: 0 });
     t.after(() => { delete NodeStub.prototype.getBoundingClientRect; });
-    const slack = { ...normalizePlacesResponse(FIXTURE.places).places[0], rooms: [{ chatId: 1099511627777 }] };
+    const slack = { ...normalizePlacesResponse(FIXTURE.places).places[0], rooms: [{ chatId: 1099511627778 }] };
     const snapshot = { ...full(), recentWakes: [
         { ...wake('214a31b6'), taskId: 'focus-late', cause: 'focus', chatId: 1099511627778, placeLabel: 'Slack' },
         { ...wake('214a31b6'), taskId: 'focus-lost', cause: 'focus', chatId: 1099511627779, placeLabel: 'Slack' }] };
@@ -563,7 +578,6 @@ test('a second press during the door\'s Places re-read is ignored; a failed re-r
         read: async () => snapshot,
         readPlacesFn: () => {
             reads += 1;
-            if (reads === 1) return Promise.resolve({ places: [slack], connectors: [], migrationProblems: [] });
             if (fail) return Promise.reject(new Error('HTTP 503'));
             return new Promise((resolve) => { settle = resolve; });
         },
@@ -573,16 +587,16 @@ test('a second press during the door\'s Places re-read is ignored; a failed re-r
     const first = mount.fire('click', { target: late });
     await new Promise((resolve) => setImmediate(resolve));
     await mount.fire('click', { target: late });
-    assert.equal(reads, 2, 'the second press starts no third read');
-    settle({ places: [{ ...slack, rooms: [...slack.rooms, { chatId: 1099511627778 }] }], connectors: [], migrationProblems: [] });
+    assert.equal(reads, 1, 'the second press starts no second read');
+    settle({ places: [slack], connectors: [], migrationProblems: [] });
     await first;
     assert.deepEqual(opened, [[slack.id, 1099511627778]], 'one sheet for two presses');
     assert.equal(late.disabled, false);
     fail = true;
     await mount.fire('click', { target: lost });
     assert.equal(opened.length, 1);
-    assert.equal(lost.disabled, false, 'a failed re-read is not absence: the door stays');
-    assert.match(mount.querySelector('[data-cx-places]').innerHTML, /HTTP 503/, 'the Places card names the failed read');
+    assert.equal(lost.disabled, false, 'a failed read is not absence: the door stays');
+    assert.match(mount.querySelector('[data-cx-status]').textContent, /Places could not be read: HTTP 503/, 'the tab names the failed read');
 });
 
 test('a first read that fails names the error without claiming earlier values', async (t) => {
@@ -601,11 +615,41 @@ test('a first read that fails names the error without claiming earlier values', 
     assert.match(mount.querySelector('[data-cx-wakes]').innerHTML, /Recent wakes could not be read: HTTP 500/);
 });
 
+test('a read that never reached Ouroboros says so in owner words; a server answer keeps its own', async (t) => {
+    const cleanups = [];
+    const { mount } = setup({ after: cleanup => cleanups.push(cleanup) });
+    let controller;
+    t.after(() => { controller?.destroy(); cleanups.forEach(cleanup => cleanup()); });
+    controller = initConsciousnessDashboard({ mount, state: { activePage: 'chat' },
+        read: async () => { throw new TypeError('Load failed'); },
+        readFallback: async () => { throw new TypeError('Load failed'); },
+        readPlacesFn: async () => { throw new TypeError('Load failed'); } });
+    await controller.refresh();
+    const said = mount.querySelector('[data-cx-status]').textContent;
+    assert.match(said, /Could not read consciousness: Couldn't reach Ouroboros\.(?!\.)/, 'one full stop, never two');
+    assert.doesNotMatch(said, /Load failed/, "the browser's transport text is never the sentence");
+    controller.destroy();
+    // The places are read at a wake's door: a read that never reached Ouroboros is said in owner words there too.
+    Object.defineProperty(NodeStub.prototype, 'content', { configurable: true, get() { return this; } });
+    t.after(() => { delete NodeStub.prototype.content; });
+    NodeStub.prototype.getBoundingClientRect = () => ({ top: 0 });
+    t.after(() => { delete NodeStub.prototype.getBoundingClientRect; });
+    const snapshot = { ...full(), recentWakes: [{ ...wake('214a31b6'), taskId: 'focus-x', cause: 'focus', chatId: 1099511627777, placeLabel: 'Slack' }] };
+    controller = initConsciousnessDashboard({ mount, state: { activePage: 'chat' }, read: async () => snapshot,
+        readPlacesFn: async () => { throw new TypeError('Load failed'); } });
+    await controller.refresh();
+    await mount.fire('click', { target: mount.querySelector('[data-cx-open-room]') });
+    const door = mount.querySelector('[data-cx-status]').textContent;
+    assert.match(door, /Places could not be read: Couldn(?:'|&#39;)t reach Ouroboros\./);
+    assert.doesNotMatch(door, /Load failed/);
+});
+
 test('Safety chips name what they checked in sentence case, keeping raw tool ids as they are', () => {
     assert.equal(wakeCheckText({ chip: 'warned', tool: 'place_reply' }), 'Safety Supervisor warned about the reply');
     assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'place_reply' }), 'The reply sent despite the check');
     assert.equal(wakeCheckText({ chip: 'held', tool: 'send_user_message' }), 'Safety Supervisor held the message');
-    assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'slack_send' }), 'slack_send sent despite the check');
+    assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'slack_send' }), 'slack_send let through despite the check');
+    assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'run_command' }), 'run_command let through despite the check');
     assert.equal(wakeCheckText({ chip: 'not_checked', tool: 'update_memory' }), 'Not checked (update_memory)');
     assert.equal(wakeCheckText({ chip: 'not_checked', tool: '' }), 'Not checked');
     assert.equal(wakeCheckText({ chip: 'unknown', tool: 'x' }), '');

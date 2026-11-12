@@ -142,7 +142,7 @@ def test_ledger_preserves_verification_receipt_criterion_id():
     assert entry["criterion_id"] == "claim_1"
 
 
-def test_acceptance_summary_surfaces_and_redacts_missing_after():
+def test_acceptance_summary_surfaces_missing_after():
     from ouroboros.review_evidence import _accept_verification_summary
 
     summary = _accept_verification_summary([
@@ -185,3 +185,15 @@ def test_observe_artifacts_still_refuses_control_plane(tmp_path):
 
     status, detail = _observe_artifacts(ctx, [str(secret)])
     assert status == "refused_out_of_scope", (status, detail)
+
+
+def test_verify_description_names_the_task_and_the_human_not_a_benchmark():
+    """Audit 08.11 item 11: the schema every task of every install sees names what a receipt rests on and
+    no benchmark's files; the hidden-grader boundary stays a mechanism (the probe refusal above) and the
+    contract rule keeps its home in prompts/SYSTEM.md."""
+    from ouroboros.tools.verify import get_tools
+
+    description = next(entry.schema for entry in get_tools() if entry.name == "verify_and_record")["description"]
+    assert "the task's own statement and materials, your human's words" in description
+    for benchmark_word in ("solution.sh", "hidden /tests/", "look up the answer online"):
+        assert benchmark_word not in description, benchmark_word

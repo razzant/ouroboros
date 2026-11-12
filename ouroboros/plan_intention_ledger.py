@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 from ouroboros.tools.plan_review_runtime import slot_is_session, slot_retrieves
 from ouroboros.utils import utc_now_iso
@@ -88,13 +88,17 @@ def _intention_verdict(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def write_intention_record(ctx: Any, prepared: PreparedAsk, facts_by_seat: Mapping[str, Mapping[str, Any]], *,
-                           record_id: str, state_root: pathlib.Path, task_id: str, revision: Mapping[str, Any]) -> Dict[str, Any]:
+                           record_id: str, state_root: pathlib.Path, task_id: str,
+                           revision: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """One review-ledger record per ask (``surface=intention``): seats, routes, the retained
-    delivery of each seat, costs and custody. Returns ``{seat_id: delivery_ref}``."""
+    delivery of each seat, costs and custody. Returns ``{seat_id: delivery_ref}``. A reading of
+    the request before any plan (``revision=None``) records ``plan_revision: None``."""
     from ouroboros import review_ledger as ledger
     from ouroboros.config import get_review_enforcement, get_runtime_mode
+    from ouroboros.plan_record import ask_subject
     from ouroboros.tools.review_helpers import review_enforcement_blocks
 
+    revision = revision or {}
     rows, delivery_refs = [], {}
     for participant in prepared.participants:
         sid = participant.seat_id
@@ -117,7 +121,7 @@ def write_intention_record(ctx: Any, prepared: PreparedAsk, facts_by_seat: Mappi
                  "root": str(prepared.active_root), "kind": INTENTION_SURFACE, "base": "", "head": "", "tree_sha": "", "diff_sha": "",
                  "checkout": "", "candidate_branch": "", "governance_root": str(prepared.system_root),
                  "plan_revision": revision.get("n"), "plan_ask": prepared.ask_id, "body": prepared.body},
-        brief={"goal": str(revision.get("goal") or ""), "scope": f"plan revision {revision.get('n')}", "parts": [],
+        brief={"goal": str(revision.get("goal") or ""), "scope": ask_subject(revision.get("n"), plan=True), "parts": [],
                "author_questions": [prepared.message] if prepared.message else [],
                "checklist": {"layer": "body" if prepared.body else "core", "body_fact": "true" if prepared.body else "false",
                              "how": "plan_is_body", "checklist_hash": "", "rules_source": {"path": "docs/CHECKLISTS.md", "sha": ""}},
@@ -149,10 +153,17 @@ def settle_ledger_seat(state_root: pathlib.Path, task_id: str, record_id: str, s
         for seat in rows:
             if str(seat.get("seat_id") or "") != seat_id:
                 continue
+            if seat.get("superseded_operation_ids") and str(facts.get("operation_id") or "") != seat.get("operation_id"):
+                raise ledger.RecordUnchanged()  # a seat an explicit continuation reopened takes only its successor's facts
             status = {"answered": "responded", "unparseable": "responded", "failed": "error", "pending": "pending",
                       "not_dispatched": "not_dispatched"}.get(str(facts.get("status") or "pending"), "pending")
             seat.update(status=status, operation_state=str(facts.get("operation_state") or seat.get("operation_state") or ""),
                         usd=facts.get("cost", seat.get("usd")))
+            # The operation, its typed stop facts and its run: what an explicit continuation is offered from.
+            seat.update({key: facts[key] for key in ("operation_id", "failure_code", "reported_cause", "failure_details")
+                         if facts.get(key)})
+            if facts.get("delegated_run_id"):
+                seat["usage_ref"] = {"delegated_run_id": str(facts["delegated_run_id"])}
             seat.update(review_cost_facts(seat.get("usd"), route=seat["requested"]["route"], model=seat["requested"]["model"]))
             session = str(seat.get("requested", {}).get("route") or "") == "agent_session"
             observed = (str(facts.get("resolved_model") or "") if session else str(facts.get("model") or "")) if status in ("responded", "error") else ""
@@ -179,8 +190,7 @@ def settle_ledger_seat(state_root: pathlib.Path, task_id: str, record_id: str, s
         payload["verdict"] = {**dict(payload.get("verdict") or {}), **_intention_verdict(rows)}
         payload["state"] = ledger.STATE_PENDING if ledger.counted_pending(rows) else ledger.STATE_SETTLED
         payload["panel"]["not_reached"] = ledger.panel_not_reached(rows)
-        known = [float(r["usd"]) for r in rows if isinstance(r.get("usd"), (int, float))]
-        payload["cost"] = {"usd": round(sum(known), 6), "unknown": len(known) < len(rows)}
+        payload["cost"] = ledger.record_cost(rows)
         return payload
 
     try:

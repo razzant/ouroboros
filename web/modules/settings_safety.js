@@ -5,9 +5,10 @@
 // and each changed level and the rules through their audited owner endpoints after it (consciousness_api.js).
 import { renderSegmentedField } from './page_header.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { apiClient } from './api_client.js';
+import { APP_SETTINGS_ORIGIN, apiClient } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { settingsWriteFailure, syncEffortSegments } from './settings_controls.js';
+import { bindEffortSegments, settingsSection, settingsWriteFailure, syncEffortSegments } from './settings_controls.js';
+import { deploymentOf, offerAllowedChoices, safetyExitsNote } from './settings_policy.js';
 import { parseModelSource } from './route_editor_primitives.js';
 import { modelRoleMap } from './model_roles.js';
 import { subagentSettingsFingerprint } from './subagents_settings.js';
@@ -24,15 +25,15 @@ export const SAFETY_MODEL_KEY = 'OUROBOROS_MODEL_SAFETY';
 const LEVEL_OPTIONS = SAFETY_LEVELS.map(({ value, label }) => ({ value, label }));
 const LOWERING_TITLE = 'Lowering a level asks for confirmation.';
 
-/** The section body under its title (settings_ui.js keeps the `<h3>`). */
+/** The whole Behavior › Safety Supervisor section (settings_controls.js settingsSection). */
 export function safetySectionHtml() {
-    const notes = SAFETY_LEVELS.map((level) => `<br><code>${escapeHtml(level.label)}</code> &mdash; ${escapeHtml(level.note)}`).join('');
-    return `
-        <div class="settings-section-copy">
-            A second model judges a step before it runs. Your work: what you asked for. Consciousness: what it does on its own, places included.${notes}
-            <br><strong>Configuration authority:</strong> outside Cyber Pro, Ouroboros cannot lower its own checks; Cyber Pro also lets it configure Supervisor coverage. Changes apply on the next task; every step a lower level lets through is recorded.
-        </div>
-        <div class="safety-levels">
+    const notes = SAFETY_LEVELS.map((level) => `<br><strong>${escapeHtml(level.label)}</strong> &mdash; ${escapeHtml(level.note)}`).join('');
+    return settingsSection({
+        title: 'Safety Supervisor',
+        lead: 'Which steps a second model checks before Ouroboros takes them.',
+        details: `A second model judges a step before it runs. Your work: what you asked for. Consciousness: what it does on its own, places included.${notes}
+            <br><strong>Configuration authority:</strong> outside Cyber Pro, Ouroboros cannot lower its own checks; Cyber Pro also lets it configure Supervisor coverage. Changes apply on the next task; every step a lower level lets through is recorded.`,
+        body: `<div class="safety-levels">
             <div class="settings-effort-card">
                 <label>${escapeHtml(SAFETY_KINDS.your_work)}</label>
                 <input id="s-safety-mode" type="hidden" value="full">
@@ -49,13 +50,16 @@ export function safetySectionHtml() {
         </div>
         <p class="safety-line" data-safety-checker></p>
         <p class="safety-line" data-safety-second-check></p>
+        <p class="safety-line" data-safety-exits hidden></p>
         <p class="safety-line" data-safety-unmeasured hidden>Not measured yet: no replay of real checks exists.</p>
+        <p class="safety-line" data-safety-organization-rules hidden>Your organization’s rules apply too; its administrator sets them.</p>
         <div class="form-field ui-field">
             <label for="s-safety-rules">Your rules</label>
             <textarea id="s-safety-rules" class="ui-control consciousness-owner-words" rows="3" spellcheck="false" aria-describedby="s-safety-rules-help"></textarea>
-            <div class="settings-inline-note ui-field-help" id="s-safety-rules-help">Rules the Safety Supervisor reads on every check. Rules for one place live in that place's notes.</div>
+            <div class="settings-inline-note ui-field-help" id="s-safety-rules-help">Ouroboros and the Safety Supervisor read these in every task and check. Rules for one place live in that place's notes.</div>
         </div>
-        <div id="s-safety-skip-counter" class="settings-inline-note"></div>`;
+        <div id="s-safety-skip-counter" class="settings-inline-note"></div>`,
+    });
 }
 
 /** The one in-page link to another Settings tab («Change in Models»); the section's binder opens the tab. */
@@ -95,12 +99,24 @@ export function agentRowHandle(rowId, settings = {}) {
 }
 
 function paintLines(root, settings) {
-    const meta = settings?._meta || {};
-    const recheck = recheckFromSettings(settings);
+    const deployment = deploymentOf(settings?._meta);
     const set = (selector, html) => { const node = root.querySelector(selector); if (node) node.innerHTML = html; };
-    set('[data-safety-checker]', `${escapeHtml(checkerText(settings))} · ${settingsLinkHtml('models', 'Change in Models')}`);
-    set('[data-safety-second-check]', `${escapeHtml(secondCheckText(recheck, settings))}${recheck.known
-        ? ` · ${settingsLinkHtml('agents', 'Change in Agents')}` : ''}`);
+    const organizationRules = root.querySelector('[data-safety-organization-rules]');
+    if (organizationRules) organizationRules.hidden = !deployment?.organization_rules;
+    // The organization's checker decides alone (deployment_policy): its route is said, never offered for change,
+    // and no Agents row takes the second check (a mark saved before stays in the roster, unshown and unused).
+    const recheck = deployment?.checker ? { known: false, rowId: '', offReason: '', eligibleRows: [], measured: false }
+        : recheckFromSettings(settings);
+    set('[data-safety-checker]', deployment?.checker
+        ? `${escapeHtml(checkerText({ [SAFETY_MODEL_KEY]: deployment.checker.model }))} · Set by your organization`
+        : `${escapeHtml(checkerText(settings))} · ${settingsLinkHtml('models', 'Change in Models')}`);
+    set('[data-safety-second-check]', deployment?.checker ? 'Second check: none. Your organization’s Supervisor decides alone.'
+        : `${escapeHtml(secondCheckText(recheck, settings))}${recheck.known ? ` · ${settingsLinkHtml('agents', 'Change in Agents')}` : ''}`);
+    const exits = root.querySelector('[data-safety-exits]');
+    if (exits) {
+        exits.textContent = safetyExitsNote(deployment);
+        exits.hidden = !exits.textContent;
+    }
     // Said wherever the second check is offered, the default Off included: no replay has measured it.
     const unmeasured = root.querySelector('[data-safety-unmeasured]');
     if (unmeasured) unmeasured.hidden = !(recheck.known && !recheck.measured);
@@ -115,6 +131,11 @@ function syncCheckFully(root) {
 
 /** Paint the section from a loaded settings document (values, facts, lines). */
 export function applySafetySettings(root, settings = {}) {
+    // A deployment's coverage floor leaves only the levels it allows (none to choose at Full).
+    for (const target of ['s-safety-mode', 's-consciousness-safety-mode']) {
+        offerAllowedChoices(root, { target, options: LEVEL_OPTIONS, axis: 'coverage' }, deploymentOf(settings._meta),
+            { render: renderSegmentedField, bind: bindEffortSegments });
+    }
     const yourWork = root.querySelector('#s-safety-mode');
     if (yourWork) yourWork.value = settings.OUROBOROS_SAFETY_MODE || 'full';
     const consciousness = root.querySelector('#s-consciousness-safety-mode');
@@ -138,7 +159,8 @@ export function applySafetySettings(root, settings = {}) {
     syncEffortSegments(root);
     paintLines(root, settings);
     syncCheckFully(root);
-    void refreshSafetySkipCounter(root);
+    owedSkipCounters.add(root);
+    showSkipCounter(root);
 }
 
 const MODEL_ROLE_MAPS = new Set(['OUROBOROS_MODEL_ACCOUNTS', 'OUROBOROS_MODEL_CONTEXT_WINDOWS', 'OUROBOROS_MODEL_PROCESSING_PREFERENCES']);
@@ -203,7 +225,8 @@ export function safetyOwnerDraft(root, body = {}, current = {}) {
 /** Save's first write: the checker's changes in one owner transaction; a refusal throws the server's sentence. */
 export async function saveSafetyChecker(draft) {
     if (!draft?.checker) return false;
-    await saveCheckerSettings(draft.checker.settings, { allowEmptyReviewPool: draft.checker.allowEmptyReviewPool });
+    await saveCheckerSettings(draft.checker.settings, {
+        allowEmptyReviewPool: draft.checker.allowEmptyReviewPool, headers: APP_SETTINGS_ORIGIN });
     return true;
 }
 
@@ -261,32 +284,52 @@ export async function saveSafetyOwnerChanges(draft, current = {}, { askOwner = o
         const kindLabel = SAFETY_KINDS[kind];
         await run(`Safety for ${kindLabel.toLowerCase()}`, async () => {
             if ((SAFETY_RANK[next] ?? 2) < (SAFETY_RANK[now] ?? 2)) await confirmLowering(kindLabel, now, next, askOwner);
-            await saveSafetyLevel(next, kind);
+            await saveSafetyLevel(next, kind, { headers: APP_SETTINGS_ORIGIN });
             return `Safety for ${kindLabel.toLowerCase()} saved as ${levelLabel(next)}.`;
         });
     }
     if (draft.rules !== null && SAFETY_RULES_KEY in current && draft.rules !== String(current[SAFETY_RULES_KEY] ?? '')) {
-        await run('Your rules', async () => { await saveSafetyRules(draft.rules); return 'Your rules saved.'; });
+        await run('Your rules', async () => {
+            await saveSafetyRules(draft.rules, { headers: APP_SETTINGS_ORIGIN });
+            return 'Your rules saved.';
+        });
     }
     return { saved: saved.join(' '), error: errors.join(' '), unknown };
 }
 
-/** Waved-through checks among the inspected recent events (the Light/Off audit), counted within 24 h. */
+const SKIP_TAIL = 2000;
+
+// The counter's read is an event tail in the compact view (each row's `type` and `ts` are all it needs): each settings
+// load owes one, paid only once the counter is on screen.
+const owedSkipCounters = new WeakSet();
+function showSkipCounter(root) {
+    if (!owedSkipCounters.has(root) || !root.querySelector?.('#s-safety-skip-counter')?.getClientRects?.().length) return;
+    owedSkipCounters.delete(root);
+    void refreshSafetySkipCounter(root);
+}
+
+/** Waved-through checks among the inspected recent events (the Light/Off audit), counted within 24 h; a full tail
+ * younger than a day says the span it read, never a day it did not inspect. */
 export async function refreshSafetySkipCounter(root, { logsTail = apiClient.logsTail, now = Date.now() } = {}) {
     const el = root?.querySelector?.('#s-safety-skip-counter');
     if (!el) return;
     try {
-        const data = await logsTail('events', 2000);
+        const data = await logsTail('events', SKIP_TAIL, 'compact');
+        const entries = data?.entries || [];
         const cutoff = now - 24 * 3600 * 1000;
-        const n = (data?.entries || []).filter((entry) => {
+        const times = entries.map((entry) => Date.parse(String(entry?.ts || ''))).filter(Number.isFinite);
+        const n = entries.filter((entry) => {
             if (String(entry?.type || '') !== 'safety_mode_skip') return false;
             const time = Date.parse(String(entry?.ts || ''));
             return Number.isFinite(time) && time >= cutoff;
         }).length;
-        // The tail may cover less than a day, including when it has no matches.
+        const oldest = times.length ? Math.min(...times) : null;
+        const span = entries.length >= SKIP_TAIL && oldest !== null && oldest > cutoff
+            ? `since ${new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }).format(oldest)} (the latest ${SKIP_TAIL.toLocaleString('en-US')} events)`
+            : 'in the last 24 h';
         el.textContent = n > 0
-            ? `${n} safety check(s) waved through among inspected recent events dated within 24h.`
-            : 'No waved-through safety checks found among inspected recent events dated within 24h.';
+            ? `${n} safety ${n === 1 ? 'check' : 'checks'} let through ${span}.`
+            : `No safety checks let through ${span}.`;
     } catch {
         el.textContent = '';
     }
@@ -311,7 +354,7 @@ export function bindSafetySettings(root, { save = saveSafetyLevel } = {}) {
         const note = root.querySelector('[data-policy-state="supervisor_consciousness"]');
         button.disabled = true;
         try {
-            await save('full', 'consciousness');
+            await save('full', 'consciousness', { headers: APP_SETTINGS_ORIGIN });
             const input = root.querySelector('#s-consciousness-safety-mode');
             if (input) input.value = 'full';
             syncEffortSegments(root);
@@ -325,5 +368,12 @@ export function bindSafetySettings(root, { save = saveSafetyLevel } = {}) {
     };
     section.addEventListener('click', onClick);
     const disposeMarks = bindRecheckMarks(root);
-    return () => { section.removeEventListener('click', onClick); disposeMarks(); };
+    const onShown = () => showSkipCounter(root);
+    const win = globalThis.window;
+    for (const shown of ['ouro:page-shown', 'ouro:settings-subtab-shown']) win?.addEventListener?.(shown, onShown);
+    return () => {
+        section.removeEventListener('click', onClick);
+        disposeMarks();
+        for (const shown of ['ouro:page-shown', 'ouro:settings-subtab-shown']) win?.removeEventListener?.(shown, onShown);
+    };
 }

@@ -10,7 +10,7 @@ import json
 import pytest
 from tests import test_subscription_role_routes_browser as roles
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
 role_ui = roles.role_ui
 
@@ -107,7 +107,7 @@ def test_reviewer_keeps_its_place_and_node_under_pointer_and_keyboard(role_ui, v
     box.click()
     assert box.is_checked() and _box(box) == start and _box(card) == card_top
     assert intent.inner_text() == ""
-    dirty = page.locator("#settings-unsaved-indicator")
+    dirty = page.locator("#settings-status")  # the draft is the Save bar's one result word
     assert dirty.is_visible() and dirty.get_attribute("aria-hidden") != "true"
     assert "Unsaved changes" in dirty.aria_snapshot(), "the one dirty indication remains accessible"
     roles.capture(page, f"quiet-{viewport}-{scheme}-marked")
@@ -229,7 +229,7 @@ def test_delegation_switch_names_what_it_stops(role_ui):
 
 
 @pytest.mark.parametrize("long_labels", [False, True])
-@pytest.mark.parametrize("consumer,width,tracks", [("settings", 720, 1), ("settings", 740, 2), ("wizard", 700, 3)])
+@pytest.mark.parametrize("consumer,width,tracks", [("settings", 720, 1), ("settings", 752, 2), ("wizard", 700, 3)])
 def test_narrow_consumers_use_card_columns_and_one_dirty_indicator(role_ui, long_labels, consumer, width, tracks, record_property):
     ui = role_ui
     rows = _roster(ui)
@@ -273,7 +273,7 @@ def test_narrow_consumers_use_card_columns_and_one_dirty_indicator(role_ui, long
             pageOverflow: document.documentElement.scrollWidth > innerWidth};
     }""")
     record_property("card_columns", json.dumps(shape))
-    # At 740px Settings has room for two columns despite the old <=760px override.
+    # At 752px, inside a section's 24px card sides, Settings has room for two columns despite the old <=760px override.
     # At 720px, the first docked width (#1998), its sidebar leaves one, while the wizard's wider card holds three.
     assert shape["expected"] == tracks, shape
     assert shape["tracks"] == shape["expected"], shape
@@ -286,7 +286,7 @@ def test_narrow_consumers_use_card_columns_and_one_dirty_indicator(role_ui, long
     assert box.evaluate("e => e === document.activeElement")
     assert page.locator("[data-subagents-intent]").inner_text() == ("" if consumer == "settings" else "Unsaved changes")
     if consumer == "settings":
-        assert page.locator("#settings-unsaved-indicator").is_visible()
+        assert page.locator(".settings-footer").get_attribute("data-draft") == "dirty"
     assert card.locator('[data-subagent-field="recommended_use"]').input_value() == DESCRIPTION
     roles.capture(page, f"quiet-{width}-{consumer}-{'long-labels' if long_labels else 'english'}")
 
@@ -352,7 +352,7 @@ def test_the_toolbar_says_automatic_for_the_reads_own_catalog_and_saved_for_a_sa
     assert ui["settings"]["_meta"]["available_subagents"]["automatic"] is True and intent.inner_text() == "Automatic"
     roles.capture(page, "intent-automatic")
     page.locator('[data-subagent-field="recommended_use"]').first.fill("Owner words.")
-    assert intent.inner_text() == "" and page.locator("#settings-unsaved-indicator").is_visible()
+    assert intent.inner_text() == "" and page.locator(".settings-footer").get_attribute("data-draft") == "dirty"
     roles.capture(page, "intent-automatic-edited")
     factory = ui["settings"]["OUROBOROS_SUBAGENTS"]
     page, intent = agents_over({"ANTHROPIC_API_KEY": "sk-ant-present-key", "OUROBOROS_SUBAGENTS": factory})

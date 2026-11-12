@@ -1,6 +1,5 @@
 """Cause titles precede wake work; only this attempt's accepted sentence can replace them."""
 import queue
-import threading
 from types import SimpleNamespace
 
 import pytest
@@ -15,63 +14,93 @@ clock = clock_tests.clock
 focus = focus_tests.focus
 
 
-@pytest.mark.parametrize("summary", ["Проверил состояние системы.", ""])
-def test_wake_admission_names_before_activity_and_finish_replaces_only_with_summary(clock, monkeypatch, summary):
-    from ouroboros import project_naming
-    from supervisor import message_bus, state, workers
+def _drain(bus):
+    frames = []
+    while not bus.empty():
+        frames.append(bus.get_nowait())
+    return frames
 
-    frames, namers, finished = [], [], threading.Event()
+
+@pytest.mark.parametrize("summary", ["Проверил состояние системы.", ""])
+def test_wake_cause_title_is_the_carriers_first_frame_and_finish_replaces_only_with_summary(clock, monkeypatch, summary):
+    """The door publishes the start receipt and no title; the carrier coins the cause title as its first
+    frame, before any work; the pooled terminal lets the clock replace it only with this attempt's summary."""
+    from ouroboros import project_naming
+    from supervisor import conversation_lane, message_bus, state, workers
+    from supervisor import queue as supervisor_queue
+    from supervisor.consciousness_carriers import finish_pooled_wake
+    from tests.conversation_carrier_support import carry, install_lane_spare
+
+    bus, frames, namers = queue.Queue(), [], []
     monkeypatch.setattr(workers, "DRIVE_ROOT", clock.root)
-    monkeypatch.setattr(workers, "get_event_q", lambda: queue.Queue())
+    monkeypatch.setattr(supervisor_queue, "DRIVE_ROOT", clock.root)
+    monkeypatch.setattr(supervisor_queue, "QUEUE_SNAPSHOT_PATH", clock.root / "state" / "queue_snapshot.json")
+    monkeypatch.setattr(workers, "WORKERS", {})
+    monkeypatch.setattr(workers, "get_event_q", lambda: bus)
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
     monkeypatch.setattr(project_naming, "spawn_turn_namer", lambda *a, **kw: namers.append(1))
-    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(
-        broadcast=frames.append, send_chat_action=lambda *a, **kw: frames.append({"type": "activity"})))
+    bridge = SimpleNamespace(broadcast=frames.append, send_chat_action=lambda *a, **kw: frames.append({"type": "activity"}))
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
+    monkeypatch.setattr(lane, "_WORKER_BUS", None)
     workers.open_repo_writer_admission()
+    spare = install_lane_spare(workers, 90)  # the idle carrier the wake takes
+    install_lane_spare(workers, 91)  # the owner's reserved spare: a wake never takes the last idle carrier (4A)
 
     def handle(task):
         task_id = task["id"]
         row = load_task_result(clock.root, task_id)
-        assert row["suggested_name"] == "Own time" and not row.get("title")
+        assert row["suggested_name"] == "Own time" and not row.get("title")  # the title precedes the body
         actor._event_queue.put({"type": "log_event", "data": {
             "type": "tool_call_started", "task_id": task_id, "tool": "read_file"}})
         seed_wake(clock.root, task_id=task_id, status="running", metadata=task["metadata"],
-                  suggested_name=row["suggested_name"], title="")
+                  suggested_name=row["suggested_name"], title="", execution_owner=task["_execution_owner"])
         write_task_result(clock.root, task_id, "completed", result="Whole note.",
-                          **terminal_result_fields({"wake_summary": summary} if summary else {}))
+                          **terminal_result_fields({"wake_summary": summary} if summary else {}, metadata=task["metadata"]))
         return []
 
     actor = SimpleNamespace(handle_task=handle)
-    monkeypatch.setattr(workers, "_get_chat_agent", lambda: actor)
 
     def bind(task):
         clock.clock._own_wake = {"task_id": task["id"], "initiator": "consciousness", "wake_cause": "own_clock"}
 
-    def done(task_id, ok):
-        clock.clock._wake_finished(task_id, ok)
-        finished.set()
-
     receipt = lane.handle_wake_direct(7, "Wake", {"initiator": "consciousness", "wake_cause": "own_clock"},
-                                      bind_input=bind, on_finished=done)
-    assert receipt["admitted"] and finished.wait(10)
-    expected = [{"type": "task_named", "task_id": receipt["task_id"], "suggested_name": "Own time"}]
-    assert frames[0] == expected[0], "the title precedes the admission activity receipt"
+                                      bind_input=bind,
+                                      on_finished=lambda *a: pytest.fail("the door calls no finish callback"))
+    task_id = receipt["task_id"]
+    assert receipt["admitted"] and frames == [{"type": "activity"}]  # the door's receipt; the title is the carrier's
+    assert not load_task_result(clock.root, task_id)  # the door wrote no row and coined nothing
+    carry(workers, spare, actor, out_q=bus)
+    carried = _drain(bus)
+    assert carried[0]["type"] == "task_named" and carried[0]["suggested_name"] == "Own time", \
+        "the title is the carrier's first frame, before its first work"
+    named = [frame for frame in carried if frame["type"] == "task_named"]
+    assert [frame["suggested_name"] for frame in named] == ["Own time"]
+    for frame in named:  # the server rebroadcasts the carrier's title as its own door once did
+        conversation_lane.handle_task_named(frame, SimpleNamespace(bridge=bridge))
+    # The end is the pooled terminal: the clock replaces the cause title only with this attempt's accepted summary.
+    finish_pooled_wake(SimpleNamespace(consciousness=clock.clock), task_id, load_task_result(clock.root, task_id),
+                       workers.RUNNING[task_id]["task"])
+    expected = [{"type": "task_named", "task_id": task_id, "suggested_name": "Own time"}]
     if summary:
         expected.append({**expected[0], "suggested_name": summary})
     assert [frame for frame in frames if frame["type"] == "task_named"] == expected
     assert namers == []
-    row = load_task_result(clock.root, receipt["task_id"])
+    row = load_task_result(clock.root, task_id)
     assert row["suggested_name"] == (summary or "Own time") and not row.get("title")
     assert "summary" not in row
 
 
 def test_owner_admission_leaves_title_empty_and_still_names_on_first_work(monkeypatch, tmp_path):
     from ouroboros import project_naming
+    from supervisor import workers
+    from tests.conversation_carrier_support import carry
     from tests.test_consciousness_wake_lane import _lane
 
-    _lane(monkeypatch, tmp_path)
-    frames, namers = [], []
-    monkeypatch.setattr(lane, "_broadcast_task_named", frames.append)
+    bus = queue.Queue()
+    spare = _lane(monkeypatch, tmp_path, event_q=bus)
+    namers = []
     monkeypatch.setattr(project_naming, "spawn_turn_namer", lambda *a, **kw: namers.append(a))
 
     def handle(task):
@@ -80,15 +109,17 @@ def test_owner_admission_leaves_title_empty_and_still_names_on_first_work(monkey
         return []
 
     actor = SimpleNamespace(handle_task=handle)
-    admitted = lane._admit_chat_task(actor, 7, "Owner work", task_metadata={"initiator": "owner"})
-    assert admitted and not load_task_result(tmp_path, admitted["task"]["id"])
-    assert frames == []
-    assert lane._execute_chat_task(admitted)
-    assert len(namers) == 1 and frames == []
+    lane.handle_chat_direct(7, "Owner work", None, task_metadata={"initiator": "owner"})
+    task_id = spare.busy_task_id
+    assert task_id and not load_task_result(tmp_path, task_id)  # the door writes no row and coins no title
+    assert _drain(bus) == []
+    carry(workers, spare, actor, out_q=bus)
+    assert len(namers) == 1 and [frame for frame in _drain(bus) if frame["type"] == "task_named"] == []
 
 
 @pytest.mark.parametrize("summary", ["Прочитал обсуждение и ответил.", ""])
-def test_focus_runner_names_its_place_then_its_accepted_summary(focus, monkeypatch, summary):
+@pytest.mark.parametrize("title", ["", "The owner's title"])
+def test_focus_runner_names_its_place_then_its_accepted_summary(focus, monkeypatch, summary, title):
     from ouroboros import presence_runner as runner
 
     root, place, admission, event = focus
@@ -101,16 +132,20 @@ def test_focus_runner_names_its_place_then_its_accepted_summary(focus, monkeypat
         assert row["suggested_name"] == place.label and not row.get("title")
         metadata = {**task["metadata"], "presence_outcome": "message", "presence_result_text": "Answer"}
         seed_wake(root, task_id=task_id, status="running", metadata=metadata,
-                  suggested_name=row["suggested_name"], title="")
+                  suggested_name=row["suggested_name"], title=title)
         write_task_result(root, task_id, "completed", result="Answer", terminal_origin="model_final",
-                          **terminal_result_fields({"wake_summary": summary} if summary else {}))
+                          **terminal_result_fields({"wake_summary": summary} if summary else {},
+                                                   metadata=task["metadata"], title=title))
         return [{"type": "presence_result", "task_id": task_id, "outcome": "message", "text": "Answer"}]
 
     result = runner.run_presence_turn(admission=admission, event=event, repo_dir=root, drive_root=root,
                                      agent_factory=lambda **_: SimpleNamespace(handle_task=handle))
     assert result.outcome == "message"
-    assert [frame["suggested_name"] for frame in frames] == [place.label] + ([summary] if summary else [])
+    assert [frame["suggested_name"] for frame in frames] == [place.label] + ([summary] if summary and not title else [])
     assert {frame["type"] for frame in frames} == {"task_named"}
+    stored = load_task_result(root, result.task_id)
+    assert stored["suggested_name"] == (summary if summary and not title else place.label)
+    assert stored.get("title", "") == title
 
 
 @pytest.mark.parametrize("metadata,expected", [

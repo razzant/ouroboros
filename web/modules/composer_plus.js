@@ -1,8 +1,9 @@
 // The composer's "+" menu filled from skills' contributions (docs/DESIGN.md "Composer owner controls", "Skills in the
 // page"): after the host's Attach file, one section per skill under its label with its `composer.plus` items in the
 // owner's arrangement, then the host's own items: "Add dictation…" while no speech engine can dictate here, once the
-// voice controls have offered their chooser, and "Make a button with Ouroboros…", which starts a request in the draft for
-// the owner to finish and send. Every item does its contribution's verb on this room's draft; none sends a message.
+// voice controls have offered their chooser, and "Make a button…", which starts a request in the draft for the owner to
+// finish and send, both under what they do ("Add to composer", U019). Every item does its contribution's verb on this
+// room's draft; none sends a message.
 import { tr } from './i18n.js';
 import { draftPort, getContributions, runContributionAction } from './contributions.js';
 
@@ -40,7 +41,7 @@ export function setDictationOffer(offer) {
     };
 }
 
-/** What "Make a button with Ouroboros…" starts in the draft (the bundled templates skill teaches the rest). */
+/** What "Make a button…" starts in the draft (the bundled templates skill teaches the rest). */
 export const MAKE_A_BUTTON_TEXT = 'Make me a button in the + menu that ';
 
 /**
@@ -73,12 +74,12 @@ export function bindComposerPlus({ composer, store = getContributions(), notice 
             host.push({ key: 'dictation', label: tr('composer.plus.dictation', 'Add dictation…'), icon: 'mic',
                 onSelect: () => offer.open({ composer, draft }) });
         }
-        host.push({ key: 'make-button', label: tr('composer.plus.make_button', 'Make a button with Ouroboros…'),
+        host.push({ key: 'make-button', label: tr('composer.plus.make_button', 'Make a button…'),
             title: tr('composer.plus.make_button_title', 'Ask Ouroboros for a button of your own in this menu'),
             icon: 'sparkle',
             onSelect: () => { draft.insert(tr('composer.plus.make_button_text', MAKE_A_BUTTON_TEXT)); } });
-        // The host's own items close the menu under Ouroboros's name, apart from the skills' sections above them.
-        return [...bySkill.values(), { key: 'host', label: tr('composer.plus.host', 'Ouroboros'), items: host }];
+        // The host's own items close the menu under what they do, apart from the skills' sections above them.
+        return [...bySkill.values(), { key: 'host', label: tr('composer.plus.host', 'Add to composer'), items: host }];
     }
 
     const sync = () => composer.plusMenu.setSections(sections());

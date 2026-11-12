@@ -22,10 +22,11 @@ from tests._work_projection_shared import with_work_fields
 from tests.test_chat_history_paging_browser import _idle
 from tests.test_room_work_backend_browser import Evidence, _decision_posts, _http, _launch, _open_chat, _wait_facts
 from tests.test_room_work_pager_return_browser import FILLER, LATER, _FRAMES, _seed_filler
+from tests.ui_chat_viewport_smoke import state_reads
 
 direct_server_with_data = smoke.direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 TASK = "jump-far-task"
 ANSWER = "JUMP The release audit found two missing citations."
@@ -127,7 +128,8 @@ def test_a_work_row_far_back_lands_on_its_work_and_back_returns(direct_server_wi
     with sync_playwright() as pw:
         browser, page, log = _launch(pw, engine)
         page.add_init_script(f"({_OBSERVE})()")
-        page.route("**/api/state", with_paused_answer)
+        # Every shared state read, not the first alone: after it the page asks `?bindings_since=` (state_reads).
+        page.route(state_reads, with_paused_answer)
         try:
             _open_chat(page, url)
             if project:

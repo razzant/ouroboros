@@ -4,11 +4,11 @@ Two facts the loop lacked (R1 §6.0): whether a task's route follows its role or
 choice, and that a role's binding is a reference, not a value frozen when the turn opened. This
 leaf answers both; it holds no model call and no checkpoint store of its own.
 
-Live view. ``ROUTE_SETTING_KEYS`` (the role model slots, their local flags, accounts, windows,
-processing preferences, the OpenRouter routing preset and every provider credential key) are read
-from the settings document as it is NOW, never from the task's entry snapshot: a saved Main reaches
-work that follows Main on its next call, and a cleared or disabled key stops every task's next
-send. The read has ``skill_settings()`` semantics (the full effective loader over
+Live view. ``ROUTE_SETTING_KEYS`` (the role model slots, the web search Source its Model belongs to,
+their local flags, accounts, windows, processing preferences, the OpenRouter routing preset and every
+provider credential key) are read from the settings document as it is NOW, never from the task's entry
+snapshot: a saved Main reaches work that follows Main on its next call, and a cleared or disabled key
+stops every task's next send. The read has ``skill_settings()`` semantics (the full effective loader over
 ``skill_environ()``: an operator's own variable still stands in for a key the document leaves
 unset; this process tree's own mirrored values never do, so a key the owner cleared cannot come
 back from a reused worker's environment), memoised behind the document's stat and the operator
@@ -21,9 +21,16 @@ Choice. ``following(role)``: the acting route is the role's current binding, re-
 logical call; a changed binding moves the route through the existing switch handover (an acting
 route that differs for another reason, a card's reprepare, is left alone); ``explicit(source)``: the task's own route
 (a configured row, a Presence turn, a task argument, ``switch_model``, a wait-card choice, an
-adopted fallback) stays until the mind returns to its primary. The choice rides the continuation
+adopted fallback, the room's chat model) stays until the mind returns to its primary. The choice rides the continuation
 ``route`` block; a checkpoint written without one is classified from what it did carry
 (``classify_legacy``: a disclosed migration policy, never reconstructed intent).
+
+Lead. Admission records a room's choice once in ``metadata.lead`` (``capture_lead``),
+including a recorded follow of Main. Continue, Resume and placement keep it; a separately
+started root reads its own destination. A carried model uses role ``lead``: Auto account,
+the model's own window and default processing. Place and circle models use the same carrier
+and derived role for place turns. Other Presence turns, delegated and autonomous work,
+role-named tasks and call turns keep their own routing. Failures use the ordinary chain walk.
 """
 
 from __future__ import annotations
@@ -43,15 +50,19 @@ from ouroboros.settings_defaults import SETTINGS_DEFAULTS, settings_env_keys
 from ouroboros.settings_integrity import PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV, runtime_setting
 
 #: Why an acting route is the task's own: the record names the chooser, never a model string.
-ROUTE_SOURCES = ("task_argument", "configured_row", "switch_model", "wait_card", "fallback", "presence")
+OWNER_LEAD_SOURCES = ("room", "owner", "owner_words")
+LEAD_SOURCES = (*OWNER_LEAD_SOURCES, "mind", "place", "circle")
+ROUTE_SOURCES = ("task_argument", "configured_row", "switch_model", "wait_card", "fallback", "presence", *LEAD_SOURCES)
+LEAD_KEY = "lead"  # host-minted primary, including a recorded follow
+LEAD_ROLE = "lead"  # no settings slot or role options
 ROLE_LABELS = {"main": "Main", "light": "Light", "safety": "Supervisor", "vision": "Vision",
-               "consciousness": "Consciousness", "deep_review": "Deep self-review", "websearch": "Web search"}
+               "consciousness": "Consciousness", "deep_review": "Deep self-review", "websearch": "Web search", LEAD_ROLE: "This work's model"}
 
 ROUTE_CREDENTIAL_SETTING_KEYS: frozenset = frozenset(provider_models.ROUTE_CREDENTIAL_SETTING_KEYS)  # the kind table's
 ROUTE_SETTING_KEYS: frozenset = frozenset({
     *MODEL_ROLE_SETTINGS.values(), *(key for key in SETTINGS_DEFAULTS if key.startswith("USE_LOCAL_")),
     MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_PREFERENCE_KEY,
-    "OUROBOROS_OR_PROVIDER", *ROUTE_CREDENTIAL_SETTING_KEYS,
+    "OUROBOROS_OR_PROVIDER", "OUROBOROS_WEBSEARCH_BACKEND", *ROUTE_CREDENTIAL_SETTING_KEYS,
 })
 _EXPORTED_ROUTE_KEYS = frozenset(settings_env_keys()) & ROUTE_SETTING_KEYS
 # The operator variables a read lets stand in, and the projection records that tell them from our echo.
@@ -100,6 +111,18 @@ def _project(effective: dict) -> dict:
 _ABSENT: Tuple[dict, dict] = ({}, {})  # no saved document: the route keys read as every other key
 
 
+def route_view(read_settings) -> Tuple[dict, dict]:
+    """``(effective document, env-shaped projection)`` of what ``read_settings`` (a loader) reads over
+    ``skill_environ``, normalized as every route consumer reads it. The live view is this read of the saved
+    document; a deployment policy judges the document a write would save with the same read
+    (``config.settings_of_document``), so an echo never stands in for a cleared key there either."""
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
+    from ouroboros.settings_integrity import skill_settings
+
+    effective = apply_runtime_provider_defaults(skill_settings(read_settings))[0]
+    return effective, _project(effective)
+
+
 def route_settings_view() -> Optional[Tuple[dict, dict]]:
     """``(effective document, env-shaped projection)`` of the route keys as the document reads now.
 
@@ -111,8 +134,7 @@ def route_settings_view() -> Optional[Tuple[dict, dict]]:
     isolated runs keep the verified reader the loader already uses."""
     global _VIEW
     from ouroboros import config
-    from ouroboros.server_runtime import apply_runtime_provider_defaults
-    from ouroboros.settings_integrity import read_settings_json_verified, skill_settings
+    from ouroboros.settings_integrity import read_settings_json_verified
 
     source = _read_source()
     stamp, signature = _document_stamp(), tuple(source.get(key) for key in _SIGNATURE_KEYS)
@@ -128,11 +150,10 @@ def route_settings_view() -> Optional[Tuple[dict, dict]]:
         try:
             if not isinstance(read_settings_json_verified(config.SETTINGS_PATH), dict):
                 return None
-            effective, _changed, _keys = apply_runtime_provider_defaults(
-                skill_settings(lambda: config.load_settings_lock_held(_settings_lock_held=False)))
+            effective, projection = route_view(lambda: config.load_settings_lock_held(_settings_lock_held=False))
         except Exception:
             return None
-        _VIEW = (stamp, signature, effective, _project(effective))
+        _VIEW = (stamp, signature, effective, projection)
         return _VIEW[2], _VIEW[3]
 
 
@@ -237,6 +258,82 @@ def following_route(role: str, llm: Any = None) -> Tuple[str, bool]:
     return model, str(runtime_setting("USE_LOCAL_MAIN", "") or "").strip().lower() in ("true", "1")
 
 
+def _local_flag(key: str) -> bool:
+    return str(runtime_setting(key, "") or "").strip().lower() in ("true", "1")
+
+
+def configured_references() -> dict:
+    """Main's current route, which rooms without a chosen model follow live."""
+    from ouroboros.model_slots import _main_model
+
+    return {"main": {"model": _main_model(), "use_local": _local_flag("USE_LOCAL_MAIN")}}
+
+
+def lead_snapshot(value: Any) -> Optional[dict]:
+    """Validate the host carrier: a recorded follow, owner choice or Cyber Pro primary."""
+    if not isinstance(value, Mapping):
+        return None
+    source = value.get("source")
+    if source == "main":
+        return {"source": "main"}
+    if (source not in LEAD_SOURCES
+            or not isinstance(value.get("model"), str) or not value["model"].strip()
+            or not isinstance(value.get("use_local"), bool)):
+        return None
+    carrier = {"source": source, "model": value["model"].strip(), "use_local": value["use_local"]}
+    if source == "owner_words" and isinstance(value.get("cited"), str) and value["cited"]:
+        carrier["cited"] = value["cited"]
+    return carrier
+
+
+def task_lead(metadata: Any) -> Optional[dict]:
+    """A root's carried model, else None; stray ``metadata.model`` never binds a root."""
+    if not isinstance(metadata, Mapping) or str(metadata.get("delegation_role") or "").lower() == "subagent":
+        return None
+    carrier = lead_snapshot(metadata.get(LEAD_KEY))
+    return carrier if carrier and carrier["source"] != "main" else None
+
+
+def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
+                 admitted: bool = False) -> None:
+    """Stamp new owner roots once, from the canonical room, never an execution copy.
+
+    Queue admission supplies its committed registry row under Q (``admitted=True``, None for Main),
+    so this stamp performs no IO under Q. Conversation admission reads the canonical root.
+    An existing carrier wins, including a recorded follow. Unreadable rooms leave no
+    carrier and follow Main with a warning, so a later door can still stamp the choice.
+    A programming error never masquerades as an unreadable room.
+    """
+    from ouroboros.composer_cognition import project_model_choice, read_model_choice
+    from ouroboros.settings_integrity import _actor_scope, SettingsIntegrityError
+
+    given = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    canonical_root, actor = _actor_scope(task, drive_root)
+    if (LEAD_KEY in given or task.get("model") or str(task.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
+            or str(given.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
+            or actor.get("parent_task_id") or actor.get("autonomous")
+            or str(task.get("delegation_role") or given.get("delegation_role") or "").lower() == "subagent"
+            or (task.get("actor_id") == "consciousness" and not actor.get("scheduled"))):
+        return
+    metadata = task.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        return
+    project_id = str(task.get("project_id") or metadata.get("project_id") or "")
+    try:
+        if admitted:
+            choice = project_model_choice(project) if project is not None else {"kind": "main"}
+        else:
+            choice = read_model_choice(canonical_root, project_id)
+    except (OSError, ValueError, SettingsIntegrityError):
+        import logging
+
+        logging.getLogger(__name__).warning("Room model choice unreadable for %s; admitted on Main",
+                                            project_id or "Main", exc_info=True)
+        return
+    metadata[LEAD_KEY] = ({"source": "room", "model": choice["model"], "use_local": choice["use_local"]}
+                          if choice["kind"] == "model" else {"source": "main"})
+
+
 def _metadata(ctx: Any) -> dict:
     metadata = getattr(ctx, "task_metadata", None)
     return metadata if isinstance(metadata, dict) else {}
@@ -271,7 +368,7 @@ def opening_choice(ctx: Any) -> dict:
 
 
 def open_route(ctx: Any, llm: Any) -> Tuple[str, bool, dict]:
-    """The route a turn opens on and its choice; a locality the task carries without a model still applies."""
+    """The route a turn opens on and its choice."""
     override = str(getattr(ctx, "task_model_override", "") or "").strip()
     local_override = getattr(ctx, "task_use_local_override", None)
     ctx._route_binding = None  # the binding a following route last resolved to (``round_route``)
@@ -279,7 +376,7 @@ def open_route(ctx: Any, llm: Any) -> Tuple[str, bool, dict]:
         return override, bool(local_override), opening_choice(ctx)
     role = opening_role(ctx)
     model, use_local = ctx._route_binding = following_route(role, llm)
-    return model, bool(local_override) if local_override is not None else use_local, following(role)
+    return model, use_local, following(role)
 
 
 def _dispatch_source(metadata: Mapping) -> str:
@@ -292,20 +389,28 @@ def _dispatch_source(metadata: Mapping) -> str:
 
 def bind_task_route(ctx: Any, task_metadata: Mapping, *, presence: bool) -> None:
     """At dispatch, the model a task carries binds its route: a configured row, a Presence turn, a lane child,
-    a nanny of a parent that chose its own route. A nanny of a following parent and a role-named task carry
-    none and open on that role's current binding instead (``open_route``). Idempotent: an amended resolution
-    rebinds."""
+    a nanny of a parent that chose its own route, owner work its admitted lead. A nanny of a
+    following parent and a role-named task carry none and open on that role's current binding instead
+    (``open_route``). Idempotent: an amended resolution rebinds."""
     ctx.task_model_override = ctx.task_use_local_override = ctx.task_route_source = None
     delegated = str(task_metadata.get("delegation_role") or "").lower() == "subagent"
     cognitive, kind = _cognition(task_metadata)
-    if not (delegated or presence) or (delegated and kind == "agent_session" and cognitive.get("follows_role")):
+    if not delegated:
+        carrier = task_lead(task_metadata)
+        if carrier:
+            ctx.task_model_override, ctx.task_use_local_override = carrier["model"], carrier["use_local"]
+            ctx.task_route_source = carrier["source"]
+            return
+        if not presence:
+            return
+    if delegated and kind == "agent_session" and cognitive.get("follows_role"):
         return
     model = str(task_metadata.get("model") or "").strip()
     if model:
         ctx.task_model_override = model
         ctx.task_route_source = "presence" if presence else _dispatch_source(task_metadata)
-    if "use_local_model" in task_metadata:
-        ctx.task_use_local_override = bool(task_metadata.get("use_local_model"))
+        if "use_local_model" in task_metadata:
+            ctx.task_use_local_override = bool(task_metadata.get("use_local_model"))
 
 
 def round_route(ctx: Any, llm: Any, acting: Tuple[str, bool]) -> Optional[Tuple[str, bool]]:
@@ -374,3 +479,29 @@ def classify_legacy(ctx: Any, state: Mapping) -> dict:
     if primary.get("model") and acting != (str(primary["model"]), bool(primary.get("use_local"))):
         return explicit("switch_model")
     return following(opening_role(ctx))
+
+
+def initial_round_route(ctx: Any, llm: Any, initial_effort: str) -> tuple:
+    """The route this turn opens on: model, effort, local flag and context modes.
+
+    Unknown routes get one honest call; no synthetic short-window capacity, so a
+    fit plan is adopted only while it still answers the preferred mode. The same
+    binding is recorded as the turn's primary (task override or role slot, role,
+    locality) for configured-route recovery and ``switch_model(primary=...)``, and
+    the turn's route choice says whether that binding follows its role live or is
+    the task's own (``route_choice``).
+    """
+    from ouroboros.model_slots import task_model_binding
+    from ouroboros.config import get_context_mode
+
+    preferred_mode = get_context_mode()
+    context_fit_plan = getattr(ctx, "context_fit_plan", None)
+    if (context_fit_plan is not None
+            and str(getattr(context_fit_plan, "preferred_mode", "")) == preferred_mode):
+        active_context_mode = str(getattr(context_fit_plan, "initial_mode", "") or preferred_mode)
+    else:
+        active_context_mode = preferred_mode
+    model, use_local, ctx.route_choice = open_route(ctx, llm)
+    ctx.primary_route = {"model": model, "use_local": use_local, "role": task_model_binding(
+        {"task_metadata": getattr(ctx, "task_metadata", {})}, context_fit_plan=context_fit_plan)[0]}
+    return model, initial_effort, use_local, preferred_mode, active_context_mode, context_fit_plan

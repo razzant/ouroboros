@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,8 @@ from ouroboros.platform_layer import force_kill_pid
     ("999 S\n", True),
 ])
 def test_service_group_liveness_inspects_every_member(monkeypatch, states, expected):
+    real_isdir = process_containment.os.path.isdir
+    monkeypatch.setattr(process_containment.os.path, "isdir", lambda path: False if path == "/proc" else real_isdir(path))
     monkeypatch.setattr(process_containment._pl, "process_group_is_alive", lambda _: True)
     monkeypatch.setattr(process_containment.subprocess, "run", lambda *_a, **_k: SimpleNamespace(
         returncode=0, stdout=states))
@@ -27,13 +30,26 @@ def test_service_group_liveness_inspects_every_member(monkeypatch, states, expec
 
 
 def test_unreadable_service_group_is_not_proven_quiet(monkeypatch):
+    real_isdir = process_containment.os.path.isdir
+    monkeypatch.setattr(process_containment.os.path, "isdir", lambda path: False if path == "/proc" else real_isdir(path))
     monkeypatch.setattr(process_containment._pl, "process_group_is_alive", lambda _: True)
     monkeypatch.setattr(process_containment.subprocess, "run", lambda *_a, **_k: SimpleNamespace(
         returncode=1, stdout=""))
     assert process_containment.process_group_has_live_members(123) is True
 
 
-@pytest.mark.serial
+@pytest.mark.parametrize("census,expected", [(None, True), ({}, True), ({123: True}, True), ({123: False}, False)])
+def test_linux_owner_uses_confirming_census_without_spawning(monkeypatch, census, expected):
+    pc = process_containment
+    real_isdir = pc.os.path.isdir
+    monkeypatch.setattr(pc.os.path, "isdir", lambda path: True if path == "/proc" else real_isdir(path))
+    monkeypatch.setattr(pc._pl, "IS_WINDOWS", False)
+    monkeypatch.setattr(pc._pl, "process_group_is_alive", lambda _: True)
+    monkeypatch.setattr(pc, "process_groups_have_live_members", lambda groups: census if groups == {123} else pytest.fail())
+    monkeypatch.setattr(pc.subprocess, "run", lambda *_a, **_k: pytest.fail("Linux needs no ps child"))
+    assert pc.process_group_has_live_members(123) is expected
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux waitid WNOWAIT zombie fixture")
 @pytest.mark.parametrize("live_child", [False, True])
 def test_update_quiesces_zombie_leader_without_losing_live_child(tmp_path, live_child):
@@ -57,7 +73,10 @@ def test_update_quiesces_zombie_leader_without_losing_live_child(tmp_path, live_
         # deliberately still contains the zombie that used to block updates.
         os.waitid(os.P_PID, leader.pid, os.WEXITED | os.WNOWAIT)
         assert process_containment.pid_is_zombie(leader.pid)
-        assert process_containment.process_group_has_live_members(leader.pid) is live_child
+        deadline = time.monotonic() + 5
+        while process_containment.process_group_has_live_members(leader.pid) is not live_child:
+            assert time.monotonic() < deadline, "group census never converged"
+            time.sleep(0.01)
         assert process_custody.quiesce_custodied_services(tmp_path) == (True, [])
         assert process_custody._read_ledger(tmp_path) == []
         assert not process_containment.process_group_has_live_members(leader.pid)
@@ -106,7 +125,6 @@ def test_test_group_cleanup_requires_positive_quiet_census(monkeypatch, live_or_
     assert waits == [{"timeout": 0}]
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="test-owned POSIX process group")
 def test_test_group_cleanup_reaps_live_helper(tmp_path):
     from tests._shared import reap_test_process_group

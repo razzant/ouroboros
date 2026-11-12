@@ -42,12 +42,44 @@ Set the frame's `srcdoc` property (not an attribute string) to this document, in
 - **`POLICY`** is the document policy below, with `ORIGIN` the page's own origin (for example `https://ouro.example`) and `SKILL` the URL-encoded skill name. An opaque frame's `'self'` matches nothing, so the sources are absolute.
 
   ```
-  default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: ORIGIN/api/extensions/SKILL/module/; worker-src blob:; style-src 'unsafe-inline'; img-src data: blob: ORIGIN/api/extensions/SKILL/; media-src data: blob: ORIGIN/api/extensions/SKILL/; font-src data: blob: ORIGIN/api/extensions/SKILL/
+  default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval' blob: ORIGIN/api/extensions/SKILL/module/; worker-src blob:; style-src 'unsafe-inline'; img-src data: blob: RESOURCE_BASE; media-src data: blob: RESOURCE_BASE; font-src data: blob: RESOURCE_BASE
   ```
+
+  `RESOURCE_BASE` is this mount's route lease (below, "Route leases"), resolved against the page's origin.
 
 - **`BRIDGE`** is your bootstrap (§3). It must run before the module.
 - **`RESIZE`** is your size reporter (§5), or empty when the card has a fixed `height`.
-- **`ENTRY`** for classic mode is `<script>MODULE</script>`, with the script text with every `</script` written as `<\/script` and every `<!--` as `<\!--`. It runs as a classic script, even when the file is named `.mjs`.
+- **`ENTRY`** for classic mode is `<script>MODULE</script><script>MARK</script>`, with the script text with every `</script` written as `<\/script` and every `<!--` as `<\!--`. It runs as a classic script, even when the file is named `.mjs`. `MARK` (builtin: `window.__ouroWidgetEntryRan?.();`) tells the size reporter (§5) the entry has run.
+
+### Route leases (classic entries and route frames)
+
+Before building a classic frame (and a `kind: "iframe"` frame, §8), the authenticated parent posts
+`{skill, tab_id, generation, scope: "routes"}` to `/api/widgets/asset-leases`. Success has the file lease's
+shape with `base_url` `/api/widget-resources/TOKEN/`; an ESM tab, another render kind or a stale publication
+answers 409. Renew and revoke it exactly like a file lease (below). Give the bootstrap `RESOURCE_BASE` and
+expose it as `OuroborosWidget.resourceBase` with `resourceUrl(url)`: a URL under the skill's route prefix or a
+relative path maps onto `RESOURCE_BASE`, anything else is returned unchanged.
+
+`GET`/`HEAD` under `RESOURCE_BASE` runs that skill's own route of the same rest path through the ordinary
+dispatcher, `Range` and streaming bodies included. No `Cookie` or `Authorization` reaches it, and the core's
+own names under the prefix (`manifest`, `module/`, `ui/`, `settings_section`) answer 400. A redirect inside the
+skill's prefix is rewritten under `RESOURCE_BASE`; one to anything else on this origin answers 403; another
+origin's is passed on. Every response is `no-store` with `Referrer-Policy: no-referrer`; other methods 405,
+an unknown or ended lease 404. Revoke, logout, password change and skill unload end its open responses at
+once, as a client disconnect would; expiry is noticed when a response next sends or at another lease
+operation, so a handler that sends nothing is not cut at the deadline. A file lease never reads routes and a route lease never
+reads files.
+
+A route lease is kept while its frame runs, so the frame's document and state survive a failed renewal and a
+core restart. Renew it like a file lease, but treat a failed, refused (5xx) or hanging renewal as transient:
+retry after 2, 4, 8, 16, 32, then every 40 seconds, and never end the mount on a timer. When renewal answers
+409 (the core no longer knows the token: a restart emptied the table, or the lease expired while this page
+could not renew), post the mint body again with `token: TOKEN`: the core re-establishes the lease under the
+same URL for the tab's current publication (the `generation` may be stale), renews it if this owner still
+holds it, answers 409 while the skill is not live yet (keep retrying), and 410 for a token that was revoked
+(Stop, even after the core had already dropped it), or ended by logout or a password change, in this core
+process; the core remembers the last 4096 such tokens, and a restart forgets them. End the mount only on 400, 401, 403 or 410,
+or when the card itself leaves the list.
 
 ### Opt-in native ESM files
 
@@ -64,8 +96,9 @@ invalid fields/body answer 400/413; foreign or opaque origins answer 403.
 
 Set `BASE` to `<meta name="referrer" content="no-referrer"><base href="ASSET_BASE">`
 and the iframe's `referrerPolicy` to `no-referrer`. Set `ENTRY` to
-`<script type="module" crossorigin="anonymous" src="ENTRY_URL"></script>`,
-where `ENTRY_URL` resolves `render.entry` from `ASSET_BASE`; escape attributes.
+`<script type="module" crossorigin="anonymous">import "ENTRY_URL"; MARK</script>`,
+where `ENTRY_URL` resolves `render.entry` from `ASSET_BASE`, as a JSON string with
+`</script` escaped; `MARK` then runs after the entry's top-level `await`.
 Use this policy (the bootstrap still runs first):
 
 ```
@@ -84,8 +117,8 @@ with `{token}` at `POST /api/widgets/asset-leases/revoke` (idempotent `{ok:true}
 These controls require the issuing parent authentication context and reject
 opaque/cross-site browser requests. They must never enter the child bridge's
 allowlist. A lease cannot renew itself. Stop/disposal sends revoke after the
-bounded save handshake; pagehide sends a keepalive revoke. Failed renewal ends
-the mount. An expired lease cannot be revived; reopening requires a new mount.
+bounded save handshake; pagehide sends a keepalive revoke. For a file lease, a failed renewal ends
+the mount; an expired file lease cannot be revived and reopening requires a new mount (route leases above).
 
 Reads and renewal check the same publication plus current enable/review/grant
 readiness. Unload/reload, disable or authority withdrawal invalidates it; logout
@@ -103,7 +136,7 @@ logs, including at a separate reverse proxy.
 
 Before the module runs, the bootstrap must provide what `CREATING_SKILLS.md` promises the author:
 
-- `window.OuroborosWidget = {fetch, onEvent, onTheme, download, openExternal}`;
+- `window.OuroborosWidget = {fetch, onEvent, onTheme, download, openExternal, resourceBase, resourceUrl, ready}` (`resourceBase` is `''` for ESM; `ready` resolves once the page accepted the channel);
 - `window.fetch` replaced by the same bridged `fetch`;
 - `window.__ouroWidgetOnDispose(fn)`, which registers a dispose hook (a hook registered while disposing runs at once);
 - `window.open(url)` routed to `openExternal`, returning `null`;
@@ -111,13 +144,19 @@ Before the module runs, the bootstrap must provide what `CREATING_SKILLS.md` pro
 - a trusted click on any other `<a href>` outside those prefixes becomes `openExternal`;
 - a fault channel: listeners on `window` for `error`, `unhandledrejection` and `securitypolicyviolation` post `ouro-widget-error`. Post at most 10 faults per frame, and each distinct kind and message once.
 
-Every message the bootstrap posts goes to `window.parent` with target origin `'*'` and carries the mount's `nonce` (§4). It accepts only messages whose `event.source` is `window.parent` and whose `nonce` matches.
+The bootstrap opens a `MessageChannel` and posts one hello to `window.parent` (§4, "The handshake"); every other message it sends or accepts travels on its end of that channel and carries the mount's `nonce`. It never listens to window messages.
 
 `openExternal(url)` accepts only `http:`, `https:` and `mailto:` URLs and needs a user action in the frame. The frame's own `Blob` URLs cannot be fetched by the page, so the bootstrap remembers the `Blob` behind each URL it creates and sends the `Blob` itself.
 
 ## 4. The message grammar
 
-Generate a fresh random `nonce` string for every mount and embed it in the bootstrap. Every message in both directions is a plain object with a `type` and that `nonce`. The page accepts a message only when `event.source` is this frame's `contentWindow` and the `nonce` matches. It answers with `frame.contentWindow.postMessage(message, '*')`.
+Generate a fresh unguessable `nonce` for every mount (the builtin host uses 16 bytes from `crypto.getRandomValues`) and embed it in the bootstrap. Every message in both directions is a plain object with a `type` and that `nonce`.
+
+**The handshake:**
+
+The bootstrap posts `ouro-widget-hello` as `{type: "ouro-widget-hello", nonce}` to `window.parent` with target origin `'*'` and one port of a fresh `MessageChannel` in the transfer list. The page adopts that port only when `event.source` is this frame's `contentWindow`, the message carries a port and the proof matches: the mount's `nonce` for a module frame, the route lease token for a route page (below, and §8). A module frame is adopted once; a later hello is ignored. The page answers `ouro-widget-ready` on the port. From then on every message in the tables below travels on that port only, in both directions: the page never posts to `frame.contentWindow` and ignores window messages other than a hello. A port belongs to the document that created it, so a document that later occupies the frame (a navigation, a redirect, another site) can neither receive the mount's replies, events or theme nor speak for it.
+
+A route page's bootstrap is the same script served at `GET /api/widget-bridge.js` (public, static JavaScript, `Access-Control-Allow-Origin: *`). It runs only in a frame whose URL lies under `/api/widget-resources/TOKEN/`, and its hello is `{type: "ouro-widget-hello", lease: TOKEN}` (its `nonce` is `""`): the lease in the document's own URL path is the proof, since neither a redirect nor a navigation carries the path to another document and the frame's `Referrer-Policy` is `no-referrer`. A route page may hello again from its next own document; adopt the new port and retire the previous document's requests, event and theme subscriptions and port. When a frame `load` follows no hello since the previous `load`, the previous document is gone: retire its channel the same way. In route mode the bootstrap leaves the page's own `fetch`, `window.open`, links, object URLs and fault handling untouched, resolves a relative request URL against the page's own URL, and learns its skill prefix from `ouro-widget-ready`.
 
 **Frame to page:**
 
@@ -130,7 +169,7 @@ Generate a fresh random `nonce` string for every mount and embed it in the boots
 | `ouro-widget-theme` | `op: "subscribe" \| "unsubscribe"` | Start or stop sending the theme. |
 | `ouro-widget-download` | `id`, `name`, `source` | Save a `Blob`, a `data:` URL or a URL under the skill's prefix. |
 | `ouro-widget-open-external` | `id`, `url` | Open an external link. |
-| `ouro-widget-resize` | `height` | The measured content height in pixels (§5). |
+| `ouro-widget-resize` | `height`, optional `held`, `fit` | The measured content height in pixels. On a board frame the builtin reporter adds `held` when it stops growing it and `fit` after a fresh fit (§5). |
 | `ouro-widget-error` | `kind: "error" \| "rejection" \| "csp"`, `message`, `source`, `line` | A fault inside the frame. Show it on the card; builtin logging is described in §5. |
 | `ouro-widget-disposed` | | The frame finished its dispose hooks (§6). |
 
@@ -140,9 +179,11 @@ Generate a fresh random `nonce` string for every mount and embed it in the boots
 
 | `type` | Fields | Meaning |
 |---|---|---|
+| `ouro-widget-ready` | `routeBase` | The page adopted this channel; `routeBase` is the skill's absolute route prefix. |
 | `ouro-widget-fetch-chunk` | `id`, `phase`, and per phase: `headers`: `status`, `statusText`, `headers` (`[name, value]` pairs); `data`: `chunk` (an `ArrayBuffer`, transferred); `end`; `error`: `error` (text) | One step of a bridged response. |
 | `ouro-widget-event` | `event`, `data` | One of the skill's WebSocket events. |
 | `ouro-widget-theme` | `theme: "light" \| "dark"` | The page's current theme. |
+| `ouro-widget-viewport` | `floor`, `ceiling`, optional `frame`, `fit` | A self-sizing frame's new bounds, in pixels; when the fit starts over (Natural height, Reset), the height it is being set to and that fresh fit's number (§5). Optional: the builtin widgets view sends it, a frame in a message never gets it. |
 | `ouro-widget-download-result` | `id`, `result` | The outcome of a download. |
 | `ouro-widget-open-external-result` | `id`, `result` | The outcome of opening a link. |
 | `ouro-widget-dispose` | | Stop now (§6). |
@@ -150,7 +191,7 @@ Generate a fresh random `nonce` string for every mount and embed it in the boots
 ## 5. What the page does for each message
 
 **Fetch:**
-1. Resolve `url` against `ASSET_BASE` for ESM, the page's origin for classic. Refuse, with the `error` text `module widget fetch outside extension route prefix`, unless the result has the page's origin and its path starts with `/api/extensions/<skill>/` for this card's skill, or with this mount's `ASSET_BASE` for GET/HEAD only.
+1. Resolve `url` against `ASSET_BASE` for ESM, the page's origin for classic (a route page sends absolute URLs). A URL under `RESOURCE_BASE` stands for the skill route of the same rest path. Refuse, with the `error` text `module widget fetch outside extension route prefix`, unless the result has the page's origin and its path starts with `/api/extensions/<skill>/` for this card's skill, or with this mount's `ASSET_BASE` for GET/HEAD only.
 2. Use `credentials: "omit"` for asset reads, the owner's session (`credentials: "same-origin"`) for skill routes. Send the upper-cased method, the headers and the body. Use `redirect: "error"`: the prefix is checked once, so a followed redirect could carry the request and the session anywhere.
 3. Post `headers` with the status, status text and every response header.
 4. Read the body one chunk per `ouro-widget-fetch-pull`. Post each chunk as a `data` phase with its bytes as a transferred `ArrayBuffer`. Post `end` when the body ends. A `HEAD` request and a 204, 205 or 304 answer have no body.
@@ -162,7 +203,7 @@ There is no default timeout. A positive `init.timeoutMs` aborts the request afte
 
 **Theme.** On `subscribe`, post the current theme at once and again whenever it changes. `unsubscribe` stops that.
 
-**Size.** Only a card without a fixed `height` sizes itself. The frame starts at 320 pixels. On `ouro-widget-resize`, set the frame's height to `min(ceiling, max(320, height + 2))`, where `ceiling` is `max_height` (default 8192) and the 2 pixels are the frame border. Ignore a height that is not a positive number. With a fixed `height`, ignore these messages. The builtin size reporter measures `#root` with a `ResizeObserver`, reports in the next animation frame, posts only a changed integer height, and hides the document's vertical scrollbar below the ceiling.
+**Size.** Only a card without a fixed `height` sizes itself. The frame starts at 320 pixels. On `ouro-widget-resize`, set the frame's height to `min(ceiling, max(floor, height + 2))`: `ceiling` is `max_height` (default 8192), `floor` 320, the 2 pixels the frame border. Ignore a height that is not a positive number. With a fixed `height`, ignore these messages and keep the declared height. The builtin size reporter measures `#root` with a `ResizeObserver`, reports in the next animation frame, posts only a changed integer height, and hides the document's vertical scrollbar below the ceiling, releasing it there. The builtin widgets view lets the owner set a card's content height `h`, the frame's height exactly (ceiling `h`, floor 0); without one, or shown all, its borderless self-sizing frame adds 0, has floor 0 and ceiling `max_height`, and stands at 320 until its first report, which waits for `MARK` or the document's `load`, whichever is first, and for something drawn (an empty document scrolls). Both are baked into its document; a change is posted as `ouro-widget-viewport`, with the hello if made before it. After `frame` the reporter measures anew once its window has that height and adds `fit` to each report; the page ignores a report with an older `fit`. Its reporter measures the laid-out document with the scrollbar hidden, again on each resize, change in the document, ended transition or animation, loaded image or video and move of the pointer or the focus: what the body holds where drawn, body margins in, the body's own height out. A box the viewport's size or larger, or one at its bottom, with space outside asks for more at every height: seen asking at two heights the frame answered exactly, no less the second time, each unchanged one animation frame later, the reporter stops asking and sends `held`, baked into the next mount so the frame does not grow again (a stop made while a finite transition or animation runs is looked at once more when nothing moves: one more height, then for good); a different extra at that height or new bounds resume it, and the document scrolls meanwhile. A fixed module or route frame takes `h` as its height.
 
 **Downloads.** A `Blob` or a `data:` URL is saved as it is. A URL must have the page's origin and lie under the skill's prefix or this mount's asset prefix; anything else fails. The builtin host streams a skill-route URL and reads an asset URL with `credentials: "omit"`, saving its finite captured bytes like a `Blob`. Answer with `result: {ok: true, ...}` or `{ok: false, error}`.
 
@@ -176,11 +217,14 @@ Both page and server redact capability-bearing asset URLs. The server normalizes
 
 Stopping is a handshake:
 
-1. Post `ouro-widget-dispose`.
+1. Post `ouro-widget-dispose` on the frame's channel.
 2. Keep answering bridged requests: the widget's dispose hooks may save state through its own routes.
 3. When `ouro-widget-disposed` arrives, or after 1000 milliseconds, whichever is first: abort every pending request, stop forwarding events and the theme, stop listening for the frame's messages and remove the frame.
 
-A frame that has already gone away is removed at once.
+A frame that has already gone away, or never said hello, is removed at once. A module frame's first `load` is
+its own document; a second `load` means it navigated to another document, which gets no dispose message: stop at
+once (step 3), revoke its leases and say so on the card. Replies to a request belong to the port it arrived on:
+drop them once that port was retired.
 
 ## 7. When widgets run
 
@@ -196,7 +240,7 @@ On WebKit, Android WebView and Firefox a frame shares the page's thread, so a st
 
 ## 8. Other widget kinds
 
-- **`kind: "iframe"`:** a frame whose `src` is `/api/extensions/<skill>/<render.route>`, with the same `sandbox` and `allow` attributes, no bridge and no document policy. Remove it at once on stop.
+- **`kind: "iframe"`:** mint a route lease for the card (§2, "Route leases") and give the frame `src` `RESOURCE_BASE` + `render.route`, `referrerPolicy` `no-referrer`, the same `sandbox` and `allow` attributes and no document policy of yours (the page keeps its own HTTP policy and URL base). Keep the lease while it runs. Listen for its hello (§4): a page that loads `/api/widget-bridge.js` gets the module bridge's grammar and relay rules, with no resize. On stop, run the §6 handshake if it joined, otherwise remove the frame at once; then revoke the lease.
 - **`kind: "declarative"`:** a component description the host draws itself. The components are listed in `CREATING_SKILLS.md`. An interface that does not draw them should say the card is not supported rather than guess.
 
 ## 9. Frames in a message

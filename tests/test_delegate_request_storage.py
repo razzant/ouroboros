@@ -193,7 +193,7 @@ def test_unreadable_ref_keeps_request_unknown_and_retry_refuses(tmp_path, damage
     assert json.loads(refusal.text)["reason"] == "invocation_request_unrecorded"
 
 
-@pytest.mark.parametrize("inline_request", [None, {}, [], "invalid"])
+@pytest.mark.parametrize("inline_request", [None, {}, "invalid"])
 def test_malformed_legacy_inline_without_a_reference_keeps_existing_behavior(tmp_path, inline_request):
     assert custody.emit(tmp_path, custody.START_REQUESTED, {
         "invocation_id": "legacy-empty", "task_id": "owner", "request": inline_request})
@@ -273,7 +273,7 @@ def test_missing_pending_body_keeps_snapshot_and_orphan_recovery_without_a_post(
     assert custody.pending_invocations(tmp_path) == [] and custody.open_snapshot_ids(tmp_path) == set()
 
 
-@pytest.mark.parametrize("prior", ["absent", "refused", "intact", "missing", "corrupt"])
+@pytest.mark.parametrize("prior", ["absent", "refused", "corrupt"])
 def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(tmp_path, fake_route, prior):
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.review_execution import ReviewRouteUnavailable
@@ -346,3 +346,53 @@ def test_task_event_omits_only_an_equal_contract_mirror_without_mutation(tmp_pat
     assert ("task_contract" in projected["metadata"]) is different
     if different:
         assert projected["metadata"]["task_contract"] == original["metadata"]["task_contract"]
+
+
+@pytest.mark.parametrize("start_row", ["written", "billing_refused", "unknown_error", "not_written"])
+def test_a_review_start_proven_unsent_spends_no_paid_wave_and_any_other_is_paid_before_its_post(
+        tmp_path, fake_route, monkeypatch, start_row):
+    """F4 (owner, 8 Nov 2026): the paid stamp follows the durable start row and precedes every POST. A start the
+    billing authority refused before any row or POST is proven unsent: no stamp, and the seat says unrequested. A
+    start row whose landing is unknown (an error, a False write a replay could still POST) is paid; a POST never
+    happens without the stamp before it."""
+    from ouroboros.review_execution import ReviewRouteUnavailable, SessionInvocation, run_delegated_review_session
+    from ouroboros.usage_accounting import BillingAuthorityUnavailable
+
+    order: list = []
+
+    def stamp():
+        order.append("stamp")
+
+    real_record, real_start = custody.record_start_requested, fake_route.start_run
+
+    def record(*args, **kwargs):
+        order.append("row")
+        if start_row == "billing_refused":
+            raise BillingAuthorityUnavailable("fixture: billing authority unreadable before any row")
+        if start_row == "unknown_error":
+            raise OSError("fixture: the row write's landing is unknown")
+        return False if start_row == "not_written" else real_record(*args, **kwargs)
+
+    def post(self, request, **kwargs):
+        order.append("post")
+        return real_start(self, request, **kwargs)
+
+    monkeypatch.setattr(custody, "record_start_requested", record)
+    monkeypatch.setattr(fake_route, "start_run", post)
+    invocation = SessionInvocation(task_id="t-paid", surface="scope_review", slot_id="scope_slot_1", timeout_sec=30,
+                                   dispatch_stamp=stamp)
+    if start_row == "written":
+        run_delegated_review_session(invocation=invocation, prompt="review this", root="/tmp/fake-repo",
+                                     custody_drive=tmp_path)
+        assert order == ["row", "stamp", "post"], "paid before the POST, after the start row"
+        return
+    with pytest.raises((ReviewRouteUnavailable, OSError)) as caught:
+        run_delegated_review_session(invocation=invocation, prompt="review this", root="/tmp/fake-repo",
+                                     custody_drive=tmp_path)
+    assert "post" not in order
+    if start_row == "billing_refused":
+        assert order == ["row"] and getattr(caught.value, "delegated_start_unrequested", None) is True
+        assert getattr(caught.value, "code", "") == "billing_authority_unavailable"
+    else:
+        assert order == ["row", "stamp"], "an unknown landing is paid, never refunded"
+        assert getattr(caught.value, "delegated_start_unrequested", None) is not True

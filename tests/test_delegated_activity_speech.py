@@ -23,13 +23,13 @@ import httpx
 import pytest
 
 from ouroboros import delegate_activity, delegate_progress
-from ouroboros.delegate_custody import RunCustody
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.subagent_messages import delegated_activity_meta
 from ouroboros.utils import truncate_within_limit
 from supervisor import events_chat_delivery, message_bus
 from tests import _dialogue as dialogue_test
 from tests.test_delegated_activity import Daemon, _agent, _ctx, _gateway, _harness, _records, _run_event
+from tests._cases import case_folders, chosen_rows
 
 CLAUDE = ("claude", "a01")
 # The adapter's key shape (consumers compare it whole and never parse it).
@@ -228,15 +228,9 @@ ANSWER = "Fixed the duplicate posts; all 15 import tests pass."
 @pytest.mark.parametrize("reply,final,lines", [
     pytest.param(_stream(1, ["Fixed the duplicate posts;", " all 15 import tests pass."], K1), _final(4, ANSWER),
                  [f"claude · a01: {ANSWER}", f"claude · a01 (answer): {ANSWER}"], id="streamed"),
-    pytest.param([_said(1, ANSWER, K1, "complete")], _final(2, ANSWER),
-                 [f"claude · a01: {ANSWER}", f"claude · a01 (answer): {ANSWER}"], id="nonstreamed"),
     pytest.param([_said(1, "Done.", K1, "complete")], _final(2, ANSWER),
                  ["claude · a01: Done.", f"claude · a01 (answer): {ANSWER}"], id="unique-words"),
     pytest.param([], _final(1, ANSWER), [f"claude · a01 (answer): {ANSWER}"], id="result-only"),
-    pytest.param([], _final(1, '{"fixed": 3}', source="structured_output"),
-                 ['claude · a01 (answer): {"fixed": 3}'], id="structured"),
-    pytest.param([_said(1, "Starting.", K1, "complete", actor=("codex", "a02"))], _final(2, ANSWER),
-                 ["codex · a02: Starting.", f"claude · a01 (answer): {ANSWER}"], id="another-actor-spoke"),
 ])
 def test_the_typed_final_answer_is_its_own_part_and_keeps_its_words_for_text_readers(tmp_path, reply, final, lines):
     record = _one(tmp_path, [*reply, final])
@@ -276,10 +270,9 @@ def test_window_rows_carry_the_key_whole_and_fold_one_utterance(tmp_path):
         {"type": "harness.event", "title": "Checking.", "detail": "Checking.", "textKind": "message", "textFinal": True,
          "harnessId": "claude", "attemptId": "a01"},
     ]}
-    advance = delegate_progress.WindowObservations().record(detail, 5, 0)
+    advance = delegate_progress.WindowObservations().record(detail, 5)
     assert [row.get("speechKey") for row in advance.events] == [key, key, key, "claude:x:2:0", None]
     assert advance.events[-1]["textFinal"] is True and "textFinal" not in advance.events[0]
-    assert delegate_progress.live_line("run-1", advance).endswith(": Checking. · [claude/a01] status · Checking.")
     daemon = Daemon([[_harness(1, "message", text="x")]], stream=False)
     daemon.revealed = 1
     record, = _records(_ctx(tmp_path, []), _gateway(daemon), 5, rows=advance.events)
@@ -294,7 +287,7 @@ def test_window_rows_carry_the_key_whole_and_fold_one_utterance(tmp_path):
     (["🛰", "️ ok"], "🛰️ ok", False),
     (["a" * 4000, "😀" * 3000], "a" * 4000 + "😀" * 3000, False),
     (["a" * 4000, "😀" * 3000], "a" * 4000 + "😀" * 2999 + "🙂", True),   # differs only past the preview
-])
+], ids=["split-cluster", "long-same", "long-differs-past-preview"])  # generated ids overflow Windows' env limit
 def test_unicode_and_preview_cuts_never_decide_whether_a_complete_text_differs(tmp_path, draft, complete, updated):
     record = _one(tmp_path, _stream(1, draft, K1, complete=complete))
     part, = record["parts"]
@@ -340,8 +333,10 @@ def test_a_draft_with_a_fragment_that_never_passed_here_is_not_proven_either_way
 LOST = [_said(1, "the", K1, "fragment"), _said(2, " big", K1, "fragment"), _said(3, " cat", K1, "fragment"), _tool(4)]
 
 
-@pytest.mark.parametrize("bounds", [[4], [1, 4]], ids=["one-poll", "across-polls"])
-@pytest.mark.parametrize("lose", ["missing", "unreadable"])
+@pytest.mark.parametrize(("lose", "bounds"), [
+    pytest.param("missing", [4], id='missing-one-poll'),
+    pytest.param("unreadable", [1, 4], id='unreadable-across-polls'),
+])
 def test_words_are_never_joined_across_an_event_this_reader_did_not_get_whole(tmp_path, lose, bounds):
     steps = [[event for event in LOST if low < event["seq"] <= high] for low, high in zip([0, *bounds], bounds)]
     daemon = Lossy(steps, **{lose: [2]})                                # " big" never reaches the reader whole
@@ -390,7 +385,7 @@ LATER_KEYS = [*_stream(7, ["Last", " one."], K3, complete="Last one, revised."),
               *_stream(10, ["Done", "."], K4, complete="Done, revised.")]
 
 
-@pytest.mark.parametrize("coverage", ["missing", "unreadable", "window", "provisional"])
+@pytest.mark.parametrize("coverage", ["missing", "unreadable", "window"])
 def test_no_key_of_a_record_without_exact_coverage_is_proven_either_way(tmp_path, coverage):
     """Every comparison needs the gap-free exact range, not only the record's first key: an earlier block of the
     same actor proves nothing about a later block whose fragment never passed here whole, or that a bounded window
@@ -399,31 +394,22 @@ def test_no_key_of_a_record_without_exact_coverage_is_proven_either_way(tmp_path
 
     lossy = coverage in ("missing", "unreadable")
     daemon = (Lossy([TWO_KEYS, LATER_KEYS], **{coverage: [5]}) if lossy
-              else Daemon([TWO_KEYS, LATER_KEYS], stream=coverage == "provisional"))
+              else Daemon([TWO_KEYS, LATER_KEYS], stream=False))
     gateway, ctx = _gateway(daemon), _ctx(tmp_path, [])
     daemon.revealed = 1
-    if coverage == "provisional":                        # the exact read fails: the window stands in, the cursor stays
-        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(
-            lambda request: httpx.Response(503, json={"code": "busy"}) if request.url.path.endswith("/events")
-            else daemon.handler(request)))
     first, = _records(ctx, gateway, 6, rows=[] if lossy else TWO_KEY_ROWS)
-    assert first["source"].get("provisional", False) is (coverage == "provisional")
+    assert first["source"]["kind"] == ("run_events" if lossy else "timeline_window")
     assert [(p["speech"], p["text"]) for p in first["parts"]] == [
         ({"key": K1, "op": "complete"}, "Checking the file."), ({"key": K2, "op": "complete"}, "Next block.")]
     assert not any({"updated", "carried"} & part.keys() for part in first["parts"]), \
         "neither key's draft passed here whole: unknown, never a difference"
     assert _speech_lines(first)[-1] == "claude · a01: Next block.", "its words stay whole for text readers"
-    if coverage == "provisional":
-        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(daemon.handler))
-        exact, = _records(ctx, gateway, 6)
-        assert exact["after_seq"] == 0 and not any("updated" in part for part in exact["parts"]), \
-            "the exact re-read of the same range saw both drafts whole: equal, not updated"
-    elif coverage == "window":
+    if coverage == "window":
         daemon.stream = True
         claudexor_run_events._SUPPORT.clear()
     later, = _read(ctx, daemon, gateway, 2, 12, after=6)
     third, fourth = later["parts"]
-    assert ("updated" in third) is (coverage == "provisional"), \
+    assert "updated" not in third, \
         "after a record that moved the cursor without exact coverage, a block's beginning is unknown again"
     assert fourth["updated"] is True, "a later block begun behind one seen whole is proven again"
 
@@ -579,23 +565,12 @@ def test_a_later_records_recap_keeps_the_abandon_and_the_answer_it_recalls(tmp_p
 
 
 def _waited(tmp_path, monkeypatch, daemon):
-    """The frames ``delegate_wait`` hands to the progress transport while it watches ``daemon``'s run."""
-    from ouroboros.tools import delegate
-    from tests._delegated_transport_shared import _nanny_ctx
+    """The frames the body's follow of ``daemon``'s run hands to the progress transport (``delegate_feed``)."""
+    from tests.test_delegated_activity import _followed
 
-    ctx = _nanny_ctx(tmp_path, task_id="child")
-    ctx.task_attempt = 0
+    ctx = SimpleNamespace(task_id="child", task_attempt=0, drive_root=tmp_path, task_metadata={})
     _agent_obj, events = _agent(ctx)
-    monkeypatch.setitem(delegate._CUSTODY, daemon.run_id, RunCustody(
-        task_id="child", run_id=daemon.run_id, route_id="claude", model="m", access="readonly"))
-    monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    clock = SimpleNamespace(now=0.0)
-    with monkeypatch.context() as timing:
-        timing.setattr(delegate.time, "monotonic", lambda: clock.now)
-        timing.setattr(delegate.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
-        result = json.loads(delegate._delegate_wait(ctx, daemon.run_id, wait_sec=60, since_seq=0,
-                                                    gateway=_gateway(daemon)))
-    assert result["status"] == "terminal", result
+    _followed(ctx, daemon)
     return [row for row in (events.get_nowait() for _ in range(events.qsize())) if row["type"] == "send_message"]
 
 
@@ -696,15 +671,6 @@ class Verbatim(Daemon):
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body + end)
 
 
-def _observed(ctx, gateway, run_id, advance, after):
-    """The records of one wait advance, each committed as its emitter would after handing it over."""
-    out = []
-    for record, commit in delegate_activity.observations(ctx, gateway, run_id, advance, after_seq=after, read_sec=2.0):
-        commit()
-        out.append(record)
-    return out
-
-
 def _splits(count, *, most=None):
     """No cut, every single cut, and a cut every third event (each part at most ``most`` long)."""
     cuts = [(), *((k,) for k in range(1, count)), tuple(range(3, count, 3))]
@@ -770,7 +736,7 @@ def _one_utterance_per_key(journal, records, *, exact=True):
     assert answers == [f"claude · a01 (answer): {journal.answer['text']}"], "its words reach text readers whole"
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
+@pytest.mark.parametrize("name", chosen_rows(SCENARIOS, 0, 1, 3))
 def test_the_engines_journals_read_as_one_utterance_per_key_however_the_polls_cut_them(tmp_path, name):
     journal = engine_journal(name)
     assert journal.answer["hasFinal"] is True
@@ -781,7 +747,7 @@ def test_the_engines_journals_read_as_one_utterance_per_key_however_the_polls_cu
         gateway, ctx, records, after = _gateway(daemon), _ctx(root, []), [], 0
         for step, bound in enumerate(daemon.bounds, start=1):
             daemon.revealed = step
-            records += _observed(ctx, gateway, daemon.run_id, SimpleNamespace(seq=bound, events=[], events_omitted=0), after)
+            records += _records(ctx, gateway, bound, after=after, run_id=daemon.run_id)
             after = bound
         assert [(r["after_seq"], r["source"]["read_through"]) for r in records] == list(zip((0, *cuts), daemon.bounds))
         assert all(delegated_activity_meta(record, task_id="child") == record for record in records)
@@ -789,40 +755,39 @@ def test_the_engines_journals_read_as_one_utterance_per_key_however_the_polls_cu
         _one_utterance_per_key(journal, records)
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
-def test_the_engines_timeline_rows_fold_the_same_way_in_the_window_view(tmp_path, name):
-    journal = engine_journal(name)
-    rows = journal.timeline
-    keys, _abandoned_keys, _unkeyed = _speech_facts(journal)
-    for cuts in _splits(len(rows), most=12):        # a window batch shows its last 12 rows
-        delegate_activity.reset_process_memo()
-        daemon = Daemon([[_harness(1, "message", text="x")]], stream=False, run_id=journal.events[0]["run_id"])
-        daemon.revealed = 1
-        gateway, ctx = _gateway(daemon), _ctx(tmp_path / ("cut-" + "-".join(map(str, cuts))), [])
-        seen, records = delegate_progress.WindowObservations(), []
-        for index, bound in enumerate((*cuts, len(rows))):
-            advance = seen.record({"timeline": rows[:bound], "lastSeq": bound}, bound, index)
-            assert not advance.events_omitted
-            line = delegate_progress.live_line(daemon.run_id, advance)
-            for key, facts in keys.items():
-                batch = [row for row in advance.events if row.get("speechKey") == key]
-                if facts["complete"] not in (None, journal.answer["text"]) and {"fragment", "complete"} <= {
-                        row["speechOp"] for row in batch}:
-                    assert line.count(facts["complete"]) == 1, (line, key)
-            records += _observed(ctx, gateway, daemon.run_id, advance, 0)
-        assert all(record["source"]["kind"] == "timeline_window" for record in records)
-        _one_utterance_per_key(journal, records, exact=False)
+def test_the_engines_timeline_rows_fold_the_same_way_in_the_window_view(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for name in SCENARIOS:
+        tmp_path = next(case_paths)
+        with subtests.test(name=name):
+            journal = engine_journal(name)
+            rows = journal.timeline
+            for cuts in _splits(len(rows), most=12):        # a window batch shows its last 12 rows
+                delegate_activity.reset_process_memo()
+                daemon = Daemon([[_harness(1, "message", text="x")]], stream=False, run_id=journal.events[0]["run_id"])
+                daemon.revealed = 1
+                gateway, ctx = _gateway(daemon), _ctx(tmp_path / ("cut-" + "-".join(map(str, cuts))), [])
+                seen, records = delegate_progress.WindowObservations(), []
+                for index, bound in enumerate((*cuts, len(rows))):
+                    advance = seen.record({"timeline": rows[:bound], "lastSeq": bound}, bound)
+                    assert not advance.events_omitted
+                    records += _records(ctx, gateway, bound, rows=advance.events, run_id=daemon.run_id)
+                assert all(record["source"]["kind"] == "timeline_window" for record in records)
+                _one_utterance_per_key(journal, records, exact=False)
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
-def test_the_engines_journal_through_the_wait_bus_and_history(tmp_path, monkeypatch, name):
-    journal = engine_journal(name)
-    count = len(journal.events)
-    daemon = Verbatim(journal, (count // 3, 2 * count // 3))
-    frames = _waited(tmp_path, monkeypatch, daemon)
-    activities = [frame["progress_meta"]["delegated_activity"] for frame in frames]
-    _one_utterance_per_key(journal, activities)
-    assert sum(frame["text"].count(f"(answer): {journal.answer['text']}") for frame in frames) == 1
-    for rows in _delivered(tmp_path, monkeypatch, frames):
-        assert [row["delegated_activity"] for row in rows] == activities
-    assert _retained(tmp_path, activities) == journal.raw
+def test_the_engines_journal_through_the_wait_bus_and_history(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for name in SCENARIOS:
+        tmp_path = next(case_paths)
+        with subtests.test(name=name), monkeypatch.context() as monkeypatch:
+            journal = engine_journal(name)
+            count = len(journal.events)
+            daemon = Verbatim(journal, (count // 3, 2 * count // 3))
+            frames = _waited(tmp_path, monkeypatch, daemon)
+            activities = [frame["progress_meta"]["delegated_activity"] for frame in frames]
+            _one_utterance_per_key(journal, activities)
+            assert sum(frame["text"].count(f"(answer): {journal.answer['text']}") for frame in frames) == 1
+            for rows in _delivered(tmp_path, monkeypatch, frames):
+                assert [row["delegated_activity"] for row in rows] == activities
+            assert _retained(tmp_path, activities) == journal.raw

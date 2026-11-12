@@ -1,9 +1,16 @@
-"""Recovery of settled empty length replies, carried by the existing checkpoint.
+"""Recovery of settled replies that did not end as a final, carried by the existing checkpoint.
 
-An informed chance, one source-address pass, then the configured route walk.
-A usable reply or new owner words ends the episode; rounds and Restart do not.
-Only the physical claim marks a send pending. A saved pending claim is uncertain,
-never permission to repeat. No response here teaches a context-window limit.
+An empty length reply: an informed chance, one source-address pass, then the configured route walk.
+A reply with text and no typed call whose provider finish names its output limit or a tool call
+(``unfinished_reply``): its text is kept as written and the informed chance is all; another one
+ends the work as incomplete, saved as that end for any recovery. Only that typed finish is read,
+never the reply's words.
+A usable reply or new owner words ends an episode; rounds and Restart do not.
+Each attempt of a step is saved pending under its own id before dispatch; only a known end of the
+current attempt lets its owner's replacement (wire, image, context) follow, saved pending again.
+A saved pending claim is uncertain, never permission to repeat: a call that returned with no known
+end stays claimed, and only the execution that heard it return keeps the round's unknown-outcome
+rails. No response here teaches a context-window limit.
 """
 from __future__ import annotations
 
@@ -11,7 +18,12 @@ import copy
 from types import SimpleNamespace
 from typing import Any
 
+from ouroboros._usage_response import OUTPUT_LIMIT_FINISH_REASONS, TOOL_CALL_FINISH_REASONS
+from ouroboros.transport_custody import attempt_end_known
+
 KEY = "_output_exhaustion_recovery"
+UNFINISHED_KEY = "_unfinished_reply_recovery"
+RECORD_KEYS = (KEY, UNFINISHED_KEY)  # the episodes a new execution's recovery carries (``working_checkpoint``)
 KIND = "llm_output_exhausted"
 REASON = "output_recovery_exhausted"
 
@@ -40,55 +52,141 @@ def binding(ctx: Any) -> list:
                               overrides=waiter.overrides if waiter else None))
 
 
+def response_facts(tool_ctx: Any) -> dict:
+    """A fresh projection for one ordinary dispatch to fill (``loop_llm_call._replace_response_meta``)."""
+    tool_ctx._round_response_facts = {}
+    return tool_ctx._round_response_facts
+
+
+def unfinished_finish(tool_ctx: Any, msg: dict) -> str:
+    """That projection's finish when a usable reply with text and no typed call ended at its output
+    limit or for a tool call; '' otherwise (stop, end_turn, absent, any typed call)."""
+    facts = getattr(tool_ctx, "_round_response_facts", None) or {}
+    finish = str(facts.get("finish_reason") or "") if facts.get("finish_reason_present") is True else ""
+    typed = finish.strip().lower() in OUTPUT_LIMIT_FINISH_REASONS | TOOL_CALL_FINISH_REASONS
+    return finish if typed and not msg.get("tool_calls") and str(msg.get("content") or "").strip() else ""
+
+
+def _answered(ctx: Any, msg: dict) -> None:
+    """A usable reply ends the episodes; an unfinished one keeps its own for ``unfinished_reply``."""
+    ctx.accumulated_usage.pop(KEY, None)
+    if not unfinished_finish(ctx.tools._ctx, msg):
+        ctx.accumulated_usage.pop(UNFINISHED_KEY, None)
+
+
+def _unfinished_cause(finish: str) -> str:
+    return (f"at its output limit (finish_reason={finish})" if finish.strip().lower() in OUTPUT_LIMIT_FINISH_REASONS
+            else f"with a tool-call finish (finish_reason={finish}) but no typed tool call")
+
+
+def unfinished_reply(ctx: Any, msg: dict) -> Any:
+    """The ordinary no-call consumer: ``False`` unless the reply is unfinished. Its text, reasoning and custody
+    then stay in the transcript as written; the episode's first buys one informed ordinary turn (``None``), and
+    another ends the work as incomplete with that text kept (``finish``), never as a completed answer."""
+    from ouroboros.anthropic_native_custody import custody_private_key
+    from ouroboros.working_checkpoint import save_or_log
+    cut = unfinished_finish(ctx.tools._ctx, msg)
+    if not cut:
+        return False
+    usage, revision = ctx.accumulated_usage, _owner_revision(ctx)
+    record = usage.get(UNFINISHED_KEY)
+    ctx.messages.append({"role": "assistant", "content": msg["content"], **{
+        key: value for key, value in msg.items() if key in ("reasoning_details", "reasoning_content")
+        or custody_private_key(key)}})
+    if record and record["owner_revision"] >= revision:  # its informed turn ended the same way
+        record["finishes"].append(cut)
+        record["stage"] = "exhausted"
+        save_or_log(ctx, "ready")  # the latest words and finishes outlive a crash before the result write
+        return finish(ctx, key=UNFINISHED_KEY)
+    usage[UNFINISHED_KEY] = {"stage": "informed", "finishes": [cut], "owner_revision": revision}
+    _loop()._append_or_merge_user_message(ctx.messages, (
+        f"[SYSTEM NOTICE]\nThe provider ended your previous reply {_unfinished_cause(cut)}; it is kept above as "
+        "written and was not delivered as a final answer. Decide how to continue: complete it, use a tool, or give "
+        "an honest final report. Another reply ended this way ends the work as incomplete."))
+    # Words, fact and allowance are one saved transition. This runs on the loop's own context, past the model-call
+    # scope ``_save`` needs; a ready state repeats its round, and a failed write is retried before the claimed send.
+    save_or_log(ctx, "ready")
+    return None
+
+
 def ready_for_fallback(usage: dict) -> bool:
     return (usage.get(KEY) or {}).get("stage") == "fallback"
 
 
+def _pending(usage: dict) -> str:
+    """The episode whose claimed send is unconfirmed; one claim is held at a time."""
+    return next((key for key in RECORD_KEYS if (usage.get(key) or {}).get("pending")), "")
+
+
+def _cut_ended(usage: dict) -> bool:
+    """A typed-cut episode saved as ended: what is left is its terminal, never another send."""
+    return (usage.get(UNFINISHED_KEY) or {}).get("stage") == "exhausted"
+
+
 def no_recap(usage: dict) -> bool:
-    record = usage.get(KEY) or {}
-    return bool(record.get("pending") or record.get("stage") in {"fallback", "exhausted"})
+    spent = (usage.get(KEY) or {}).get("stage") in {"fallback", "exhausted"}
+    return bool(_pending(usage) or _cut_ended(usage) or spent)
 
 
 def next_step(usage: dict) -> str:
     """Only our own failure ends this episode; other failure/control rails win."""
-    if (_loop().provider_no_call_source(usage, False)[0]
-            or usage.get("_last_llm_error_kind") not in {KIND, "output_recovery_interrupted"}):
+    if usage.get("_last_llm_error_kind") == "output_recovery_interrupted":
+        return "finish"  # its own gate refused the send, whatever the restored usage still says of that call
+    if _loop().provider_no_call_source(usage, False)[0] or usage.get("_last_llm_error_kind") != KIND:
         return ""
     return "finish" if no_recap(usage) else "inform"
 
 
-def fallback_untried(ctx: Any) -> bool:
+def fallback_untried(usage: dict, target: Any) -> bool:
     """Eligibility only: the physical claim below consumes the binding."""
-    record = ctx.accumulated_usage.get(KEY)
-    return not record or binding(ctx) not in record["tried"]
+    record = usage.get(KEY)
+    return not record or list(target) not in record["tried"]
 
 
-def _invoke(ctx: Any, send: Any, step: str) -> Any:
-    """Use the shared physical claim, so an unstarted Pause/budget wait spends nothing."""
-    from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed
+class _StepAttempts:
+    """One step's physical attempts (``transport_custody.track_physical_attempts``), called before each dispatch.
 
-    usage, record = ctx.accumulated_usage, ctx.accumulated_usage[KEY]
-    prior_stage, target, claimed = record["stage"], binding(ctx), []
-    def claim(reservation):
-        if claimed:
-            raise PhysicalAttemptPreconditionFailed("output recovery send already claimed")
-        claimed.append(reservation.attempt_id)
-        record.update(pending=step, attempt_id=reservation.attempt_id)
-        if step == "fallback":
-            record["tried"].append(target)
-        _save(ctx)
+    Every attempt is saved pending under its own id before dispatch. A further attempt only replaces the current
+    one once that attempt's end was heard as known; whether a refusal earns a replacement stays its owner's rule."""
+
+    def __init__(self, ctx: Any, record: dict, step: str, target: list) -> None:
+        self.ctx, self.record, self.step, self.target = ctx, record, step, target
+        self.attempt, self.ended, self.sent = "", "", False  # the current attempt, its known end, an earlier send
+
+    def __call__(self, reservation: Any) -> None:
+        from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed
+
+        if self.attempt:
+            if not self.ended:  # no known end: its answer could still come, so nothing may overlap it
+                raise PhysicalAttemptPreconditionFailed("output recovery send already claimed")
+            self.sent |= self.ended != "released"
+        elif self.step == "fallback":
+            self.record["tried"].append(self.target)
+        self.attempt, self.ended = reservation.attempt_id, ""
+        self.record.update(pending=self.step, attempt_id=reservation.attempt_id)
+        _save(self.ctx)  # every send of this step is saved pending before dispatch, replacements included
+
+    def attempt_ended(self, capture: Any, error: Any) -> None:
+        if capture.attempt_id == self.attempt and attempt_end_known(capture, error):
+            self.ended = capture.state
+
+
+def _invoke(ctx: Any, send: Any, step: str, key: str = KEY) -> Any:
+    """Track this step's physical attempts, so an unstarted Pause/budget wait spends nothing."""
+    usage, record = ctx.accumulated_usage, ctx.accumulated_usage[key]
+    prior_stage, target = record["stage"], binding(ctx)
+    attempts = _StepAttempts(ctx, record, step, target)
     def refund_unsent():
-        capture = _loop().last_physical_attempt_capture()
-        if (claimed and capture is not None and capture.attempt_id == claimed[0]
-                and capture.state == "released"):
-            claimed.clear()
+        if attempts.attempt and attempts.ended == "released":
             record.pop("pending", None)
-            record["stage"] = prior_stage
-            if step == "fallback":
-                record["tried"].remove(target)
+            if not attempts.sent:  # nothing of this step was sent: it stays owed
+                attempts.attempt = ""
+                record["stage"] = prior_stage
+                if step == "fallback":
+                    record["tried"].remove(target)
             _save(ctx)
     prior_cap, ctx.attempt_cap = ctx.attempt_cap, 1
-    prior_claim, ctx.physical_send_claim = getattr(ctx, "physical_send_claim", None), claim
+    prior_claim, ctx.physical_send_claim = getattr(ctx, "physical_send_claim", None), attempts
     try:
         result = send()  # preparation helpers run before the Main-only claim scope
     except BaseException:
@@ -98,8 +196,11 @@ def _invoke(ctx: Any, send: Any, step: str) -> Any:
         ctx.attempt_cap = prior_cap
         ctx.physical_send_claim = prior_claim
     refund_unsent()
-    record.pop("pending", None)
-    if claimed:
+    if result[0] is not None or attempts.ended:
+        record.pop("pending", None)
+    elif attempts.attempt:  # no reply, no known end: the saved claim stands; only this execution heard the call return
+        ctx.tools._ctx._output_recovery_returned_unknown = attempts.attempt
+    if attempts.attempt and key == KEY:  # the empty episode's ladder; an informed turn stays owed until a reply
         record["last_failure"] = dict(usage.get("_last_llm_failure") or {})
         record["last_failure_kind"] = usage.get("_last_llm_error_kind", "")
         if step != "informed" or usage.get("_last_llm_error_kind") != KIND:
@@ -110,27 +211,31 @@ def _invoke(ctx: Any, send: Any, step: str) -> Any:
 def call(ctx: Any, ordinary_call: Any) -> tuple:
     """Wrap the ordinary call; preserve transport, unknown and control ownership."""
     usage = ctx.accumulated_usage
-    record = usage.get(KEY)
-    if record and not record.get("pending") and record["owner_revision"] < _owner_revision(ctx):
-        usage.pop(KEY)
-        record = None
-    if record and record.get("pending"):
-        record.update(stage="exhausted", interrupted=True)
+    for key in RECORD_KEYS:  # new owner words end an episode; never a claimed send's unconfirmed outcome
+        if (stale := usage.get(key)) and not stale.get("pending") and stale["owner_revision"] < _owner_revision(ctx):
+            usage.pop(key)
+    returned_here = getattr(ctx.tools._ctx, "_output_recovery_returned_unknown", "")  # each start builds a new context
+    interrupted = (pending := _pending(usage)) and usage[pending].get("attempt_id") != returned_here
+    if interrupted:
+        usage[pending].update(stage="exhausted", interrupted=True)
+    if interrupted or _cut_ended(usage):
         usage["_last_llm_error_kind"] = "output_recovery_interrupted"
         return None, None, ctx.active_context_mode
+    record = usage.get(KEY)
     fallback = bool(getattr(ctx, "output_recovery_fallback", False))
     if record and record["stage"] == "smaller" and not fallback:
         return _send_smaller(ctx, None)
     if record and record["stage"] != "informed" and not fallback:
         usage["_last_llm_error_kind"] = KIND
         return None, None, ctx.active_context_mode
-    msg, cost, mode = (_invoke(ctx, lambda: ordinary_call(ctx), "fallback" if fallback else "informed")
-                       if record else ordinary_call(ctx))
+    claimed = KEY if record else UNFINISHED_KEY if UNFINISHED_KEY in usage else ""  # an owed informed turn
+    msg, cost, mode = (_invoke(ctx, lambda: ordinary_call(ctx), "fallback" if fallback else "informed", claimed)
+                       if claimed else ordinary_call(ctx))
     if msg is not None:
-        usage.pop(KEY, None)
+        _answered(ctx, msg)
         return msg, cost, mode
     if usage.get("_last_llm_error_kind") != KIND or _loop().provider_no_call_source(usage, False)[0]:
-        if record:
+        if claimed:
             _save(ctx)
         return msg, cost, mode
     if record is None:
@@ -203,29 +308,37 @@ def _send_smaller(ctx: Any, cost: Any) -> tuple:
         if refused is not None and getattr(refused, "predicted_free_tokens", None) is None:
             # The smaller send's own provider refusal is window evidence like any other; empty replies are not.
             from ouroboros.context_anchor import record_refused_input
-            record_refused_input(usage, ctx.context_fit_plan, _refusal_window(ctx, fit, refused)[1])
+            record_refused_input(usage, ctx.context_fit_plan, _refusal_window(ctx, fit, refused)[1],
+                                 measured=fit.measurement.anchor_input_tokens is not None)
     if msg is not None:
-        usage.pop(KEY, None)
+        _answered(ctx, msg)
     _save(ctx)
     return msg, float(cost or 0.0) + float(retry_cost or 0.0), ctx.active_context_mode
 
 
-def finish(ctx: Any, *, reason: str = REASON) -> tuple:
+def finish(ctx: Any, *, reason: str = REASON, key: str = "") -> tuple:
     """Preserve existing model bytes and files, never generate an explanation."""
     from ouroboros.task_finalization import set_terminal_host_notice
     usage = ctx.accumulated_usage
-    record = usage.get(KEY) or {}
+    key = key or _pending(usage) or (UNFINISHED_KEY if _cut_ended(usage) else KEY)
+    record = usage.get(key) or {}
     record["stage"] = "exhausted"
     notice = ("Work is incomplete: a recovery attempt was interrupted and its outcome is unconfirmed. "
-              "It was not repeated." if record.get("interrupted") else
+              "It was not repeated." if record.get("interrupted") or record.get("pending") else
+              f"Work is incomplete: the provider again ended the reply {_unfinished_cause(record['finishes'][-1])} "
+              "after one informed turn; the replies stay as written and no extra generation summarized the failure."
+              if key == UNFINISHED_KEY else
               "Work is incomplete: the model returned empty length-limited replies and the permitted "
               "recovery steps did not produce an answer. No extra generation was made to summarize the failure.")
     notice += " Saved work remains available; choose whether and how to continue."
-    candidate = _loop()._live_delivery_candidate(ctx)
-    saved = candidate.full_text if candidate is not None else _loop()._last_assistant_text(ctx.messages)
+    candidate, kept = _loop()._live_delivery_candidate(ctx), _loop()._last_assistant_text(ctx.messages)
+    if candidate is not None and key == UNFINISHED_KEY and candidate.full_text == kept:  # its own end, saved composed
+        ctx.tools._ctx._delivery_candidate = ctx.delivery_candidate = candidate = None
+    saved = candidate.full_text if candidate is not None else kept
+    # Stamped before composing: the composer may end this rail on the owner's Stop now.
+    usage.update(execution_status="infra_failed" if reason == REASON else "failed", reason_code=reason)
     text, usage, trace = _loop()._forced_fallback_result(
         ctx, ctx.llm_trace, saved or notice, reason, source="output_exhaustion_no_recap", host_words=not saved)
-    usage.update(execution_status="infra_failed" if reason == REASON else "failed", reason_code=reason)
     trace["output_recovery"] = copy.deepcopy(record)
     set_terminal_host_notice(usage, str(usage.get("terminal_host_notice") or ""), notice)
     return text, usage, trace

@@ -295,7 +295,6 @@ def test_finish_preserves_visible_empty_inheritance_and_shipped_value(onboarding
     assert saved["OUROBOROS_MODEL_FALLBACKS"] == ""
 
 
-@pytest.mark.serial
 def test_explicit_preset_recovery_previews_main_reviews_then_saves_visible_draft(onboarding, pool_seams):
     """A broken CLI inventory does not replace a working Main with keyless API defaults:
     every reviewer row the preview proposes runs on Main, and the visible draft is saved
@@ -333,7 +332,6 @@ def test_explicit_preset_recovery_previews_main_reviews_then_saves_visible_draft
     assert onboarding.calls["supervisor"] == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("model", ["", "openai/no-key-model"])
 def test_main_review_recovery_does_not_invent_main_access(onboarding, model):
     response = onboarding.client.post("/api/onboarding/subagents/preview", json={
@@ -343,3 +341,26 @@ def test_main_review_recovery_does_not_invent_main_access(onboarding, model):
     assert response.status_code == 400, response.text
     assert not onboarding.settings_path.exists()
     assert onboarding.calls["snapshot"] == 0
+
+
+@pytest.mark.parametrize("subscriptions,local", [(False, False), (True, False), (False, True)])
+def test_named_only_api_connections_survive_atomic_completion(onboarding, subscriptions, local):
+    rows = [{"kind": "openai-compatible", "name": name, "label": name.title(),
+             "base_url": f"http://127.0.0.1:{port}/v1", **({"api_key": "b"} if name == "beta" else {})}
+            for name, port in (("alpha", 41001), ("beta", 41002))]
+    main, light = (f"openai-compatible@{name}::same-model" for name in ("alpha", "beta"))
+    payload = {**WIZARD_PAYLOAD, "OPENROUTER_API_KEY": "", "OUROBOROS_CONNECTIONS": rows,
+               "OUROBOROS_MODEL": main, "OUROBOROS_MODEL_LIGHT": light, "OUROBOROS_MODEL_FALLBACKS": "",
+               "subscriptionsConnected": subscriptions}
+    if local:
+        payload.update(LOCAL_MODEL_SOURCE="/tmp/fixture.gguf", LOCAL_ROUTING_MODE="fallback")
+    preview = onboarding.client.post("/api/onboarding/subagents/preview", json=payload)
+    assert preview.status_code == 200, preview.text
+    assert not onboarding.settings_path.exists()
+    response = onboarding.client.post("/api/onboarding/complete", json=payload)
+    assert response.status_code == 200, response.text
+    saved = onboarding.saved()
+    assert saved["OUROBOROS_CONNECTIONS"] == rows
+    assert (saved["OUROBOROS_MODEL"], saved["OUROBOROS_MODEL_LIGHT"], saved["OUROBOROS_MODEL_FALLBACKS"]) == (main, light, "")
+    assert saved[ONBOARDING_COMPLETED_KEY]
+    assert onboarding.calls["snapshot"] == (2 if subscriptions else 0)

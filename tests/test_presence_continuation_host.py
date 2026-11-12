@@ -6,13 +6,15 @@ reviews its own result, leaves that review for an addressed message and parks on
 the Host's own gate, execution registry, admission, in-flight budget and endpoints decide;
 the admitted behavior selects ``review_change``, so the Host's admission is the authority
 that lets the author review its result.
+
+A parked author is its conversation's sole reader: a later event of that conversation reaches it
+as a wake, heard by the Host and never a new turn (CREATING_SKILLS "Places").
 """
 
 from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
 
-import functools
 import json
 import pathlib
 import time
@@ -24,13 +26,19 @@ from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import run_presence_turn
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_host_service_api import _seed_token
+from tests.test_place_conversation_work import attention
 from tests.test_presence_continuation import (
     ANSWER, NEW_WORDS, author, deliver, finish, harness as harness, parked, resumed, wait_for,
 )
 
 _TOKEN = "presence-token"
 _HEADERS = {"X-Skill-Token": _TOKEN}
-pytestmark = pytest.mark.serial
+
+
+def heard_by(h, number, author_ref):
+    """The Host heard event ``number`` for the parked author: settled at once, no turn and no speech of its own."""
+    seen = attention(h, f"telegram:bot-1:{number}")
+    return (seen.get("decision"), seen.get("reason"), seen.get("recipient")) == ("heard", "current_author", author_ref)
 
 
 class _Quick:
@@ -89,6 +97,9 @@ def _seed_reviewing_behavior(data_dir: pathlib.Path) -> str:
 
 @pytest.fixture
 def host(harness, monkeypatch):
+    from tests.conversation_carrier_support import host_lane
+
+    host_lane(monkeypatch, harness.data)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_args, **_kwargs: (True, ""))
     monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
     monkeypatch.setattr("supervisor.consciousness_carriers.autonomous_work_enabled", lambda *_: True, raising=False)
@@ -134,14 +145,68 @@ def poll(h, ref):
 
 
 def test_identity_advertises_the_continuation_version(host):
-    assert host.client.get("/identity", headers=_HEADERS).json()["presence_continuation_version"] == 1
+    identity = host.client.get("/identity", headers=_HEADERS).json()
+    assert identity["presence_continuation_version"] == 1  # deployed consumers compare the scalar exactly
+    assert identity["presence_continuation_versions"] == [1, 2]
 
 
-def test_v1_consumer_gets_the_envelope_the_next_event_runs_and_the_late_result_polls_once(host):
+def test_v2_early_answer_lends_nothing_and_the_real_park_returns_the_reservation_once(host, monkeypatch):
+    import threading
+    from ouroboros.conversation_lease import live_author
+
+    h = host
+    original = h.Agent.handle_task
+
+    def opens_intake(self, task):
+        # ``OuroborosAgent._handle_task_scoped`` fires it once its prepared loop opens intake; this harness
+        # agent runs the loop directly, so it fires it here, twice: a repeat answers nothing again.
+        callback = getattr(self, "intake_opened_callback", None)
+        for _ in range(2):
+            callback(task)
+        return original(self, task)
+
+    monkeypatch.setattr(h.Agent, "handle_task", opens_intake)
+    proceed, step = threading.Event(), author(deliver)
+
+    def held(messages):
+        assert proceed.wait(60), "the test never let the author's model call return"
+        return step(messages)
+
+    h.script = held
+    reservations = h.client.app.state.host_service_context._inflight
+    first = turn(h, 42, version=2).json()
+    ref = first["continuation_ref"]
+    assert (first["status"], first["continuation_version"], first["turn_ref"]) == ("continuing", 2, ref)
+    record = load_task_result(h.data, ref)["presence_continuation"]
+    assert "lent_at" not in record and "first_lent_at" not in record and record["continuation_version"] == 2
+    assert reservations["telegram-bot:presence"] == 1 and live_author(record["conversation_key"], drive_root=h.data) == ref
+    proceed.set()
+    wait_for(lambda: parked(h, ref), what="the review park")
+    wait_for(lambda: reservations["telegram-bot:presence"] == 0, what="the park's return of the reservation")
+    record = load_task_result(h.data, ref)["presence_continuation"]
+    assert record["lent_at"] and record["first_lent_at"] and record["initial"] == {
+        "status": "continuing", "outcome": "deferred", "text": "", "output_ref": "", "work_ref": ""}
+    h.quick.add("telegram:bot-1:43")  # armed, never run: the parked author is this conversation's sole reader
+    second = turn(h, 43, NEW_WORDS, version=2).json()
+    assert (second["status"], second["outcome"], second["text"]) == ("completed", "silent", "") and heard_by(h, 43, ref)
+    assert turn(h, 42, version=2).json() == first  # still the write-once envelope
+    h.release.set()
+    wait_for(lambda: poll(h, ref).status_code == 200, timeout=60, what="the late result")
+    late = poll(h, ref).json()
+    assert (late["text"], late["continuation_version"]) == (ANSWER, 2)
+    # The woken author's final model send carried event 43 once, whole, as its place event: that is the last
+    # input its answer covers, so the reply anchors there, with 43's exact captured message.
+    assert str(h.inputs[-1]).count(NEW_WORDS) == 1 and len(h.reviews) == 1
+    assert late["reply_anchor"] == {"source_event_id": "telegram:bot-1:43", "message": {"message_id": "43"}}
+    wait_for(lambda: reservations["telegram-bot:presence"] == 0, what="no second return")
+    assert reservations["telegram-bot:presence"] == 0
+
+
+def test_v1_consumer_gets_the_envelope_the_next_event_wakes_its_author_and_the_late_result_polls_once(host):
     h = host
 
     def after_wake(messages):
-        assert NEW_WORDS in resumed(messages)
+        assert str(messages).count(NEW_WORDS) == 1  # event 43, once, as its place event
         return deliver()
 
     h.script = author(after_wake)
@@ -151,10 +216,11 @@ def test_v1_consumer_gets_the_envelope_the_next_event_runs_and_the_late_result_p
     assert first["continuation_ref"] == first["turn_ref"] and first["work_ref"] == ""
     pending = poll(h, first["continuation_ref"])
     assert pending.status_code == 202 and pending.json()["status"] == "pending" and pending.json()["outputs"] == []
-    # Cap 1: the next event of the same conversation is answered while the author waits.
-    h.quick.add("telegram:bot-1:43")
+    # The next event of the same conversation is answered at once while the author waits: heard for it.
+    h.quick.add("telegram:bot-1:43")  # armed, never run: the parked author is this conversation's sole reader
     second = turn(h, 43, NEW_WORDS).json()
-    assert (second["status"], second["text"]) == ("completed", "Noted.")
+    assert (second["status"], second["outcome"], second["text"]) == ("completed", "silent", "")
+    assert heard_by(h, 43, first["continuation_ref"])
     assert turn(h, 42).json() == first  # replay: the identical write-once envelope, nothing rerun
     h.release.set()
     wait_for(lambda: poll(h, first["continuation_ref"]).status_code == 200, timeout=60, what="the late result")
@@ -175,9 +241,11 @@ def test_v0_consumer_keeps_the_legacy_shape_and_waits_for_the_terminal(host):
     worker = threading.Thread(target=lambda: box.update(body=turn(h, 42, version=None).json()), daemon=True)
     worker.start()
     wait_for(lambda: (load_task_result(h.data, _turn_id(h, 42)) or {}).get("presence_continuation"), what="the park")
-    # The legacy request still waits, but the conversation and the active slot are free.
-    h.quick.add("telegram:bot-1:43")
-    assert turn(h, 43, NEW_WORDS, version=None).json()["text"] == "Noted."
+    # The legacy request still waits; the next event is answered at once, heard for the parked author.
+    h.quick.add("telegram:bot-1:43")  # armed, never run: the parked author is this conversation's sole reader
+    second = turn(h, 43, NEW_WORDS, version=None).json()
+    assert (second["status"], second["outcome"], second["text"]) == ("completed", "silent", "")
+    assert "continuation_ref" not in second and heard_by(h, 43, _turn_id(h, 42))
     assert "body" not in box
     h.release.set()
     worker.join(60)
@@ -319,8 +387,6 @@ def test_initiated_turn_outlives_the_callers_operation_bound(host, monkeypatch):
     h = host
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr("tests.presence_legacy_helpers._INITIATION_MARGIN_SEC", 0.5)
-    monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
-                        functools.partial(run_presence_turn, agent_factory=lambda **_kw: h.Agent()))
     gate = threading.Event()
     callers_scope = usage_accounting.UsageScope(task_id="the-initiating-task", root_task_id="the-initiating-task")
     seen = {}
@@ -329,12 +395,13 @@ def test_initiated_turn_outlives_the_callers_operation_bound(host, monkeypatch):
         from ouroboros.model_wait import dispatch_deadline_remaining_sec
 
         assert gate.wait(30)
-        # On the turn's own thread, after the caller's bound passed: its one-second operation
-        # deadline was never adopted (only the explicit calendar bounds the turn), and the
-        # turn's own controls (Stop, calendar, ceiling) report nothing.
-        assert dispatch_deadline_remaining_sec() > 86_400
+        # On the turn's own carrier, after the caller's bound passed: the initiated turn is a conversation-lane
+        # turn (one execution model), admitted from durable facts and started from no caller context — the
+        # caller's one-second operation deadline was never adopted, and neither was its explicit calendar (the
+        # retired proactive thread carried that); the turn's own controls (Stop, calendar, ceiling) report nothing.
+        assert dispatch_deadline_remaining_sec() is None
         assert h.ctxs[0].model_wait_context.control_reason() is None
-        # The caller's money attribution stays with the caller; its explicit calendar carries.
+        # The caller's money attribution stays with the caller.
         seen.update(scope=usage_accounting.current_usage_scope(), calendar=_CALENDAR.get())
         return finish("final", message="Hello from the initiated cycle.")
 
@@ -354,8 +421,8 @@ def test_initiated_turn_outlives_the_callers_operation_bound(host, monkeypatch):
     stored = load_task_result(h.data, result["turn_ref"])
     assert stored["status"] == "completed" and stored["metadata"]["presence_result_text"] == "Hello from the initiated cycle."
     assert h.calls == 1
-    # The caller's money attribution stayed with the caller; its explicit calendar carried.
-    assert seen["scope"] is not callers_scope and "2099-01-01T00:00:00+00:00" in seen["calendar"]
+    # The caller's money attribution stayed with the caller; the carrier started from no caller context.
+    assert seen["scope"] is not callers_scope and not seen["calendar"]
 
 
 def _proactive_id(h, prompt, dedupe):
@@ -370,8 +437,6 @@ def _proactive_id(h, prompt, dedupe):
 def test_an_initiated_continuing_envelope_reaches_the_initiating_call(host, monkeypatch):
     """Finding 4: the initiating call is a version-1 consumer; a continuing author's first envelope reaches it."""
     h = host
-    monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
-                        functools.partial(run_presence_turn, agent_factory=lambda **_kw: h.Agent()))
     h.script = author(deliver)
     result = _initiate(h, "Report the status.", "release")
     assert (result["status"], result["outcome"], result["text"], result["output_ref"]) == ("continuing", "deferred", "", "")
@@ -391,22 +456,25 @@ def test_an_initiated_continuing_envelope_reaches_the_initiating_call(host, monk
 
 def test_reporting_v1_receipts_own_outgoing_history_and_reach_the_resuming_author(host):
     h = host
-    second_ref = _turn_id(h, 43)
+    earlier_ref = _turn_id(h, 41)
 
     def after_wake(messages):
         note = resumed(messages)
-        # The receipt of the newer turn's reply, reported while this author waited, is a fact of its reentry.
-        assert f"delivery delivered for turn {second_ref}" in note and "Noted." in note
+        # The receipt of the earlier turn's reply, reported while this author waited, is a fact of its reentry.
+        assert f"delivery delivered for turn {earlier_ref}" in note and "Noted." in note
         return deliver()
 
     h.script = author(after_wake)
+    # An earlier event of the conversation is answered by its own turn before the author starts (a later one would
+    # reach the parked author, its sole reader); its transport reports that reply only while the author waits.
+    h.quick.add("telegram:bot-1:41")
+    earlier = turn(h, 41, "Hello there.", reporting=1).json()
+    assert (earlier["status"], earlier["text"], earlier["turn_ref"]) == ("completed", "Noted.", earlier_ref)
+    assert earlier["delivery_reporting_version"] == 1
     first = turn(h, 42, reporting=1).json()
     assert (first["status"], first["outcome"], first["text"], first["output_ref"]) == ("continuing", "deferred", "", "")
     assert first["delivery_reporting_version"] == 1
-    h.quick.add("telegram:bot-1:43")
-    second = turn(h, 43, NEW_WORDS, reporting=1).json()
-    assert (second["status"], second["text"], second["turn_ref"]) == ("completed", "Noted.", second_ref)
-    assert second["delivery_reporting_version"] == 1
+    wait_for(lambda: parked(h, first["continuation_ref"]), what="the review park")
     chat = h.data / "logs" / "chat.jsonl"
     assert not [row for row in dialogue_test.log_rows(chat) if row.get("direction") == "out"]  # mode 1: receipts own it
 
@@ -417,7 +485,7 @@ def test_reporting_v1_receipts_own_outgoing_history_and_reach_the_resuming_autho
                 "origin": {"kind": "automatic", "task_id": task_id, "source_event_id": source_event_id}}
 
     # The stub turn mints no output ref of its own (it never reaches the pipeline): its receipt names the turn.
-    sent = receipt(second["output_ref"] or second_ref, second_ref, "telegram:bot-1:43", "Noted.")
+    sent = receipt(earlier["output_ref"] or earlier_ref, earlier_ref, "telegram:bot-1:41", "Noted.")
     assert h.client.post("/presence/delivery", headers=_HEADERS, json=sent).status_code == 200
     h.release.set()
     wait_for(lambda: poll(h, first["continuation_ref"]).status_code == 200, timeout=60, what="the terminal")

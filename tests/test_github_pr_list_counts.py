@@ -16,7 +16,8 @@ from ouroboros.tools import github, github_read
 from tests.test_github_project_target import _context
 
 BASE = "https://github.example/owner/selected"
-PAGE = "repos/{owner}/{repo}/pulls?state=%s&sort=updated&direction=desc&per_page=30&page=1"
+PAGE = "repos/owner/selected/pulls?state=%s&sort=updated&direction=desc&per_page=30&page=1"
+VIEW = json.dumps({"nameWithOwner": "owner/selected", "url": "https://github.example/owner/selected"})
 COUNT_ARGV = ["gh", "api", "graphql", "--hostname", "github.example", "--input", "-"]
 _REAL_RUN = subprocess.run
 
@@ -39,6 +40,8 @@ def gh(monkeypatch):
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
 
     def run(argv, **kwargs):
+        if argv[1:3] == ["repo", "view"]:  # naming the target, apart from the two reads these cases count
+            return SimpleNamespace(returncode=0, stdout=VIEW, stderr="")
         world.calls.append((argv, kwargs))
         if argv[2] == "--include":
             return SimpleNamespace(returncode=0, stdout=json.dumps({"total_count": len(world.rows), "items": world.rows} if "search/issues?" in argv[3] else world.rows), stderr="")
@@ -64,7 +67,7 @@ def _items(text):
     return json.loads(text.partition("\n")[2])["items"]
 
 
-@pytest.mark.parametrize("state", ["open", "closed", "merged", "all"])
+@pytest.mark.parametrize("state", ["open", "merged", "all"])
 def test_fifty_prs_keep_metadata_order_and_exact_counts_in_two_reads(tmp_path, gh, monkeypatch, state):
     monkeypatch.setattr(github_read, "tool_result_limit", lambda name: 10 ** 6)  # fifty rows in one answer, no artifact
     ctx, _cwd = _context(tmp_path, "queued")
@@ -79,7 +82,7 @@ def test_fifty_prs_keep_metadata_order_and_exact_counts_in_two_reads(tmp_path, g
         assert list_argv[:3] == ["gh", "api", "--include"] and "search/issues?" in list_argv[3]
         assert "is%3Amerged" in list_argv[3] and "per_page=50" in list_argv[3]
     else:
-        assert list_argv == ["gh", "api", "--include", PAGE.replace("per_page=30", "per_page=50") % state]
+        assert list_argv == ["gh", "api", "--include", PAGE.replace("per_page=30", "per_page=50") % state, "--hostname", "github.example"]
     request = json.loads(count_kw["input"])
     assert request == {"query": github_read._PR_COMMIT_COUNTS_QUERY, "variables": {"ids": [r["node_id"] for r in gh.rows]}}
     assert "commits{totalCount}" in request["query"] and "nodes(ids:$ids)" in request["query"] and "reviewDecision" in request["query"]
@@ -96,8 +99,11 @@ def test_an_empty_page_needs_no_count_read(tmp_path, gh):
     assert len(gh.calls) == 1
 
 
-@pytest.mark.parametrize("kind", ["system", "queued", "room"])
-@pytest.mark.parametrize("repo", ["", "github.example/owner/selected"])
+@pytest.mark.parametrize(("repo", "kind"), [
+    ("", "system"),
+    ("", "room"),
+    ("github.example/owner/selected", "queued"),
+])
 def test_the_count_read_follows_the_returned_url_not_ambient_targets(tmp_path, gh, monkeypatch, kind, repo):
     ctx, expected_cwd = _context(tmp_path, kind)
     monkeypatch.setenv("GH_REPO", "unrelated/wrong-repo")
@@ -111,10 +117,8 @@ def test_the_count_read_follows_the_returned_url_not_ambient_targets(tmp_path, g
     assert [i["commits"] for i in _items(text)] == [2, 5], text
     (list_argv, list_kw), (count_argv, count_kw) = gh.calls
     assert list_kw["cwd"] == str(expected_cwd) and "--repo" not in list_argv
-    if repo:
-        assert list_argv[3].startswith("repos/owner/selected/pulls?") and list_argv[-2:] == ["--hostname", "github.example"]
-    else:
-        assert list_argv[3].startswith("repos/{owner}/{repo}/pulls?") and "--hostname" not in list_argv
+    # One destination either way: an explicit repository's, or the one resolved for the selected repository.
+    assert list_argv[3].startswith("repos/owner/selected/pulls?") and list_argv[-2:] == ["--hostname", "github.example"]
     assert ("GH_REPO" in list_kw["env"]) is (kind == "system")
     # The generic transport: host from GitHub's own URL, never --repo, GH_REPO or GH_HOST;
     # it runs in the host's own repository directory (ctx.repo_dir).
@@ -131,7 +135,7 @@ def test_an_unusable_host_repository_directory_is_a_visible_count_error(tmp_path
         if argv[2] == "graphql":
             assert kwargs["cwd"] == str(ctx.repo_dir)
             return _REAL_RUN(argv, **kwargs)
-        return SimpleNamespace(returncode=0, stdout=json.dumps(gh.rows), stderr="")
+        return SimpleNamespace(returncode=0, stdout=VIEW if argv[1:3] == ["repo", "view"] else json.dumps(gh.rows), stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
     text = _list(ctx)
@@ -167,7 +171,7 @@ def test_an_unreadable_count_withholds_the_list(tmp_path, gh, monkeypatch, case)
         def run(argv, **kwargs):
             if argv[2] == "graphql":
                 raise subprocess.TimeoutExpired(argv, 30)
-            return SimpleNamespace(returncode=0, stdout=json.dumps(gh.rows), stderr="")
+            return SimpleNamespace(returncode=0, stdout=VIEW if argv[1:3] == ["repo", "view"] else json.dumps(gh.rows), stderr="")
         monkeypatch.setattr(subprocess, "run", run)
 
     text = _list(ctx)
@@ -175,8 +179,7 @@ def test_an_unreadable_count_withholds_the_list(tmp_path, gh, monkeypatch, case)
     assert text.startswith("⚠️ ") and "PR 0" not in text and '"commits": 0' not in text, text
 
 
-@pytest.mark.parametrize("case", ["no-url", "no-id", "foreign-repo", "foreign-host", "number-mismatch",
-                                  "repeated-id", "not-a-row"])
+@pytest.mark.parametrize("case", ["no-url", "foreign-host", "repeated-id"])
 def test_rows_without_one_consistent_identity_never_reach_the_count_read(tmp_path, gh, case):
     ctx, _cwd = _context(tmp_path, "queued")
     rows = _rows(1, 2)

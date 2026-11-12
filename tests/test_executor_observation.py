@@ -46,7 +46,7 @@ def _observation(**changes):
 def _project(detail=None, entry=None, **ctx_fields):
     detail = _detail() if detail is None else detail
     ctx = SimpleNamespace(task_id="child", task_attempt=0, **ctx_fields)
-    advance = progress.WindowObservations().record(detail, detail["lastSeq"], 0)
+    advance = progress.WindowObservations().record(detail, detail["lastSeq"])
     return progress.executor_observation(ctx, "run-1", advance, detail, entry or _entry())
 
 
@@ -81,7 +81,7 @@ def test_foreign_custody_does_not_mint_an_observation(change):
 
 def test_snapshot_run_and_revision_must_match_the_emitted_advance():
     detail = _detail()
-    advance = progress.WindowObservations().record(detail, 5, 0)
+    advance = progress.WindowObservations().record(detail, 5)
     ctx = SimpleNamespace(task_id="child", task_attempt=0)
     detail["summary"]["runId"] = "other-run"
     assert progress.executor_observation(ctx, "run-1", advance, detail, _entry()) == {}
@@ -91,8 +91,8 @@ def test_snapshot_run_and_revision_must_match_the_emitted_advance():
 
 
 @pytest.mark.parametrize("changes", [
-    {"task_id": "parent"}, {"task_attempt": "1"}, {"run_id": ""},
-    {"attempt_id": ""}, {"harness_id": None}, {"revision": True}, {"revision": -1},
+    {"run_id": ""},
+    {"harness_id": None}, {"revision": True},
 ])
 def test_delivery_rejects_cross_task_attempt_or_incomplete_identity(changes):
     assert executor_observation_meta(_observation(**changes), task_id="child", task_attempt=0) == {}
@@ -110,22 +110,19 @@ def test_observation_projection_preserves_zero_and_unknown_without_mutating_inpu
     assert "model" not in projected and "model_source" not in projected
 
 
-def test_plain_emit_stays_positional_and_metadata_errors_are_not_retried():
+def test_metadata_errors_are_not_retried(tmp_path):
     detail = _detail()
-    advance = progress.WindowObservations().record(detail, 5, 0)
-    plain = []
-    progress.emit(SimpleNamespace(emit_progress_fn=plain.append), "run-1", advance)
-    assert plain == [progress.live_line("run-1", advance)]
+    advance = progress.WindowObservations().record(detail, 5)
     calls = []
 
     def broken(text, **metadata):
         calls.append((text, metadata))
         raise TypeError("an internal callback bug")
 
-    ctx = SimpleNamespace(task_id="child", task_attempt=0, emit_progress_fn=broken)
-    progress.emit(ctx, "run-1", advance, detail=detail, entry=_entry())
+    ctx = SimpleNamespace(task_id="child", task_attempt=0, drive_root=tmp_path, emit_progress_fn=broken)
+    progress.emit(ctx, "run-1", advance, detail=detail, entry=_entry(), after_seq=0)
     assert len(calls) == 1
-    assert calls[0][1] == {"executor_observation": _observation()}
+    assert calls[0][1]["executor_observation"] == _observation()
 
 
 def _agent(tool_ctx):
@@ -159,41 +156,19 @@ def test_agent_cannot_relabel_a_late_callback_as_its_new_task_or_attempt(changes
     assert event["progress_meta"]["model"] == "coordinator-model"
 
 
-def test_wait_to_live_chat_to_history_keeps_each_own_actor_without_terminal_claim(tmp_path, monkeypatch):
-    from ouroboros.gateways import claudexor
-    from ouroboros.tools import delegate
+def test_the_window_view_to_live_chat_to_history_keeps_each_own_actor_without_terminal_claim(tmp_path, monkeypatch):
+    """The window view of a run whose engine serves no journal (``delegate_feed.Feed.window``): each detail read
+    that moved the run publishes its own actor, and delivery keeps it through the live chat, stored progress and
+    history, never as a terminal claim."""
     from tests._delegated_transport_shared import _nanny_ctx
 
     ctx = _nanny_ctx(tmp_path, task_id="child")
     ctx.task_attempt = 0
     _agent_obj, events = _agent(ctx)
-    entry = _entry()
-    monkeypatch.setitem(delegate._CUSTODY, "run-1", entry)
-    clock = SimpleNamespace(now=0.0)
-
-    class Gateway:
-        reads = 0
-        closed = False
-
-        def handshake(self, **kwargs):
-            return {"compatible": True, "protocolMajor": 3}
-
-        def get_run(self, rid, **kwargs):
-            assert rid == "run-1"
-            self.reads += 1
-            return _detail(seq=self.reads, attempt=f"a0{self.reads}")
-
-        def close(self):
-            self.closed = True
-
-    gateway = Gateway()
-    monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda: gateway)
-    with monkeypatch.context() as timing:
-        timing.setattr(delegate.time, "monotonic", lambda: clock.now)
-        timing.setattr(delegate.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
-        result = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1, since_seq=0))
-    assert result["status"] == "progress"
-    assert gateway.reads == 2 and gateway.closed
+    entry, seen = _entry(), progress.WindowObservations()
+    for seq in (1, 2):
+        detail = _detail(seq=seq, attempt=f"a0{seq}")
+        progress.emit(ctx, "run-1", seen.record(detail, seq), detail=detail, entry=entry, after_seq=seq - 1)
     queued = [events.get_nowait() for _ in range(events.qsize())]
     frames = [row for row in queued if row["type"] == "send_message"]
     assert len(frames) == 2

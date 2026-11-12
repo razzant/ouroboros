@@ -12,6 +12,8 @@ It acts on two phases of ``handoff.json`` and nothing else:
 * ``switching`` — an interrupted switch. Resume it by content.
 
 A ``stuck`` transition refuses the boot (exit 3): a mixed tree is never imported.
+Under a deployment policy no captured helper runs: the hook executes this tree's
+own copy with ``MANAGED_HELPER_DIR`` (``managed_entry``), which switches nothing.
 
 Order: files first, each changed path replaced atomically (temp + fsync +
 ``os.replace``), so a crash leaves old-or-new bytes and never a torn file; then
@@ -107,7 +109,7 @@ def _git(root, *args, data=None, check=True):
     for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
         env.pop(key, None)
     proc = subprocess.run(["git", *args], cwd=root, env=env, input=data,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=_DEPS_TIMEOUT_SEC)
     if check and proc.returncode != 0:
         raise RuntimeError("git %s failed rc=%d: %s" % (
             " ".join(args[:2]), proc.returncode, proc.stderr.decode("utf-8", "replace").strip()))
@@ -659,5 +661,34 @@ def main(serving_root):
                 type(exc).__name__, exc))
 
 
+def managed_entry(serving_root, helper_dir):
+    """The package-init hook's entry under a deployment policy: the program is its administrator's, so no
+    captured helper runs and nothing is switched. An ``armed`` adoption is abandoned with the tree untouched
+    (``managed_by_deployment``); its record stays for ``body_adoption.finalize_on_boot`` to archive and tell,
+    and the candidate stays where it is. A ``switched`` tree is attested as ``main`` attests it; a record
+    found unreadable or mid-switch under the lock refuses the boot as ``main`` would."""
+    root, phase = os.path.realpath(serving_root), "unreadable (no record directory)"
+    if os.path.isdir(helper_dir):
+        with _locked(helper_dir):
+            try:
+                handoff = read_handoff(helper_dir)
+                phase = handoff.get("phase")
+            except (OSError, ValueError, AttributeError) as exc:
+                handoff, phase = {}, "unreadable (%s)" % exc
+            if phase == "armed":
+                record(helper_dir, handoff, "abandoned", "managed_by_deployment")
+                _remove_pointer(root)
+                return
+            if phase == "switched" and os.path.realpath(str(handoff.get("repo_dir") or "")) == root:
+                _attest_loaded(root, handoff)
+            if phase not in ("switching", "stuck") and not str(phase).startswith("unreadable"):
+                return
+    _refuse_boot(root, helper_dir, "a body adoption is %s under a deployment policy; its administrator decides what "
+                                   "this tree should be" % phase)
+
+
 if __name__ == "__ouroboros_body_switch__":
-    main(SERVING_ROOT)  # noqa: F821 -- injected by the package-init hook
+    if "MANAGED_HELPER_DIR" in globals():  # a deployment policy's entry: this tree's own copy, read as a file
+        managed_entry(SERVING_ROOT, MANAGED_HELPER_DIR)  # noqa: F821 -- injected by the package-init hook
+    else:
+        main(SERVING_ROOT)  # noqa: F821 -- injected by the package-init hook

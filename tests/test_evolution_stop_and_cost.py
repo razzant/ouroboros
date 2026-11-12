@@ -216,8 +216,8 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
                        "BUDGET_ROOT_FENCES": {}}.items():
         monkeypatch.setattr(q, key, value)
     real_enqueue = q.enqueue_task
-    def enqueue(task, front=False, timeout_retry=False):
-        admitted = real_enqueue(task, front=front, timeout_retry=timeout_retry)
+    def enqueue(task, front=False):
+        admitted = real_enqueue(task, front=front)
         assert not admitted.get("_admission_blocked"), admitted
         assert any(row is admitted for row in q.PENDING)
         enqueued.append(admitted)
@@ -227,7 +227,7 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
     monkeypatch.setattr(q, "load_state", lambda: {"evolution_mode_enabled": evolution_enabled, "owner_chat_id": 0})
 
     q.enforce_task_timeouts()
-    # Variant A: terminal write + retry happen in the off-loop reaper; drain it here.
+    # Variant A: the terminal write happens in the off-loop reaper; drain it here.
     while not q._reap_queue.empty():
         q._reap_timed_out_task(q._reap_queue.get_nowait())
 

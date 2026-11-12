@@ -106,7 +106,62 @@ test('a bounded preview links its complete original; unread ranges are stated by
     const windowHtml = delegatedActivityBodyHtml(delegatedLineView({ activity: windowView }), { expanded: true });
     assert.match(windowHtml, /The run&#39;s journal holds it whole\.|The run's journal holds it whole\./);
     assert.match(windowHtml, /\+4 earlier timeline rows not shown/);
-    assert.match(windowHtml, /Bounded timeline window of run run-1 \(stream_not_listed\)/);
+    assert.match(windowHtml, /Bounded timeline window of run run-1 \(stream_not_listed\); exact originals stay on the run/);
+});
+
+test('after the engine refused the journal a row promises no later read or journal copy, its code and range in Expand', () => {
+    const APOS = "(?:'|&#39;)";
+    const PROMISES = /reads them|holds it whole|stays on the run|on the run(?:'|&#39;)s journal|originals stay|remain on run/;
+    const html = (activity, expanded) => delegatedActivityBodyHtml(delegatedLineView({ activity }), { expanded });
+    const refusedGap = (reason, retryable, final = true) => [{ after_seq: 15, through_seq: 20, reason, retryable, final }];
+    // A window the engine refused for good: the bounded window row is realistic (300 chars and its omission note,
+    // delegate_progress), a second part was cut by this record's own preview.
+    const windowText = `${'Reading the renderer. '.repeat(14)}\n⚠️ OMISSION NOTE: truncated at 300 chars; original length 7000`;
+    const reclaimed = { ...activity(10, 20, [
+        { kind: 'message', actor: 'claude/a01', text: windowText },
+        { kind: 'message', actor: 'claude/a01', text: 'y…', chars: 9000, truncated: true }]),
+        source: { kind: 'timeline_window', reason: 'stream_error:run_expired_by_retention', retryable: false, rows: 2 },
+        gaps: refusedGap('stream_error:run_expired_by_retention', false), omitted: { message: 1 } };
+    const quiet = html(reclaimed, false);
+    assert.match(quiet, new RegExp(`chat-delegated-gap chat-delegated-final">Not all of this run${APOS}s events are shown: its journal can no longer be read, so waiting again will not show the rest\\. The run${APOS}s result is reported separately\\.`));
+    assert.match(quiet, /Reading the renderer\./, 'the window words stay visible');
+    assert.match(quiet, /The rest of it can no longer be read\./);
+    assert.match(quiet, /Not in this row: 1 message \(they can no longer be read\)\./);
+    assert.doesNotMatch(quiet, /stream_error|seq 16/, 'the code and the range stay quiet in the row');
+    assert.doesNotMatch(quiet, PROMISES);
+    const open = html(reclaimed, true);
+    assert.match(open, /Not read: seq 16–20\./, 'the window source line below names the code once');
+    assert.match(open, new RegExp(`Bounded timeline window of run run-1 \\(stream_error:run_expired_by_retention\\); the run${APOS}s journal can no longer be read\\.`));
+    assert.doesNotMatch(open, PROMISES);
+    // Exact events read before the refusal whose original failed to save, and a draft its complete text updated.
+    const lost = activity(10, 20, [{ kind: 'message', actor: 'claude/a01', text: 'z…', chars: 9000, truncated: true, seq: 11, last_seq: 11 },
+        { kind: 'message', actor: 'claude/a01', text: 'Final words.', speech: { key: 'k1', op: 'complete' }, updated: true, seq: 12, last_seq: 12 }],
+    { source: { kind: 'run_events', read_through: 12, events: 2, retained: false },
+        gaps: [{ after_seq: 12, through_seq: 20, reason: 'stream_error:run_expired_by_retention', retryable: false, final: true }] });
+    const lostOpen = html(lost, true);
+    assert.match(lostOpen, /Not read: seq 13–20 \(stream_error:run_expired_by_retention\)\./);
+    assert.match(lostOpen, /The rest of it can no longer be read\./);
+    assert.match(lostOpen, /Updated\. The streamed draft can no longer be read\./);
+    assert.match(lostOpen, /Source: run run-1 seq 11–12 \(retention failed; originals can no longer be read\)/);
+    assert.doesNotMatch(lostOpen, PROMISES);
+    const noTail = { ...lost, through_seq: 12, gaps: [], source: { ...lost.source,
+        reason: 'stream_error:run_expired_by_retention', retryable: false } };
+    const noTailHtml = html(noTail, true);
+    assert.match(noTailHtml, /originals can no longer be read/);
+    assert.doesNotMatch(noTailHtml, PROMISES, 'a refusal is current even when no unread tail needs a gap');
+    // Refused this time: the gap says another wait tries again, without a provisional line or the code.
+    const retryable = { ...reclaimed, parts: [], omitted: {},
+        source: { kind: 'timeline_window', reason: 'stream_error:run_event_not_found', provisional: true, retryable: true, rows: 0 },
+        gaps: refusedGap('stream_error:run_event_not_found', true) };
+    const retryQuiet = html(retryable, false);
+    assert.match(retryQuiet, new RegExp(`Not all of this run${APOS}s events are shown yet: the engine could not read its journal\\. Another wait on the run tries again\\.`));
+    assert.doesNotMatch(retryQuiet, /stream_error|seq 16|shown meanwhile|can no longer/);
+    const retryOpen = html(retryable, true);
+    assert.match(retryOpen, /Not read: seq 16–20\./);
+    assert.match(retryOpen, new RegExp(`Bounded timeline window of run run-1 \\(stream_error:run_event_not_found\\); the engine could not read the run${APOS}s journal\\.`));
+    assert.doesNotMatch(retryOpen, PROMISES);
+    const live = html({ ...retryable, gaps: refusedGap('stream_error:run_event_not_found', true, false) }, false);
+    assert.match(live, new RegExp(`The rest is read at the run${APOS}s next advance or its end\\.`));
 });
 
 test('the row renders its words without a second Expand and keeps Expand for the detail', () => {
@@ -355,6 +410,43 @@ test('a failed exact read is a provisional window that folds once the exact even
         source: { kind: 'timeline_window', reason: 'stream_not_listed', rows: 1 }, parts: [{ kind: 'message', actor: '', text: 'same' }] };
     const legacy = { items: [{ activity: windowRow }, { activity: { ...windowRow } }] };
     assert.deepEqual(visible(legacy), [[['same'], 0], [['same'], 0]]);
+});
+
+test('a later permanent journal refusal repaints earlier rows without changing their raw facts', () => {
+    const earlier = { ...activity(0, 2, [say(1, 'first')]),
+        source: { kind: 'run_events', read_through: 2, events: 2 },
+        gaps: [] };
+    const refused = { ...activity(2, 3, []),
+        source: { kind: 'run_events', read_through: 3, events: 1 },
+        gaps: [{ after_seq: 2, through_seq: 3, reason: 'stream_error:run_expired_by_retention',
+            retryable: false, final: true }] };
+    const record = { items: [{ activity: earlier }, { activity: refused }] };
+    reconcileDelegatedItems({ items: [{ activity: structuredClone(earlier) }] });
+    const before = { items: [{ activity: structuredClone(earlier) }] };
+    reconcileDelegatedItems(before);
+    const priorSignature = before.items[0].delegatedSignature;
+    reconcileDelegatedItems(record);
+    const first = delegatedLineView(record.items[0]);
+    const html = delegatedActivityBodyHtml(first, { expanded: true });
+    assert.notEqual(record.items[0].delegatedSignature, priorSignature,
+        'the later permanent gap changes the current run projection');
+    assert.match(html, /originals can no longer be read/);
+    assert.equal(record.items[0].activity.source.ref, undefined,
+        'the projection did not rewrite the earlier raw source facts');
+});
+
+test('an earlier gap that promised another read follows the journal refused since', () => {
+    const tried = { ...activity(0, 2, [say(1, 'first')]), source: { kind: 'run_events', read_through: 1, events: 1 },
+        gaps: [{ after_seq: 1, through_seq: 2, reason: 'stream_error:run_event_not_found', retryable: true, final: true }] };
+    const refused = { ...activity(1, 3, []), source: { kind: 'timeline_window', reason: 'stream_error:run_expired_by_retention',
+        retryable: false, rows: 0 }, gaps: [{ after_seq: 1, through_seq: 3, reason: 'stream_error:run_expired_by_retention',
+        retryable: false, final: true }] };
+    const record = { items: [{ activity: tried }, { activity: refused }] };
+    reconcileDelegatedItems(record);
+    const html = delegatedActivityBodyHtml(delegatedLineView(record.items[0]), { expanded: true });
+    assert.match(html, /its journal can no longer be read, so waiting again will not show the rest/);
+    assert.doesNotMatch(html, /tries again|reads them/, 'no row promises a read its journal can no longer give');
+    assert.equal(record.items[0].activity.gaps[0].retryable, true, 'the row keeps its own historical fact');
 });
 
 test('the host problem label translates and escapes without rewriting executor evidence', async () => {

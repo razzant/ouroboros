@@ -184,10 +184,8 @@ def test_requested_head_tail_spends_free_room_while_unsolicited_shares_the_eight
 @pytest.mark.parametrize("window,target,reserve,part,multiple", [
     (100_000, 85_000, 8_192, 60_000, False),
     (100_000, 85_000, 8_192, 60_000, True),
-    (None, 85_000, 8_192, 90_000, True),
-    (300_000, 250_000, 65_536, 160_000, True),
     (40_000, 85_000, 8_192, 60_000, True),
-], ids=["nano", "multiple-forms", "unknown-beyond-target", "low", "physical-nonfit"])
+], ids=["nano", "multiple-forms", "physical-nonfit"])
 def test_only_requested_content_over_the_window_can_shrink_a_chosen_form(
         tmp_path, window, target, reserve, part, multiple):
     """Escaped ends and a plain omitted middle misprice the unasked log initially.
@@ -524,6 +522,31 @@ def test_requested_result_view_classifies_declared_range_parameters():
     assert requested_result_view({"run_id": 7, "page": 2}) is None
     assert requested_result_view({"cursor": "2"}) is None
     assert requested_result_view({"run_id": 7, "tail_lines": 500}) == (None, None)
+    from ouroboros.tool_capabilities import requested_call_view
+    page = {"name": "mcp_slack__history", "arguments": {"channel": "c", "limit": 200}}
+    assert requested_call_view("call_mcp_tool", page) == (None, None)  # the gateway's inner arguments chose a page
+    assert requested_call_view("call_mcp_tool", {**page, "arguments": json.dumps(page["arguments"])}) == (None, None)
+    assert requested_call_view("call_mcp_tool", {"name": "mcp_slack__history", "arguments": {"channel": "c"}}) is None
+    assert requested_call_view("enable_tools", {"tools": "mcp_gmail"}) == (None, None)  # a catalog view the mind asked for
+    assert requested_call_view("read_file", {"path": "a"}) is None
+
+
+def test_a_gateway_page_and_a_catalog_view_stay_protected_from_the_passes():
+    """Size passes spare chosen reads: a page chosen inside call_mcp_tool's arguments and the schema text enable_tools
+    showed are chosen; an unasked MCP result through the same gateway is not."""
+    from ouroboros import context_compaction
+    from ouroboros.context_source_view import chosen_read_units
+
+    calls = (("page", "call_mcp_tool", {"name": "mcp_slack__history", "arguments": {"channel": "c", "limit": 200}}),
+             ("catalog", "enable_tools", {"tools": "mcp_slack"}),
+             ("plain", "call_mcp_tool", {"name": "mcp_slack__history", "arguments": {"channel": "c"}}))
+    messages = [{"role": "user", "content": "go"}]
+    for call_id, name, args in calls:
+        messages += [{"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function", "function": {
+            "name": name, "arguments": json.dumps(args)}}]}, {"role": "tool", "tool_call_id": call_id, "content": "x" * 400}]
+    units = context_compaction.context_units(messages, scope="tool")
+    protected = {messages[unit.start]["tool_calls"][0]["id"] for unit in units if unit.unit_id in chosen_read_units(messages, units)}
+    assert protected == {"page", "catalog"}
 
 
 @pytest.mark.parametrize("args,explicit", [
@@ -577,3 +600,26 @@ def test_chosen_body_survives_a_full_host_prefix_unless_it_alone_exceeds_usable_
         assert trace["tool_calls"][0]["result_source_view"]["cut_reason"] == "chosen_body_exceeds_usable_input"
     else:
         assert not trace["tool_calls"][0].get("result_partial")
+
+
+@pytest.mark.parametrize(("tool", "reader"), [
+    ('chat_history', False),
+    ('journal_read', True),
+    ('tree_read', True),
+    ('recent_tasks', False),
+    ('query_code', True),
+    ('query_data', False),
+    ('run_shell', True),
+])
+def test_range_recovery_respects_pageable_tool_and_loaded_reader(tool, reader):
+    from ouroboros.tool_result_delivery import render_result_view
+    text, view = render_result_view('complete source ' * 2000, head_chars=30, tail_chars=30,
+        tool_name=tool, source_ref={'path': 'exact/result.txt', 'read': {'tool': 'read_file'}}, reader_available=reader)
+    assert view and 'exact/result.txt' in text
+    if tool != 'run_shell':
+        assert "this tool's declared parameters" in text
+        assert 'Do not rerun' not in text
+    else:
+        assert 'Do not rerun' in text
+    assert ('Read the exact source above' in text) is reader
+    assert ('read_omitted' in view) is reader

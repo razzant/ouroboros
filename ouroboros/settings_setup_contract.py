@@ -9,15 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.config import SETTINGS_DEFAULTS, VALID_RUNTIME_MODES
 from ouroboros.review_run_isolation import run_cap_from_env
-from ouroboros.provider_models import (
-    ANTHROPIC_DIRECT_DEFAULTS,
-    CLOUDRU_DIRECT_DEFAULTS,
-    DEEPSEEK_DIRECT_DEFAULTS,
-    ZAI_DIRECT_DEFAULTS,
-    MINIMAX_DIRECT_DEFAULTS,
-    MINIMAX_REGION_ENDPOINTS,
-    OPENAI_DIRECT_DEFAULTS,
-)
+from ouroboros.provider_models import DIRECT_PROVIDER_DEFAULTS, MINIMAX_REGION_ENDPOINTS
 from ouroboros.secret_masking import (
     CONFIGURED_SECRET_PLACEHOLDER,
     MASKED_SECRET_SETTING_KEYS as SECRET_SETTING_KEYS,
@@ -26,7 +18,10 @@ from ouroboros.model_slots import (
     MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY,
     PROCESSING_PREFERENCE_KEY, normalize_model_role_options, normalize_processing_preference,
 )
-from ouroboros.provider_models import parse_claudexor_model, provider_for_model
+from ouroboros.provider_models import compatible_endpoint_configured, parse_claudexor_model, provider_for_model
+from ouroboros.provider_connections import configured_connections, connection_rows, normalize_connections
+from ouroboros.gateway.secret_rows import mask_connections, rehydrate_connections
+from ouroboros.settings_integrity import operator_variables, skill_environ
 
 
 
@@ -129,12 +124,9 @@ _MODEL_DEFAULTS = {
         "consciousness": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"]),
         "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"]),
     },
-    "openai": {key: value for key, value in OPENAI_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "cloudru": {key: value for key, value in CLOUDRU_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "minimax": {key: value for key, value in MINIMAX_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "deepseek": {key: value for key, value in DEEPSEEK_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "zai": {key: value for key, value in ZAI_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "anthropic": {key: value for key, value in ANTHROPIC_DIRECT_DEFAULTS.items() if key != "heavy"},
+    # Every direct provider's own defaults (provider_models.DIRECT_PROVIDER_DEFAULTS), never a second list.
+    **{kind: {key: value for key, value in defaults.items() if key != "heavy"}
+       for kind, defaults in DIRECT_PROVIDER_DEFAULTS.items()},
     # No defaults: model names are server-specific; user must fill all slots.
     "openai-compatible": {"main": "", "light": "", "vision": "", "fallback": ""},
     # Several direct providers and no router: the owner chooses Main; no provider is guessed.
@@ -151,8 +143,8 @@ for _profile_defaults in _MODEL_DEFAULTS.values():
 _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts. Subscription limits and optional provider credits still apply."),
     ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
-    ("review_mode", "Choose review mode", "Advisory vs blocking", "Decide how strict pre-commit review should be before Ouroboros starts modifying itself.", "Pick both review enforcement and the initial runtime mode before Ouroboros starts."),
-    ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", "When subscription quota is exhausted, work waits for renewal or your choice of another account or model. This integration does not enable paid provider credits."),
+    ("review_mode", "Choose review mode", "Advisory vs blocking", "Reviewers read how Ouroboros understood a request, its plans, its results and its changes. Decide whether their critical findings block the work or only inform Ouroboros.", "Pick both review enforcement and the initial runtime mode before Ouroboros starts."),
+    ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
     ("summary", "Review before launch", "Final check", "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
@@ -164,6 +156,10 @@ _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "la
     ("openrouter-key", "openrouterKey", "OPENROUTER_API_KEY", "s-openrouter", "OpenRouter API Key", "sk-or-v1-...", "Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.", "password", "primary"),
     ("openai-key", "openaiKey", "OPENAI_API_KEY", "s-openai", "OpenAI API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills OpenAI's own model ids.", "password", "primary"),
     ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "Optional. If this is the only remote key, the next step prefills Cloud.ru's own model ids.", "password", "more"),
+    # GigaChat is ready with an authorization key, or a user and password (provider_models.PROVIDER_KINDS).
+    ("gigachat-credentials", "gigachatCredentials", "GIGACHAT_CREDENTIALS", "s-gigachat-credentials", "GigaChat Authorization Key", "Base64 client_id:secret", "Optional. If this is the only remote key, the next step prefills GigaChat's own model ids.", "password", "more"),
+    ("gigachat-user", "gigachatUser", "GIGACHAT_USER", "s-gigachat-user", "GigaChat User", "username", "Basic auth instead of an authorization key, with the password below.", "text", "more"),
+    ("gigachat-password", "gigachatPassword", "GIGACHAT_PASSWORD", "s-gigachat-password", "GigaChat Password", "password", "Basic auth, with the user above.", "password", "more"),
     ("minimax-key", "minimaxKey", "MINIMAX_API_KEY", "s-minimax-key", "MiniMax API Key", "MiniMax API key", "Optional. If this is the only remote key, the next step prefills MiniMax's own model ids.", "password", "more"),
     ("minimax-region", "minimaxRegion", "MINIMAX_REGION", "s-minimax-region", "MiniMax Region", "global_en or cn_zh", "Choose global_en for the global endpoint or cn_zh for the China endpoint.", "text", "more"),
     ("deepseek-key", "deepseekKey", "DEEPSEEK_API_KEY", "s-deepseek-key", "DeepSeek API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills DeepSeek's own model ids.", "password", "more"),
@@ -180,6 +176,7 @@ _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "la
 _PROFILE_SPECS = {
     "openrouter": ("OpenRouter", "OpenRouter is present, so the next step keeps router-style defaults while still saving any extra direct keys you paste here.", "OpenRouter-style routing remains active. OpenRouter stays the source for ids such as openai/gpt-5.6-terra or anthropic/claude-sonnet-5."),
     "openai": ("OpenAI", "OpenAI is present, so the next step prefills OpenAI's own model ids.", "OpenAI-only setup detected. These defaults are explicit and official."),
+    "gigachat": ("GigaChat", "GigaChat is present, so the next step prefills GigaChat's own model ids.", "GigaChat-only setup detected. These defaults use GigaChat's own model ids."),
     "cloudru": ("Cloud.ru Foundation Models", "Cloud.ru is present, so the next step prefills Cloud.ru's own model ids.", "Cloud.ru-only setup detected. These defaults use Cloud.ru's own model ids."),
     "minimax": ("MiniMax", "MiniMax is present, so the next step prefills MiniMax's own model ids.", "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M3.1-Flash."),
     "deepseek": ("DeepSeek", "DeepSeek is present, so the next step prefills DeepSeek's own model ids.", "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-v4-flash for the light lane."),
@@ -200,7 +197,7 @@ _MODEL_SLOTS = _rows(("slot", "stateKey", "settingKey", "inputId", "label", "not
 ))
 
 _REVIEW_MODES = _rows(("value", "label", "tone", "className", "copy"), (
-    ("advisory", "Advisory", "Flexible", "advisory", "Review still runs. After feedback, Ouroboros can fix, reject or finish; raw reviewer findings remain visible."),
+    ("advisory", "Advisory", "Flexible", "advisory", "Reviewers read plans, results and changes; their findings stay visible and Ouroboros decides what to do with them."),
     ("blocking", "Blocking", "Strict", "blocking", "Outside Cyber Pro Access, unresolved critical review findings block commits. Cyber Pro keeps the findings as evidence for Ouroboros's decision."),
 ))
 
@@ -221,6 +218,19 @@ _ACTIVE_LOCAL_KEYS = (
     "USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_CONSCIOUSNESS", "USE_LOCAL_FALLBACK",
 )
 
+_BUDGET_NOTE = (
+    "Spending limits use known spend only: confirmed and estimated prices count toward the applicable limit; "
+    "known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay without a price "
+    "and are not counted as $0: they add nothing to known spend, so unpriced spending alone never triggers a limit. "
+    "Open reservations and unresolved charges are not counted as spending. The Total Budget covers all work: once "
+    "known spend reaches it, new paid calls are refused, API calls with an unknown price included, while known $0 "
+    "calls and subscription or local calls on a route that has charged nothing continue. The Per-task Cost Cap "
+    "covers one task's whole tree, subagents included: once that tree's known spend reaches it, every new model call "
+    "of the tree is refused, known $0 and unpriced calls included. A resumable task pauses with its work saved; "
+    "without a continuation it ends budget-exhausted. Calls already in flight settle normally and can overshoot the "
+    "limit. Raising the cap does not resume a paused task; it must be resumed explicitly."
+)
+
 _BUDGET_FIELDS = [
     {
         "stateKey": "totalBudget",
@@ -229,7 +239,9 @@ _BUDGET_FIELDS = [
         "settingsInputId": "s-total-budget",
         "title": "Total budget",
         "label": "Total Budget (USD)",
-        "note": "Global spend budget across the runtime. Keep this editable even after onboarding.",
+        # Owner 2026-10-03 Q4-A / 2026-10-07: the cap is the limit itself,
+        # decided on known spend; no default share of the wallet or margin.
+        "note": _BUDGET_NOTE,
         "default": float(SETTINGS_DEFAULTS["TOTAL_BUDGET"]),
         "min": "0.01",
         "step": "any",
@@ -241,16 +253,7 @@ _BUDGET_FIELDS = [
         "settingsInputId": "s-settings-per-task-cost",
         "title": "Per-task cost cap",
         "label": "Per-task Cost Cap (USD)",
-        # Owner 2026-10-03 Q4-A / 2026-10-07: the cap is the limit itself, decided
-        # on known spend; no default share of the wallet or margin before it.
-        "note": (
-            "Hard cap over one task's WHOLE tree, subagents included: new model calls are "
-            "refused once the tree's known spend (confirmed and estimated) reaches it. A resumable "
-            "task then pauses with its work saved; a run that cannot be resumed ends as "
-            "budget-exhausted instead. Calls already in flight settle normally and can take the "
-            "total past the cap. Reservations and unresolved charges are shown separately, not "
-            "counted as spending. Raising the cap does not resume a paused task."
-        ),
+        "note": _BUDGET_NOTE,
         "default": float(SETTINGS_DEFAULTS.get("OUROBOROS_PER_TASK_COST_USD", 50.0)),
         "min": "0.01",
         "step": "any",
@@ -359,7 +362,8 @@ def derive_provider_profile(settings: dict) -> str:
     flags = {field["settingKey"]: bool(_string(settings.get(field["settingKey"]))) for field in _PROVIDER_FIELDS}
     if flags["OPENROUTER_API_KEY"]:
         return "openrouter"
-    if flags["OPENAI_COMPATIBLE_BASE_URL"]:
+    # The legacy OPENAI_BASE_URL pair counts too: its OPENAI_API_KEY then belongs to that endpoint.
+    if compatible_endpoint_configured(lambda key: _string(settings.get(key))):
         return "openai-compatible"
     direct = [
         ("OPENAI_API_KEY", "openai"),
@@ -396,15 +400,21 @@ def model_defaults_for_profile(profile: str) -> dict:
 
 
 def build_setup_contract(host_mode: str = "desktop") -> dict:
+    """The choices Settings and the wizard offer: under a deployment policy only the Access levels it allows,
+    and a Supervisor slot its checker fixes is ``managed`` (shown, never edited or written)."""
+    from ouroboros.deployment_policy import CHECKER_KEY, checker, choice_refusal
+
+    managed_checker = checker() is not None
     return {
         "version": 1,
         "hostMode": "web" if host_mode == "web" else "desktop",
         "steps": [dict(item) for item in _STEPS],
         "providerFields": [dict(item) for item in _PROVIDER_FIELDS],
         "providerProfiles": {key: {"label": spec[0], "providerCopy": spec[1], "modelCopy": spec[2]} for key, spec in _PROFILE_SPECS.items()},
-        "modelSlots": [dict(item) for item in _MODEL_SLOTS],
+        "modelSlots": [{**item, "managed": managed_checker and item["settingKey"] == CHECKER_KEY} for item in _MODEL_SLOTS],
         "reviewModes": [dict(item) for item in _REVIEW_MODES],
-        "runtimeModes": [dict(item) for item in _RUNTIME_MODES],
+        "runtimeModes": [dict(item) for item in _RUNTIME_MODES
+                         if not choice_refusal("OUROBOROS_RUNTIME_MODE", item["value"])],
         "localRoutingModes": [dict(item) for item in _LOCAL_ROUTING_MODES],
         "budgetFields": [dict(item) for item in _BUDGET_FIELDS],
         "subscriptionFields": [dict(item) for item in _SUBSCRIPTION_FIELDS],
@@ -436,7 +446,7 @@ def parse_completion_attempt(data: Any) -> Tuple[str, str]:
     return "", "attempt_id must be 16-128 letters, digits, '-' or '_'."
 
 
-def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dict:
+def build_initial_setup_state(settings: dict, host_mode: str = "desktop", document: Optional[dict] = None) -> dict:
     profile = derive_provider_profile(settings)
     defaults = model_defaults_for_profile(profile)
     local_source = _string(settings.get("LOCAL_MODEL_SOURCE"))
@@ -460,6 +470,10 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
         value, error = parse_budget_setting(field["settingKey"], settings.get(field["settingKey"]), use_default_for_blank=True)
         budget_state[field["stateKey"]] = float(field["default"] if error or value is None else value)
     state = {
+        "connections": mask_connections(list(connection_rows(settings.get("OUROBOROS_CONNECTIONS")))),
+        # Read-only here: an older install's endpoint, paired with OPENAI_API_KEY while the dedicated
+        # address is empty (``compatible_endpoint``). No provider field: completion keeps it as saved.
+        "legacyCompatibleBaseUrl": _string(settings.get("OPENAI_BASE_URL")),
         "providerProfile": profile,
         "reviewEnforcement": _string(settings.get("OUROBOROS_REVIEW_ENFORCEMENT")) or str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"]),
         "runtimeMode": _string(settings.get("OUROBOROS_RUNTIME_MODE")) or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"]),
@@ -497,10 +511,35 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
     # takes the profile default. A fresh install's wizard proposes its defaults itself.
     state.update({slot["stateKey"]: _string(settings[slot["settingKey"]]) if slot["settingKey"] in settings
                   else defaults[slot["slot"]] for slot in _MODEL_SLOTS})
+    # The model slots the wizard proposes and may move to another key or a subscription's model (#2969): set by
+    # neither the stored ``document`` (``settings`` when none is given) nor an operator's own variable. Any other
+    # value, blank included, is kept.
+    chosen = set(settings if document is None else document) | set(
+        operator_variables(skill_environ(), [slot["settingKey"] for slot in _MODEL_SLOTS]))
+    state["automaticModels"] = [slot["stateKey"] for slot in _MODEL_SLOTS if slot["settingKey"] not in chosen]
     return state
 
 
-def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False) -> dict:
+def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None) -> dict:
+    """The Summary's optional Consciousness row. It is offered while setup has never completed here
+    (an unticked choice the owner makes now; a completed setup neither shows nor repeats one), with
+    the limits consciousness runs under now, as the runtime's own readers report them. ``enabled``
+    is the control as the state shows it (``None``: unknown). Nothing here is saved or started:
+    a ticked row sends the ordinary Start after the save, from the wizard."""
+    from ouroboros.runtime_limits import (
+        get_consciousness_autonomy, get_consciousness_daily_usd, get_consciousness_max_tasks,
+    )
+
+    return {"offered": not _string(settings.get(ONBOARDING_COMPLETED_KEY)),
+            "enabled": enabled if isinstance(enabled, bool) else None,
+            "autonomy": get_consciousness_autonomy(), "dailyUsd": get_consciousness_daily_usd(),
+            "maxTasks": get_consciousness_max_tasks()}
+
+
+def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
+                          consciousness_enabled: Optional[bool] = None, document: Optional[dict] = None) -> dict:
+    from ouroboros.deployment_policy import policy_state
+
     normalized_host = "web" if host_mode == "web" else "desktop"
     return {
         "hostMode": normalized_host,
@@ -516,7 +555,9 @@ def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_i
         # hardcoding it: a prefilled credential field holds this string, not a key.
         "secretPlaceholder": CONFIGURED_SECRET_PLACEHOLDER,
         "contract": build_setup_contract(normalized_host),
-        "initialState": build_initial_setup_state(settings, normalized_host),
+        "initialState": build_initial_setup_state(settings, normalized_host, document),
+        "consciousnessOffer": consciousness_offer(settings, enabled=consciousness_enabled),
+        "deployment": policy_state(),
     }
 
 
@@ -559,6 +600,15 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             return {}, str(exc)
     secret_keys = secret_provider_setting_keys()
     keys: Dict[str, str] = {}
+    connections = current_settings.get("OUROBOROS_CONNECTIONS", [])
+    if "OUROBOROS_CONNECTIONS" in data:
+        connections, error = normalize_connections(data["OUROBOROS_CONNECTIONS"])
+        if error:
+            return {}, error
+        try:
+            connections = rehydrate_connections(connections, current_settings.get("OUROBOROS_CONNECTIONS"))
+        except ValueError as exc:
+            return {}, str(exc)
     for field in _PROVIDER_FIELDS:
         setting_key = field["settingKey"]
         raw_value = data.get(setting_key)
@@ -599,6 +649,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             continue
         if (
             value
+            and setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "GIGACHAT_PASSWORD"}  # API keys only
             and (field.get("inputType") or "password") == "password"
             and len(value) < 10
         ):
@@ -607,8 +658,9 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     has_remote = any(
         value
         for setting_key, value in keys.items()
-        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN"}
+        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN", "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
     )
+    has_remote = has_remote or bool(configured_connections({**keys, "OUROBOROS_CONNECTIONS": connections}))
     has_local = bool(local_source)
     if not has_remote and not has_local and not (pending_subscription or selected_subscription):
         return {}, "Connect Codex, an API provider, or a local model before continuing."
@@ -650,6 +702,8 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
         return {}, "Local-only setups must route at least one model to the local runtime."
 
     prepared = dict(current_settings)
+    if "OUROBOROS_CONNECTIONS" in data:
+        prepared["OUROBOROS_CONNECTIONS"] = connections
     for key in (MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY):
         if key in data:
             try:

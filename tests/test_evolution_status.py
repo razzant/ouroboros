@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -56,7 +57,12 @@ def test_evolution_status_reports_waiting_for_idle(monkeypatch):
     assert snapshot["pending_count"] == 1
 
 
-def test_evolution_status_reports_budget_stop_when_disabled_after_run(monkeypatch):
+@pytest.mark.parametrize("enabled,failures,remaining,status", [
+    (False, 0, 1.25, "disabled"),  # formerly inferred as budget_stopped
+    (True, 0, 0.0, "budget_blocked"),  # the ordinary exhausted limit
+    (True, 0, 0.003, "idle_ready"),  # shown as $0.00, yet positive money the tick admits on
+])
+def test_evolution_status_names_no_count_stop_or_reserve(monkeypatch, enabled, failures, remaining, status):
     from supervisor import queue as queue_module
 
     monkeypatch.setattr(queue_module, "PENDING", [])
@@ -65,19 +71,74 @@ def test_evolution_status_reports_budget_stop_when_disabled_after_run(monkeypatc
         queue_module,
         "load_state",
         lambda: {
-            "evolution_mode_enabled": False,
+            "evolution_mode_enabled": enabled,
             "owner_chat_id": 7,
             "evolution_cycle": 6,
-            "evolution_consecutive_failures": 0,
+            "evolution_consecutive_failures": failures,
             "last_evolution_task_at": "2026-03-31T10:00:00Z",
         },
     )
-    monkeypatch.setattr(queue_module, "budget_remaining", lambda st, **_kwargs: 1.25)
+    monkeypatch.setattr(queue_module, "budget_remaining", lambda st, **_kwargs: remaining)
 
     snapshot = queue_module.get_evolution_status_snapshot()
 
-    assert snapshot["status"] == "budget_stopped"
-    assert snapshot["budget_remaining_usd"] == 1.25
+    assert snapshot["status"] == status
+    assert (snapshot["budget_remaining_usd"], snapshot["consecutive_failures"]) == (round(remaining, 2), failures)
+    assert snapshot["budget_reserve_usd"] == 0.0
+
+
+def test_a_subscription_main_is_not_budget_blocked_at_the_reached_limit(monkeypatch):
+    from supervisor import queue as queue_module
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "claudexor::codex=gpt-6-astra")
+    monkeypatch.setattr(queue_module, "PENDING", [])
+    monkeypatch.setattr(queue_module, "RUNNING", {})
+    monkeypatch.setattr(queue_module, "load_state", lambda: {
+        "evolution_mode_enabled": True, "owner_chat_id": 7, "evolution_cycle": 6})
+    monkeypatch.setattr(queue_module, "budget_remaining", lambda st, **_kwargs: 0.0)
+    assert queue_module.get_evolution_status_snapshot()["status"] == "idle_ready"
+
+
+@pytest.mark.parametrize("case,settled,status,shown,admitted", [
+    ("positive_subcent", 4.997, "idle_ready", 0.0, True),
+    ("overspent", 5.25, "budget_blocked", 0.0, False),  # the store reports no room, never a negative one
+    ("unknown", 4.997, "accounting_unavailable", None, False),
+])
+def test_the_state_endpoint_reports_what_the_tick_then_admits(tmp_path, monkeypatch, case, settled, status, shown, admitted):
+    """The real GET /api/state handler classifies the money the real tick admits on; its
+    budget_remaining_usd keeps its cents (owner decision 2026-11-02 removed the $2 reserve)."""
+    import asyncio
+    import types
+
+    from starlette.requests import Request
+
+    from ouroboros import usage_accounting as ua
+    from ouroboros.gateway.state import api_state
+    from supervisor import queue, state
+    from tests.test_evolution_redesign import _owner_campaign, _settle
+
+    pending, notices, _ctx = _owner_campaign(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 5.0)
+    _settle(tmp_path, "earlier-work", settled)
+    if case == "disabled":
+        state.update_state(lambda live: live.update(evolution_mode_enabled=False))
+    if case == "unknown":
+        def unreadable(*_args, **_kwargs):
+            raise OSError("usage store unreadable")
+        monkeypatch.setattr(ua, "usage_projection", unreadable)
+    request = Request({"type": "http", "method": "GET", "path": "/api/state", "headers": [], "query_string": b"",
+                       "scheme": "http", "server": ("test", 80), "client": ("test", 1),
+                       "app": types.SimpleNamespace(state=types.SimpleNamespace(drive_root=tmp_path, app_start=0.0))})
+
+    evolution = json.loads(asyncio.run(api_state(request)).body)["evolution_state"]
+    queue.enqueue_evolution_task_if_needed()
+
+    assert [row["type"] for row in pending] == (["evolution"] if admitted else [])
+    assert (evolution["status"], evolution["budget_remaining_usd"]) == (status, shown)
+    assert notices == []
+    events_path = tmp_path / "logs" / "events.jsonl"
+    events = events_path.read_text(encoding="utf-8") if events_path.exists() else ""
+    assert ("evolution_accounting_unavailable" in events) is (case == "unknown")
 
 
 def test_consciousness_status_snapshot_exposes_the_alarm_facts(monkeypatch, tmp_path):

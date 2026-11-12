@@ -94,7 +94,6 @@ def _peer_world(root, *, waits=True):
          "task": {"id": "peer", "chat_id": 1, "title": "Peer work", "focus": focus}},
         {"id": "other", "attempt": 1, "started_at": 1793000000.0,
          "task": {"id": "other", "chat_id": 1, "title": "Other work"}}]})
-    write_queue_document(root / "state/direct_roots.json", {"ts": stamp, "incomplete": False, "roots": []})
 
 
 def _unreadable_results(monkeypatch, failing):
@@ -102,14 +101,14 @@ def _unreadable_results(monkeypatch, failing):
     from ouroboros import task_results
     from ouroboros.store import StoreBusy
 
-    real = task_results.load_task_result
+    real = task_results._admit_stored  # the roster's one read admits each row here (task_results.load_task_results)
 
-    def load(root, task_id, *args, **kwargs):
+    def admit(data, task_id, *args, **kwargs):
         if str(task_id) in failing:
             raise StoreBusy("task store busy")
-        return real(root, task_id, *args, **kwargs)
+        return real(data, task_id, *args, **kwargs)
 
-    monkeypatch.setattr(task_results, "load_task_result", load)
+    monkeypatch.setattr(task_results, "_admit_stored", admit)
 
 
 def test_an_unreadable_task_result_is_named_on_its_row_and_never_reads_as_an_ended_wait(monkeypatch, tmp_path):

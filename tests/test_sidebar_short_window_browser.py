@@ -15,7 +15,7 @@ from tests.test_design_system_gate_browser import seed_page, settle, sidebar_met
 from tests.test_shell_interactions_browser import boot, chromium_ui, evidence, open_drawer, shell_ui
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 __all__ = ['chromium_ui', 'shell_ui', 'subscription_ui']
 
 SHORT = "matchMedia('(max-height: 540px), (pointer: coarse) and (max-height: 600px)').matches"
@@ -34,7 +34,7 @@ FOOT = """() => {
             opaque: getComputedStyle(meta).backgroundColor === getComputedStyle(side).backgroundColor
                 && getComputedStyle(meta).backgroundColor !== 'rgba(0, 0, 0, 0)',
             toolsClear: m.top >= box(side.querySelector('[data-nav-page="settings"]')).bottom - 0.5,
-            gapToTools: Math.round(box(side.querySelector('[data-nav-page="files"]')).top
+            gapToTools: Math.round(box(side.querySelector('.sidebar-foot > [data-nav-page]')).top
                 - box(document.getElementById('nav-projects')).bottom)};
 }"""
 SCROLL = "f => { const s = document.getElementById('primary-sidebar'); s.scrollTop = f * (s.scrollHeight - s.clientHeight); }"

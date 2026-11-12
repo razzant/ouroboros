@@ -4,157 +4,11 @@ Split out of ``tests/test_agent_task_pipeline.py`` when that module was divided
 by theme; every moved block is verbatim. Covers task-scoped recent attempts,
 repo-scoped open obligations, and commit-readiness debt extraction.
 
-Also covers advisory-run ATTRIBUTION. Repository readiness is repository-scoped
-by design, but the run lists are not: a root's reflection received another
-task's failed advisory rows with their identity stripped and narrated them as
-its own failures. The split is a projection over existing records, so it is the
-same under advisory and blocking review enforcement; since decision 3A retired
-the advisory gate, no ``repo_commit_ready`` verdict is projected from the rows.
+The advisory-run ATTRIBUTION cases (own versus ``foreign_advisory_runs``, legacy
+rows with no creator) retired with the run lists themselves: the retired advisory
+lane is an archive the evidence no longer projects, so another task's old rows
+cannot be narrated as this task's (``tests/test_advisory_run_archive.py``).
 """
-
-import pytest
-
-
-def _repo_with_history(tmp_path, name="repo"):
-    """A checkout with a tracked file, so ``compute_snapshot_hash`` is stable."""
-    repo_dir = tmp_path / name
-    repo_dir.mkdir(parents=True)
-    (repo_dir / ".git").mkdir()
-    (repo_dir / "tracked.py").write_text("print('hello')\n", encoding="utf-8")
-    return repo_dir
-
-
-_FOREIGN_FAILURE = "deleted the release notes instead of editing them"
-
-
-def _advisory_run(*, snapshot_hash, repo_key, task_id, status="fresh", failing=""):
-    from ouroboros.review_state import AdvisoryRunRecord
-
-    return AdvisoryRunRecord(
-        snapshot_hash=snapshot_hash,
-        commit_message=f"advisory for {task_id or '(legacy)'}",
-        status=status,
-        ts="2026-08-08T10:00:00+00:00",
-        repo_key=repo_key,
-        task_id=task_id,
-        attempt=1,
-        phase="advisory",
-        items=[{"verdict": "FAIL", "severity": "critical", "item": "destructive_edit",
-                "reason": failing}] if failing else [],
-    )
-
-
-def test_another_tasks_advisory_failures_are_not_collected_as_this_tasks_own(tmp_path):
-    """The reproduced incident: A's evidence holds B's FAIL rows as B's, labelled."""
-    from ouroboros.review_evidence import collect_review_evidence
-    from ouroboros.review_state import AdvisoryReviewState, make_repo_key, save_state
-
-    repo_dir = _repo_with_history(tmp_path)
-    repo_key = make_repo_key(repo_dir)
-    state = AdvisoryReviewState()
-    state.advisory_runs.append(_advisory_run(snapshot_hash="b-snapshot", repo_key=repo_key,
-                                task_id="task-b", failing=_FOREIGN_FAILURE))
-    save_state(tmp_path, state)
-
-    evidence = collect_review_evidence(tmp_path, task_id="task-a", repo_dir=repo_dir)
-
-    assert evidence["recent_advisory_runs"] == []
-    assert evidence["omitted_advisory_runs"] == 0
-    assert [row["task_id"] for row in evidence["foreign_advisory_runs"]] == ["task-b"]
-    assert evidence["foreign_advisory_runs"][0]["findings"][0]["reason"] == _FOREIGN_FAILURE
-    assert evidence["foreign_advisory_runs"][0]["snapshot_hash"] == "b-snapshot"
-    assert evidence["has_evidence"] is True
-
-
-def test_another_tasks_exact_snapshot_advisory_still_describes_the_checkout(tmp_path):
-    """Attribution is not scoping: B's row still names the checkout's advisory status."""
-    from ouroboros.review_evidence import collect_review_evidence
-    from ouroboros.review_state import (
-        AdvisoryReviewState, compute_snapshot_hash, make_repo_key, save_state,
-    )
-
-    repo_dir = _repo_with_history(tmp_path)
-    repo_key = make_repo_key(repo_dir)
-    state = AdvisoryReviewState()
-    state.advisory_runs.append(_advisory_run(snapshot_hash=compute_snapshot_hash(repo_dir),
-                                repo_key=repo_key, task_id="task-b"))
-    save_state(tmp_path, state)
-
-    evidence = collect_review_evidence(tmp_path, task_id="task-a", repo_dir=repo_dir)
-
-    assert evidence["current_repo"]["advisory_status"] == "fresh"
-    assert "repo_commit_ready" not in evidence["current_repo"]
-    assert evidence["recent_advisory_runs"] == []
-    assert [row["task_id"] for row in evidence["foreign_advisory_runs"]] == ["task-b"]
-
-
-def test_a_run_without_a_task_id_stays_unknown_and_is_never_re_attributed(tmp_path):
-    """A legacy row predates the field; it is not evidence that it is mine."""
-    from ouroboros.review_evidence import collect_review_evidence
-    from ouroboros.review_state import AdvisoryReviewState, make_repo_key, save_state
-
-    repo_dir = _repo_with_history(tmp_path)
-    state = AdvisoryReviewState()
-    state.advisory_runs.append(_advisory_run(snapshot_hash="legacy-snapshot",
-                                repo_key=make_repo_key(repo_dir), task_id=""))
-    save_state(tmp_path, state)
-
-    evidence = collect_review_evidence(tmp_path, task_id="task-a", repo_dir=repo_dir)
-
-    assert evidence["foreign_advisory_runs"] == []
-    assert [row["task_id"] for row in evidence["recent_advisory_runs"]] == [""]
-    assert evidence["recent_advisory_runs"][0]["snapshot_hash"] == "legacy-snapshot"
-
-
-@pytest.mark.parametrize("legacy", [{"bypassed_by_task": "task-b"}, {"task_id": None},
-                                    {"task_id": None, "bypassed_by_task": None}],
-                         ids=["missing-creator-beside-a-bypass", "null-creator", "null-creator-and-bypass"])
-def test_a_legacy_row_without_its_creator_stays_unknown_through_load_save_and_reload(tmp_path, legacy):
-    """The loader once took a missing creator from the bypass actor and turned a null one
-    into the string "None"; either made a legacy row foreign to the task that wrote it.
-    The real state file, read, collected, saved and read again: the creator stays unknown
-    in the repository group, the bypass actor stays its own field."""
-    import json
-
-    from ouroboros.review_evidence import collect_review_evidence
-    from ouroboros.review_state import _STATE_RELPATH, load_state, make_repo_key, save_state
-
-    repo_dir = _repo_with_history(tmp_path)
-    path = tmp_path / _STATE_RELPATH
-    path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"advisory_runs": [{
-        "snapshot_hash": "legacy-snapshot", "commit_message": "legacy advisory", "status": "fresh",
-        "ts": "2026-09-01T10:00:00+00:00", "repo_key": make_repo_key(repo_dir), "items": [], **legacy}]}),
-        encoding="utf-8")
-
-    for _pass in ("as written", "after a save"):
-        evidence = collect_review_evidence(tmp_path, task_id="task-a", repo_dir=repo_dir)
-        assert evidence["foreign_advisory_runs"] == [], _pass
-        assert [row["task_id"] for row in evidence["recent_advisory_runs"]] == [""], _pass
-        save_state(tmp_path, load_state(tmp_path))
-    [saved] = json.loads(path.read_text(encoding="utf-8"))["advisory_runs"]
-    assert (saved["task_id"], saved["bypassed_by_task"]) == ("", legacy.get("bypassed_by_task") or "")
-
-
-def test_an_empty_repo_key_does_not_pull_another_tasks_runs_into_this_task(tmp_path):
-    """No repo_dir widens the candidate list to the whole drive; identity still holds."""
-    from ouroboros.review_evidence import collect_review_evidence
-    from ouroboros.review_state import AdvisoryReviewState, make_repo_key, save_state
-
-    repo_a = _repo_with_history(tmp_path, "repo-a")
-    repo_b = _repo_with_history(tmp_path, "repo-b")
-    state = AdvisoryReviewState()
-    state.advisory_runs.append(_advisory_run(snapshot_hash="a-snapshot", repo_key=make_repo_key(repo_a),
-                                task_id="task-a"))
-    state.advisory_runs.append(_advisory_run(snapshot_hash="b-snapshot", repo_key=make_repo_key(repo_b),
-                                task_id="task-b", failing=_FOREIGN_FAILURE))
-    save_state(tmp_path, state)
-
-    evidence = collect_review_evidence(tmp_path, task_id="task-a", repo_dir=None)
-
-    assert evidence["repo_key"] == ""
-    assert [row["task_id"] for row in evidence["recent_advisory_runs"]] == ["task-a"]
-    assert [row["task_id"] for row in evidence["foreign_advisory_runs"]] == ["task-b"]
 
 
 def test_collect_review_evidence_keeps_recent_attempts_task_scoped(tmp_path):
@@ -190,7 +44,6 @@ def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
     from ouroboros.review_evidence import collect_review_evidence
     from ouroboros.review_state import (
         AdvisoryReviewState,
-        AdvisoryRunRecord,
         CommitAttemptRecord,
         compute_snapshot_hash,
         make_repo_key,
@@ -209,13 +62,10 @@ def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
     repo_a_key = make_repo_key(repo_a)
     repo_b_key = make_repo_key(repo_b)
     state = AdvisoryReviewState()
-    state.advisory_runs.append(AdvisoryRunRecord(
-        snapshot_hash=compute_snapshot_hash(repo_a),
-        commit_message="repo a ready",
-        status="fresh",
-        ts="2026-04-07T10:00:00+00:00",
-        repo_key=repo_a_key,
-    ))
+    state.advisory_runs.append({  # an archived row of the retired lane: never readiness
+        "snapshot_hash": compute_snapshot_hash(repo_a), "commit_message": "repo a ready",
+        "status": "fresh", "ts": "2026-04-07T10:00:00+00:00", "repo_key": repo_a_key,
+    })
     state.record_attempt(CommitAttemptRecord(
         ts="2026-04-07T10:01:00+00:00",
         commit_message="repo b blocked",

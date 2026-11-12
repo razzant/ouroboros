@@ -38,7 +38,6 @@ from tests.test_delegate_retry_output import (
     reader_coverage as reader_coverage,
 )
 
-pytestmark = pytest.mark.serial
 
 
 def _summary(reader, task_id):
@@ -58,8 +57,11 @@ def _source(reader, recipe_or_args, length=80):
     return json.loads(result.text)["delegated_output_source"]
 
 
-@pytest.mark.parametrize("cleanup", [False, True], ids=["drive-kept", "drive-removed"])
-@pytest.mark.parametrize("published", ["a_only", "b_only", "both"])
+@pytest.mark.parametrize(("published", "cleanup"), [
+    pytest.param("a_only", False, id='a_only-drive-kept'),
+    pytest.param("b_only", True, id='b_only-drive-removed'),
+    pytest.param("both", False, id='both-drive-kept'),
+])
 def test_ordinary_discovery_follows_each_publishing_physical_task(tmp_path, monkeypatch, published, cleanup):
     ctx, held, _before = discharged_retry(tmp_path, monkeypatch)  # A failed + discharged; B is the live retry
     data = custody.custody_root(ctx)

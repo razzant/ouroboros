@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 
@@ -477,7 +479,6 @@ def test_stop_sidecar_bounds_cancellation_resistant_proxy_close(
     asyncio.run(scenario())
 
 
-@pytest.mark.serial
 def test_stuck_proxy_close_hard_exits_companion_process() -> None:
     code = """
 import asyncio
@@ -751,11 +752,13 @@ def test_cold_start_reconciles_durable_old_owner_before_new_owner(
                 _state: Path,
                 *,
                 client: Any,
+                api_root: str | None = None,
+                bot: str = "",
             ) -> None:
-                assert client is not None
+                assert client is not None and bot == "7"
                 observed.append(owner)
 
-        monkeypatch.setattr(companion, "snapshot_owner_chat_id", lambda _state: 111)
+        monkeypatch.setattr(companion, "snapshot_owner_chat_id", lambda _state, _bot: 111)
         monkeypatch.setattr(companion, "TelegramMenuManager", Menu)
 
         class Bridge:
@@ -764,12 +767,13 @@ def test_cold_start_reconciles_durable_old_owner_before_new_owner(
             def owned_owner_chat_id() -> int:
                 return 111
 
-        needs_reconcile, prior = companion._prior_owner_reconciliation(
+        needs_reconcile, prior = await companion._prior_owner_reconciliation(
             "token",
             222,
             tmp_path,
             object(),  # type: ignore[arg-type]
             Bridge(),  # type: ignore[arg-type]
+            "7",
         )
         assert needs_reconcile
         assert isinstance(prior, Menu)
@@ -792,6 +796,8 @@ def test_shutdown_during_prior_owner_reconcile_cleans_up_prior_manager(
         restored: list[int] = []
 
         class Menu:
+            bot = "7"
+
             def __init__(self, owner: int) -> None:
                 self.owner = owner
 
@@ -837,15 +843,269 @@ def test_shutdown_during_prior_owner_reconcile_cleans_up_prior_manager(
         monkeypatch.setattr(companion.httpx, "AsyncClient", lambda **_kwargs: Client())
         monkeypatch.setattr(companion, "TelegramSettingsObserver", lambda *_args: Bridge())
         monkeypatch.setattr(companion, "_wait_for_owner", owner)
-        monkeypatch.setattr(companion, "snapshot_owner_chat_id", lambda _state: 111)
+        monkeypatch.setattr(companion, "snapshot_owner_chat_id", lambda _state, _bot: 111)
         monkeypatch.setattr(
             companion,
             "TelegramMenuManager",
-            lambda _token, old_owner, _state, *, client: Menu(old_owner),
+            lambda _token, old_owner, _state, *, client, api_root=None, bot="": Menu(old_owner),
         )
         monkeypatch.setattr(companion, "_reconcile_owner_change", stop_during_reconcile)
         assert await companion.run() == 0
         assert restored == [111]
+
+    asyncio.run(scenario())
+
+
+def test_cold_start_reconciles_only_this_bots_previous_owner(tmp_path: Path) -> None:
+    """Real per-bot ledgers: another bot's record names no previous owner of this one."""
+    for bot, owner in (("111", 41), ("222", 42)):
+        (tmp_path / f"menu_button_snapshot.bot-{bot}.json").write_text(json.dumps({
+            "schema": 3, "bot": bot, "chat_id": owner, "phase": "installed",
+            "original": {"type": "default"}, "owned": {"type": "commands"}}), encoding="utf-8")
+
+    def prior(token: str, owner: int, bot: str) -> tuple[bool, Any]:
+        return asyncio.run(companion._prior_owner_reconciliation(token, owner, tmp_path, object(), object(), bot))
+
+    needs, menu = prior("222:t", 43, "222")
+    assert needs and menu is not None and menu.chat_id == 42 and menu.bot == "222"
+    assert prior("333:t", 43, "333") == (False, None)
+    assert prior("222:t", 42, "222") == (False, None)
+
+
+# The menu writer of the last public release before ledgers named their bot (chat-only, schema 2), read from
+# history by commit and checked by digest, so these tests run the very code that wrote such files.
+_SCHEMA2_WRITER = ("8ee5aaadc1a56e724d62dceb163d3bf8216ec3a7", "skills/telegram/scripts/telegram_menu.py",
+                   "5d00cabe2e0e7afd1ce19de2f7cc78ac1d1d79871e02001a5123e02ab41b0654")
+
+
+def _older_release_left(tmp_path: Path, state: Path, bots: Any, *, interrupted: bool) -> bytes:
+    """The older release's companion for bot 111 and owner 42 installs its Mini App button (commands before it)
+    and is killed: its chat-only record stays, ``interrupted`` mid-install (the set reached Telegram, its reply
+    was lost). Returns the record's bytes."""
+    import hashlib
+    import importlib.util
+
+    from tests.test_telegram_miniapp_telegram_menu import OLD_URL
+
+    commit, path, digest = _SCHEMA2_WRITER
+    try:
+        source = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[1]), "show", f"{commit}:{path}"],
+                                capture_output=True, check=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        pytest.skip("the schema-2 menu writer's commit is not in this checkout's history")
+    assert hashlib.sha256(source).hexdigest() == digest
+    (tmp_path / "schema2_telegram_menu.py").write_bytes(source)
+    spec = importlib.util.spec_from_file_location("schema2_telegram_menu", tmp_path / "schema2_telegram_menu.py")
+    assert spec is not None and spec.loader is not None
+    release = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(release)
+    bots.fail_after_set = interrupted
+
+    async def install() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(bots.handler)) as http:
+            writer = release.TelegramMenuManager("111:current", 42, state, api_root="https://api.test", client=http)
+            if not interrupted:
+                assert await writer.install(OLD_URL) is True
+                return
+            with pytest.raises(release.TelegramMenuTransportError):
+                await writer.install(OLD_URL)
+
+    asyncio.run(install())
+    record = json.loads((state / "menu_button_snapshot.json").read_text(encoding="utf-8"))
+    assert (record["schema"], record["chat_id"], record["phase"]) == (2, 42, "mutating" if interrupted else "installed")
+    return (state / "menu_button_snapshot.json").read_bytes()
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_a_cold_start_restores_an_older_releases_owner_before_exposing_the_new_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool,
+) -> None:
+    """The real companion after an upgrade, with the owner changed to 43 while the older release's chat-only
+    record names 42: one bounded read of 42's menu (retried after a transport failure, exposing nothing) derives
+    the bot's own ledger, 42 gets its commands button back, and only then is the new owner exposed. The retained
+    chat-only file no longer matches, so the next pass reads 42 once and moves on; its bytes never change."""
+    import threading
+
+    from tests.test_telegram_miniapp_telegram_menu import Bots
+
+    state = tmp_path / "state"
+    state.mkdir()
+    bots = Bots({"111:current": 111}, {(111, 42): {"type": "commands"}})
+    legacy = _older_release_left(tmp_path, state, bots, interrupted=interrupted)
+    reads: list[int] = []
+    sets: list[int] = []
+    unavailable = [1]  # the first read of 42's menu fails in transport
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        method, chat = request.url.path.rsplit("/", 1)[-1], json.loads(request.content or b"{}").get("chat_id")
+        if method == "getChatMenuButton":
+            reads.append(chat)
+            if chat == 42 and unavailable[0]:
+                unavailable[0] -= 1
+                return httpx.Response(502, json={"ok": False, "error_code": 502, "description": "Bad Gateway"})
+        if method == "setChatMenuButton":
+            sets.append(chat)
+        return bots.handler(request)
+
+    real_client = httpx.AsyncClient
+    (state / companion._CONFIG_NAME).write_text(
+        '{"schema":2,"core_port":8765,"owner_chat_id":0,"button_text":"Ouroboros","tunnel":"cloudflare_quick"}',
+        encoding="utf-8")
+    (state / "settings.json").write_text('{"TELEGRAM_CHAT_ID":"43"}', encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(state))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "111:current")
+    monkeypatch.setattr(companion, "require_isolated_process_group", lambda: None)
+    monkeypatch.setattr(companion, "_server_parent_pid", lambda: os.getpid())
+    monkeypatch.setattr(companion, "start_parent_lifeline", lambda *_a, **_k: (threading.Event(), None))
+    monkeypatch.setattr(companion, "_retry_delay", lambda _count: 0.01)
+    monkeypatch.setattr(companion.httpx, "AsyncClient",
+                        lambda **_kwargs: real_client(transport=httpx.MockTransport(handler)))
+    seen: list[tuple[str, str]] = []
+    transition = companion.RuntimeStatus.transition
+
+    def record(self: Any, state_name: str, message: str, *, reason_code: str, **kwargs: Any) -> None:
+        seen.append((state_name, reason_code))
+        transition(self, state_name, message, reason_code=reason_code, **kwargs)
+
+    exposed: list[dict[str, Any]] = []
+
+    async def expose(*_args: Any) -> Any:  # the first step toward the new owner's tunnel and button
+        exposed.append(dict(bots.buttons))
+        raise companion.ShutdownRequested("the new owner is about to be exposed")
+
+    monkeypatch.setattr(companion.RuntimeStatus, "transition", record)
+    monkeypatch.setattr(companion, "_wait_for_cloudflared", expose)
+    assert asyncio.run(asyncio.wait_for(companion.run(), timeout=20)) == 0
+
+    assert len(exposed) == 1 and exposed[0][(111, 42)] == {"type": "commands"}
+    assert ("reconciling", "owner_change_rollback_pending") in seen[:seen.index(("stopping", "shutdown"))]
+    assert sets == [42]  # the one restore of 42; nothing is set for 43 before it is exposed
+    # The failed read, the read that derived, the restore's read and confirmation, and the next pass's one read.
+    assert reads.count(42) == 5
+    assert (state / "menu_button_snapshot.json").read_bytes() == legacy
+    assert not (state / "menu_button_snapshot.bot-111.json").exists()
+
+
+@pytest.mark.parametrize("case", ["other_bot", "refused", "external_change", "current_owner"])
+def test_a_chat_only_record_without_this_bots_button_restores_nothing(tmp_path: Path, case: str) -> None:
+    """Another bot (its menu there shows none of the record's buttons, or Telegram refuses that chat), a menu
+    changed outside the skill, or a record naming the current owner: ownership there stays unestablished, so no
+    previous owner is reconciled, no ledger is derived, the record and every button stay as they were."""
+    from tests.test_telegram_miniapp_telegram_menu import OLD_URL, Bots, web_app
+
+    state = tmp_path / "state"
+    state.mkdir()
+    bots = Bots({"111:current": 111, "222:other": 222}, {(111, 42): {"type": "commands"}})
+    legacy = _older_release_left(tmp_path, state, bots, interrupted=False)
+    token, owner = ("222:other", 43) if case in {"other_bot", "refused"} else ("111:current", 43)
+    if case == "current_owner":
+        owner = 42
+    if case == "external_change":
+        bots.buttons[(111, 42)] = web_app("https://elsewhere.trycloudflare.com/")
+    calls: list[tuple[str, int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        method, chat = request.url.path.rsplit("/", 1)[-1], json.loads(request.content or b"{}").get("chat_id")
+        calls.append((method, chat))
+        if case == "refused" and chat == 42:
+            return httpx.Response(400, json={"ok": False, "error_code": 400, "description": "Bad Request"})
+        return bots.handler(request)
+
+    before = dict(bots.buttons)
+
+    async def scenario() -> tuple[bool, Any]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await companion._prior_owner_reconciliation(token, owner, state, client, object(),
+                                                               token.split(":")[0])
+
+    assert asyncio.run(scenario()) == (False, None)
+    assert calls == ([] if case == "current_owner" else [("getChatMenuButton", 42)])
+    assert bots.buttons == before and (case == "external_change" or before[(111, 42)] == web_app(OLD_URL))
+    assert (state / "menu_button_snapshot.json").read_bytes() == legacy
+    assert not list(state.glob("menu_button_snapshot.bot-*.json"))
+
+
+def test_a_restore_interrupted_after_the_derivation_resumes_from_its_ledger(tmp_path: Path) -> None:
+    """The derived ledger carries the chat-only source and digest through an interrupted restore; the next start
+    finds it as this bot's own previous owner and completes, and the chat-only file stays as it was."""
+    import hashlib
+
+    from tests.test_telegram_miniapp_telegram_menu import Bots
+
+    state = tmp_path / "state"
+    state.mkdir()
+    bots = Bots({"111:current": 111}, {(111, 42): {"type": "commands"}})
+    legacy = _older_release_left(tmp_path, state, bots, interrupted=False)
+    ledger = state / "menu_button_snapshot.bot-111.json"
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(bots.handler)) as http:
+            async def prior_owner() -> tuple[bool, Any]:
+                return await companion._prior_owner_reconciliation("111:current", 43, state, http, object(), "111")
+
+            needs, prior = await prior_owner()
+            assert needs and prior.chat_id == 42
+            bots.fail_after_set = True  # the restore reaches Telegram; its reply is lost
+            with pytest.raises(companion.TelegramMenuTransportError):
+                await prior.restore()
+            saved = json.loads(ledger.read_text(encoding="utf-8"))
+            assert (saved["phase"], saved["chat_id"], saved["bot"]) == ("mutating", 42, "111")
+            assert saved["adopted_from"] == {"ledger": "menu_button_snapshot.json", "schema": 2,
+                                             "basis": "current_menu_match", "sha256": hashlib.sha256(legacy).hexdigest()}
+            needs, prior = await prior_owner()
+            assert needs and prior.chat_id == 42  # this bot's own ledger now names it
+            await prior.restore()
+            assert not ledger.exists() and bots.buttons[(111, 42)] == {"type": "commands"}
+            assert await prior_owner() == (False, None)
+
+    asyncio.run(scenario())
+    assert (state / "menu_button_snapshot.json").read_bytes() == legacy
+
+
+@pytest.mark.parametrize("old_original,new_original", [("default", "commands"), ("commands", "default")])
+def test_a_replacement_bot_syncs_its_menu_past_a_record_its_predecessor_could_not_restore(
+    tmp_path: Path, old_original: str, new_original: str,
+) -> None:
+    """The companion's real menu sync for bot B after bot A's revoked token left A's record: B is not blocked."""
+    buttons = {"111:old": {"type": old_original}, "222:new": {"type": new_original}}
+    revoked: set[str] = set()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        token, method = request.url.path.removeprefix("/bot").split("/", 1)
+        if token in revoked:
+            return httpx.Response(401, json={"ok": False, "error_code": 401, "description": "Unauthorized"})
+        body = json.loads(request.content or b"{}")
+        result: Any = {"id": int(token.split(":")[0]), "is_bot": True} if method == "getMe" else True
+        if method == "getChatMenuButton":
+            result = buttons[token]
+        elif method == "setChatMenuButton":
+            buttons[token] = body["menu_button"]
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            old = companion.TelegramMenuManager("111:old", 42, tmp_path, client=client, api_root="https://api.test")
+            await old.install("https://old-menu.trycloudflare.com/")
+            revoked.add("111:old")
+            with pytest.raises(companion.TelegramMenuRejectedError):
+                await old.restore()
+            new = companion.TelegramMenuManager("222:new", 42, tmp_path, client=client, api_root="https://api.test")
+            observer = types.SimpleNamespace(state_dir=tmp_path, owner_chat_id=lambda: 42,
+                                             safe_for_exposure=lambda _owner: True)
+            transitions: list[str] = []
+            status = types.SimpleNamespace(transition=lambda state, *_args, **_kwargs: transitions.append(state))
+            server_task = asyncio.create_task(asyncio.Event().wait())
+            context = companion._GenerationContext(new, observer, 42, "Ouroboros", 8765, status, asyncio.Event(),
+                                                   server_task)
+            try:
+                outcome = await companion._sync_menu_until_confirmed(
+                    "https://new-menu.trycloudflare.com/", types.SimpleNamespace(returncode=None), context)
+            finally:
+                server_task.cancel()
+                await asyncio.gather(server_task, return_exceptions=True)
+            assert outcome is None and "blocked" not in transitions
+            assert buttons["222:new"]["web_app"]["url"] == "https://new-menu.trycloudflare.com/"
+            assert old.snapshot_path.exists()  # A's record waits for A
 
     asyncio.run(scenario())
 
@@ -972,19 +1232,53 @@ def test_sidecar_start_wraps_server_task_exception(monkeypatch: pytest.MonkeyPat
     asyncio.run(scenario())
 
 
-def test_missing_token_publishes_error_status(
+@pytest.mark.parametrize("enabled", ["on", "off"])
+def test_a_missing_token_is_a_visible_wait_not_a_crash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    enabled: str,
 ) -> None:
+    """No token in the spawn environment: the companion stays alive with a fresh heartbeat and a truthful
+    state (Off is told first), reads no runtime config, opens no Telegram client or tunnel and spends none
+    of the host's restart budget. A host stop ends it cleanly; the host respawns it with a saved token."""
+    import json
+    import threading
+
     state = tmp_path / "state"
     state.mkdir()
+    (state / "settings.json").write_text(json.dumps({"TELEGRAM_MINIAPP_ENABLED": enabled}), encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(state))
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.setattr(companion, "require_isolated_process_group", lambda: None)
-    assert asyncio.run(companion.run()) == 1
-    payload = __import__("json").loads((state / companion._STATUS_NAME).read_text(encoding="utf-8"))
-    assert payload["state"] == "error"
-    assert payload["reason_code"] in {"fatal_error", "fatal_error_rollback_pending"}
+    monkeypatch.setattr(companion, "_server_parent_pid", lambda: os.getpid())
+    monkeypatch.setattr(companion, "start_parent_lifeline", lambda *_a, **_k: (threading.Event(), None))
+
+    def forbidden(*_args: Any, **_kwargs: Any):
+        raise AssertionError("a companion without a token reached Telegram, the tunnel or its config")
+
+    monkeypatch.setattr(companion, "load_runtime_config", forbidden)
+    monkeypatch.setattr(companion.httpx, "AsyncClient", forbidden)
+
+    async def scenario() -> dict:
+        task = asyncio.create_task(companion.run())
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            payload = json.loads((state / companion._STATUS_NAME).read_text(encoding="utf-8"))
+            if payload.get("state") in {"waiting_token", "disabled"}:
+                break
+        await asyncio.sleep(0.2)
+        assert not task.done(), "a missing token must not end the companion"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return payload
+
+    payload = asyncio.run(scenario())
+    if enabled == "on":
+        assert (payload["state"], payload["reason_code"]) == ("waiting_token", "token_missing")
+    else:
+        assert (payload["state"], payload["reason_code"]) == ("disabled", "miniapp_disabled")
+    assert payload["pid"] == os.getpid()
 
 
 def test_sidecar_start_retries_beyond_host_restart_limit(
@@ -1031,7 +1325,7 @@ def test_sidecar_start_retries_beyond_host_restart_limit(
                 return True
 
         async def owner(*_args: Any, **_kwargs: Any) -> tuple[int, object]:
-            return 12345, type("Menu", (), {"restore": lambda self: _true()})()
+            return 12345, type("Menu", (), {"bot": "7", "restore": lambda self: _true()})()
 
         async def _true() -> bool:
             return True
@@ -1125,7 +1419,7 @@ def test_sidecar_runtime_crash_retries_beyond_host_restart_limit(
             return True
 
         async def owner(*_args: Any, **_kwargs: Any) -> tuple[int, object]:
-            return 12345, type("Menu", (), {"restore": lambda self: _true()})()
+            return 12345, type("Menu", (), {"bot": "7", "restore": lambda self: _true()})()
 
         async def binary(*_args: Any, **_kwargs: Any) -> Path:
             return state / "cloudflared"

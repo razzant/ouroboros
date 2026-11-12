@@ -270,8 +270,8 @@ def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
     or RUNNING members stays: only the last settling member clears it.
     Without this, cancelling a paused tree left the fence latched forever
     (and the snapshot restore would resurrect it after a restart). An owner
-    Pause latch also stays while the answered root's late phase still runs:
-    that upkeep is the tree's last member until the Pause ends it.
+    Pause latch also stays while its census names an answered root's running
+    upkeep or a run an ended member left: a terminal result is not ended execution.
     """
     q = _queue_module()
     if not isinstance(task, dict):
@@ -279,14 +279,14 @@ def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
     root_id = str(task.get("root_task_id") or task.get("id") or "").strip()
     if not root_id:
         return False
-    from ouroboros.post_task_checkpoint import late_phase_state
+    from supervisor.owner_pause_control import owner_latch_holds
 
-    late = late_phase_state(q.DRIVE_ROOT, root_id) if (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get(
-        "cause") == "owner_pause" else ""
+    held = (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get(
+        "cause") == "owner_pause" and owner_latch_holds(q, root_id)
     with q._queue_lock:
         if root_id not in q.BUDGET_ROOT_FENCES:
             return False
-        if late and (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get("cause") == "owner_pause":
+        if held and (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get("cause") == "owner_pause":
             return False
 
         def _member(row) -> bool:
@@ -313,16 +313,14 @@ def sweep_orphaned_budget_fences(pending, fences, drive_root) -> list:
     cannot outlive its tree across restarts.
     """
     try:
-        from ouroboros.post_task_checkpoint import late_phase_state
+        from supervisor.owner_pause_control import owner_latch_holds
 
-        live_roots = {
-            str(t.get("root_task_id") or t.get("id") or "")
-            for t in pending if isinstance(t, dict)
-        }
-        # A running late phase is the owner-paused tree's member across Restart until
-        # recovery settles it (the census then releases the Pause).
+        live_roots = {str(t.get("root_task_id") or t.get("id") or "") for t in pending if isinstance(t, dict)}
+        # A running late phase or a run an ended member left is the owner-paused tree's
+        # member across Restart until settled (the census then releases the Pause).
+        q = _queue_module()
         orphaned = [root for root in list(fences) if root not in live_roots and not (
-            (fences.get(root) or {}).get("cause") == "owner_pause" and late_phase_state(drive_root, root))]
+            (fences.get(root) or {}).get("cause") == "owner_pause" and owner_latch_holds(q, root, drive_root))]
         for root in orphaned:
             fences.pop(root, None)
         if orphaned:
@@ -382,7 +380,7 @@ def queued_admitted_dispatch(task: Any) -> bool:
 
 def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, str]:
     """Whether one PENDING row genuinely never dispatched (zero physical calls)."""
-    from supervisor.restart_retention import never_started
+    from supervisor.restart_retention import never_started, returned_before_body
     from ouroboros.owner_wait import governing_continuation
     from supervisor.schedule_occurrence import restore_allowed
 
@@ -414,7 +412,7 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
                      and pause.get("task_attempt") == 1
                      and int(member.get("_attempt") or 1) == 1 and pause.get("replay_safe") is True
                      and pause.get("physical_calls") == 0 and pause.get("cause") == "owner_pause")
-    if not never_started(member) and not legacy_saved_zero and not prestart_zero:
+    if not (never_started(member) or legacy_saved_zero or prestart_zero or returned_before_body(member)):  # #2555
         return False, "dispatch_outcome_unknown"
     member_id = str(member.get("id") or "")
     cost_fields = q.reconstruct_task_cost(
@@ -424,7 +422,7 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
     if cost_fields.get("cost_accounting_status") != "available":
         return False, "accounting_unavailable"
     retry_lineage = bool(
-        int(member.get("_attempt") or 1) > 1
+        int(member.get("_attempt") or 1) > 1 and not (returned_before_body(member) or {}).get("seed_return")  # D5
         or member.get("original_task_id") or member.get("timeout_retry_from")
     )
     return bool(
@@ -437,26 +435,25 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
 def resume_budget_paused_task(task_id: str, *, selected_by: str = "") -> Dict[str, Any]:
     from ouroboros.owner_pause import paused_gap
     from ouroboros.pause_notices import gap_fact
-    from ouroboros.work_stop import resume_outcome
+    from ouroboros.work_stop import resume_asked, resume_outcome
 
     gap = paused_gap(_queue_module().DRIVE_ROOT, task_id)  # read before this Resume ends that Pause
+    answered = resume_asked(_queue_module(), task_id, selected_by=selected_by)  # and the control it answers about
     seen: List[Dict[str, str]] = []  # what this Resume's own census found; the Pause's record keeps its own
     outcome = _resume_budget_paused_task(task_id, selected_by=selected_by, gaps=seen)
-    if seen:
-        gap = {"membership_gaps": gap_fact(seen, gap.get("membership_gaps"))}
-    return resume_outcome({**outcome, **gap} if outcome.get("ok") else outcome)
+    gap = {"membership_gaps": gap_fact(seen, gap.get("membership_gaps"))} if seen else gap
+    return answered(resume_outcome({**outcome, **gap} if outcome.get("ok") else outcome))
 
 
 def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
                                gaps: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """Explicitly resume one budget-paused task and, if needed, its root latch.
 
-    A replay-safe ZERO-dispatch row is released as before. An EXACT
-    continuation gets a single-use ``grant_exact_budget_resume``, never a rerun.
-    A lifted root fence releases a held row only after recording its selection.
-    ``selected_by`` names the MODEL-issued request (owner Q9); an empty value is
-    the owner's own act, which needs no root grant above itself. ``gaps``
-    receives the damaged rows each door's owner-Pause tree census ties to no tree.
+    A replay-safe ZERO-dispatch row is released as before. An EXACT continuation gets a single-use
+    ``grant_exact_budget_resume``, never a rerun. A lifted root fence releases a held row only after recording
+    its selection. ``selected_by`` names the MODEL-issued request (owner Q9); an empty value is the owner's own
+    act, which needs no root grant above itself. ``gaps`` receives the damaged rows each door's owner-Pause tree
+    census ties to no tree.
     """
     from ouroboros.control_actor import control_actor, observed_control_stop
     from ouroboros.work_stop import clear_refusal, release_refusal, selection_record
@@ -511,7 +508,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
                     return {"ok": False, "error": "sleep_retention_unwritable"}
                 located.update(parked)
                 located.pop("_owner_wait_resume", None)
-                if not q.persist_queue_snapshot(reason="saved_pause_retained"):
+                if not q.publish_queue_snapshot(reason="saved_pause_retained"):  # durable before the Resume proceeds
                     return {"ok": False, "error": "snapshot_not_persisted"}
         exact = bool(located is not None and isinstance(located.get("_budget_pause"), dict)
                      and located["_budget_pause"].get("exact_continuation"))
@@ -631,11 +628,9 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
         if authority["owner_fence"] and (selected_by or not authority["consumed_resume"]):
             return {"ok": False, "error": "selection_owner_held"}
         nominated_safe, nominated_error = observation["safe"], observation["unsafe_error"]
-        nominated_safe = bool(
-            nominated_safe
-            and pause.get("replay_safe")
-            and pause.get("physical_calls") == 0
-        )
+        # A zero-dispatch pause, or (owner 4A) held saved work this observation just revalidated: never a replay.
+        nominated_safe = bool(nominated_safe and (pause.get("replay_safe") and pause.get("physical_calls") == 0
+                                                  or pause.get("continuation") == "working" and "_working_recovery" in task))
         if not nominated_safe:
             return {
                 "ok": False,
@@ -657,6 +652,9 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
             except Exception:
                 return {"ok": False, "error": "selection_authority_unavailable"}
         else:
+            from ouroboros.presence_carrier import owner_resume_lift
+            if refusal := owner_resume_lift(task, result_root):  # the owner's Resume of a moved Presence turn (#2566)
+                return refusal
             resumed_at = utc_now_iso()
             prior_pause = dict(pause)
             task.pop("_budget_pause", None)
@@ -1198,27 +1196,23 @@ def _live_retry_target_locked(q: Any, task_id: str, *, results) -> Tuple[str, st
 
 
 def task_has_live_ownership(task_id: str, *, ignore_review_operation: str = '', ownership=None) -> bool:
-    """Whether executable or paused custody remains for this task: a RUNNING row,
-    busy worker, direct turn, still-billing synthesis or a retained late review.
+    """Executable/paused custody, including uncertainty. Durable terminality precedes post-task work,
+    so only False proves no owner. Cancel uses allow_settled_target=True to stop surviving spend
+    without replacing the result. Worker twin: task_status.task_has_live_queue_ownership."""
+    return bool(_task_ownership_reason(task_id, ignore_review_operation=ignore_review_operation, ownership=ownership))
 
-    The pipeline persists the durable terminal result BEFORE post-task
-    cognition ends, so "the status is settled" and "the worker is dead" are
-    two different facts — ``already_settled`` is a terminal answer ONLY when
-    this predicate is False. Cancel INGRESSES consult it and pass
-    ``allow_settled_target=True`` to ``request_cancel`` while ownership is
-    live, so custody kills the still-spending worker instead of no-oping;
-    completion-wins keeps the stored result either way. (The worker-process
-    twin — the agent tool cannot see the live maps — is
-    ``ouroboros.task_status.task_has_live_queue_ownership`` over the queue
-    snapshot.)
-    """
+
+def _task_ownership_reason(task_id: str, *, ignore_review_operation: str = '', ownership=None) -> str:
+    """Ownership's existing conservative check, preserving its uncertainty for settlement."""
     q = _queue_module()
     from supervisor import workers
 
     task_id = str(task_id or "").strip()
     if not task_id:
-        return False
-    from supervisor.task_ownership import TaskOwnershipRead, prepare_retry_chain
+        return ""
+    from supervisor.task_ownership import BUSY, UNCHANGED, TaskOwnershipRead, prepare_retry_chain
+    from ouroboros.store import StoreBusy
+    from ouroboros.presence_runner import presence_turn_owned
     from ouroboros.review_operation import task_has_live_review_operation
     from ouroboros.owner_pause import FENCE_REQUESTED, FENCE_PAUSED, FENCE_RELEASED
 
@@ -1232,48 +1226,40 @@ def task_has_live_ownership(task_id: str, *, ignore_review_operation: str = '', 
         current = read(task_id)
         if task_has_live_review_operation(q.DRIVE_ROOT, task_id, exclude_owner_id=ignore_review_operation,
                                           result_loader=read):
-            return True
+            return "task_live"
+        if presence_turn_owned(current, task_id, drive_root=q.DRIVE_ROOT):
+            return "task_live"  # no queue map holds it; its runner reads the intent (#2012)
         fence = current.get("owner_pause") or {}
         if not isinstance(fence, dict) or (fence and fence.get("state") not in
                                            {FENCE_REQUESTED, FENCE_PAUSED, FENCE_RELEASED}):
-            return True
+            return "liveness_unknown"
         prepare_retry_chain(q, task_id, read)
-    except (OSError, ValueError, TypeError, RuntimeError):
-        return True  # Unknown durable ownership cannot authorize a mutation.
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        return "store_busy" if isinstance(exc, StoreBusy) or isinstance(exc.__cause__, StoreBusy) else "liveness_unknown"
     with q._queue_lock:
-        if not ownership.unchanged(accessed):
-            return True
+        checked = ownership.recheck(accessed)
+        if checked != UNCHANGED:
+            return "store_busy" if checked == BUSY else "liveness_unknown"
         if task_id in q.RUNNING:
-            return True
+            return "task_live"
         if any(
             worker.busy_task_id == task_id for worker in workers.WORKERS.values()
         ):
-            return True
-        # The in-process direct-chat turn is live PHYSICAL ownership too: it
-        # spends on the owner's behalf from inside the supervisor process and
-        # writes an ordinary durable running row, so it must be as
-        # addressable as a pooled worker (custody stops it cooperatively).
+            return "task_live"
+        # Direct turns and post-task synthesis still spend after a durable terminal row.
         if workers.direct_chat_turn(task_id) is not None:
-            return True
-        # The turn's paid post-task synthesis OUTLIVES the turn: the loop
-        # returns and ``_busy`` drops while the in-process worker thread still
-        # bills, so the pipeline's in-flight key is live physical ownership
-        # too — the stop ingress must not answer 404 while the spend
-        # continues, and custody keeps the intent open for the stage gate.
+            return "task_live"
         if post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
-            return True
+            return "task_live"
         # A dead attempt whose reap the reaper retains (slot reserved, terminal owed) is custody Stop must reach.
         from supervisor.task_reaper import _deferred_reap_jobs
         if any(str(job.get("task_id") or "") == task_id for job in _deferred_reap_jobs):
-            return True
+            return "task_live"
         try:
             retry_target, _retry_settled_status = _live_retry_target_locked(q, task_id, results=ownership)
-        except Exception:
-            # An indeterminate chain cannot prove that physical ownership is
-            # absent.  Fail open toward liveness so intent minting, which does
-            # the authoritative locked validation, decides the request.
-            return True
-        return bool(
+        except Exception as exc:
+            return "store_busy" if isinstance(exc, StoreBusy) or isinstance(exc.__cause__, StoreBusy) else "liveness_unknown"
+        return "task_live" if (
             retry_target != task_id
             and (
                 retry_target in q.RUNNING
@@ -1282,15 +1268,15 @@ def task_has_live_ownership(task_id: str, *, ignore_review_operation: str = '', 
                     for worker in workers.WORKERS.values()
                 )
             )
-        )
+        ) else ""
 
 
 def task_settlement_liveness(task_id: str) -> Optional[bool]:
     """The probe a destructive custody settlement asks (``task_custody.settle_child_drive``):
     True while ``task_has_live_ownership`` holds or the id waits in PENDING, None while a
     reap of this task (its slot or a queued/deferred reap job) makes absence inconclusive
-    or the queue cannot be read, False only for proven absence. Callers without the
-    supervisor's live maps have no such probe, so they never delete."""
+    or the queue cannot be read, False only for proven absence. StoreBusy retains the
+    distinct busy cause. Callers without live maps cannot prove absence."""
     q = _queue_module()
     from supervisor import task_reaper, workers
 
@@ -1299,15 +1285,21 @@ def task_settlement_liveness(task_id: str) -> Optional[bool]:
         return None  # empty maps outside the supervisor process prove no absence
     try:
         from supervisor.task_ownership import settlement_reads
+        from ouroboros.store import StoreBusy
 
         locked = q._queue_lock._is_owned()
         reads = settlement_reads(q.DRIVE_ROOT, task_id, locked=locked)
         if reads is None:
             return None
         if not locked:
-            task_has_live_ownership(task_id, ownership=reads)  # Prepare before the mutation lock.
+            _task_ownership_reason(task_id, ownership=reads)  # Prepare before the mutation lock.
         with q._queue_lock:
-            if task_has_live_ownership(task_id, ownership=reads) or any(str(row.get("id") or "") == task_id for row in q.PENDING):
+            reason = _task_ownership_reason(task_id, ownership=reads)
+            if reason == "store_busy":
+                raise StoreBusy("ownership re-check found the store busy", reason="contention")
+            if reason == "liveness_unknown":
+                return None
+            if reason or any(str(row.get("id") or "") == task_id for row in q.PENDING):
                 return True
             with q._reap_queue.mutex:
                 jobs = [*q._reap_queue.queue, *task_reaper._deferred_reap_jobs]
@@ -1317,6 +1309,8 @@ def task_settlement_liveness(task_id: str) -> Optional[bool]:
         if not locked:
             settlement_reads(q.DRIVE_ROOT, task_id, locked=False, prepared=reads)
         return False
+    except StoreBusy:
+        raise  # The destructive caller reports contention, never a live owner.
     except Exception:
         log.warning("Settlement liveness of %s is unknown", task_id, exc_info=True)
         return None

@@ -18,8 +18,8 @@ export const SUBAGENT_MODES = Object.freeze(['off', 'auto', 'swarm']);
 const WORDS = Object.freeze({ off: 'Off', auto: 'Auto', swarm: 'Swarm' });
 export const SUBAGENT_MEANINGS = Object.freeze({
     off: 'Ouroboros works alone in this chat: no subagents, no Claude Code or Codex sessions. Reviews still run.',
-    auto: 'Ouroboros decides when helpers are worth it.',
-    swarm: "Don't economise: independent views of several models, critics, one synthesis. Costs more.",
+    auto: 'Ouroboros decides when helpers, critics and debate are worth it.',
+    swarm: "Don't economise: helpers, critics and debate on every step, as wide as your models allow. Costs more.",
 });
 // Why only Off can be chosen (`subagents_availability` in the room's state); `available` or an unknown answer locks nothing.
 export const SUBAGENT_LOCKS = Object.freeze({
@@ -29,7 +29,8 @@ export const SUBAGENT_LOCKS = Object.freeze({
 const modeOf = (mode) => (SUBAGENT_MODES.includes(mode) ? mode : 'auto');
 
 /* The mark: Ouroboros (the large node), each helper with the thread to it, and the threads between helpers, which
-   only Swarm lights (there helpers talk to each other). Every part paints with currentColor; style.css colours it. */
+   only Swarm lights, its widest breadth (helpers may answer each other in Auto too). Every part paints with
+   currentColor; style.css colours it. */
 const helperMark = (n, x, y, r) => `<g class="chat-subagents-helper" data-helper="${n}">`
     + `<path d="M66 110 L${x} ${y}" fill="none" stroke="currentColor" stroke-width="11" stroke-linecap="round"></path>`
     + `<circle cx="${x}" cy="${y}" r="${r}" fill="currentColor"></circle></g>`;
@@ -128,7 +129,7 @@ export function createSubagentsChoice({ doc = globalThis.document, onChoose = ()
 
 /**
  * The capsule in its room's composer row. `capsule(options)` is the family's open/fit machine
- * (composer_owner_controls.js), `save({ mode })` the room's owner write (it answers the room's cognition),
+ * (capsule.js), `save({ mode })` the room's owner write (it answers the room's cognition),
  * `openSettings()` Settings › Agents. Returns `{ el, capsule, syncState(values, availability), hasPendingSave,
  * pendingSave, destroy }`.
  */

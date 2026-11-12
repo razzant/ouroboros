@@ -130,6 +130,19 @@ def row_at_position(root: Any, pos: int) -> Optional[Row]:
     return None if record is None else ds._row(record)
 
 
+def last_stream_position(root: Any) -> int:
+    """The chat projection's current head, excluding A2A, or -1 for an empty stream; no history scan."""
+    ds.require_imported(root, "chat")
+    with ds.transaction(root, write=False) as conn:
+        row = conn.execute("SELECT next_pos, pos_base FROM streams JOIN import_ledger ON id=live "
+                           "WHERE streams.stream='chat'").fetchone()
+        if row is None:
+            return -1
+        if row["pos_base"] is None:
+            raise _uncovered(conn, "chat")
+        return int(row["pos_base"]) + int(row["next_pos"]) - 1
+
+
 def generation_row(root: Any, gen: str, offset: int) -> Optional[Row]:
     """The row a legacy consolidation cursor names: the ``offset``-th stream row counted from
     the first line of generation ``gen`` on, through the following generations

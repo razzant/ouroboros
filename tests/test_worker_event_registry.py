@@ -1,20 +1,23 @@
-"""Every typed worker event — literal or module-constant typed — must have a supervisor handler.
+"""Every typed worker event — literal, module-constant typed or built by a function — must have a supervisor handler.
 
-The supervisor drops an event whose type is not in EVENT_HANDLERS: it is
-downgraded to a truncated ``unknown_worker_event`` repr in supervisor.jsonl
-(see ``dispatch_event``), so its payload is lost to every typed consumer.
+The supervisor drops an event whose type is not in EVENT_HANDLERS: it decays
+to a content-free ``unknown_worker_event`` row in supervisor.jsonl (see
+``dispatch_event``), so its payload is lost to every typed consumer.
 v6.69.0 registered one branch of review_helpers' if/else and missed the
 other; this scan closes the class: it walks the emitter call sites and
-asserts each literal event type is either registered or on the explicit
-allowlist below, with a reason.
+asserts each event type is either registered or on the explicit allowlist
+below, with a reason. ``presence_result`` was the frame a dict-literal-only
+scan could not see: ``pending_events.append(build_presence_result_event(...))``.
 """
 
 import ast
+import gc
 import pathlib
 from types import MappingProxyType
 from typing import Mapping, NamedTuple
 
 import pytest
+from tests._source_scan import parse
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -95,12 +98,33 @@ def _runtime_trees():
     files += list((REPO / "ouroboros").rglob("*.py"))
     files += list((REPO / "supervisor").rglob("*.py"))
     trees = {}
-    for path in files:
-        try:
-            trees[path] = ast.parse(path.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError):
-            continue
+    collecting = gc.isenabled()
+    gc.disable()  # AST nodes are acyclic; avoid a full heap walk between files.
+    try:
+        for path in files:
+            try:
+                trees[path] = parse(path.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError):
+                continue
+    finally:
+        if collecting:
+            gc.enable()
     return trees
+
+
+def _builder_returns(trees, constants):
+    """Function name -> event types of the dict literals it returns: one hop, by name, and not a dataflow
+    analyser. A dict assigned to a local and put later stays out of its reach, as it does for the literal scan."""
+    builders = {}
+    for tree in trees.values():
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for inner in ast.walk(node):
+                    if isinstance(inner, ast.Return):
+                        event_type = _dict_type(inner.value, constants)
+                        if event_type:
+                            builders.setdefault(node.name, set()).add(event_type)
+    return builders
 
 
 def _emitted_types(trees=None, constants=None, *, commands=False):
@@ -112,6 +136,7 @@ def _emitted_types(trees=None, constants=None, *, commands=False):
     trees = _runtime_trees() if trees is None else trees
     constants = _string_constants(trees.values()) if constants is None else constants
     emitted = {}
+    builders = _builder_returns(trees, constants)
     for path, tree in trees.items():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -136,10 +161,10 @@ def _emitted_types(trees=None, constants=None, *, commands=False):
             if not commands and _call_name(node.func) in _WRAPPER_FUNCS:
                 candidates = node.args
             for arg in candidates:
-                event_type = _dict_type(arg, constants)
-                if event_type:
-                    emitted.setdefault(event_type, []).append(
-                        f"{path.relative_to(REPO)}:{node.lineno}"
+                built = builders.get(_call_name(arg.func), ()) if isinstance(arg, ast.Call) else ()
+                for event_type in {_dict_type(arg, constants), *built} - {None}:
+                    emitted.setdefault(event_type, []).append(  # one spelling on every OS
+                        f"{path.relative_to(REPO).as_posix()}:{node.lineno}"
                     )
     return MappingProxyType({kind: tuple(sites) for kind, sites in emitted.items()})
 
@@ -205,6 +230,32 @@ def test_every_emitted_literal_type_has_a_handler(event_index):
         "supervisor/events.py EVENT_HANDLERS or add an ALLOWLIST entry with "
         "a reason."
     )
+
+
+def test_the_scan_sees_an_event_a_function_builds(event_index):
+    """The pooled final's frame reached the dispatcher unregistered because only dict literals were read."""
+    assert "ouroboros/agent_task_pipeline.py" in " ".join(event_index.emitted["presence_result"])
+    source = (
+        'def build_frame(task):\n'
+        '    return {"type": "built_by_a_function", "task_id": task}\n'
+        'def emit(ctx, q, task):\n'
+        '    ctx.pending_events.append(build_frame(task))\n'
+        '    q.put_nowait(build_frame(task))\n'
+        '    q.put(unrelated(task))\n'
+    )
+    path = REPO / "server.py"  # any repository path: only its relative form is reported
+    assert list(_emitted_types({path: ast.parse(source)}, {})) == ["built_by_a_function"]
+    assert len(_emitted_types({path: ast.parse(source)}, {})["built_by_a_function"]) == 2
+
+
+def test_the_scan_reports_a_site_in_one_spelling_on_every_os(monkeypatch):
+    """Windows reported ``ouroboros\\agent_task_pipeline.py:935`` and the witness above, which reads the POSIX
+    spelling, failed there only (post-merge run 41792459443). A Windows-spelled checkout keeps that visible here."""
+    windows_checkout = pathlib.PureWindowsPath("D:/a/ouroboros/ouroboros")
+    monkeypatch.setitem(globals(), "REPO", windows_checkout)
+    tree = ast.parse('def emit(q):\n    q.put({"type": "spelled_once"})\n')
+    sites = _emitted_types({windows_checkout / "ouroboros" / "agent_task_pipeline.py": tree}, {})
+    assert sites["spelled_once"] == ("ouroboros/agent_task_pipeline.py:2",)
 
 
 def test_allowlist_entries_stay_emitted(event_index):

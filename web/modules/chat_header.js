@@ -50,6 +50,11 @@ export function createRoomHeader({ bar, ws, shade = null, openDashboardTab = nul
     budget?.addEventListener('click', onBudget);
     const disposePlacement = actions && shade ? bindHeaderControlPlacement({ headerActions: actions, budgetPill: budget, shade }) : () => {};
     const consciousness = createConsciousnessStatus({ bar, ws, openDashboardTab, refreshState });
+    // The chip leads the bar's end group (Main's commands, a Project's Panic and ×), so the group's one gap holds the
+    // whole row of capsules (owner seed S3; style.css "A room's bar").
+    const endGroup = [...bar.children].find((node) => node.classList?.contains('app-page-actions')
+        || node.classList?.contains('app-page-trailing'));
+    if (consciousness?.chip && endGroup) endGroup.prepend(consciousness.chip);
     return {
         update(data) {
             consciousness?.update(data);

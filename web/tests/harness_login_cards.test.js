@@ -73,7 +73,7 @@ function statusPayload(loggedIn) {
 
 const flush = async () => { for (let i = 0; i < 40; i += 1) await Promise.resolve(); };
 
-test('the controller drives create → poll → Connected, and holds the status poll while it runs', async (t) => {
+test('the controller drives create → poll → Signed in, and holds the status poll while it runs', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     let jobState = 'running';
     let statusReads = 0;
@@ -114,7 +114,7 @@ test('the controller drives create → poll → Connected, and holds the status 
     jobState = 'succeeded';
     t.mock.timers.tick(3000);
     await flush();
-    assert.ok(host.innerHTML.includes('Connected.'), `verified state reached: ${host.innerHTML}`);
+    assert.ok(host.innerHTML.includes('Signed in.'), `verified state reached: ${host.innerHTML}`);
     assert.equal(settled, 1, 'the host was told to re-render its rows');
     assert.equal(store.polling, false, 'the settled login released the poll hold');
     assert.ok(statusReads >= 1, 'the verdict refreshed the shared status');
@@ -194,7 +194,7 @@ test('a verify-race failure is re-checked against live account status before the
     loggedIn = true;
     t.mock.timers.tick(3000);
     await flush();
-    assert.ok(host.innerHTML.includes('Connected.'),
+    assert.ok(host.innerHTML.includes('Signed in.'),
         `the verify-race must resolve to success, not "Sign-in failed": ${host.innerHTML}`);
     ctl.dispose();
     store.dispose();
@@ -952,9 +952,9 @@ test('a terminal GET overtaking an unconfirmed DELETE keeps the settled card vis
     const closing = ctl.close(ctl.active); await flush();
     assert.equal(calls.delete, 1, 'the active-card Close owns one DELETE');
     t.mock.timers.tick(3000); await flush();
-    assert.match(host.innerHTML, /Connected\./);
+    assert.match(host.innerHTML, /Signed in\./);
     releaseDelete(); assert.equal(await closing, LOGIN_CUSTODY_RELEASED);
-    assert.equal(ctl.active?.verdict?.kind, 'success'); assert.match(host.innerHTML, /Connected\./,
+    assert.equal(ctl.active?.verdict?.kind, 'success'); assert.match(host.innerHTML, /Signed in\./,
         'the late DELETE must not erase the settled face');
     assert.deepEqual(calls, { create: 1, delete: 1, get: 1 });
     t.mock.timers.tick(60000); await flush();
@@ -1336,6 +1336,7 @@ test('required-profile code without its action and unrelated 409 remain ordinary
         required_actions: ['disable_extra_profiles'] });
     await ctl.start('zephyr', '');
     assert.ok(!host.innerHTML.includes('data-profile-name-input'));
+    assert.ok(!host.innerHTML.includes('disable_extra_profiles'));
     assert.equal(ctl.active.absent, true, 'a typed pre-job conflict proves no job exists');
     assert.equal(ctl.active.custodyStatus, LOGIN_CUSTODY_RELEASED);
     assert.equal(await ctl.dispose(), LOGIN_CUSTODY_RELEASED);
@@ -1473,4 +1474,28 @@ test('normalizeProfileName enforces the engine slug contract ^[a-z0-9][a-z0-9_-]
     const submitted = profileNameSubmission('Работа');
     assert.equal(submitted.profile, '', 'an unslugifiable name never starts a login');
     assert.ok(submitted.note.includes('starts with a lowercase letter or digit'));
+});
+
+for (const actions of [[], ['Read the program in Accounts']]) test(`Connect problems show ${actions.length} engine actions through the existing card reader`, async () => {
+    const host = fakeHost();
+    const ctl = createLoginCardController({host, store: {refresh: async () => null},
+        fetchImpl: async () => json(403, {error: 'The receipt cannot be read.', code: 'refused',
+            context: {operationId: 'accepted-operation'}, retryable: false, required_actions: actions})});
+    await ctl.start('codex', '');
+    assert.match(host.innerHTML, /The receipt cannot be read/);
+    assert.equal(host.innerHTML.includes('Read the program in Accounts'), actions.length > 0);
+    assert.doesNotMatch(host.innerHTML, /accepted-operation/);
+    await ctl.dispose();
+});
+
+for (const maintenance of [false, true]) test(`extra actions belong only to maintenance problems: ${maintenance}`, async () => {
+    const host = fakeHost();
+    const ctl = createLoginCardController({host, store: {refresh: async () => null},
+        fetchImpl: async () => json(503, {error: 'The engine is serving recovery only.', code: 'daemon_recovery_only',
+            context: maintenance ? {operationId: 'accepted-operation'} : {}, required_actions: ['Retry after recovery', 'use_external_terminal']})});
+    await ctl.start('cursor', 'work');
+    assert.match(host.innerHTML, /The engine is serving recovery only/);
+    assert.equal(host.innerHTML.includes('Retry after recovery'), maintenance);
+    assert.equal(host.innerHTML.includes('use_external_terminal'), maintenance, 'maintenance actions are not a local token allowlist');
+    await ctl.dispose();
 });

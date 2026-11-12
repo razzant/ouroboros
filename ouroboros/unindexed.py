@@ -8,6 +8,9 @@ hidden flag does not exclude a folder on current macOS. So a NEW copy is born un
 while one that already exists keeps its spelling: nothing in use moves, and the copies made
 before this rule leave the index through their normal removal. Other systems ignore the suffix,
 and nothing a person keeps (projects, Deliverables, uploads, task results) is named this way.
+The bytecode prefix is such a tree too, mirroring every source path, the app's own
+(``…/Ouroboros.app/…``, which Spotlight lists as an application) included; it records no
+binding, so the old spelling is renamed rather than kept.
 """
 
 from __future__ import annotations
@@ -18,6 +21,25 @@ from typing import Any
 
 SUFFIX = ".noindex"
 COPIES = "copies" + SUFFIX  # under a worktree root: new acting checkouts and their sibling scratch
+BYTECODE = "pycache.noindex"  # under a data root's state/: the PYTHONPYCACHEPREFIX mirror
+LEGACY_BYTECODE = "pycache"  # its earlier spelling: renamed once, else retired (maintenance_retirement)
+
+
+def bytecode_prefix(data_dir: Any, inherited: str = "") -> str:
+    """The bytecode prefix of ``data_dir``; an ``inherited`` one wins unless it is the legacy default,
+    which an older frozen launcher hands down. While the new tree is absent the legacy one is renamed,
+    keeping its warm bytecode."""
+    state = pathlib.Path(data_dir) / "state"
+    legacy, prefix = state / LEGACY_BYTECODE, state / BYTECODE
+    if inherited and os.path.normcase(os.path.abspath(inherited)) != os.path.normcase(os.path.abspath(legacy)):
+        return inherited
+    try:
+        if not os.path.lexists(prefix) and os.path.isdir(legacy) and not os.path.islink(legacy):
+            os.replace(legacy, prefix)
+        prefix.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass  # a cache: an unwritable data dir leaves Python writing none
+    return str(prefix)
 
 
 def unindexed(parent: Any, name: str, recorded: Any = "") -> pathlib.Path:

@@ -31,7 +31,7 @@ from tests.test_main_results_browser import _nf_observe, _nf_retain
 from tests.test_owner_wait_integration import wait_clone as wait_clone
 
 
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 
 
 @contextmanager

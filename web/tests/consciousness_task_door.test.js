@@ -13,7 +13,8 @@ function harness() {
         window: { addEventListener: (name, fn) => { assert.equal(name, 'ouro:open-task'); context.listener = fn; } },
         showPage: async name => { calls.push(name); return context.canShow; },
         apiClient: { chatHistory: async ({ chatId, around }) => { calls.push(['read', chatId, around]); return context.page; } },
-        mainChat: { revealSource: async (address, current, page) => {
+        drawn: new Set(),
+        mainChat: { drawsSource: address => context.drawn.has(address), revealSource: async (address, current, page) => {
             assert.equal(page, context.page, 'reuse the pre-read page');
             calls.push(['reveal', address, current()]); return { state: 'found' };
         } },
@@ -35,6 +36,17 @@ test('the Dashboard door lands through the real task anchor and keeps the pre-re
     context.canShow = false;
     await press();
     assert.deepEqual(calls, ['chat']);
+});
+
+test('a card Main already draws is the destination without a read; Main lands on it itself', async () => {
+    const { context, calls, notices, press } = harness();
+    context.drawn.add('task:214a31b6');
+    context.mainChat.revealSource = async (address, current, page) => {
+        calls.push(['reveal', address, current(), page]); return { state: 'found' };
+    };
+    await press();
+    assert.deepEqual(calls, ['chat', 'main', ['reveal', 'task:214a31b6', true, null]]);
+    assert.deepEqual(notices, []);
 });
 
 test('missing, mismatched and failed task reads never land and explain unavailability', async () => {

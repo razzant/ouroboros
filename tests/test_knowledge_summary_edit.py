@@ -1,8 +1,9 @@
 """An authored summary is revised where the index reads it, never as body text.
 
 ``knowledge_write(mode="edit", summary=...)`` revises the resident summary alone or
-together with one exact ``old_str`` replacement, through the same revision-checked
-note writer, history and index as every other write. The receipt states whether the
+together with one exact ``old_str`` replacement, and ``mode="append"`` together with
+the appended text, through the same revision-checked note writer, history and index
+as every other write. The receipt states whether the
 body bytes and the resident summary changed; it says nothing about what was learned.
 Every test writes only a synthetic data root.
 """
@@ -21,6 +22,7 @@ from ouroboros.memory import Memory
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests import test_book_context_capture as book
+from tests._cases import case_folders
 
 OLD = "Prefers long written reports."
 NEW = "Prefers short answers first, detail on request."
@@ -81,7 +83,8 @@ def test_registry_summary_edit_reaches_the_next_context_and_not_a_captured_one(t
     assert receipt["knowledge_source"]["revision"] == current.revision
     row = _history(address)[-1]
     assert (row["mode"], row["writer"], row["task_id"], row["summary"]) == ("edit", "turn", "summary-edit", NEW)
-    assert (row["old_content"], row["new_content"], row["delta"]) == (original.text, current.text, delta)
+    from tests._knowledge_history_shared import replaced
+    assert (replaced(address.canonical_root, row), row["new_content"], row["delta"]) == (original.text, current.text, delta)
     assert "edits" not in row
     for inventory in ((address.shelf / store.INDEX_FILE).read_text(encoding="utf-8"),
                       registry.execute("knowledge_list", {"scope": scope})):
@@ -108,8 +111,31 @@ def test_one_body_replacement_and_its_summary_land_in_one_revision(tmp_path):
     assert (receipt["knowledge_delta"]["body_changed"], receipt["knowledge_delta"]["summary_changed"]) == (True, True)
     rows = _history(address)
     assert len(rows) == 2 and rows[-1]["summary"] == "Line one.\nLine two."
-    assert (rows[-1]["old_content"], rows[-1]["new_content"]) == (original.text, current.text)
+    from tests._knowledge_history_shared import replaced
+    assert (replaced(address.canonical_root, rows[-1]), rows[-1]["new_content"]) == (original.text, current.text)
     assert "  Line one.\n  Line two." in (address.shelf / store.INDEX_FILE).read_text(encoding="utf-8")
+
+
+def test_an_append_and_its_summary_land_in_one_revision(tmp_path):
+    ctx, address, original = _setup(tmp_path)
+    plain = _receipt(tools._knowledge_write(ctx, "people/ada", "First fact.", mode="append", scope="global"))
+    kept = store.read_knowledge_note(address)  # adding text alone stays blind and keeps the summary
+    assert kept.summary == OLD and plain["knowledge_delta"]["summary_changed"] is False
+    before = _files(tmp_path)  # replacing the summary beside it needs the current revision
+    reply = tools._knowledge_write(ctx, "people/ada", "Second fact.", mode="append", scope="global", summary=NEW)
+    assert "not completed: revision_required" in reply and _files(tmp_path) == before
+    receipt = _receipt(tools._knowledge_write(ctx, "people/ada", "Second fact.", mode="append", scope="global",
+                                              summary=NEW, expected_revision=kept.revision))
+    current = store.read_knowledge_note(address)
+    assert current.metadata == {**original.metadata, "summary": NEW}
+    assert _body(current) == _body(kept) + b"\nSecond fact."
+    assert (receipt["knowledge_delta"]["body_changed"], receipt["knowledge_delta"]["summary_changed"]) == (True, True)
+    rows = _history(address)
+    assert len(rows) == 3 and (rows[-1]["mode"], rows[-1]["summary"]) == ("append", NEW)
+    index = (address.shelf / store.INDEX_FILE).read_text(encoding="utf-8")
+    assert f"  {NEW}" in index and OLD not in index
+    _receipt(tools._knowledge_write(ctx, "people/new", "Met today.", mode="append", scope="global", summary=NEW))
+    assert store.read_knowledge_note(store.resolve_knowledge_address(tmp_path, "people/new", "global")).summary == NEW
 
 
 def test_summary_text_written_into_the_body_is_reported_as_an_unchanged_summary(tmp_path):
@@ -138,8 +164,7 @@ def test_legacy_calls_and_an_empty_summary_publish_identical_bytes(tmp_path, mod
 
 
 REFUSALS = [
-    ({"mode": "overwrite", "content": "Body.", "summary": NEW}, "summary is used only with mode=edit"),
-    ({"mode": "append", "content": "Body.", "summary": NEW}, "summary is used only with mode=edit"),
+    ({"mode": "overwrite", "content": "Body.", "summary": NEW}, "used only with mode=edit or mode=append, not mode=overwrite"),
     ({"mode": "edit", "summary": "   "}, "is not summary text"),
     ({"mode": "edit", "summary": 7}, "is not summary text"),
     ({"mode": "edit", "summary": NEW, "content": "Orphan replacement."}, "has no old_str to replace"),
@@ -151,13 +176,16 @@ REFUSALS = [
 ]
 
 
-@pytest.mark.parametrize("args,message", REFUSALS)
-def test_ambiguous_or_invalid_calls_refuse_before_any_write(tmp_path, args, message):
-    ctx, _address, original = _setup(tmp_path)
-    before = _files(tmp_path)
-    reply = tools._knowledge_write(ctx, "people/ada", scope="global", expected_revision=original.revision, **args)
-    assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply
-    assert _files(tmp_path) == before
+def test_ambiguous_or_invalid_calls_refuse_before_any_write(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for args, message in REFUSALS:
+        tmp_path = next(case_paths)
+        with subtests.test(args=args, message=message):
+            ctx, _address, original = _setup(tmp_path)
+            before = _files(tmp_path)
+            reply = tools._knowledge_write(ctx, "people/ada", scope="global", expected_revision=original.revision, **args)
+            assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply
+            assert _files(tmp_path) == before
 
 
 @pytest.mark.parametrize("old_str", ["Absent line.", "e"])  # missing, then ambiguous
@@ -294,7 +322,7 @@ def test_schema_adds_summary_without_breaking_older_calls(tmp_path):
     schema = next(entry.schema for entry in tools.get_tools() if entry.name == "knowledge_write")
     props = schema["parameters"]["properties"]
     assert schema["parameters"]["required"] == ["topic"]
-    assert props["summary"]["type"] == "string" and "mode=edit only" in props["summary"]["description"]
+    assert props["summary"]["type"] == "string" and "mode=edit or append" in props["summary"]["description"]
     assert {"topic", "scope", "content", "mode", "old_str", "expected_revision"} < set(props)
     assert props["mode"]["enum"] == ["overwrite", "append", "edit", "archive", "restore"]
     assert set(props) == set(inspect.signature(tools._knowledge_write).parameters) - {"ctx"}

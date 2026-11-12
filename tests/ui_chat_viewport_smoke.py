@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 import time
+from urllib.parse import urlsplit
 
 import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
 
 from tests.ui_failure_evidence import FailureEvidence
+
+
+def state_reads(url: str) -> bool:
+    """Every shared state read of the page: the first `/api/state` and each `?bindings_since=` read after it
+    (#2307, state_snapshots.js createStateSnapshotSequencer). A `**/api/state` glob matches the first alone."""
+    return urlsplit(url).path == "/api/state"
 
 _CAPTURE_TEST_SOCKET = """() => {
     const NativeWebSocket = window.WebSocket;
@@ -21,10 +28,10 @@ _CAPTURE_TEST_SOCKET = """() => {
         }
     };
 }"""
-# One page-wide /api/state read is in flight at a time (chat_activity.js
+# One page-wide /api/state read is in flight at a time (state_snapshots.js
 # createStateSnapshotSequencer.gate): a forced refresh that lands behind an
-# in-flight read starts only after that read settles, so the socket-open census
-# can still be reading after the socket reports OPEN. A frame emitted on the test
+# in-flight read starts once that read settles, or at once when a socket change
+# retires it, so the socket-open census can still be reading after OPEN. A frame emitted on the test
 # socket exists nowhere on the server; a complete census whose request started
 # after that frame concludes its card by absence, exactly as it would a task the
 # queue really lost. Tests that emit such frames wait for the reads to land first.
@@ -193,10 +200,12 @@ def run_chat_viewport_smoke(
         return result
 
     def feed_wheel_point(page):
-        # .chat-live-card is overflow:hidden (web/style.css). WebKit treats
-        # that as a scrollport and does not chain the wheel to #chat-messages.
-        # The feed center is often that card. Cards are flex-start, so aim
-        # at a point on the feed that is not inside such a scrollport.
+        # A general feed gesture: aim at a point that is not inside any
+        # overflow:hidden/auto/scroll box, so the wheel reaches #chat-messages
+        # whatever sits under the pointer. A wheel aimed at a card's heading or
+        # actions is its own check (test_history_continuity_browser.py, #1524);
+        # the historical Linux report was not reproduced by card-aimed checks in
+        # macOS/Linux Chromium and Playwright WebKit; the system WKWebView is untested.
         return page.locator("#chat-messages").evaluate(
             """feed => {
                 const box = feed.getBoundingClientRect();
@@ -317,7 +326,7 @@ def run_chat_viewport_smoke(
         held_census.append(route)
 
     def release_census(page):
-        page.unroute("**/api/state", hold_census)
+        page.unroute(state_reads, hold_census)
         while held_census:
             held_census.pop(0).fallback()
 
@@ -331,7 +340,7 @@ def run_chat_viewport_smoke(
         # cards (switched below between complete and incomplete) repaints them,
         # and inside the follow zone that repaint follows. The frame under test
         # is the window's only writer; the census answers after it.
-        page.route("**/api/state", hold_census)
+        page.route(state_reads, hold_census)
         page.locator("#chat-scroll-bottom").dispatch_event("click")
         read_to_latest(page)
         state = jump_state(page)
@@ -391,7 +400,7 @@ def run_chat_viewport_smoke(
             evidence = FailureEvidence(page, browser, evidence_dir, nodeid, browser_engine)
             with evidence:
                 page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
-                page.route("**/api/state", incomplete_activity_census)
+                page.route(state_reads, incomplete_activity_census)
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 page.add_style_tag(
                     content="#chat-messages, #chat-messages * { overflow-anchor: none !important; }"
@@ -613,9 +622,8 @@ def run_chat_viewport_smoke(
                 state = jump_state(page)
                 assert state["remaining"] <= 6 and state["dotHidden"], state
 
-                # The reader's own wheel leaves the live edge. Aim it outside any
-                # card scrollport (WebKit swallows a wheel there, see
-                # feed_wheel_point); only a wheel that moved nothing at all is
+                # The reader's own wheel leaves the live edge, aimed by
+                # feed_wheel_point; only a wheel that moved nothing at all is
                 # retried, inside one 30 s deadline.
                 page.evaluate("""() => {
                     window.__readerScrolls = 0;
@@ -960,7 +968,7 @@ def run_chat_viewport_smoke(
                 # The cancelable frame is then a duplicate and never sets the
                 # activity bit. Install the census only after that bit is observed.
                 page.route(
-                    "**/api/state",
+                    state_reads,
                     lambda route: route.fulfill(
                         status=200,
                         content_type="application/json",
@@ -1014,8 +1022,8 @@ def run_chat_viewport_smoke(
                 )
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 assert_noop_read(page, noop_top)
-                page.unroute("**/api/state")
-                page.route("**/api/state", incomplete_activity_census)
+                page.unroute(state_reads)
+                page.route(state_reads, incomplete_activity_census)
 
                 # A production-shaped review reference hydrates asynchronously;
                 # both the fetch result and its review DOM reconcile stay anchored.
@@ -1057,7 +1065,7 @@ def run_chat_viewport_smoke(
                 # changes no projection, so it must not manufacture activity
                 # (the census poll waits, as in every no-op window). The row's own sleep
                 # mark (chat_row_sleep.js) may change between the reads: it is no write of the card.
-                page.route("**/api/state", hold_census)
+                page.route(state_reads, hold_census)
                 button.click()
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 set_remaining(page, 300)
@@ -1207,7 +1215,7 @@ def run_chat_viewport_smoke(
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 assert_noop_read(page, noop_top)
                 page.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "chat-viewport") / f"live-card-viewport-{browser_engine}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "chat-viewport", publish=True) / f"live-card-viewport-{browser_engine}.png"),
                     full_page=True,
                 )
 
@@ -1233,7 +1241,7 @@ def run_chat_viewport_smoke(
                     "cards => cards.map(card => card.dataset.taskId).filter(id => id !== 'vp-detail-noop')"
                 )
                 page.route(
-                    "**/api/state",
+                    state_reads,
                     lambda route: route.fulfill(
                         status=200,
                         content_type="application/json",

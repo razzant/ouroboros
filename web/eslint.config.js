@@ -34,6 +34,16 @@ export default [
         rules: { 'no-undef': 'error' },
     },
     {
+        // The classic script every first-party page runs before CSS: a script, never a module.
+        files: ['theme.js'],
+        languageOptions: {
+            ecmaVersion: 2022,
+            sourceType: 'script',
+            globals: { ...globals.browser, ...globals.es2022 },
+        },
+        rules: { 'no-undef': 'error' },
+    },
+    {
         // The node --test suite: browser globals it stubs by name plus node's.
         files: ['tests/**/*.test.js'],
         languageOptions: {

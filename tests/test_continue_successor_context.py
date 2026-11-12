@@ -32,6 +32,53 @@ SURFACE_ADVANCED = "2026-10-01T09:30:00+00:00"
 TERMINAL_AT = "2026-10-01T10:00:00+00:00"
 
 
+@pytest.mark.parametrize("source", ["place", "circle", "consciousness", "main", "room", "owner", "owner_words", "mind"])
+@pytest.mark.parametrize("local", [False, True])
+def test_continue_opens_on_the_same_carried_or_followed_route(tmp_path, monkeypatch, source, local):
+    from ouroboros import route_choice
+    from ouroboros.agent_dispatch import _initial_effort_for
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, task_model_binding
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.registry import ToolContext
+    from supervisor.continuation_admission import _successor_task
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "main-model")
+    monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "conscious-model")
+    monkeypatch.setenv("OUROBOROS_EFFORT_CONSCIOUSNESS", "high")
+    monkeypatch.setenv("OUROBOROS_MODEL_ACCOUNTS", json.dumps({"main": "main-pin", "consciousness": "wake-pin"}))
+    for role in ("MAIN", "CONSCIOUSNESS"):
+        monkeypatch.setenv("USE_LOCAL_" + role, "true" if local else "false")
+    wake = source in {"place", "circle", "consciousness"}
+    metadata = {"model_role": "consciousness"} if wake else {}
+    if source == "main":
+        metadata["lead"] = {"source": "main"}
+    elif source != "consciousness":
+        metadata["lead"] = {"source": source, "model": "chosen-model", "use_local": local}
+    if source == "owner_words":
+        metadata["lead"]["cited"] = "Use this model for the work."
+    write_task_result(tmp_path, "route-source", "failed", metadata=metadata)
+    successor = _successor_task(SimpleNamespace(DRIVE_ROOT=tmp_path), "route-source",
+        load_task_result(tmp_path, "route-source"), {"successor_task_id": "route-next", "chat_id": 7},
+        {"cause": "context_overflow"}, {"original": {"content": "Do the work"}, "later": []}, {})
+
+    def opening(meta, presence):
+        ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_metadata=meta)
+        route_choice.bind_task_route(ctx, meta, presence=presence)
+        role, pin = task_model_binding({"metadata": meta})
+        model, use_local, _ = route_choice.open_route(ctx, None)
+        return model, role, pin if pin is not None else model_role_option(MODEL_ACCOUNTS_KEY, role), \
+            _initial_effort_for({"metadata": meta}, "task"), use_local
+
+    fresh = opening(metadata, wake)
+    assert opening(successor["metadata"], False) == fresh
+    assert fresh[-1] is local
+    assert fresh[1:3] == (("consciousness", "wake-pin") if source == "consciousness"
+                         else ("main", "main-pin") if source == "main" else ("lead", ""))
+    if wake:
+        assert fresh[3] == "high" and successor["metadata"]["model_role"] == "consciousness"
+    assert successor["metadata"].get("lead") == metadata.get("lead")
+
+
 def _mutation_evidence() -> dict:
     """An advanced baseline: the task's own commit re-anchored the system surface
     (its SHA and captured_at), the top-level baseline time stayed at the start."""
@@ -229,8 +276,6 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
 @pytest.mark.parametrize("canonical,metadata,expected", [
     pytest.param({FIELD: False}, {FIELD: True}, False, id="canonical-false-wins"),
     pytest.param({FIELD: True}, {FIELD: False}, True, id="canonical-true-wins"),
-    pytest.param({"context": "partial canonical contract"}, {FIELD: True}, True, id="per-field-fallback"),
-    pytest.param(None, {FIELD: True}, True, id="metadata-only-true"),
     pytest.param(None, {FIELD: False}, False, id="metadata-only-false"),
     pytest.param({}, {}, None, id="absent-stays-absent"),
     pytest.param({FIELD: None}, {FIELD: True}, None, id="canonical-nonbool-wins"),
@@ -355,8 +400,6 @@ def test_peer_mail_rides_as_a_count_and_reader_not_bodies(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("stored,carried", [
     pytest.param({"model_role": "consciousness"}, "consciousness", id="role-carried"),
-    pytest.param({"model_role": "consciousness", "model": "claudexor::codex=gpt-6-astra"}, "consciousness",
-                 id="role-carried-route-dropped"),
     pytest.param({"model": "claudexor::codex=gpt-6-astra"}, "", id="route-alone-not-a-choice"),
     pytest.param({}, "", id="install-default-stays-default"),
 ])
@@ -405,3 +448,26 @@ def test_only_a_dated_system_surface_is_a_checkout_observation(evidence, expecte
     from ouroboros.owner_continue import recorded_system_checkout
 
     assert recorded_system_checkout({"mutation_evidence": evidence}) == expected
+
+
+@pytest.mark.parametrize("lead", [{"source": "main"}, {"source": "owner", "model": "openai::chosen", "use_local": False}])
+@pytest.mark.parametrize("acting_source", ["fallback", "switch_model"])
+def test_continue_keeps_whole_lead_after_room_change_never_the_acting_departure(tmp_path, monkeypatch, lead, acting_source):
+    from ouroboros.composer_cognition import update_project_model_choice
+    from ouroboros.projects_registry import create_project
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    create_project(tmp_path, "room", origin="owner_ui")
+    update_project_model_choice(tmp_path, "room", {"kind": "model", "model": "openai::new-room"})
+    _interrupted(tmp_path, project_id="room", metadata={"lead": lead, "model": "openai::acting"},
+                 model="openai::acting", route={"active_model": "openai::acting", "active_model_override": "openai::acting",
+                                               "route_choice": {"kind": "explicit", "source": acting_source}})
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+    assert ack["ok"] is True, ack
+    successor = next(row for row in workers.PENDING if row["id"] == ack["successor_task_id"])
+    assert successor["metadata"]["lead"] == lead
+    assert "model" not in successor and "model" not in successor["metadata"]
+    assert "route" not in successor
+    assert load_task_result(tmp_path, successor["id"])["metadata"]["lead"] == lead

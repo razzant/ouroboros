@@ -8,13 +8,25 @@ from ouroboros import skill_source_catalog as catalog
 from scripts.generate_consciousness_fixture import generate
 
 
+def _fixture_handles():
+    """Cached store handles left under the generator's temporary folders: Windows cannot remove an open file."""
+    from ouroboros import store
+
+    with store._CONNECTION_GUARD:
+        return [name for pool in list(store._CONNECTION_POOLS) for name in pool.entries if "wake-fixture-" in name]
+
+
 def test_browser_fixture_matches_the_producers():
     expected = json.loads((Path(__file__).parents[1] / "web/tests/fixtures/consciousness_contract.json").read_text(encoding="utf-8"))
+    if not hasattr(time, "tzset"):  # Windows cannot change the process zone; the generator pins the producer's own
+        assert generate() == expected and not _fixture_handles()
+        return
     try:
         for zone in ("UTC", "Europe/Moscow"):
             with patch.dict("os.environ", TZ=zone):
                 time.tzset()
                 assert generate() == expected
+                assert not _fixture_handles(), _fixture_handles()
     finally:
         time.tzset()
 

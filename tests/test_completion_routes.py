@@ -91,7 +91,7 @@ def test_authored_stop_money_check_uses_real_cap_not_planning_margin(monkeypatch
     from ouroboros.loop_budget import authored_completion_budget_exhausted
     import ouroboros.loop as loop
     monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 10)
-    ctx = SimpleNamespace(active_use_local=False, accumulated_usage={'cost': 1.0})
+    ctx = SimpleNamespace(active_use_local=False, active_model=PAID, accumulated_usage={'cost': 1.0})
     cap = SimpleNamespace(root_cap_usd=10.0, ceiling_usd=7.0)
     monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'settled_usd': 8.0, 'accounted_usd': 8.0})
     assert authored_completion_budget_exhausted(ctx, 10, cap) is False
@@ -100,8 +100,59 @@ def test_authored_stop_money_check_uses_real_cap_not_planning_margin(monkeypatch
     assert authored_completion_budget_exhausted(ctx, 10, cap) is False
     monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'settled_usd': 10.0, 'accounted_usd': 10.0})
     assert authored_completion_budget_exhausted(ctx, 10, cap) is True
+    # A route that needs paid admission: the fresh wallet at zero owns its stop.
     monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 0)
     assert authored_completion_budget_exhausted(ctx, 10, None) is True
+
+
+PAID, SUBSCRIPTION = 'openai/gpt-5.2', 'claudexor::codex=gpt-6-astra'
+ROUTES = [('local-model', True, False), (SUBSCRIPTION, False, False), (PAID, False, True)]
+
+
+def test_the_reached_global_limit_owns_an_authored_stop_only_on_a_paid_route(subtests, monkeypatch):
+    """Owner 2A: the limit refuses paid admission only, so on a $0 route (local, an unbilled subscription) neither
+    the task's wallet snapshot nor a fresh wallet at zero makes its own stop a budget failure; the root cap binds
+    every route."""
+    for model, local, pays in ROUTES:
+        with subtests.test(model=model, local=local, pays=pays), monkeypatch.context() as monkeypatch:
+            from ouroboros.loop_budget import authored_completion_budget_exhausted
+            import ouroboros.loop as loop
+            ctx = SimpleNamespace(active_use_local=local, active_model=model, accumulated_usage={'cost': 0.0})
+            monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 10)
+            assert authored_completion_budget_exhausted(ctx, 0, None) is pays  # the snapshot the task started with
+            monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 0)
+            assert authored_completion_budget_exhausted(ctx, 10, None) is pays  # the wallet reached zero meanwhile
+            monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'settled_usd': 5.0, 'accounted_usd': 5.0})
+            assert authored_completion_budget_exhausted(ctx, 10, SimpleNamespace(root_cap_usd=5.0)) is True
+
+
+@pytest.mark.parametrize('model, local, pays', ROUTES)
+def test_an_authored_stop_at_the_reached_global_limit_completes_unless_its_route_pays(
+        tmp_path, monkeypatch, model, local, pays):
+    """The real loop at remaining $0: the stop the model authored is published as itself on a $0 route; on a paid
+    route the money rail still owns it (``budget_exhausted``)."""
+    import json
+    import queue
+    import ouroboros.loop as loop
+
+    monkeypatch.setenv('OUROBOROS_TASK_REVIEW_MODE', 'off')
+    monkeypatch.setenv('USE_LOCAL_MAIN', 'true' if local else '')
+    stop = {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'stop', 'type': 'function', 'function': {
+        'name': 'finish_task', 'arguments': json.dumps({'action': 'stop', 'answer': 'Partial answer.',
+                                                        'rationale': 'One check remains.'})}}]}
+    calls = []
+    monkeypatch.setattr(loop, 'call_llm_with_retry', lambda *_a, **_k: calls.append(1) or (stop, 0.0))
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    text, usage, trace = loop.run_llm_loop(
+        [{'role': 'user', 'content': 'go'}], registry, SimpleNamespace(default_model=lambda: model), tmp_path / 'logs',
+        lambda *_a, **_k: None, queue.Queue(), task_id='stopper', budget_remaining_usd=0.0,
+        drive_root=tmp_path)
+    assert calls == [1]
+    assert (usage.get('reason_code') == 'budget_exhausted') is pays
+    assert (usage.get('execution_status') == 'failed') is pays
+    assert ('forced_finalization' in trace) is pays
+    assert pays or (trace.get('task_completion') or {}).get('action') == 'stop'
+    assert 'Partial answer.' in text
 
 
 def test_resealing_author_stop_retains_queue_generation_comparison():

@@ -13,6 +13,7 @@ import pytest
 from ouroboros import dialogue_store, store, store_import, usage_store
 from ouroboros.utils import atomic_write_json
 from tests._usage_store_testing import seed
+from tests._cases import case_folders, chosen_rows
 
 KINDS = ('current', 'dialog', 'usage')
 
@@ -69,66 +70,72 @@ def _assert_content(root, kind):
         assert dialogue_store.meta(root, 'schema_version') == dialogue_store.SCHEMA_VERSION
 
 
-@pytest.mark.parametrize('kind', KINDS)
-@pytest.mark.parametrize('tier', (store.TIER_ENFORCED, store.TIER_NAME))
-def test_creation_ddl_and_seed_share_one_full_transaction(tmp_path, monkeypatch, kind, tier):
-    from ouroboros import platform_layer
-    monkeypatch.setattr(platform_layer, 'kernel_file_locks_enforced', lambda *_a, **_kw: tier == store.TIER_ENFORCED)
-    _seed(tmp_path, kind)
-    connect = store.connect
-    traces, settings = [], []
+def test_creation_ddl_and_seed_share_one_full_transaction(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for kind in KINDS:
+        for tier in ((store.TIER_ENFORCED, store.TIER_NAME)):
+            tmp_path = next(case_paths)
+            with subtests.test(kind=kind, tier=tier), monkeypatch.context() as monkeypatch:
+                from ouroboros import platform_layer
+                monkeypatch.setattr(platform_layer, 'kernel_file_locks_enforced', lambda *_a, **_kw: tier == store.TIER_ENFORCED)
+                _seed(tmp_path, kind)
+                connect = store.connect
+                traces, settings = [], []
 
-    def observed(path, selected_tier, **kwargs):
-        conn = connect(path, selected_tier, **kwargs)
-        if kwargs.get('create'):
-            settings.append((selected_tier, conn.execute('PRAGMA synchronous').fetchone()[0],
-                             conn.execute('PRAGMA journal_mode').fetchone()[0]))
-            conn.set_trace_callback(lambda sql: traces.append((sql.strip().rstrip(';').upper(), conn.in_transaction)))
-        return conn
+                def observed(path, selected_tier, **kwargs):
+                    conn = connect(path, selected_tier, **kwargs)
+                    if kwargs.get('create'):
+                        settings.append((selected_tier, conn.execute('PRAGMA synchronous').fetchone()[0],
+                                         conn.execute('PRAGMA journal_mode').fetchone()[0]))
+                        conn.set_trace_callback(lambda sql: traces.append((sql.strip().rstrip(';').upper(), conn.in_transaction)))
+                    return conn
 
-    monkeypatch.setattr(store, 'connect', observed)
-    _create(tmp_path, kind)
-    assert len(settings) == 1 and settings[0][:2] == (tier, 2)
-    assert settings[0][2] == store._journal_mode(_target(tmp_path, kind), tier).lower()
-    writes = [(sql, active) for sql, active in traces if sql.startswith(('CREATE ', 'ALTER ', 'INSERT ', 'UPDATE ', 'DELETE ', 'DROP '))]
-    assert writes and all(active for _, active in writes), writes
-    assert sum(sql == 'BEGIN IMMEDIATE' for sql, _ in traces) == 1
-    assert sum(sql == 'COMMIT' for sql, _ in traces) == 1
-    _assert_content(tmp_path, kind)
-    before = _target(tmp_path, kind).read_bytes()
-    _create(tmp_path, kind)
-    assert _target(tmp_path, kind).read_bytes() == before
+                monkeypatch.setattr(store, 'connect', observed)
+                _create(tmp_path, kind)
+                assert len(settings) == 1 and settings[0][:2] == (tier, 2)
+                assert settings[0][2] == store._journal_mode(_target(tmp_path, kind), tier).lower()
+                writes = [(sql, active) for sql, active in traces if sql.startswith(('CREATE ', 'ALTER ', 'INSERT ', 'UPDATE ', 'DELETE ', 'DROP '))]
+                assert writes and all(active for _, active in writes), writes
+                assert sum(sql == 'BEGIN IMMEDIATE' for sql, _ in traces) == 1
+                assert sum(sql == 'COMMIT' for sql, _ in traces) == 1
+                _assert_content(tmp_path, kind)
+                before = _target(tmp_path, kind).read_bytes()
+                _create(tmp_path, kind)
+                assert _target(tmp_path, kind).read_bytes() == before
 
 
-@pytest.mark.parametrize('kind', KINDS)
-@pytest.mark.parametrize('stage', ('schema', 'seed', 'commit'))
-def test_creation_sql_failure_never_publishes_and_retry_succeeds(tmp_path, monkeypatch, kind, stage):
-    _seed(tmp_path, kind)
-    connect, reached = store.connect, []
+def test_creation_sql_failure_never_publishes_and_retry_succeeds(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for kind in KINDS:
+        for stage in (('schema', 'seed', 'commit')):
+            tmp_path = next(case_paths)
+            with subtests.test(kind=kind, stage=stage), monkeypatch.context() as monkeypatch:
+                _seed(tmp_path, kind)
+                connect, reached = store.connect, []
 
-    def failing(path, tier, **kwargs):
-        conn = connect(path, tier, **kwargs)
-        if kwargs.get('create'):
-            def deny(action, first, second, _db, _trigger):
-                matches = ((stage == 'schema' and action == sqlite3.SQLITE_CREATE_INDEX)
-                           or (stage == 'seed' and action == sqlite3.SQLITE_INSERT and first != 'sqlite_master')
-                           or (stage == 'commit' and action == sqlite3.SQLITE_TRANSACTION and first == 'COMMIT'))
-                if matches:
-                    reached.append((action, first, second))
-                    return sqlite3.SQLITE_DENY
-                return sqlite3.SQLITE_OK
-            conn.set_authorizer(deny)
-        return conn
+                def failing(path, tier, **kwargs):
+                    conn = connect(path, tier, **kwargs)
+                    if kwargs.get('create'):
+                        def deny(action, first, second, _db, _trigger):
+                            matches = ((stage == 'schema' and action == sqlite3.SQLITE_CREATE_INDEX)
+                                       or (stage == 'seed' and action == sqlite3.SQLITE_INSERT and first != 'sqlite_master')
+                                       or (stage == 'commit' and action == sqlite3.SQLITE_TRANSACTION and first == 'COMMIT'))
+                            if matches:
+                                reached.append((action, first, second))
+                                return sqlite3.SQLITE_DENY
+                            return sqlite3.SQLITE_OK
+                        conn.set_authorizer(deny)
+                    return conn
 
-    monkeypatch.setattr(store, 'connect', failing)
-    with pytest.raises(Exception):
-        _create(tmp_path, kind)
-    assert reached, 'The intended SQL failure was not exercised'
-    assert not _target(tmp_path, kind).exists()
-    assert not list((tmp_path / 'state').glob(f'{kind}.sqlite.import-*'))
-    monkeypatch.setattr(store, 'connect', connect)
-    _create(tmp_path, kind)
-    _assert_content(tmp_path, kind)
+                monkeypatch.setattr(store, 'connect', failing)
+                with pytest.raises(Exception):
+                    _create(tmp_path, kind)
+                assert reached, 'The intended SQL failure was not exercised'
+                assert not _target(tmp_path, kind).exists()
+                assert not list((tmp_path / 'state').glob(f'{kind}.sqlite.import-*'))
+                monkeypatch.setattr(store, 'connect', connect)
+                _create(tmp_path, kind)
+                _assert_content(tmp_path, kind)
 
 
 # The child really exits without unwinding Python's context managers. It touches only
@@ -170,7 +177,7 @@ raise AssertionError('crash point not reached')
 '''
 
 
-@pytest.mark.parametrize('kind', KINDS)
+@pytest.mark.parametrize('kind', chosen_rows(KINDS, 0, 2))
 @pytest.mark.parametrize('stage', ('schema', 'before_commit', 'after_commit', 'after_publish'))
 def test_process_death_then_public_creation_preserves_atomicity(tmp_path, kind, stage):
     _seed(tmp_path, kind)

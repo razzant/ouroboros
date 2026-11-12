@@ -1,12 +1,13 @@
-// Installed skill cards (Skills → Installed): one head shared with Browse, the run
-// state as one chip, at most two attention trays (one sentence + its actions), and
+// Installed skill cards (Skills → Installed): one head shared with Browse, the switch as
+// the run state (a chip only for a state it cannot show), at most two attention trays (one sentence + its actions), and
 // Details for the record. Rows come from the listing fixture shaped as SPEC §8.1.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-    fillFindingsOnOpen, installedSkillModel, installedWhoHtml, isMadeHere, renderInstalledSkillCard, reviewSentence,
+    continuableReview, fillFindingsOnOpen, installedSkillModel, installedWhoHtml, isMadeHere, renderInstalledSkillCard,
+    reviewSentence,
 } from '../modules/skill_card_renderer.js';
 
 const LISTING = JSON.parse(readFileSync(new URL('./fixtures/skills_v4/extensions_v4.json', import.meta.url), 'utf8'));
@@ -28,7 +29,7 @@ function skill(overrides = {}) {
 
 test('one head: the name opens the detail sheet, marks stay beside it, the who line names the source', () => {
     const html = renderInstalledSkillCard(row('weather'));
-    assert.match(html, /<button type="button" class="skills-card-name" data-skill="weather" data-skill-action="open_detail"><span data-i18n-authored>weather<\/span><span class="skills-card-name-more" aria-hidden="true">›<\/span><\/button>/);
+    assert.match(html, /<button type="button" class="skills-card-name ui-hit-area" data-skill="weather" data-skill-action="open_detail"><span data-i18n-authored>weather<\/span><span class="skills-card-name-more" aria-hidden="true">›<\/span><\/button>/);
     assert.match(html, /data-official-mark[^>]*>[\s\S]*?Official<\/button>/, 'Official comes from the install record');
     assert.match(installedWhoHtml(row('weather')), /^Ouroboros · v0\.3\.1 · installed .* by Ouroboros$/);
     assert.match(installedWhoHtml(row('telegram')), /^Built in · v1\.3\.0 · came with Ouroboros /);
@@ -37,9 +38,22 @@ test('one head: the name opens the detail sheet, marks stay beside it, the who l
     assert.doesNotMatch(html, / title="/, 'no explanation lives in a hover title');
 });
 
-test('the run state is one status chip: On, Off, Needs access, Reviewing…, Review found problems, Not reviewed yet', () => {
-    assert.deepEqual(chipOf(renderInstalledSkillCard(row('telegram'))).slice(1), ['ok', 'On']);
-    assert.deepEqual(chipOf(renderInstalledSkillCard(skill())).slice(1), ['neutral', 'Off']);
+test('Details lists each placed control in the Details row layout with a polarity-true Hide/Show', () => {
+    const rows = [{ key: 'demo:chip', label: 'Meter', place: 'Chip above the composer', hidden: false },
+        { key: 'demo:save', label: 'Save', place: 'On replies', hidden: true }];
+    const html = renderInstalledSkillCard(skill(), new Set(), new Set(), {}, { contributionVisibility: () => rows });
+    const section = html.split('data-skill-detail-contributions>')[1].split('<div class="skills-details-facts" data-skill-detail-facts>')[0];
+    assert.match(section, /<span class="skills-detail-label">Shown in chat<\/span>/);
+    assert.match(section, /data-contribution-row="demo:chip"><span class="skills-detail-label">Meter<\/span><span class="skills-detail-value">Chip above the composer <button[^>]*data-skill-action="toggle_contribution"[^>]*data-contribution-key="demo:chip" data-contribution-hidden="false" aria-label="Hide Meter, chip above the composer">Hide<\/button>/);
+    assert.match(section, /On replies · hidden <button[^>]*data-contribution-hidden="true" aria-label="Show Save, on replies">Show<\/button>/);
+    assert.doesNotMatch(section, /<small>|<strong>|<h4>/, 'no raw small text or ad-hoc headings');
+    assert.doesNotMatch(renderInstalledSkillCard(skill(), new Set(), new Set(), {}, { contributionVisibility: () => [] }),
+        /data-skill-detail-contributions/, 'a skill without placed controls has no such rows');
+});
+
+test('normal On and Off state lives in the switch; only attention states get a status chip', () => {
+    assert.equal(chipOf(renderInstalledSkillCard(row('telegram'))), null);
+    assert.equal(chipOf(renderInstalledSkillCard(skill())), null);
     // Amber is the owner's move: a grant, a review, a review to try again (each offers the owner's own action).
     assert.deepEqual(chipOf(renderInstalledSkillCard(row('zoom_meeting'))).slice(1), ['warn', 'Needs access']);
     assert.deepEqual(chipOf(renderInstalledSkillCard(row('claudexor_quotas'))).slice(1), ['warn', 'Not reviewed yet']);
@@ -77,6 +91,49 @@ test('each attention tray is one sentence with its own actions, visible without 
     const otherEdit = traysOf(renderInstalledSkillCard(row('claudexor_quotas')));
     assert.match(otherEdit, /Its files changed here since it was installed, so it waits for a review\. Review it, or skip the review\./);
     assert.match(otherEdit, /data-skill-action="rereview"[^>]*>Review</);
+});
+
+test('page-module faults and holds are owner-visible and keep recovery discoverable', () => {
+    const faulty = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: { faults: [{ skill: 'demo', reason: 'boom', current: true }], held: [] },
+    });
+    assert.deepEqual(chipOf(faulty).slice(1), ['warn', 'Off in this window']);
+    assert.match(traysOf(faulty), /page module stopped in this window: boom/);
+    assert.doesNotMatch(traysOf(faulty), /data-host-module-key/);
+    const held = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: { faults: [], held: [{ key: 'demo:voice', skill: 'demo', reason: 'start' }] },
+    });
+    assert.match(traysOf(held), /Held back: the page stopped while this was starting last time\./);
+    assert.match(held, /data-skill-action="start_host_module"[^>]*data-host-module-key="demo:voice"/);
+    const stale = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: { faults: [{ skill: 'demo', reason: 'old', current: false }], held: [] },
+    });
+    assert.equal(chipOf(stale), null, 'stale faults do not add a chip to the normal enabled switch');
+    assert.match(stale, /class="skills-toggle"[^>]*checked/);
+});
+
+test('faults and held siblings of one skill both retain their page facts', () => {
+    const html = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: {
+            faults: [{ skill: 'demo', reason: 'voice failed', current: true }],
+            held: [{ key: 'demo:tts', skill: 'demo', reason: 'start' }],
+        },
+    });
+    assert.match(html, /page module stopped in this window: voice failed/);
+    assert.match(html, /data-skill-action="start_host_module"[^>]*data-host-module-key="demo:tts"/);
+});
+
+test('page attention keeps an overflow update fact in Details', () => {
+    const row = skill({
+        enabled: true,
+        install: { update_available: { version: '2.0.0' }, release: { version: '1.0.0' } },
+    });
+    const html = renderInstalledSkillCard(row, new Set(['demo']), new Set(), {}, {
+        pageModules: { faults: [], held: [{ key: 'demo:voice', skill: 'demo', reason: 'start' }] },
+    });
+    assert.match(html, /data-skill-detail-overflow/);
+    assert.match(html, /2\.0\.0 is available/);
+    assert.match(html, /data-skill-action="update"/);
 });
 
 test('updates: one click for an unmodified skill, «Update…» asks what to keep for a modified one', () => {
@@ -120,7 +177,7 @@ test('a rejected update names the restored state and offers findings and owner s
     assert.match(traysOf(html), /data-skill-action="read_findings"[^>]*>See findings</);
     assert.match(traysOf(html), /data-skill-action="update_without_review"[^>]*>Update without review</);
     assert.match(traysOf(html), /data-skill-action="update"[^>]*>Update</);
-    assert.deepEqual(chipOf(html).slice(1), ['ok', 'On']);
+    assert.equal(chipOf(html), null);
     const pending = renderInstalledSkillCard(FIXES.find((skill) => skill.name === 'pending_update'));
     assert.match(traysOf(pending), /Updating to 2\.0\.0: it stays off until the review finishes\./);
     assert.match(pending, /class="skills-toggle"[^>]*disabled/);
@@ -141,6 +198,16 @@ test('self-check is escaped, abbreviated in the review sentence, complete in Det
     changed.review_gate = { ...changed.review_gate, executable_review: false, blocking_reason: 'review_pending' };
     changed.executable_review = false;
     assert.equal(reviewSentence(changed), 'Not reviewed for its current files.');
+});
+
+test('a passed review stays the evidence while a newer round has no verdict: one sentence, no pending chip', () => {
+    const detailsReview = (html) => html.split('data-skill-detail-review>')[1].split('</div>')[0];
+    const waiting = skill({ review_status: 'pending', skill_review: { current: { review_round: 2, snapshot_attempt: 2, content_hash: 'd853fe070533aa', status: 'pending' }, history: [] } });
+    assert.equal(reviewSentence(waiting), 'Reviewed on this computer · passed · a new review (round 2) is pending.');
+    assert.doesNotMatch(detailsReview(renderInstalledSkillCard(waiting)), /ui-chip/, 'no verdict yet is no chip, never a green pending');
+    // Without a newer round the passed review is said alone, beside its verdict.
+    assert.equal(reviewSentence(skill()), 'Reviewed on this computer · passed.');
+    assert.match(detailsReview(renderInstalledSkillCard(skill())), /data-tone="ok"[^>]*>clean</);
 });
 
 test('per-release withdrawal names the withdrawn version supplied by the host', () => {
@@ -333,4 +400,75 @@ test('skill titles prefer the optional title, then connector label, then canonic
         assert.match(html, /data-skill="demo"/);
         assert.match(html, /skills-detail-label">ID<\/span><span class="skills-detail-value"><code data-i18n-authored>demo<\/code><\/span>/);
     }
+});
+
+test('a stopped Skills-page reviewer of these bytes is continued by its own action beside a new review', () => {
+    // The real projection after a stopped seat (gateway /api/extensions): the job failed without a verdict
+    // and its record's card row offers the seat (skill_review_runner._ledger_history_rows).
+    const offer = { seat_id: 'review-s', operation_id: 'op-1', run_id: 'run-1', cause: 'Account limit reached' };
+    const stopped = (rows) => skill({ review_status: 'pending', review_gate: { executable_review: false }, executable_review: false,
+        content_hash: 'h1', skill_review: { current: { lifecycle_status: 'failed', content_hash: 'h1', record_id: 'rl-1',
+            terminal_reason: 'no verdict was formed' }, history: rows } });
+    const row = { record_id: 'rl-1', content_hash: 'h1', task_id: 'api_skill_review', continuable_seats: [offer] };
+    const html = traysOf(renderInstalledSkillCard(stopped([row])));
+    assert.match(html, /The review didn’t finish: no verdict was formed/);
+    assert.match(html, /A reviewer stopped with work it can continue from where it stopped\./);
+    const actions = [...html.matchAll(/<button[^>]*data-skill-action="([^"]+)"[^>]*>([^<]+)</g)].map((m) => [m[1], m[2]]);
+    assert.deepEqual(actions.slice(0, 2), [['continue_review', 'Continue review'], ['review', 'Try again']]);
+    assert.deepEqual(continuableReview(stopped([row])), row);
+    // Other bytes, nothing offered, or no record: a new review is the only move.
+    for (const other of [{ ...row, content_hash: 'h0' }, { ...row, continuable_seats: [] }, { ...row, record_id: '' }]) {
+        assert.equal(continuableReview(stopped([other])), null);
+        assert.doesNotMatch(renderInstalledSkillCard(stopped([other])), /continue_review/);
+    }
+});
+
+test('a declared secret that is not set is a neutral tray with Open Secrets and puts the card in Needs you; unknown is said, never a value', () => {
+    const fields = (state) => ({ secret_config: { fields: [{ id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state }] } });
+    const missing = renderInstalledSkillCard(skill({ enabled: true, ...fields('missing') }));
+    assert.match(traysOf(missing), /TELEGRAM_BOT_TOKEN is not set\.<div class="skills-tray-note">Save it in Settings → Secrets\.<\/div>/);
+    assert.doesNotMatch(traysOf(missing), /next read|some skills|Disable and Enable/, 'when it applies is the skill’s own status');
+    assert.match(traysOf(missing), /data-skill-action="open_secrets"[^>]*>Open Secrets</);
+    const two = renderInstalledSkillCard(skill({ enabled: true, secret_config: { fields: [
+        { id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state: 'missing' }, { id: 'proxy', key: 'TELEGRAM_PROXY', state: 'missing' }] } }));
+    assert.match(traysOf(two), /TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY are not set\.<div class="skills-tray-note">Save them in Settings → Secrets\.<\/div>/);
+    assert.doesNotMatch(traysOf(missing), /data-tone="(warn|danger)"/, 'a fact, not the owner’s amber move');
+    assert.equal(chipOf(missing), null);
+    // Saving it is the owner's move, so the card is under Needs you; the tray stays neutral and adds no chip.
+    assert.equal(installedSkillModel(skill({ enabled: true, ...fields('missing') })).needs, true);
+    assert.match(missing, /<article [^>]*data-needs-you[ >]/);
+    const unknown = traysOf(renderInstalledSkillCard(skill({ enabled: true, ...fields('unknown') })));
+    assert.match(unknown, /Saved settings can’t be read now, so whether TELEGRAM_BOT_TOKEN is set is unknown\./);
+    assert.doesNotMatch(unknown, /skills-tray-note|Save it/, 'an unreadable value is not a reason to save it again');
+    assert.match(unknown, /data-skill-action="open_secrets"/);
+    // Configured, an off skill, or a grant still missing: nothing here (the grant tray speaks for itself).
+    assert.doesNotMatch(renderInstalledSkillCard(skill({ enabled: true, ...fields('configured') })), /open_secrets/);
+    assert.doesNotMatch(renderInstalledSkillCard(skill({ ...fields('missing') })), /open_secrets/);
+    assert.doesNotMatch(renderInstalledSkillCard(skill({ enabled: true, grants: { all_granted: false, missing_keys: ['TELEGRAM_BOT_TOKEN'] },
+        ...fields('missing') })), /open_secrets/);
+    // Needs you follows the tray's own condition: an unreadable, a configured or an off skill's secret asks nothing;
+    // a grant still missing is already Needs access, once.
+    for (const overrides of [{ enabled: true, ...fields('unknown') }, { enabled: true, ...fields('configured') }, fields('missing')]) {
+        assert.equal(installedSkillModel(skill(overrides)).needs, false, JSON.stringify(overrides));
+        assert.doesNotMatch(renderInstalledSkillCard(skill(overrides)), /data-needs-you/);
+    }
+    const ungranted = skill({ enabled: true, grants: { all_granted: false, missing_keys: ['TELEGRAM_BOT_TOKEN'] }, ...fields('missing') });
+    assert.equal(installedSkillModel(ungranted).needs, true);
+    assert.deepEqual(chipOf(renderInstalledSkillCard(ungranted)).slice(1), ['warn', 'Needs access']);
+});
+
+test('a grant left behind by a byte change is named as the earlier version’s grant, never as missing keys', () => {
+    const earlier = { all_granted: false, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID'],
+        earlier_grant: { keys: ['GOOGLE_OAUTH_CLIENT_ID'], permissions: [] } };
+    const named = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: earlier })));
+    assert.match(named, /Wants to use GOOGLE_OAUTH_CLIENT_ID\./);
+    assert.match(named, /class="skills-tray-note">You granted this to an earlier version of the skill/);
+    // A new version asking for more than the earlier grant covered: the note does not claim all of it.
+    const wider = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: { ...earlier, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID', 'NEW_KEY'] } })));
+    assert.match(wider, /Wants to use GOOGLE_OAUTH_CLIENT_ID, NEW_KEY\./);
+    assert.match(wider, /You granted some of this to an earlier version/);
+    assert.match(named, /data-skill-action="grant" data-keys="GOOGLE_OAUTH_CLIENT_ID"/, 'the same Grant access button restores it');
+    // Never granted: the tray asks, and says nothing about an earlier version.
+    const fresh = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: { all_granted: false, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID'] } })));
+    assert.doesNotMatch(fresh, /earlier version|skills-tray-note/);
 });

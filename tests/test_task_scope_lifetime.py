@@ -26,7 +26,7 @@ from ouroboros import process_scope as ps
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tools.shell_process import _active_subprocesses, _tracked_subprocess_run
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
+pytestmark = [pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
 
 
 @contextmanager
@@ -83,10 +83,21 @@ def _end_pids(*pids) -> None:
             pass
 
 
+def _tracked_facts() -> list:
+    """Each child the tracked registry still names: pid, argv, observed exit and its retained group witness
+    (held, birth), so a failure names the command that left it, wherever in the session it was started."""
+    return [(proc.pid, getattr(proc, "args", None), getattr(proc, "returncode", None),
+             getattr(proc, "__dict__", {}).get("_ouroboros_group_held"),
+             getattr(proc, "__dict__", {}).get("_ouroboros_group_birth")) for proc in list(_active_subprocesses)]
+
+
 @pytest.fixture(autouse=True)
 def _own_cleanup_threads():
     yield
     ps.wait_for_cleanups(15)
+    from ouroboros.tools.shell_process import unsettled_tracked_children
+    leaked = unsettled_tracked_children()
+    assert leaked is None, (leaked, _tracked_facts())
 
 
 @pytest.mark.parametrize("task_id", ["t-end", "manual"])
@@ -139,11 +150,10 @@ def test_the_platform_binary_leftover_is_ended_even_when_its_marker_is_hidden(tm
 
 
 def test_a_non_platform_child_carries_the_task_marker_and_a_setsid_escape_is_still_ended(tmp_path):
-    node = _pl.resolve_bundled_node()
-    if not node:
-        pytest.skip("no bundled node for the marker-visible child")
-    # The runaway leaves the command's group (setsid): only the marker names it.
-    script = (f"import subprocess; p=subprocess.Popen([{node!r},'-e','setTimeout(()=>{{}},120000)'],"
+    # The runaway leaves the command's group (setsid): only the marker names it. It runs this test's own
+    # interpreter, whose environment every POSIX host shows (as ``_marker_child``'s does), so the case needs no
+    # bundled payload and runs wherever this module runs, CI included.
+    script = ("import subprocess, sys; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],"
               "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); print(p.pid)")
     res = _run(tmp_path, "t-marker", f"{sys.executable} -c {subprocess.list2cmdline([script])}")
     pid = int(res.stdout.strip().splitlines()[-1])

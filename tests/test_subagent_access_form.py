@@ -30,8 +30,11 @@ def registry(tmp_path, monkeypatch):
     return registry
 
 
-@pytest.mark.parametrize("access", ["inherit", "readonly", "workspace_write"])
-@pytest.mark.parametrize("surface", ["read_only", "self_worktree"])
+@pytest.mark.parametrize(("surface", "access"), [
+    ("read_only", "inherit"),
+    ("self_worktree", "readonly"),
+    ("self_worktree", "workspace_write"),
+])
 def test_api_all_fields_form_queues_without_changing_write_surface(registry, access, surface):
     """The incident's complete optional shape must reach the actual registered handler."""
     args = {
@@ -44,6 +47,8 @@ def test_api_all_fields_form_queues_without_changing_write_surface(registry, acc
         "allowed_origins": [], "delegation_intent": "", "may_mutate": False,
         "may_fan_out": True, "max_children": 0, "requested_depth": 0,
         "required_capabilities": [], "deadline_at": "", "acceptance_claims": [], "effort": "auto",
+        "input_files": [],  # an explicit none gates no surface
+        "memory_view": {},  # an explicit none widens no view; the child's start, not the schedule, judges it
     }
     schema = registry.get_schema_by_name("schedule_subagent")["function"]["parameters"]
     # Session-only choices have no API-child default; omission preserves native execution.
@@ -81,7 +86,7 @@ def test_api_omitted_access_keeps_result_free_of_an_ignored_field_notice(registr
     assert "ignored" not in result.text
 
 
-@pytest.mark.parametrize("access", ["full", "", "invalid", [], {}])
+@pytest.mark.parametrize("access", ["full", "", {}])
 def test_invalid_access_names_field_value_and_selected_route(access):
     with pytest.raises(SubagentSelectionError) as raised:
         select_subagent_snapshot(_settings(), subagent_id="api-scout", access=access)

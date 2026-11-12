@@ -189,12 +189,6 @@ def test_physical_retry_seals_each_actual_selected_send(declared_plan, monkeypat
             raise Rejected("temperature unsupported")
         return Response()
 
-    def retry_without_temperature(candidate, _model, _exc):
-        updated = copy.deepcopy(candidate)
-        updated.pop("temperature", None)
-        return updated
-
-    monkeypatch.setattr(client, "_retry_without_optional_sampling", retry_without_temperature)
     monkeypatch.setattr(client, "_openrouter_signature_retry_kwargs", lambda *_: None)
     payload = {"model": "fixture", "messages": plan.messages_for("max") + _tool_round(),
                "max_tokens": 32, "temperature": 0.7}

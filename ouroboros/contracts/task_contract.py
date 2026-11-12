@@ -145,26 +145,41 @@ def normalize_attachment_manifest(value: Any) -> list[Dict[str, Any]]:
 def normalize_engine_import_receipts(value: Any, row: Mapping[str, Any]) -> list[Dict[str, Any]]:
     """Store-bound document import receipts bound to exactly ROW's bytes and semantics.
 
-    A receipt carries one ready engine import of this input across tasks
+    A receipt carries one observed engine import across tasks, including finished or gapped keys
     (``ouroboros.delegate_documents``): the store id, the saved key and exact request,
-    and the resource id. Its request must declare ROW's bytes and the same kind (``file``),
+    the resource id when observed, and any non-ready state. Its request must
+    declare ROW's bytes and the same kind (``file``),
     MIME and file name the row would declare; anything else is dropped, so a copied row
-    never selects a resource admitted as other bytes or under another MIME or name.
+    never selects a resource admitted as other bytes or under another MIME or name. A managed
+    import keeps its ``lifetime: "managed"`` (bound into the key: every replay resends it; any
+    other value drops the receipt) and the task that owes its release (``owner_task_id``); a
+    holder of the receipt only replays it and owes no release of its own. Ordered newest first,
+    valid receipts select one state per store before the eight-store bound applies.
     """
     content = {"sizeBytes": row.get("size"), "sha256": f"sha256:{row.get('sha256')}"}
     semantics = {"kind": "file", "mime": row.get("mime"), "name": str(row.get("relpath") or "").rsplit("/", 1)[-1]}
-    receipts: list[Dict[str, Any]] = []
+    receipts: Dict[str, Dict[str, Any]] = {}
     for item in value if isinstance(value, list) else []:
         request = item.get("request") if isinstance(item, Mapping) else None
+        state = item.get("state", "ready") if isinstance(item, Mapping) else None
         if (isinstance(request, Mapping) and request.get("content") == content
                 and request.get("expectedStoreId") == item.get("store_id")
-                and all(isinstance(item.get(name), str) and item[name] for name in ("store_id", "import_key", "resource_id"))
+                and all(isinstance(item.get(name), str) and item[name] for name in ("store_id", "import_key"))
+                and isinstance(state, str)
+                and state in {"ready", "send_possible", "gap", "damaged", "cancelled", "conflict", "rejected", "released"}
+                and ((isinstance(item.get("resource_id"), str) and item["resource_id"])
+                     or ("resource_id" not in item and state != "ready"))
                 and all(request.get(name) == expected for name, expected in semantics.items())
-                and isinstance(request.get("source", ""), str)):
-            receipts.append({"store_id": item["store_id"], "import_key": item["import_key"], "resource_id": item["resource_id"],
+                and isinstance(request.get("source", ""), str) and request.get("lifetime", "managed") == "managed"):
+            owner = item.get("owner_task_id")
+            receipts.setdefault(item["store_id"], {"store_id": item["store_id"], "import_key": item["import_key"],
+                             **({"resource_id": item["resource_id"]} if item.get("resource_id") else {}),
+                             **({"state": state} if state != "ready" else {}),
                              "request": {name: copy.deepcopy(request[name]) for name in
-                                         ("expectedStoreId", "kind", "mime", "name", "source", "content") if name in request}})
-    return receipts[:8]
+                                         ("expectedStoreId", "kind", "mime", "name", "source", "lifetime", "content")
+                                         if name in request},
+                             **({"owner_task_id": owner} if isinstance(owner, str) and owner else {})})
+    return list(receipts.values())[:8]
 
 
 def _opt_nonneg_int(value: Any) -> Any:
@@ -287,9 +302,10 @@ def normalize_budget_profile(value: Any) -> Dict[str, Any]:
     in-task cost stop as a percentage of the budget remaining at task start.
     None -> no explicit percentage: an ordinary task has no early cost stop of
     the host's own (owner 2026-10-07, #1128 — formerly the historical 50%
-    default); new paid calls are refused only when known spend reaches the real
-    global/root/group limits, and a producer's allowance (a consciousness wake)
-    still stops at its actual value. A positive value keeps the authored math
+    default); only the real limits refuse new calls once known spend reaches
+    them, every model call at the root and group limits and paid calls at the
+    global one, and a producer's allowance (a consciousness wake) still stops
+    at its actual value. A positive value keeps the authored math
     (that share of the starting wallet, min the per-task cap minus a planning
     margin). 0 -> NO in-task cost stop at all (bench contract). The ceiling is
     resolved in ``task_pacing.resolve_cost_ceiling`` (typed; 0 and None map to
@@ -343,6 +359,19 @@ def answer_protocol_active(ctx: Any) -> bool:
         if isinstance(source, Mapping):
             contract = source.get("task_contract") if isinstance(source.get("task_contract"), Mapping) else source
             if str((contract or {}).get("answer_protocol") or "").strip() == "final_answer_line":
+                return True
+    return False
+
+
+def review_answer_required(ctx: Any) -> bool:
+    """True when the running ctx's task contract carries ``review_answer`` (owner, 8 Nov 2026): the whole final
+    answer is a deliverable the task-review Required floor reviews even when no file was produced. Written by its
+    admission caller (an API body, ``start_task(review_answer=true)``, a runner) and carried by Continue; a plain
+    request in prose stays the mind's own call of review_change, never a host reading of words."""
+    for source in (getattr(ctx, "task_contract", None), getattr(ctx, "task_metadata", None)):
+        if isinstance(source, Mapping):
+            contract = source.get("task_contract") if isinstance(source.get("task_contract"), Mapping) else source
+            if normalize_bool((contract or {}).get("review_answer")):
                 return True
     return False
 
@@ -691,6 +720,11 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
         if "input_sources" in source:
             contract["input_sources"] = normalize_input_sources(source["input_sources"])
             break
+    if any(normalize_bool(source.get("review_answer")) for source in (merged, task, metadata)):
+        contract["review_answer"] = True  # task review Required reviews the whole final answer (``review_answer_required``)
+    # The task's own direct handbook answer, from its contract alone: a legacy top-level value keeps its Max meaning.
+    if isinstance(merged.get("context_requires_development"), bool):
+        contract["context_requires_development"] = merged["context_requires_development"]
     attachment_ref = merged.get("attachment_manifest_ref", task.get("attachment_manifest_ref"))
     if attachment_ref is not None:
         if not isinstance(attachment_ref, Mapping):
@@ -906,4 +940,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "effective_acceptance_claims", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_allowed_origins", "normalize_browser_origin", "normalize_answer_protocol", "normalize_attachment_manifest", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_depth_provenance", "normalize_disabled_tools", "normalize_engine_import_receipts", "normalize_input_sources", "normalize_resource_policy", "task_input_sources"]
+__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "effective_acceptance_claims", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_allowed_origins", "normalize_browser_origin", "normalize_answer_protocol", "normalize_attachment_manifest", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_depth_provenance", "normalize_disabled_tools", "normalize_engine_import_receipts", "normalize_input_sources", "normalize_resource_policy", "review_answer_required", "task_input_sources"]

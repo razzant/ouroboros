@@ -20,7 +20,6 @@ from pydantic import BaseModel, Field
 from ouroboros import mcp_client
 from tests.test_settings_secret_mask import settings_client  # noqa: F401
 
-pytestmark = pytest.mark.serial  # binds real loopback ports
 
 BEARER = "Bearer synthetic-loopback-0001"
 BASIC = "Basic c3ludGhldGljOmxvb3BiYWNr"
@@ -233,9 +232,10 @@ class _Echoing:
         await self.app(scope, receive, send)
 
 
-@pytest.mark.parametrize("transport, sdk_line", [("http", "Error parsing JSON response"),
-                                                  ("sse", "Error parsing server message")])
-@pytest.mark.parametrize("redacted", [True, False])
+@pytest.mark.parametrize(("redacted", "transport", "sdk_line"), [
+    (True, "http", "Error parsing JSON response"),
+    (False, "sse", "Error parsing server message"),
+])
 def test_sdk_parse_tracebacks_in_process_logs_never_carry_a_saved_token(loopback, monkeypatch, transport, sdk_line,
                                                                         redacted):
     """The SDK logs the raw invalid body with its traceback before Ouroboros sees an error.

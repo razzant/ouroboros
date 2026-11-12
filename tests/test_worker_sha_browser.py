@@ -8,7 +8,7 @@ import os
 import pytest
 from ouroboros.test_evidence import diagnostic_directory
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / 'web'
 BOOT = '''<script type="module">
 import {initDashboard} from '/static/modules/dashboard.js';
@@ -69,7 +69,7 @@ def test_descendant_is_informational_and_problem_stays_warning(width, tmp_path):
                 assert 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' in descendant.locator('.log-raw').inner_text()
                 assert 'Worker SHA mismatch' not in page.locator('#page-logs').inner_text()
                 assert not errors, errors
-                output = diagnostic_directory(tmp_path, "worker-sha") / f'worker-sha-{width}.png'
+                output = diagnostic_directory(tmp_path, "worker-sha", publish=True) / f'worker-sha-{width}.png'
                 page.screenshot(path=str(output), full_page=True)
                 print(f'WORKER_SHA_SCREENSHOT={output}')
             finally:

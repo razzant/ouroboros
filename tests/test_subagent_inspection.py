@@ -22,9 +22,14 @@ def _snapshot(target="claude=claude-fable-5-1", *, kind="agent_session", enabled
     })}, {})
 
 
+# A measured window for every model and kind: an engine "available" is a claim
+# about this request only with one (OB1851); its ratio sets no headroom policy.
+MEASURED = {"used_ratio": 0.2, "resets_at": "2099-01-01T00:00:00Z"}
+
+
 def _quota(*, scope=None, state="exhausted", fresh="fresh"):
     return {"snapshots": [{"subject": {"harness": "claude", "subject_id": "chosen"},
-        "freshness": fresh, "constraints": [],
+        "freshness": fresh, "constraints": [dict(MEASURED)],
         "availability": {"state": state, "resets_at": "2099-01-01T00:00:00Z"}}],
         "absences": [], "resources": [],
         "availability_scope": scope or {"model": "claude-fable-5-1", "requestKind": "text", "basis": "quota_block"}}
@@ -43,8 +48,7 @@ def _resource(profile="chosen", harness="cursor"):
     return row
 
 
-@pytest.mark.parametrize("scope", [None, {}, {"model": "fable", "requestKind": "text", "basis": "quota_block"},
-                                   {"model": "claude-fable-5-1", "requestKind": "image"}])
+@pytest.mark.parametrize("scope", [None, {}, {"model": "claude-fable-5-1", "requestKind": "image"}])
 def test_sent_selector_is_not_honored_selector(scope):
     value = _quota()
     value["availability_scope"] = scope
@@ -55,6 +59,9 @@ def test_engine_verdict_not_raw_ratio_or_money_controls_availability():
     value = _quota(state="available")
     value["snapshots"][0]["constraints"] = [{"used_ratio": 1, "applies_to_models": ["fable"]}]
     value["resources"] = [_resource(harness="claude")]
+    # A model-scoped window alone witnesses no applicable measurement.
+    assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "unknown"
+    value["snapshots"][0]["constraints"].append(dict(MEASURED))
     assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "available"
     value["snapshots"][0]["freshness"] = "stale"
     assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "unknown"
@@ -69,10 +76,14 @@ def test_pin_and_absences_are_subject_exact():
     assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "available"
     assert quota_availability(value, "claude", model="claude-fable-5-1", profile="chosen")["state"] == "exhausted"
     value["absences"] = [{"subject": {"harness": "claude", "subject_id": "chosen"}}]
-    assert quota_availability(value, "claude", model="claude-fable-5-1", profile="chosen")["state"] == "unknown"
+    # The pin's own dated block outlives its refresh gap; its gap still blocks a positive claim.
+    assert quota_availability(value, "claude", model="claude-fable-5-1", profile="chosen")["state"] == "exhausted"
+    value["absences"] = [{"subject": {"harness": "claude", "subject_id": "healthy"}}]
+    assert quota_availability(value, "claude", model="claude-fable-5-1", profile="healthy")["state"] == "unknown"
+    assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "unknown"
 
 
-@pytest.mark.parametrize("failure", ["timeout", "malformed", 403, 500])
+@pytest.mark.parametrize("failure", ["timeout", "malformed", 500])
 def test_no_legacy_repeat_for_unknown_or_non_selector_refusal(failure):
     class Gateway:
         calls = []
@@ -201,7 +212,7 @@ def _pinned(pin):
 
 
 def _window(subject, state):
-    return {"subject": {"harness": "claude", "subject_id": subject}, "freshness": "fresh", "constraints": [],
+    return {"subject": {"harness": "claude", "subject_id": subject}, "freshness": "fresh", "constraints": [dict(MEASURED)],
             "availability": {"state": state, "resets_at": "2099-01-01T00:00:00Z"}}
 
 

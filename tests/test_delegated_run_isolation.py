@@ -39,14 +39,14 @@ def _seed_target(tmp_path: pathlib.Path) -> pathlib.Path:
     target = tmp_path / "target"
     target.mkdir()
     _git(target, "init")
-    (target / "tracked.txt").write_text("one\n", encoding="utf-8")
+    (target / "tracked.txt").write_text("one\n", encoding="utf-8", newline="\n")  # LF: the tests compare bytes
     _git(target, "add", "-A")
     _git(target, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "seed")
-    (target / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")   # unstaged mod
-    (target / "staged.txt").write_text("staged\n", encoding="utf-8")
-    _git(target, "add", "staged.txt")                                     # staged add
-    (target / "untracked.txt").write_text("loose\n", encoding="utf-8")    # eligible
-    (target / ".env").write_text("SECRET=1\n", encoding="utf-8")          # sensitive
+    (target / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8", newline="\n")   # unstaged mod
+    (target / "staged.txt").write_text("staged\n", encoding="utf-8", newline="\n")
+    _git(target, "add", "staged.txt")                                                   # staged add
+    (target / "untracked.txt").write_text("loose\n", encoding="utf-8", newline="\n")    # eligible
+    (target / ".env").write_text("SECRET=1\n", encoding="utf-8", newline="\n")          # sensitive
     return target
 
 
@@ -448,19 +448,31 @@ class TestProtectedPathScope:
         assert (target / ".github" / "workflows" / "ci.yml").exists()
         custody._CUSTODY.clear()
 
-    def test_system_repo_target_still_refuses(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(("mode", "grant"), [
+        ("advanced", False), ("advanced", True), ("pro", False), ("cyber_pro", False), ("pro", True),
+    ])
+    def test_system_repo_target_still_refuses(self, tmp_path, monkeypatch, mode, grant):
         import ouroboros.tools.subagent_integration as si
 
         target, ctx, _ = self._ready(tmp_path, monkeypatch, ".github/workflows/ci.yml")
         # The SAME patch, but the task's own surface says this tree is a checkout
-        # of the Ouroboros body: the protected-path policy applies again.
+        # of the Ouroboros body: the protected-path policy applies again. Its
+        # refusal names the cause that holds (#2734): the mode, or this acting
+        # caller's own protected_paths_grant, which no mode switch supplies.
         ctx.task_constraint = {"mode": "acting_subagent", "surface": "self_worktree",
-                               "write_root": str(target)}
-        monkeypatch.setattr(si, "get_runtime_mode", lambda: "advanced")
+                               "write_root": str(target), "protected_paths_grant": grant}
+        monkeypatch.setattr(si, "get_runtime_mode", lambda: mode)
         out = si._integrate_delegated_patch(ctx, "run-1", "apply", "")
-        assert "✅ Integrated" not in out
-        assert ".github/workflows/ci.yml" in out
-        assert not (target / ".github" / "workflows" / "ci.yml").exists()
+        written = (target / ".github" / "workflows" / "ci.yml").exists()
+        if mode == "pro" and grant:
+            assert "✅ Integrated" in out and written, out
+        else:
+            assert "✅ Integrated" not in out and not written, out
+            assert out.startswith("⚠️ CORE_PROTECTION_BLOCKED") and ".github/workflows/ci.yml" in out, out
+            assert ("protected_paths_grant" in out) != grant and ("Switch to runtime_mode" in out) == grant, out
+            entry = custody._CUSTODY["run-1"]  # the captured result stays: its patch, and no disposition
+            cap = custody.delegated_capture_dir(custody.custody_root(ctx), entry.task_id, custody.capture_key(entry))
+            assert (cap / "workspace.patch").is_file() and not entry.patch_disposed
         custody._CUSTODY.clear()
 
 
@@ -784,9 +796,9 @@ class _AbsentGateway:
         return {"compatible": True}
 
     def get_run(self, rid, **_kw):
-        from ouroboros.gateways.claudexor import ClaudexorUnavailable
+        from tests._shared import run_absent_in
 
-        raise ClaudexorUnavailable("not_found", "no such run", status_code=404)
+        raise run_absent_in(self.store_identity)
 
     def cancel_run(self, rid, reason=""):
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -1398,7 +1410,7 @@ class TestApplyIntentAmbiguity:
         replayed = custody.replay(drive)["run-retry"]
         assert replayed.patch_apply_pending is False  # resolved: tree unmutated
         # The nanny reconciles the tree back, restarts, retries: apply works.
-        (target / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+        (target / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8", newline="\n")  # the seed's LF bytes
         out2 = _integrate_delegated_patch(ctx, "run-retry", "apply", "")
         assert "✅ Integrated" in out2, out2
         custody._CUSTODY.clear()
@@ -1558,6 +1570,26 @@ class TestAmbiguityAcknowledgment:
         assert replayed.patch_disposed == ""
         # The retry lane is open: a fresh, unpatched apply succeeds normally.
         out = si._integrate_delegated_patch(ctx, "run-vw", "apply", "")
+        assert "✅ Integrated" in out, out
+        custody._CUSTODY.clear()
+
+
+    def test_a_busy_target_is_not_started_and_the_same_run_integrates_later(self, tmp_path, monkeypatch):
+        # #2889, both directions: a target another git step holds answers INTEGRATE_NOT_STARTED naming the run
+        # and the target, with no conflict verdict; once free, the same run applies.
+        from ouroboros.tools import subagent_integration as si
+
+        target, ctx, handle, drive = self._settled_run(
+            tmp_path, monkeypatch, snapshot_id="snapBusy", run_id="run-busy")
+        with monkeypatch.context() as patched:
+            patched.setattr(si, "_locked_apply", lambda *a, **k: {
+                "proc": None, "drifted": [], "drift_error": "", "staging_failure": "", "reverted": False,
+                "lock_error": "TimeoutError: held by task other"})
+            out = si._integrate_delegated_patch(ctx, "run-busy", "apply", "")
+        assert "INTEGRATE_NOT_STARTED: run run-busy into" in out and "the target is busy" in out, out
+        assert "CONFLICT" not in out and "LOCK_TIMEOUT" not in out, out
+        custody._CUSTODY.clear()
+        out = si._integrate_delegated_patch(ctx, "run-busy", "apply", "")
         assert "✅ Integrated" in out, out
         custody._CUSTODY.clear()
 

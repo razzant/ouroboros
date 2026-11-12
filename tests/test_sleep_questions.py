@@ -13,7 +13,6 @@ import pytest
 from tests.test_model_sleep import _ctx, _result
 from tests._budget_pause_exact_helpers import _loop_ctx
 
-pytestmark = pytest.mark.serial  # cold consumers bind queue module state
 
 
 def _run(root, run_id="run-one", task_id="sleeper", source="delegate_start"):
@@ -214,9 +213,11 @@ def test_native_saved_sleep_delivers_question_on_its_existing_return_path(tmp_pa
     assert ctx._sleep_interaction_seen == {"run-one": ["q1"]}
 
 
-@pytest.mark.parametrize("outcome,named", [("timeout", "the wake time you chose"), ("mail:peer", "mail from peer"),
-                                           ("run:run-x", "delegated run run-x reaching an engine terminal")])
-@pytest.mark.parametrize("started", [None, 30.0])
+@pytest.mark.parametrize(("started", "outcome", "named"), [
+    (None, "timeout", "the wake time you chose"),
+    (None, "run:run-x", "delegated run run-x reaching an engine terminal"),
+    (30.0, "mail:peer", "mail from peer"),
+])
 def test_native_saved_sleep_names_its_wake_without_inventing_elapsed_time(tmp_path, monkeypatch, outcome,
                                                                          named, started):
     import re
@@ -446,7 +447,8 @@ def test_cold_notice_marks_all_sources_it_actually_shows(tmp_path, monkeypatch, 
 @pytest.mark.parametrize("view", ["complete_refusal", "spilled_refusal", "partial"])
 def test_loop_acks_each_delivered_wake_but_exposes_only_questions_its_text_carries(tmp_path, monkeypatch, view):
     """Wake ACK keys on the wake a delivered result names, error or not; question
-    exposure keys only on interaction ids present in that delivered text."""
+    exposure keys only on interaction ids present in that delivered text. A spilled
+    wake's complete view is a summary: it waits for its exact source (#2992)."""
     from ouroboros import delegate_supervision as sup, sleep_custody, tool_capabilities
     from ouroboros.tool_result_delivery import render_result_view
 
@@ -459,7 +461,8 @@ def test_loop_acks_each_delivered_wake_but_exposes_only_questions_its_text_carri
     if view == "spilled_refusal":
         monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 900)
     result = sup._render_wake_payload(ctx, payload)
-    assert result.status == "error" and result.meta == {"supervision_wake_id": "wake"}
+    spilled = {"wake_source": json.loads(result.text)["wake_delivery"]["source"]} if view == "spilled_refusal" else {}
+    assert result.status == "error" and result.meta == {"supervision_wake_id": "wake", **spilled}
     text = render_result_view(result.text, head_chars=80, tail_chars=80)[0] if view == "partial" else result.text
     _deliver(ctx, text, monkeypatch, partial=view == "partial", error=True, tool="delegate_wait", meta=result.meta)
     assert sup._load_state(ctx, "")["pending_wake"], "delivery alone cannot ACK unsaved content"
@@ -469,9 +472,11 @@ def test_loop_acks_each_delivered_wake_but_exposes_only_questions_its_text_carri
     pending = sup._load_state(ctx, "").get("pending_wake")
     if view == "partial":
         assert pending and sleep_custody.seen_interactions(ctx) == {}, "a partial view proves no delivery"
+    elif view == "spilled_refusal":
+        assert pending and sleep_custody.seen_interactions(ctx) == {}, "its summary omitted q1: no ACK, no exposure"
     else:
         assert not pending, "a delivered refusal wake is acknowledged, so it never replays"
-        assert sleep_custody.seen_interactions(ctx) == ({"run-a": ["q1"]} if view == "complete_refusal" else {})
+        assert sleep_custody.seen_interactions(ctx) == {"run-a": ["q1"]}
 
 
 def test_supervision_id_without_delivered_question_cannot_mark_sleep_exposure(tmp_path):

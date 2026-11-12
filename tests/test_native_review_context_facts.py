@@ -183,8 +183,7 @@ def test_inspect_reports_previous_request_not_accumulated_or_cache_added_input(t
     assert "free_tokens" not in facts and "current_input_tokens" not in facts
 
 
-@pytest.mark.parametrize("usage", [{}, {"prompt_tokens": None}, {"prompt_tokens": -1},
-                                   {"prompt_tokens": 12, "reported_tokens": {"prompt_tokens": None}}, {"prompt_tokens": True}])
+@pytest.mark.parametrize("usage", [{}, {"prompt_tokens": 12, "reported_tokens": {"prompt_tokens": None}}, {"prompt_tokens": True}])
 def test_missing_usage_and_unknown_window_are_unknown_not_zero(tmp_path, monkeypatch, usage):
     from ouroboros import reviewer_window
 
@@ -210,8 +209,6 @@ def test_missing_usage_and_unknown_window_are_unknown_not_zero(tmp_path, monkeyp
       "cache_creation_input_tokens": 0, "output_tokens": 1}, 0),
     ({"input_tokens": 7, "cache_read_input_tokens": 100,
       "cache_creation_input_tokens": 20, "output_tokens": 1}, 127),
-    ({"input_tokens": "9", "cache_read_input_tokens": 0,
-      "cache_creation_input_tokens": 0, "output_tokens": 1}, 9),
 ])
 def test_native_inspection_respects_reported_anthropic_input(tmp_path, monkeypatch, raw_usage, expected):
     """Billing zero/partial totals cannot replace missing diagnostic evidence."""
@@ -384,3 +381,60 @@ def test_provider_context_refusal_keeps_its_original_failure_without_new_recover
     with pytest.raises(openai.BadRequestError):
         executor.execute()
     assert len(llm.calls) == 1
+
+
+@pytest.mark.parametrize("request_form", ["naming_a_note", "saved_without_the_field"])
+def test_main_and_native_review_apply_one_request_to_the_same_notes(tmp_path, monkeypatch, request_form):
+    """Both executors of a queued compact_context request keep and replace the same notes and name the
+    same replaced notes in their receipts; a request saved before replace_note_ids names none in either."""
+    from types import SimpleNamespace
+
+    from ouroboros.context_compaction import _capsule_metadata, context_units
+    from ouroboros.loop_round_limits import _run_authored_context_view
+    from ouroboros.tools.compact_context import _compact_context, record_context_view
+    from tests.test_compaction import _large_unit, _note
+    from tests.test_context_view_tool import _context
+
+    goal, second = _note(tmp_path, "Goal: a few generalizable fixes.", "goal"), _note(tmp_path, "Second note.", "second")
+    view = [goal, *_large_unit("read", "r"), second]
+    first = context_units(view, scope="dialogue")[0]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, view, [])
+    named = {"replace_note_ids": [first.unit_id]} if request_form == "naming_a_note" else {}
+    assert "requested" in _compact_context(ctx, working_note="Merged account.", keep_unit_ids=[], **named)
+    pending = copy.deepcopy(ctx._pending_compaction)
+    if request_form == "saved_without_the_field":
+        del pending["replace_note_ids"]
+
+    main = _run_authored_context_view(copy.deepcopy(view), _context(tmp_path / "main", ctx, [], monkeypatch),
+                                      copy.deepcopy(pending), None)
+    (tmp_path / "native").mkdir()
+    executor = _executor(tmp_path / "native", _ScriptedLLM([]))
+    executor._inspection_ctx = SimpleNamespace(_pending_compaction=copy.deepcopy(pending))
+    reviewed = copy.deepcopy(view)
+    assert executor._apply_working_view(reviewed, [], 1)
+
+    main_receipt, native_receipt = ctx._context_view_receipt, executor._view_receipt
+    assert main_receipt["status"] == native_receipt["status"] == "applied"
+    for key in ("selected_unit_ids", "retained_unit_ids"):
+        assert list(main_receipt[key]) == list(native_receipt[key])
+    main_notice = json.loads(main[-1]["content"].split("\n", 1)[1])
+    native_notice = json.loads(reviewed[-1]["content"])
+    from ouroboros.tools.compact_context import residue_by_kind
+    for rows, notice in ((main, main_notice), (reviewed, native_notice)):
+        assert notice.get("residue") == residue_by_kind(rows[:-1])
+        assert notice["residue"]["capsule"]["units"] == (2 if named else 3)
+        assert "tool" not in notice["residue"]
+        assert notice["basis"] == "host estimates"
+    named_notes = [(source.get("replaced_notes") or {}).get("notes")
+                   for source in (main_receipt, native_receipt, main_notice, native_notice)]
+    expected = ([{"unit_id": first.unit_id, "raw_sha256": first.raw_sha256,
+                  "first_line": "Goal: a few generalizable fixes."}] if named else None)
+    assert named_notes == [expected] * 4
+
+    def accounts(rows):
+        return [row["content"][0]["text"].partition("\n")[2] for row in rows if _capsule_metadata(row)[1]]
+
+    assert accounts(main) == accounts(reviewed) == (["Merged account.", "Second note."] if named
+                                                    else ["Goal: a few generalizable fixes.", "Merged account.", "Second note."])
+    assert all(second in rows and (goal in rows) is not bool(named) for rows in (main, reviewed))

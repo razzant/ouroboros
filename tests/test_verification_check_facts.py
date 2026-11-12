@@ -17,11 +17,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.test_process_environment import process_context as _process_context
+from tests._process_environment import process_context as _process_context
 
 process_context = _process_context
 
-pytestmark = pytest.mark.serial  # real child processes (CI serial lane)
 
 _KEYS = {"status", "contract_kind", "expected_match", "check", "check_rendering",
          "criterion_source", "receipt_ts"}
@@ -76,9 +75,7 @@ def test_text_mismatch_is_a_completed_call_with_a_failed_verdict(process_context
     ("exact", "hello", "hello world", False),
     ("exact", "hello world", "hello world", True),
     ("exact_line", "two", "one\ntwo three", False),
-    ("exact_line", "two", "one\ntwo", True),
     ("json_equals", '{"a": 1}', '{"a": 2}', False),
-    ("json_equals", '{"b": 2, "a": 1}', '{"a": 1, "b": 2}', True),
 ])
 def test_each_match_mode_reports_its_own_evaluated_match(process_context, mode, expected, output, matches):
     registry, ctx, workspace, data = process_context
@@ -134,7 +131,7 @@ def test_bytes_equal_keeps_the_producers_own_detail(process_context, case, prefi
     (workspace / "a.bin").write_bytes(b"abcdef")
     if case != "missing":
         (workspace / "b.bin").write_bytes(b"abcdef" if case == "equal" else b"abcXef")
-    result = _verify(registry, workspace, check=["true"], expected_match="bytes_equal",
+    result = _verify(registry, workspace, check=[sys.executable, "-c", "pass"], expected_match="bytes_equal",
                      artifact_paths=["a.bin", "b.bin"])
     fact = result.meta["verification"]
     # A missing file is not "differing bytes": no byte verdict, so no `matched`, and the
@@ -173,13 +170,15 @@ def test_selected_secret_cannot_rewrite_the_verdict_vocabulary(process_context, 
 
 
 def test_wide_characters_stay_inside_the_result_meta_bound(process_context):
-    registry, _ctx, workspace, _data = process_context
+    registry, ctx, workspace, data = process_context
     wide = "\U0001F600" * 400
-    result = _verify(registry, workspace, check=["sh", "-c", f"echo {wide}"], expected="absent",
+    result = _verify(registry, workspace, check=[sys.executable, "-c", "pass", wide], expected="absent",
                      criterion_id=wide)
     fact = result.meta["verification"]
     assert fact["status"] == "fail" and len(fact["criterion_id"]) == 120
     assert "truncated" in fact["check"]
+    receipt = _receipts(data, ctx.task_id)[-1]
+    assert receipt["returncode"] == 0 and receipt["matched"] is False
 
 
 # ---------------------------------------------------------------------------

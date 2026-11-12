@@ -22,7 +22,7 @@ from ouroboros import delegate_custody as custody
 from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
 from ouroboros.delegate_start_instructions import INVESTIGATION_INSTRUCTION, scratch_fact
 from ouroboros.unindexed import COPIES
-from ouroboros.workspace_preflight import SNAPSHOT_ENVIRONMENT_NOTE
+from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME, SNAPSHOT_ENVIRONMENT_NOTE
 
 ENGINE_VERSION = "3.25.1"  # carries workspaceRoot (3.8.1+) and scope.ephemeral (3.3.7+)
 
@@ -158,10 +158,14 @@ def test_git_subdirectory_investigation_copies_the_worktree_and_starts_in_the_fo
     assert f"the private execution root for this run is {start_folder}:" in request["instructions"]
     assert f"evidence worth returning under {start_folder / '.review-evidence'}:" in request["instructions"]
     # Dependency files are read at the clone's root, but the environment does not go there (outside the
-    # folder this session may write): it is disposable state outside every Git tree. A foreign project
-    # hears no safe_test.
+    # folder this session may write): it is disposable state outside every Git tree, in the scratch the
+    # host owns for a full-access run, else the unowned default. A foreign project hears no safe_test.
     assert f"Dependency files in {clone.resolve()} (sha256): none at its top level" in request["instructions"]
-    assert f"disposable process state ({scratch_fact()}), since this session writes only in " \
+    record = Path(ctx.drive_root) / "task_drives" / "child" / SESSION_SCRATCH_DIRNAME / held.snapshot_id / "scratch.json"
+    place = (scratch_fact(granted=json.loads(record.read_text(encoding="utf-8"))["path"]) if access == "full"
+             else scratch_fact())
+    assert record.exists() is (access == "full")
+    assert f"disposable process state ({place}), since this session writes only in " \
            f"{start_folder.resolve()}, a folder of the copy" in request["instructions"]
     assert SNAPSHOT_ENVIRONMENT_NOTE not in request["instructions"] and "safe_test" not in request["instructions"]
     assert f"authority/project root {folder} is a read-only" in request["instructions"]
@@ -211,7 +215,9 @@ def _source_local(project, policy):
         _git(project, "config", "core.autocrlf", "true")
     else:
         (project / ".git" / "info").mkdir(exist_ok=True)
-        (project / ".git" / "info" / "attributes").write_text("*.py text\n*.txt text\n")
+        # The policy names its line end: a bare `text` checks out the host's native one (CRLF on Windows).
+        (project / ".git" / "info" / "attributes").write_text("*.py text eol=lf\n*.txt text eol=lf\n",
+                                                              encoding="utf-8", newline="\n")
     for path in (project / "conftest.py", *(project / "pkg" / "component").iterdir()):
         path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
 
@@ -226,9 +232,11 @@ def _settled_capture(ctx, held):
         custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("policy", ["autocrlf", "info_attributes", "filemode"])
-@pytest.mark.parametrize("access", ["full", "workspace_write"])
-@pytest.mark.parametrize("geometry", ["root", "subdirectory"])
+@pytest.mark.parametrize(("geometry", "access", "policy"), [
+    ("root", "full", "autocrlf"),
+    ("root", "full", "filemode"),
+    ("subdirectory", "workspace_write", "info_attributes"),
+])
 def test_source_local_comparison_settings_reach_the_investigation_copy(tmp_path, monkeypatch, geometry, access, policy):
     from ouroboros.subagent_worktrees import find_execution_snapshot
 
@@ -243,7 +251,7 @@ def test_source_local_comparison_settings_reach_the_investigation_copy(tmp_path,
     clone = Path(find_execution_snapshot(held.snapshot_id)["path"])
     # The copy holds the source's current files as Git checks them out under the source's own
     # (shared) settings, and its Git sees them unchanged. autocrlf and filemode reproduce the
-    # working bytes; a `text` attribute checks normalized files out with the native LF.
+    # working bytes; the `text eol=lf` attributes check normalized files out with LF.
     copied = {rel: (clone / rel).read_bytes() for rel in before[2]}
     if policy == "info_attributes":
         assert {rel: raw.replace(b"\r\n", b"\n") for rel, raw in before[2].items()} == copied

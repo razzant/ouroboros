@@ -7,7 +7,7 @@ from tests._skills_page_harness import (
     URL, capture, fixture, no_overflow, open_skills, refresh, skills_browser as skills_browser,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 MATRIX = [(engine, width, theme) for engine in ("chromium", "webkit")
           for width in (1280, 390) for theme in ("light", "dark")]
 

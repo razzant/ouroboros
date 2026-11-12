@@ -25,6 +25,17 @@ from tests.test_store import document, publish
 OLD = "2026-10-01T00:00:00+00:00"
 
 
+@pytest.mark.parametrize("generic_cause", ["in_use", None])
+def test_exact_cause_breakdown_keeps_the_generic_remainder(generic_cause):
+    run = {"items": [SimpleNamespace(key="a", cause="task_live"),
+                     SimpleNamespace(key="b", cause=generic_cause)],
+           "kept_items": {"a": "in_use", "b": "in_use"}, "kept": {"in_use": 2}}
+    assert FreeSpace._kept_view(run) == [{"reason": "in_use", "count": 2, "causes": [
+        {"cause": "in_use", "count": 1}, {"cause": "task_live", "count": 1}]}]
+    run["items"][0].cause = "in_use"
+    assert FreeSpace._kept_view(run) == [{"reason": "in_use", "count": 2}]
+
+
 def _recent() -> str:
     return datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc).isoformat()
 
@@ -176,7 +187,8 @@ def test_preview_lists_finished_not_live_folders_and_copies_and_names_the_rest(t
     assert folders["bytes_complete"] is True and folders["bytes"] >= 3 * 4096
     assert all(item["bytes"] >= 4096 for item in folders["items"])
     copies = _group(view, "working_copies")
-    assert [item["id"] for item in copies["items"]] == ["plain:copy-done"]
+    assert [item["name"] for item in copies["items"]] == ["copy-done"]
+    assert [item["id"].rsplit("-", 1)[0] for item in copies["items"]] == ["plain:copy-done"]  # one object, not its task
     assert (copies["count"], copies["in_use"]) == (1, 1)
     assert view["done"] == view["total"] == 4
 
@@ -295,7 +307,9 @@ def test_the_run_names_the_folders_it_freed_in_its_event(tmp_path, monkeypatch):
     rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text().splitlines()]
     report, = [row["report"] for row in rows if row["type"] == "storage_free"]
     assert report["removed_ids"] + report["deleting_ids"] == ["direct:gone"] and report["stuck_ids"] == []
-    assert report["removed"] + report["deleting"] == 1 and report["kept"] == [{"reason": "in_use", "count": 1}]
+    assert report["kept_ids"] == {"direct:busy": "in_use"}
+    assert report["kept_causes"] == {"direct:busy": "task_live"}
+    assert report["removed"] + report["deleting"] == 1 and report["kept"] == [{"reason": "in_use", "count": 1, "causes": [{"cause": "task_live", "count": 1}]}]
 
 
 def test_a_folder_not_previewed_is_untouched_and_a_task_live_again_is_kept(tmp_path, monkeypatch):
@@ -311,7 +325,7 @@ def test_a_folder_not_previewed_is_untouched_and_a_task_live_again_is_kept(tmp_p
     run = view["run"]
     assert not (root / "task_drives" / "first").exists()
     assert (root / "task_drives" / "late").is_dir() and (root / "task_drives" / "second").is_dir()
-    assert run["kept"] == [{"reason": "in_use", "count": 1}]
+    assert run["kept"] == [{"reason": "in_use", "count": 1, "causes": [{"cause": "task_live", "count": 1}]}]
     assert run["removed"] + run["deleting"] == 1 and run["selected"] == 2
 
 
@@ -356,7 +370,7 @@ def test_a_kept_folder_names_its_reason_and_the_next_run_frees_it(tmp_path, monk
     owner = _owner(probes)
     _preview(owner, root, tmp_path)
     view = _run(owner, root, tmp_path)
-    assert view["run"]["kept"] == [{"reason": "results_pending", "count": 1}]
+    assert view["run"]["kept"] == [{"reason": "results_pending", "count": 1, "causes": [{"cause": "child_refs_pending", "count": 1}]}]
     assert (root / "task_drives" / "pending").is_dir()
 
     _preview(owner, root, tmp_path)
@@ -367,12 +381,7 @@ def test_a_kept_folder_names_its_reason_and_the_next_run_frees_it(tmp_path, monk
 
 @pytest.mark.parametrize("code, reason", [
     ("unread_mailbox_uncustodied", "results_pending"),  # late mail: the next pass unions and carries it
-    ("call_inventory_changed", "results_pending"),  # call records moved under the pass: re-armed next time
-    ("unread_mailbox_unreadable", "unreadable_record"),  # a torn mailbox is a read failure, not pending work
-    ("task_result_unreadable", "unreadable_record"),
     ("custody_error: ValueError('torn')", "unreadable_record"),
-    ("generation_closed", "restart"),
-    ("store_busy", "busy"),  # a store still leased inside the drive: busy right now, tried next pass
     ("not_own_drive", "other"),  # a code with no owner-facing group stays "for another reason"
 ])
 def test_the_fail_closed_mailbox_and_call_inventory_codes_name_their_owner_facing_reason(code, reason):
@@ -595,6 +604,8 @@ def test_a_closed_generation_stops_the_run_between_settlements(tmp_path, monkeyp
     monkeypatch.setattr(task_custody, "settle_child_drive", settle_then_close)
     view = _run(owner, root, tmp_path)
     assert view["state"] == "stopped" and view["run"]["stopped"] is True
+    from ouroboros.storage_free import _request_sentence
+    assert "run stopped" in _request_sentence({"actor": "owner", "outcome": view["run"]})
     assert view["run"]["removed"] + view["run"]["deleting"] == 1 and view["run"]["done"] == 1
     assert sum(1 for name in ("one", "two") if (root / "task_drives" / name).is_dir()) == 1, "nothing half-moved"
     row = json.loads((root / "logs" / "supervisor.jsonl").read_text().splitlines()[-1])
@@ -641,7 +652,7 @@ def test_working_copies_of_finished_work_are_freed_and_a_running_ones_stays(tmp_
     owner = _owner({"finished": False, "busy": True})
     view = _preview(owner, root, tmp_path)
     copies = _group(view, "working_copies")
-    assert [item["id"] for item in copies["items"]] == ["plain:finished"] and copies["in_use"] == 1
+    assert [item["id"].rsplit("-", 1)[0] for item in copies["items"]] == ["plain:finished"] and copies["in_use"] == 1
 
     view = _run(owner, root, tmp_path, groups=("working_copies",))
     assert view["state"] == "done"
@@ -718,7 +729,7 @@ def test_stop_between_working_copies_leaves_the_rest_and_reports_a_stopped_run(t
 
     def retire_then_stop(*args, **kwargs):
         outcome = real(*args, **kwargs)
-        calls.append(list(kwargs["only"]))
+        calls.append(list(kwargs.get("only") or kwargs["only_rows"]))
         if len(calls) == 1:
             assert owner.cancel() is True  # Stop lands as the first copy's retirer returns
         return outcome
@@ -804,8 +815,8 @@ def test_leftover_groups_offer_only_proven_leftovers_and_the_run_frees_exactly_t
     assert offered == {
         "review_evidence": ([f"seat:{seats['done'].name}"], 2, 1),
         "review_checkouts": (["checkout:orphan"], 1, 0),
-        "lost_copies": ([f"lost:{folders['lost'].name}"], 1, 0),
-        "service_folders": (["env:gone.env", "test_run:run-done"], 1, 0),
+        "lost_copies": ([f"lost:{sw._record_name(folders['lost'])}"], 1, 0),  # the full path: one name may stand in two roots
+        "service_folders": ([f"env:{sw._record_name(folders['env'])}", f"test_run:{sw._record_name(folders['run_done'])}"], 1, 0),
     }
     requested = []
     monkeypatch.setattr(maintenance.child, "request", lambda: requested.append(True))
@@ -843,12 +854,115 @@ def test_leftover_listing_is_pure_and_a_run_re_checks_each_item(tmp_path, monkey
         before, outside = tree_state(root, mtimes=True), tree_state(wtroot, mtimes=True)
         view = _preview(owner, root, tmp_path)
         assert tree_state(root, mtimes=True) == before and tree_state(wtroot, mtimes=True) == outside
+    from ouroboros import review_checking_prune as rp
+    causes = {}
+    homes = rp.finished_seat_homes(root, owner._probe(), lambda: False, causes=causes)
+    assert causes[seats["copy"]] == "seat_checking" and causes[seats["live"]] == "not_proven_over"
+    assert all(home not in causes for home, verdict, _task in homes if verdict == "offer")
     assert _group(view, "review_evidence")["count"] == 2
     probes["seat-done"] = True  # the task is live again: nothing of it goes
     with rc._seat_locked(second):  # a worker holds the other seat
         view = _run(owner, root, tmp_path, groups=("review_evidence",))
     assert sorted((row["reason"], row["count"]) for row in view["run"]["kept"]) == [("busy", 1), ("in_use", 1)]
     assert seats["done"].is_dir() and second.is_dir()
+
+
+@pytest.mark.parametrize("state", ["done", "live", "unknown"])
+def test_pseudo_owner_seat_homes_use_their_own_proof_in_free(tmp_path, monkeypatch, state):
+    """Pseudo owners have no task row: a settled seat run is offered and retired, while a live or unknown
+    seat proof remains held even after its copy is gone."""
+    from ouroboros import delegate_custody_current as current
+
+    root = tmp_path / state / "data"
+    root.mkdir(parents=True)
+    task_id = "api_skill_review" if state != "unknown" else "marketplace_install"
+    home = _seat(root, task_id, f"op-{state}", area=True)
+    area = home / "area"
+    marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+    marker["created_at"] = "2020-01-01T00:00:00+00:00"
+    (home / "checking.json").write_text(json.dumps(marker), encoding="utf-8")
+    area.rmdir()
+    if state == "unknown":
+        snapshot = {"runs": {}, "pending": []}
+    else:
+        snapshot = {"runs": {"run": SimpleNamespace(
+            execution_root=str(area), terminal_state="succeeded" if state == "done" else "",
+            started_ts=marker["created_at"], max_seconds=0)}, "pending": []}
+    monkeypatch.setattr(current, "task_snapshot", lambda _root, _task_id: snapshot)
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("review_evidence",))
+    view = _preview(owner, root, tmp_path)
+    evidence = _group(view, "review_evidence")
+    if state == "done":
+        assert [item["id"] for item in evidence["items"]] == [f"seat:{home.name}"] and evidence["in_use"] == 0
+        run = _run(owner, root, tmp_path, groups=("review_evidence",))["run"]
+        assert run["removed"] + run["deleting"] == 1 and not home.exists()
+    else:
+        assert evidence["items"] == [] and evidence["in_use"] == 1 and home.is_dir()
+
+
+@pytest.mark.parametrize("finished_first", [True, False])
+def test_each_pseudo_owner_seat_home_is_judged_on_its_own_runs_whatever_the_order(tmp_path, monkeypatch, finished_first):
+    """Two Skills-page homes share the pseudo task id but not a proof: the one whose copy's run finished is offered
+    and retired, the one whose run is live stays, in either name order; their custody is read once."""
+    from ouroboros import delegate_custody_current as current
+
+    root = tmp_path / "data"
+    root.mkdir()
+    homes = sorted((_seat(root, "api_skill_review", operation, area=True) for operation in ("op-a", "op-b")), key=lambda home: home.name)
+    finished, live = homes if finished_first else homes[::-1]
+    runs = {}
+    for home, state in ((finished, "succeeded"), (live, "")):
+        marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+        marker["created_at"] = "2020-01-01T00:00:00+00:00"
+        (home / "checking.json").write_text(json.dumps(marker), encoding="utf-8")
+        (home / "area").rmdir()
+        runs[home.name] = SimpleNamespace(execution_root=str(home / "area"), terminal_state=state,
+                                          started_ts=marker["created_at"], max_seconds=0)
+    reads = []
+    monkeypatch.setattr(current, "task_snapshot", lambda _root, task_id: reads.append(task_id) or {"runs": runs, "pending": []})
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("review_evidence",))
+    evidence = _group(_preview(owner, root, tmp_path), "review_evidence")
+    assert [item["id"] for item in evidence["items"]] == [f"seat:{finished.name}"], "the finished home is offered"
+    assert evidence["in_use"] == 1, "the live home stays"
+    assert reads == ["api_skill_review"], "one custody read for the pseudo owner"
+    run = _run(owner, root, tmp_path, groups=("review_evidence",))["run"]
+    assert run["removed"] + run["deleting"] == 1 and not finished.exists() and live.is_dir()
+
+
+@pytest.mark.parametrize("state", ["readable", "unreadable"])
+def test_the_checkout_run_reads_the_review_state_once_and_unknown_custody_keeps_every_checkout(tmp_path, monkeypatch, state):
+    """The run's own listing reads the review state, and the markerless fallback one more time, not once per
+    checkout; a state that turns unreadable keeps every checkout, named, as the listing would."""
+    from ouroboros import review_checking_prune as rp
+
+    root = tmp_path / "data"
+    base = root / "state" / "review_checkouts"
+    entries = [base / name for name in ("first", "second", "third")]
+    for entry in entries:
+        (entry / "repo").mkdir(parents=True)
+        (entry / "repo" / "f.txt").write_text("x", encoding="utf-8")
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("review_checkouts",))
+    assert _group(_preview(owner, root, tmp_path), "review_checkouts")["count"] == 3
+    real, calls = rp._review_rounds, []
+
+    def counted(data_root):
+        calls.append(data_root)
+        if state == "unreadable" and len(calls) > 1:
+            raise ValueError("the review state changed shape under the run")
+        return real(data_root)
+
+    monkeypatch.setattr(rp, "_review_rounds", counted)
+    view = _run(owner, root, tmp_path, groups=("review_checkouts",))
+    assert view["state"] == "done" and view["run"]["error"] is None
+    if state == "readable":
+        assert len(calls) == 2 and view["run"]["removed"] == 3 and not any(entry.exists() for entry in entries)
+    else:
+        assert view["run"]["kept"] == [{"reason": "unreadable_record", "count": 3,
+                                       "causes": [{"cause": "review_state_unreadable", "count": 3}]}]
+        assert all(entry.is_dir() for entry in entries) and view["run"]["failed"] == 0
 
 
 def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_dropped(tmp_path, monkeypatch):

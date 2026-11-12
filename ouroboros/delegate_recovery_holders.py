@@ -5,7 +5,6 @@ from copy import deepcopy
 from typing import Any
 import uuid
 
-from ouroboros import delegate_supervision_state as checkpoints
 from ouroboros.utils import utc_now_iso
 
 IDENTITY_FIELDS = ("selected_subagent_id", "config_fingerprint", "authority_fingerprint",
@@ -85,7 +84,3 @@ def wait_fields(state: dict, *, replay_acknowledged: bool) -> dict:
     return {"journal_cursor": int(state.get("journal_cursor") or 0),
             "interaction_acknowledged_ids": list(state.get("interaction_acknowledged_ids") or []),
             "pending_wake": deepcopy(pending), "checkpoint": deepcopy(state.get("checkpoint") or {})}
-
-
-def checkpoint_view(state: dict, run_id: str) -> dict:
-    return checkpoints.run_view(state, run_id) if run_id else checkpoints.task_facts(state)

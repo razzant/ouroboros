@@ -28,6 +28,7 @@ GROUPS = {
     "s-post-task-evolution-mode": 3, "s-consciousness-autonomy": 3, "s-consciousness-safety-mode": 3,
 }
 COMPACT = {"s-review-max-cycles"}
+NARROW_CARD_REM = 20
 
 _MEASURE = """() => [...document.querySelectorAll('[data-effort-group]')]
   .filter((group) => group.getClientRects().length).map((group) => {
@@ -40,7 +41,16 @@ _MEASURE = """() => [...document.querySelectorAll('[data-effort-group]')]
       return {left: rect.left, right: rect.right, top: Math.round(rect.top), width: rect.width,
               textLeft: text.left, textRight: text.right};
     });
-    return {target: group.dataset.effortTarget, left: box.left, right: box.right, width: box.width, buttons};
+    // The card a scale measures against: the nearest `settingsbox` size container (a tray, else its section).
+    let card = null;
+    for (let node = group.parentElement; node && card === null; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.containerName.split(/\\s+/).includes('settingsbox')) {
+        card = node.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      }
+    }
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    return {target: group.dataset.effortTarget, left: box.left, right: box.right, width: box.width, buttons, card, rem};
   })"""
 
 
@@ -64,12 +74,19 @@ def _groups(page) -> dict:
     return found
 
 
-def _check_layout(groups: dict, *, narrow: bool) -> list[str]:
+def _check_layout(groups: dict, *, phone: bool) -> list[str]:
     problems = []
     assert set(groups) == set(GROUPS), sorted(set(GROUPS) ^ set(groups))
+    stacked = 0
     for target, group in groups.items():
         count = GROUPS[target]
         buttons = group["buttons"]
+        # A card of 20rem or less stacks two (settings.css; DESIGN "a narrow card stacks two"): the card, not the window.
+        # A section with one choice draws it with no tray, so its section is the card (#2886, 7ebdc8468).
+        if group["card"] is None:
+            problems.append(f"{target}: no settingsbox card to measure against")
+        narrow = group["card"] is not None and group["card"] <= NARROW_CARD_REM * group["rem"]
+        stacked += narrow and target not in COMPACT
         columns = count if target in COMPACT else min(count, 2 if narrow else 4)
         rows = [top for top in sorted({button["top"] for button in buttons})]
         widths = [button["width"] for button in buttons]
@@ -85,10 +102,14 @@ def _check_layout(groups: dict, *, narrow: bool) -> list[str]:
         for button in buttons:
             if button["textLeft"] < button["left"] - 0.5 or button["textRight"] > button["right"] + 0.5:
                 problems.append(f"{target}: a label leaves its button ({button})")
+    # The desktop window keeps every scale in full rows; a phone has narrow cards, so stacking is measured there.
+    if phone and not stacked:
+        problems.append("no scale stacks on a phone: no card measured 20rem or less")
+    if not phone and stacked:
+        problems.append(f"{stacked} scale(s) stack on the desktop window")
     return problems
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_every_segmented_group_lays_out_from_its_own_choices(direct_server_with_data, engine):
@@ -102,17 +123,16 @@ def test_every_segmented_group_lays_out_from_its_own_choices(direct_server_with_
         browser = getattr(pw, engine).launch(headless=True)
         try:
             page = browser.new_page()
-            for width, narrow in ((1280, False), (390, True)):
+            for width, phone in ((1280, False), (390, True)):
                 _open(page, fixture["url"], width)
                 groups = _groups(page)
-                problems += [f"{engine} {width}: {problem}" for problem in _check_layout(groups, narrow=narrow)]
+                problems += [f"{engine} {width}: {problem}" for problem in _check_layout(groups, phone=phone)]
                 page.screenshot(path=str(evidence / f"segmented-{engine}-{width}-behavior.png"), full_page=True)
         finally:
             browser.close()
     assert not problems, "\n".join(problems)
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_server_with_data, engine):
@@ -142,9 +162,12 @@ def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_ser
                 return json.loads(settings_path.read_text(encoding="utf-8"))
 
             open_behavior()
+            # The draft's state is the Save bar's; its one word gives way to a load still in that line (#2886, e83cd2103).
+            footer = page.locator(".settings-footer")
+            expect(footer).to_have_attribute("data-draft", "clean")
             press("required", "Enter")
             assert page.locator("#s-task-review-mode").input_value() == "required"
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(__import__("re").compile("is-visible"))
+            expect(footer).to_have_attribute("data-draft", "dirty")
             ring = page.evaluate("""(selector) => {
                 const focused = document.activeElement;
                 const probe = document.createElement('span');

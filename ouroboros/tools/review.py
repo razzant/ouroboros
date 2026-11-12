@@ -8,12 +8,11 @@ from typing import Any, List, Optional
 from ouroboros.llm import LLMClient  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 from ouroboros.utils import (
     run_cmd,
-    append_jsonl,
     estimate_tokens,  # noqa: F401 — patchable seam: fit_triad_prompt resolves it through THIS namespace
     truncate_review_artifact,  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
-    utc_now_iso,
 )
 from ouroboros import config as _cfg
+from ouroboros.review_overrides import record_override
 from ouroboros.owner_words import owner_words_text
 from ouroboros.review_substrate import SLOT_ID_PREFIX, TYPED_FAILURE_FACT_KEYS, slot_id_for_row  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 from ouroboros.tools.registry import ToolContext
@@ -41,6 +40,7 @@ from ouroboros.tools.review_helpers import (
     load_checklist_layers,
     load_governance_doc,  # noqa: F401 -- retained test/facade patch seam
     build_touched_file_pack,
+    pack_omission_note,
     triad_pack_exclusions,
     build_goal_section,
     build_scope_section,
@@ -292,54 +292,11 @@ def _handle_review_block_or_warning(
         return blocked_msg
     if cyber:
         advisory_prefix = "Cyber Pro: review does not prohibit action; original signal follows. "
-    _record_advisory_override(ctx, blocked_msg)
+    record_override(ctx, blocked_msg)
     _append_review_warning(ctx, advisory_prefix + blocked_msg)
     ctx._review_iteration_count = 0
     ctx._review_history = []
     return None
-
-
-def _record_advisory_override(ctx: ToolContext, blocked_msg: str) -> None:
-    """Durable trace of a blocking signal waved through by advisory enforcement.
-
-    Constitutional requirement (BIBLE P3 "Owner-chosen enforcement, loud
-    advisory"): every decision blocking enforcement would have stopped must
-    leave a durable, owner-visible trace. Persisted to events.jsonl AND to a
-    persistent counter file surfaced by the review_status tool.
-    """
-    reason = str(getattr(ctx, "_last_review_block_reason", "") or "unknown")
-    try:
-        append_jsonl(ctx.drive_logs() / "events.jsonl", {
-            "ts": utc_now_iso(),
-            "type": "review_advisory_override",
-            "review_enforcement": _cfg.get_review_enforcement(),
-            "decision_authority": "cyber_pro" if not review_enforcement_blocks("blocking") else "advisory",
-            "block_reason": reason,
-            "message_head": str(blocked_msg or "")[:600],
-            "task_id": str(getattr(ctx, "task_id", "") or ""),
-        })
-    except Exception:
-        log.debug("Failed to emit review_advisory_override event", exc_info=True)
-    try:
-        from ouroboros.utils import update_json_locked
-
-        path = ctx.drive_root / "state" / "advisory_overrides.json"
-
-        def _bump(current: dict) -> dict:
-            recent = list(current.get("recent") or [])
-            recent.append({
-                "ts": utc_now_iso(),
-                "block_reason": reason,
-                "message_head": str(blocked_msg or "")[:300],
-            })
-            return {
-                "count": int(current.get("count") or 0) + 1,
-                "recent": recent[-10:],
-            }
-
-        update_json_locked(path, _bump)
-    except Exception:
-        log.warning("Failed to persist advisory override visibility", exc_info=True)
 
 
 def _collect_review_findings(ctx: ToolContext, model_results: list, row_plan: Optional[dict] = None) -> tuple[list[str], list[str], list[str], list[dict]]:
@@ -529,7 +486,8 @@ def _triad_governance_usable_window(api_models: list, api_slots: list) -> int:
 def _triad_governance_context(ctx: ToolContext, touched_paths: list,
                               checklist_section: str, api_models: list, api_slots: list,
                               *, delivery: str = "packet", governance_root=None,
-                              layer: str = "body", subject_root: Optional[pathlib.Path] = None):
+                              layer: str = "body", subject_root: Optional[pathlib.Path] = None,
+                              review_words=None):
     """The triad's shared governance tiers for either delivery class.
 
     ``governance_root`` is the installed body (a frozen subject names it; the
@@ -561,6 +519,7 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
         already_inline=already_inline,
         layer=layer,
         subject_root=subject_root,
+        review_words=review_words,
     )
 
 
@@ -764,9 +723,14 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     # disclosures ride the checklist section, so both are declared as already
     # delivered rather than sent twice. An all-retrieving panel assembles no
     # packet, so it asks for none.
+    from ouroboros.review_words import section_budget, words_for_diff
+
+    words = (frozen.review_words if frozen is not None and frozen.diff_text == diff_text
+             else words_for_diff(target_repo, diff_text))
+    words_section = words.render(section_budget(_triad_governance_usable_window(api_models, api_slots))) if api_models else ""
     governance = _triad_governance_context(
         ctx, touched_paths, checklist_section, api_models, api_slots,
-        governance_root=governance_root, layer=layer, subject_root=subject_root)
+        governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words)
 
     # Build touched-file pack for full current context (managed: the reviewed
     # resolution set; binary rows carry the M0 baseline identity). A plain
@@ -787,10 +751,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
             exclude_paths=exclude_paths,
         )
         if _omitted:
-            current_files_section += (
-                f"\n\n⚠️ OMISSION NOTE: {len(_omitted)} file(s) omitted from direct context: "
-                f"{', '.join(_omitted)}"
-            )
+            current_files_section += f"\n\n{pack_omission_note(_omitted)}"
         if exclusion_note:
             current_files_section += f"\n\n{exclusion_note}"
         if not current_files_section.strip():
@@ -807,7 +768,10 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         ctx._commit_review_evidence = task_evidence
     task_evidence_compact = False
     owner_words, execution = owner_words_text(ctx), dict(getattr(ctx, "_preflight_execution", None) or {})
-    pulse = review_subject_pulse(target_repo, layer, subject)  # the same line on every seat's brief
+    # The same subject lines on every seat's brief: its growth, then the selected composition's attribution gap.
+    from ouroboros.mutation_attribution import selection_disclosure
+    pulse = "\n\n".join(line for line in (review_subject_pulse(target_repo, layer, subject),
+                                          selection_disclosure(getattr(ctx, "_commit_attribution", None))) if line)
     goal_section = build_goal_section(goal, scope, commit_message, owner_words, execution_section(execution), pulse)
     scope_section = build_scope_section(scope)
 
@@ -819,12 +783,14 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
             diff_text=staged_diff, changed_files=review_changed, rebuttal_section=rebuttal_section,
             review_history_section=review_history_section,
             task_evidence_section=commit_review_evidence_section(task_evidence, delivery="packet", compact=task_evidence_compact),
+            words_section=words_section,
         )
 
     def _compact_task_evidence():
-        nonlocal task_evidence_compact
+        nonlocal task_evidence_compact, words_section
         task_evidence_compact = True
-    if task_evidence:
+        words_section = words.omission()
+    if task_evidence or words_section:
         _assemble_prompt.compact_optional_evidence = _compact_task_evidence
 
     # P3 stays one-pass. The api pack, its fit ladder and the fixed_overflow
@@ -887,7 +853,8 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         ctx, row_plan, models, row_routes, target_repo=target_repo, governance_root=governance_root,
         subject=subject, frozen=frozen, diff_text=diff_text, layer=layer, checklist_section=checklist_section,
         commit_message=commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal,
-        owner_words=owner_words, task_evidence=task_evidence, preflight_execution=execution, diff_pulse=pulse)
+        owner_words=owner_words, task_evidence=task_evidence, preflight_execution=execution, diff_pulse=pulse,
+        review_words=words)
     if brief_failure is not None:
         failed_slot, exc = brief_failure
         ctx._last_review_block_reason = "infra_failure"
@@ -1145,7 +1112,7 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
                 ctx, commit_message, critical_fails, advisory_warns, errored_note,
             )
 
-        _record_advisory_override(ctx, "; ".join(critical_fails[:5]))
+        record_override(ctx, "; ".join(critical_fails[:5]))
         _append_review_warning(
             ctx,
             ("Cyber Pro: critical review findings do not prohibit action."

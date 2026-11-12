@@ -11,7 +11,7 @@ from tests.test_chat_history_recovery_browser import _click_project
 from tests.test_history_continuity_browser import _FAULT, _bookmark_place
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # Holds one room's history reads until released; the reader acts meanwhile.
 _HOLD_ROOM = """() => {
@@ -134,7 +134,7 @@ def test_a_visible_receipt_line_keeps_its_node_when_the_newest_window_moves_past
         const box = feed.getBoundingClientRect(), rect = node => node.getBoundingClientRect();
         const shown = node => node.getClientRects().length && rect(node).bottom > box.top && rect(node).top < box.bottom;
         return {header: rect(card.querySelector(':scope > [data-live-summary-button]')).bottom - box.top,
-            reviews: rect(card.querySelector(':scope > [data-live-reviews-host]')).top - box.bottom,
+            reviews: rect(card.querySelector(':scope > [data-live-reviews-host]')).bottom - box.top,
             line: rect(line).top - box.top, height: box.height,
             others: [...feed.querySelectorAll('[data-history-id]')].filter(n => shown(n) && !n.matches('.chat-live-line.result')).length,
             focused: feed.contains(document.activeElement)};
@@ -168,7 +168,8 @@ def test_a_visible_receipt_line_keeps_its_node_when_the_newest_window_moves_past
             }""")
             page.evaluate(_FRAMES)
             placed = line.evaluate(geometry)
-            assert placed['header'] < 0 and placed['reviews'] > 0 and 0 <= placed['line'] < placed['height'], placed
+            # Reviews sit under the card's header since #2278: both are above the feed, the line inside it.
+            assert placed['header'] < 0 and placed['reviews'] < 0 and 0 <= placed['line'] < placed['height'], placed
             assert placed['others'] == 0 and not placed['focused'], placed
             _screenshot(page, tmp_path, f'receipt-rebase-before-{browser_engine}')
 

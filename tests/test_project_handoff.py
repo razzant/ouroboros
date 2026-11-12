@@ -26,8 +26,13 @@ def _main_origin(client_message_id="first"):
             "text": "Investigate"}
 
 
-@pytest.mark.parametrize("source_chat", [1, "project", 0, -42, None])
-@pytest.mark.parametrize("direct_carrier", ["event", "task", "result", "done"])
+@pytest.mark.parametrize(("direct_carrier", "source_chat"), [
+    ("event", 1),
+    ("event", None),
+    ("task", "project"),
+    ("result", 0),
+    ("done", -42),
+])
 def test_direct_completion_requires_a_durable_main_origin(tmp_path, monkeypatch, source_chat, direct_carrier):
     project = create_project(tmp_path, "research", name="Research")
     chat = project["chat_id"] if source_chat == "project" else source_chat

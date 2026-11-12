@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 
-@pytest.mark.serial
 def test_binding_metadata_failure_keeps_the_listener_and_legacy_browser_boundary(tmp_path, monkeypatch, caplog):
     import socket
     from ouroboros import server_process
@@ -134,7 +133,6 @@ server.serve_forever()
 '''
 
 
-@pytest.mark.serial
 def test_model_fixture_serves_without_reverse_dns():
     """The model fixture binds a numeric loopback address, so it must start and answer
     while ``socket.getfqdn`` raises: that lookup costs about 35 s per bind on macOS CI."""
@@ -163,7 +161,6 @@ def test_model_fixture_serves_without_reverse_dns():
         proc.stderr.close()
 
 
-@pytest.mark.serial
 def test_child_observes_late_local_model_health_binding_and_stop(tmp_path, monkeypatch):
     from ouroboros.local_model import LocalModelManager
 
@@ -213,7 +210,6 @@ for line in sys.stdin:
             if proc.stdout: proc.stdout.close()
 
 
-@pytest.mark.serial
 def test_local_model_custody_row_identifies_a_legacy_server(tmp_path, monkeypatch):
     """Without a binding, the local model's own custody row plus its live argv prove
     the endpoint; a dead row proves nothing and the port becomes ordinary."""
@@ -239,7 +235,6 @@ def test_local_model_custody_row_identifies_a_legacy_server(tmp_path, monkeypatc
     assert runtime_service_kind("http://127.0.0.1:9333/v1/models", ctx) == ""
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("failed_publication", [False, True])
 def test_host_binding_is_independent_of_healthy_main(tmp_path, monkeypatch, failed_publication):
     from ouroboros.browser_policy import browser_request_block_reason

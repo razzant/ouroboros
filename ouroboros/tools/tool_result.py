@@ -189,6 +189,13 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "use the reviewed protected-write path",
         ),
+        "MANAGED_BY_DEPLOYMENT": _code_spec(  # the serving checkout or a required extension (deployment_policy)
+            "blocked",
+            "protected_blocked",
+            "warning",
+            "author in a body candidate or another workspace; the administrator deploys the serving program "
+            "and the extensions it requires",
+        ),
         # The two demanded roots are DISTINCT codes and the merged `ROOT_REQUIRED`
         # parent is retired: the recovery walk credits a retry only when the write
         # lands on the root the redirect named, so a merged code makes that branch
@@ -367,11 +374,17 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "use a permitted interpreter and script path",
         ),
-        "SAFETY_VIOLATION": _code_spec(
+        "SAFETY_VIOLATION": _code_spec(  # old records only: the Supervisor now returns a call or holds it
             "blocked",
             "safety_violation",
             "error",
             "choose a safe alternative",
+        ),
+        "SAFETY_RETURNED": _code_spec(
+            "blocked", "safety_returned", "warning", "change the call, drop it, or issue it again in a later step",
+        ),
+        "SAFETY_UNAVAILABLE": _code_spec(
+            "unavailable", "safety_unavailable", "warning", "issue the identical call again in a later step",
         ),
         "LEGACY_BLOCKED": _code_spec(
             "blocked",
@@ -453,6 +466,12 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "unavailable",
             "warning",
             "enable or repair the MCP provider",
+        ),
+        "MCP_AUTH_REQUIRED": _code_spec(
+            "unavailable",
+            "unavailable",
+            "warning",
+            "the owner signs in (Settings → MCP, or a link from remote_mcp_sign_in)",
         ),
         "EXTENSION_UNAVAILABLE": _code_spec(
             "unavailable",
@@ -578,8 +597,8 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "error",
             "follow the legacy failure text",
         ),
-        # Unreachable from core producers (only SAFETY_VIOLATION spells a
-        # violation today, and it is claimed by an exact branch), but a skill or
+        # Unreachable from core producers (none spells a violation now; an old
+        # SAFETY_VIOLATION record is claimed by an exact branch), but a skill or
         # MCP payload can emit an arbitrary ``⚠️ X_VIOLATION`` and the legacy
         # chain gave it its own status. Ported rather than folded into `error`.
         "LEGACY_VIOLATION": _code_spec(
@@ -883,6 +902,7 @@ def _wrap_run_script_process_result(
 _EXACT_IDENTIFIER_CODES = MappingProxyType(
     {
         "ACCESS_DENIED": "ACCESS_BLOCKED",
+        "MCP_AUTH_REQUIRED": "MCP_AUTH_REQUIRED",
         "TOOL_ACCESS_BLOCKED": "ACCESS_BLOCKED",
         "ACTING_NO_WORKSPACE_BLOCKED": "ACCESS_BLOCKED",
         "ACTING_SUBAGENT_BLOCKED": "ACCESS_BLOCKED",
@@ -890,6 +910,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "LOCAL_READONLY_SUBAGENT_BLOCKED": "ACCESS_BLOCKED",
         "MUTATIVE_SUBAGENTS_DISABLED": "ACCESS_BLOCKED",
         "CORE_PROTECTION_BLOCKED": "CORE_PROTECTION_BLOCKED",
+        "MANAGED_BY_DEPLOYMENT": "MANAGED_BY_DEPLOYMENT",
         "ROOT_REQUIRED_USER_FILES": "ROOT_REQUIRED_USER_FILES",
         "ROOT_REQUIRED_ACTIVE_WORKSPACE": "ROOT_REQUIRED_ACTIVE_WORKSPACE",
         "USER_FILES_PATH_BLOCKED": "USER_FILES_PATH_BLOCKED",
@@ -916,6 +937,8 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "ARTIFACT_OUTPUT_UNDECLARED": "ARTIFACT_OUTPUT_UNDECLARED",
         "ARTIFACT_OUTPUT_ERROR": "ARTIFACT_OUTPUT_ERROR",
         "SAFETY_VIOLATION": "SAFETY_VIOLATION",
+        "SAFETY_RETURNED": "SAFETY_RETURNED",
+        "SAFETY_UNAVAILABLE": "SAFETY_UNAVAILABLE",
         "CAPABILITY_UNAVAILABLE": "CAPABILITY_UNAVAILABLE",
         "MCP_DISABLED": "MCP_UNAVAILABLE",
         # Catalog gaps differ from proven absence and disabled providers.
@@ -930,7 +953,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         # hung-session backlog refusal is browser unavailability.
         "BROWSER_SESSION_RETIRED": "TOOL_TIMEOUT",
         "BROWSER_ACTION_OUTCOME_UNKNOWN": "TOOL_ERROR",
-        "BROWSER_BACKLOG_RETIRED_SESSIONS": "LEGACY_UNAVAILABLE",
+        "BROWSER_BACKLOG_RETIRED_SESSIONS": "LEGACY_UNAVAILABLE", "BROWSER_PREPARING": "LEGACY_UNAVAILABLE",
         # imagegen typed markers: the same no-blind-retry contract as the
         # browser unknown-outcome marker, with the rate window its own lane.
         "IMAGE_RATE_LIMITED": "IMAGE_RATE_LIMITED",
@@ -1070,6 +1093,12 @@ def _structured_failure(text: str) -> bool:
 def _classification(code: str, meta: Mapping[str, Any] | None = None) -> tuple[ToolStatus, str, dict[str, Any]]:
     spec = TOOL_CODE_SPECS[code]
     return spec.status, code, dict(meta or {})
+
+
+def safety_refusal(text: str) -> tuple[ToolStatus, str]:
+    """``(status, code)`` of a call ``check_safety`` did not let through: held without a reading, else returned."""
+    code = "SAFETY_UNAVAILABLE" if text.startswith("⚠️ SAFETY_UNAVAILABLE") else "SAFETY_RETURNED"
+    return TOOL_CODE_SPECS[code].status, code
 
 
 def _classify_legacy_text(

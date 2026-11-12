@@ -57,9 +57,14 @@ class WidgetsResponse(TypedDict):
 
 
 class WidgetAssetLeaseRequest(TypedDict):
+    """``scope`` ``files`` (default): an ESM mount's declared files; ``routes``: GET/HEAD of a classic module or
+    route-iframe mount's own skill routes, at ``/api/widget-resources/``. One kind never reads the other.
+    ``token`` (routes only) re-establishes the lease the mount's running frame already uses."""
     skill: str
     tab_id: str
     generation: str
+    scope: NotRequired[Literal["files", "routes"]]
+    token: NotRequired[str]
 
 
 class WidgetAssetTokenRequest(TypedDict):

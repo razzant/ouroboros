@@ -14,17 +14,19 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / 'web'
 VIEWPORTS = [
     (360, 844, False), (390, 844, False), (390, 780, True),
     (719, 844, False), (720, 844, False), (721, 844, False),
     (1280, 860, False), (1280, 600, False), (844, 320, False),
 ]
-PROJECTS = [dict(id=f'gate-{i}', name=f'Project {i}: a descriptive project name',
-                 chat_id=100+i, lifecycle='active', visible_revision=0) for i in range(30)]
+# Each row carries the time the list orders by, as the server's always does: gate-0 newest, so the list is this order.
+PROJECTS = [dict(id=f'gate-{i}', name=f'Project {i}: a descriptive project name', chat_id=100+i, lifecycle='active',
+                 visible_revision=0, last_message_at=f'2026-11-01T00:{59 - i:02d}:00+00:00') for i in range(30)]
 TG_STUB = """(() => {
     const listeners = new Map();
     const button = () => ({isVisible:false, show(){this.isVisible=true}, hide(){this.isVisible=false},
@@ -59,28 +61,32 @@ MEASURE = """root => {
     const shown = """ + SHOWN + """;
     const name = e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') +
         [...e.classList].slice(0,3).map(c=>'.'+c).join('');
-    const local = e => e.matches('.app-tab-strip, pre, .md-table-wrap, .widget-table-wrap, ' +
-        '.costs-tables-grid > div, .files-preview-content, .files-editor');
+    // [data-scroll-x] marks the product's own sideways strips (drawer_drag.js SIDEWAYS_SELECTOR: Skills' filters and
+    // categories on a phone), which scroll inside themselves with a fade like a tab strip.
+    const local = e => e.matches('.app-tab-strip, [data-scroll-x], pre, .md-table-wrap, .widget-table-wrap, ' +
+        '.files-preview-content, .files-editor');
     const overflow = [], small = [], headers = [];
     const scope = document.querySelector(root);
     const doc = document.scrollingElement;
     // The 44px rule is a touch rule: it applies when the pointer is coarse, and it measures the HIT area, not the
     // box. A control passes when its centre ±21px (clipped to the viewport) lands on it or on something inside it
-    // (an invisible hit extension counts); otherwise its box is reported. A control below the fold is brought into
-    // view first, where a finger would meet it.
+    // (an invisible hit extension counts); otherwise its box is reported. A control the loop finds where a finger
+    // cannot meet it (below the fold, clipped by its own scroller, or with its reach under a bar such as the Save bar)
+    // is brought to the middle of its scroller first, where a finger would meet it, and judged there.
     const coarse = matchMedia('(pointer: coarse)').matches;
     const hits = (e, r) => {
-        if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) {
-            e.scrollIntoView({block: 'center', inline: 'nearest'});
-            r = e.getBoundingClientRect();
-        }
-        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
         const clampX = x => Math.min(Math.max(x, 0), innerWidth - 1);
         const clampY = y => Math.min(Math.max(y, 0), innerHeight - 1);
-        return [[cx - 21, cy], [cx + 21, cy], [cx, cy - 21], [cx, cy + 21]].every(([x, y]) => {
-            const t = document.elementFromPoint(clampX(x), clampY(y));
-            return Boolean(t) && (t === e || e.contains(t));
-        });
+        const reached = box => {
+            const cx = box.left + box.width / 2, cy = box.top + box.height / 2;
+            return [[cx - 21, cy], [cx + 21, cy], [cx, cy - 21], [cx, cy + 21]].every(([x, y]) => {
+                const t = document.elementFromPoint(clampX(x), clampY(y));
+                return Boolean(t) && (t === e || e.contains(t));
+            });
+        };
+        if (reached(r)) return true;
+        e.scrollIntoView({block: 'center', inline: 'nearest'});
+        return reached(e.getBoundingClientRect());
     };
     if (doc.scrollWidth > doc.clientWidth + 1)
         overflow.push({node:'document.scrollingElement',extra:doc.scrollWidth-doc.clientWidth});
@@ -149,6 +155,7 @@ def seed_page(ui, width, height, telegram=False, touch=None):
         return lambda route: route.fulfill(json=body)
     for path, body in payloads.items():
         page.route('**' + path, response(body))
+    page.route('**/api/projects?id=*', lambda route: answer_projects(route, PROJECTS))  # a reference's own read
     return page
 
 
@@ -270,9 +277,10 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
 
 def test_main_header_keeps_one_row_whatever_width_its_words_set(gate_ui, tmp_path):
     """DESIGN "Page header": one row that never wraps. At the first docked width Main's bar is narrow (Restart and
-    the budget wait in ⋯) and this Mac's face left its commands about ten pixels; a wider face (Linux WebKit set
-    them two rows high) moves nothing onto a second row and nothing out of the bar: the commands keep their place
-    and the status yields, its word dropping whole while its mark stays. A word too wide for its place drops."""
+    the budget wait in the status Shade since More ended, #2324) and this Mac's face left its commands about ten
+    pixels; a wider face (Linux WebKit set them two rows high) moves nothing onto a second row and nothing out of the
+    bar: the commands keep their place and the status yields, its word dropping whole while its mark stays. A word
+    too wide for its place drops."""
     page = seed_page(gate_ui, 720, 844)
     facts = {}
     try:
@@ -309,7 +317,7 @@ def test_main_header_keeps_one_row_whatever_width_its_words_set(gate_ui, tmp_pat
         page.close()
     for step, fact in facts.items():
         assert fact['height'] <= 56.1, (step, fact)
-        assert fact['commands'] == ['Panic', 'More'] and not fact['outside'], (step, fact)
+        assert fact['commands'] == ['Panic'] and not fact['outside'], (step, fact)
         # The word shows whole or not at all, and its mark stays in the bar either way.
         assert fact['mark'] and (fact['dropped'] != fact['wordShown']) and not fact['wordClipped'], (step, fact)
     assert facts['wide-word']['dropped'], facts
@@ -373,11 +381,11 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
                 page.wait_for_selector('.widgets-card')
             if name == 'dashboard':
                 page.locator('[data-dashboard-tab="costs"]').click()
-                page.wait_for_function("document.querySelector('#cost-top-model').textContent.length > 200")
-                table = page.locator('#cost-by-model').locator('..')
-                assert table.evaluate('e => e.scrollWidth > e.clientWidth'), 'fixture must scroll locally'
-                table.evaluate('e => e.scrollLeft = e.scrollWidth')
-                assert table.evaluate('e => e.scrollLeft > 0')
+                page.wait_for_function("document.querySelector('#cost-by-model .cost-cell-name')?.textContent.length > 200")
+                cell = page.locator('#cost-by-model .cost-cell-name').first
+                # The cell is the amount's neighbour: a name longer than its column ends in an ellipsis in place.
+                assert cell.evaluate('e => e.scrollWidth > e.clientWidth'), 'the fixture name is longer than its cell'
+                assert cell.evaluate('e => getComputedStyle(e).textOverflow') == 'ellipsis'
             if name == 'settings':
                 page.wait_for_selector('#available-subagents-editor .available-subagent-row', state='attached')
                 for tab in page.locator('[data-settings-tab]').all():
@@ -390,13 +398,13 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
                 results[name] = page.evaluate(MEASURE, scope)
         assert not {k:v for k,v in results.items() if any(v.values())}, json.dumps(results, indent=2)
 
-        # Regression sensitivity: restoring the old ineffective stat-value rule
-        # must make the same probe fail, although the table still scrolls locally.
+        # Regression sensitivity: a name cell allowed to grow (the old recipe) must make the same probe fail: the long
+        # name would widen its table past its card and the tab body would scroll sideways.
         open_nav(page, 'dashboard')
         page.locator('[data-dashboard-tab="costs"]').click()
-        page.add_style_tag(content='.costs-stats-grid .value { overflow-wrap: normal; }')
+        page.add_style_tag(content='.cost-cell-name { max-width: none; overflow: visible; }')
         settle(page)
         broken = page.evaluate(MEASURE, '.dashboard-shell')
-        assert any(row['node'] == 'div.costs-scroll' for row in broken['overflow']), broken
+        assert any(row['node'].startswith('div#page-costs') for row in broken['overflow']), broken
     finally:
         page.close()

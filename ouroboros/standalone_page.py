@@ -5,10 +5,10 @@ browser sees before the gate lets anything else through, and the desktop windows
 launcher shows before its server exists. Each inlines the builtin interface's own
 appearance owner (``web/theme.js``) and its tokens and recipes (``web/ui.css``), so it
 paints the saved Light / Dark / System choice where its document can read one (the
-login form, on the interface's own origin) and the device's appearance where it cannot
-(a pre-server window has no origin that remembers a choice). No second store, resolver
-or palette exists. A file that cannot be read or inlined leaves the page readable in
-the system's own colours, never unusable.
+login form, which names the installation's appearance scope as the interface does) and
+the device's appearance where it cannot (a pre-server window has no origin that
+remembers a choice). No second store, resolver or palette exists. A file that cannot be
+read or inlined leaves the page readable in the system's own colours, never unusable.
 """
 
 from __future__ import annotations
@@ -32,17 +32,18 @@ def _inline(path: pathlib.Path, tag: str) -> str:
     return f"<{tag}>{text}</{tag}>"
 
 
-def themed_page(web_dir: pathlib.Path, title: str, body: str, css: str = "") -> str:
+def themed_page(web_dir: pathlib.Path, title: str, body: str, css: str = "", head: str = "") -> str:
     """One self-contained document: ``theme.js`` before any style, then ``ui.css`` and the page's own ``css``.
 
     ``css`` maps the page's elements onto the tokens; it gives each a system-colour fallback
-    (``var(--bg-primary, Canvas)``) for a tree whose files were not inlined."""
+    (``var(--bg-primary, Canvas)``) for a tree whose files were not inlined. ``head`` is markup
+    ``theme.js`` reads (the appearance scope a served page names)."""
     web_dir = pathlib.Path(web_dir)
     return (
         '<!DOCTYPE html>\n<html lang="en" class="ouro-ui">\n<head>\n<meta charset="UTF-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
         '<meta name="color-scheme" content="light dark">\n'
-        f"<title>{html.escape(title)}</title>\n"
+        f"<title>{html.escape(title)}</title>\n{head}"
         f"{_inline(web_dir / 'theme.js', 'script')}\n{_inline(web_dir / 'ui.css', 'style')}\n"
         f"<style>{css}</style>\n</head>\n<body>\n{body}\n</body>\n</html>\n"
     )

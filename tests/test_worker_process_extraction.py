@@ -22,8 +22,8 @@ _MOVED = (
 # What could NOT move: the pool's own state, and everything that reads it. The
 # child process has none of it, which is exactly why the seam sits here.
 _POOL_STATE = (
-    "REPO_DIR", "DRIVE_ROOT", "MAX_WORKERS", "WORKERS", "PENDING", "RUNNING",
-    "CRASH_TS", "QUEUE_SEQ_COUNTER_REF", "_CTX", "_LAST_SPAWN_TIME",
+    "REPO_DIR", "DRIVE_ROOT", "WORKERS", "PENDING", "RUNNING",
+    "QUEUE_SEQ_COUNTER_REF", "_CTX", "_LAST_SPAWN_TIME",
 )
 
 

@@ -182,7 +182,7 @@ test('both verification statuses are honest: vendor is trusted, local is neutral
         verification: 'passed', verification_source: 'vendor', last_verified_at: '2099-08-03T10:00:00Z',
     } });
     assert.equal(vendor.tone, 'ok');
-    assert.equal(vendor.label, 'Verified live');
+    assert.equal(vendor.label, 'Login verified');
     // The raw ISO instant left the badge entirely (owner: a row must never lead
     // with a timestamp); accountMetaLine humanizes it on line 2 instead.
     assert.doesNotMatch(vendor.label, /\d{4}-\d{2}-\d{2}/);
@@ -610,7 +610,7 @@ test('account rows consume the REAL schema shape: array of {profile,status,ident
     assert.equal(profile.identity.email, 'koshak@example.com');
     // The vendor-verified status flows straight through from wrapper.status.
     assert.equal(verificationBadge(profile).tone, 'ok');
-    assert.equal(verificationBadge(profile).label, 'Verified live');
+    assert.equal(verificationBadge(profile).label, 'Login verified');
 });
 
 test('the invented flat camelCase shape yields NOTHING (guards against the regression)', () => {
@@ -925,7 +925,7 @@ test('a settled verdict silences the live status line, so the card never says bo
     const settled = { ...pending, verdict: { kind: 'success', reason: '' } };
     const html = loginCardHtml(settled, 0);
     assert.ok(!html.includes('data-login-state'));
-    assert.ok(html.includes('Connected.'));
+    assert.ok(html.includes('Signed in.'));
     // Same while the live re-check is deciding.
     assert.ok(!loginCardHtml({ ...pending, confirming: true }, 0).includes('data-login-state'));
 });
@@ -970,7 +970,7 @@ test("a settled non-success verdict carries the engine's own explanation", () =>
     assert.ok(loginCardHtml({ ...nested, verdict: { kind: 'failure', reason: 'launch_failed' } }, 0)
         .includes('data-login-detail'));
 
-    // Never beside "Connected." (a stale message must not contradict success),
+    // Never beside "Signed in." (a stale message must not contradict success),
     // and never while the job is unsettled (the status line owns the card).
     assert.ok(!loginCardHtml({ ...nested, verdict: { kind: 'success', reason: '' } }, 0)
         .includes('data-login-detail'));
@@ -1468,13 +1468,21 @@ test('each row projection is gated by ITS OWN facet, and a stale value says it i
     // the account and its status, line 2 the humanized metadata (D-10).
     const fresh = accountRowFacts(row, payload, { accountsRead: 'ok', quotaRead: 'ok' });
     assert.equal(fresh.badge.tone, 'ok');
-    assert.equal(fresh.badge.label, 'Verified live');
+    assert.equal(fresh.badge.label, 'Login verified');
     // Honest naming: the retired "Default CLI login" claimed a separate
     // account TYPE; an identity-less migrated default row is named by its id.
     assert.equal(fresh.name, 'codex-default');
     assert.equal(fresh.quota.exhausted, true);
     assert.match(fresh.quota.label, /^Limit reached/);
     assert.match(fresh.meta, /Limit reached/);
+    // Line 2 is facts: only the spent window takes the warning's hue; a plan id is said in the owner's words (U094, U102).
+    const planned = accountRowFacts({ ...row, identity: { plan: 'self_serve_business_usage_based', email: 'a@b.c' } }, payload,
+        { accountsRead: 'ok', quotaRead: 'ok' });
+    assert.deepEqual(planned.metaParts.filter((part) => part.tone).map((part) => part.tone), ['warn']);
+    assert.match(planned.metaParts.find((part) => part.tone).text, /^Limit reached/);
+    assert.ok(planned.metaParts.some((part) => part.text === 'Business usage-based' && !part.tone));
+    assert.doesNotMatch(planned.meta, /self_serve/);
+    assert.equal(planned.meta, planned.metaParts.map((part) => part.text).join(' · '));
 
     // The QUOTA read refused: nothing may be claimed about the window, so the
     // remembered percentage is not re-shown as current — and the row stops
@@ -1485,12 +1493,13 @@ test('each row projection is gated by ITS OWN facet, and a stale value says it i
     assert.equal(staleQuota.quota.exhausted, false);
     assert.equal(staleQuota.quota.label, 'Limits not checked');
     assert.match(staleQuota.meta, /Limits not checked/);
+    assert.ok(staleQuota.metaParts.every((part) => !part.tone), 'an unread window paints nothing');
 
     // The ACCOUNTS read refused: the row is memory of an account, so its
     // verification claim is dated — and the window, read fine, is not.
     const staleAccount = accountRowFacts(row, payload, { accountsRead: 'failed', quotaRead: 'ok' });
     assert.match(staleAccount.badge.label, /last known/);
-    assert.equal(staleAccount.badge.tone, 'muted', 'no green "Verified live" over a read that never landed');
+    assert.equal(staleAccount.badge.tone, 'muted', 'no green "Login verified" over a read that never landed');
     assert.equal(staleAccount.quota.exhausted, true);
     assert.doesNotMatch(staleAccount.quota.label, /last known/);
 
@@ -1827,7 +1836,7 @@ test('a lower pin under a newer engine is never promised to activate', () => {
     const line = daemonStatusLine(read, {});
     assert.equal(line.tone, 'warn');
     assert.match(line.text, /^Engine 4\.3\.1 keeps serving; this Ouroboros version pins older Claudexor 4\.3\.0\./);
-    assert.match(line.text, /After a Restart, Panic or engine exit, 4\.3\.0 may refuse data a newer engine served\./);
+    assert.match(line.text, /After Restart Claudexor, Panic or an engine exit, 4\.3\.0 may refuse data a newer engine served\./);
     assert.ok(!/activate|staged|ready/.test(line.text), line.text);
     // A facet gap: the serving claim yields to the facets; the pin fact stays.
     const gap = daemonStatusLine({ ...read, reads: { catalog: 'ok', accounts: 'failed', quota: 'ok' } }, {});

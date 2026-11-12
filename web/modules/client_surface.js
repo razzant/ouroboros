@@ -25,9 +25,9 @@ export function clientSurfaceSnapshot() {
             captured_at: new Date().toISOString(),
         };
         // The owner's Interface size, where this page sets it (the desktop app, a touch screen); a browser's own
-        // zoom is not the page's to know.
+        // zoom is not the page's to know, and a size asked of the desktop window counts once the window reports it.
         const size = getInterfaceSize().state();
-        if (size.route === 'app' || size.route === 'screen') snapshot.interface_size = size.percent;
+        if ((size.route === 'app' && !size.requested) || size.route === 'screen') snapshot.interface_size = size.percent;
         // The sender's IANA zone: the host names it beside UTC in Main's clock line
         // (owner 7A). A browser that cannot report one sends none — never a guess.
         const timezone = sendingTimeZone();

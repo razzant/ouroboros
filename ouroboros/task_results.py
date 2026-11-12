@@ -355,6 +355,40 @@ def _admit_stored(data: Dict[str, Any], task_id: str, *, strict: bool, noun: str
         raise ValueError(f"{noun} is unreadable or invalid: task:{task_id}")
 
 
+def load_task_results(drive_root: Any, task_ids: List[str]) -> Dict[str, Any]:
+    """Many results in ONE read transaction (``task_store.documents_by_ids``), each strictly admitted.
+
+    A reader over every live root pays one round trip however many roots live. An unreadable store is
+    one aggregate fact (``{"_unavailable": exc}``); a row the strict admission refuses is named on its
+    own entry (``{"_refused": exc}``), never read as an absent result. Absent ids are absent keys."""
+    from ouroboros.task_store import documents_by_ids
+
+    if not task_ids:
+        return {}
+    valid: Dict[str, str] = {}
+    for task_id in task_ids:
+        try:
+            valid[task_id] = validate_task_id(task_id)
+        except ValueError:
+            valid[task_id] = ""
+    try:
+        documents = documents_by_ids(drive_root, sorted({tid for tid in valid.values() if tid}))
+    except Exception as exc:
+        return {"_unavailable": exc}
+    results: Dict[str, Any] = {}
+    for task_id, tid in valid.items():
+        data = documents.get(tid) if tid else None
+        if data is None:
+            continue
+        try:
+            _admit_stored(data, tid, strict=True, noun="task result authority")
+        except Exception as exc:
+            results[task_id] = {"_refused": exc}
+            continue
+        results[task_id] = _normalize_swarm_efficiency(data)
+    return results
+
+
 def list_task_results(
     drive_root: Any,
     *,
@@ -380,6 +414,7 @@ def write_task_result(
     status: str,
     *,
     _field_projector: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+    _last_word: Optional[Callable[[Any, Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     strict_existing_dict: bool = False,
     create_only: bool = False,
     _terminal_observed: bool = False,
@@ -394,6 +429,8 @@ def write_task_result(
     ``_field_projector`` runs after review-publication selection under the same
     lock, deriving fields/status from CURRENT or publishing its verified refs;
     repeating the incoming-review merge afterward would undo that handoff.
+    ``_last_word`` (``store.update_task``) judges the finished document against other addressed
+    tasks in this transaction; a refusal leaves no write and no follow-up of one.
     ``strict_existing_dict`` is accepted for its callers: every stored row is a dict.
     ``create_only`` initializes only absence, before projection or timestamps.
     The body is one store transaction: the merge over CURRENT, the typed columns and
@@ -407,7 +444,7 @@ def write_task_result(
     from ouroboros.task_store import Reprepare, prepared_write
 
     prepared: Dict[str, Any] = {}
-    transition: Dict[str, bool] = {}  # set by the reducer when THIS write turns the row truly terminal
+    transition: Dict[str, bool] = {}  # the reducer's first admission / truly terminal transition
 
     def _write(needs: set) -> Dict[str, Any]:
         # TZ-1 V10: the mailbox bytes are read BEFORE the row lock (a bounded union happens
@@ -416,7 +453,14 @@ def write_task_result(
         # (what an earlier round prepared is kept, not read again).
         if "mail" not in prepared and (status in _TRULY_TERMINAL_STATUSES or "mail" in needs):
             prepared["mail"] = (capture_unread_mail(results_drive_root, task_id), capture_owner_mail(results_drive_root, task_id))
-        return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared))
+        return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared),
+                              last_word=_judged if _last_word else None)
+
+    def _judged(txn: Any, current: Dict[str, Any], document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        judged = _last_word(txn, current, document)
+        if judged is None:
+            transition.clear()
+        return judged
 
     def _merge(existing: Dict[str, Any], prepared: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         transition.clear()
@@ -443,6 +487,18 @@ def write_task_result(
         projected_fields = _field_projector(existing, {**prepared_fields, "status": status}) if _field_projector else prepared_fields
         if projected_fields is None:  # projector saw a terminal/stale row: no mutation
             return None
+        from ouroboros.owner_model import preserve_carrier
+
+        projected_fields = preserve_carrier(existing, projected_fields)
+        # The owner's lift of a producer allowance outlives any writer's older copy of the task (a warm stack's own
+        # dict at its terminal): nothing re-arms the number a restart, a member or a Continue would read (#2566).
+        metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+        if isinstance(metadata.get("producer_allowance_lifted"), dict):
+            projected_fields.pop("root_cost_ceiling_usd", None)
+            if isinstance(projected_fields.get("metadata"), dict):
+                projected_fields["metadata"] = {**{key: value for key, value in projected_fields["metadata"].items()
+                                                   if key != "root_cost_ceiling_usd"},
+                                                "producer_allowance_lifted": metadata["producer_allowance_lifted"]}
         # The store reconciles fan-out base witnesses with addressed event union,
         # including an independently repaired execution-root base on copy-back.
         projected_status = str(projected_fields.pop("status", status))
@@ -500,10 +556,13 @@ def write_task_result(
 
             title = wake_cause_title(projected_fields.get("metadata", existing.get("metadata")) or {})
             if title or existing.get("wake_summary"):
-                projected_fields.update(wake_summary=None, suggested_name=title or existing.get("title") or None)
+                projected_fields.update(wake_summary=None, fold_read=None,
+                                        suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
             task_id=task_id, observed_at=now if _terminal_observed else None, replica=_terminal_time_source))
+        transition["admitted"] = (existing_status in {"", STATUS_REQUESTED}
+                                  and projected_status in {STATUS_SCHEDULED, STATUS_RUNNING})
         # ABI-3: shared deep cost normalization handles both rows/nested planes; incoming values win.
         return stamp_task_result_schema(normalize_task_result_cost_planes({
             **normalize_task_result_cost_planes(existing),
@@ -515,6 +574,19 @@ def write_task_result(
         }))
 
     stored = prepared_write(_write)
+    if transition.get("admitted") and stored.get("project_id"):
+        # The first committed admission, including a schedule receipt, opens the room once. Callers may
+        # hold Q and the captured admission stays the address, so a lock-free display read only hints
+        # closure; the registry compares and writes. Replays cannot undo a later closure.
+        try:
+            from ouroboros.project_admission import display_registry_snapshot
+            from ouroboros.projects_registry import update_project
+            pid = stored["project_id"]
+            if any(row.get("id") == pid and "closed" in row
+                   for row in display_registry_snapshot(results_drive_root).get("projects") or ()):
+                update_project(results_drive_root, pid, closed=None)
+        except Exception:
+            log.warning("Admitted task %s could not reopen its project", task_id, exc_info=True)
     if transition.get("terminal"):
         # Prior safety flags are in-process retry authority, never a durable grant.
         # Child completion cannot clear its still-running root's history.

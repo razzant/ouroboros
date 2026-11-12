@@ -48,8 +48,29 @@ def test_outbox_accepts_thread_and_omission_stays_room_lookup(tmp_path, monkeypa
             "place_id": "topic", "label": "Room", "state": "silent"}
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("no_folder", [False, True])
+@pytest.mark.parametrize("metadata", [{}, {"initiator": "consciousness", "consciousness_autonomy": "act"}])
+def test_explicit_foreign_account_is_unbound_without_ignoring_its_own_scopes(tmp_path, monkeypatch, metadata):
+    quiet = places.Place("quiet", "bridge", "chat", "A", "room", "Quiet", "silent")
+    rows = [quiet]
+    monkeypatch.setattr(places, "load_places", lambda _: rows)
+    monkeypatch.setattr(place_guard, "effect_of", lambda *_a, **_k: ToolEffect(
+        "message", targets=("account_id", "to"), conversation="room", declared=True))
+    monkeypatch.setattr(place_guard, "connector_of", lambda *_: "bridge")
+    ctx = SimpleNamespace(drive_root=tmp_path, task_id="caller", task_metadata=metadata)
+    assert not place_guard.dispatch_refusal(ctx, "send", {"account_id": "C", "to": "recipient"})
+    assert "cannot be attributed" in place_guard.dispatch_refusal(ctx, "send", {"account_id": "A", "to": "unknown"})
+    assert "cannot be attributed" in place_guard.dispatch_refusal(ctx, "send", {"to": "unknown"})
+    for account in ("", "*"):
+        rows[:] = [replace(quiet, account_id=account, conversation_id="")]
+        assert "Quiet is Silent" in place_guard.dispatch_refusal(ctx, "send", {"account_id": "C", "to": "recipient"})
+    rows[:] = [replace(quiet, destination={"account_id": "C", "conversation_id": "target"})]
+    assert "Quiet is Silent" in place_guard.dispatch_refusal(ctx, "send", {"account_id": "C", "to": "target", "room": "target"})
+    assert "cannot be attributed" in place_guard.dispatch_refusal(ctx, "send", {"account_id": "C", "to": "unknown"})
+    ctx.task_metadata = {"initiator": "consciousness", "consciousness_autonomy": "observe"}
+    assert "Advises" in place_guard.dispatch_refusal(ctx, "send", {"account_id": "foreign", "to": "recipient"})
+
+
+@pytest.mark.parametrize(("no_folder", "legacy"), [(False, True), (True, False)])
 def test_promotion_preserves_requested_scope_unless_legacy_ceiling(focus, monkeypatch, legacy, no_folder):
     from ouroboros.tools import control_routing as routing
     from supervisor import worker_promotion, workers
@@ -71,7 +92,7 @@ def test_promotion_preserves_requested_scope_unless_legacy_ceiling(focus, monkey
                           current_chat_id=parent["chat_id"], drive_root=root)
     requested = "" if no_folder else str(root / "requested")
     assert routing._start_task(ctx, "Build a report", title="Report", project_id="report-project", workspace_root=requested,
-                               workspace="none" if no_folder else "",
+                               workspace="none" if no_folder else "", destination="place",
                                source="https://example.invalid/report.git").startswith("OK: task")
     evt = events[0]
     assert (evt["project_id"], evt["workspace_root"], evt["source"]) == (
@@ -146,7 +167,7 @@ def test_legacy_presence_promotion_keeps_its_host_scope_and_records_handoff(tmp_
     out = _start_task(
         ctx, "Audit and fix the issue", title="Issue audit and fix", project_id="beta", project_name="Injected Project",
         workspace_root="/tmp/foreign", workspace="none",
-        source="https://example.invalid/repo.git",
+        source="https://example.invalid/repo.git", destination="place",
     )
     assert out.startswith("OK: task")
     evt = ctx.pending_events[0]

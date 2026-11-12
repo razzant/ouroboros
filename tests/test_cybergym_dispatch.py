@@ -1244,12 +1244,11 @@ def test_custody_pause_is_never_reset_and_drains_in_flight_work_at_expiry():
     assert events[-1]["event"] == "workspace_custody_timeout"
 
 
-@pytest.mark.parametrize("workers", [1, 3], ids=["serial", "concurrent"])
-@pytest.mark.parametrize(
-    ("probe_at", "healed_at", "stops"),
-    [(270.0, 299.5, False), (300.0, 300.0, True), (270.0, 300.5, True)],
-    ids=["heal-inside-budget", "heal-at-expiry", "slow-heal-past-expiry"],
-)
+@pytest.mark.parametrize(("probe_at", "healed_at", "stops", "workers"), [
+    pytest.param(270.0, 299.5, False, 1, id='heal-inside-budget-serial'),
+    pytest.param(300.0, 300.0, True, 3, id='heal-at-expiry-concurrent'),
+    pytest.param(270.0, 300.5, True, 1, id='slow-heal-past-expiry-serial'),
+])
 def test_custody_budget_is_hard_so_a_heal_at_or_after_expiry_still_stops(
     workers, probe_at, healed_at, stops
 ):

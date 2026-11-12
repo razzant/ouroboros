@@ -45,7 +45,7 @@ const count = (overrides = {}) => ({
     growth_bytes: 52 * GB, growth_since: '2026-10-16T15:10:05Z',
     ...overrides,
 });
-const free = { state: 'idle', plan: null, started_at: null, finished_at: null, done: 0, total: 0, groups: [], run: null, error: null };
+const free = { state: 'idle', plan: null, started_at: null, finished_at: null, done: 0, total: 0, groups: [], pool: null, run: null, error: null };
 const response = (overrides = {}) => ({ count: null, counting: null, error: null, volume, retention_days: 7, free, ...overrides });
 const counting = (overrides = {}) => ({
     started_at: '2026-10-17T16:05:10Z', place: 'engine', current: 'projects', places_done: 1, places_total: 12,
@@ -93,12 +93,12 @@ test('places keep server order under their five groups; an absent place is omitt
         ['temporary', 34 * GB, 7 * GB], ['other', 0.4 * GB, null],
     ]);
     assert.equal(groups.find((group) => group.id === 'other').caveat, true, 'an unreadable member flags its group');
-    assert.match(rows.find((row) => row.id === 'working_copies').why, /Removed 7 days after they were made, once their task has finished\.$/);
+    assert.match(rows.find((row) => row.id === 'working_copies').why, /Removed 7 days after they were made, once their task has finished, their work is saved and you have not asked to keep them\.$/);
     // A group whose only member could not be listed has no size, never zero.
     const unknownOnly = groupRows(placeRows(count({ places: [place('app_state', 'other', null, { unreadable: 1 })] }), 7));
     assert.deepEqual(unknownOnly.map((group) => [group.id, group.bytes]), [['other', null]]);
     const { places: html } = renderStorage(response({ count: count({ places: [place('app_state', 'other', null, { unreadable: 1 })] }) }), { now: NOW });
-    assert.match(html, /storage-group-head[\s\S]*storage-place-size is-unknown"[^>]*><\/span>/);
+    assert.match(html, /storage-folder-fold[\s\S]*storage-place-size is-unknown"[^>]*>unknown<\/span>/);
     assert.doesNotMatch(html, /0 bytes/);
     assert.deepEqual(barSegments(count({ places: [place('app_state', 'other', null, { unreadable: 1 })] })), []);
 });
@@ -113,8 +113,12 @@ test('the live region carries one sentence per phase, never the progress figures
     assert.equal(early, 'Measuring. You can leave this tab.');
     assert.equal(later, early, 'a second of progress changes nothing a screen reader hears');
     assert.match(announceSentence(response({ count: count(), error: { at: 'x', message: 'Stopped before it finished.', stopped: true } }), { now: NOW }), /^Stopped before it finished\. Showing the count from today at \d\d:\d\d\.$/);
-    assert.equal(announceSentence(response({ count: count(), free: { ...free, state: 'listing', total: 3 } }), { now: NOW, tray }), 'Ouroboros uses 400 GB. Checking what can go. Nothing is removed.');
-    assert.equal(announceSentence(response({ count: count(), free: { ...free, state: 'running', total: 3, run: {} } }), { now: NOW, tray }), 'Ouroboros uses 400 GB. Freeing space. You can leave this tab.');
+    assert.equal(announceSentence(response({ count: count(), free: { ...free, state: 'listing', total: 3 } }), { now: NOW, tray }), 'Ouroboros uses 400 GB. Checking for files to remove. Nothing is removed.');
+    assert.equal(announceSentence(response({ count: count(), free: { ...free, state: 'running', total: 3, run: {} } }), { now: NOW, tray }), 'Ouroboros uses 400 GB. Removing. You can leave this tab.');
+    const ready = { ...free, state: 'ready', plan: 'p', pool: { count: 9, bytes: 1, bytes_complete: true, kinds: {}, excluded: [] } };
+    assert.equal(announceSentence(response({ free: ready }), { now: NOW, tray }), 'Not counted yet. 9 items ready to remove.');
+    const failedRun = { ...free, state: 'failed', plan: 'p', run: { removed: 2, failed: 1, error: 'OSError', kept: [] } };
+    assert.equal(announceSentence(response({ free: failedRun }), { now: NOW, tray }), 'Not counted yet. Freeing stopped: OSError. 1 could not be deleted. Removed 2 items.', 'what went wrong is heard first');
     assert.equal(announceSentence(response({ free: { ...free, state: 'failed', error: 'x' } }), { now: NOW, tray }), 'Not counted yet. Temporary space could not be listed. Nothing was removed.');
     assert.equal(announceSentence(response(), { readFailed: true, now: NOW }), 'Storage status could not be read. Not counted yet.');
     assert.equal(renderStorage(response({ counting: counting() }), { now: NOW }).announce, early);
@@ -129,8 +133,8 @@ test('the bar exists only for a finished count, its five shares sum to 100 and s
     assert.equal(never.places, '', 'no bar and no list before a finished count');
     assert.equal(renderStorage(response({ counting: counting() }), { now: NOW }).places, '', 'a first count sums nothing into a headline');
     const counted = renderStorage(response({ count: count() }), { now: NOW });
-    assert.match(counted.places, /class="storage-bar" role="img" aria-label="Share of each group; sizes are listed below"/);
-    assert.equal((counted.places.match(/storage-bar-seg/g) || []).length, 5);
+    assert.match(counted.bar, /class="storage-bar" role="img" aria-label="Share of each group; sizes are listed below"/);
+    assert.equal((counted.bar.match(/storage-bar-seg/g) || []).length, 5);
     assert.doesNotMatch(counted.places, /is-unmeasured|title=/);
     const recount = renderStorage(response({ count: count(), counting: counting() }), { now: NOW });
     assert.equal(recount.places, counted.places, 'the saved bar and list stay exactly as they were');
@@ -138,65 +142,93 @@ test('the bar exists only for a finished count, its five shares sum to 100 and s
     assert.equal(stopped.places, counted.places);
 });
 
-test('the summary names the total, the free space, the growth and the unreadable items', () => {
+test('the footprint leads, free disk is secondary, every folder opens independently', () => {
     const view = renderStorage(response({ count: count({ unreadable: 12, growth_flag: 'unreadable' }) }), { now: NOW });
-    assert.match(view.summary, /Ouroboros uses[\s\S]*400 GB/);
-    assert.match(view.summary, /170 GB free of 4\.0 TB on the disk the data folder is on/);
-    assert.match(view.summary, /Last count: today at \d\d:\d\d · took 19 min · \+52 GB since 16 Oct at \d\d:\d\d \(some items could not be read\)/);
-    assert.match(view.summary, /12 items could not be read/);
-    assert.deepEqual(view.measure, { label: 'Measure again', busy: false });
-    assert.equal(view.stop, false);
-    const flat = renderStorage(response({ count: count({ growth_bytes: 0 }) }), { now: NOW });
-    assert.match(flat.summary, /no change since 16 Oct/);
-    const less = renderStorage(response({ count: count({ growth_bytes: -3 * GB }) }), { now: NOW });
-    assert.match(less.summary, /−3\.0 GB since 16 Oct/);
-    const one = renderStorage(response({ count: count({ unreadable: 1 }) }), { now: NOW });
-    assert.match(one.summary, /1 item could not be read/);
+    assert.match(view.summary, /Space used by Ouroboros[\s\S]*storage-total"[^>]*>400 GB</);
+    // The count's age and its growth are the hero's own lines; how it was taken is said once, in its Details (U068).
+    assert.match(view.summary, /Counted today at \d\d:\d\d<\/p>[\s\S]*>\+52 GB since [^<]+<\/p>/);
+    assert.doesNotMatch(view.summary, /could not be read|[Tt]ook /, 'the caveat and how long it took leave the main view');
+    assert.match(view.facts, /Took 19 min\.[\s\S]*12 items could not be read\./);
+    assert.equal((view.facts.match(/could not be read/g) || []).length, 1, 'the caveat is said once');
+    assert.doesNotMatch(view.summary, /Free on this disk|170 GB/);
+    assert.match(view.places, /This disk: 170 GB free of 4.0 TB · read/);
+    assert.match(view.auto, /7 days after the task ends/);
+    assert.match(renderStorage(response({ retention_days: 30 })).auto, /30 days/);
+    assert.deepEqual(view.measure, { label: 'Refresh sizes', busy: false });
+    const rows = [...view.places.matchAll(/data-storage-place="([^"]+)"/g)].map((match) => match[1]);
+    assert.equal(new Set(rows).size, 8);
+    assert.equal((view.places.match(/class="storage-folder-fold"/g) || []).length, 8);
+    assert.doesNotMatch(view.places, /storage-folder-fold"[^>]*\sopen/);
+    const unknown = renderStorage(response({ count: count(), volume: { free_bytes: null } }), { now: NOW });
+    assert.match(unknown.places, /Free space on this disk could not be read/);
+    assert.match(renderStorage(response({ count: count({ growth_bytes: 0 }) }), { now: NOW }).summary, /No change since/);
+    // An older count says how old it is; the earlier count's unreadable items alone still qualify the growth.
+    const older = renderStorage(response({ count: count({ unreadable: 0, growth_flag: 'unreadable' }) }), { now: new Date('2026-10-23T12:00:00Z') });
+    assert.match(older.summary, />Counted 17 Oct — 6 days ago</);
+    assert.match(older.facts, /Some items could not be read, so the growth is approximate\./);
+    assert.equal(renderStorage(response({ count: count({ duration_seconds: undefined }) }), { now: NOW }).facts, '', 'nothing to say draws no Details');
+    assert.match(renderStorage(response({ count: count({ growth_bytes: -3 * GB }) }), { now: NOW }).summary, /−3.0 GB since/);
 });
 
 test('rows carry their size, growth, reason and the largest parts; growth never shows for a missing or zero delta', () => {
     const { places } = renderStorage(response({ count: count() }), { now: NOW });
     const row = (id) => places.split(/(?=data-storage-place=")/).find((chunk) => chunk.startsWith(`data-storage-place="${id}"`));
     assert.match(row('model_calls'), /156 GB[\s\S]*\+20 GB[\s\S]*The exact prompts and answers behind every decision\. Kept; this screen cannot delete them\./);
-    assert.match(row('model_calls'), /<summary>Largest parts<\/summary>[\s\S]*blobs[\s\S]*151 GB[\s\S]*and 3 more, 2\.0 GB/);
+    assert.match(row('model_calls'), /<summary[^>]*>Largest parts<\/summary>[\s\S]*blobs[\s\S]*151 GB[\s\S]*and 3 more, 2\.0 GB/);
     assert.match(row('engine'), /Run history 76 GB · Account data 59 GB · Engine files 11 GB/);
     assert.match(row('archives'), /16 GB/);
     assert.doesNotMatch(row('archives'), /\+0|−0/);
     assert.match(row('working_copies'), /on another disk/);
-    assert.match(row('app_state'), /storage-place-size is-unknown"[^>]*><\/span>[\s\S]*Could not be read\./);
+    assert.match(row('app_state'), /storage-place-size is-unknown"[^>]*>unknown<\/span>[\s\S]*Could not be read\./);
     assert.match(row('program'), /Ouroboros program[\s\S]*The installed app and its history\. Updated by the app\./);
     assert.doesNotMatch(places, AVOIDED);
     assert.doesNotMatch(renderStorage(response({ count: count() }), { now: NOW }).summary, AVOIDED);
 });
 
+test('a work folder whose default could not be chosen stays listed as unknown with the server\'s reason', () => {
+    const reason = 'the default projects folder is undecided: this data root\'s work-root basis is unknown. Set OUROBOROS_SUBAGENT_PROJECTS_ROOT to the folder to use; nothing was created or moved.';
+    const undecided = place('project_folders', 'work', null, { roots: [], unreadable: 1, logical_bytes: 0, files: 0, undecided: reason });
+    const saved = count({ unreadable: 1, places: [place('task_results', 'work', 48 * GB), undecided] });
+    assert.deepEqual(placeRows(saved, 7).map((row) => [row.id, row.bytes]), [['task_results', 48 * GB], ['project_folders', null]]);
+    const view = renderStorage(response({ count: saved }), { now: NOW });
+    const row = view.places.split(/(?=data-storage-place=")/).find((chunk) => chunk.startsWith('data-storage-place="project_folders"'));
+    assert.match(row, /storage-place-size is-unknown"[^>]*>unknown<\/span>[\s\S]*Your project files\. Not deleted here\. · Not counted: the default projects folder is undecided/);
+    assert.match(row, /Set OUROBOROS_SUBAGENT_PROJECTS_ROOT to the folder to use/);
+    assert.doesNotMatch(row, /Could not be read\.|0 bytes/);
+    assert.match(view.facts, /1 item could not be read\./);
+});
+
 test('a running count shows its progress sentence, Stop and the measure action busy; a first count lists finished places', () => {
     const first = renderStorage(response({ counting: counting() }), { now: NOW });
-    assert.match(first.summary, /Not counted yet/);
-    assert.match(first.summary, /Measuring Agent engine · projects · 182 GB so far · 2 of 12 places\. You can leave this tab\./);
+    assert.match(first.summary, /Not measured yet/);
+    assert.match(first.summary, /Not measured yet/);
+    assert.match(first.status, /Measuring Agent engine · projects · 182 GB so far · 2 of 12 places\. You can leave this tab\./);
     // The work that runs now is the shared moving mark in the line's ink (web/modules/status_mark.js).
-    assert.match(first.summary, /<p class="storage-progress"[^>]*><span class="status-mark" aria-hidden="true" data-shape="moving" data-hue="ink"><i><\/i><i><\/i><i><\/i><\/span><span>Measuring/);
-    assert.doesNotMatch(first.summary, /chat-live-typing/);
-    assert.match(first.summary, /storage-first-count[\s\S]*Model call records[\s\S]*156 GB/);
+    assert.match(first.status, /<p class="storage-progress"[^>]*><span class="status-mark" aria-hidden="true" data-shape="moving" data-hue="ink"><i><\/i><i><\/i><i><\/i><\/span><span>Measuring/);
+    assert.doesNotMatch(first.status, /chat-live-typing/);
+    assert.match(first.status, /storage-first-count[\s\S]*Model call records[\s\S]*156 GB/);
     assert.deepEqual(first.measure, { label: 'Measuring…', busy: true });
     assert.equal(first.stop, true);
     const recount = renderStorage(response({ count: count(), counting: counting() }), { now: NOW });
-    assert.match(recount.summary, /400 GB[\s\S]*Last count:[\s\S]*Measuring Agent engine/);
-    assert.doesNotMatch(recount.summary, /storage-first-count/);
+    assert.match(recount.summary, /400 GB/);
+    assert.match(recount.status, /Measuring Agent engine/);
+    assert.doesNotMatch(recount.status, /storage-first-count/);
     assert.deepEqual(renderStorage(response(), { pending: true }).measure, { label: 'Measuring…', busy: true });
 });
 
 test('a stopped or failed count never replaces the saved one and says so; a first failure reads "Could not be counted"', () => {
     const stopped = renderStorage(response({ count: count(), error: { at: 'x', message: 'Stopped before it finished.', stopped: true } }), { now: NOW });
-    assert.match(stopped.summary, /400 GB[\s\S]*data-tone="warn"[^>]*>Stopped before it finished\. Showing the count from today at \d\d:\d\d\./);
-    assert.equal(stopped.measure.label, 'Measure again');
+    assert.match(stopped.summary, /400 GB/);
+    assert.match(stopped.status, /data-tone="warn"[^>]*>Stopped before it finished\. Showing the count from today at \d\d:\d\d\./);
+    assert.equal(stopped.measure.label, 'Refresh sizes');
     const failed = renderStorage(response({ count: count(), error: { at: 'x', message: 'The count failed: OSError.', stopped: false } }), { now: NOW });
-    assert.match(failed.summary, /This count stopped: The count failed: OSError\. Showing the count from today/);
+    assert.match(failed.status, /This count stopped: The count failed: OSError\. Showing the count from today/);
     const nothing = renderStorage(response({ error: { at: 'x', message: 'The data folder could not be found.', stopped: false } }), { now: NOW });
-    assert.match(nothing.summary, /Could not be counted[\s\S]*This count stopped: The data folder could not be found\./);
+    assert.match(nothing.status, /This count stopped: The data folder could not be found\./);
     assert.equal(nothing.measure.label, 'Try again');
     const stoppedFirst = renderStorage(response({ error: { at: 'x', message: 'Stopped before it finished.', stopped: true } }), { now: NOW });
-    assert.match(stoppedFirst.summary, /Not counted yet[\s\S]*Stopped before it finished\.</);
-    assert.equal(stoppedFirst.measure.label, 'Measure now');
+    assert.match(stoppedFirst.status, /Stopped before it finished\.</);
+    assert.equal(stoppedFirst.measure.label, 'Measure sizes');
     assert.equal(storageState(null), 'loading');
     assert.equal(storageState(response()), 'never');
     assert.equal(storageState(response({ counting: counting() })), 'counting');
@@ -204,35 +236,47 @@ test('a stopped or failed count never replaces the saved one and says so; a firs
 
 test('before any count the empty state names what Measure does; a failed read keeps the last answer', () => {
     const never = renderStorage(response(), { now: NOW });
-    assert.match(never.summary, /Not counted yet[\s\S]*Measuring reads file sizes only and changes nothing\. It can take a while on a large data folder\./);
-    assert.deepEqual(never.measure, { label: 'Measure now', busy: false });
+    assert.match(never.status, /Measuring reads file sizes only and changes nothing\. It can take a while on a large data folder\./);
+    assert.deepEqual(never.measure, { label: 'Measure sizes', busy: false });
+    assert.match(never.summary, /<p class="storage-meta storage-disk" data-i18n-fmt="storage\.disk">This disk: 170 GB free of 4\.0 TB/, 'the free space shows before a first count');
+    assert.match(renderStorage(response({ count: count() }), { now: NOW }).summary, /^(?![\s\S]*storage-disk)/, 'with a count the disk line stands under the folders');
+    assert.match(renderStorage(response({ count: count() }), { now: NOW }).places, /storage-disk/);
     assert.match(renderStorage(null).summary, /Loading…/);
     assert.match(renderStorage(null, { readFailed: true }).summary, /Could not be read/);
     const stale = renderStorage(response({ count: count() }), { readFailed: true, now: NOW });
     assert.match(stale.summary, /400 GB[\s\S]*Storage status could not be read\. Showing the last answer\./);
 });
 
-test('the second card carries the tray whenever an answer exists, idle before any count', () => {
+test('the door is offered whenever an answer exists at rest, before any count too; a phase of the flow holds it back', () => {
     const never = renderStorage(response(), { now: NOW });
-    assert.match(never.tray, /Temporary space[\s\S]*Show what can go/);
+    assert.equal(never.door, true);
+    // Before a check the tray says what a check is for in a sentence; the figure slot waits for a real size (U070).
+    assert.match(never.tray, /<p class="storage-tray-text">See what finished work can be removed\.<\/p>/);
+    assert.doesNotMatch(never.tray, /storage-cleanup-amount|Can be removed/);
     assert.equal(renderStorage(null).tray, '');
-    const counted = renderStorage(response({ count: count() }), { now: NOW, tray: { checked: new Set(), dismissed: false } });
-    assert.match(counted.tray, /Copies and leftovers of finished work/);
-    assert.doesNotMatch(counted.tray, AVOIDED);
+    assert.equal(renderStorage(null).door, false);
+    assert.equal(renderStorage(null).auto, '');
+    const listing = renderStorage(response({ count: count(), free: { ...free, state: 'listing', plan: 'p', total: 3 } }), { now: NOW });
+    assert.equal(listing.door, false);
+    assert.match(listing.tray, /Checking for files to remove/);
+    assert.doesNotMatch(listing.tray, AVOIDED);
+    const dismissed = renderStorage(response({ free: { ...free, state: 'done', plan: 'p', run: { removed: 1, kept: [] } } }), { now: NOW, tray: { checked: new Set(), dismissed: true } });
+    assert.equal(dismissed.door, true);
+    assert.match(dismissed.tray, /<p class="storage-tray-text">Not checked since the last removal\.<\/p>/);
 });
 
 test('titles and accessible names are fixed chrome: no size or name is minted per count', () => {
     // The language overlay translates every title and aria-label by its English text, so a value
     // that changes with the count would be a new miss each time.
-    const attributes = (view) => [...(view.summary + view.places).matchAll(/\s(title|aria-label)="([^"]*)"/g)].map(([, name, value]) => `${name}=${value}`);
+    const attributes = (view) => [...(view.summary + view.status + view.bar + view.places).matchAll(/\s(title|aria-label)="([^"]*)"/g)].map(([, name, value]) => `${name}=${value}`);
     const small = attributes(renderStorage(response({ count: count() }), { now: NOW }));
     const large = attributes(renderStorage(response({ count: count({ bytes: 9e12, places: count().places.map((row) => ({ ...row, bytes: row.bytes === null ? null : row.bytes * 23 })) }) }), { now: NOW }));
-    assert.deepEqual(small, ['aria-label=Share of each group; sizes are listed below']);
+    assert.deepEqual(small, ['aria-label=Share of each group; sizes are listed below', 'aria-label=Groups of the bar']);
     assert.deepEqual(large, small);
     for (const entry of small) assert.doesNotMatch(entry, /\d/, entry);
 });
 
-test('each place says who removes it and how its last pass ended, unknown never as zero', () => {
+test('each place says who removes it and how its last pass or change ended, unknown never as zero', () => {
     const at = '2026-10-17T15:05:00Z';
     const held = [{ id: 'engine', state: 'held', at, freed_bytes: 2e9, held: 357, held_since: '2026-10-16T09:00:00Z', errors: 0, first_error: null }];
     assert.equal(removerLine(held, NOW), `Removed by engine retention · last pass ${whenLabel(at, NOW)} · 2.0 GB freed · `
@@ -279,4 +323,24 @@ test('each place says who removes it and how its last pass ended, unknown never 
     assert.match(placeLine('task_results'), /storage-place-remover[^>]*>Compression: 1,204 files compressed, 2\.1 GB saved, in progress</);
     assert.match(placeLine('app_state'), /storage-place-remover[^>]*>Compression: 3 files compressed, in progress</);
     assert.doesNotMatch(placeLine('app_state'), /1,204/, 'each place its own plane, never one total under two places');
+});
+
+test('a retirer pass says what it released and what it holds, by typed reason since when; a place of scratch has words', () => {
+    const at = '2026-11-05T09:00:00Z';
+    const pass = [{ id: 'drive_settlement', state: 'done', at, released: 2, held: 3, held_since: '2026-11-04T09:00:00Z',
+        holds: [{ class: 'task_live', count: 2, example: 'task-1', since: '2026-11-04T09:00:00Z' },
+            { class: 'child_result_unadopted', count: 1, example: 'task-2', since: at }] }];
+    assert.equal(removerLine(pass, NOW), `Work folder settlement: last change ${whenLabel(at, NOW)} · 2 released · `
+        + `holding 3 since ${whenLabel('2026-11-04T09:00:00Z', NOW)}: 2 the task has a live owner, 1 the child result is not adopted yet`);
+    const quiet = [{ id: 'session_scratch_release', state: 'done', at, released: 0, held: 0, holds: [] }];
+    assert.equal(removerLine(quiet, NOW), `Scratch release: last change ${whenLabel(at, NOW)} · 0 released`, 'nothing held says so, never a fake hold');
+    const unknownClass = [{ id: 'copy_retirement', state: 'done', at, released: 1, held: 1, held_since: at, holds: [{ class: 'some_new_reason', count: 1, example: '', since: at }] }];
+    assert.match(removerLine(unknownClass, NOW), /holding 1 since .*: 1 some new reason$/, 'a class this client lacks words for is shown by its name');
+    const withErrors = [{ id: 'engine_runtime_prune', state: 'done', at, released: 0, errors: 2, first_error: 'x' }];
+    assert.equal(removerLine(withErrors, NOW), `Engine program copies: last change ${whenLabel(at, NOW)} · 0 released · 2 errors`);
+    const rows = placeRows(count({ places: [{ id: 'session_scratch', group: 'temporary', roots: ['/var/tmp/obs-1'], present: true, same_volume: true,
+        bytes: 5e8, logical_bytes: 5e8, files: 10, unreadable: 0, parts: [], rest: { count: 0, bytes: 0 } }] }), 7, { session_scratch: quiet }, NOW);
+    assert.equal(rows[0].label, 'Session scratch');
+    assert.match(rows[0].why, /Released by the app once their task or reviewer seat is over/);
+    assert.match(rows[0].remover, /^Scratch release: last change/);
 });

@@ -118,6 +118,12 @@ test('installed from this source: On, Off · Turn on, an update, needs you, modi
     assert.doesNotMatch(on.status, /status-mark/, 'at rest the sentence keeps its own dot');
     const modified = browseCardState({ ...item('ouroboros/weather'), name: 'anime_studio', source_id: 'ouroboros-community' }, { installed: installed('anime_studio') });
     assert.equal(text(modified.status), 'Installed · modified here');
+    const modifiedNeeds = browseCardState({ ...item('ouroboros/weather'), name: 'anime_studio', source_id: 'ouroboros-community' }, {
+        installed: { ...installed('anime_studio'), skill_review: {} },
+        pageModules: { faults: [{ skill: 'anime_studio', current: true, reason: 'fixture failed' }], held: [] },
+    });
+    assert.equal(text(modifiedNeeds.status), 'Installed v3.3.0 · needs you');
+    assert.match(modifiedNeeds.action, /data-browse-action="installed"/);
 });
 
 test('one name, two sources: the card offers Compare… instead of a silent replace', () => {
@@ -126,6 +132,21 @@ test('one name, two sources: the card offers Compare… instead of a silent repl
     const state = browseCardState(claw, { installed: installed('weather') });
     assert.equal(text(state.status), 'You have another “weather” (from Ouroboros)');
     assert.match(state.action, /data-browse-action="compare"[^>]*>Compare…</);
+    // The listing names no id for a copy no connected source matches (its id now reads another address or view).
+    const elsewhere = installed('weather');
+    delete elsewhere.install.source.id;
+    const moved = browseCardState(item('ouroboros/weather'), { installed: elsewhere });
+    assert.equal(text(moved.status), 'You have another “weather” (from Ouroboros)');
+    assert.match(moved.action, /data-browse-action="compare"/);
+    // Its view connected again under another id: the host names that source, so its card offers the update.
+    const reconnected = installed('weather');
+    reconnected.install.source = { id: 'shared', name: 'Ouroboros', kind: 'hub' };
+    const shared = browseCardState({ ...item('ouroboros/weather'), id: 'shared/weather', source_id: 'shared' }, { installed: reconnected });
+    assert.equal(text(shared.status), 'Installed v0.3.1 · v0.3.2 available');
+    assert.match(shared.action, /data-browse-action="update"/);
+    assert.match(browseCardState(item('ouroboros/weather'), { installed: reconnected }).action, /data-browse-action="compare"/);
+    const unrecorded = browseCardState({ ...item('ouroboros/weather'), name: 'zoom_meeting' }, { installed: installed('zoom_meeting') });
+    assert.doesNotMatch(text(unrecorded.status), /You have another/, 'a copy without a source record is not another');
     assert.match(text(browseCardState(item('ouroboros-community/old_tool'), {}).status), /^Withdrawn by Ouroboros Community$/);
 });
 
@@ -140,7 +161,7 @@ test('Browse offers the current update after rejection, including a newer releas
                 assert.doesNotMatch(state.action, /Open in Installed/);
                 assert.ok(text(state.status).includes(`v${row.install.update_available.version} available`));
             } else {
-                assert.match(state.action, modified ? />Details</ : /Open in Installed/);
+                assert.match(state.action, modified && !/needs you/.test(text(state.status)) ? />Details</ : /Open in Installed/);
                 assert.doesNotMatch(state.action, /data-browse-action="update"/);
             }
         }

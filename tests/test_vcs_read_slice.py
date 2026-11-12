@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 
@@ -19,7 +21,8 @@ def repo(path: pathlib.Path) -> pathlib.Path:
     git(path, "init", "-q")
     git(path, "config", "user.name", "Test")
     git(path, "config", "user.email", "test@example.com")
-    (path / "note.txt").write_text("first\n", encoding="utf-8")
+    # Payloads the reads must return byte-exact are LF on every host (a fresh repository converts nothing).
+    (path / "note.txt").write_text("first\n", encoding="utf-8", newline="\n")
     git(path, "add", "note.txt")
     git(path, "commit", "-qm", "first")
     return path
@@ -89,9 +92,10 @@ def test_repository_is_selected_before_path_and_nested_repo_is_distinct(world):
 
 def test_literal_metacharacter_filename_blame_and_file_whitespace(world):
     _registry, ctx, _system, project = world
-    filename = "literal [x] $cash ?.txt"
+    # Glob, shell and history metacharacters; NTFS forbids the glob ``?`` in a name, so Windows checks the rest.
+    filename = "literal [x] $cash &!.txt" if os.name == "nt" else "literal [x] $cash ?&!.txt"
     content = "alpha  \n\nlast\t \n\n"
-    (project / filename).write_text(content, encoding="utf-8")
+    (project / filename).write_text(content, encoding="utf-8", newline="\n")
     git(project, "add", "--", filename)
     git(project, "commit", "-qm", "literal filename")
     head = git(project, "rev-parse", "HEAD")
@@ -123,7 +127,7 @@ def test_identity_unborn_dirty_refs_merge_base_and_linked_worktree(world):
     (project / "dirty.txt").write_text("untracked", encoding="utf-8")
     identity = json.loads(read_ok(ctx, action="identity").split("\n\nVCS target:")[0])
     assert identity["head"] == second and identity["dirty"] is True
-    assert identity["worktree"] == str(project)
+    assert pathlib.Path(identity["worktree"]).resolve() == project.resolve()  # Git spells it with "/"
     assert first in read_ok(ctx, action="merge_base", base=first, head=second)
     assert "refs/heads/" in read_ok(ctx, action="refs")
     assert "first" in read_ok(ctx, action="log", max_count=2)
@@ -132,7 +136,7 @@ def test_identity_unborn_dirty_refs_merge_base_and_linked_worktree(world):
     linked = project / "linked"
     git(project, "worktree", "add", "-q", "-b", "linked-test", str(linked), second)
     linked_identity = json.loads(read_ok(ctx, action="identity", repository="linked").split("\n\nVCS target:")[0])
-    assert linked_identity["worktree"] == str(linked)
+    assert pathlib.Path(linked_identity["worktree"]).resolve() == linked.resolve()
     assert linked_identity["git_dir"] != linked_identity["common_dir"]
     assert linked_identity["head"] == second
 
@@ -209,6 +213,9 @@ def test_historical_protected_file_blocks_file_blame_show_and_diff(world):
         assert "RESOURCE_POLICY_BLOCKED" in output and "historical secret" not in output
     assert "RESOURCE_POLICY_BLOCKED" in read_ok(ctx, action="show", path="private", ref=old)
     assert "RESOURCE_POLICY_BLOCKED" in read_ok(ctx, action="show", ref=old)
+    for summary in ({"stat": True}, {"name_only": True}):  # the owner's show summaries keep plain show's block
+        assert "RESOURCE_POLICY_BLOCKED" in read_ok(ctx, action="show", ref=old, **summary)
+        assert "RESOURCE_POLICY_BLOCKED" in read_ok(ctx, action="show", path="private", ref=old, **summary)
     assert "historical secret" not in read_ok(ctx, action="log")
     from ouroboros.tools.git_vcs_ops import _git_diff
     from ouroboros.tools.tool_resolution import _build_builtin_target_binding
@@ -223,29 +230,33 @@ def test_hostile_git_env_and_repo_helpers_cannot_execute_or_write(world, monkeyp
     _registry, ctx, _system, project = world
     marker = project / "helper-ran"
     helper = project / "helper.sh"
-    helper.write_text(f"#!/bin/sh\ntouch '{marker}'\nprintf hijacked\n", encoding="utf-8")
+    helper.write_text(f"#!/bin/sh\ntouch {shlex.quote(marker.as_posix())}\nprintf hijacked\n",
+                      encoding="utf-8", newline="\n")
     helper.chmod(0o755)
+    # Git hands these values to sh, which would eat a Windows path's backslashes: then nothing could
+    # execute and the refusals below would hold vacuously.
+    command = shlex.quote(helper.as_posix())
     (project / ".gitattributes").write_text("*.txt diff=spy\n", encoding="utf-8")
     git(project, "add", ".gitattributes")
     git(project, "commit", "-qm", "attributes")
-    (project / "note.txt").write_text("second\n", encoding="utf-8")
+    (project / "note.txt").write_text("second\n", encoding="utf-8", newline="\n")
     git(project, "add", "note.txt")
     git(project, "commit", "-qm", "second")
-    git(project, "config", "diff.spy.textconv", str(helper))
+    git(project, "config", "diff.spy.textconv", command)
     # Prove the configured converter can execute for this exact file/commit.
     git(project, "show", "--textconv", "--no-ext-diff", "HEAD", "--", "note.txt")
     assert marker.exists()
     marker.unlink()
-    git(project, "config", "diff.external", str(helper))
-    git(project, "config", "core.pager", str(helper))
-    git(project, "config", "core.fsmonitor", str(helper))
+    git(project, "config", "diff.external", command)
+    git(project, "config", "core.pager", command)
+    git(project, "config", "core.fsmonitor", command)
     (project / "note.txt").write_text("changed\n", encoding="utf-8")
     monkeypatch.setenv("GIT_DIR", str(project / "missing-git-dir"))
-    monkeypatch.setenv("GIT_PAGER", str(helper))
-    monkeypatch.setenv("GIT_EXTERNAL_DIFF", str(helper))
+    monkeypatch.setenv("GIT_PAGER", command)
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", command)
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "diff.external")
-    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(helper))
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", command)
     index = project / ".git" / "index"
     before_index = index.read_bytes()
     before_objects = {p.relative_to(project / ".git" / "objects")
@@ -441,7 +452,7 @@ def test_registered_protected_ancestor_blocks_unfiltered_history_without_sibling
 def test_registered_file_content_that_looks_like_tool_error_is_ok(world):
     registry, _ctx, _system, project = world
     content = "⚠️ TOOL_ERROR literal historical content\nsecond line\n"
-    (project / "warning.txt").write_text(content, encoding="utf-8")
+    (project / "warning.txt").write_text(content, encoding="utf-8", newline="\n")
     git(project, "add", "warning.txt")
     git(project, "commit", "-qm", "warning file")
     result = registry.execute_result("vcs_read", {"action": "file", "path": "warning.txt"})
@@ -456,10 +467,11 @@ def test_registered_worktree_reads_keep_configured_clean_and_process_filters(wor
     clean_marker = project / "clean-ran"
     process_marker = project / "process-ran"
     clean = project / "clean.sh"
-    clean.write_text(f"#!/bin/sh\ntouch '{clean_marker}'\ncat\n", encoding="utf-8")
+    clean.write_text(f"#!/bin/sh\ntouch {shlex.quote(clean_marker.as_posix())}\ncat\n", encoding="utf-8", newline="\n")
     clean.chmod(0o755)
     process = project / "process.sh"
-    process.write_text(f"#!/bin/sh\ntouch '{process_marker}'\nexit 1\n", encoding="utf-8")
+    process.write_text(f"#!/bin/sh\ntouch {shlex.quote(process_marker.as_posix())}\nexit 1\n", encoding="utf-8",
+                       newline="\n")
     process.chmod(0o755)
     (project / "process.txt").write_text("first\n", encoding="utf-8")
     (project / ".gitattributes").write_text(
@@ -467,8 +479,8 @@ def test_registered_worktree_reads_keep_configured_clean_and_process_filters(wor
     )
     git(project, "add", "process.txt", ".gitattributes")
     git(project, "commit", "-qm", "filters")
-    git(project, "config", "filter.clean-spy.clean", str(clean))
-    git(project, "config", "filter.process-spy.process", str(process))
+    git(project, "config", "filter.clean-spy.clean", shlex.quote(clean.as_posix()))  # sh keeps it whole on Windows
+    git(project, "config", "filter.process-spy.process", shlex.quote(process.as_posix()))
     (project / "note.txt").write_text("changed\n", encoding="utf-8")
     (project / "process.txt").write_text("changed\n", encoding="utf-8")
     subprocess.run(["git", "diff", "--", "note.txt", "process.txt"], cwd=project, capture_output=True)
@@ -514,3 +526,112 @@ def test_registered_log_and_show_do_not_invoke_signature_verifier(world, tmp_pat
         assert result.status == "ok" and result.code != "GIT_ERROR", result
         assert "signed" in result.text
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("args, named", [
+    ({"action": "status", "staged": True}, "staged=true applies only to diff; for action=status omit staged"),
+    ({"action": "log", "stat": True}, "stat=true applies only to diff and show; for action=log omit stat"),
+    ({"action": "diff", "ref": "HEAD"}, "ref='HEAD' does not apply to action=diff; diff takes base and head"),
+    ({"action": "identity", "ref": "HEAD"}, "ref='HEAD' does not apply to action=identity; omit ref"),
+    ({"action": "status", "ref": 5}, "ref='5' does not apply to action=status; omit ref"),
+    ({"action": "log", "base": "HEAD~1", "head": "HEAD"},
+     "base='HEAD~1', head='HEAD': base and head apply to diff and merge_base; for action=log name the revision with ref"),
+    ({"action": "status", "base": "main"},
+     "base='main': base and head apply to diff and merge_base; action=status takes no revision; omit base and head"),
+    ({"action": "identity", "head": "HEAD"},
+     "head='HEAD': base and head apply to diff and merge_base; action=identity takes no revision; omit base and head"),
+    ({"action": "diff", "head": "HEAD"}, "head='HEAD' compares two trees: diff needs base beside it and staged=false"),
+    ({"action": "refs", "path": "note.txt"}, "path='note.txt' applies to blame, diff, file, log, show, status; action=refs takes no path"),
+    ({"action": "file"}, "action=file requires path (the file's repository-relative path)"),
+    ({"action": "merge_base", "base": "HEAD"}, "action=merge_base requires both base and head"),
+    ({"action": "status", "max_count": 500}, "max_count=500: an integer from 1 to 200 (the number of commits log reads)"),
+    ({"action": "log", "max_chars": -1}, "max_chars=-1: 0 (no limit) or a positive integer"),
+    ({"action": "refs", "ref": "heads/"}, "ref='heads/': for action=refs the filter is a literal refs/ prefix, e.g. refs/heads/"),
+    ({"action": "show", "ref": " "}, "ref=' ': a nonempty local Git revision"),
+    ({"action": "log", "ref": ["HEAD"]}, "ref=['HEAD']: a local Git revision, written as text"),
+    # Presence, not truthiness: a falsey value that is not text was said, so it is named, not served as omitted.
+    ({"action": "status", "base": False},
+     "base=False: base and head apply to diff and merge_base; action=status takes no revision; omit base and head"),
+    ({"action": "refs", "ref": []}, "ref=[]: for action=refs the filter is a literal refs/ prefix, e.g. refs/heads/"),
+    ({"action": "diff", "base": 0.0}, "base=0.0: a local Git revision, written as text"),
+    ({"action": "log", "ref": {}}, "ref={}: a local Git revision, written as text"),
+])
+def test_an_argument_refusal_names_the_field_its_value_and_the_repair(world, args, named):
+    """One phrase for every violated constraint was retried unchanged: the refusal names the field, the
+    value received and a repair that the tool then serves, and says what the call did not do."""
+    _registry, ctx, _system, _project = world
+    text = read(ctx, **args)
+    assert text.startswith("⚠️ TOOL_ARG_ERROR (vcs_read): ") and text.endswith(". Nothing was read."), text
+    assert named in text, text
+
+
+def test_every_violated_constraint_of_one_call_is_named_in_one_reply_and_never_twice(world):
+    _registry, ctx, _system, _project = world
+    text = read(ctx, action="status", stat=True, max_count=0)
+    assert ("max_count=0: an integer from 1 to 200 (the number of commits log reads); "
+            "stat=true applies only to diff and show; for action=status omit stat") in text, text
+    text = read(ctx, action="refs", ref="   ")  # the refs filter is not a revision: one problem, not two
+    assert "for action=refs the filter is a literal refs/ prefix" in text and "nonempty local Git revision" not in text
+    text = read(ctx, action="diff", ref="HEAD", head="HEAD")
+    assert "ref='HEAD' does not apply to action=diff" in text and "head='HEAD' compares two trees" in text, text
+
+
+def test_the_served_shapes_beside_those_refusals_keep_reading(world):
+    """The other direction of the guard: every accepted combination reads, with no refusal of any kind;
+    a repair the refusals name (omit the revision, name it with ref) is served."""
+    _registry, ctx, system, _project = world
+    head = git(system, "rev-parse", "HEAD")
+    for args in ({"action": "diff", "stat": True}, {"action": "diff", "staged": True, "name_only": True},
+                 {"action": "diff", "base": "HEAD", "head": "HEAD", "path": "note.txt"}, {"action": "show"},
+                 {"action": "show", "path": "note.txt", "ref": "HEAD"}, {"action": "log", "ref": "HEAD", "max_count": 1},
+                 {"action": "log", "path": "note.txt"}, {"action": "refs", "ref": "refs/heads/"},
+                 {"action": "merge_base", "base": "HEAD", "head": "HEAD"}, {"action": "file", "path": "note.txt"},
+                 {"action": "blame", "path": "note.txt", "ref": "HEAD"}, {"action": "identity"}, {"action": "status"},
+                 {"action": "log", "ref": "HEAD~0"}):
+        output = read(ctx, root="system_repo", **args)
+        assert "TOOL_ARG_ERROR" not in output and "GIT_ERROR" not in output, (args, output)
+    assert read(ctx, root="system_repo", action="rev_parse", ref="HEAD").split("\n")[0].strip() == head
+    git(system, "tag", "7")  # an integer revision is read as text, as diff always did
+    assert read_ok(ctx, root="system_repo", action="log", ref=7, max_count=1).startswith("commit " + head)
+    assert read(ctx, root="system_repo", action="merge_base", base="HEAD", head="HEAD").split("\n")[0].strip() == head
+
+
+def test_show_summarizes_a_commit_like_diff(world):
+    """Owner 09.11 (answer A): show takes stat and name_only, as git show does; staged stays diff's."""
+    _registry, ctx, _system, _project = world
+    stat = read_ok(ctx, root="system_repo", action="show", ref="HEAD", stat=True)
+    assert "note.txt | 1 +" in stat and "1 file changed" in stat and "+first" not in stat, stat
+    names = read_ok(ctx, root="system_repo", action="show", ref="HEAD", name_only=True, stat=True)
+    assert "\nnote.txt" in names and "|" not in names.split("VCS target:")[0].split("first", 1)[-1], names
+    plain = read_ok(ctx, root="system_repo", action="show", ref="HEAD")
+    assert "+first" in plain, plain
+    assert "staged=true applies only to diff" in read(ctx, root="system_repo", action="show", staged=True)
+
+
+def test_an_unresolved_revision_names_the_argument_with_gits_whole_answer(world, monkeypatch):
+    """Git's "fatal: Needed a single revision" arrives behind the fact the caller can act on (which
+    argument did not resolve, that nothing was read, where to look), with Git's earlier lines kept; a
+    failure that is not Git's answer is not described as an unresolved revision."""
+    _registry, ctx, system, _project = world
+    text = read(ctx, action="show", ref="no-such-revision")
+    assert text.startswith("⚠️ GIT_ERROR: ref='no-such-revision' did not resolve to a commit here (git: "), text
+    assert "); nothing was read; list revisions with action=refs or action=log" in text
+    assert "head='nope' did not resolve to a commit here (git: " in read(ctx, action="merge_base", base="HEAD", head="nope")
+    blob = git(system, "rev-parse", "HEAD:note.txt")
+    text = read(ctx, root="system_repo", action="diff", base=blob)
+    assert f"base='{blob}' did not resolve to a tree here (git: " in text, text
+    assert "expected tree type" in text and "Needed a single revision" in text, "every line of Git's answer is kept"
+    assert read(ctx, action="show", ref="HEAD").startswith("commit "), "a resolved revision keeps its plain output"
+    from ouroboros.tools import vcs_read
+
+    real = vcs_read._run_read_git
+
+    def refuse_resolution(repo, args, **kwargs):  # the revision lookup itself fails, not Git's answer
+        if args[:2] == ["rev-parse", "--verify"]:
+            raise PermissionError("operation not permitted")
+        return real(repo, args, **kwargs)
+
+    monkeypatch.setattr(vcs_read, "_run_read_git", refuse_resolution)
+    for args in ({"action": "show", "ref": "HEAD"}, {"action": "diff", "base": "HEAD"}):
+        text = read(ctx, **args)
+        assert "operation not permitted" in text and "did not resolve" not in text, (args, text)

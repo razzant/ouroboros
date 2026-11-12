@@ -17,7 +17,9 @@ from typing import Any, Callable, Dict, Optional
 from ouroboros.config import (
     SETTINGS_DEFAULTS, defaults_for_settings_document, normalize_settings_raw, serialize_settings,
 )
-from ouroboros.settings_scales import EFFORT_FORMAT_KEY, normalize_effort_document
+from ouroboros.settings_scales import (
+    EFFORT_FORMAT_KEY, OWNER_CAP_FORMAT_KEY, OWNER_CAP_KEY, normalize_effort_document, optional_bound_value,
+)
 from ouroboros.update_channels import get_managed_update_fetch_timeout_sec, normalize_update_channel
 from ouroboros.utils import atomic_write_json, write_text_atomic
 
@@ -122,13 +124,21 @@ _COLAB_MODEL_OVERRIDE_KEYS = frozenset({
 })
 
 
+# What a launch gives a Drive document that holds no value of its own for a launch knob: the first-launch pair.
+# The worker cap has none: blank, the machine's memory is the limit (owner decision 09.11, migration A).
+_COLAB_FIRST_LAUNCH = {
+    "TOTAL_BUDGET": float(SETTINGS_DEFAULTS["TOTAL_BUDGET"]),
+    "OUROBOROS_RUNTIME_MODE": "advanced",
+}
+
+
 def build_colab_settings(
     secrets: Dict[str, str],
     *,
     github_repo: str = "",
-    total_budget: float = float(SETTINGS_DEFAULTS["TOTAL_BUDGET"]),
-    runtime_mode: str = "advanced",
-    max_workers: int = 1,
+    total_budget: Optional[float] = None,
+    runtime_mode: Optional[str] = None,
+    max_workers: Optional[int] = None,
     models: Dict[str, str] | None = None,
     network_password: str = "",
     existing: Optional[Dict[str, Any]] = None,
@@ -139,8 +149,12 @@ def build_colab_settings(
     On a re-run, ``existing`` (the current Drive ``settings.json``) is merged over
     the defaults FIRST, so prior owner choices that the Colab launch does not set
     explicitly — a pinned ``TELEGRAM_CHAT_ID``, tweaked model slots, an auto-grant
-    preference — survive instead of being reset to defaults. The launch knobs
-    below (secrets, budget, runtime mode, workers, host, repo) then win.
+    preference — survive instead of being reset to defaults. The launch's secrets,
+    host and repo then win. Budget, runtime mode and workers are launch knobs
+    only when given (``None`` is "not given"): an explicit value wins, even one equal to
+    the first-launch value, else the Drive document's own value stays, else a document
+    that holds none takes the first-launch 200 / advanced and no worker cap. A document
+    from before the optional cap reads the 1 an earlier first launch wrote as blank.
     ``drive_document_present`` says whether that Drive file existed (default: a
     non-empty ``existing``): an existing document keeps the finite optional bounds it
     ran under when it lacks them (``config.defaults_for_settings_document``).
@@ -164,13 +178,22 @@ def build_colab_settings(
     # renamed key is already present as its default and the customization under the
     # former key is lost, then written back to Drive as the owner's choice. Private
     # sentinel keys stay out of the document.
-    loaded = {k: v for k, v in normalize_settings_raw(document).items() if not str(k).startswith("_") or k == EFFORT_FORMAT_KEY} if document else {}
+    loaded = {k: v for k, v in normalize_settings_raw(document).items()
+              if not str(k).startswith("_") or k in (EFFORT_FORMAT_KEY, OWNER_CAP_FORMAT_KEY)} if document else {}
+    if OWNER_CAP_FORMAT_KEY not in document and optional_bound_value(OWNER_CAP_KEY, document.get(OWNER_CAP_KEY)) == 1:
+        loaded[OWNER_CAP_KEY] = ""  # Colab's own first-launch 1, read once as blank (migration A)
     settings.update(normalize_effort_document(loaded))
     if github_repo:
         settings["GITHUB_REPO"] = github_repo
-    settings["TOTAL_BUDGET"] = float(total_budget)
-    settings["OUROBOROS_RUNTIME_MODE"] = runtime_mode
-    settings["OUROBOROS_MAX_WORKERS"] = int(max_workers)
+    for key, explicit in (
+        ("TOTAL_BUDGET", None if total_budget is None else float(total_budget)),
+        ("OUROBOROS_RUNTIME_MODE", runtime_mode),
+        ("OUROBOROS_MAX_WORKERS", None if max_workers is None else int(max_workers)),
+    ):
+        if explicit is not None:
+            settings[key] = explicit
+        elif key not in loaded and key in _COLAB_FIRST_LAUNCH:  # the document's own value stays when it holds one
+            settings[key] = _COLAB_FIRST_LAUNCH[key]
     settings["OUROBOROS_SERVER_HOST"] = "127.0.0.1"
     settings["OUROBOROS_UPDATE_CHANNEL"] = normalize_update_channel(
         settings.get("OUROBOROS_UPDATE_CHANNEL")
@@ -195,17 +218,28 @@ def build_colab_settings(
 def write_colab_settings(data_dir: pathlib.Path, settings: Dict[str, Any]) -> pathlib.Path:
     """Persist the generated document for the Drive data root, in the one on-disk spelling.
 
-    Deliberately NOT routed through the persistence prologue: it proves the owner-only
-    ratchets against THIS process's ``config.SETTINGS_PATH``, and the Drive root is another
-    path (the quickstart exports the Colab paths only after this write). The bytes are
-    still ``serialize_settings`` bytes, so the next reader of the Drive file meets the
-    spelling every other writer produces. The one prologue duty it shares: a review-pool
+    Exempt from the persistence prologue only for ANOTHER root, judged by the physical target:
+    the prologue proves the ratchets and a deployment policy against THIS process's
+    ``config.SETTINGS_PATH``, and the Drive root is normally another path (the quickstart exports
+    the Colab paths only after this write). A target that is this process's own document under
+    any spelling (a symlinked alias included) is this deployment's write: the owner's whole-document
+    writer persists the notebook owner's document, as onboarding's, so a deployment policy judges
+    it first while the owner-only ratchets pass it as before. The foreign bytes are still ``serialize_settings`` bytes, so the
+    next reader of the Drive file meets the spelling every other writer produces. The one prologue
+    duty it shares: a review-pool
     migration ``build_colab_settings`` computed for the Drive document gets its durable
     receipts under the Drive root (``review_pool_receipts.persist_write_receipts``) BEFORE this
     write replaces the pre-image — the kernel is a different process from the server that later tells the owner."""
+    from ouroboros import config
+    from ouroboros.gateway.owner_settings import _owner_write_settings
+    from ouroboros.launch_roots import same_location
     from ouroboros.review_pool_receipts import persist_write_receipts
 
     path = pathlib.Path(data_dir) / "settings.json"
+    if same_location(path, config.SETTINGS_PATH):
+        _owner_write_settings(dict(settings), authored_keys=tuple(settings),
+                              allow_context_lowering=True, allow_safety_lowering=True)
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     persist_write_receipts(data_dir, settings, path)
     write_text_atomic(path, serialize_settings(dict(settings)))
@@ -220,6 +254,11 @@ def export_colab_env(repo_dir: pathlib.Path, data_dir: pathlib.Path, settings_pa
     # export it explicitly here and respect an explicit override.
     start_method = (os.environ.get("OUROBOROS_WORKER_START_METHOD") or "forkserver").strip().lower()
     env = {"OUROBOROS_APP_ROOT": str(pathlib.Path(data_dir).parent), "OUROBOROS_REPO_DIR": str(repo_dir), "OUROBOROS_DATA_DIR": str(data_dir), "OUROBOROS_SETTINGS_PATH": str(settings_path), "OUROBOROS_WORKER_START_METHOD": start_method, "PYTHONUNBUFFERED": "1", "PYTHONPATH": str(repo_dir)}
+    # Disposable worktrees stay on local disk, never Drive FUSE, for existing and new installs alike;
+    # a new install's projects (their git clones included) and Deliverables follow APP_ROOT onto Drive
+    # so they persist with its memory (#1239). A saved setting or the operator's own export wins.
+    if not os.environ.get("OUROBOROS_SUBAGENT_WORKTREE_ROOT"):
+        env["OUROBOROS_SUBAGENT_WORKTREE_ROOT"] = os.path.expanduser(os.path.join("~", "Ouroboros", "subagent_worktrees"))
     os.environ.update(env)
     return env
 

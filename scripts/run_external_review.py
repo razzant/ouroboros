@@ -11,7 +11,7 @@ proposal's own copy (D31), so a checkout that already contains the proposal is
 refused. Contributor mode makes its review drive its whole private data root
 before any config load, under an explicit ``--run-cap-usd``
 (review_run_isolation.py). READY_FOR_INTEGRATION is evidence, never merge
-authority: maintainers allocate release metadata and run the production gate on
+authority: maintainers land it version-neutral and run the production gate on
 the exact landing tree.
 
 Exit codes:
@@ -150,9 +150,9 @@ _CONTRIBUTOR_CONTRACT = {
         "those changes normally."
     ),
     "landing_rule": (
-        "A maintainer must apply the proposal onto current ouroboros, allocate "
-        "collision-free release metadata, and run the production review gate on "
-        "the exact landing tree before commit/tag/push."
+        "A maintainer must apply the proposal onto current ouroboros, leave release "
+        "metadata unchanged (maintainers open cycles and cut releases separately), and "
+        "run the production review gate on the exact landing tree before commit/push."
     ),
 }
 
@@ -337,7 +337,7 @@ def _contributor_proposal(base_ref: str, head_ref: str) -> dict:
         changed = ", ".join(release_sensitive["carrier_fields"])
         raise RuntimeError(
             "contributor proposals must not change release-version carriers "
-            f"({changed}); maintainers allocate them on the final landing"
+            f"({changed}); maintainers move them only to open a cycle or cut a release"
         )
     target_version = _git_text(["show", f"{base_sha}:VERSION"]).strip()
     substrate_changed = sorted(set(changed_paths) & _REVIEW_SUBSTRATE_PATHS)
@@ -955,8 +955,8 @@ def _apply_contributor_landing_obligations(
     return {
         "status": "passed",
         "message": (
-            "Contributor readiness passed with release metadata deferred to the "
-            "maintainer-owned final landing."
+            "Contributor readiness passed; release metadata stays with the maintainers' "
+            "cycle and release cut."
         ),
         "block_reason": "",
         "pre_fingerprint": outcome.get("pre_fingerprint", {}),
@@ -1205,6 +1205,11 @@ def _operator_reviewable_diff_chars(fallback_chars: int) -> int:
 
 
 def main() -> int:
+    # Reviews carry any text; a console that cannot encode it (a Windows pipe opens in cp1252) shows
+    # escapes, while the UTF-8 artifacts keep the exact text (as scripts/rc_audit.py does).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     args = _parse_args()
 
@@ -1340,9 +1345,10 @@ def _contributor_lane(args, host_ctx, proposal: dict, *, resolved_config: dict, 
     return exit_code
 
 
-def _write_preflight_record(output_dir: pathlib.Path, ctx, review_drive_root: pathlib.Path) -> None:
+def _write_preflight_record(output_dir: pathlib.Path, ctx, review_drive_root: pathlib.Path) -> str:
     """``preflight.json`` + ``preflight.txt``: the cycle's preflight fact, its ``surface=preflight``
-    record with every seat row, and the helper's full answer beside it (``--preflight-reviewer``)."""
+    record with every seat row, and the helper's full answer beside it (``--preflight-reviewer``).
+    Returns the console text, which the lane shows after its last artifact."""
     fact = dict(getattr(ctx, "_commit_preflight", None)
                 or {"status": "not_performed", "record_id": "", "reason": "cycle did not reach preflight"})
     record, problem = _review_record(ctx, fact) if fact.get("record_id") else (None, "")
@@ -1352,8 +1358,8 @@ def _write_preflight_record(output_dir: pathlib.Path, ctx, review_drive_root: pa
                **({"record_problem": problem} if problem else {})}
     _write_json(output_dir / "preflight.json", {**summary, "seats": seats})
     (output_dir / "preflight.txt").write_text(text + "\n", encoding="utf-8")
-    print("PREFLIGHT REVIEW (surface=preflight record; the helper's full answer follows)\n"
-          + _json_text(summary) + ("\n" + text if text else ""))
+    return ("PREFLIGHT REVIEW (surface=preflight record; the helper's full answer follows)\n"
+            + _json_text(summary) + ("\n" + text if text else ""))
 
 
 def _reviewed_tree_drift(checkout: pathlib.Path, staged: str, output_dir: pathlib.Path) -> bool:
@@ -1385,6 +1391,7 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
     open after the cycle."""
     from ouroboros.tools.commit_gate import preflight_reviewer_error
     from ouroboros.tools.git import _run_non_committing_review_cycle
+    from ouroboros.tools.registry import ToolRegistry
     from ouroboros.tools.review_subject import ReviewSubjectSpec, isolated_checkout
 
     refusal = preflight_reviewer_error(args.preflight_reviewer.strip()) if args.preflight_reviewer.strip() else ""
@@ -1393,9 +1400,14 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
         _write_json(output_dir / "outcome.json", {"exit_code": 2, "outcome": {
             "status": "failed", "block_reason": "tool_arg_error", "message": f"TOOL_ARG_ERROR: {refusal}"}})
         return 2
+    # Like a worker, load every tool module before the gate mints its test proof: the browser module's
+    # packaged-browser default joins the environment that proof binds, and the panel's first registry
+    # would otherwise change it before the record reads the tests fact (#2363).
+    ToolRegistry(repo_dir=host_ctx.repo_dir, drive_root=review_drive_root)
     spec = ReviewSubjectSpec(root_kind="system_repo", root=str(REPO), kind="index", surface="commit_gate")
     retained: dict = {}
     outcome: dict = {}
+    preflight_shown = ""
     ctx, checkout = host_ctx, None
     t0 = time.time()
     with contextlib.ExitStack() as stack:
@@ -1414,7 +1426,7 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
         try:
             outcome = _run_non_committing_review_cycle(
                 ctx, commit_message, goal=goal, scope=scope, preflight_reviewer=args.preflight_reviewer)
-            _write_preflight_record(output_dir, ctx, review_drive_root)
+            preflight_shown = _write_preflight_record(output_dir, ctx, review_drive_root)
             if checkout is not None and not _pending_checkout_custody(ctx):
                 _reviewed_tree_drift(checkout, staged, output_dir)
         finally:
@@ -1458,9 +1470,11 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
             "elapsed_sec": round(time.time() - t0, 1),
         }),
     ])
-    print(out)
     (output_dir / "full-output.txt").write_text(out + "\n", encoding="utf-8")
     _write_json(output_dir / "outcome.json", {"exit_code": exit_code, "outcome": outcome})
+    # Shown last: a console that fails (a closed pipe) cannot cost the saved verdict.
+    print(preflight_shown)
+    print(out)
     print(f"Artifacts: {output_dir}", file=sys.stderr)
     return exit_code
 

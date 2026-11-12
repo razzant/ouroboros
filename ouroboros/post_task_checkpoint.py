@@ -247,7 +247,22 @@ def _delegated_receipt_counts(value: Any) -> tuple[int, int] | None:
 
 # Local custody rows are written only by their owners and the retirement writers on the canonical
 # result (``tool_custody``, ``local_custody_repair``); a child's replica carries results, not custody.
-CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "retired_model_consumers")
+CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "retired_model_consumers",
+                          "native_capture_pending", "received_file_outputs")
+
+
+def canonical_name_fields(canonical_fields: Dict[str, Any]) -> tuple:
+    """The name slots a titled canonical record owns over any replica of it (#3047).
+
+    A ``title`` is authorship, and every write that names a titled run lands on the canonical record: admission,
+    a Continue author's adopted subject (``adopt_continued_work_name``) with its successor's ``Continue:`` claim
+    (``update_focus``), and a direct turn's namer. The execution-side namers (the closing sentence, a wake's cause)
+    name only untitled runs, so a replica of a titled run holds a copy that may predate the canonical name. An
+    untitled record keeps taking its execution's name; a slot the canonical record lacks still takes the replica's.
+    """
+    if not str(canonical_fields.get("title") or "").strip():
+        return ()
+    return tuple(field for field in ("title", "suggested_name") if field in canonical_fields)
 
 
 def project_replica_task_result_fields(
@@ -259,8 +274,10 @@ def project_replica_task_result_fields(
     A terminal canonical post-task checkpoint owns its synthesis fields and
     accounting snapshot. Canonical custody also retains non-regressing delegation
     receipts and canonical-if-present reconciliation disclosures under the narrow
-    rules below. The replica continues to own result and trace fields;
-    review snapshots retain the newest host publication of each panel.
+    rules below, and a titled record's name (``canonical_name_fields``). The
+    replica continues to own result and trace fields;
+    review snapshots retain the newest host publication of each panel, and a
+    verification ledger stays canonical while the replica carries the same capture.
     ``updated_at`` is monotonic metadata only; it never selects field authority.
     """
     from ouroboros.terminal_time import preserve_terminal_attempt, replica_terminal_time
@@ -275,6 +292,8 @@ def project_replica_task_result_fields(
     overlay.pop("canonical_terminal_projection_origin", None)
     overlay.pop("pause_notices", None)  # confirmed host transitions alone own pending chat disclosure
     for field in CANONICAL_CUSTODY_FIELDS:  # a replica never revives a retired claim nor erases a live one
+        overlay.pop(field, None)
+    for field in canonical_name_fields(canonical_fields):
         overlay.pop(field, None)
     # Unread-mail custody is a union: a stale replica never drops a canonical row.
     from ouroboros.task_custody import merge_unread_mail
@@ -293,6 +312,14 @@ def project_replica_task_result_fields(
         overlay["review_projection"] = merge_review_projection(
             canonical_fields.get("review_projection"), overlay["review_projection"],
         )
+    # Each producer call dates its ledger capture (``created_at``). The canonical copy of the same
+    # capture holds the host's refreshed summary (#2472) and any refs retention rebound; only a
+    # later capture from the child replaces it.
+    ledger = canonical_fields.get("verification_ledger")
+    if (isinstance(ledger, dict) and ledger.get("created_at")
+            and isinstance(overlay.get("verification_ledger"), dict)
+            and overlay["verification_ledger"].get("created_at") == ledger["created_at"]):
+        overlay.pop("verification_ledger")
     canonical_checkpoint = canonical_fields.get("root_phase_checkpoint")
     canonical_post_task = (
         str(canonical_checkpoint.get("post_task_synthesis") or "")

@@ -29,6 +29,34 @@ from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CON
 # (``split_leading_system_prefix``). Host-only metadata: popped from every send copy.
 STABLE_PREFIX_BLOCKS_KEY = "_stable_prefix_blocks"
 
+# One send-copy policy. These are host custody/presentation fields, never model
+# content. Strings (including JSON tool results/arguments) remain byte-identical.
+HOST_ONLY_MESSAGE_KEYS = frozenset({
+    "_host_context_kind", "_host_text_sha256", TOOL_RESULT_RECORD_KEY,
+    REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY, STABLE_PREFIX_BLOCKS_KEY,
+    "cache_control", "_context_capsule", "_evicted_image", "_caption", "_source_path", "_source_sha256",
+    "_review_image_id", "_original_image_url", "acceptance_observation", "_acceptance_observation", "review_feedback",
+    "_capture_source", "_canonical", "_requested_look", "_tool_answer", "_call_frame_source", "_call_frame_digest",
+})
+DELIVERY_MESSAGE_KEYS = frozenset({"_call_frame_source", "_call_frame_digest"})
+
+
+def project_wire_messages(messages, *, delivery_marks=False):
+    """Copy the structured message tree after host image/cache decisions.
+
+    A live command may retain its source stamp until the adapter has used it to
+    replace a native image item. The final provider mapping strips that stamp too.
+    Opaque strings and unknown provider fields are never interpreted or rewritten.
+    """
+    hidden = HOST_ONLY_MESSAGE_KEYS - (DELIVERY_MESSAGE_KEYS if delivery_marks else frozenset())
+    def project(value):
+        if isinstance(value, dict):
+            return {key: project(child) for key, child in value.items() if key not in hidden}
+        if isinstance(value, (list, tuple)):
+            return [project(child) for child in value]
+        return value
+    return project(messages)
+
 
 def own_lane_image_marker(lane: str, caption: str = "") -> str:
     """The text standing where an image was on a lane of ours that cannot carry image bytes.
@@ -79,8 +107,9 @@ def split_leading_system_prefix(
     (OpenRouter's translation for OpenAI): the leading blocks that already carry their own
     ``cache_control`` after the declared ones stay separate system items too, since the
     breakpoint ending each one is written and looked up on its own. Without explicit
-    breakpoints only the end of the leading system group is a lookup boundary, so a
-    changed knowledge block kept there would also lose the governance prefix before it.
+    breakpoints the lookup points are item ends: on Codex each leading item's end is one
+    (measured 04.10 and 06.10.2026), so a changed knowledge block kept inside the governance
+    item would also lose the governance prefix before it.
     """
     if placement not in SYSTEM_PREFIX_SPLIT_PLACEMENTS:
         raise ValueError(f"unknown system prefix placement: {placement!r}")
@@ -202,6 +231,46 @@ class _MessageShapingMixin:
     """Send-copy message transforms and reasoning-artifact predicates."""
 
     @classmethod
+    def _cache_declared_system_context(cls, source: List[Dict[str, Any]], payload: Dict[str, Any]) -> None:
+        """Use a spare Anthropic breakpoint for Main's complete starting context.
+
+        A rolling history entry cannot preserve the unmarked system tail after
+        compaction. Keep the declared governance/story endpoints and the rolling
+        one; C takes priority over the finalizer's optional tools-only endpoint.
+        No spare slot (e.g. a full separate handbook) means no change. Unsealed
+        prompts stay unchanged: caching their previously uncached C would buy a
+        write rather than merely split an already-cached prefix.
+
+        Called only by direct/OR Anthropic builders on their fresh payload, before
+        TTL finalization. The original transcript and native replay receipts are
+        never copied through a different lane's metadata scrubber here.
+        """
+        if not source or source[0].get("role") != "system":
+            return
+        leading = source[0]
+        declared = leading.get(STABLE_PREFIX_BLOCKS_KEY)
+        content = leading.get("content")
+        if (not isinstance(declared, int) or declared < 1 or not isinstance(content, list)
+                or len(content) <= declared or not all(
+                    isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str) for block in content)
+                or not content[-1]["text"].strip()):
+            return
+        if not any(message.get("role") in {"user", "tool"}
+                   and isinstance(message.get("cache_control"), dict) for message in source):
+            return
+        blocks = payload.get("system")
+        if blocks is None:
+            messages = payload.get("messages") or []
+            blocks = messages[0].get("content") if messages and messages[0].get("role") == "system" else None
+        if (not isinstance(blocks, list) or not blocks or not isinstance(blocks[-1], dict)
+                or blocks[-1].get("text") != content[-1]["text"]
+                or isinstance(blocks[-1].get("cache_control"), dict)
+                or len(cls._payload_cache_breakpoints(payload)) >= cls._MAX_CACHE_BREAKPOINTS):
+            return
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+
+    @classmethod
     def _copy_messages_with_cache_policy(
         cls,
         messages: List[Dict[str, Any]],
@@ -263,7 +332,7 @@ class _MessageShapingMixin:
                     else:
                         block.pop("cache_control", None)
                     # Known host metadata never leaves the send copy.
-                    for key in ("_caption", "_source_path", "_source_sha256", "_review_image_id", "_original_image_url", "_context_capsule"):
+                    for key in HOST_ONLY_MESSAGE_KEYS - {"cache_control"}:
                         block.pop(key, None)
         return cleaned
 

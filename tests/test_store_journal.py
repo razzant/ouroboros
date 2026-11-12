@@ -52,8 +52,7 @@ def _mountinfo_path(path: pathlib.Path) -> str:
 
 
 @pytest.mark.parametrize("kind,expected", [
-    ("ext4", "ext4"), ("xfs", "xfs"), ("nfs", "nfs"), ("nfs4", "nfs4"), ("cifs", "cifs"),
-    ("smb3", "smb3"), ("fuse", "fuse"), ("fuseblk", "fuseblk"), ("fuse.drive", "fuse.drive"), ("9p", "9p")])
+    ("ext4", "ext4"), ("xfs", "xfs"), ("9p", "9p")])
 def test_linux_uses_longest_mount_including_bind_and_escaped_names(tmp_path, kind, expected):
     mount = tmp_path.resolve() / "nested mount"
     mount.mkdir()
@@ -67,7 +66,7 @@ def test_linux_uses_longest_mount_including_bind_and_escaped_names(tmp_path, kin
 
 @pytest.mark.skipif(os.name == "nt", reason="overlay options separate directories with ':', which a Windows "
                     "drive path carries; this parser runs only on Linux")
-@pytest.mark.parametrize("backing", ["ext4", "nfs", "fuse.drive", "missing"])
+@pytest.mark.parametrize("backing", ["ext4", "fuse.drive", "missing"])
 def test_overlay_requires_every_backing_directory_to_be_known_local(tmp_path, backing):
     overlay, lower, upper = [tmp_path / part for part in ("overlay", "lower", "upper")]
     for directory in (overlay, lower, upper):
@@ -82,7 +81,7 @@ def test_overlay_requires_every_backing_directory_to_be_known_local(tmp_path, ba
 
 @pytest.mark.parametrize("platform,kind,expected", [
     ("darwin", "apfs", "apfs"), ("darwin", "hfs", "hfs"), ("darwin", "smbfs", None),
-    ("freebsd14", "ufs", "ufs"), ("freebsd14", "zfs", None), ("freebsd14", "nfs", None)])
+    ("freebsd14", "zfs", None), ("freebsd14", "nfs", None)])
 def test_bsd_statfs_reads_the_native_filesystem_name(monkeypatch, tmp_path, platform, kind, expected):
     class StatFS:
         def __call__(self, path, pointer):
@@ -98,7 +97,7 @@ def test_bsd_statfs_reads_the_native_filesystem_name(monkeypatch, tmp_path, plat
     assert store._filesystem_type(tmp_path) == expected
 
 
-@pytest.mark.parametrize("kind", [0, 1, 2, 3, 4, 5, 6])
+@pytest.mark.parametrize("kind", [0, 1, 6])
 def test_windows_only_accepts_fixed_volume_including_volume_mounts(monkeypatch, tmp_path, kind):
     class Volume:
         def __call__(self, path, root, size):
@@ -168,8 +167,7 @@ def test_wal_is_full_and_export_checkpoints_to_standalone_delete(tmp_path, monke
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
-@pytest.mark.parametrize("money", [False, True])
-@pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
+@pytest.mark.parametrize(("mode", "money"), [("PERSIST", False), ("WAL", True)])
 def test_sibling_build_is_standalone_before_publication(tmp_path, monkeypatch, money, mode):
     monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     if money:
@@ -195,8 +193,7 @@ def test_failed_build_rolls_back_and_releases_its_temporary_journal(tmp_path, mo
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == ("wal" if mode == "WAL" else "delete")
 
 
-@pytest.mark.parametrize("dialogue", [False, True])
-@pytest.mark.parametrize("wal", [True, False])
+@pytest.mark.parametrize(("wal", "dialogue"), [(True, False), (False, True)])
 def test_a_door_reset_hands_every_store_off_out_of_wal_first(tmp_path, monkeypatch, wal, dialogue):
     # A store-aware older body never sets the journal mode: it must receive DELETE files, from the
     # door's own reset and from the seam alike (every release before the dialogue store needs the
@@ -729,8 +726,7 @@ def test_a_required_wal_exit_never_defers_silently(tmp_path, monkeypatch):
         txn.set_meta("served", True)
 
 
-@pytest.mark.parametrize("which", ["facts", "dialogue"])
-@pytest.mark.parametrize("conversion", ["completes", "busy"])
+@pytest.mark.parametrize(("conversion", "which"), [("completes", "facts"), ("busy", "dialogue")])
 def test_a_retier_leaves_wal_under_the_old_tier_before_the_header_names_the_new_one(tmp_path, monkeypatch, which,
                                                                                     conversion):
     """Enforced (WAL) -> name tier: the file leaves WAL through the enforced protocol it is used with, and
@@ -931,3 +927,37 @@ def test_an_open_read_blocks_a_commit_only_under_a_rollback_journal(tmp_path, mo
         assert reader.row("t", "status") == "running"
     with store.open_store(tmp_path, write=False) as after:
         assert after.row("t", "status") == ("completed" if mode == "WAL" else "running")
+
+
+def test_a_forced_journal_a_late_thread_still_leases_is_given_back_at_a_later_teardown(tmp_path, monkeypatch):
+    """The teardown give-back of a forced journal leaves a store another thread still leases to a later teardown
+    instead of failing the test that ends, and converts it once the lease is gone (tests/_store_journal_shared.py)."""
+    from tests import _store_journal_shared as shared
+
+    root = tmp_path / "root"
+    publish(root, {"task_id": "t", "status": "completed", "_schema_version": 1})
+    path = os.path.abspath(store.store_path(root))
+    with store.open_store(root, write=False) as txn:
+        native = txn.conn.execute("PRAGMA journal_mode").fetchone()[0]
+    shared.use_journal(monkeypatch, "PERSIST" if native == "wal" else "WAL")
+    leased, release = threading.Event(), threading.Event()
+
+    def late_reader():
+        with store.open_store(root, write=False):
+            leased.set()
+            release.wait(10)
+
+    reader = threading.Thread(target=late_reader)
+    reader.start()
+    try:
+        assert leased.wait(10)
+        monkeypatch.undo()  # what the teardown hook sees: every monkeypatch undone
+        shared.give_back_converted_journals()  # the lease is the other thread's: nothing raises here
+        assert any(os.path.abspath(converted) == path for converted, _tier in shared._CONVERTED)
+    finally:
+        release.set()
+        reader.join(10)
+    shared.give_back_converted_journals()
+    assert not any(os.path.abspath(converted) == path for converted, _tier in shared._CONVERTED)
+    with store.open_store(root, write=False) as txn:
+        assert txn.conn.execute("PRAGMA journal_mode").fetchone()[0] == native

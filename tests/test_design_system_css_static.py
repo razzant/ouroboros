@@ -34,10 +34,10 @@ def test_first_party_styles_do_not_uppercase_labels():
 # queries should become container queries, never another viewport breakpoint.
 MAX_WIDTH_DEBT = {
     'web/model_roles.css': {'720px': 1},  # existing model editor stack
-    'web/onboarding.css': {'1100px': 1, '900px': 1, '760px': 1, '720px': 1},  # wizard
+    'web/onboarding.css': {'900px': 1, '760px': 1, '720px': 1},  # wizard
     'web/room_work.css': {'900px': 1},  # existing Shade height recipe (L1)
     'web/settings.css': {'980px': 2, '760px': 1, '640px': 1, '600px': 1},  # existing form/MCP layout debt
-    'web/style.css': {'980px': 2, '640px': 2, '620px': 2},  # legacy content only: the shell's queries are gone (L1)
+    'web/style.css': {'980px': 1, '640px': 2, '620px': 2},  # legacy content only: the shell's queries are gone (L1)
     'web/ui.css': {'640px': 1},  # native field font-size/zoom recipe
 }
 
@@ -80,7 +80,7 @@ def test_width_inventory_sees_multiline_compound_queries_and_repeated_debt():
 # before `+`/`~` when an attribute or class in its argument changes, and for a scope-breaking argument. Browser tests
 # assert geometry, not cost, so this static check is the guard. Rewrite by asking from the styled element
 # (`.a > .x:has(~ .b)`) or by letting a common parent hold the `:has()` and set an inherited custom property the styled
-# element reads (`--chat-feed-reserve` in style.css).
+# element reads (`--project-answer-tail` in style.css).
 COMBINATORS = " \t\n>+~"
 
 
@@ -143,6 +143,34 @@ def test_has_stays_in_the_subject_compound():
     found = [f"{path}:{line}: {' '.join(selectors.split())}" for path, line, selectors in rules
              if unscoped_has(selectors)]
     assert not found, "Keep :has() in its subject compound (comment above):\n" + "\n".join(found)
+
+
+# A `:has()` on what holds a room's rows. Measured in WebKit (2026-11-05): a room's `:has()` beside the rows' own made each
+# live card's log frame cost 3-4x (about 8 -> 2 ms with 20 rooms kept) and grow with every room kept away, though hidden; a
+# busy burst's script doubled. No browser test sees cost: ask from a narrower element, or from the element itself with
+# `:empty` (`.chat-panel-statusbar`, style.css).
+ROW_HOLDERS = re.compile(r"(?:\.chat-instance-panel|\.project-panel|\.chat-messages|#chat-messages|#page-chat|^body|^html|:root)(?![\w-])")
+
+
+def has_on_a_row_holder(selectors):
+    """A `:has()`, at any depth of the subject compound, whose compound names an element holding a room's rows."""
+    for selector in top_level(re.sub(r'"[^"]*"|\'[^\']*\'', '""', selectors), ","):
+        subject = top_level(selector, COMBINATORS)[-1]
+        if ":has(" in subject.lower() and ROW_HOLDERS.search(re.sub(r"\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)", "", subject)):
+            return True
+    return False
+
+
+def test_no_has_on_an_element_holding_a_rooms_rows():
+    found = [f"{path.relative_to(ROOT).as_posix()}:{line}: {' '.join(selectors.split())}" for path in first_party_sheets()
+             for line, selectors in selectors_by_line(path.read_text(encoding="utf-8")) if has_on_a_row_holder(selectors)]
+    assert not found, "Ask from a narrower element or with :empty (comment above):\n" + "\n".join(found)
+    for selector in (".project-panel .chat-instance-panel:has(> .bar > :not([hidden]))", ".x, .chat-messages:not(:has(> *))",
+                     "#page-chat:has(.y)", "body:has(.y)", ".project-panel:has(.y)", ":root:has(.y)"):
+        assert has_on_a_row_holder(selector), selector
+    for selector in (".chat-bubble:has(> .x)", ".project-panel-bar:has(> .x)", ".chat-messages > .row:has(.x)",
+                     ".project-panel .chat-panel-statusbar:not(:empty) ~ .chat-messages", ".nobody:has(.chat-messages)"):
+        assert not has_on_a_row_holder(selector), selector
 
 
 def test_has_guard_reads_every_selector_position():

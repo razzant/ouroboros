@@ -8,8 +8,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
+
+import yaml
 
 from scripts import sync_legacy_mirrors as mirrors
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _git(cwd, *args):
@@ -148,6 +153,36 @@ def test_the_published_stable_release_passes_the_gate(tmp_path, monkeypatch):
     # No mirror selected: the run stops right after the gate, without network or mutations.
     assert mirrors.main(["--source-ref", head, "--only", "joi-lab/none"]) == 0
     assert ("GET", "/user") in calls and _mutations(calls) == []
+
+
+def test_main_promotion_commits_resolve_to_the_tag_they_project(tmp_path, monkeypatch):
+    from scripts import promote_stable as promotion
+
+    first = _tagged_repo(tmp_path, monkeypatch, tag="v7.7.0")  # a main that is still the raw tag commit
+    repo = tmp_path / "official"
+    p1 = promotion.plan_promotion("v7.7.0", first, promotion.render_cask("7.7.0", "a" * 64), first, first)["main"]
+    assert mirrors.released_commit(p1) == first
+    _git(repo, "checkout", "-q", first)
+    second = _commit(repo, {"VERSION": "7.8.0\n"}, "release 7.8.0")
+    _git(repo, "tag", "v7.8.0")
+    p2 = promotion.plan_promotion("v7.8.0", second, promotion.render_cask("7.8.0", "b" * 64), p1, first)["main"]
+    assert _git(repo, "rev-parse", f"{p2}^1", f"{p2}^2").split() == [p1, second]
+    assert mirrors.released_commit(p2) == second
+    p3 = promotion.plan_promotion("v7.8.0", second, promotion.render_cask("7.8.0", "c" * 64), p2, second)["main"]
+    assert mirrors.released_commit(p3) == second  # a re-rendered cask on top reads through as well
+    _git(repo, "checkout", "-q", p3)
+    code = _commit(repo, {"app.py": "x = 1\n"}, "code")
+    assert mirrors.released_commit(code) == code  # anything else is not skipped
+    calls = _fake_github(monkeypatch, release={"draft": False, "prerelease": False})
+    # A run on main's promotion commit refreshes the tagged release instead of reporting "not a release".
+    assert mirrors.main(["--source-ref", p2, "--only", "joi-lab/none"]) == 0
+    assert ("GET", "/user") in calls and _mutations(calls) == []
+
+
+def test_the_refresh_ignores_pushes_that_only_rerender_the_cask():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/sync-legacy-mirrors.yml").read_text(encoding="utf-8"))
+    triggers = workflow.get("on", workflow.get(True))  # PyYAML's YAML 1.1 spelling of "on"
+    assert triggers["push"] == {"branches": ["main"], "paths-ignore": ["Casks/**"]}
 
 
 def test_archive_only_archives_both_mirrors(monkeypatch):

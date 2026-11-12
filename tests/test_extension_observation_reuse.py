@@ -13,7 +13,9 @@ from ouroboros import extension_loader as loader, extension_liveness as liveness
 from ouroboros import skill_loader, skill_peer_inventory, skill_identity
 from ouroboros.tools import extension_dispatch
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests.test_extension_freshness_cross_process import live_route as live_route, _in_another_process
+from tests.test_extension_freshness_cross_process import (
+    _discovery_keeps_nothing, _in_another_process, live_route as live_route,
+)
 from tests.test_extensions_api import _write_ext
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -53,6 +55,7 @@ def _consumer(fixture, surface, monkeypatch):
 
 
 def _read_counts(monkeypatch):
+    _discovery_keeps_nothing(monkeypatch)
     counts = Counter()
     real_inventory = skill_loader._skill_location_inventory
     real_text = pathlib.Path.read_text
@@ -83,6 +86,7 @@ def _read_counts(monkeypatch):
     monkeypatch.setattr(pathlib.Path, "read_text", text)
     monkeypatch.setattr(skill_peer_inventory, "parse_skill_manifest_text", parse)
     monkeypatch.setattr(skill_identity, "payload_digest", digest)
+    skill_peer_inventory._HELD_FACTS.clear()  # count from a new process's empty reuse
     return counts
 
 
@@ -110,13 +114,45 @@ def test_dispatch_reuses_locations_but_keeps_each_fresh_state_read(
         assert dispatch()
         # Every peer's enablement and the subject are read fresh per observation; an OFF
         # peer's manifest is neither read nor parsed, since an OFF peer cannot conflict.
+        # An ON peer's bytes are read every time, parsed only while its text is new.
         assert counts == {
             "locations": observations,
             "enabled": observations * (peers + 1),
             "manifest_text": observations * (on + 1),
-            "peer_parse": observations * on,
+            **({"peer_parse": on} if peers == 12 else {}),
             "hash:fresh_ext": observations,
         }, (surface, supervisor_present, peers, counts)
+
+
+@pytest.mark.parametrize("surface", ["http", "ws", "tool"])
+def test_more_enabled_peers_than_the_former_reuse_count_are_parsed_once_and_stay_fresh(live_route, monkeypatch, surface):
+    """#1217: 130 harmless enabled peers outran the former 128 reused texts, so every observation of every
+    dispatch parsed them all again. Each is parsed once now; bytes and enablement stay fresh reads, and an
+    equal-size conflicting edit with a restored mtime from another process refuses the next dispatch."""
+    monkeypatch.setattr(loader, "is_server_process", lambda: True)
+    monkeypatch.setattr(loader, "get_global_supervisor", lambda: None)
+    on = 130
+    for index in range(on):
+        _write_ext(live_route["skills_root"], f"many_{index:03d}", permissions=["tool"],
+                   plugin="def register(api):\n    pass\n", conflicts=["other_ext"] if index == 0 else None)
+        skill_loader.save_enabled(live_route["drive_root"], f"many_{index:03d}", True)
+    dispatch = _consumer(live_route, surface, monkeypatch)
+    counts = _read_counts(monkeypatch)
+    observations = 1 if surface == "http" else 2
+    assert dispatch() and counts["peer_parse"] == on
+    for _ in range(2):
+        counts.clear()
+        assert dispatch()
+        assert counts == {"locations": observations, "enabled": observations * (12 + on + 1),
+                          "manifest_text": observations * (on + 1), "hash:fresh_ext": observations}, counts
+    _in_another_process(
+        "from pathlib import Path\nimport os\np = Path(peer) / 'SKILL.md'\ns = p.stat()\n"
+        "raw = p.read_bytes(); changed = raw.replace(b'other_ext', b'fresh_ext')\n"
+        "assert changed != raw and len(changed) == len(raw)\np.write_bytes(changed)\n"
+        "os.utime(p, ns=(s.st_atime_ns, s.st_mtime_ns))\n", peer=str(live_route["skills_root"] / "many_000"))
+    counts.clear()
+    assert not dispatch(), surface
+    assert counts["peer_parse"] == 1  # only the edited text
 
 
 @pytest.mark.parametrize("tools", [1, 5])
@@ -146,8 +182,12 @@ def test_schema_enumeration_checks_a_skill_once_and_reads_again_next_time(live_r
     assert counts["enabled"] == 13 and counts["peer_parse"] == 0
 
 
-@pytest.mark.parametrize("surface", ["http", "ws", "tool"])
-@pytest.mark.parametrize("change", ["review", "payload", "peer", "membership"])
+@pytest.mark.parametrize(("change", "surface"), [
+    ("review", "http"),
+    ("payload", "ws"),
+    ("peer", "tool"),
+    ("membership", "http"),
+])
 def test_next_dispatch_observes_cross_process_changes(live_route, monkeypatch, surface, change):
     dispatch = _consumer(live_route, surface, monkeypatch)
     assert dispatch()
@@ -183,6 +223,42 @@ def test_next_dispatch_observes_cross_process_changes(live_route, monkeypatch, s
     _in_another_process(code, drive=str(live_route["drive_root"]), digest=live_route["content_hash"],
                         selected=str(live_route["skill_dir"]), peer=str(live_route["skills_root"] / "peer_00"))
     assert not dispatch(), (surface, change)
+
+
+@pytest.mark.parametrize("point", ["inside_reconcile", "before_second_observation"])
+def test_a_peer_edit_inside_one_ws_dispatch_is_seen_although_its_old_text_was_parsed(live_route, monkeypatch, point):
+    """A WS frame reconciles, yields to a thread and observes again. An equal-size conflicting edit with a
+    restored mtime landing in either window is refused, though the peer's previous text is already parsed."""
+    peer = live_route["skills_root"] / "peer_00" / "SKILL.md"
+    peer.write_text(peer.read_text(encoding="utf-8").replace("conflicts: []", 'conflicts: ["other_ext"]'),
+                    encoding="utf-8")
+    skill_loader.save_enabled(live_route["drive_root"], "peer_00", True)
+    dispatch = _consumer(live_route, "ws", monkeypatch)
+    assert dispatch()  # the previous text is parsed and held
+    landed = []
+
+    def land():
+        if not landed:
+            _in_another_process(
+                "from pathlib import Path\nimport os\np = Path(peer)\ns = p.stat()\n"
+                "raw = p.read_bytes(); changed = raw.replace(b'other_ext', b'fresh_ext')\n"
+                "assert changed != raw and len(changed) == len(raw)\np.write_bytes(changed)\n"
+                "os.utime(p, ns=(s.st_atime_ns, s.st_mtime_ns))\n", peer=str(peer))
+            landed.append(point)
+
+    if point == "inside_reconcile":
+        finalize = loader._finalize_extension_reconcile
+        monkeypatch.setattr(loader, "_finalize_extension_reconcile", lambda *a, **k: (land(), finalize(*a, **k))[1])
+    else:
+        to_thread = asyncio.to_thread
+
+        async def boundary(func, *args, **kwargs):
+            if getattr(func, "__name__", "") == "runtime_state_for_skill_name":
+                land()
+            return await to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "to_thread", boundary)
+    assert not dispatch() and landed == [point]
 
 
 def test_post_load_observation_does_not_reuse_reconcile_start_membership(live_route, monkeypatch):

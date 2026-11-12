@@ -213,11 +213,11 @@ def resolve_project_id(task: Dict[str, Any]) -> str:
     # mismatch the forked seed prepared at schedule time for an unscoped parent.
     if str(task.get("delegation_role") or "") == "subagent":
         return ""
-    from ouroboros.dialogue_provenance import presence_metadata_binding
+    from ouroboros.dialogue_provenance import presence_metadata_binding, presence_record_metadata
 
-    if presence_metadata_binding(task.get("metadata")) is not None:
+    if presence_metadata_binding(presence_record_metadata(task)) is not None:
         # Presence (a speaker, or work acting for its binding) changes file/process cwd,
-        # not its canonical memory scope.
+        # not its canonical memory scope; the owner's related work is not Presence here.
         return ""
     workspace = str(task.get("workspace_root") or "").strip()
     if workspace:

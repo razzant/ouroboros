@@ -20,8 +20,15 @@ task review / LLM safety are off so token counts measure editing work only.
 Benchmarking the CURRENT WORKING TREE is this launcher's purpose (evaluating
 uncommitted editing-tool changes), so real runs on a dirty tree need the
 recorded ``--allow-dirty-seed`` escape; the admission gate refuses otherwise.
+The TASKS stay fixed: t1 is tracked in fixtures/, t2-t5 are the pinned v2
+workload that make_fixtures_v2.py materializes. Every selected task is checked
+after admission and before the clone, server or any model call; a missing,
+partial or stale fixture ends the run as a recorded ``fixture_preflight``
+refusal (exit 2), and an admitted run writes its task identities to the run
+manifest before executing anything.
 
 Usage:
+  python devtools/benchmarks/editbench/make_fixtures_v2.py   # once, for t2-t5
   python devtools/benchmarks/editbench/run_editbench.py --tasks all --runs 3 --allow-dirty-seed
   python devtools/benchmarks/editbench/run_editbench.py --tasks t1_rename --configs full --runs 1 --keep
 """
@@ -64,8 +71,8 @@ from devtools.benchmarks.common.server_runner import (  # noqa: E402
 from ouroboros.config import SETTINGS_DEFAULTS  # noqa: E402
 from ouroboros.event_token_totals import event_token_totals  # noqa: E402
 from ouroboros.tool_call_log import CALL_SETTLED, CALL_STARTED, CALL_WAIT_ENDED, logical_calls  # noqa: E402
-from checker import grade_generic  # noqa: E402
-from make_fixtures_v2 import T3_NEW_CMDSTR, T3_NEW_STRIP, T3_NEW_SUDO  # noqa: E402
+from checker import grade_generic, oracle_problems  # noqa: E402
+from make_fixtures_v2 import V2_TASKS, check_argv, task_identity, verify_task  # noqa: E402
 
 FIXTURES = HERE / "fixtures" / "toyproj"
 
@@ -115,71 +122,23 @@ CONFIGS: dict[str, list[str]] = {
 
 _V2_CONFIGS = ["edit_text_only", "apply_patch_only", "edit_batch_only", "full"]
 
-T2_PROMPT = """\
-In review_state.py apply EXACTLY these four changes and nothing else (the file \
-must stay byte-identical everywhere else — no reformatting, no other renames):
-1. Rename the helper function `_stable_digest` to `_content_digest` — the def and every reference.
-2. Rename the helper function `_max_iso_ts` to `_latest_iso_ts` — the def and every reference. \
-Do NOT touch `_min_iso_ts`.
-3. Change the constant `_MAX_RUN_HISTORY` from 10 to 25.
-4. Change the constant `_REVIEW_ATTEMPT_TTL_SEC` from 1800 to 2400.
-Do not create new files and do not commit."""
-
-T3_PROMPT = f"""\
-In shell_parse.py replace three functions with the new implementations given below. \
-Each replacement must be verbatim exactly as given (same indentation), and the rest \
-of the file must stay byte-identical. Do not create new files and do not commit.
-
-Replace the function `strip_leading_env_assignments` with:
-
-```python
-{T3_NEW_STRIP}
-```
-
-Replace the function `shell_command_string` with:
-
-```python
-{T3_NEW_CMDSTR}
-```
-
-Replace the function `sudo_noninteractive_violation` with:
-
-```python
-{T3_NEW_SUDO}
-```"""
-
-T4_PROMPT = """\
-Refactor: move the function `collect_leading_env` from ouroboros/shell_parse.py \
-into ouroboros/git_shell_policy.py as a private helper. Exact spec — everything \
-else must stay byte-identical:
-1. In ouroboros/shell_parse.py: delete the entire `collect_leading_env` function \
-(def line through its final `return`), leaving exactly two blank lines between the \
-functions that surrounded it.
-2. In ouroboros/git_shell_policy.py: remove `collect_leading_env,` from the \
-`from ouroboros.shell_parse import (...)` list (delete that whole line).
-3. In ouroboros/git_shell_policy.py: insert the function immediately BEFORE \
-`def _git_subcommand_and_args(`, renamed to `_collect_leading_env` (body and \
-docstring unchanged, byte-for-byte), with exactly two blank lines before it and \
-exactly two blank lines after it.
-4. Rename its single call site `collect_leading_env(segment)` to \
-`_collect_leading_env(segment)`.
-Do not touch ouroboros/utils.py or ouroboros/__init__.py. Do not create new files \
-and do not commit."""
-
-T5_PROMPT = """\
-In provider_models.py convert string literals from double quotes to single quotes \
-per this EXACT rule, and change nothing else:
-- Applies to every SINGLE-LINE string literal written with double quotes, including \
-prefixed ones (f"...", r"...", b"..." etc.).
-- SKIP (leave unchanged): triple-quoted strings/docstrings, and any literal whose \
-inner text contains a single quote ('), a double quote, or a backslash.
-- Comments are not string literals — never edit comment text.
-- The file's code semantics must be unchanged (same AST), only quote characters change.
-There are a LOT of eligible literals — be systematic and cover the whole file. \
-Do not create new files and do not commit."""
-
+# t2-t5 are the FIXED v2 workload: prompts, graded files, checks and pinned bytes
+# live together in make_fixtures_v2.py, which materializes them into fixtures_v2/.
 V2 = HERE / "fixtures_v2"
-CHECKS = HERE / "checks"
+
+
+def _v2_task(name: str, configs: list[str]) -> dict:
+    spec = V2_TASKS[name]
+    return {
+        "workspace": V2 / name / "workspace",
+        "expected": V2 / name / "expected",
+        "files": spec["files"],
+        "prompt": spec["prompt"],
+        "check": check_argv(name),
+        "check_pythonpath": bool(spec["check"]),
+        "configs": configs,
+    }
+
 
 # Task registry: workspace source tree, expected tree, graded files, optional
 # behavior check, and the config set to run.
@@ -194,44 +153,34 @@ TASKS: dict[str, dict] = {
         "check_pythonpath": False,
         "configs": list(CONFIGS),
     },
-    "t2_surgical": {
-        "workspace": V2 / "t2_surgical" / "workspace",
-        "expected": V2 / "t2_surgical" / "expected",
-        "files": ["review_state.py"],
-        "prompt": T2_PROMPT,
-        "check": None,
-        "check_pythonpath": False,
-        "configs": _V2_CONFIGS,
-    },
-    "t3_blocks": {
-        "workspace": V2 / "t3_blocks" / "workspace",
-        "expected": V2 / "t3_blocks" / "expected",
-        "files": ["shell_parse.py"],
-        "prompt": T3_PROMPT,
-        "check": [sys.executable, str(CHECKS / "t3_check.py")],
-        "check_pythonpath": True,
-        "configs": _V2_CONFIGS,
-    },
-    "t4_move": {
-        "workspace": V2 / "t4_move" / "workspace",
-        "expected": V2 / "t4_move" / "expected",
-        "files": ["ouroboros/shell_parse.py", "ouroboros/git_shell_policy.py",
-                  "ouroboros/utils.py", "ouroboros/__init__.py"],
-        "prompt": T4_PROMPT,
-        "check": [sys.executable, str(CHECKS / "t4_check.py")],
-        "check_pythonpath": True,
-        "configs": _V2_CONFIGS,
-    },
-    "t5_overhaul": {
-        "workspace": V2 / "t5_overhaul" / "workspace",
-        "expected": V2 / "t5_overhaul" / "expected",
-        "files": ["provider_models.py"],
-        "prompt": T5_PROMPT,
-        "check": [sys.executable, str(CHECKS / "t5_check.py")],
-        "check_pythonpath": True,
-        "configs": _V2_CONFIGS + ["write_file_only"],
-    },
+    "t2_surgical": _v2_task("t2_surgical", _V2_CONFIGS),
+    "t3_blocks": _v2_task("t3_blocks", _V2_CONFIGS),
+    "t4_move": _v2_task("t4_move", _V2_CONFIGS),
+    "t5_overhaul": _v2_task("t5_overhaul", _V2_CONFIGS + ["write_file_only"]),
 }
+
+
+def _fixture_preflight(task_names: list[str]) -> tuple[dict, list[str]]:
+    """Check every selected task's inputs before the server, clone or any model call.
+
+    A v2 task must be the pinned workload (prompt, check, exact file set); every
+    task's expected tree must pass its own oracle and its untouched workspace must
+    not. Returns the workload identities to record, and the problems to refuse on.
+    """
+    workloads: dict[str, dict] = {}
+    problems: list[str] = []
+    for name in task_names:
+        task = TASKS[name]
+        # <root>/<name>/workspace: the root this registry entry actually reads.
+        found = verify_task(name, pathlib.Path(task["workspace"]).parents[1]) if name in V2_TASKS else []
+        found = found or oracle_problems(
+            task["workspace"], task["expected"], task["files"],
+            check_argv=task["check"], check_pythonpath=task["check_pythonpath"],
+        )
+        problems += [f"{name}: {problem}" for problem in found]
+        # t1's fixtures are tracked files, so the manifest's seed commit pins them.
+        workloads[name] = task_identity(name) if name in V2_TASKS else {"version": "v1", "source": "tracked fixtures/"}
+    return workloads, problems
 
 
 def _log(msg: str) -> None:
@@ -559,21 +508,6 @@ def main() -> int:
             task_configs = TASKS[task_name]["configs"]
         jobs.extend((task_name, config, idx) for config in task_configs for idx in range(1, args.runs + 1))
 
-    # FAIL FAST on missing fixtures. t2-t5 read `fixtures_v2/`, which is GENERATED
-    # from the current tree by make_fixtures_v2.py and is deliberately not committed
-    # (it is the tree under measurement, not a pinned snapshot). Discovering that
-    # inside copytree() would happen AFTER the isolated server is up and the paid t1
-    # jobs have already run — pure argv/path arithmetic belongs before admission.
-    missing = sorted({
-        str(TASKS[t]["workspace"]) for t, _c, _i in jobs
-        if not pathlib.Path(TASKS[t]["workspace"]).is_dir()
-    })
-    if missing:
-        raise SystemExit(
-            "editbench: fixture tree(s) not found: " + ", ".join(missing) + "\n"
-            "Generate them first: python devtools/benchmarks/editbench/make_fixtures_v2.py"
-        )
-
     # DERIVE the run root, do not CREATE it: admission is the outer boundary, so a
     # seed-gate refusal must leave no filesystem footprint (DEVELOPMENT's
     # admission-as-outer-boundary rule). timestamp_run_id's pid+counter suffix is
@@ -610,6 +544,26 @@ def main() -> int:
     )
 
     with finalize_run_manifest(manifest_path, manifest) as final:
+        # Fixtures are world state, so they are judged after admission, where a refusal is
+        # recorded, and before anything that spends: no clone, server or model yet. A
+        # missing tree (t2-t5 need make_fixtures_v2.py) or a build that died half-way
+        # is refused here like stale content.
+        workloads, problems = _fixture_preflight(task_names)
+        if problems:
+            final.update({
+                "outcome": "refused",
+                "exit_code": 2,
+                "refusal": {"stage": "fixture_preflight", "reason": "invalid_fixture",
+                            "problems": problems[:40], "exit_code": 2},
+            })
+            for problem in problems:
+                _log(f"REFUSED fixture: {problem}")
+            _log("Rebuild the fixed v2 workload: python devtools/benchmarks/editbench/make_fixtures_v2.py")
+            return 2
+        # On disk before execution: a run killed mid-way still names the exact tasks
+        # its runs.json rows were measured on.
+        manifest["workloads"] = workloads
+        final.checkpoint("fixtures_validated")
         data_root.mkdir(parents=True)
         clone = _clone_working_tree(run_root)
         settings_path = _seed_settings(data_root, model=args.model)
@@ -643,7 +597,7 @@ def main() -> int:
                         rows.append(fut.result())
                         (out_dir / "runs.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
         finally:
-            server.stop()
+            teardown_unconfirmed = server.stop()
 
         rows.sort(key=lambda r: r["run"])
         summary = _summarize(rows)
@@ -661,7 +615,7 @@ def main() -> int:
         if not args.keep:
             _log("(pass --keep to retain workspaces/logs; keeping run root because results live there)"
                  if not args.out else "cleaning run root")
-            if args.out:
+            if args.out and not teardown_unconfirmed:  # an unconfirmed stop keeps its root for inspection
                 shutil.rmtree(run_root, ignore_errors=True)
     return 0
 

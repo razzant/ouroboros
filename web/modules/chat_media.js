@@ -3,7 +3,7 @@ import { tr, fmt } from './i18n.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 import { strokeIcon } from './page_icons.js';
 import { showToast } from './toast.js';
-import { downloadViaHostBridge, normalizeTone, openViaHostBridge } from './ui_helpers.js';
+import { copyTextToClipboard, downloadViaHostBridge, normalizeTone, openViaHostBridge } from './ui_helpers.js';
 import { MAX_LINK_ACTIONS } from './api_types.js';
 import { apiFetch, taskArtifactDownloadUrl } from './api_client.js';
 import { bindMenu } from './ui_interactions.js';
@@ -12,6 +12,7 @@ import { isFileDrag } from './chat_activity.js';
 import { buildAttachmentBlock } from './chat_attachments.js';
 import { createDocumentReader, documentReaderKind } from './document_reader.js';
 import { createChatCards } from './chat_cards.js';
+import { recordCardSource } from './message_actions.js';
 
 // Player controls draw the house stroke vectors; each button's aria-label names its
 // current action and is rewritten with the icon whenever the state flips.
@@ -145,7 +146,8 @@ export function decorateContactSource(bubble, contact) {
     const href = safeHttpUrl(contact.url);
     const source = document.createElement(href ? 'a' : 'span');
     source.dataset.contactSource = contact.task_id;
-    source.textContent = String(contact.label || tr('Connected place'));
+    // A label stored before its connector stopped doubling its word reads once ("Telegram · Telegram · …").
+    source.textContent = String(contact.label || tr('Connected place')).split(' · ').filter((part, i, all) => part !== all[i - 1]).join(' · ');
     source.title = fmt('Source work: {task_id}', { task_id: contact.task_id });
     if (href) {
         source.className = 'md-link';
@@ -217,7 +219,6 @@ export function bindComposerFileTargets({ page, inputArea, input, stagePendingFi
 }
 
 export function createChatMedia({
-    chatSessionId,
     durableChatMediaUrl,
     formatMsgTime,
     insertMessageNode,
@@ -239,10 +240,15 @@ export function createChatMedia({
     let fileDialog = null;
     let dialogFile = null;
     let dialogOwner = null;  // the card's item (buildGallery may move it to an earlier group): releasing it or its holder closes the dialog
+    // An overlay a row's action opened over the room (Share's sheet): it closes with the room's reader (closeTransient),
+    // with its row (release) and with the room (reset, destroy).
+    const transients = new Map();  // close -> its row
     let destroyed = false;
-    // Living cards are delivered rows too: Copy takes their fallback text, Reply their row address (chat_cards.js).
-    const cards = createChatCards({ frameNode: bubbleFrameNode, composer, onDomWrite, decorate(bubble, msg, text) {
+    // Living cards are delivered rows too: Copy takes their fallback text, Reply their row address, Share the card
+    // itself (chat_cards.js), with this room's hold on its sheet.
+    const cards = createChatCards({ frameNode: bubbleFrameNode, composer, onDomWrite, decorate(bubble, msg, text, describe) {
         attachCopyControl(bubble, () => bubble.dataset.rowWords ?? text);  // a replaced card's words are its new ones
+        if (describe) recordCardSource(bubble, describe, (close) => holdTransient(bubble, close));
         replies?.decorate(bubble, msg);
     } });
 
@@ -269,11 +275,7 @@ export function createChatMedia({
 
     function messageSender(msg, role) {
         return role === 'user'
-            ? senderLabel('user', false, '', {
-                source: msg.source || '',
-                senderLabel: msg.sender_label || '',
-                senderSessionId: msg.sender_session_id || '',
-            }, chatSessionId)
+            ? senderLabel('user', false, '', { source: msg.source || '', senderLabel: msg.sender_label || '' })
             : 'Ouroboros';
     }
 
@@ -923,31 +925,11 @@ export function createChatMedia({
         button.innerHTML = COPY_ICON_SVG;
         button.title = tr('code.copy', 'Copy');
         button.setAttribute('aria-label', tr('media.copy_message', 'Copy message'));
-        const writeFallback = () => {
-            // Selecting the hidden field takes focus; it goes back, so a keyboard owner stays on Copy.
-            const owner = document.activeElement;
-            const area = document.createElement('textarea');
-            area.className = 'chat-copy-fallback';
-            area.value = words();
-            area.setAttribute('readonly', '');
-            document.body.appendChild(area);
-            try {
-                area.select();
-                const copied = typeof document.execCommand === 'function'
-                    && document.execCommand('copy') === true;
-                if (!copied) throw new Error('Clipboard access is unavailable');
-            } finally {
-                area.remove();
-                if (owner && owner !== document.body && owner.isConnected !== false) owner.focus?.({ preventScroll: true });
-            }
-        };
         listen(button, 'click', async () => {
             let ok = true;
             try {
-                if (navigator.clipboard?.writeText) {
-                    try { await navigator.clipboard.writeText(words()); }
-                    catch { writeFallback(); }
-                } else writeFallback();
+                // The shared write keeps a keyboard owner on Copy and finds the open modal's selection field.
+                await copyTextToClipboard(words(), { anchor: button });
             } catch {
                 ok = false;
             }
@@ -1000,18 +982,36 @@ export function createChatMedia({
         }
     }
 
-    // The chat left the screen: the reader or file dialog a card opened closes, nothing else.
-    function closeTransient() {
+    // The chat left the screen: the reader or file dialog a card opened closes, nothing else; a room another place
+    // replaces (`pause`) also pauses what plays, each player keeping its place.
+    function closeTransient(pause = false) {
+        closeTransients();
         reader.close({ restoreFocus: false });
         closeFileDialog();
+        if (pause) for (const player of playerRegistry) { try { player.pause(); } catch {} }
     }
 
     // Release only the evicted page's subtree; other media and copy controls
     // keep their listeners, playback, focus and outstanding user actions.
+    /** Hold `close` for an overlay opened from `owner` (a row of this room); returns its release. */
+    function holdTransient(owner, close) {
+        transients.set(close, owner);
+        return () => transients.delete(close);
+    }
+
+    function closeTransients(owns = () => true) {
+        for (const [close, owner] of [...transients]) {
+            if (!owns(owner)) continue;
+            transients.delete(close);
+            try { close(); } catch {}
+        }
+    }
+
     function release(root) {
         reader.release(root);
         cards.release(root);
         const owns = (node) => node === root || root?.contains?.(node);
+        closeTransients(owns);
         if (dialogOwner && owns(dialogOwner)) closeFileDialog();  // no actions on a released message's file
         for (const [dispose, owner] of resourceOwners) if (owns(owner)) {
             try { dispose(); } catch {}
@@ -1173,6 +1173,7 @@ export function createChatMedia({
         reset,
         release,
         closeTransient,
+        holdTransient,
         destroy,
     };
 }

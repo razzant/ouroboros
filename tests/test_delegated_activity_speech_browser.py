@@ -50,7 +50,7 @@ from tests.test_subscription_setup_browser import subscription_ui as subscriptio
 from tests.test_task_file_serving import _client
 
 MEASURE = Path(__file__).resolve().parents[1] / "skills" / "ui_design" / "references" / "measure.js"
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 AGAIN = "Re-running the import tests."
 SOLE = "The feed validates: 0 errors and 1 warning (no ttl element), which readers ignore."
 K3, K4, K5 = "claude:ses-1:3:0", "claude:ses-1:3:2", "claude:ses-1:4:0"
@@ -215,6 +215,7 @@ def test_one_keyed_utterance_live_reconnect_reload_with_updated_abandoned_and_an
     reconnected = page.evaluate(SNAPSHOT, [ROOT])
     assert reconnected == live, "a reconnect adopts the live rows"
 
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first.wait_for()
     page.evaluate(EXPAND, ROOT)
@@ -226,7 +227,7 @@ def test_one_keyed_utterance_live_reconnect_reload_with_updated_abandoned_and_an
     _evidence("1698-frames.json", frames)
     _evidence("1698-history-pages.json", served)
     _evidence("1698-rows.json", {"draft": draft, "live": rows, "snapshot": live, "reconnected": reconnected})
-    assert not ui["errors"], ui["errors"]
+    assert not ui["errors"].unexpected(), ui["errors"].report()
 
 
 # What each executor row shows: its run, its readable words (a folded answer's are not read), each
@@ -339,6 +340,7 @@ def test_the_engines_four_journals_in_one_served_card_cut_into_polls(engine_ui, 
     page.wait_for_timeout(500)
     page.evaluate(EXPAND, ROOT)
     assert page.evaluate(SNAPSHOT, [ROOT]) == snapshot, "a reconnect adopts the live rows"
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first.wait_for()
     page.evaluate(EXPAND, ROOT)
@@ -349,7 +351,7 @@ def test_the_engines_four_journals_in_one_served_card_cut_into_polls(engine_ui, 
     _evidence("1698-fixtures-frames.json", frames)
     _evidence("1698-fixtures-history-pages.json", served)
     _evidence("1698-fixtures-rows.json", {"live": live, "snapshot": snapshot})
-    assert not ui["errors"], ui["errors"]
+    assert not ui["errors"].unexpected(), ui["errors"].report()
 
 
 def test_words_lost_between_one_keys_fragments_stay_apart_in_the_served_card(engine_ui, tmp_path, monkeypatch):
@@ -401,6 +403,7 @@ def test_words_lost_between_one_keys_fragments_stay_apart_in_the_served_card(eng
             (run, live, "the words around the lost seq stay apart, never 'the cat'")
         assert sum("Not read whole: seq 2–2" in row["text"] for row in rows if run in row["text"]) == 1, (run, rows)
     capture(page, "1698-lost-event-1110-light")
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first.wait_for()
     page.evaluate(EXPAND, ROOT)
@@ -408,7 +411,7 @@ def test_words_lost_between_one_keys_fragments_stay_apart_in_the_served_card(eng
     assert page.evaluate(SPEECH, ROOT) == live, "history replay keeps them apart too"
     _evidence("1698-lost-event-frames.json", frames)
     _evidence("1698-lost-event-rows.json", {"live": live, "rows": rows})
-    assert not ui["errors"], ui["errors"]
+    assert not ui["errors"].unexpected(), ui["errors"].report()
 
 
 def test_a_poll_holding_only_the_space_between_words_keeps_it_in_the_served_card(engine_ui, tmp_path, monkeypatch):
@@ -458,13 +461,14 @@ def test_a_poll_holding_only_the_space_between_words_keeps_it_in_the_served_card
     assert [message["text"] for row in live for message in row["messages"]] == ["the cat"], live
     assert page.evaluate(blank) == 0, "the space alone is no empty paragraph"
     capture(page, "1698-space-1110-light")
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first.wait_for()
     page.evaluate(EXPAND, ROOT)
     page.wait_for_function(landed)
     assert page.evaluate(SPEECH, ROOT) == live and page.evaluate(blank) == 0, "history replay reads the same"
     _evidence("1698-space-frames.json", frames)
-    assert not ui["errors"], ui["errors"]
+    assert not ui["errors"].unexpected(), ui["errors"].report()
 
 
 def test_a_keyed_piece_a_preview_left_out_is_never_joined_across_in_the_served_card(engine_ui, tmp_path, monkeypatch):
@@ -532,6 +536,7 @@ def test_a_keyed_piece_a_preview_left_out_is_never_joined_across_in_the_served_c
     apart = words()
     assert apart == {"run-left": ["the", "cat"], "run-shown": ["the big cat"]}, apart
     capture(page, "1698-preview-left-out-live")
+    ui["errors"].watch(page)  # the reloads may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.locator(f'#chat-messages .chat-live-card[data-task-id="{ROOT}"]').first.wait_for()
     page.evaluate(EXPAND, ROOT)
@@ -548,4 +553,4 @@ def test_a_keyed_piece_a_preview_left_out_is_never_joined_across_in_the_served_c
     page.wait_for_function(shown, arg=["the big cat"])
     assert words() == {"run-left": ["the big cat"], "run-shown": ["the big cat"]}
     _evidence("1698-preview-left-out-frames.json", frames)
-    assert not ui["errors"], ui["errors"]
+    assert not ui["errors"].unexpected(), ui["errors"].report()

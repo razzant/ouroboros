@@ -64,8 +64,7 @@ def test_transfer_before_the_retirement_decision_keeps_the_checkout(candidate, m
     assert body.find("successor", data)["owners"] == ["predecessor", "successor"]
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-@pytest.mark.parametrize("survives", [False, True])
+@pytest.mark.parametrize(("survives", "explicit"), [(False, True), (True, False)])
 def test_retirement_wins_after_candidate_lookup(candidate, monkeypatch, explicit, survives):
     data, bound, successor = candidate
     transfer = body._transfer

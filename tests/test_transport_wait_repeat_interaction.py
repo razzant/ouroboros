@@ -248,7 +248,8 @@ def test_fallback_chain_fence_holds_inside_a_wait_episode_too(monkeypatch):
     """`fallback_chain_allowed` on the combined tree: the configured-route walk runs
     before a wait episode opens and after paced redials (remote routes included); a round
     record — an unresolved paid repeat of this round — blocks it whatever the kind says;
-    an unknown outcome walks only when it is eligible for a new generation."""
+    an unknown outcome walks only when it is eligible for a new generation, and an acting
+    primary's first one (no episode open yet) leaves the walk to its own continuation."""
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
     routable = SimpleNamespace(exact_model_route=False, task_id="t")
     record = {"round_id": "r", "count": 1, "backoff_sec": 4.0}
@@ -256,13 +257,17 @@ def test_fallback_chain_fence_holds_inside_a_wait_episode_too(monkeypatch):
 
     assert loop_transport.fallback_chain_allowed(routable, "transport_unavailable", None, {}) is True
     assert loop_transport.fallback_chain_allowed(routable, "provider_outcome_unknown", None, {}) is True
+    assert loop_transport.fallback_chain_allowed(routable, "provider_outcome_unknown", None, {}, primary_acting=True) is False
     for kind in ("transport_unavailable", "provider_outcome_unknown", "bad_request"):
+        assert loop_transport.fallback_chain_allowed(routable, kind, episode, {}, primary_acting=True) is True
         assert loop_transport.fallback_chain_allowed(routable, kind, episode, {}) is True
         assert loop_transport.fallback_chain_allowed(routable, kind, None, {TRANSPORT_DEATHS_KEY: record}) is False
     rejoinable = {"_pending_transport_outcome": {"same_operation_recoverable": True}}
     assert loop_transport.fallback_chain_allowed(routable, "provider_outcome_unknown", None, rejoinable) is False
     presence = SimpleNamespace(exact_model_route=False, task_id="t", current_task_type="presence")
     assert loop_transport.fallback_chain_allowed(presence, "provider_outcome_unknown", None, {}) is True
+    assert not loop_transport.fallback_chain_allowed(presence, "provider_outcome_unknown", None, {}, primary_acting=True)
+    assert loop_transport.fallback_chain_allowed(presence, "transport_unavailable", None, {}, primary_acting=True) is True
     assert not loop_transport.fallback_chain_allowed(presence, "provider_outcome_unknown", None, rejoinable)
     assert loop_transport.fallback_chain_allowed(presence, "transport_unavailable", None, {}) is True
     assert not hasattr(episode, "local_pass_used")

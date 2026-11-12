@@ -1,75 +1,58 @@
-"""S26 — v7 follow-up Ф1 (sprint plan §5.1 Ф1-B, D-05): the owner stops an
-in-process DIRECT-CHAT turn.
+"""S26 — v7 follow-up Ф1 (sprint plan §5.1 Ф1-B, D-05): the owner stops a
+DIRECT-CHAT turn mid-round.
 
 THE CLASS (rc.7 QA regress, item 010). A message typed into the main chat runs as
-a DIRECT-CHAT TURN: minted by ``worker_chat_lane.py`` with an 8-hex id and executed
-on the long-lived chat agent INSIDE the supervisor — no queue row, no worker
-process. ``agent.py`` writes its ordinary durable ``running`` row, so
-``GET /api/tasks?status=running`` listed the turn while every queue-keyed owner
-control answered 404 "task not found or not active", and the spend kept growing
-until ``/restart``. Ф1-B made ``supervisor.workers.direct_chat_turn`` the ONE
-ownership reader every ingress resolves a live direct turn through; custody stops
-the turn COOPERATIVELY — the typed ``finalize_now`` control carrying
-``REASON_OWNER_STOPPED_DIRECT_TURN`` on the canonical owner mailbox, drained at the
-loop's next round boundary (``_handle_direct_turn_hard_stop``: ZERO further model
-calls, the post-task synthesis included — the hard stop records the existing
-``_skip_post_task_synthesis`` marker the pipeline honours, so no summary or
-reflection bills after the stop). ``tests/test_direct_chat_turn_owner_control.py`` pins the seams against a
-stubbed agent; THIS scenario pins the whole path on a real server, keyless, over
-the same WS chat and HTTP cancel surfaces the SPA drives.
+a DIRECT-CHAT TURN. It once ran on the chat agent INSIDE the supervisor with no
+queue row, so ``GET /api/tasks?status=running`` listed the turn while every
+queue-keyed owner control answered 404 "task not found or not active", and the
+spend kept growing until ``/restart``. Since #2654 the turn runs on the
+CONVERSATION LANE: routing publishes its RUNNING row first (never PENDING) and a
+custodied worker process carries it (``supervisor/conversation_lane.py``), so
+"a lane turn stops like any worker" (ARCHITECTURE §5 Cancellation): one durable
+intent, the one custody claim, the carrier's death confirmed, a typed
+``cancelled`` terminal and its owed receipt. The cooperative ``finalize_now``
+control (``REASON_OWNER_STOPPED_DIRECT_TURN``) remains only for the disclosed
+inline executors (``inline_carrier.stop_direct_chat_turn``), pinned by
+``tests/test_direct_chat_turn_owner_control.py``; THIS scenario pins the whole
+worker-carried path on a real server, keyless, over the same WS chat and HTTP
+cancel surfaces the SPA drives.
 
 DETERMINISM. "Mid-turn" is not a sleep. The loopback model HOLDS the turn's first
 tool-bearing round on a ``ModelGate`` (harness): the request thread blocks until the
 scenario releases it, so the owner's stop provably lands while the turn is inside
-a model round, the endpoint's typed 202 ``cancel_state: pending`` is the ONLY
-answer it can give (a turn cannot reach its round boundary while its round is
-held), and the armed
-control, the toast and the marker are all read back DURABLY before the release.
-Everything else is durable-event polling over ``ArtifactOracle`` readers.
+a model round. Everything else is durable-event polling over ``ArtifactOracle``
+readers.
 
 WHAT S26 ASSERTS, in order:
 1. IN FLIGHT and ADDRESSABLE — inside a model round (``gate.arrived``), the turn is
    in ``/api/state.active_chat_activities`` as kind ``direct_chat`` linked to the
    client_message_id, listed by ``GET /api/tasks?status=running`` (its durable
-   running row), absent from the queue snapshot (the class: no queue row), and
-   ``events.jsonl`` carries its durable ``task_received`` row with
-   ``_is_direct_chat=true`` and the client_message_id link (``task_started`` is a
-   session-only live log, never persisted);
+   running row), its published RUNNING row is the conversation lane's held by a
+   live carrier process (``conversation_turn_row``), and ``events.jsonl`` carries
+   its durable ``task_received`` row with ``_is_direct_chat=true`` and the
+   client_message_id link;
 2. STOP-NOW over the UI's ``POST /api/tasks/{id}/cancel`` (empty body = immediate)
-   mid-round is NOT 404: the intent is recorded first and the teardown is not yet
-   confirmed, so the answer is the typed 202 ``cancel_state: pending``
-   (``reason_code=teardown_unconfirmed``) naming the task and its durable
-   request; the cooperative control is ARMED — exactly one ``finalize_now`` row with the
-   direct-turn reason in the canonical mailbox; the durable intent is open with
-   the forensic trail requested(http_single, single) → claimed → claim_released
-   ("has not reached its next step"); the owner toast went out as a progress frame
-   carrying the host-attested ``cancelable`` marker (the direct-turn branch of the
-   delivery seam) — durable in progress.jsonl and live on /ws; the durable row is
-   still honestly ``running`` (no fabricated cancelled over a live turn);
-3. a SECOND stop-now while armed is typed and idempotent — 202 pending again on
-   the same request, still ONE control, still ONE toast, no model round in
-   between (stamp latch, no re-arm);
-4. RELEASE — the turn ends at its next step under the owner-stop reason with ZERO
-   further model rounds: the durable terminal carries
-   ``reason_code=owner_requested_finalization`` and the typed no-further-work
-   answer, ``task_done`` names the same status, the gate matched exactly ONE round
-   and the keepalive script was never run down; the DURABLE artifacts show no
-   post-stop paid work either — the tool-bearing gate cannot see a tool-less
-   summary/reflection call, so the pin reads the task result (no open
-   ``root_phase_checkpoint``), chat.jsonl (no paid ``authored_root_summary`` row;
-   the free host facts row is not paid work) and ``task_reflections.jsonl`` (no row);
-5. the chat CONCLUDED (no "Working…" forever) — over the SAME /ws the SPA opens
+   mid-round is NOT 404: custody tore the carrier down before answering, so the
+   answer is the typed ``200 {"ok": true, "task_id": ...}``; ONE durable request
+   with the forensic trail requested(http_single, single) → claimed →
+   settled(cancelled); no ``finalize_now`` control (that is the inline
+   executors' stop); the carrier process is gone and the projection drained;
+3. the turn ENDED with ZERO further model rounds — the durable terminal is
+   ``cancelled`` with its ``http_single`` cancel origin, ``task_done`` names the
+   same status, the held round never completed (the gate matched exactly ONE
+   round, the keepalive script was never run down, no other call reached the
+   model even after the release) and no paid post-task work exists (no open
+   ``root_phase_checkpoint``, no paid ``authored_root_summary`` row, no
+   reflection);
+4. the chat CONCLUDED (no "Working…" forever) — over the SAME /ws the SPA opens
    the turn announced itself (typing frame: activity_id = task id, kind
-   ``direct_chat``, the client_message_id link), the toast frame carried
-   ``cancelable``, the keyed FINAL system frame (the host-authored stop notice;
-   task_id = the turn, not
-   progress) arrived, the activity left ``/api/state``, the running list no
-   longer names the turn, and the final landed in chat.jsonl under the task id;
-6. custody SETTLED the intent against the turn's OWN terminal (the sweep's
-   ``settled`` row: outcome ``already_settled``, detail = the stored status) and
-   the projection drained;
-7. a LATER stop is the typed 404 with nothing re-armed: no new intent, no new
-   control, no new forensic request, the terminal fields unchanged.
+   ``direct_chat``, the client_message_id link) and the keyed system
+   ``cancel_receipt`` frame for this request arrived; the activity left
+   ``/api/state``, the running list no longer names the turn, the receipt
+   landed in chat.jsonl under the task id, and the root's terminal projection
+   row is final with the same status;
+5. a LATER stop is the typed 404 with nothing re-armed: no new intent, no new
+   forensic request, the terminal fields unchanged.
 
 The default-lane test pins the ``ModelGate`` contract itself, through the stub's
 real HTTP surface: match-only, once-only, held OUTSIDE the call lock (unrelated
@@ -91,6 +74,7 @@ from tests.system_e2e.harness import (
     ModelGate,
     ScriptedStubModel,
     body_text,
+    conversation_turn_row,
     keyless_settings,
     require_lane,
     start_server,
@@ -126,7 +110,6 @@ def _tool_body(text: str) -> dict:
             "tools": [{"type": "function", "function": {"name": "list_files"}}]}
 
 
-@pytest.mark.serial  # a real loopback port (ScriptedStubModel) — the serial pass
 def test_model_gate_holds_once_outside_the_call_lock_and_releases():
     gate = ModelGate(lambda body: bool(body.get("tools")) and "HOLD-ME" in body_text(body),
                      timeout=30)
@@ -182,10 +165,7 @@ S26_CHAT_ID = 1  # WEB_UI_CHAT_ID: the ordinary owner chat thread
 S26_MARKER = "S26_DIRECT_TURN_e2e_w6"
 S26_PROBE = (f"[{S26_MARKER}] List the repository root and keep listing it "
              "until the owner stops you.")
-# Literals of the tree under test (worker_chat_lane.stop_direct_chat_turn's toast,
-# loop_round_limits._handle_direct_turn_hard_stop's typed no-candidate answer).
-S26_TOAST_TEXT = "The owner stopped chat turn"
-S26_STOP_TEXT = "The owner stopped this chat turn"
+# Literal of the tree under test (the cancel endpoint's answer for a settled task).
 S26_NOT_ACTIVE = "task not found or not active"
 
 
@@ -268,13 +248,6 @@ def _mailbox_controls(data_root, task_id: str) -> list:
     return [row for row in rows if isinstance(row, dict) and row.get("kind") == KIND_FINALIZE_NOW]
 
 
-def _toast_rows(oracle: ArtifactOracle, task_id: str) -> list:
-    """The owner-stop toast as persisted (progress frames land in progress.jsonl)."""
-    return [row for row in oracle._jsonl("logs/progress.jsonl")
-            if str(row.get("task_id") or "") == task_id
-            and S26_TOAST_TEXT in str(row.get("text") or "")]
-
-
 def _post_task_synthesis_is_open(stored: dict) -> bool:
     """The durable checkpoint the boot reconciler re-dispatches (and re-pays) from."""
     from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
@@ -302,19 +275,16 @@ def _terminal_fields(oracle: ArtifactOracle, task_id: str) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s26_direct_chat_turn_owner_stop_mid_round_is_typed_and_ends_the_turn(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
-    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
-    from ouroboros.cancel_intents import INTENT_REQUESTED, STOP_POLICY_IMMEDIATE, stop_policy
-    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+    from ouroboros.platform_layer import pid_is_alive
 
     root = tmp_path_factory.mktemp("s26")
     gate = ModelGate(_is_turn_round, timeout=240)
-    # A SHORT keepalive script on purpose: were the stop control ever not drained,
-    # the turn would run these rounds and end on the stub's final answer — the
-    # round-count pin below then names that failure instead of a long burn.
+    # A SHORT keepalive script on purpose: were the stop ever not honoured, the turn
+    # would run these rounds and end on the stub's final answer — the round-count pin
+    # below then names that failure instead of a long burn.
     with ScriptedStubModel([dict(KEEPALIVE_STEP) for _ in range(6)], gate=gate) as stub:
         server = start_server(e2e_clone, root, keyless_settings(stub))
         try:
@@ -346,7 +316,8 @@ def test_s26_direct_chat_turn_owner_stop_mid_round_is_typed_and_ends_the_turn(
                 assert task_id and activity.get("phase") == "working", activity
                 assert wait_until(lambda: task_id in _running_task_ids(server), 30), (
                     "the live direct turn is not listed by GET /api/tasks?status=running")
-                assert task_id not in oracle.running_ids(), "a direct turn must have no queue row"
+                # #2654: the conversation lane's RUNNING row, held by a live carrier process.
+                carrier = conversation_turn_row(oracle, task_id)["carrier_pid"]
                 # The durable running row agent.py writes for the turn (the row the
                 # public running list projects) — bound to the owner's chat thread.
                 running_row = oracle.task_result(task_id)
@@ -361,96 +332,61 @@ def test_s26_direct_chat_turn_owner_stop_mid_round_is_typed_and_ends_the_turn(
                 assert ((received_task.get("metadata") or {}).get("origin_message_ref") or {}).get(
                     "client_message_id") == client_message_id, received_task
 
-                # 2. STOP-NOW over the UI's endpoint, mid-round: typed, never 404,
-                #    the cooperative control ARMED. The intent is recorded first and
-                #    the teardown is not yet confirmed: 202 ``cancel_state: pending``
-                #    (``teardown_unconfirmed``), never a fabricated 200.
+                # 2. STOP-NOW over the UI's endpoint, mid-round: typed, never 404. Custody
+                #    confirmed the carrier's death before answering, as for any worker.
                 first = server.cancel_task(task_id)
-                assert first.get("status") == 202, first
-                first_body = first.get("body") or {}
-                assert first_body.get("cancel_state") == "pending", first
-                assert first_body.get("reason_code") == "teardown_unconfirmed", first
-                assert first_body.get("task_id") == task_id, first
-                controls = _mailbox_controls(server.data_root, task_id)
-                assert len(controls) == 1, controls
-                control_reason = str(controls[0].get("text") or "").splitlines()[0].strip()
-                assert control_reason == REASON_OWNER_STOPPED_DIRECT_TURN, controls
-                # The durable intent: minted by the legacy immediate shape (the
-                # tree's own reader says IMMEDIATE), claim released back to
-                # ``requested`` for the sweep with the typed 202 pending answer.
-                intent = oracle.cancel_intents().get(task_id) or {}
-                assert intent, oracle.cancel_intents()
-                assert first_body.get("request_id") == intent.get("request_id"), (first_body, intent)
-                assert stop_policy(intent) == STOP_POLICY_IMMEDIATE, intent
-                assert intent.get("state") == INTENT_REQUESTED, intent
-                assert "not reached its next step" in str(intent.get("last_error") or ""), intent
+                assert first.get("status") == 200, first
+                assert first.get("body") == {"ok": True, "task_id": task_id}, first
                 rows = _cancel_forensics(oracle, task_id)
-                events = _forensic_events(rows)
-                assert events[:3] == ["requested", "claimed", "claim_released"], events
+                assert _forensic_events(rows)[:3] == ["requested", "claimed", "settled"], rows
                 requested = next(r for r in rows if r.get("event") == "requested")
-                assert requested.get("source") == "http_single", requested
-                assert requested.get("scope") == "single", requested
-                released = next(r for r in rows if r.get("event") == "claim_released")
-                assert "not reached its next step" in str(released.get("error") or ""), released
-                # The owner toast: a progress frame addressed to the turn's card
-                # that the delivery seam stamps with the host-attested marker —
-                # durable, then over the wire.
-                toasts = wait_until(lambda: _toast_rows(oracle, task_id) or None, 30)
-                assert toasts and len(toasts) == 1, toasts
-                assert toasts[0].get("cancelable") is True, toasts[0]
-                # The typed incident vocabulary rides the toast.
-                assert toasts[0].get("task_incident") == REASON_OWNER_STOPPED_DIRECT_TURN, toasts[0]
-                toast_frames = wait_until(
-                    lambda: [f for f in frames.find(type="chat", task_id=task_id, is_progress=True)
-                             if S26_TOAST_TEXT in str(f.get("content") or "")] or None, 30)
-                assert toast_frames and toast_frames[0].get("cancelable") is True, toast_frames
-                # No fabricated terminal over a live turn.
-                assert oracle.task_result(task_id).get("status") == "running", oracle.task_result(task_id)
+                assert (requested.get("source"), requested.get("scope")) == ("http_single", "single"), requested
+                settled = [r for r in rows if r.get("event") == "settled"]
+                assert len(settled) == 1 and settled[0].get("outcome") == "cancelled", settled
+                assert settled[0].get("request_id") == requested.get("request_id"), (requested, settled)
+                assert _mailbox_controls(server.data_root, task_id) == [], "a worker carrier is stopped, not asked"
+                assert wait_until(lambda: not pid_is_alive(carrier), 30), f"the carrier {carrier} outlived the stop"
+                assert wait_until(lambda: task_id not in oracle.cancel_intents(), 60), oracle.cancel_intents()
 
-                # 3. A SECOND stop while armed: typed and idempotent — the same
-                #    pending envelope on the same durable request.
-                second = server.cancel_task(task_id)
-                assert second.get("status") == 202, second
-                second_body = second.get("body") or {}
-                assert second_body.get("cancel_state") == "pending", second
-                assert second_body.get("request_id") == intent.get("request_id"), (second_body, intent)
-                assert len(_mailbox_controls(server.data_root, task_id)) == 1, "the stop was re-armed"
-                assert len(_toast_rows(oracle, task_id)) == 1, "the owner was toasted twice"
-                assert gate.matched == 1 and gate.held == 1, (gate.matched, gate.held)
-
-                # 4. RELEASE: the turn ends at its next step, ZERO further rounds.
-                gate.release.set()
+                # 3. ENDED with ZERO further model rounds: the held round never completes.
                 stored = wait_durable_result(oracle, task_id, timeout=180)
-                assert stored.get("reason_code") == REASON_OWNER_REQUESTED_FINALIZATION, stored
-                assert stored.get("status") == "failed", stored
-                assert S26_STOP_TEXT in str(stored.get("result") or ""), stored
+                assert stored.get("status") == "cancelled", stored
+                origin = stored.get("cancel_origin") or {}
+                assert (origin.get("source"), origin.get("request_id")) == (
+                    "http_single", requested.get("request_id")), origin
                 done = wait_until(
                     lambda: [r for r in oracle.events("task_done")
                              if str(r.get("task_id") or "") == task_id] or None, 60)
                 assert done and done[-1].get("status") == stored.get("status"), done
+                gate.release.set()  # the killed carrier's held request has nowhere to answer
 
-                # 5. The chat CONCLUDED on the same surfaces the SPA reads.
+                # 4. The chat CONCLUDED on the same surfaces the SPA reads.
                 typing = wait_until(lambda: frames.find(type="typing", activity_id=task_id) or None, 30)
                 assert typing, [f.get("type") for f in frames.frames]
                 assert typing[0].get("kind") == "direct_chat", typing[0]
                 assert typing[0].get("client_message_id") == client_message_id, typing[0]
-                # The keyed FINAL frame: a HOST-authored terminal (terminal_origin
-                # host_notice) is published as a typed SYSTEM row — the owner's
-                # stop notice, never Ouroboros's own speech — keyed by the turn id
-                # so the client concludes exactly this activity.
+                # The keyed FINAL frame: the host-authored stop receipt of THIS request, a typed
+                # SYSTEM row keyed by the turn id so the client concludes exactly this activity.
+                delivery_id = f"cancel:{task_id}:{requested.get('request_id')}"
                 final = wait_until(
                     lambda: [f for f in frames.find(type="chat", task_id=task_id)
-                             if not f.get("is_progress")
-                             and S26_STOP_TEXT in str(f.get("content") or "")] or None, 60)
-                assert final, "no keyed final frame for the turn arrived over /ws"
-                assert final[-1].get("role") == "system", final[-1]
+                             if not f.get("is_progress") and f.get("delivery_id") == delivery_id] or None, 60)
+                assert final, "no keyed stop receipt for the turn arrived over /ws"
+                assert final[-1].get("role") == "system" and final[-1].get("system_type") == "cancel_receipt", final[-1]
                 assert wait_until(lambda: not _direct_activities(server, client_message_id), 60), (
                     "the direct turn is still an active chat activity after it ended")
                 assert wait_until(lambda: task_id not in _running_task_ids(server), 60)
+                # The published queue drops the row on the supervisor's NEXT tick: custody's removal is
+                # a mark (supervisor/queue_publication.py, `persist_queue_snapshot`), the tick writes the
+                # document at the end of its iteration and drains `task_done` at the start of the next,
+                # so a Stop settled right after one publication shows `task_done` and every drain above
+                # about a second before the document follows. Waited like S21's read of the same document.
+                assert wait_until(lambda: task_id not in oracle.running_ids(), 60), (
+                    oracle.queue_snapshot().get("running"))
                 chat_rows = wait_until(
                     lambda: [r for r in oracle._jsonl("logs/chat.jsonl")
                              if str(r.get("task_id") or "") == task_id
-                             and S26_STOP_TEXT in str(r.get("text") or "")] or None, 60)
+                             and r.get("delivery_id") == delivery_id] or None, 60)
                 assert chat_rows and chat_rows[-1].get("direction") == "system", chat_rows
                 # ...and the durable terminal projection the chat renders for the
                 # card: the root's terminal summary row, final, with the same status.
@@ -462,30 +398,26 @@ def test_s26_direct_chat_turn_owner_stop_mid_round_is_typed_and_ends_the_turn(
                 assert terminal_rows[-1].get("outcome_final") is True, terminal_rows[-1]
                 assert terminal_rows[-1].get("status") == stored.get("status"), terminal_rows[-1]
 
-            # 6. Custody settles against the turn's OWN terminal; the projection drains.
-            assert wait_until(lambda: task_id not in oracle.cancel_intents(), 120), (
-                oracle.cancel_intents())
-            settled = [r for r in _cancel_forensics(oracle, task_id) if r.get("event") == "settled"]
-            assert len(settled) == 1, settled
-            assert settled[0].get("outcome") == "already_settled", settled[0]
-            assert settled[0].get("detail") == stored.get("status"), settled[0]
-
-            # 7. A LATER stop is the typed 404 with nothing re-armed.
+            # 5. A LATER stop is the typed 404 with nothing re-armed.
             before = _terminal_fields(oracle, task_id)
-            third = server.cancel_task(task_id)
-            assert third.get("status") == 404, third
-            assert (third.get("body") or {}).get("error") == S26_NOT_ACTIVE, third
-            assert (third.get("body") or {}).get("task_id") == task_id, third
+            again = server.cancel_task(task_id)
+            assert again.get("status") == 404, again
+            assert (again.get("body") or {}).get("error") == S26_NOT_ACTIVE, again
+            assert (again.get("body") or {}).get("task_id") == task_id, again
             assert task_id not in oracle.cancel_intents()
-            assert len(_mailbox_controls(server.data_root, task_id)) <= 1
+            assert _mailbox_controls(server.data_root, task_id) == []
             requested_rows = [r for r in _cancel_forensics(oracle, task_id)
                               if r.get("event") == "requested"]
             assert len(requested_rows) == 1, requested_rows
             assert _terminal_fields(oracle, task_id) == before
 
-            # ZERO further model rounds, end to end: one held round, nothing after it.
+            # ZERO further model rounds, end to end: one held round, nothing after it,
+            # even once the gate let the held request go.
             assert gate.matched == 1 and gate.held == 1, (gate.matched, gate.held)
             assert gate.timed_out is False, "the gate expired: the scenario lost its mid-round premise"
+            # The released request of the killed carrier may still be recorded as its one round;
+            # nothing else (no further round, no finalization, no summary) ever reached the model.
+            assert set(stub.kinds()) <= {"agent"} and stub.kinds().count("agent") <= 1, stub.kinds()
             assert not stub.script_consumed(), "the keepalive script was run down: the stop was not honored"
             # ...and ZERO paid POST-TASK work: the matcher above counts tool-bearing
             # rounds only, so a tool-less summary/reflection call after the stop is

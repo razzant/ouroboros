@@ -14,6 +14,7 @@ import subprocess
 import uuid
 from typing import Any, Dict
 from ouroboros.config import MAX_ACTIVE_SUBAGENTS_HARD_CAP
+from ouroboros.delegate_readonly_inputs import native_selection_block
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
 from supervisor.events_chat_delivery import _bound_project_chat_id
@@ -90,11 +91,14 @@ def _depth_reservation_admits(
 
 
 def _subagent_cap_blocks(root_task_id: str, parent_id: Any, pending: list, running: dict, max_active: int) -> bool:
-    """A subagent schedule is rejected when the tree is at the per-root active cap AND
-    the FR2 depth-aware reservation does not admit it."""
+    """Queue behind awake pending + acting children unless depth reserves a place; the hard bound counts every child."""
+    from supervisor.pool_admission import acting_children, cold_sleeping
+
+    awake = [task for task in pending if not cold_sleeping(task)]
     return (
-        _active_subagent_count(root_task_id, pending, running) >= max_active
-        and not _depth_reservation_admits(root_task_id, parent_id, pending, running, max_active)
+        _active_subagent_count(root_task_id, pending, running) >= MAX_ACTIVE_SUBAGENTS_HARD_CAP
+        or (_active_subagent_count(root_task_id, awake, {}) + acting_children(root_task_id, running.values()) >= max_active
+            and not _depth_reservation_admits(root_task_id, parent_id, pending, running, max_active))
     )
 
 
@@ -236,6 +240,7 @@ def _compose_subagent_text(
     context: str,
     task_constraint=None,
     delegation_budget=None,
+    selected_inputs=None,
 ) -> str:
     role = str(role or "").strip()
     parts = ["[SUBAGENT ROLE]", role, ""] if role else []
@@ -255,10 +260,12 @@ def _compose_subagent_text(
             context,
             "[END_PARENT_CONTEXT]",
         ])
+    if block := native_selection_block(selected_inputs):  # host-retained copies, outside the parent's reference text
+        parts.extend(["", block])
     parts.extend([
         "",
         "[HANDOFF CONTRACT]",
-        "Return a concise final answer with sections: summary, findings, evidence, blockers, recommended_parent_action.",
+        "Your final answer goes to your parent as the handoff [EXPECTED_OUTPUT] asks for, in its form.",
     ])
     # The `[CAPABILITY DELTA]` block used to be composed HERE, from a delta the
     # scheduling tool call had already resolved. It moved to dispatch in v6.87.28
@@ -279,17 +286,17 @@ def _compose_subagent_text(
             # schedule time, when the executor is unknown — it states WHERE
             # changes land, never that the child executes them natively itself
             # (the dispatch-time executor note owns execution framing).
-            "All changes land inside the write root only. Do NOT commit, run review gates / "
-            "runtime / skills lifecycle, grant yourself tools, or write identity or scratchpad. "
-            "You may optionally ask independent reviewers about work in your write root with "
-            "review_change; it never approves, commits or integrates that work. "
-            + _CHILD_MEMORY_SENTENCE + " Your "
-            "Git changes are recorded as a workspace.patch; ordinary-folder outputs use their "
-            "registered file artifacts. Isolated self_worktree changes are applied; shared "
-            "external_workspace files are verified without reapplying. "
-            "The parent is the sole committer of the live body. Nested delegation is "
-            "allowed within configured depth/cap limits; depth bounds how DEEP delegation "
-            "nests and never how strong a descendant is — ask for the lane you need.",
+            "Your changes to the project are captured from the write root: that is where this work's result "
+            "lives. Scratch, logs, caches and test evidence are not part of the result; keep them out of it, "
+            "wherever your tools let you write. Committing, review gates, runtime and skills lifecycle, "
+            "granting yourself tools and writing identity or scratchpad are the parent's steps, not yours. You "
+            "may optionally ask independent reviewers about work in your write root with review_change; it "
+            "never approves, commits or integrates that work. "
+            + _CHILD_MEMORY_SENTENCE + " Your Git changes are recorded as a workspace.patch; ordinary-folder "
+            "outputs use their registered file artifacts. Isolated self_worktree changes are applied; shared "
+            "external_workspace files are verified without reapplying. The parent is the sole committer of the "
+            "live body. Nested delegation is allowed within configured depth/cap limits; depth bounds how DEEP "
+            "delegation nests and never how strong a descendant is — ask for the lane you need.",
         ])
         if surface == "genesis":
             parts.append(
@@ -492,9 +499,9 @@ def _resolve_subagent_constraint(
             )
     if surface == "genesis":
         try:
-            from ouroboros import subagent_worktrees
+            from ouroboros import genesis_project
 
-            handle = subagent_worktrees.provision_genesis_project(
+            handle = genesis_project.provision_genesis_project(
                 repo_dir=ctx.REPO_DIR,
                 task_id=tid,
                 parent_task_id=parent_task_id,
@@ -511,7 +518,7 @@ def _resolve_subagent_constraint(
             except Exception:
                 stray = []
             if stray:
-                subagent_worktrees.remove_genesis_project(handle.path)
+                genesis_project.remove_genesis_project(handle.path, task_id=str(tid))
                 return readonly, workspace_root, workspace_mode, (
                     f"Subagent rejected: freshly provisioned genesis root is not empty "
                     f"({len(stray)} stray entries) — possible provisioning collision."

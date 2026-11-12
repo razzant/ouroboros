@@ -88,7 +88,7 @@ def _causal_path(actors, edges, complete):
             "coverage": "complete" if known else "missing_intervals_or_edges", "rejected_edges": gaps}
 
 
-def fold_tree(root_task_id, actors, *, edges=(), waits=(), usage=(), coverage=None, mind_comparison=None):
+def fold_tree(root_task_id, actors, *, edges=(), waits=(), usage=(), coverage=None, mind_comparison=None, refused_starts=None):
     """Fold immutable actor/attempt identities; ancestry alone supplies no causal edge."""
     actors = list({row["id"]: copy.deepcopy(row) for row in actors}.values())
     intervals = [value for row in actors if (value := _interval(row)) is not None]
@@ -118,6 +118,9 @@ def fold_tree(root_task_id, actors, *, edges=(), waits=(), usage=(), coverage=No
     unknown_costs = sum(not row["cost_final"] for row in costs)
     return {"schema_version": 1, "root_task_id": root_task_id, "state": "closed" if closed else "provisional",
         "coverage": {**coverage, "intervals_observed": len(intervals), "actors_observed": len(actors)},
+        # A refused helper start leaves custody with no actor. A list, empty too, says its producer read the refusals;
+        # no list says nothing about them (an older receipt, or a fold given no custody facts).
+        **({"refused_starts": copy.deepcopy(list(refused_starts))} if refused_starts is not None else {}),
         "actor_intervals": actors, "selected_waits": list(waits), "causal_edges": list(edges),
         "parallelism": _overlap(intervals),
         "longest_causal_path": _causal_path(actors, edges, coverage.get("causal_edges") == "complete"),

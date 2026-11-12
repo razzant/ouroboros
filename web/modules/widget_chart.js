@@ -6,6 +6,7 @@
    widgets.js shares with them. Moved out of widgets.js unchanged (widgets
    lifecycle phase 3; the table cell helpers in the cycle-A fix round). */
 
+import { THEME_TRANSITION, seriesColours } from './theme_palette.js';
 import { normalizeTone } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
@@ -18,13 +19,6 @@ export function getPath(root, path, fallback = '') {
     }
     return current ?? fallback;
 }
-
-const CHART_PALETTE = [
-    ['#e85d6f', 'rgba(232, 93, 111, 0.22)'],
-    ['#60a5fa', 'rgba(96, 165, 250, 0.22)'],
-    ['#34d399', 'rgba(52, 211, 153, 0.22)'],
-    ['#fbbf24', 'rgba(251, 191, 36, 0.22)'],
-];
 
 export function finiteChartValue(value) {
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -42,21 +36,23 @@ export function chartConfig(component, data) {
         type,
         data: {
             labels: Array.isArray(labels) ? labels.map((item) => String(item ?? '')) : [],
-            datasets: Array.isArray(datasets) ? datasets.map((dataset, idx) => {
-                const [borderColor, backgroundColor] = CHART_PALETTE[idx % CHART_PALETTE.length];
-                return {
-                    label: String(dataset?.label ?? 'Series'),
-                    data: Array.isArray(dataset?.data) ? dataset.data.map(finiteChartValue) : [],
-                    borderColor,
-                    backgroundColor,
-                    spanGaps: false,
-                };
-            }) : [],
+            // The host's default series in their dark values; `ouroSeries` lets theme_palette.js
+            // repaint each in the mounted chart's theme. A bar carries its colour's edge.
+            datasets: Array.isArray(datasets) ? datasets.map((dataset, idx) => ({
+                label: String(dataset?.label ?? 'Series'),
+                data: Array.isArray(dataset?.data) ? dataset.data.map(finiteChartValue) : [],
+                ...seriesColours(idx),
+                ...(type === 'bar' ? { borderWidth: 2 } : {}),
+                ouroSeries: idx,
+                spanGaps: false,
+            })) : [],
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             spanGaps: false,
+            // A theme switch repaints the series at once, as the rest of the page does.
+            transitions: { [THEME_TRANSITION]: { animation: { duration: 0 } } },
             plugins: { legend: { display: true } },
             scales: {
                 x: { grid: { color: 'rgba(255, 255, 255, 0.06)' } },
@@ -69,11 +65,36 @@ export function chartConfig(component, data) {
     };
 }
 
+// A value a chart carries: a number at its label, a point (`{x, y}`, a bubble's `r`), or a tuple: `[x, y]` or a
+// bubble's `[x, y, r]` where the chart plots points, a floating bar's `[from, to]` at its label.
+const isChartPoint = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const chartRange = (value) => (Array.isArray(value) ? value.map((part) => part ?? '—').join(' – ') : value);
+
+/** The accessible table of a chart's data, every value kept: one row per label, or, for a chart of points (a scatter
+ *  or bubble chart, a point value, values without labels), one row per point: its series, its label where the chart
+ *  has labels, x, y and radius. */
 export function renderChartDataTable(config, label, expanded) {
     const labels = config.data.labels || [];
     const datasets = config.data.datasets || [];
-    const rows = labels.map((item, idx) => `<tr><th scope="row">${escapeHtml(item)}</th>${datasets.map((dataset) => `<td data-label="${escapeHtml(dataset.label)}">${escapeHtml(dataset.data[idx] ?? '—')}</td>`).join('')}</tr>`).join('');
-    return `<details class="widget-chart-data"${expanded ? ' open' : ''}><summary>View ${escapeHtml(label)} data</summary><div class="widget-table-wrap"><table class="widget-table"><thead><tr><th>Label</th>${datasets.map((dataset) => `<th>${escapeHtml(dataset.label)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
+    const values = (dataset) => (Array.isArray(dataset?.data) ? dataset.data : []);
+    const cell = (name, value) => `<td data-label="${escapeHtml(name)}">${escapeHtml(value ?? '—')}</td>`;
+    let head;
+    let rows;
+    if (['scatter', 'bubble'].includes(config.type) || datasets.some((dataset) => values(dataset).some(isChartPoint))
+        || (!labels.length && datasets.some((dataset) => values(dataset).length))) {
+        const points = datasets.flatMap((dataset) => values(dataset).map((value, idx) => {
+            const point = isChartPoint(value) ? value : Array.isArray(value) ? { x: value[0], y: value[1], r: value[2] } : { y: value };
+            return { series: dataset.label, label: labels[idx], x: point.x, y: point.y, r: point.r };
+        }));
+        const labelled = labels.length > 0;
+        const radius = points.some((point) => point.r !== undefined);
+        head = `<th>Series</th>${labelled ? '<th>Label</th>' : ''}<th>x</th><th>y</th>${radius ? '<th>r</th>' : ''}`;
+        rows = points.map((point) => `<tr><th scope="row">${escapeHtml(point.series ?? '—')}</th>${labelled ? cell('Label', point.label) : ''}${cell('x', point.x)}${cell('y', point.y)}${radius ? cell('r', point.r) : ''}</tr>`).join('');
+    } else {
+        head = `<th>Label</th>${datasets.map((dataset) => `<th>${escapeHtml(dataset.label)}</th>`).join('')}`;
+        rows = labels.map((item, idx) => `<tr><th scope="row">${escapeHtml(item)}</th>${datasets.map((dataset) => cell(dataset.label, chartRange(values(dataset)[idx]))).join('')}</tr>`).join('');
+    }
+    return `<details class="widget-chart-data"${expanded ? ' open' : ''}><summary>View ${escapeHtml(label)} data</summary><div class="widget-table-wrap"><table class="widget-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 
 function safeTableHref(value) {

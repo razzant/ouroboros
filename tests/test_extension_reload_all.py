@@ -328,7 +328,7 @@ def test_reload_all_sweeps_stale_extension_imports(tmp_path, monkeypatch):
     assert not stale_root.exists()  # dead-owner + past-grace orphan reaped
     live_roots = list(imports_dir.iterdir())
     assert len(live_roots) == 1
-    assert live_roots[0].name.startswith(f"sha256-{loaded.content_hash}-")
+    assert live_roots[0].name == extension_loader.extension_import_identity(loaded)
     assert (live_roots[0] / "owners" / str(_os.getpid())).exists()
     assert (live_roots[0] / "skill").exists()
 

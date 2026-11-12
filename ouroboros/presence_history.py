@@ -74,7 +74,7 @@ class HistoryRequest:
     records: tuple[HistoryRecord, ...]
 
 
-def _instant(value: Any) -> datetime | None:
+def instant(value: Any) -> datetime | None:
     """A timezone-qualified ISO time as UTC; None when absent or unreadable (unknown, never invented),
     also when moving it to UTC leaves the calendar (year 1 east of UTC, year 9999 west of it)."""
     if not isinstance(value, str) or not value or len(value) > 64:
@@ -103,7 +103,7 @@ def source_order_block(message: Any, *, received: str, sent: str = "") -> dict |
     and the provider's order. None when neither is known: the row then reads at its ``ts`` with no order
     (``place_arrivals.READING_TIME``)."""
     if not sent:
-        at, receipt = _instant(message.get("sent_at") if isinstance(message, Mapping) else None), _instant(received)
+        at, receipt = instant(message.get("sent_at") if isinstance(message, Mapping) else None), instant(received)
         sent = at.isoformat() if at is not None and (receipt is None or at <= receipt) else ""
     try:
         order = source_order(message)
@@ -121,12 +121,12 @@ def _unicode(value: Any, field: str) -> None:
 
 
 def _source_time(value: Any, field: str, received: datetime, message: Mapping[str, Any]) -> str:
-    parsed = _instant(value)
+    parsed = instant(value)
     if parsed is None:
         raise PresenceHistoryInvalid(field, f"{field} must be an ISO 8601 time with a time zone")
     if parsed > received:  # a time ahead of the Host's clock would sort above live rows
         raise PresenceHistoryInvalid(field, f"{field} is later than the Host's receipt time")
-    if "sent_at" in message and message["sent_at"] is not None and _instant(message["sent_at"]) != parsed:
+    if "sent_at" in message and message["sent_at"] is not None and instant(message["sent_at"]) != parsed:
         raise PresenceHistoryInvalid(field, f"{field} and event.message.sent_at name different times")
     return parsed.isoformat()
 
@@ -151,6 +151,9 @@ def _event(value: Any, field: str) -> Any:
         raise PresenceHistoryInvalid(f"{field}.actor.authenticated", "actor.authenticated must be a boolean, as live")
     if "transport_queue" in value["conversation"]:
         raise PresenceHistoryInvalid(f"{field}.conversation.transport_queue", "history carries no inbox observation")
+    from ouroboros.dialogue_provenance import reaction_fact
+    if reaction_fact(value["message"]):  # a reaction withheld from an older core is never relabelled an earlier message
+        raise PresenceHistoryInvalid(f"{field}.message.reaction", "a reaction is not an earlier message")
     provider, account, conversation, thread = (value[key].strip() for key in (
         "provider", "account_id", "conversation_id", "thread_id"))
     source_event_id = value["source_event_id"].strip()
@@ -232,7 +235,7 @@ def source_message_facts(message: Any) -> dict:
     """The compared provider facts of one ``event.message``; an edit time compares as an instant."""
     message = message if isinstance(message, Mapping) else {}
     facts = {key: message.get(key) for key in SOURCE_MESSAGE_FACTS}
-    if (edited := _instant(facts["edited_at"])) is not None:
+    if (edited := instant(facts["edited_at"])) is not None:
         facts["edited_at"] = edited.isoformat()
     media = message.get("media")
     facts["media"] = ({key: value for key, value in media.items() if key not in _MEDIA_OBSERVATIONS}
@@ -252,7 +255,7 @@ def _matches(row: Mapping[str, Any], identity: str, record: HistoryRecord) -> bo
         return marker.get("authorship") == record.authorship and str(row.get("ts") or "") == record.ts
     # A live capture of the same revision keeps its custody and is never rewritten. Its row
     # time is its receipt, not a send time: only a send time it recorded is compared.
-    sent = _instant(message.get("sent_at"))
+    sent = instant(message.get("sent_at"))
     return sent is None or sent.isoformat() == record.ts
 
 
@@ -272,8 +275,9 @@ def _record_one(root: Path, admission: Any, import_id: str, record: HistoryRecor
     with intake_lock(root, event.conversation_key):
         with dialogue_store.transaction(root, write=False) as conn:
             prior = _record(conn, task_id)
-        if prior is not None:
-            seq, row, duplicate = int(prior["seq"]), dialogue_store.decode(prior["body"]), True
+            stored = dialogue_store.whole_body(conn, prior["body"]) if prior is not None else None
+        if prior is not None:  # the receipt's row whole, as a fresh capture's is
+            seq, row, duplicate = int(prior["seq"]), stored, True
         else:
             marker = {"version": HISTORY_IMPORT_VERSION, "import_id": import_id, "authorship": record.authorship,
                       "received_at": utc_now_iso(), "transport_skill": admission.transport_skill}

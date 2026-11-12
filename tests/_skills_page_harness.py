@@ -26,12 +26,14 @@ def fixture(name: str):
 
 
 def _document() -> str:
-    sheets = "".join(f'<link rel="stylesheet" href="/static/{name}">' for name in ("ui.css", "style.css")
+    sheets = "".join(f'<link rel="stylesheet" href="/static/{name}">' for name in ("ui.css", "style.css", "settings.css")
                      if (WEB / name).exists())
     return (
         f'<!doctype html><html><head>{sheets}</head><body><main id="content"></main>'
         '<script type="module">'
-        'import {initSkills} from "/static/modules/skills.js";'
+        'const [{initSkills},{startHostModules},{getContributions}]=await Promise.all(['
+        'import("/static/modules/skills.js"),import("/static/modules/host_modules.js"),import("/static/modules/contributions.js")]);'
+        'if(new URL(location.href).searchParams.has("host_modules")){const contributions=getContributions();contributions.attach();window.hostRuntime=startHostModules({store:contributions});}'
         'window.skillsView=initSkills({showPage:(page)=>{window.shownPage=page;},'
         'openSettingsTab:(tab)=>{window.settingsTab=tab;}});'
         'document.querySelector("#page-skills").classList.add("active");'
@@ -49,6 +51,16 @@ def skills_browser():
 
     with sync_playwright() as playwright:
         yield playwright
+
+
+def open_place_sheet(page, place_id):
+    """The place sheet as Circles opens it, with the circles of the same real places read: a connector's sheet only
+    points to Circles, and this harness mounts the Skills page alone. `/api/places` must be answered."""
+    page.evaluate("""async id => {
+        const [{openPlaceSheet}, {readPlaces}] = await Promise.all([import('/static/modules/place_sheet.js'), import('/static/modules/consciousness_api.js')]);
+        const view = await readPlaces();
+        openPlaceSheet(view.places.find(row => row.id === id), {circles: view.circles});
+    }""", place_id)
 
 
 class SkillsPage:

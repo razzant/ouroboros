@@ -52,6 +52,13 @@ def add_usage_rows(reexports):
     return facade_consumers(REPO, "add_usage", reexports=reexports)
 
 
+@pytest.fixture(scope="module")
+def self_built_add_usage_rows():
+    """Build the cold answer once for the equivalence proof; xdist workers own
+    their immutable scan independently, while all tests in each worker reuse it."""
+    return facade_consumers(REPO, "add_usage")
+
+
 # ---------------------------------------------------------------------------
 # owner_of
 # ---------------------------------------------------------------------------
@@ -168,11 +175,11 @@ def test_facade_symbol_query_narrows_to_the_reexported_name(reexports, add_usage
     assert "ouroboros/loop_llm_call.py" in {r.consumer for r in rows}
 
 
-def test_injected_reexports_answer_exactly_as_the_self_built_map(add_usage_rows):
+def test_injected_reexports_answer_exactly_as_the_self_built_map(add_usage_rows, self_built_add_usage_rows):
     """The kwarg is reuse, never a different question: an injected map answers with
     exactly the rows the query builds for itself. The two teaching refusals are pinned
     on the injected path by the test below."""
-    assert add_usage_rows == facade_consumers(REPO, "add_usage")  # cold: builds its own map
+    assert add_usage_rows == self_built_add_usage_rows
 
 
 def test_facade_query_on_a_non_facade_is_a_teaching_refusal(reexports):

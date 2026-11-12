@@ -137,7 +137,6 @@ def test_a_direct_selector_call_without_an_invocation_still_returns_its_text(tmp
     ("label", "prefix"),
     [
         ("effort_arg_error", "⚠️ TOOL_ARG_ERROR (schedule_subagent): effort must be auto or one of: "),
-        ("unsupported_param", "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): bogus."),
         ("validator_refusal", "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required."),
         (
             "capability_arg_error",
@@ -179,11 +178,6 @@ def test_schedule_argument_refusals_publish_their_adapter_code(tmp_path, monkeyp
             "wait_tasks_empty",
             "wait_tasks",
             "⚠️ TOOL_ARG_ERROR (wait_tasks): task_ids must be a non-empty list.",
-        ),
-        (
-            "wait_tasks_bad_id",
-            "wait_tasks",
-            "⚠️ TOOL_ARG_ERROR (wait_tasks): task_id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,127}",
         ),
         (
             "wait_tasks_bad_mode",

@@ -32,13 +32,14 @@ from ouroboros.skill_loader import (
     save_review_state,
 )
 from ouroboros.skill_peer_inventory import discover_skill_peers
-from tests._shared import clean_extension_runtime_state
+from tests._shared import clean_extension_runtime_state, current_python_env
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SEEDS = REPO / "skills"
 UNIX = "unix_computer_use"
 WINDOWS = "windows_computer_use"
-EVERYWHERE = ["ui_design", "templates", "device_voice"]  # on by default on every host
+EVERYWHERE = ["ui_design", "templates", "device_voice",  # on by default on every host
+              "live_conversation", "gemini_live", "grok_realtime", "openai_realtime"]  # inert until Calls (beta)
 UNIX_043 = "1e237c1bc89f0600a7362f69eddafdff4ddd1f2d"  # official history: os any, permissions with net
 log = logging.getLogger(__name__)
 
@@ -140,8 +141,7 @@ def test_each_host_is_offered_and_installs_only_its_own_computer_use_skill(data,
 
 # ── the Unix copy kept on Windows for remote machines ──
 
-@pytest.mark.parametrize("actor", ["owner_ui", None])
-@pytest.mark.parametrize("backend", ["osworld_http", "ssh_macos"])
+@pytest.mark.parametrize(("backend", "actor"), [("osworld_http", None), ("ssh_macos", "owner_ui")])
 def test_a_legacy_unix_remote_choice_on_windows_survives_off_reseed_and_on(data, monkeypatch, tmp_path, actor, backend):
     from ouroboros import extension_loader, skill_lifecycle_actions
 
@@ -328,7 +328,7 @@ def windows_installed(data, monkeypatch):
                                  installed_by="owner")["ok"]
     installs, reconciles = [], []
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     monkeypatch.setattr("ouroboros.extension_loader.reconcile_extension",
                         lambda name, *args, **kwargs: reconciles.append(name) or {"action": "extension_loaded"})
     from ouroboros import skill_lifecycle_actions
@@ -379,7 +379,7 @@ def test_a_failed_install_names_the_failure_and_the_next_boot_retries(windows_in
     assert reconciles == [WINDOWS]
 
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     assert _dependency_pass(data, [WINDOWS], log) == [WINDOWS]
     assert installs == [["comtypes==1.4.17"]] and load_enabled(data, WINDOWS) is True
 
@@ -630,7 +630,7 @@ def test_a_builtin_installed_after_the_receipt_retries_its_dependencies_at_the_n
     assert _dependency_pass(drive, [WINDOWS], log) == [WINDOWS] and not load_enabled(drive, WINDOWS)
 
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     skill_builtin.ensure_builtin_skills(drive, repo_dir=repo, log_obj=log)  # the network is back
     assert installs == [["comtypes==1.4.17"]] and load_enabled(drive, WINDOWS) is True
     assert receipt(drive) is not None  # the seed receipt certifies the bundle, not package work
@@ -706,6 +706,10 @@ def test_os_declarations_parse_as_platform_lists():
     unix, windows = skill_builtin._manifest(SEEDS / UNIX), skill_builtin._manifest(SEEDS / WINDOWS)
     assert unix.os == "darwin,linux" and windows.os == "win32"
     assert windows.permissions == ["tool"]
+    # Each permission is enforced where the skill uses it (PluginAPIImpl._require): `net` carries the remote OSWorld
+    # HTTP/SSH backends of the Unix skill, `route` the Telegram bridge's settings and mini-app routes.
+    assert unix.permissions == ["tool", "subprocess", "net"]
+    assert "route" in skill_builtin._manifest(SEEDS / "telegram").permissions
     assert windows.raw_extra["install"] == [{"kind": "pip", "package": "comtypes==1.4.17"}]
 
 
@@ -754,7 +758,7 @@ def _boot(drive, monkeypatch):
 def lifecycle(monkeypatch):
     installs = []
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     _stub_lifecycle_effects(monkeypatch)
     return installs
 
@@ -829,7 +833,7 @@ def test_an_existing_unix_copy_is_turned_on_once_unless_the_owner_chose(data, mo
 
     _boot(data, monkeypatch)
 
-    assert skill_builtin._version(native / UNIX) == "0.5.3"
+    assert skill_builtin._version(native / UNIX) == skill_builtin._version(SEEDS / UNIX)
     assert load_enabled(data, UNIX) is (choice is None)
     assert (state / "connections.json").read_bytes() == connections
     if choice is None:

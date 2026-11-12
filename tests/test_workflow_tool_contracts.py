@@ -7,11 +7,10 @@ import subprocess
 import pytest
 
 from tests.test_vcs_target_binding import _registry, _git
-from tests.test_process_environment import process_context as _process_context
+from tests._process_environment import process_context as _process_context
 
 process_context = _process_context
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("fallback", [False, True])

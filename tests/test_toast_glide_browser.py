@@ -14,7 +14,7 @@ from tests import test_subscription_setup_browser as setup_browser
 from tests.test_design_system_gate_browser import save_evidence, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=['webkit', 'chromium'])
@@ -119,7 +119,12 @@ def _key_scroll(page, key, to_end):
     raise AssertionError((key, 'the keyboard did not scroll the notices there', state))
 
 
-@pytest.mark.parametrize('width,height', [(320, 568), (1280, 800)], ids=['phone', 'wide'])
+# The wide window has room for both warnings at the body type (14 px, #2886 4ace565ef), their shadow room included,
+# under a mouse or a finger (whose 44 px close button narrows their words).
+WIDE = (1280, 1000)
+
+
+@pytest.mark.parametrize('width,height', [(320, 568), WIDE], ids=['phone', 'wide'])
 def test_two_kept_warnings_are_reached_whole_by_wheel_and_keyboard(toast_ui, tmp_path, width, height):
     """Once both "Resuming" lines time out, the two gap warnings stay. On a phone the page's stack ends above the
     screen's bottom and scrolls: a wheel over a notice reaches the second close button and the last word, the keyboard
@@ -183,4 +188,44 @@ def test_two_kept_warnings_are_reached_whole_by_wheel_and_keyboard(toast_ui, tmp
         page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast').length === 1")
     finally:
         save_evidence(tmp_path, name, facts)
+        page.close()
+
+
+MARGIN_HIT = """([x, y]) => document.getElementById('toast-stack').contains(document.elementFromPoint(x, y))"""
+
+
+def test_the_kept_column_follows_the_window_and_scrolls_from_its_margin(toast_ui, tmp_path):
+    """On a phone the two kept warnings cut the column, and a wheel over its empty left margin scrolls it in every
+    engine. A window that grows releases the column with no notice coming or going, and its margin lets the page
+    through again; shrunk back, the column is cut again."""
+    page = seed_page(toast_ui, 320, 568)
+    facts = {'engine': toast_ui['engine']}
+    try:
+        page.goto(toast_ui['url'] + '/')
+        page.wait_for_selector('#chat-input', state='attached')
+        settle(page)
+        page.evaluate(TWO_GAPS)
+        page.wait_for_function(WARNINGS_ONLY, timeout=15_000)
+        settle(page)
+        facts['cut'] = cut = page.evaluate(REACH)
+        assert cut['stack']['role'] == 'region' and cut['stack']['scroll_end'] > 0, cut
+        first = cut['toasts'][0]
+        margin = ((cut['stack']['left'] + first['left']) / 2, (cut['stack']['top'] + cut['stack']['bottom']) / 2)
+        assert page.evaluate(MARGIN_HIT, list(margin)), ('the cut column takes the pointer in its margin', facts)
+        page.mouse.move(*margin)
+        for _ in range(10):
+            page.mouse.wheel(0, 300)
+            settle(page)
+        facts['margin_wheel'] = page.evaluate(SCROLL)
+        assert facts['margin_wheel']['top'] > 0, ('a wheel over the margin scrolls the cut column', facts)
+        page.set_viewport_size({'width': WIDE[0], 'height': WIDE[1]})
+        page.wait_for_function("() => !document.getElementById('toast-stack').hasAttribute('tabindex')")
+        facts['wide'] = wide = page.evaluate(REACH)
+        first = wide['toasts'][0]
+        margin = ((wide['stack']['left'] + first['left']) / 2, (wide['stack']['top'] + wide['stack']['bottom']) / 2)
+        assert not page.evaluate(MARGIN_HIT, list(margin)), ('the released column lets the page through', facts)
+        page.set_viewport_size({'width': 320, 'height': 568})
+        page.wait_for_function("() => document.getElementById('toast-stack').getAttribute('role') === 'region'")
+    finally:
+        save_evidence(tmp_path, f'toast-follow-{toast_ui["engine"]}', facts)
         page.close()

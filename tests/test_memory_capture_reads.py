@@ -41,7 +41,7 @@ def test_main_view_reads_its_open_rows_a_page_at_a_time_and_reads_as_before(tmp_
     made = shape.open_rows(tmp_path, 1_300)
     opened = _counted(monkeypatch, ds, "transaction")
     batched = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
-    assert batched.active and len(batched.live_rooms) == shape.ROOMS - 1
+    assert batched.active and sum(len(group["rooms"]) for group in batched.conversations) == shape.ROOMS - 1
     pages = -(-1_300 // cc._ADDRESS_PAGE)
     # The stream's pages, two lookups a page, the selected rows' one read, and the readers' bounds.
     assert len(opened) <= 3 * pages + 8, collections.Counter(opened)
@@ -60,8 +60,8 @@ def test_a_view_enters_the_chronicle_index_for_its_activation_and_its_one_captur
                                   covers={"rows": [f"sealed-{chat}"], "stream_span": [chat, chat]}).ok
     entered = _counted(monkeypatch, ChronicleStore, "_index")
     view = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
-    assert view.active and len(view.live_rooms) == 23 and view.room["facts"]["pages"] == 1
-    assert entered == ["_reading", "capture"]  # the activation receipt, then one read for every reader of the view
+    assert view.active and sum(len(group["rooms"]) for group in view.conversations) == 23 and view.room["facts"]["pages"] == 1
+    assert entered == ["_reading", "_read_snapshot"]  # the activation receipt, then one read for every reader of the view
 
 
 def test_rows_by_address_answers_as_resolve_row_and_a_wrong_hint_still_finds_its_row(tmp_path):
@@ -118,6 +118,52 @@ def test_legacy_authors_are_read_together_and_answer_as_one_lookup_a_task(tmp_pa
     monkeypatch.setattr(mv, "warm_lineage", lambda *_args: None)
     assert mv.capture_memory_view(tmp_path, made["task"], made["spec"]) == warmed
     assert len(alone) == 240  # the same authors, one task result at a time
+
+
+def test_earlier_roots_working_notes_add_one_batch_read_and_no_source_reads(tmp_path, monkeypatch):
+    import json
+    from ouroboros import artifacts, task_results, task_store
+    from ouroboros.context_timing import measured_sections, section_spans
+    from ouroboros.main_context_authority import WORKING_NOTES_FIELD
+    from tests._store_shared import seed_result
+
+    made = shape.open_rows(tmp_path, 0, rooms=1)
+    result_bytes, source_bytes = 0, 0
+    result = ("Completed the implementation; evidence and decisions follow.\n" * 5000)[:256 * 1024]
+    note = ("SOURCE NOTE BODY: the decision and its retained evidence.\n" * 160)[:8 * 1024]
+    for index in range(40):
+        task = f"earlier{index:02d}"
+        raw = json.dumps({"task_id": task, "notes": [note] * 6}).encode("utf-8")
+        ref = artifacts.store_actor_source_bytes(tmp_path, task, category="context_checkpoints",
+                                                 source_id="working-notes", data=raw, extension="json")
+        saved = seed_result(tmp_path, task, {"status": "completed", "chat_id": shape.MAIN,
+                                           "root_task_id": task, "is_root_task": True, "result": result,
+                                           WORKING_NOTES_FIELD: ref})
+        result_bytes += len(json.dumps(saved).encode("utf-8"))
+        source_bytes += len(raw)
+        ds.append(tmp_path, "chat", {"chat_id": shape.MAIN, "direction": "system", "task_id": task,
+                                     "root_task_id": task, "type": "task_summary", "status": "completed",
+                                     "summary_kind": "terminal_result_projection", "text": "Completed prior work."})
+    batched = _counted(monkeypatch, task_results, "load_task_results")
+    opened = _counted(monkeypatch, task_store, "open_store")
+    sources = _counted(monkeypatch, artifacts, "read_actor_source_bytes")
+    samples = []
+    for _ in range(3):
+        with measured_sections():
+            view = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
+            samples.append(section_spans())
+    section = "memory_view.working_notes"
+    print(json.dumps({"section": section, "roots": 40, "result_bytes": result_bytes,
+                      "source_bytes": source_bytes, "wall_ms": [s["sections_ms"][section] for s in samples],
+                      "cpu_ms": [s["sections_cpu_ms"][section] for s in samples],
+                      "batch_transactions": opened.count("documents_by_ids"), "source_reads": len(sources)}))
+    assert batched == ["_working_notes"] * 3 and opened.count("documents_by_ids") == 3
+    assert sources == []  # the fact and exact reader come from the field; capture never opens the notes
+    assert len(view.room["lane2"]) == 40
+    assert all("working notes" in row["line"] and "read_file(" in row["line"] for row in view.room["lane2"])
+    assert "SOURCE NOTE BODY" not in json.dumps(view.room) and result not in json.dumps(view.room)
+    transactions = len(opened)
+    assert mv._working_notes(tmp_path, []) == {} and len(opened) == transactions  # no roots, no added read
 
 
 def _legacy_units_fresh(root):
@@ -238,14 +284,12 @@ def test_warm_lineage_reads_every_task_the_author_rule_asks_about():
 
 def test_documents_by_ids_keys_each_document_by_its_stored_row(tmp_path):
     from ouroboros import task_results, task_store
-    from tests._store_shared import seed_result
-
-    import sqlite3
     from ouroboros.store import store_path
+    from tests._store_shared import independent_writer, seed_result
 
     seed_result(tmp_path, "good", {"status": "completed", "root_task_id": "good", "is_root_task": True})
     seed_result(tmp_path, "zbad", {"status": "completed", "root_task_id": "elsewhere"})
-    with sqlite3.connect(store_path(tmp_path)) as conn:  # a damaged body that names another task
+    with independent_writer(store_path(tmp_path)) as conn:  # a damaged body that names another task
         conn.execute("UPDATE task_bodies SET body=json_set(body, '$.task_id', 'good') WHERE task_id='zbad'")
     documents = task_store.documents_by_ids(tmp_path, ["good", "zbad"])
     assert documents["good"]["root_task_id"] == "good" and documents["zbad"]["root_task_id"] == "elsewhere"

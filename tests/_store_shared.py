@@ -9,8 +9,9 @@ from __future__ import annotations
 import contextlib
 import os
 import pathlib
+import sqlite3
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 from ouroboros.task_result_schema import SCHEMA_VERSION_KEY, TASK_RESULT_SCHEMA_VERSION
 from ouroboros.task_store import delete_document, exists, patch_document, read_document, signature
@@ -110,10 +111,20 @@ def unreadable_result(monkeypatch, task_id: str, *, root=None) -> dict:
             rows[str(task_id)] = store.StoreError(f"simulated unreadable row: {task_id}")
         return rows
 
+    real_statuses = store_hot_facts.statuses
+
+    def statuses(root, task_ids):  # a batch names the unreadable row alone, as a single read of it fails
+        answers = real_statuses(root, task_ids)
+        if switch["on"] and str(task_id) in answers and (
+                wanted_root is None or pathlib.Path(root).resolve() == wanted_root):
+            answers[str(task_id)] = store.StoreError(f"simulated unreadable row: {task_id}")
+        return answers
+
     monkeypatch.setattr(store.Txn, "body_text", body_text)
     monkeypatch.setattr(store.Txn, "row", row)
     monkeypatch.setattr(task_store, "display_documents", display_documents)
     monkeypatch.setattr(store_hot_facts, "_read_rows", hot_rows)
+    monkeypatch.setattr(store_hot_facts, "statuses", statuses)
     return switch
 
 
@@ -166,3 +177,18 @@ def remove_store_tree(tree: Any) -> None:
 
     release_store_handles(tree)
     shutil.rmtree(tree)
+
+
+@contextlib.contextmanager
+def independent_writer(path: Any) -> Iterator[sqlite3.Connection]:
+    """An independent connection for SQL a test runs on a store file behind every product write API
+    (a damaged body, a row changed after it was stored), closed on exit. It opens as every connection
+    that may write must (``store.connect``, docs/USAGE_STORE.md §1), on the kernel-lock tier test roots
+    probe, and keeps the file's journal; this process's cached product handle stays open. A raw
+    ``sqlite3.connect`` commits in DELETE mode instead, which fails on Windows (SQLITE_IOERR_DELETE)
+    while that handle holds the PERSIST journal open. Statements autocommit, with the 5 s busy wait a
+    raw connection has by default."""
+    from ouroboros import store
+
+    with contextlib.closing(store.connect(pathlib.Path(path), store.TIER_ENFORCED, wait_sec=5.0)) as conn:
+        yield conn

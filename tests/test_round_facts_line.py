@@ -62,6 +62,18 @@ def _facts_ctx(tmp_path, monkeypatch, **tool_attrs):
     return context
 
 
+@pytest.mark.parametrize("source", ["owner", None])
+def test_model_segment_names_an_owner_choice_and_leaves_the_follower_plain(tmp_path, monkeypatch, source):
+    monkeypatch.setattr(task_pacing, "shared_wallet_observation", lambda: {"status": "no_global_limit"})
+    monkeypatch.setattr(loop, "_loop_tree_accounting", lambda **_kw: None)
+    context = _facts_ctx(tmp_path, monkeypatch, task_model_override="openai::chosen" if source else None,
+                         task_route_source=source)
+    assert append_context_facts(context)
+    line = context.messages[-1]["content"]
+    assert f"model {context.active_model}" in line
+    assert ("set by my human for this work" in line) is bool(source)
+
+
 def test_the_round_notices_and_the_facts_line_share_one_money_observation(tmp_path, monkeypatch):
     """#1129: a neighbour drained the wallet; the round's wallet crossing and its facts
     line render the SAME observation, read once (no added per-round ledger read)."""

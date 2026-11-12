@@ -90,12 +90,6 @@ _ROUTE_ENV_NAMES = (
 _CLASS_CACHE_NAMES = (
     "_SUPPORTED_PARAMS_CACHE",
     "_CONTEXT_LENGTH_CACHE",
-    "_REJECTED_PARAMS_CACHE",
-    "_REJECTED_PARAMS_LOADED",
-    "_EFFORT_CEILING_CACHE",
-    "_EFFORT_CEILING_LOADED",
-    "_EFFORT_FLOOR_CACHE",
-    "_EFFORT_FLOOR_LOADED",
 )
 
 
@@ -576,9 +570,9 @@ def _observe(spec: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in (spec.get("env") or {}).items():
             os.environ[key] = str(value)
 
-        # Durable capability evidence is read through the frozen ``config.DATA_DIR``
-        # constant, so the env override alone would let host state leak into (and a
-        # learned rejection leak out of) a recorded projection.
+        # Route code still reads the frozen ``config.DATA_DIR`` constant (the subscription
+        # lane, stream evidence), so the env override alone would let host state leak into
+        # (and a case's writes leak out of) a recorded projection.
         import ouroboros.config as config_module
 
         stack.enter_context(mock.patch.object(config_module, "DATA_DIR", root))
@@ -592,15 +586,10 @@ def _observe(spec: Dict[str, Any]) -> Dict[str, Any]:
             LLMClient._SUPPORTED_PARAMS_CACHE[model_id] = set(params)
 
         durable = spec.get("durable_evidence") or {}
-        if durable:
-            from ouroboros import capability_evidence as ce
+        if durable:  # rows older releases learned: negative controls, never dispatch authority
+            from tests._shared import write_legacy_capability_rows
 
-            for key, value in (durable.get("effort_ceilings") or {}).items():
-                ce.record_effort_ceiling(root, key, value)
-            for key, value in (durable.get("effort_floors") or {}).items():
-                ce.record_effort_floor(root, key, value)
-            for key, value in (durable.get("rejected_params") or {}).items():
-                ce.record_rejected_params(root, key, value)
+            write_legacy_capability_rows(root, **durable)
 
         _install_fakes(stack, recorder, spec)
 
@@ -704,13 +693,14 @@ def test_golden_fixture_ids_are_unique_and_documented():
         assert case.get("route"), f"{case['id']} has no route description"
 
 
-@pytest.mark.parametrize("case", _CASES, ids=[case["id"] for case in _CASES])
-def test_llm_provider_route_matches_golden(case):
-    observed = _observe(case["spec"])
-    assert observed == case["expected"], (
-        f"route {case['id']} drifted from {case['_file']}:\n"
-        f"observed={json.dumps(observed, indent=2, sort_keys=True)}"
-    )
+def test_llm_provider_route_matches_golden(subtests):
+    for case in _CASES:
+        with subtests.test(case=case):
+            observed = _observe(case["spec"])
+            assert observed == case["expected"], (
+                f"route {case['id']} drifted from {case['_file']}:\n"
+                f"observed={json.dumps(observed, indent=2, sort_keys=True)}"
+            )
 
 
 

@@ -99,6 +99,7 @@ export class NodeStub {
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) || ''; }
     removeAttribute(name) { this.attributes.delete(name); }
+    hasAttribute(name) { return this.attributes.has(name); }
     addEventListener(type, fn) {
         if (!this.listeners.has(type)) this.listeners.set(type, new Set());
         this.listeners.get(type).add(fn);

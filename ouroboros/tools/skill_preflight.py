@@ -25,7 +25,8 @@ from ouroboros.tool_access import (
     load_bound_skill,
 )
 from ouroboros.tools.process_facts import publish_process_facts, signal_name_for_returncode
-from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
+from ouroboros.tools.shell import _kill_process_group
+from ouroboros.tools.shell_process import CommandAdmissionClosed, contained_popen, retire_tracked, tracked_start
 from ouroboros.platform_layer import (
     merge_hidden_kwargs,
     subprocess_new_group_kwargs,
@@ -139,7 +140,8 @@ def _run_check(cmd: List[str], cwd: pathlib.Path) -> Dict[str, Any]:
     popen_kwargs.update(subprocess_new_group_kwargs())
     _check_started_ts = time.monotonic()
     try:
-        proc = Popen(cmd, **merge_hidden_kwargs(popen_kwargs))  # noqa: S603 — argv array
+        with tracked_start() as publish:
+            proc = publish(contained_popen(Popen, cmd, **merge_hidden_kwargs(popen_kwargs)))  # noqa: S603 — argv array
     except FileNotFoundError as exc:
         publish_process_facts(
             started_ts=_check_started_ts, pre_exec_failure="FileNotFoundError",
@@ -151,8 +153,9 @@ def _run_check(cmd: List[str], cwd: pathlib.Path) -> Dict[str, Any]:
             "timeout": False,
             "pre_exec_failure": "FileNotFoundError",
         }
-    with _subprocess_lock:
-        _active_subprocesses.add(proc)
+    except CommandAdmissionClosed as exc:  # refused before any child existed: no process facts to publish
+        return {"returncode": None, "stdout": "", "stderr": str(exc), "timeout": False,
+                "pre_exec_failure": type(exc).__name__}
     try:
         try:
             stdout, stderr = proc.communicate(timeout=_PREFLIGHT_TIMEOUT_SEC)
@@ -176,8 +179,7 @@ def _run_check(cmd: List[str], cwd: pathlib.Path) -> Dict[str, Any]:
                 "killed_by_host": True,
             }
     finally:
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
     returncode = int(proc.returncode or 0)
     if returncode < 0:
         # A validator killed by something OTHER than our deadline (the macOS

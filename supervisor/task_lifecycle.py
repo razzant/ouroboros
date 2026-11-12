@@ -14,7 +14,6 @@ import pathlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
 from ouroboros.review_owner_custody import reconcile_confirmed_dead_review_owner as _reconcile_dead_review_owner
 from ouroboros.utils import utc_now_iso
 
@@ -152,13 +151,10 @@ def root_cancellation_fenced(task: Dict[str, Any], root_task_id: str = "") -> bo
     return False
 
 
-def apply_budget_root_admission_fence(task: Dict[str, Any], root_task_id: str, *,
-                                      timeout_retry: bool = False) -> bool:
+def apply_budget_root_admission_fence(task: Dict[str, Any], root_task_id: str) -> bool:
     """Latch new work under Pause or cancellation; money stays in the attempt ledger.
     Budget increases cannot resume refused roots. Cascade needs this gate because
-    schedule_subagent can drain after its last sweep. A reaper-only timeout_retry
-    stays admitted under owner Pause but undispatchable at assignment/launch (#1729/1730).
-    Root Resume selects no children. Cancellation/money never grant the retry exception.
+    schedule_subagent can drain after its last sweep. Root Resume selects no children.
     """
     if root_cancellation_fenced(task, root_task_id):
         task["_admission_blocked"] = "root_cancelled"
@@ -166,14 +162,6 @@ def apply_budget_root_admission_fence(task: Dict[str, Any], root_task_id: str, *
     fence = BUDGET_ROOT_FENCES.get(str(root_task_id or ""))
     if not isinstance(fence, dict) or str(fence.get("status") or "") not in {"active", "paused"}:
         return False
-    if timeout_retry and fence.get("cause") == "owner_pause":
-        from ouroboros.task_results import resolve_task_lineage
-
-        lineage = resolve_task_lineage(task.get("id"), **{key: task.get(key) for key in (
-            "metadata", "root_task_id", "parent_task_id", "delegation_role", "original_task_id",
-            "timeout_retry_from")})
-        if lineage["root_task_id"] == str(root_task_id):
-            return False
     # One latch, typed by its cause: an owner Pause is not a monetary stop.
     task["_admission_blocked"] = ("root_owner_paused" if fence.get("cause") == "owner_pause"
                                   else "root_budget_fence")
@@ -550,6 +538,7 @@ def cancel_task_custody(
     """
     q = _queue_module()
     from supervisor import workers
+    from supervisor.ended_work_helpers import closes_only_parked_row, yield_to_dispatch
 
     task_id = str(task_id or "").strip()
     if not task_id:
@@ -591,6 +580,8 @@ def cancel_task_custody(
     # landing meanwhile is re-read after the kill (completion wins) or on miss.
     prepared = reads.prepared(task_id)
     settled = settled_status_of(prepared)
+    from supervisor.cancel_publication import runner_takes_stop  # a witnessed Presence author's Stop is its runner's
+    runner_owned = not settled and runner_takes_stop(q, task_id, prepared)
 
     # Read the durable intent BEFORE claiming it. The pre-claim row is what the
     # reaping-takeover gate below judges: a slot already marked ``reaping`` is
@@ -632,6 +623,7 @@ def cancel_task_custody(
     # ---- phase 1: capture under the lock -----------------------------------
     captured_was_reaping = False
     captured_pending = None
+    captured_awaiting = None  # a conversation-lane turn no carrier holds yet: no process, held like PENDING
     captured_worker = None
     captured_meta = None
     captured_running = None
@@ -655,9 +647,13 @@ def cancel_task_custody(
                 if str(item.get("id")) == task_id:
                     captured_pending = q.PENDING.pop(index)
                     break
+            if captured_pending is None:
+                from supervisor.conversation_lane import take_awaiting_turn
+                captured_awaiting = take_awaiting_turn(task_id)
+                captured_pending = captured_awaiting["task"] if captured_awaiting else None
         if captured_pending is None:
             for worker in workers.WORKERS.values():
-                if worker.busy_task_id == task_id:
+                if worker.busy_task_id == task_id and not runner_owned:
                     from ouroboros.headless import terminal_task_files_ready
                     bound_task = (q.RUNNING.get(task_id) or {}).get("task") or {"id": task_id}
                     if (settled and not _worker_possibly_alive(worker)
@@ -696,6 +692,11 @@ def cancel_task_custody(
                     captured_worker.reaping = True
                     break
 
+    if captured_worker is not None and not cascade_claim and closes_only_parked_row(intent):
+        # A dispatch that got there first keeps its process; a Stop or cascade that joined the closure is carried out.
+        intent = yield_to_dispatch(q, task_id, intent, captured_worker, captured_was_reaping)
+        if isinstance(intent, str):
+            return intent
     if captured_pending is None and captured_worker is None:
         from ouroboros.review_operation import task_has_live_review_operation
 
@@ -711,10 +712,11 @@ def cancel_task_custody(
         # ownership wins over the settled fast path; the stored terminal
         # stays the answer either way.
         turn = workers.direct_chat_turn(task_id)
-        if turn is not None or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
-            from supervisor.cancel_publication import _finish_captured_chat_turn
-
-            return _finish_captured_chat_turn(q, task_id, turn, intent=intent, deliver=deliver)
+        from supervisor.cancel_publication import finish_in_process_turn  # a live inline Presence turn too
+        in_process = finish_in_process_turn(q, task_id, turn, prepared, intent=intent, deliver=deliver,
+                                            runner_owned=runner_owned)
+        if in_process is not None:
+            return in_process
     if settled and captured_worker is None and not captured_was_reaping:
         # A slot stranded at ``reaping`` by a custody attempt that crashed is
         # recovered HERE too: the task settled on its own afterwards, so nothing
@@ -765,7 +767,8 @@ def cancel_task_custody(
         return CANCEL_FAILED
     try:
         if captured_pending is not None:
-            return _finish_captured_pending(task_id, captured_pending, intent=intent)
+            return _finish_captured_pending(task_id, captured_pending, intent=intent, awaiting=captured_awaiting,
+                                            may_close=not cascade_claim)
         if captured_worker is not None:
             # ``settled_status`` (GR6-1b): a settled RESULT with a live WORKER
             # goes through the SAME kill/join path — the stored terminal truth
@@ -782,7 +785,8 @@ def cancel_task_custody(
         # shape). Give the custody back and reopen the intent so the watchdog
         # retries instead of skipping the slot for the rest of the process life.
         log.error("Cancellation custody for %s raised; releasing custody", task_id, exc_info=True)
-        _restore_custody(task_id, pending=captured_pending, worker=captured_worker)
+        _restore_custody(task_id, pending=None if captured_awaiting else captured_pending, worker=captured_worker,
+                         awaiting=captured_awaiting)
         _release_intent_claim(
             q, task_id, error="custody raised mid-teardown",
             expected_generation=generation, request_id=request_id,
@@ -948,21 +952,10 @@ def _cancel_live_retry_successor(
     """
     intent_before = _active_intent(q, intent_task_id)
     try:
-        from ouroboros.cancel_intents import (
-            SCOPE_CASCADE,
-            STOP_POLICY_FINALIZE,
-            stop_policy,
-        )
+        from ouroboros.cancel_intents import SCOPE_CASCADE, STOP_POLICY_FINALIZE, stop_policy
 
-        if (
-            str(intent_before.get("scope") or "") == SCOPE_CASCADE
-            or stop_policy(intent_before) == STOP_POLICY_FINALIZE
-        ):
-            log.error(
-                "Refusing legacy retry-intent transfer for policy-owned task %s -> %s",
-                intent_task_id,
-                retry_task_id,
-            )
+        if str(intent_before.get("scope") or "") == SCOPE_CASCADE or stop_policy(intent_before) == STOP_POLICY_FINALIZE:
+            log.error("Refusing legacy retry-intent transfer for policy-owned task %s -> %s", intent_task_id, retry_task_id)
             return CANCEL_FAILED
     except Exception:
         return CANCEL_FAILED
@@ -973,18 +966,11 @@ def _cancel_live_retry_successor(
         # A2: no durable request on the logical root mints none on its retry.
         return CANCEL_NOT_FOUND
     try:
-        from ouroboros.cancel_intents import (
-            request_cancel,
-        )
+        from ouroboros.cancel_intents import request_cancel
 
-        request_cancel(
-            q.DRIVE_ROOT,
-            retry_task_id,
-            reason=str(intent.get("reason") or "logical retry cancellation"),
-            source="timeout_retry_lineage",
-            requested_by=str(intent.get("requested_by") or ""),
-            allow_settled_target=True,
-        )
+        request_cancel(q.DRIVE_ROOT, retry_task_id, reason=str(intent.get("reason") or "logical retry cancellation"),
+                       source="timeout_retry_lineage", requested_by=str(intent.get("requested_by") or ""),
+                       allow_settled_target=True)
     except Exception:
         log.error(
             "Could not carry cancellation from retry ancestor %s to %s",
@@ -1072,7 +1058,7 @@ def _release_intent_claim(
 
 def _restore_custody(
     task_id: str, *, pending: Any = None, worker: Any = None,
-    worker_reaping: bool = False,
+    worker_reaping: bool = False, awaiting: Any = None,
 ) -> None:
     """Release custody after a failed cancellation.
 
@@ -1091,39 +1077,52 @@ def _restore_custody(
     with q._queue_lock:
         if pending is not None and all(str(t.get("id")) != task_id for t in q.PENDING):
             q.PENDING.append(pending)
+        if awaiting is not None:  # a captured awaiting lane row returns to RUNNING, never PENDING
+            q.RUNNING.setdefault(task_id, awaiting)
         if worker is not None:
             worker.reaping = worker_reaping
 
 
 def _finish_captured_pending(
-    task_id: str, task: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None,
+    task_id: str, task: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None, awaiting: Any = None,
+    may_close: bool = True,
 ) -> str:
-    """A queued task has no process: persist first, publish second."""
+    """A queued task (or a lane turn ``awaiting`` its carrier) has no process: persist first, publish second. Under a
+    cascade (``may_close`` False) a closure intent it joined is an ordinary cancel of the row."""
     q = _queue_module()
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
+    from supervisor.ended_work_helpers import prepare_closure, stop_closed_runs
 
     cost_fields = _reconstructed_cost_fields(q, task_id, task)
+    closure = prepare_closure(q, task_id, task, intent, awaiting, cost_fields) if may_close else None
+    if isinstance(closure, str):
+        return closure
+    closing = closure or {}
     try:
         existing = load_task_result(q.DRIVE_ROOT, task_id) or {}
         stored = write_task_result(
-            q.DRIVE_ROOT, task_id, STATUS_CANCELLED,
-            **_cancel_result_fields(
-                task, existing=existing, result="Task cancelled by user/agent request.",
-                **cost_fields, **_intent_outcome_fields(intent or {}),
-            ),
+            q.DRIVE_ROOT, task_id, STATUS_CANCELLED, _last_word=closing.get("last_word"),
+            **{**closing.get("lineage", {}), **_cancel_result_fields(
+                task, existing=existing, result=closing.get("result") or "Task cancelled by user/agent request.",
+                **closing.get("cancel_fields", {}), **cost_fields, **_intent_outcome_fields(intent or {}),
+            )},
         )
     except Exception:
         log.warning("Cancel persistence failed for pending task %s", task_id, exc_info=True)
-        _restore_custody(task_id, pending=task)
+        _restore_custody(task_id, pending=None if awaiting else task, awaiting=awaiting)
         _release_intent_claim(q, task_id, error="pending cancel persistence failed", intent=intent)
         return CANCEL_FAILED
+    if closing.get("refused"):  # the closure's own transaction saw the work's control change: the row returns
+        return closing["withdraw"]()
     if str((stored or {}).get("status") or "") != STATUS_CANCELLED:
         # The writer's monotonic guard refused it: the task settled on its own
         # between capture and write. Its outcome and event stand.
         _settle_intent(q, task_id, outcome=SETTLED_ALREADY,
                        detail=str((stored or {}).get("status") or ""), intent=intent)
         return CANCEL_ALREADY_SETTLED
-    _settle_intent(q, task_id, outcome="cancelled", detail="cancelled while pending", intent=intent)
+    if closing:  # the closure won its write; its helper's delegated runs stop only now, before the intent settles
+        stop_closed_runs(q, task_id)
+    _settle_intent(q, task_id, outcome="cancelled", detail=closing.get("detail") or "cancelled while pending", intent=intent)
     q._emit_cancel_task_done(task, task_id, cost_fields=cost_fields)
     q.persist_queue_snapshot(reason="cancel_pending")
     return CANCEL_CANCELLED
@@ -1183,7 +1182,6 @@ def _finish_captured_running(
     with q._queue_lock:
         from supervisor.worker_health import retire_confirmed_worker_consumers
         retire_confirmed_worker_consumers(worker, captured_running)
-
 
     # A terminal checkpoint can precede split-drive adoption and artifact capture.
     # Keep fully published CURRENT byte-identical; complete only work still owed.

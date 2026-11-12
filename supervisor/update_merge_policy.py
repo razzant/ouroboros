@@ -77,6 +77,14 @@ HOT_CODE_PATHS = frozenset({
     "ouroboros/loop_model_call.py",
     "ouroboros/loop_nudges.py",
     "ouroboros/loop_round_limits.py",
+    # Initial routing, the round handover and primary return/wait moved from
+    # the loop/control owners; their conflict labels follow those bodies.
+    "ouroboros/route_choice.py",
+    "ouroboros/loop_routes.py",
+    "ouroboros/owner_model.py",
+    # join_ledger received the direct-child reads of the hot forced-finalization
+    # leaf: the label follows the moved body.
+    "ouroboros/tools/join_ledger.py",
 })
 
 
@@ -148,7 +156,8 @@ def carrier_guidance(conflicts: List[str]) -> str:
         "already synced mechanically, and carrier conflicts confined to declared version spans "
         "were already resolved to the target's side. A carrier still in your list degraded to "
         "manual resolution (a broken or duplicate span anchor, or a conflict outside the spans): "
-        "make its version tokens match VERSION exactly. In the README Version History table keep "
+        "make its version tokens match VERSION exactly (under a development marker the download "
+        "links keep the target's published release instead). In the README Version History table keep "
         "BOTH sides' rows (never delete this fork's local history rows); resolve prose conflicts "
         "on their merits."
     )

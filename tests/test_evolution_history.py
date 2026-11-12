@@ -368,7 +368,11 @@ def test_the_checkpoints_follow_their_journal_and_never_remember_an_unreadable_o
         return real(p, start)
 
     monkeypatch.setattr(eh, "_appended_rows", unreadable_once)
+    previous = path.stat()
     path.write_text(_checkpoint(8), encoding="utf-8")
+    # Same size, same inode: a coarse clock (Windows) can give the rewrite the old mtime too. The
+    # changed time is the fact this path needs, set exactly rather than waited for.
+    os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000_000))
     assert owner.checkpoints(str(data)) == [], "unreadable: nothing known this time"
     assert [row["task_id"] for row in owner.checkpoints(str(data))] == ["evo-8"], \
         "the same unchanged journal is read again, never remembered as empty"

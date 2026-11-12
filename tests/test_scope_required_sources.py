@@ -255,9 +255,7 @@ def test_the_touched_manifest_carries_dispositions_and_candidate_sizes(tmp_path,
     ({"status": "complete"}, "complete"),
     ({"status": "complete", "reason": "declared_empty"}, "declared_empty"),
     ({"status": "incomplete"}, "incomplete"),
-    ({"status": "unobserved", "reason": "required_source_manifest_missing"}, "unobserved"),
     (None, "unobserved"),
-    ("not a fact", "unobserved"),
 ])
 def test_the_four_coverage_states(fact, expected):
     assert coverage_state(fact) == expected

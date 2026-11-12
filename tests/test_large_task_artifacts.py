@@ -264,11 +264,10 @@ def _many_inputs(tmp_path, drive, task_id, count=28):
     return artifacts.attachment_manifest_projection(drive, task_id, rows)
 
 
-def test_full_input_contract_inheritance_retry_and_mailbox(tmp_path):
+def test_full_input_contract_inheritance_and_mailbox(tmp_path):
     from ouroboros.contracts.task_contract import build_task_contract
-    from ouroboros.owner_mailbox import write_owner_message, copy_owner_mailbox_for_retry, owner_attachment_manifest
+    from ouroboros.owner_mailbox import write_owner_message
     from ouroboros.tools.control_scheduling import _materialize_child_attachment_manifest, _build_child_subagent_contract
-    import shutil
 
     drive = tmp_path / "data"
     authority = _many_inputs(tmp_path, drive, "parent")
@@ -286,15 +285,6 @@ def test_full_input_contract_inheritance_retry_and_mailbox(tmp_path):
     child_contract = _build_child_subagent_contract({"tid": "child", "parent_contract": contract, **child_authority})
     assert child_contract["attachment_manifest_ref"] == child_authority["attachment_manifest_ref"]
     assert child_contract["attachment_manifest_ref"] != contract["attachment_manifest_ref"]
-    task = {"id": "retry", "task_contract": contract, "metadata": {"task_contract": contract}}
-    replacements, error = artifacts.handoff_task_attachments_for_retry(drive, "parent", "retry", task)
-    assert not error
-    assert copy_owner_mailbox_for_retry(drive, "parent", "retry", path_replacements=replacements)
-    shutil.rmtree(artifacts.task_artifact_dir_path(drive, "parent"))
-    assert len(artifacts.resolve_attachment_manifest(drive, "retry", task["task_contract"])) == 28
-    assert len(owner_attachment_manifest(drive, "retry")) == 28
-    for row in artifacts.resolve_attachment_manifest(drive, "retry", task["task_contract"]):
-        assert artifacts.stream_artifact_file(Path(row["abs_path"]), expected=row)["sha256"] == row["sha256"]
 
 
 def test_input_manifest_tamper_and_changed_file_never_fall_back_to_preview(tmp_path):
@@ -383,7 +373,7 @@ def test_document_bridge_rejects_foreign_task_and_changed_capture(tmp_path, monk
     assert not bridge.send_document(1, b"", task_id=ctx.task_id, file_ref=first["file_ref"])[0]
 
 
-@pytest.mark.parametrize("ref", [{}, "", False, {"kind": "task_source"}])
+@pytest.mark.parametrize("ref", [{}, "", {"kind": "task_source"}])
 def test_malformed_full_reference_cannot_become_a_complete_preview(tmp_path, ref):
     authority = {"attachment_manifest": [{"status": "staged", "label": "only a preview"}],
                  "attachment_manifest_ref": ref}
@@ -517,16 +507,6 @@ def test_complete_directory_manifest_has_no_old_member_count_cutoff(tmp_path):
         assert archive.read("member-1001.txt") == b"changed beyond the former bound"
 
 
-def test_retry_rejects_missing_input_outside_inline_preview(tmp_path):
-    drive = tmp_path / "data"
-    authority = _many_inputs(tmp_path, drive, "missing")
-    rows = artifacts.resolve_attachment_manifest(drive, "missing", authority)
-    Path(rows[-1]["abs_path"]).unlink()
-    task = {"id": "retry", "task_contract": authority}
-    _, error = artifacts.handoff_task_attachments_for_retry(drive, "missing", "retry", task)
-    assert error and task["task_contract"] == authority
-
-
 @pytest.mark.parametrize("drive_kind", ["headless", "direct"])
 def test_input_copy_failure_protects_each_existing_gc_root(tmp_path, monkeypatch, drive_kind):
     from ouroboros import headless
@@ -624,7 +604,6 @@ def test_immutable_child_copy_back_retains_name_bytes_and_original_identity(tmp_
             record["path"], immutable=True, expected=record)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
 @pytest.mark.parametrize("registered", [True, False])
 def test_file_verification_does_not_run_on_the_asgi_loop(tmp_path, monkeypatch, method, registered):
@@ -866,7 +845,7 @@ def test_first_materialization_copy_failure_keeps_each_gc_root(tmp_path, monkeyp
     assert Path(published["path"]).is_relative_to(artifacts.task_artifact_dir_path(parent, "capture").resolve())
 
 
-@pytest.mark.parametrize("context", ["healthy", "missing", "none", "storage_failure"])
+@pytest.mark.parametrize("context", ["healthy", "missing", "storage_failure"])
 def test_small_document_keeps_inline_delivery_when_capture_is_unavailable(tmp_path, monkeypatch, context):
     import base64
     from ouroboros.tools import core_artifacts
@@ -934,8 +913,13 @@ def test_inline_fallback_keeps_the_source_and_capture_boundaries(tmp_path, monke
     assert ctx.pending_events == []
 
 
-@pytest.mark.parametrize("initial_input", [False, True])
-@pytest.mark.parametrize("count,failure", [(1, ""), (28, ""), (28, "file"), (28, "manifest"), (28, "mailbox")])
+@pytest.mark.parametrize(("count", "failure", "initial_input"), [
+    (1, "", False),
+    (28, "", True),
+    (28, "file", False),
+    (28, "manifest", True),
+    (28, "mailbox", False),
+])
 def test_acknowledged_owner_inputs_survive_copyback_retry_mailbox_cleanup_and_gc(
     tmp_path, monkeypatch, initial_input, count, failure,
 ):

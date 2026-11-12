@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { createChatInstance } from '../modules/chat.js';
 import { taskReasonDetail } from '../modules/log_events.js';
+import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
 import {
     acceptanceIncidentFromTaskDetail,
     mergeReviewGroup,
@@ -169,7 +170,7 @@ test('a resolved incident adds nothing to the final cause', () => {
             },
         },
     });
-    assert.equal(line, 'Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off.');
+    assert.equal(line, TASK_CAUSE_PHRASES.author_finish);
 });
 
 // ── the ACTUAL chat consumer: review_reference → hydrate → keyed group merge ──

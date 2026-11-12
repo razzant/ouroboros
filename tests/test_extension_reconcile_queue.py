@@ -219,3 +219,83 @@ def test_server_lifespan_wires_extension_reconcile_pickup() -> None:
     assert "name=\"extension-reconcile-pickup\"" in text
     assert "extension_reconcile_task.cancel()" in text
     assert "await asyncio.wait_for(extension_reconcile_task, timeout=30)" in text
+
+
+# --- cost law L8: one reconcile per skill per pass ------------------------------------------
+
+
+def _spy_reconcile(monkeypatch, answer=None):
+    calls = []
+
+    def reconcile(skill_name, *_args, **_kwargs):
+        calls.append(skill_name)
+        if isinstance(answer, BaseException):
+            raise answer
+        return dict(answer or {"action": "extension_loaded", "reason": "ready"})
+
+    monkeypatch.setattr(extension_loader, "reconcile_extension", reconcile)
+    monkeypatch.setattr(extension_loader, "ensure_companions_running", lambda *a, **k: {"action": "noop"})
+    return calls
+
+
+def test_a_backlog_of_requests_is_one_reconcile_per_skill_and_drains_in_one_pass(
+    tmp_path: pathlib.Path, monkeypatch,
+) -> None:
+    """The 01.11 shape: duplicate per-request markers (78 per skill) re-read every pass, one
+    reconcile EACH. Now a pass reconciles every named skill once and removes all it read; the
+    next pass over an empty queue reconciles nothing."""
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    for n in range(60):
+        request_extension_reconcile(drive_root, ("alpha", "beta", "gamma")[n % 3], reason=f"reload-{n}")
+    calls = _spy_reconcile(monkeypatch)
+
+    processed = process_extension_reconcile_requests(drive_root, lambda: {})
+
+    assert sorted(calls) == ["alpha", "beta", "gamma"]
+    assert sorted((row["skill"], row["requests"], row["marker_removed"]) for row in processed) == [
+        ("alpha", 20, True), ("beta", 20, True), ("gamma", 20, True)]
+    assert list_extension_reconcile_requests(drive_root) == []
+    assert process_extension_reconcile_requests(drive_root, lambda: {}) == [] and len(calls) == 3
+
+
+def test_a_deferred_skill_keeps_only_its_newest_request_until_the_call_ends(
+    tmp_path: pathlib.Path, monkeypatch,
+) -> None:
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    for reason in ("first", "second", "third"):
+        request_extension_reconcile(drive_root, "voice", reason=reason)
+    calls = _spy_reconcile(monkeypatch, {"action": "extension_reload_pending", "reason": "live_call_active"})
+
+    [deferred] = process_extension_reconcile_requests(drive_root, lambda: {})
+    assert (deferred["reason"], deferred["marker_removed"], deferred["requests"]) == ("live_call_active", False, 3)
+    assert [row["reason"] for row in list_extension_reconcile_requests(drive_root)] == ["third"]
+
+    calls = _spy_reconcile(monkeypatch)
+    [done] = process_extension_reconcile_requests(drive_root, lambda: {})
+    assert calls == ["voice"] and done["marker_removed"] is True
+    assert list_extension_reconcile_requests(drive_root) == []
+
+
+def test_a_failing_skill_counts_its_attempts_on_one_marker_and_records_the_terminal_failure(
+    tmp_path: pathlib.Path, monkeypatch,
+) -> None:
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    for _ in range(4):
+        request_extension_reconcile(drive_root, "broken", reason="dup")
+    calls = _spy_reconcile(monkeypatch, RuntimeError("boom"))
+
+    process_extension_reconcile_requests(drive_root, lambda: {})
+    [pending] = list_extension_reconcile_requests(drive_root)
+    assert pending["attempts"] == 1 and "boom" in pending["last_error"]
+    for _ in range(MAX_ATTEMPTS - 1):
+        process_extension_reconcile_requests(drive_root, lambda: {})
+    assert calls == ["broken"] * MAX_ATTEMPTS, "one attempt per pass, never one per duplicate"
+    assert list_extension_reconcile_requests(drive_root) == []
+    [failed] = list((drive_root / "state" / "extension_reconcile" / "failed").glob("*.json"))
+    assert json.loads(failed.read_text(encoding="utf-8"))["status"] == "failed"
+    events = [json.loads(line) for line in (drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(row["type"], row["skill"], row["attempts"]) for row in events] == [
+        ("extension_reconcile_failed", "broken", MAX_ATTEMPTS)]

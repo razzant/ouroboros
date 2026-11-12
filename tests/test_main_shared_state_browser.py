@@ -13,10 +13,10 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 from tests._shared import producer_evidence_dir
 from tests.ui_chat_viewport_smoke import (
     _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
-    _wait_state_reads_quiescent,
+    _wait_state_reads_quiescent, state_reads,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 _PILL = '#page-chat .chat-toolbar-row > button.chat-question-nav'
 _ACTION = '#chat-messages .chat-bubble.owner-action[data-owner-action="paused-task"]'
@@ -58,11 +58,18 @@ def test_shared_app_read_failure_reaches_main_without_overwriting_newer_question
         page = browser.new_page(viewport={"width": 1100, "height": 900})
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.add_init_script(f"({_CAPTURE_TEST_SOCKET})(); ({_OBSERVE_STATE_READS})();")
+        # A poll reads after awaiting its gate, so its tick is not on the read's stack: the tick names itself until its task ends.
         page.add_init_script("""(() => {
-            const fetch = window.fetch;
+            const fetch = window.fetch, every = window.setInterval;
+            let tick = '';
+            window.setInterval = (run, ...rest) => every((...args) => {
+                tick = run.name;
+                setTimeout(() => { tick = ''; });
+                return run(...args);
+            }, ...rest);
             window.__stateCallers = [];
             window.fetch = (url, init) => {
-                if (String(url).endsWith('/api/state')) window.__stateCallers.push(new Error().stack);
+                if (String(url).split('?')[0].endsWith('/api/state')) window.__stateCallers.push(`${tick}\\n${new Error().stack}`);
                 return fetch(url, init);
             };
         })();""")
@@ -74,7 +81,7 @@ def test_shared_app_read_failure_reaches_main_without_overwriting_newer_question
                 response = route.fetch()
                 route.fulfill(response=response, json={**response.json(), **census})
 
-        page.route("**/api/state", state_read)
+        page.route(state_reads, state_read)
         # A Main copy that lost its authority re-reads its canonical task before it takes
         # answers again; serve that existing read too, rather than treating an unknown
         # synthetic task as a confirmed question.
@@ -147,26 +154,26 @@ def test_shared_app_read_failure_reaches_main_without_overwriting_newer_question
             expect(live).to_have_attribute("data-state", "open")
             stages.append("new complete census restores availability")
             _wait_state_reads_quiescent(page)
-            # The existing Main poll is a second producer of failed reads. Admit
-            # other shared reads normally until that actual consumer is observed.
+            # The page's periodic poll while a room is on screen (app.js) is a second producer of failed reads.
+            # Admit other shared reads normally until that actual consumer is observed.
             holding = True
             chat_read = None
             for _ in range(150):
                 if held:
                     route = held.pop(0)
                     caller = page.evaluate('window.__stateCallers.at(-1)')
-                    if 'refreshHeaderControlState' in caller:
+                    if 'pollShownRoomState' in caller:
                         chat_read = route
                         break
                     response = route.fetch()
                     route.fulfill(response=response, json={**response.json(), **census})
                 page.wait_for_timeout(100)
-            assert chat_read is not None, 'real chat poll was not observed'
+            assert chat_read is not None, 'real room poll was not observed'
             chat_read.fulfill(status=503, json={'error': 'fixture chat state failure'})
             expect(budget).to_have_text('Unavailable')
             expect(resume).to_be_disabled()
             expect(cached).to_have_attribute("data-state", "unknown")
-            stages.append('chat-originated failure remains unavailable rather than loading')
+            stages.append('poll-originated failure remains unavailable rather than loading')
             assert not errors, errors
         finally:
             page.screenshot(path=str(evidence / "last-view.png"))
@@ -224,11 +231,11 @@ def test_project_panel_read_failure_reaches_main_without_overwriting_newer_quest
             const fetch = window.fetch;
             window.__stateCallers = [];
             window.fetch = (url, init) => {
-                if (String(url).endsWith('/api/state')) window.__stateCallers.push(new Error().stack);
+                if (String(url).split('?')[0].endsWith('/api/state')) window.__stateCallers.push(new Error().stack);
                 return fetch(url, init);
             };
         })();""")
-        page.route("**/api/state", lambda route: held.append(route) if holding else admit(route))
+        page.route(state_reads, lambda route: held.append(route) if holding else admit(route))
         page.route("**/api/tasks/question-task", lambda route: route.fulfill(json={
             "task_id": "question-task", "project_id": "build", "question_rooms": {
                 row["quiz_id"]: {"state": "known", "chat_id": 12, "project_id": "build"} for row in [question, newer]}, "owner_quiz": {
@@ -248,7 +255,7 @@ def test_project_panel_read_failure_reaches_main_without_overwriting_newer_quest
             stages.append("cached census enables Resume; the pill mounts its question at its own date")
             _wait_state_reads_quiescent(page)
 
-            # Hold a shared read so Main's periodic poll joins it instead of reading;
+            # Hold a shared read so the page's periodic poll joins it instead of reading;
             # the panel's forced mount read then owns the one coalesced follow-up.
             holding = True
             _emit_ws_frame(page, {"type": "projects_changed"})
@@ -381,7 +388,7 @@ def test_genuine_socket_close_withdraws_main_authority_until_a_fresh_census(dire
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.add_init_script("window.__windowErrors = []; addEventListener('error', e => window.__windowErrors.push(String(e.message)));")
         page.add_init_script(f"({_OBSERVE_STATE_READS})(); ({_REAL_SOCKET_DROP})({json.dumps(refused_url)});")
-        page.route("**/api/state", state_read)
+        page.route(state_reads, state_read)
         page.route("**/api/tasks/question-task", lambda route: route.fulfill(json={
             "task_id": "question-task", "project_id": "build", "question_rooms": {
                 row["quiz_id"]: {"state": "known", "chat_id": 12, "project_id": "build"} for row in [question, newer]}, "owner_quiz": {

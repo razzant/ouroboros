@@ -22,7 +22,7 @@ from tests.test_sidebar_activity_browser import FRAMES, activity, mount_sidebar
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 subscription_ui = setup.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 ROOM = [dict(id="p-fixture", name="Synthetic room", chat_id=42, lifecycle="active", visible_revision=0)]
 
 
@@ -137,8 +137,19 @@ def test_unrelated_system_rows_keep_working_and_sending(subscription_ui, tmp_pat
     assert ui["errors"] == []
 
 
+@pytest.fixture(params=["chromium", "webkit"])
+def engine_ui(request, monkeypatch):
+    """``subscription_ui`` in Chromium and WebKit; the browser that actually launched is checked, not assumed."""
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", request.param)
+    if os.environ.get("OUROBOROS_UI_EVIDENCE_DIR"):  # one engine's screenshots never replace the other's
+        monkeypatch.setenv("OUROBOROS_UI_EVIDENCE_DIR", str(Path(os.environ["OUROBOROS_UI_EVIDENCE_DIR"]) / request.param))
+    ui = request.getfixturevalue("subscription_ui")
+    assert ui["page"].context.browser.browser_type.name == request.param
+    return ui
+
+
 @pytest.mark.parametrize("theme,width", [("light", 1360), ("dark", 1360), ("light", 390)])
-def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, monkeypatch, theme, width):
+def test_reworded_host_rows_live_and_after_reload(engine_ui, tmp_path, monkeypatch, theme, width):
     import supervisor.queue as q
     from ouroboros.cancel_intents import active_intent, request_cancel
     from ouroboros.server_owner_routing import _record_routing_receipt
@@ -149,7 +160,7 @@ def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, mon
     from supervisor.events_schedule_task import _reject_schedule_task
     from supervisor.terminal_delivery import build_unreviewed_salvage_event, deliver_miss_lane_outcome
 
-    ui, out = subscription_ui, _evidence(tmp_path)
+    ui, out = engine_ui, _evidence(tmp_path)
     page = ui["page"]
     bridge, frames = _host(tmp_path, monkeypatch)
     # Each run is its own install: the process-wide delivered-id memo must not dedupe it.
@@ -261,6 +272,7 @@ def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, mon
 
     live = check("live")
     assert all(live.values()), live
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload(wait_until="domcontentloaded")
     page.wait_for_function("() => window.__ouroWs?.ws?.readyState === WebSocket.OPEN")
     page.locator(".msg-routing-annotation").filter(has_text="Message saved for task").wait_for()
@@ -269,7 +281,7 @@ def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, mon
     # The production history endpoint carries the card rows as well as the
     # standalone receipt and mailbox annotation; pin every observed live/replay pair.
     assert all(replay.values()), replay
-    assert ui["errors"] == []
+    assert not ui["errors"].unexpected(), ui["errors"].report()
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1360), ("dark", 1360), ("light", 390)])

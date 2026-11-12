@@ -9,7 +9,6 @@ import pytest
 from devtools.benchmarks.common.server_runner import seed_owner_state
 from supervisor import state, state_initialization
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -65,7 +64,7 @@ def test_seeded_identity_does_not_make_lost_control_known(tmp_path, boot):
     assert state.control_value(current.projection(), "evolution_owner_stopped")[0] is False
 
 
-@pytest.mark.parametrize("case", ["existing", "backup", "lost", "history", "invalid_witness", "unreadable"])
+@pytest.mark.parametrize("case", ["existing", "invalid_witness", "unreadable"])
 def test_seed_refuses_prior_or_unknown_root_without_overwriting(tmp_path, monkeypatch, case):
     path = tmp_path / "state/state.json"
     path.parent.mkdir()

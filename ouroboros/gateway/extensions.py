@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros.extension_loader import list_routes, snapshot
+from ouroboros.deployment_extensions import discloses_failure, failure_words
 from ouroboros.gateway.contributions import contribution_catalog
 from ouroboros.gateway._helpers import (
     coerce_bool,
@@ -229,6 +230,11 @@ def _build_extensions_index(drive_root, repo_path):
         for s in unique_skills
         if s.manifest.is_extension()
     }
+    from ouroboros.deployment_extensions import state_rows, trust_state
+    from ouroboros.deployment_policy import when_unmet
+
+    # What the deployment requires, as this server process observes it; a missing package is still a row.
+    requirements = {row["name"]: {**row, "when_unmet": when_unmet()} for row in state_rows(drive_root, skills=skills)}
 
     def _live_tool_count(skill_name: str) -> int:
         prefix = extension_name_prefix(skill_name)
@@ -268,6 +274,37 @@ def _build_extensions_index(drive_root, repo_path):
     from ouroboros.extension_health import read_extension_health
     from ouroboros.skill_review_runner import skill_review_ui_projection
     from ouroboros.tools.github import github_token_from_env_or_settings
+
+    secret_view: dict[str, Any] = {}
+
+    def _secret_config(skill) -> dict[str, Any] | None:
+        """Whether each declared secret field holds a value: ``configured``, ``missing`` or ``unknown``.
+
+        A derived fact for the card, never a value, prefix or length, and no requirement: whether a
+        skill needs the field, and when it applies a saved one, is the skill's own. The secret form's
+        rule (``configured_fields``) judges one strict read of what skills read (``skill_settings``),
+        shared by the whole index."""
+        from ouroboros.secret_requests import SecretRequestError, configured_fields, declared_secret_fields
+        from ouroboros.settings_integrity import SettingsDocumentUnknown, skill_settings
+
+        try:
+            fields = declared_secret_fields(skill.manifest)
+        except SecretRequestError:
+            return None
+        if not fields:
+            return None
+        if not secret_view:
+            try:
+                secret_view["settings"] = skill_settings(strict=True)
+            except SettingsDocumentUnknown:
+                secret_view["settings"] = None
+        rows = [{"id": field_id, "setting_key": key} for field_id, key in fields.items()]
+        settings = secret_view["settings"]
+        configured = None if settings is None else configured_fields(settings, {"fields": rows})
+        return {"fields": [
+            {"id": row["id"], "key": row["setting_key"],
+             "state": "unknown" if configured is None else "configured" if configured[str(row["id"])] else "missing"}
+            for row in rows]}
     # Request-invariant: resolve the github-token state ONCE for the whole index, not
     # once per skill (FR1 — avoids N settings.json reads per GET /api/extensions).
     _gh_token_configured = (
@@ -284,6 +321,7 @@ def _build_extensions_index(drive_root, repo_path):
                 payload_root = rel_skill_dir.as_posix()
         except Exception:
             payload_root = ""
+        trust = trust_state(s)  # under an execution domain: whether the service runs this extension's code
         entry: dict[str, Any] = {
             "name": s.name,
             "type": s.manifest.type,
@@ -301,6 +339,8 @@ def _build_extensions_index(drive_root, repo_path):
             "content_hash": str(getattr(s, "content_hash", "") or ""),
             "payload_root": payload_root,
             "installed_at": _path_installed_at(s.skill_dir),
+            **({"deployment": requirements[s.name]} if s.name in requirements else {}),
+            **({"trust": trust} if trust is not None else {}),
         }
         if bool(getattr(s, "identity_collision", False)):
             stale = True
@@ -359,6 +399,7 @@ def _build_extensions_index(drive_root, repo_path):
             ),
             "review_findings": list(s.review.findings or []),
             "skill_review": skill_review_ui_projection(drive_root, s.name),
+            "secret_config": _secret_config(s),
             # An extension row reuses the grant status its runtime state computed
             # above (same function, same drive_root and skill): one settings
             # read per skill, not two.
@@ -407,6 +448,8 @@ def _build_extensions_index(drive_root, repo_path):
                     })
         catalog.append(entry)
     return {"skills": catalog, "live": live_snapshot,
+            **({"deployment": {"when_unmet": when_unmet(), "required": list(requirements.values())}}
+               if requirements else {}),
             **contribution_catalog(drive_root, repo_path, skills=skills, live=live_snapshot)}
 
 
@@ -604,8 +647,8 @@ async def api_extension_dispatch(request: Request) -> Response:
             )
             return child_result
         except Exception as exc:
-            log.exception("extension child dispatch failure: %s", mount)
-            return json_error(f"{type(exc).__name__}: {exc}", 502)
+            log.error("extension child dispatch failure: %s", mount, exc_info=discloses_failure(skill))
+            return json_error(failure_words(skill, exc), 502)
     handler = spec.get("handler")
     if not callable(handler):
         return json_error("registered handler is not callable")
@@ -622,8 +665,8 @@ async def api_extension_dispatch(request: Request) -> Response:
             surface=mount,
         )
     except Exception as exc:
-        log.exception("extension cost disclosure failure: %s", mount)
-        return json_error(f"model-cost disclosure failed: {type(exc).__name__}: {exc}", 502)
+        log.error("extension cost disclosure failure: %s", mount, exc_info=discloses_failure(skill))
+        return json_error(f"model-cost disclosure failed: {failure_words(skill, exc)}", 502)
     try:
         if inspect.iscoroutinefunction(handler):
             result = await handler(request)
@@ -632,9 +675,13 @@ async def api_extension_dispatch(request: Request) -> Response:
         if inspect.iscoroutine(result):
             result = await result
     except Exception as exc:
-        log.exception("extension dispatch failure: %s", mount)
-        return json_error(f"{type(exc).__name__}: {exc}")
+        log.error("extension dispatch failure: %s", mount, exc_info=discloses_failure(skill))
+        return json_error(failure_words(skill, exc))
     if isinstance(result, Response):
+        if not discloses_failure(skill):
+            from ouroboros.extension_route_stream import PolicyResponse
+
+            return PolicyResponse(result, skill)
         return result
     return JSONResponse(result if result is not None else {})
 
@@ -644,7 +691,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     sentinel = object()
@@ -711,22 +758,47 @@ async def _run_owner_skill_action(request: Request, skill_name: str, action: str
 
 
 async def api_skill_review(request: Request) -> JSONResponse:
-    """Queue the skill review from the UI without blocking the event loop."""
+    """Queue the skill review from the UI without blocking the event loop. No body (or ``{}``) is a
+    new review of the current bytes. ``SkillReviewRequest`` (``review_reference`` + ``continue_seats``)
+    continues stopped seats of that exact Skills-page review on its own recorded bytes
+    (``skill_review.continue_skill_review``); any other body is refused before a job or a send."""
+    import json
+
+    from ouroboros.review_continuation import ContinuationRefused, parse_selections
+
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
+    try:
+        raw = await request.body()
+        body = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or set(body) - {"review_reference", "continue_seats"}:
+        return json_error("request body must be {} or {review_reference, continue_seats}", 400)
+    try:
+        selections = parse_selections(body["continue_seats"]) if body else None
+        if body and not isinstance(body.get("review_reference"), dict):
+            raise ContinuationRefused("invalid_reference", "review_reference names the review whose seats continue")
+    except (KeyError, ContinuationRefused) as exc:  # nothing decided: no job, no review, no send
+        return json_error(str(exc) if isinstance(exc, ContinuationRefused) else "review_reference needs continue_seats", 400)
 
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
     ctx = _ApiReviewCtx(drive_root, repo_dir)
     from ouroboros.skill_review_runner import run_skill_review_lifecycle
-    from ouroboros.skill_review import review_skill as _review_skill_impl
+    from ouroboros.skill_review import continue_skill_review, review_skill as _review_skill_impl
 
+    review_impl = _review_skill_impl
+    if selections:
+        def review_impl(review_ctx, name):
+            return continue_skill_review(review_ctx, name, reference=body["review_reference"],
+                                         continue_seats=body["continue_seats"])
     payload = await run_skill_review_lifecycle(
         ctx,
         skill_name,
         source="skills",
-        review_impl=_review_skill_impl,
+        review_impl=review_impl,
     )
     return JSONResponse(payload)
 
@@ -736,7 +808,7 @@ async def api_owner_skill_attest_review(request: Request) -> JSONResponse:
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     payload = await _run_owner_skill_action(request, skill_name, "attest", body)
@@ -785,7 +857,7 @@ async def api_skill_grants(request: Request) -> JSONResponse:
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     if "enable_after_grant" in body and not isinstance(body["enable_after_grant"], bool):
@@ -820,7 +892,7 @@ async def api_skill_delete(request: Request) -> JSONResponse:
     skill_name = _sanitize_skill_name(str(request.path_params.get("skill") or "").strip())
     if not skill_name or skill_name == "_unnamed":
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     payload = await _run_owner_skill_action(request, skill_name, "delete", body)

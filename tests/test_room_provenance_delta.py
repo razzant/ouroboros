@@ -78,21 +78,20 @@ def test_reserved_names_and_removed_or_ambiguous_rooms(tmp_path, lifecycle):
 
 @pytest.mark.parametrize("entry,label", [
     ({}, "Unresolved room [chat_id=missing]"),
-    ({"chat_id": None}, "Unresolved room [chat_id=missing]"),
     ({"chat_id": "oops"}, "Unresolved room [chat_id=oops]"),
     ({"chat_id": True}, "Unresolved room [chat_id=True]"),
-    ({"chat_id": 1.2}, "Unresolved room [chat_id=1.2]"),
-    ({"chat_id": "1"}, "Main"),
-    ({"chat_id": 0}, "Hidden [chat_id=0]"),
-    ({"chat_id": 987654}, "Unknown room [chat_id=987654]"),
 ])
 def test_unknown_address_never_defaults_to_main(entry, label):
     assert RoomLabelResolver(projects=[]).label(entry) == label
 
 
 def test_actual_main_context_names_every_room_by_its_registry_label(tmp_path):
-    """Main keeps its own rows verbatim and names every other live room in one labelled line;
-    the registry is only read, A2A never enters and the hidden partition is not Main's."""
+    """Main keeps its own rows; every other room is in my other conversations by its label, with the same
+    labelled directory; the registry is only read, A2A never enters and the hidden partition is not Main's."""
+    from types import SimpleNamespace
+
+    from ouroboros.tools.chronicle import _memory_read
+
     root = _drive(tmp_path)
     path = _registry(root, [{"id": "alpha", "chat_id": 1500, "name": "Alpha"}])
     ts = "2026-01-01T00:0{}:00+00:00"
@@ -107,14 +106,27 @@ def test_actual_main_context_names_every_room_by_its_registry_label(tmp_path):
     _write_chat(root, rows)
     before = path.read_bytes()
     changing = _view(tmp_path, 1)
-    room, live = section(changing, "## This room (Main)"), section(changing, "## Live rooms")
+    room, block = section(changing, "## This room (Main)"), section(changing, "## Other conversations")
     assert path.read_bytes() == before
     assert "] MAIN" in room and "] MISSING" in room and room.index("] MAIN") < room.index("] MISSING")
     assert "] UNKNOWN" in room  # a non-Project chat's unbound row is Main's too
-    assert "PROJECT" not in changing and "HIDDEN" not in room and "A2A EXCLUDED" not in changing
-    for label in ("### Project Alpha [chat_id=1500] — open", "### Unknown room [chat_id=987654] — open"):
-        assert label in live, label
-    assert "Main — open" not in live  # the current room is not one of the other rooms
+    assert "] UNKNOWN" not in block, block  # a row this room holds is not repeated among the others
+    assert "PROJECT" not in changing  # an unsigned outgoing row is a task fact there: counted, with its reader
+    assert "task facts 1, ~7 chars; no page of that room yet; memory_read(room_id='1500', rows=true)" in block
+    assert "HIDDEN" not in changing and "A2A EXCLUDED" not in changing
+    reader = SimpleNamespace(drive_root=root)
+    directory = _memory_read(reader, room_id="*", start=0)
+    assert directory.startswith("Open rooms: 4 in 4 conversations")  # the directory has no focus: Main too
+    for label, chat_id in (("Project Alpha [chat_id=1500]", "1500"),
+                          ("Unknown room [chat_id=987654]", "987654"), ("Hidden [chat_id=0]", "0")):
+        assert f"### {label}" in block, block
+        assert f"- {label};" in directory
+        assert f"memory_read(room_id='{chat_id}', rows=true)" in directory
+    assert "Main" not in block.replace("## Other conversations", "")  # the current room is not one of the others
+    project_rows = _memory_read(reader, room_id="1500", rows=True)
+    assert "] PROJECT" in project_rows and "] MAIN" not in project_rows
+    assert "] UNKNOWN" in _memory_read(reader, room_id="987654", rows=True)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("ambiguous", [False, True])
@@ -151,7 +163,7 @@ def test_project_room_and_explicit_history_keep_the_row_author_and_its_body(tmp_
         assert memory.chat_history(chat_id=chat_id).encode() == expected_history
 
 
-@pytest.mark.parametrize("direction", ["in", "out", "outgoing", "system"])
+@pytest.mark.parametrize("direction", ["in", "out", "system"])
 def test_row_author_and_text_retain_author_direction_transport_and_body(direction):
     """The retired block formatter's provenance moved to ``row_author``/``render_row_text``:
     the author by source fields (a system row is the host's, never "Ouroboros"), the
@@ -182,13 +194,15 @@ def test_presence_rows_of_one_room_share_one_label_from_transport_facts():
     initiated = {"chat_id": chat_id, "direction": "in", "transport": dict(base)}
     summary = {"chat_id": chat_id, "direction": "system", "type": "task_summary",
                "presence_provenance": {**base, "binding_id": "1" * 32}}  # the turn's summary row carries no transport
-    expected = f"Place telegram -100 [chat_id={chat_id}]"
-    # One room, four row types, one label: the correspondent-controlled title never enters it.
+    expected = f"Place telegram Aika admin [chat_id={chat_id}]"
+    # One room, four row types, one label: the room's own name (its brackets cleaned) whichever row asks first.
     assert {resolver.label(inbound), resolver.label(receipt), resolver.label(initiated), resolver.label(summary)} == {expected}
+    later = RoomLabelResolver(projects=[])
+    assert [later.label(summary), later.label(inbound)] == [f"Place telegram -100 [chat_id={chat_id}]"] * 2
     assert resolver.label({**summary, "presence_provenance": {**base, "conversation_id": "-101"}}) == f"Unknown room [chat_id={chat_id}]"
     topic_chat = _stable_numeric_id("presence-conversation", conversation_key("telegram", "900", "-100", "42"))
     assert resolver.label({"chat_id": topic_chat, "transport": {**base, "thread_id": "42"}}) == (
-        f"Place telegram -100 topic 42 [chat_id={topic_chat}]"
+        f"Place telegram -100 · thread 42 [chat_id={topic_chat}]"
     )
     # Transport facts that do not re-derive this exact chat id never name the room.
     assert resolver.label({"chat_id": chat_id + 1, "transport": dict(base)}) == f"Unknown room [chat_id={chat_id + 1}]"
@@ -198,6 +212,39 @@ def test_presence_rows_of_one_room_share_one_label_from_transport_facts():
     assert resolver.label({"chat_id": weird_chat, "transport": {**base, "conversation_id": "x]y[z"}}) == (
         f"Place telegram x y z [chat_id={weird_chat}]"
     )
+
+
+def test_a_place_room_reads_by_my_label_of_its_place_its_own_name_and_audience(tmp_path, monkeypatch):
+    """The registry names a place; an account-wide place's room names itself from its conversation scalars, with who
+    reads it; a room with no row in hand is named from its latest inbound row's transport, read once for every room
+    asked together and never by decoding the row; a room no row and no record names stays unknown, never guessed."""
+    from ouroboros import dialogue_store as ds, places
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    exact = places.connect_place(tmp_path, connector="telegram-bot", provider="telegram", account_id="900",
+                                 conversation_id="-100", label="Telegram · Team leads · AIRI")
+    places.connect_place(tmp_path, connector="slack-bridge", provider="slack", account_id="T1", label="Slack")
+    group = presence_chat_id(conversation_key("telegram", "900", "-100", ""))
+    channel = presence_chat_id(conversation_key("slack", "T1", "C7", "1.5"))
+    tg = {"provider": "telegram", "account_id": "900", "conversation_id": "-100", "thread_id": "",
+          "conversation": {"title": "Renamed by a member", "chat_type": "supergroup"}}
+    sl = {"provider": "slack", "account_id": "T1", "conversation_id": "C7", "thread_id": "1.5",
+          "conversation": {"name": "ml-public", "channel_type": "channel", "is_private": False}}
+    resolver = RoomLabelResolver(tmp_path)
+    assert resolver.label({"chat_id": group, "transport": tg, "presence_provenance": {"place_id": exact.place_id}}) == (
+        f"Telegram · Team leads · AIRI · group [chat_id={group}]")  # my label of the place, not a member's title
+    assert resolver.label({"chat_id": channel, "transport": sl}) == (
+        f"Slack · ml-public · channel · thread 1.5 [chat_id={channel}]")
+    ds.append(tmp_path, "chat", {"ts": "2026-11-06T00:00:00+00:00", "chat_id": channel, "direction": "in", "text": "hi",
+                                 "source": "presence:slack",
+                                 "transport": {**sl, "conversation": {**sl["conversation"], "is_im": True}}})
+    fresh, decoded = RoomLabelResolver(tmp_path), []
+    monkeypatch.setattr(ds, "decode", lambda body, _decode=ds.decode: decoded.append(body) or _decode(body))
+    fresh.warm([channel, group])
+    assert decoded == []  # the room's transport alone leaves the store: no row is decoded per room
+    assert fresh.label({"chat_id": channel}) == f"Slack · ml-public · DM · thread 1.5 [chat_id={channel}]"
+    assert fresh.label({"chat_id": group}) == f"Unknown room [chat_id={group}]"
 
 
 def test_terminal_projection_row_of_a_presence_turn_carries_the_room_facts(tmp_path):

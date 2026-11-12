@@ -23,12 +23,17 @@ from tests.worker_pool_support import affirm_ready
 
 # --------------------------------------------------------------------------- supervisor: park
 
-def test_exact_pause_event_parks_same_task_id_and_confirms_row(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reason,rail,code", [("budget", "global_exhausted", "budget_paused"),
+    ("owner", "owner_pause", "owner_paused"), ("sleep", "model_sleep", "model_sleeping")])
+def test_exact_pause_event_parks_same_task_id_and_confirms_row(tmp_path, monkeypatch, reason, rail, code):
     from ouroboros import budget_pause
+    from ouroboros.task_results import load_task_result
     from supervisor.events import _handle_budget_pause
 
     queue, _state, workers = _install_queue(tmp_path, monkeypatch)
     ctx, _limit, pause = _pause(tmp_path, monkeypatch, scope="root")
+    pause.update(reason=reason, rail=rail)
+    budget_pause.set_budget_pause(tmp_path, ctx.task_id, pause, expected_pause_id=pause["pause_id"])
     budget_pause.end_dispatch_fence(ctx.task_id)
     task = {"id": ctx.task_id, "type": "task", "chat_id": 3, "root_task_id": ctx.task_id, "_attempt": 1}
     worker = SimpleNamespace(busy_task_id=ctx.task_id)
@@ -49,6 +54,17 @@ def test_exact_pause_event_parks_same_task_id_and_confirms_row(tmp_path, monkeyp
     assert persisted == ["budget_pause_exact_continuation"]
     assert pushed[0]["type"] == "budget_scope_paused" and pushed[0]["pause_id"] == pause["pause_id"]
     assert "checkpoint" not in pushed[0]
+    assert not {"owner_visible", "toast_once"}.intersection(pushed[0])
+    result = load_task_result(tmp_path, ctx.task_id)
+    assert result["reason_code"] == code
+    assert result["cost_final"] is False
+    if reason == "sleep":
+        assert pushed[0]["pause_reason"] == "sleep" and pushed[0]["rail"] == "model_sleep"
+        assert "sleeping" in result["result"] and "selected wake condition" in result["result"]
+        assert "budget" not in result["result"] and "explicit Resume" not in result["result"]
+    else:
+        assert "an explicit Resume continues the same task" in result["result"]
+        assert ("(budget)" if reason == "budget" else "(Pause)") in result["result"]
     # The queue predicate already reads the marker: no false "queued".
     from supervisor.queue_transitions import budget_pause_fact
 
@@ -98,7 +114,7 @@ def test_late_park_confirmation_never_regresses_a_live_grant(tmp_path, monkeypat
     assert after["grant"]["grant_id"] == "g-live"  # the live grant is intact
     assert "paused_confirmed_at" not in after
     assert pushed[-1]["type"] == "budget_pause_park_superseded"
-    assert pushed[-1]["owner_visible"] is False and "toast_once" not in pushed[-1]
+    assert not {"owner_visible", "toast_once"}.intersection(pushed[-1])
     assert pushed[-1]["park_state"] == budget_pause.STATE_RESUME_GRANTED
     # The owner-facing status projection belongs to the newer writer, not to us.
     assert load_task_result(tmp_path, "late-1", strict=True).get("reason_code") != "budget_paused"
@@ -213,6 +229,19 @@ def test_worker_death_after_a_consumed_grant_is_not_reopened(tmp_path, monkeypat
 
 
 # --------------------------------------------------------------------------- supervisor: resume
+
+def test_a_reached_limit_refuses_resume_only_for_work_that_needs_paid_admission(monkeypatch):
+    """A money pause named a refused paid send and still refuses; a $0 route's other pauses resume."""
+    from types import SimpleNamespace
+    from supervisor import budget_resume
+
+    q, zero = SimpleNamespace(load_state=lambda: {}), (lambda *_a, **_k: 0.0)
+    monkeypatch.setenv("OUROBOROS_MODEL", "claudexor::codex=gpt-6-astra")
+    assert budget_resume._global_money_refusal(q, zero, [{"id": "t"}]) is None
+    assert budget_resume._global_money_refusal(q, zero)["error"] == "budget_still_exhausted"
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-5.2")
+    assert budget_resume._global_money_refusal(q, zero, [{"id": "t"}])["error"] == "budget_still_exhausted"
+
 
 def test_resume_refuses_while_money_is_still_exhausted(tmp_path, monkeypatch):
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
@@ -568,14 +597,14 @@ def test_threshold_refresh_reads_the_ledger_now_never_a_cached_snapshot(tmp_path
 
 def test_state_phase_budget_pausing_reads_the_durable_row(tmp_path, monkeypatch):
     from ouroboros import budget_pause
-    from ouroboros.gateway import state as gw_state
+    from ouroboros.work_stop import row_pausing
 
     ctx, _limit, _pause_row = _pause(tmp_path, monkeypatch, task_id="phase-1")
     budget_pause.end_dispatch_fence("phase-1")
     row = {"_attempt": 1, "budget_drive_root": str(tmp_path)}
-    assert gw_state._managed_task_budget_pausing(tmp_path, row, "phase-1") is True
-    assert gw_state._managed_task_budget_pausing(tmp_path, {"_attempt": 2}, "phase-1") is False
-    assert gw_state._managed_task_budget_pausing(tmp_path, {"_attempt": 1}, "absent") is False
+    assert row_pausing(tmp_path, row, "phase-1") is True
+    assert row_pausing(tmp_path, {"_attempt": 2}, "phase-1") is False
+    assert row_pausing(tmp_path, {"_attempt": 1}, "absent") is False
 
 
 def test_resume_child_tool_only_targets_own_children(monkeypatch):

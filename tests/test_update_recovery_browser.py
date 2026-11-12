@@ -10,7 +10,7 @@ import pytest
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_update_letter_browser import BOOT, WEB
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize('tx, headline', [
@@ -62,7 +62,7 @@ def test_pending_restore_explains_real_server_restart(width, tx, headline, tmp_p
                 page.locator('#btn-update-primary').click()
                 page.wait_for_function("document.querySelector('#btn-update-primary').textContent.trim() === 'Check again'")
                 assert not any('/api/restart' in url or '/api/update/apply' in url for _method, url in requests)
-                image = diagnostic_directory(tmp_path, 'update-recovery') / f'update-recovery-{tx["phase"]}-{width}.png'
+                image = diagnostic_directory(tmp_path, 'update-recovery', publish=True) / f'update-recovery-{tx["phase"]}-{width}.png'
                 page.screenshot(path=str(image), full_page=True)
                 print(f'UPDATE_RECOVERY_SCREENSHOT={image}')
             finally:

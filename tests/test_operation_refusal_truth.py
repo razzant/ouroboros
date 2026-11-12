@@ -10,7 +10,6 @@ from ouroboros import mcp_client, owner_pause
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import claims, owner, run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("code,status", [("OWNER_OPERATION_REFUSED", "blocked"),
@@ -198,6 +197,7 @@ def test_retired_service_is_not_whole_call_no_effect(tmp_path, monkeypatch, fail
 
     def retire(*_args, **_kwargs):
         marker.write_text("retired previous record")
+        services._SERVICES.pop(key)  # a stop that returned frees the name
         return "stopped"
     monkeypatch.setattr(services, "_stop_service", retire)
     monkeypatch.setattr(services, "_executor_can_run_cwd", lambda *_args: True)

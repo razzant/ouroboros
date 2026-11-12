@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { mainLogFrameAccepts, mainThreadAccepts } from '../modules/chat_activity.js';
+import { chatLogThreadAccepts, chatThreadAccepts, mainLogFrameAccepts, mainThreadAccepts } from '../modules/chat_activity.js';
 
 const known = new Set([60193030]);
 
@@ -40,4 +40,13 @@ test('server stamp rejects a project frame the client has not learned yet', () =
 test('stamp is authoritative regardless of chat_id shape', () => {
     assert.equal(mainThreadAccepts({ chat_id: 1, project_thread: true }, known), false);
     assert.equal(mainThreadAccepts({ project_thread: true }, known), false);
+});
+
+test('a Project instance also adopts the one frame of its work written to Main, and no other room does', () => {
+    const notice = { chat_id: 1, also_rooms: [60193030], system_type: 'main_notice' };
+    assert.equal(chatThreadAccepts(notice, false, 60193030, known), true);   // its work's Project
+    assert.equal(chatThreadAccepts(notice, true, 1, known), true);           // Main, where it was written
+    assert.equal(chatThreadAccepts(notice, false, 77777777, known), false);  // an unrelated Project
+    assert.equal(chatThreadAccepts({ chat_id: 1, system_type: 'main_notice' }, false, 60193030, known), false);
+    assert.equal(chatLogThreadAccepts({ chat_id: 1, data: { chat_id: 1, also_rooms: [60193030] } }, false, 60193030, known), true);
 });

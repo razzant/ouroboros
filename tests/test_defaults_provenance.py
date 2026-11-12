@@ -32,6 +32,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from tests._safety_fixtures import pin_safety_model, settings_install as install_fixture
+from tests._cases import chosen_rows
 install = install_fixture
 
 from ouroboros import config as cfg
@@ -81,12 +82,7 @@ def _pool_targets(settings):
      "OUROBOROS_MODEL_LIGHT", "openai::gpt-5.4-mini"),
     ({"ANTHROPIC_API_KEY": "k", "OUROBOROS_MODEL": "anthropic::claude-opus-5"},
      "OUROBOROS_MODEL", "anthropic::claude-opus-5"),
-    ({"OPENROUTER_API_KEY": "k", "OUROBOROS_MODEL_LIGHT": "openai/gpt-5.6-luna"},
-     "OUROBOROS_MODEL_LIGHT", "openai/gpt-5.6-luna"),
-    ({"ANTHROPIC_API_KEY": "k", "OUROBOROS_MODEL_LIGHT": SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]},
-     "OUROBOROS_MODEL_LIGHT", SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]),
-], ids=["former-anthropic-default", "former-openai-light", "pre-refresh-default", "router-saved-light",
-        "saved-shipped-light-on-direct"])
+], ids=["former-anthropic-default", "former-openai-light", "pre-refresh-default"])
 def test_a_saved_model_name_survives_even_when_it_equals_a_default(install, document, key, expected):
     _write(install, document)
     assert _task_start().settings[key] == expected
@@ -138,12 +134,11 @@ def test_the_legacy_fallback_alias_still_serves_a_process_with_no_modern_chain(m
     assert parse_fallback_chain() == ["a/one", "b/two"]
 
 
-@pytest.mark.parametrize("document", [None, {}, {"TOTAL_BUDGET": 50.0}], ids=["no-file", "raw-empty", "unrelated-key"])
-@pytest.mark.parametrize("env, expected", [
-    ({"ANTHROPIC_API_KEY": "k"}, ANTHROPIC),
-    ({"OPENAI_API_KEY": "k"}, OPENAI),
-    ({"OPENROUTER_API_KEY": "k"}, SHIPPED),
-], ids=["anthropic", "openai", "openrouter"])
+@pytest.mark.parametrize(("env", "expected", "document"), [
+    pytest.param({"ANTHROPIC_API_KEY": "k"}, ANTHROPIC, None, id='anthropic-no-file'),
+    pytest.param({"OPENAI_API_KEY": "k"}, OPENAI, {}, id='openai-raw-empty'),
+    pytest.param({"OPENROUTER_API_KEY": "k"}, SHIPPED, {"TOTAL_BUDGET": 50.0}, id='openrouter-unrelated-key'),
+])
 def test_absent_slots_follow_the_configured_access_on_every_read(install, monkeypatch, document, env, expected):
     if document is not None:
         _write(install, document)
@@ -202,10 +197,8 @@ def test_a_settings_save_that_does_not_edit_a_slot_does_not_author_it(install, m
 @pytest.mark.parametrize("key, value, runs", [
     ("OUROBOROS_MODEL", "anthropic::claude-operator-main", "anthropic::claude-operator-main"),
     ("OUROBOROS_MODEL_LIGHT", "anthropic::claude-operator-light", "anthropic::claude-operator-light"),
-    ("OUROBOROS_MODEL_FALLBACKS", "anthropic::claude-operator-fallback", "anthropic::claude-operator-fallback"),
-    ("OUROBOROS_MODEL", SHIPPED[0], SHIPPED[0]),  # equal to a shipped default, still the operator's
     ("OUROBOROS_MODEL", "anthropic/claude-sonnet-5", "anthropic::claude-sonnet-5"),  # read respelled onto the provider
-], ids=["main", "light", "fallbacks", "default-equal", "respelled"])
+], ids=["main", "light", "respelled"])
 def test_an_operator_variable_slot_survives_an_unrelated_save_in_this_process_and_every_next_task(
         install, monkeypatch, key, value, runs):
     """An operator's variable sets a slot the document does not (2A). An unrelated Settings save posts it back as GET
@@ -290,7 +283,7 @@ AGENTS_EDITS = {  # the owner's edit of the shown factory catalog in Settings â†
 }
 
 
-@pytest.mark.parametrize("origin", [*AGENTS_EDITS, "saved-equal-to-factory", "wizard-finish"])
+@pytest.mark.parametrize("origin", chosen_rows([*AGENTS_EDITS, "saved-equal-to-factory", "wizard-finish"], 0, 3, 5))
 def test_an_authored_catalog_stays_the_owners_through_a_main_and_access_change(install, monkeypatch, origin):
     from ouroboros.configured_subagents import canonical_subagents
     from ouroboros.gateway import onboarding

@@ -22,7 +22,7 @@ from tests.test_ui_smoke_playwright import _browser_missing, _open_review_checkp
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 WIDTHS = {"phone": {"width": 390, "height": 844}, "desktop": {"width": 1280, "height": 900}}
 TASK_ID = "pool-card"
@@ -112,6 +112,12 @@ def test_review_pool_card_and_reviewer_caption_at_phone_and_desktop_widths(direc
                         assert line in shown, (name, line, shown)
                     assert any(line.startswith("Reviewer critic: adviser, not counted · cost unknown") for line in shown)
                     _assert_contained(page, detail, viewport["width"])
+                    # Record facts keeps its values readable at every width: a long label never squeezes the value
+                    # column below the label column (a phone once read the record id two characters a line).
+                    columns = detail.locator('dl').evaluate("""dl => { const dt = dl.querySelector('dt');
+                        const dd = dt?.nextElementSibling; return dt && dd ? [dt.getBoundingClientRect().width,
+                        dd.getBoundingClientRect().width] : null; }""")
+                    assert columns and columns[1] >= columns[0], (name, columns)
                     detail.scroll_into_view_if_needed()
                     card.screenshot(path=str(evidence / f"review-pool-card-{name}.png"))
                     page.close()

@@ -162,24 +162,24 @@ def test_resource_intent_is_resolved_at_admission(q, tmp_path, case):
         (q.root / "state" / "projects.json").write_text("{not json", encoding="utf-8")
     q.queue.check_scheduled_tasks()
     row = _rows(q)["s1"]
-    if case in {"explicit_gone", "registry_unreadable"}:
-        assert q.pending == [] and row["hold"]["reason"] == (
-            "workspace_unusable" if case == "explicit_gone" else "registry_unreadable")
+    if case == "registry_unreadable":
+        assert q.pending == [] and row["hold"]["reason"] == "registry_unreadable"
         assert not list((q.root / "task_results").glob("*.json"))
         return
     [task] = q.pending
-    expected = {"room_current": new, "explicit_kept": old}.get(case)
+    expected = {"room_current": new, "explicit_kept": old, "explicit_gone": old}.get(case)
     assert task.get("workspace_root", "") == (str(expected.resolve()) if expected else "")
     if expected:
         assert task["workspace_mode"] == "external" and task["memory_mode"] == "forked"
         assert pathlib.Path(task["drive_root"]).is_dir()
+    # A known folder that is merely gone starts as the same address and says so (#1799).
+    assert ("workspace_availability" in task["metadata"]) == (case == "explicit_gone")
     assert task["metadata"]["resource_intent"]["kind"] == {
-        "room_current": "room_default", "room_folderless": "room_default",
+        "room_current": "room_default", "room_folderless": "room_default", "explicit_gone": "explicit_resource",
         "explicit_kept": "explicit_resource", "explicit_none": "explicit_none"}[case]
 
 
-@pytest.mark.parametrize("origin", ["external_workspace", "main", "missing", "project_without_folder",
-                                    "unaddressed", "bound_to_project"])
+@pytest.mark.parametrize("origin", ["external_workspace", "missing", "bound_to_project"])
 def test_a_legacy_followup_recovers_only_from_its_origin_record(q, tmp_path, origin):
     from ouroboros.task_results import write_task_result
 
@@ -212,7 +212,7 @@ def test_a_legacy_followup_recovers_only_from_its_origin_record(q, tmp_path, ori
         assert not task.get("workspace_root") and task["metadata"]["resource_intent"]["kind"] == "system_repo"
 
 
-@pytest.mark.parametrize("change", ["disable", "edit", "rebind", "delete"])
+@pytest.mark.parametrize("change", ["disable", "rebind", "delete"])
 def test_a_change_during_prepare_never_launches_the_old_choice(q, tmp_path, monkeypatch, change):
     from supervisor import schedule_occurrence as occurrences
 

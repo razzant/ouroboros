@@ -448,15 +448,18 @@ def review_index_view(mandatory: Mapping[str, Any], family: str, *, task_id: str
             continue
         addressed = False
         if "plan_ask" in wave:  # the plan record's ask: its message, participants and replies live in the record
+            from ouroboros.plan_record import ask_subject
+
             ask = wave.get("plan_ask")
             if task_id:
-                entry("plan_record:" + task_id, "this task's plan record: every revision, ask (message, attached evidence "
-                      "manifest), participant status and reply", {"tool": "get_task_result", "arguments": {
+                entry("plan_record:" + task_id, "this task's plan record: every revision, ask (message, the evidence "
+                      "it declared and attached, and each locator cut or not attached with its reason), participant "
+                      "status and reply", {"tool": "get_task_result", "arguments": {
                           "task_id": task_id, "include_authority": True}, "field": "plan_record"})
                 addressed = True
             for row in wave.get("reviewers") or []:
                 if isinstance(row, Mapping) and isinstance(row.get("response"), Mapping):
-                    address(row["response"].get("source"), f"reply of {_seat(row)} to plan ask {ask} on revision {wave.get('revision')}")
+                    address(row["response"].get("source"), f"reply of {_seat(row)} to plan ask {ask} on {ask_subject(wave.get('revision'))}")
         elif wave.get("review_record_id"):  # a review ledger record
             rid = str(wave["review_record_id"])
             verdict = wave.get("verdict")

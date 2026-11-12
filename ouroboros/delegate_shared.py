@@ -68,6 +68,8 @@ _AGENT_FAULT_REASONS = frozenset({
     # The engine's typed rejection of a live message whose message_id was
     # replayed with DIFFERENT text: the caller reused an invocation identity.
     "idempotency_conflict",
+    "input_files_invalid",
+    "input_files_readonly_only",
     "message_text_required",
     "message_frame_conflict",
     "reply_to_mismatch",
@@ -140,6 +142,10 @@ def publish_delegate_result(ctx: Any, result: ToolResult) -> str:
 
 
 def _fail(tool: str, code: str, detail: str, **extra: Any) -> ToolResult:
+    if tool == "delegate_start" and "engine_pool" not in extra:
+        from ouroboros.engine_facts import engine_pool_line  # a refused start states the engine and pool facts
+
+        extra["engine_pool"] = engine_pool_line()
     payload = {
         "status": "refused", "ok": False, "tool": tool, "reason": code,
         "host_code": refusal_host_code(code), "detail": detail, **extra,
@@ -149,7 +155,7 @@ def _fail(tool: str, code: str, detail: str, **extra: Any) -> ToolResult:
 
 # The typed facts a refused snapshot provision may carry; the same keys ride the
 # refusal payload, the $0 terminal, the availability row and the START_FAILED row.
-REFUSAL_FACT_KEYS = ("cause", "holder", "waited_sec", "retryable", "retry_hint")
+REFUSAL_FACT_KEYS = ("cause", "holder", "waited_sec", "retryable", "retry_hint", "input_files")
 
 
 def _emit(ctx: ToolContext, kind: str, payload: Dict[str, Any]) -> bool:
@@ -422,6 +428,7 @@ def orphan_apply_target_ok(target: Any, active_root: Any) -> bool:
     through ``workspace_copies.copy_apply_refusal``; this predicate grants none.
     """
     from ouroboros.config import get_subagent_projects_root, get_subagent_worktree_root
+    from ouroboros.launch_roots import WorkRootUnavailable
     from ouroboros.tool_access import path_is_relative_to
 
     try:
@@ -433,8 +440,14 @@ def orphan_apply_target_ok(target: Any, active_root: Any) -> bool:
         return False
     if target_path == root_path:
         return True
-    return any(path_is_relative_to(target_path, pathlib.Path(root()).expanduser().resolve(strict=False))
-               for root in (get_subagent_projects_root, get_subagent_worktree_root))
+
+    def inside(root) -> bool:
+        try:
+            return path_is_relative_to(target_path, pathlib.Path(root()).expanduser().resolve(strict=False))
+        except WorkRootUnavailable:  # an undecided default root contains nothing
+            return False
+
+    return any(inside(root) for root in (get_subagent_projects_root, get_subagent_worktree_root))
 
 
 def orphan_capture_read_target(

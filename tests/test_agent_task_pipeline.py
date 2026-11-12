@@ -30,7 +30,7 @@ def test_direct_project_completion_writes_the_real_last_result_pointer(tmp_path,
 def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     memory_calls = []
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: memory_calls.append("scratchpad"))
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", lambda *args, **kwargs: memory_calls.append("draft"))
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: memory_calls.append("post_task"))
 
     pending_events = []
@@ -132,7 +132,7 @@ def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypat
 def test_lineage_child_without_delegation_role_cannot_run_global_post_task(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     memory_calls = []
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a, **k: memory_calls.append("scratchpad"))
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", lambda *a, **k: memory_calls.append("draft"))
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: memory_calls.append("post_task"))
     drive_logs = tmp_path / "logs-child-lineage"
     drive_logs.mkdir()
@@ -167,7 +167,6 @@ def test_split_drive_root_runs_one_canonical_post_task_synthesis(tmp_path, monke
     (child / "logs").mkdir()
     (canonical / "logs").mkdir()
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a, **k: None)
     calls = []
 
     def fake_post(env, task, *_args, **_kwargs):
@@ -249,7 +248,6 @@ def test_task_result_and_task_done_mirror_authoritative_review_status(tmp_path, 
 def test_direct_typed_routing_delivers_nonempty_final_and_keeps_receipt_metadata(tmp_path, monkeypatch):
     """A typed receipt annotates the owner message; normalized final model prose
     remains one durable assistant reply for every routing action."""
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: None)
     drive_logs = tmp_path / "routing-logs"
     drive_logs.mkdir(parents=True)
@@ -303,7 +301,6 @@ def test_direct_typed_routing_delivers_nonempty_final_and_keeps_receipt_metadata
 def test_emit_project_scoped_parent_drive_gets_only_global_backlog_channel(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "load_task_result", lambda *args, **kwargs: {})
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: None)
 
     parent = tmp_path / "parent"
     child = tmp_path / "child"
@@ -374,14 +371,13 @@ def test_truncate_with_notice_uses_utils_ssot():
 
 
 def test_emit_task_results_surfaces_receipt_absent_flag_in_event_stream(tmp_path, monkeypatch):
-    # Regression: the receipt_absent / expected_output_ungrounded objective-axis flag must reach
+    # Regression: the receipt_absent objective-axis flag must reach
     # the task_eval (events.jsonl) and task_metrics (pending_events) monitoring streams — where the
     # day-1 kill-switch metric reads it — not only the stored task_result.json. Previously the flag
     # was applied inside _store_task_result, AFTER the events were already emitted from an un-flagged
     # outcome, so the event stream never saw it.
     captured = {}
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *a, **k: captured.update(k))
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
 
     pending_events = []
@@ -415,6 +411,36 @@ def test_emit_task_results_surfaces_receipt_absent_flag_in_event_stream(tmp_path
     assert captured["loop_outcome"]["outcome_axes"]["objective"].get("warning") == "receipt_absent"
 
 
+def test_declared_output_answered_in_prose_without_tools_finishes_done(tmp_path, monkeypatch):
+    # A consultation that declared expected_output and answered in plain prose, with no tool
+    # call and no FINAL ANSWER marker, once read "Done with warnings" (the retired M2 check).
+    from ouroboros.outcomes import normalize_outcome_axes
+    from ouroboros.project_dialogue import outcome_phase
+
+    captured = {}
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *a, **k: captured.update(k))
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
+    pending_events = []
+    drive_logs = tmp_path / "logs"
+    drive_logs.mkdir(parents=True)
+    pipeline.emit_task_results(
+        env=SimpleNamespace(drive_root=tmp_path), memory=object(), llm=object(),
+        pending_events=pending_events,
+        task={"id": "prose", "type": "task", "chat_id": 1, "text": "which option?",
+              "expected_output": "a recommendation with its reasons"},
+        text="Take option B: it keeps the history and costs nothing to undo.",
+        usage={"rounds": 1, "cost": 0.01},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        start_time=0.0, drive_logs=drive_logs, ctx=SimpleNamespace(pending_restart_reason=""),
+    )
+    objective = captured["loop_outcome"]["outcome_axes"]["objective"]
+    assert "warning" not in objective and "warnings" not in objective
+    metrics = next(e for e in pending_events if e["type"] == "task_metrics")
+    assert "warning" not in metrics["outcome_axes"]["objective"]
+    axes = normalize_outcome_axes({"outcome_axes": captured["loop_outcome"]["outcome_axes"]})
+    assert outcome_phase({"status": "completed", "reason_code": "final_message", "outcome_axes": axes}, {}) == "done"
+
+
 def test_stopped_direct_turn_pays_no_post_task_synthesis(tmp_path, monkeypatch):
     """"Stop now" on a direct-chat turn: ZERO model calls after the stop, end to
     end through the real post-task lane. The loop's hard stop records the
@@ -423,7 +449,8 @@ def test_stopped_direct_turn_pays_no_post_task_synthesis(tmp_path, monkeypatch):
     runs, so the post-task worker is never dispatched and no open
     ``root_phase_checkpoint`` is seeded for the boot reconciler to re-pay. A
     positive control (the same turn, not stopped) proves the recording model
-    would have seen the paid scratchpad upkeep call. Neither turn buys a narrative:
+    would have seen the paid post-task chooser call (the scratchpad upkeep call that
+    used to serve here is retired, #918). Neither turn buys a narrative:
     both keep free host facts even when Stop prevents the worker from starting."""
     import ouroboros.llm as llm_mod
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
@@ -465,11 +492,8 @@ def test_stopped_direct_turn_pays_no_post_task_synthesis(tmp_path, monkeypatch):
     (root / "memory").mkdir()
     (root / "repo").mkdir()
     env = SimpleNamespace(drive_root=root, repo_dir=root / "repo", drive_path=lambda rel: root / rel)
-    # A scratchpad big enough for its upkeep: the unstopped turn's paid post-step would fire.
-    from ouroboros.memory import Memory
-
-    for index in range(4):
-        Memory(root).append_scratchpad_block(f"note-{index}-" + "x" * 8_000, source=f"task-{index}")
+    # The owner-enabled chooser: the unstopped turn's paid post-step would fire.
+    monkeypatch.setenv("OUROBOROS_POST_TASK_EVOLUTION", "true")
     llm_trace = {"reasoning_notes": [], "tool_calls": [
         {"tool": "list_files", "arguments": {}, "result": "ok", "is_error": False}]}
 
@@ -525,11 +549,11 @@ def test_stopped_direct_turn_pays_no_post_task_synthesis(tmp_path, monkeypatch):
 
 # --- "Stop now" while the paid synthesis is ALREADY in flight (audit point 4, G18) ---
 
-_STAGES = ("memory_fallback_draft", "scratchpad_consolidation", "promotion")
+_STAGES = ("memory_fallback_draft", "promotion")
 
 
 def _stubbed_stages(monkeypatch, calls, *, on_first=None):
-    """Record the free facts row and the three paid stages in order; ``on_first`` runs
+    """Record the free facts row and the two paid stages in order; ``on_first`` runs
     INSIDE stage 1 (the Stop lands after the synthesis has begun, past the entry snapshot)."""
     import ouroboros.llm as llm_mod
     import ouroboros.post_task_evolution as pte
@@ -545,7 +569,6 @@ def _stubbed_stages(monkeypatch, calls, *, on_first=None):
         return _f
 
     monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", _stage("memory_fallback_draft"))
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", _stage("scratchpad_consolidation"))
     monkeypatch.setattr(pipeline, "_record_task_facts", _stage("facts"))
     monkeypatch.setattr(pte, "maybe_promote", _stage("promotion"))
 
@@ -567,7 +590,7 @@ def test_stop_now_during_inflight_synthesis_skips_the_remaining_paid_stages(tmp_
     """The Stop lands AFTER stage 1 began (the loop has returned, the entry
     snapshot saw no marker): the durable immediate cancel intent every stop
     ingress mints — or the live task marker re-read — trips the per-stage gate,
-    so stages 2..3 never run, the checkpoint settles ``degraded`` and the typed
+    so stage 2 never runs, the checkpoint settles ``degraded`` and the typed
     ``post_task_stop_reason`` NAMES the skipped stages, riding the result row
     and the ``task_cost_finalized`` event alike. The in-flight key is gone."""
     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, request_cancel
@@ -593,7 +616,7 @@ def test_stop_now_during_inflight_synthesis_skips_the_remaining_paid_stages(tmp_
     checkpoint = (pipeline.load_task_result(root, task_id) or {}).get("root_phase_checkpoint") or {}
     assert checkpoint.get("post_task_synthesis") == "degraded", checkpoint
     assert checkpoint.get("post_task_stop_reason") == (
-        "owner_stopped:skipped=scratchpad_consolidation,promotion"), checkpoint
+        "owner_stopped:skipped=promotion"), checkpoint
     finalized = _finalized_events(root, task_id)
     assert len(finalized) == 1 and finalized[0]["post_task_status"] == "degraded", finalized
     assert finalized[0]["post_task_stop_reason"] == checkpoint["post_task_stop_reason"], finalized
@@ -602,7 +625,7 @@ def test_stop_now_during_inflight_synthesis_skips_the_remaining_paid_stages(tmp_
 
 def test_no_stop_runs_every_paid_stage_and_finalizes_without_a_stop_reason(tmp_path, monkeypatch):
     """Positive control for the gate: an un-stopped synthesis records its free
-    facts row, then runs all three paid stages in order, and the checkpoint is
+    facts row, then runs both paid stages in order, and the checkpoint is
     byte-identical to before (``completed``, no ``post_task_stop_reason`` anywhere)."""
     root, env = _synthesis_root(tmp_path)
     task_id = "unstopped1"

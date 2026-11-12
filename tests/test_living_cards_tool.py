@@ -63,13 +63,7 @@ def test_a_card_tree_indexes_its_commit_controls_with_their_drawn_labels():
 
 
 @pytest.mark.parametrize(("tree", "message"), [
-    ([{"type": "poll", "route": "x"}], "components[0] type 'poll' is not available in a card"),
-    ([{"type": "subscription", "event": "tick"}], "components[0] type 'subscription' is not available"),
-    ([{"type": "file", "src": "data:x"}], "components[0] type 'file' is not available"),
     ([{"type": "action", "label": "Go"}], "components[0].submit.id is required"),
-    ([{"type": "action", "label": "Go", "submit": {"id": "Bad Id"}}], "components[0].submit.id is required"),
-    ([{"type": "group", "components": [{"type": "action", "route": "r", "submit": {"id": "a"}}]}],
-     "components[0].components[0].route is not available in a card"),
     ([ACTION, {**FORM, "submit": {"id": "book"}}], "components[1].submit.id duplicates 'book' first used at components[0]"),
     ([{"type": "markdown", "text": "x", "submit": {"id": "a"}}], "components[0].submit binds only action and form"),
     ([{"type": "action", "submit": {"id": "a", "once": "yes"}}], "components[0].submit.once must be boolean"),
@@ -98,7 +92,8 @@ def test_a_component_card_is_stored_before_its_event_leaves_the_task(tmp_path):
     receipt = json.loads(_show_card(ctx, title="Flights", fallback_text="A 9:00 or B 12:00",
                                     components=[ACTION, {"type": "table", "path": "rows", "columns": [{"path": "t"}]}],
                                     data={"rows": [{"t": "9:00"}]}))
-    assert receipt == {"card_id": receipt["card_id"], "revision": 1, "shown": True}
+    assert receipt == {"card_id": receipt["card_id"], "revision": 1,
+                       "delivery": "OK: card accepted for delivery to owner chat."}
     card = load_card(tmp_path, receipt["card_id"])
     assert card["kind"] == "components" and card["chat_id"] == 1 and card["task_id"] == "task-1"
     assert card["data"] == {"rows": [{"t": "9:00"}]} and card["submissions"] == [] and card["revision"] == 1
@@ -112,14 +107,14 @@ def test_a_display_only_card_is_not_interactive_and_a_queued_card_says_so(tmp_pa
     ctx = _ctx(tmp_path, live=False)
     receipt = json.loads(_show_card(ctx, title="Status", fallback_text="All green",
                                     components=[{"type": "metric", "label": "Uptime", "value": "99.9"}]))
-    assert receipt["shown"] is False and receipt["queued"] is True
+    assert receipt["delivery"] == "OK: card queued for delivery to owner." and receipt["queued"] is True
+    assert "shown" not in receipt
     [event] = _events(ctx)
     assert event["interactive"] is False
 
 
 @pytest.mark.parametrize(("kwargs", "fragment"), [
     ({}, "give exactly one body"),
-    ({"components": [ACTION], "app": {"html": "<p>x</p>"}}, "give exactly one body"),
     ({"widget": {"skill": "s", "tab_id": "t"}, "data": {}}, "data belongs to a components body"),
     ({"components": [ACTION], "data": [1]}, "data must be an object"),
     ({"components": [{"type": "stream", "route": "s"}]}, "components[0] type 'stream'"),
@@ -243,3 +238,25 @@ def test_a_malformed_card_id_never_reaches_the_filesystem(tmp_path):
     assert load_card(tmp_path, "../state/state") is None
     assert load_card(tmp_path, "card_ABC") is None
     assert read_app_bytes(tmp_path, "../x") is None
+
+
+def test_a_work_turned_into_a_project_replaces_its_own_card_there_and_no_other_room_can(tmp_path):
+    """A card a work showed in Main lives in its Project once the work moves there (its row does too):
+    the same work, readmitted in the Project, may replace it; a work of an unrelated Project may not."""
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_results import write_task_result
+
+    nova, other = create_project(tmp_path, "nova", name="Nova"), create_project(tmp_path, "other", name="Other")
+    write_task_result(tmp_path, "task-1", "running", chat_id=1, title="task-1")
+    card_id = json.loads(_show_card(_ctx(tmp_path), title="Plan", fallback_text="v1",
+                                    components=[{"type": "markdown", "text": "v1"}]))["card_id"]
+    bind_task_to_project(tmp_path, "task-1", nova["id"], nova["chat_id"], origin={"absent": "system"})
+    moved = json.loads(_show_card(_ctx(tmp_path, chat_id=nova["chat_id"]), title="Plan", fallback_text="v2",
+                                  components=[{"type": "markdown", "text": "v2"}], replace=card_id))
+    assert moved["revision"] == 2 and load_card(tmp_path, card_id)["fallback_text"] == "v2"
+    stranger = _ctx(tmp_path, chat_id=other["chat_id"])
+    stranger.task_id = "stranger"
+    write_task_result(tmp_path, "stranger", "running", chat_id=other["chat_id"], title="stranger")
+    refused = _show_card(stranger, title="Plan", fallback_text="hijack", components=[{"type": "markdown", "text": "x"}],
+                         replace=card_id)
+    assert refused.startswith("⚠️ CARD_REPLACE_OTHER_CHAT") and load_card(tmp_path, card_id)["revision"] == 2

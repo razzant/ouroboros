@@ -1,9 +1,13 @@
-"""Verdict-neutral storage and accounting for the Safety Supervisor."""
+"""Parse, retain and account for reported Safety verdicts without assigning them execution authority."""
 
+import contextlib
 import json
 import logging
 import pathlib
 import threading
+import time
+import uuid
+from collections import OrderedDict
 from typing import Any, Dict, Optional
 
 from ouroboros.utils import utc_now_iso
@@ -14,6 +18,74 @@ _CHECK_CHIPS = ("checked", "warned", "sent_despite", "held", "not_checked")
 _CHECK_TOOL_CHARS = 160
 _RECORDED_CHIPS: dict[tuple[pathlib.Path, str], set[str]] = {}
 _CHIP_LOCK = threading.RLock()
+
+
+def parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
+    """Parse the ``{"status", "reason", "quote"}`` verdict from a Safety model response.
+
+    ``quote`` is kept only as non-empty text, the checker's claim. Words are a host fact, so any other key is dropped.
+    Models occasionally wrap the JSON in prose or code fences despite the prompt.
+    The whole reply and every outermost ``{...}`` in it are candidates; the
+    strictest recognized status wins (DANGEROUS > SUSPICIOUS > SAFE, first of
+    equals), so a quoted SAFE cannot outrank a direct flag. Only when no candidate
+    carries a verdict is the whole reply read as ``{"answer": "<verdict JSON>"}``
+    with no other key: that string is decoded once, never searched. Otherwise
+    None: the caller fails closed.
+    """
+    clean = text.replace("```json", "").replace("```", "").strip()
+    candidates = [clean]
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for idx, ch in enumerate(clean):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = idx
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidates.append(clean[start:idx + 1])
+                start = -1
+    best: Dict[str, Any] | None = None
+    rank = {"SAFE": 1, "SUSPICIOUS": 2, "DANGEROUS": 3}
+
+    def verdict_of(raw: str) -> Optional[Dict[str, Any]]:
+        obj = json.loads(raw)
+        status = str(obj.get("status") or "").upper() if isinstance(obj, dict) else ""
+        if status not in rank:
+            return None
+        quote = obj.get("quote")
+        return {"status": status, "reason": str(obj.get("reason") or ""),
+                **({"quote": quote} if isinstance(quote, str) and quote.strip() else {})}
+
+    for candidate in candidates:
+        try:
+            found = verdict_of(candidate)
+        except json.JSONDecodeError:
+            continue
+        if found and (best is None or rank[found["status"]] > rank[best["status"]]):
+            best = found
+    if best is None:
+        try:
+            envelope = json.loads(clean)
+            if isinstance(envelope, dict) and list(envelope) == ["answer"] and isinstance(envelope["answer"], str):
+                best = verdict_of(envelope["answer"])
+        except (ValueError, RecursionError):  # a degenerate payload stays unparseable, as before
+            pass
+    return best
+
 
 
 def coalesce_verdicts(previous, incoming):
@@ -34,9 +106,68 @@ def coalesce_verdicts(previous, incoming):
 def verdict_history_bytes(history):
     """Charge distinct rows and their counters once; counter growth is not new evidence."""
     evidence = {key: {**row, "verdicts": [
-        {**verdict, "repeat_count": 0} for verdict in row["verdicts"]]}
+        {**verdict, "repeat_count": 0} for verdict in row.get("verdicts", ())]}
         for key, row in history.items()}
     return len(json.dumps(evidence, ensure_ascii=False).encode("utf-8", "replace"))
+
+
+# A work's returned and held calls (``safety._remember``), each tool's pending reading and the flagged calls its bound
+# no longer keeps: process memory, keyed by work (``_work_key``) and bounded to 512 works.
+_PRIOR_VERDICTS: OrderedDict[str, dict[str, dict]] = OrderedDict()  # work -> subject digest -> returned or held call
+_RETURNED: OrderedDict[str, dict[str, dict]] = OrderedDict()  # work -> tool -> the reading its last call came back with
+_JUDGED: dict[str, set] = {}  # work -> digests and words gates of flagged calls no longer kept: read, never unread
+_PRIOR_LOCK = threading.RLock()
+
+
+def _root_id(ctx):
+    metadata = getattr(ctx, "task_metadata", None) or {}
+    return str(metadata.get("root_task_id") or getattr(ctx, "root_task_id", "") or getattr(ctx, "task_id", "") or "")
+
+
+def _work_key(ctx):
+    """Whose returned and held calls these are: the root task, else a key minted once on a context that has none;
+    "" without a context, which keeps nothing."""
+    key = _root_id(ctx)
+    if key or ctx is None:
+        return key
+    with _PRIOR_LOCK:
+        if not getattr(ctx, "_safety_work_key", ""):
+            ctx._safety_work_key = "context:" + uuid.uuid4().hex
+        return ctx._safety_work_key
+
+
+def clear_safety_work(root_task_id: str) -> None:
+    """Root terminal hook: audit persists, retry authority and returned readings do not."""
+    with _PRIOR_LOCK:
+        for store in (_PRIOR_VERDICTS, _RETURNED, _JUDGED):
+            store.pop(str(root_task_id), None)
+
+
+def _drop(key, rows, digest, judged=True):
+    """A kept call leaves its work's record; a flagged one stays judged (``_JUDGED``). A fresh SAFE reading drops it
+    unjudged (``judged=False``): its marks and its gate's leave too, and the call is as one never flagged."""
+    row = rows.pop(digest, None) or {}
+    marks = set(filter(None, (digest, row.get("gate"))))
+    if not judged:
+        _JUDGED.get(key, set()).difference_update(marks)
+    elif row.get("flagged"):
+        _JUDGED.setdefault(key, set()).update(marks)
+
+
+def _track_returned(ctx, tool_name, result):
+    """Per tool, the reading this work's last call through it was returned with; a call let through ends it."""
+    verdicts = () if result[0] else getattr(result, "verdicts", ())
+    key = (result[0] or verdicts) and _work_key(ctx)
+    if key:
+        with _PRIOR_LOCK:
+            tools = _RETURNED.pop(key, {})
+            tools.pop(tool_name, None)
+            if verdicts:
+                tools[tool_name] = {"status": verdicts[-1].get("status", ""), "reason": verdicts[-1].get("reason", "")}
+            if tools:
+                _RETURNED[key] = tools
+            while len(_RETURNED) > 512:
+                _RETURNED.popitem(last=False)
 
 
 def _record_task_checks(ctx: Optional[Any], event: Dict[str, Any]) -> None:
@@ -52,7 +183,8 @@ def _record_task_checks(ctx: Optional[Any], event: Dict[str, Any]) -> None:
         return
     kind = event.get("type")
     chips = {"safety_sent_despite_check": ("sent_despite",), "safety_hold": ("held",),
-             "safety_mode_skip": ("not_checked",), "safety_declared_read_skip": ("not_checked",)}.get(kind, ())
+             "safety_mode_skip": ("not_checked",), "safety_declared_read_skip": ("not_checked",),
+             "safety_sent_without_assessment": ("not_checked",)}.get(kind, ())
     if kind == "safety_verdict":
         chips = tuple(dict.fromkeys("checked" if verdict["status"] == "SAFE" else "warned"
                                    for verdict in event.get("verdicts", ()) if verdict.get("status")))
@@ -125,6 +257,20 @@ def _record_safety_usage(ctx: Optional[Any], usage_payload: Dict[str, Any]) -> N
     update_budget_from_usage(usage_payload)
 
 
+def _canonical_logs(ctx: Optional[Any], logs: pathlib.Path) -> Optional[pathlib.Path]:
+    """The canonical shared ``logs`` directory when ``logs`` belongs to a per-task drive, else None.
+
+    A per-task drive is pruned two days after its task; the shared log keeps the audit. When the
+    drive is the canonical root the one row already landed there, so nothing is written twice."""
+    from ouroboros.preflight_receipts import canonical_data_root
+
+    root = canonical_data_root(ctx)
+    if root is None:
+        return None
+    canonical = (pathlib.Path(root) / "logs").resolve(strict=False)
+    return None if canonical == pathlib.Path(logs).resolve(strict=False) else canonical
+
+
 def _emit_durable_safety_event(ctx: Optional[Any], event: Dict[str, Any]) -> None:
     """Emit a safety audit event durably AT THE MOMENT of the decision (v6.54.3).
 
@@ -132,8 +278,9 @@ def _emit_durable_safety_event(ctx: Optional[Any], event: Dict[str, Any]) -> Non
     append into the drive's events.jsonl — the per-worker log sink forwards
     appended lines to the live dashboard, so no separate queue put is needed and
     a queued-but-undrained event can never be lost to a worker death (review
-    round 9, P3). The event_queue is only the last resort for contexts with no
-    drive_logs at all."""
+    round 9, P3). A per-task drive's row is also appended to the canonical shared
+    log (``_canonical_logs``), which outlives the drive's pruning. The event_queue
+    is only the last resort for contexts with no drive_logs at all."""
     payload = {
         "task_id": str(getattr(ctx, "task_id", "") or "") if ctx is not None else "",
         "ts": utc_now_iso(),
@@ -148,7 +295,10 @@ def _emit_durable_safety_event(ctx: Optional[Any], event: Dict[str, Any]) -> Non
         if callable(drive_logs):
             from ouroboros.utils import append_jsonl
 
-            if append_jsonl(drive_logs() / "events.jsonl", payload):
+            logs = drive_logs()
+            if append_jsonl(logs / "events.jsonl", payload):
+                if (shared := _canonical_logs(ctx, logs)) is not None and not append_jsonl(shared / "events.jsonl", payload):
+                    log.error("durable safety event %s not copied to the shared log", event.get("type") or "?")
                 return
             # append_jsonl answers whether the row landed (its documented contract for
             # important events); a False here means the durable half of the disclosure
@@ -179,3 +329,35 @@ def _emit_safety_mode_skip(ctx: Optional[Any], tool_name: str, mode: str, policy
         "safety_mode": mode,
         "policy": policy,
     })
+
+
+@contextlib.contextmanager
+def safety_check_wait(ctx: Optional[Any], tool_name: str):
+    """One host wait episode in the task's progress stream while a tool call waits on its Safety check
+    (``checkpoint_waits``): ``entered`` before the first attempt, ``ended`` however the check ends (an answer,
+    a failure or a cancellation). Presentation only: it never changes or fails the check."""
+    episode_id, started = uuid.uuid4().hex, time.monotonic()
+
+    def say(phase):
+        queue_, task_id = getattr(ctx, "event_queue", None), str(getattr(ctx, "task_id", "") or "")
+        if queue_ is None or not task_id:
+            return
+        try:
+            from ouroboros.loop_messages import _emit_checkpoint_event
+
+            detail = "Checking safety" if phase == "entered" else "Safety check ended"
+            drive_root, chat_id = getattr(ctx, "drive_root", None), getattr(ctx, "current_chat_id", None)
+            _emit_checkpoint_event(queue_, task_id, pathlib.Path(drive_root) / "logs" if drive_root else None, {
+                "checkpoint_kind": "safety_check_wait", "owner_visible": True, "tool": tool_name,
+                "phase": phase, "episode_id": episode_id, "elapsed_sec": time.monotonic() - started,
+                "detail": detail, "content": detail, "text": detail, "role": "system", "system_type": "task_checkpoint",
+                **({"chat_id": chat_id} if chat_id is not None else {}),
+            })
+        except Exception:
+            log.debug("Could not disclose the Safety check wait", exc_info=True)
+
+    say("entered")
+    try:
+        yield
+    finally:
+        say("ended")

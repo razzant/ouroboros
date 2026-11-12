@@ -32,7 +32,7 @@ import logging
 import pathlib
 from typing import Any, Callable, Dict, List, Optional
 
-from ouroboros.review_projection import PLAN_REVIEW_OBJECTIONS_OPEN
+from ouroboros.review_projection import PLAN_REVIEW_OBJECTIONS_OPEN, PLAN_REVIEW_UNREADABLE
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
 from ouroboros.store import StoreError
@@ -262,11 +262,11 @@ def archive_current(drive_root: Any, task_id: str, *, reason: str) -> bool:
 
 
 def retry_reset(task_drive: Any, canonical_drive_root: Any, task_id: str, *, reason: str) -> None:
-    """The ONE shared same-id requeue reset (§19.7.2 item 11).
+    """The ONE shared same-id attempt reset (§19.7.2 item 11).
 
-    EVERY same-id requeue producer — the reaper timeout path AND the
-    ``supervisor/workers.py`` crash-requeue — calls this.  Attempt-local
-    mailbox controls are revoked, while durable owner text and its ack ledger
+    Crash and planned-restart requeues (``worker_health.py``, ``workers.py``)
+    and the hard-bound reaper, whose attempt ends without a retry, call this.
+    Attempt-local controls are revoked; durable owner text and its ack ledger
     survive for canonical/replay continuity.  The current ``owner_hurry``
     block is archived into history. Fail-soft; never raises.
     """
@@ -419,15 +419,18 @@ def plan_gate_decision(
         record, enforcement=str(enforcement or ""), cyber_pro=not review_enforcement_blocks("blocking"),
         hurry=latched(ctx) is not None,
         hard_rail=hard_rail, legacy=legacy, unreadable=unreadable)
-    if decision.get("required") and decision.get("open_objections"):
-        # The outcome class at delivery (``outcome_axes.execution.plan_review``).
-        decision["plan_review_class"] = PLAN_REVIEW_OBJECTIONS_OPEN
+    if decision.get("required") and (unreadable or decision.get("open_objections")):
+        # The outcome class at delivery (``outcome_axes.execution.plan_review``): an unreadable record leaves the
+        # review's state unknown, whatever objections a readable part still names.
+        decision["plan_review_class"] = PLAN_REVIEW_UNREADABLE if unreadable else PLAN_REVIEW_OBJECTIONS_OPEN
     return decision
 
 
 def _objection_lines(decision: Dict[str, Any], *, holding_only: bool) -> List[str]:
+    from ouroboros.plan_record import ask_subject
+
     rows = [o for o in decision.get("open_objections") or [] if not holding_only or o.get("holds")]
-    return [f"{o.get('seat_id')}/{o.get('id')} (ask {o.get('ask_id')}, revision {o.get('revision')}"
+    return [f"{o.get('seat_id')}/{o.get('id')} (ask {o.get('ask_id')}, {ask_subject(o.get('revision'))}"
             + ("; not adjudicated in its raiser's last reply" if o.get("not_adjudicated") else "")
             + ("; imported from the previous plan review" if o.get("legacy") else "") + f"): {o.get('text')}" for o in rows]
 
@@ -449,11 +452,13 @@ def plan_review_reminder(decision: Dict[str, Any]) -> str:
             "or a change of enforcement. Nobody votes and no verdict closes this.")
 
 
-def plan_review_disclosure(decision: Dict[str, Any], forced_reason: str = "") -> str:
+def plan_review_disclosure(decision: Dict[str, Any], forced_reason: str = "", *, author_stop: bool = False) -> str:
     """The loud host suffix when the planning gate did not hold the final answer but the
-    council's talk was not over: open objections (released by a rail, Advisory, Cyber Pro
-    or the owner's hurry), asks whose answers had not arrived, or an unreadable record
-    released by a rail."""
+    council's talk was not over: open objections (released by a rail, Advisory, Cyber Pro,
+    the owner's hurry, or under Blocking raised by reviewers whose objections do not hold),
+    asks whose answers had not arrived, or an unreadable record released by a rail or ended by
+    the author's own stop. ``author_stop`` comes only from that stop: a projection an earlier
+    hold left behind on another exit never speaks for one."""
     if not decision.get("required"):
         return ""
     objections = decision.get("open_objections") or []
@@ -476,11 +481,27 @@ def plan_review_disclosure(decision: Dict[str, Any], forced_reason: str = "") ->
             what = "answers still on their way for ask(s) " + ", ".join(pending)
         else:
             what = "the plan record could not be read"
-        return f"\n\n⚠️ {subject} is open ({what}); {rail} required best-effort finalization."
+        if unreadable and (objections or pending):
+            what = "the plan record could not be read; known " + what
+        state = "state is unknown" if unreadable else "is open"
+        return f"\n\n⚠️ {subject} {state} ({what}); {rail} required best-effort finalization."
+    if status == "unreadable" and author_stop:  # the gate held every normal answer it could not judge
+        known = f" beyond {count}: {listed}" if objections else ""
+        return ("\n\n⚠️ Plan review: the plan record could not be read, so the state of the plan review is unknown"
+                f"{known}; Ouroboros stopped with the work unfinished.")
     if objections:
+        cyber = decision.get("decision_authority") == "cyber_pro"
         why = ("released by the owner's hurry request" if decision.get("owner_hurry_local_advisory") else
-               "Cyber Pro: Ouroboros proceeded by its own judgment" if decision.get("decision_authority") == "cyber_pro" else
+               # A stop no gate decided never says the work proceeded (the stop is said below).
+               "" if author_stop and (cyber or decision.get("enforcement") != "blocking") else
+               "Cyber Pro: Ouroboros proceeded by its own judgment" if cyber else
+               # Blocking holds a normal answer over them: the one exit that delivers here is the author's stop.
+               "Blocking enforcement held the final answer" if status == "held" else
+               "under Blocking enforcement, objections of unmarked reviewers and advisers do not hold the answer"
+               if status == "objections_open" and decision.get("enforcement") == "blocking" else
                "work proceeded under the owner-selected advisory enforcement")
+        if author_stop or status == "held":
+            why = " and ".join(part for part in (why, "Ouroboros stopped with the work unfinished") if part)
         return f"\n\n⚠️ Plan review: {count} remain{'s' if len(objections) == 1 else ''} open — {listed}; {why}."
     if pending:
         return ("\n\n⚠️ Plan review: the answers of ask(s) " + ", ".join(pending)

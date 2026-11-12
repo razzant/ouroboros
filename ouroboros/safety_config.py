@@ -4,21 +4,24 @@ import os
 
 
 def _safety_values(settings: dict) -> dict:
+    from ouroboros.deployment_policy import effective_settings
     from ouroboros.settings_defaults import SETTINGS_DEFAULTS
     from ouroboros.server_runtime import authored_model_slots, propose_unauthored_model_slots, apply_runtime_provider_defaults
 
     values = {**SETTINGS_DEFAULTS, **settings}
     propose_unauthored_model_slots(values, authored_model_slots(settings))
-    return apply_runtime_provider_defaults(values)[0]
+    return effective_settings(apply_runtime_provider_defaults(values)[0])
 
 
 def safety_configuration(settings: dict) -> tuple:
-    """Resolved checker identity; unrelated model/catalog changes remain ordinary writes."""
+    """Resolved checker identity; unrelated model/catalog changes remain ordinary writes. A deployment's
+    checker is part of it (its fallbacks and no second check) and stays constant under any document."""
     return _resolved_safety_configuration(_safety_values(settings))
 
 
 def _resolved_safety_configuration(values: dict) -> tuple:
     from ouroboros.configured_subagents import parse_configured_subagents
+    from ouroboros.deployment_policy import checker
     from ouroboros.settings_defaults import SETTINGS_DEFAULTS
     from ouroboros.settings_scales import normalize_safety_mode
     from ouroboros.model_slots import (model_role_option, MODEL_ACCOUNTS_KEY,
@@ -34,7 +37,9 @@ def _resolved_safety_configuration(values: dict) -> tuple:
                     for key in (MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY))
     raw = values.get("OUROBOROS_SUBAGENTS")
     recheck = ()
-    if raw:
+    if (managed := checker()) is not None:
+        recheck = ("deployment_policy", managed.routes())
+    elif raw:
         try:
             catalog = parse_configured_subagents(raw)
             recheck = tuple((row.subagent_id, row.route, row.effort, row.processing_preference,
@@ -133,3 +138,63 @@ def get_safety_mode(kind: str = "owner") -> str:
     key = "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE" if kind == "consciousness" else "OUROBOROS_SAFETY_MODE"
     default_val = str(cfg.SETTINGS_DEFAULTS[key])
     return cfg.normalize_safety_mode(cfg.runtime_setting(key, default_val) or default_val)
+
+
+OWNER_RULES_KEY = "OUROBOROS_SAFETY_OWNER_RULES"
+_RULES_ADDRESS = "Settings › Behavior › Safety Supervisor › Your rules"
+
+
+def owner_rules_section(*, session: bool = False) -> str:
+    """The standing rules for an acting mind (``session``: a delegated session's start request): the owner's,
+    then a managed deployment's organization rules under their own provenance (``organization_rules_section``).
+
+    The owner's text is the Supervisor's own read (``runtime_setting``: this actor's settings snapshot), so a
+    task's context and its checks hold the same bytes; a later save reaches the next task, turn or
+    session start. Empty rules read as none; an unreadable setting is a gap, never none."""
+    return _owner_rules(session) + organization_rules_section(session=session)
+
+
+def organization_rules_section(*, session: bool = False) -> str:
+    """The organization's rules from the deployment policy file, never presented as Settings words; ""
+    outside a managed deployment or without rules, and a gap when the policy cannot be read."""
+    from ouroboros.deployment_policy import organization_rules
+
+    head = ("\n\nORGANIZATION RULES DELIVERY (host instructions, separate from canonical work order)\n" if session
+            else "\n\n## My organization's rules\n\n")
+    try:
+        rules = organization_rules()
+    except Exception as exc:
+        return head + f"Unreadable now ({type(exc).__name__}): the deployment policy file holds them."
+    if not rules.strip():
+        return ""
+    frame = (("The administrator of your host's deployment set these rules for Ouroboros and the work it delegates, "
+              "this session included; verbatim from its policy file, not from Settings. The owner's rules cannot "
+              "relax them; your assignment's explicit constraints also bind.") if session else
+             ("Verbatim from this deployment's policy file, set by its administrator and not editable in Settings; "
+              "every Safety check and delegated session reads them too. They bind beside my human's rules, which "
+              "cannot relax them, nor can a place note. A changed file applies at the next start."))
+    return head + frame + "\n\n" + rules
+
+
+def _owner_rules(session: bool) -> str:
+    from ouroboros import config as cfg
+    head = ("\n\nOWNER RULES DELIVERY (host instructions, separate from canonical work order)\n" if session
+            else "## My human's standing rules\n\n")
+    try:
+        rules = str(cfg.runtime_setting(OWNER_RULES_KEY, "") or "")
+    except Exception as exc:
+        return head + f"Unreadable now ({type(exc).__name__}); they live in {_RULES_ADDRESS}."
+    reach = ("every Safety check and delegated session reads them, while my marks reach only my own work and the "
+             "sessions it starts")
+    if not rules.strip():
+        return head + f"None set: {_RULES_ADDRESS} is empty" + ("." if session else f"; once set, {reach}.")
+    frame = (("The owner of your host set these standing rules for Ouroboros and the work it delegates, this "
+              f"session included; verbatim from {_RULES_ADDRESS} as this start was prepared. Within their scope "
+              "they outrank general defaults, as permission and as restriction; your assignment's explicit "
+              "constraints also bind.") if session else
+             (f"Verbatim from {_RULES_ADDRESS}, as this task's settings hold them; {reach}. Within their scope "
+              "they bind in every mode (BIBLE P0) and outrank general defaults, as permission and as restriction; "
+              "my human's notes in a place add rules for that place, and their words for a circle add rules for "
+              "each place in it, permission only where they placed it. A change in Settings reaches the next task "
+              "or turn."))
+    return head + frame + "\n\n" + rules

@@ -11,41 +11,9 @@ import pytest
 
 from ouroboros import config, model_wait, subagent_runtime
 from ouroboros.settings_integrity import task_settings_snapshot
-from tests._socket_seal import block_network_except_socketpair
+from tests._task_settings_helpers import isolated_runtime, save_owner  # noqa: F401 -- fixture
 
 
-@pytest.fixture(autouse=True)
-def isolated_runtime(tmp_path, monkeypatch):
-    # Env alone does not rebind already imported supervisor writers.
-    from supervisor import git_ops, queue, state, workers
-
-    root = tmp_path / "app"
-    data, repo = root / "data", root / "repo"
-    data.mkdir(parents=True)
-    repo.mkdir()
-    for name, value in (("APP_ROOT", root), ("DATA_DIR", data),
-                        ("REPO_DIR", repo), ("SETTINGS_PATH", data / "settings.json"),
-                        ("HOME", root / "home")):
-        monkeypatch.setattr(config, name, value)
-    for key in set(config.SETTINGS_DEFAULTS) | set(config.RETIRED_COMMA_LIST_SETTING_KEYS):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.delenv(config.SETTINGS_INTEGRITY_ENV, raising=False)
-    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACK", raising=False)
-    monkeypatch.setenv("OUROBOROS_APP_ROOT", str(root))
-    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
-    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(config.SETTINGS_PATH))
-    monkeypatch.setenv("OUROBOROS_REPO_DIR", str(repo))
-    state.init(data, 200.0)
-    queue.init(data)
-    for module in (git_ops, workers):
-        monkeypatch.setattr(module, "DRIVE_ROOT", data)
-        monkeypatch.setattr(module, "REPO_DIR", repo)
-
-    def no_network(*args, **kwargs):
-        raise AssertionError("Snapshot regressions must never contact a provider")
-
-    block_network_except_socketpair(monkeypatch, no_network)
-    yield data
 
 
 def document(label, *, safety="full", enforcement="blocking"):
@@ -76,11 +44,6 @@ def document(label, *, safety="full", enforcement="blocking"):
     }
 
 
-def save_owner(values):
-    from ouroboros.gateway.owner_settings import _owner_write_settings
-
-    _owner_write_settings(values, authored_keys=tuple(values),
-                          allow_context_lowering=True, allow_safety_lowering=True)
 
 
 def observe():
@@ -339,6 +302,7 @@ def test_failed_reload_discloses_then_binds_previous_env_and_resets():
     def body(task):
         # An unreadable document makes a credential unavailable, never the mirrored old key (route_choice).
         assert config.runtime_setting("OPENAI_API_KEY") is None and config.runtime_setting("OUROBOROS_EFFORT_TASK") == "high"
+        config.SETTINGS_PATH.unlink()  # repaired by moving it aside: a save never writes over an unreadable document
         save_owner(document("new"))
         subagent_runtime.apply_task_start_settings()
         assert config.runtime_setting("OPENAI_API_KEY") == "test-key-new"  # repaired: read at once
@@ -356,6 +320,35 @@ def test_failed_reload_discloses_then_binds_previous_env_and_resets():
     assert "previously applied" in events[0][1]["message"]
     assert "document-only values" in events[0][1]["message"]
     assert "test-key" not in json.dumps(events)
+
+
+def test_carried_presence_turn_decides_on_saved_settings_not_its_birth_environment(monkeypatch):
+    # A Presence turn's gate and allowance decide in its carrier before its agent's own task start; a fresh carrier's
+    # environment is its birth's (a forkserver child keeps the server's from the forkserver's start).
+    from ouroboros import presence_carrier
+    from ouroboros.runtime_limits import get_consciousness_daily_usd
+    from supervisor.worker_process import _run_task_body
+
+    seen, frames = [], []
+
+    def carry(task, *args, **kwargs):  # another thread's publication mid-carry must not move the turn's own view
+        seen.append(get_consciousness_daily_usd())
+        monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "40")
+        seen.append(get_consciousness_daily_usd())
+
+    monkeypatch.setattr(presence_carrier, "carry_presence_turn", carry)
+    endpoint = SimpleNamespace(put=frames.append)  # the turn's own event endpoint
+    save_owner({"OUROBOROS_CONSCIOUSNESS_DAILY_USD": 160})
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "80")  # the allowance the carrier was born with
+    task = {"id": "presence-raised", "_presence_turn": True}
+    assert _run_task_body(SimpleNamespace(), task, str(config.DATA_DIR), endpoint) == []
+    # An unreadable document never stops the turn: it runs on the environment it has, and says so on its endpoint.
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "80")
+    config.SETTINGS_PATH.write_text("{broken", encoding="utf-8")
+    _run_task_body(SimpleNamespace(), {"id": "presence-unreadable", "_presence_turn": True}, str(config.DATA_DIR), endpoint)
+    assert seen == [160.0, 160.0, 80.0, 80.0]
+    assert [(f["data"]["type"], f["data"]["task_id"]) for f in frames] == [
+        ("task_start_settings_reload_failed", "presence-unreadable")]
 
 
 def test_simultaneous_admission_cannot_capture_half_projected_credentials(monkeypatch):

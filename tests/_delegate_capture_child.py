@@ -2,6 +2,7 @@
 
 The native subprocess boundary has its own test. This transport lets recovery tests
 control exact capture/Stop interleavings without a daemon or an unrelated history job.
+``idle_maintenance_child`` is the dispatcher's other seam: stopped, for tests of other duties.
 """
 from __future__ import annotations
 
@@ -63,3 +64,22 @@ def capture_child(monkeypatch):
     for root in list(threads):
         drain(root)
     assert not errors
+
+
+@pytest.fixture
+def idle_maintenance_child(monkeypatch):
+    """A stopped maintenance dispatcher, for a test that runs other duties through the real periodic tick.
+
+    ``maintenance.child`` is one object per process and its state outlives the test that changed it: owed in every
+    fresh worker and again by any ``request()``, stopped by a server shutdown (server.py, server_control.py). The first
+    tick that finds it owed starts its dispatch thread, which reads the job facts of the test's root and, finding jobs
+    due (a fresh root has four), spawns a real maintenance process against it; nothing in those tests stops or joins
+    either, so which test pays for them depends on what ran before it, and on a slow host the thread outlives the
+    thread-hygiene grace. A stopped child is never owed and starts nothing. Its tick, job facts and spawn are tested
+    where they are the subject: tests/test_duty_inventory.py, test_maintenance_child.py, test_maintenance_discovery.py."""
+    from ouroboros import maintenance
+
+    idle = maintenance.MaintenanceChild()
+    idle.stop()
+    monkeypatch.setattr(maintenance, "child", idle)
+    yield idle

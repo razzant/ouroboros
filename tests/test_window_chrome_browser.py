@@ -19,12 +19,13 @@ from urllib.parse import urlsplit
 import pytest
 
 from ouroboros.launcher_window_chrome import DOCUMENT_SCRIPT, HANDLER, INTEGRATED
+from tests._shared import answer_projects
 from tests.test_subscription_setup_browser import capture
 from tests.test_subscription_setup_browser import subscription_ui as _subscription_ui
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 TOP, START = 52, 73  # a unified bar and its traffic lights, as one native run measured them
 LIGHTS = {"left": 19, "right": START, "top": 18, "bottom": 34}
@@ -34,6 +35,7 @@ PORT = """Object.defineProperty(window, 'webkit', {configurable: true, value: {m
 
 def shell_page(ui, width, height=722):
     page = ui["new_page"](viewport={"width": width, "height": height})
+    serve_room(page)
     page.add_init_script(PORT)
     page.add_init_script(DOCUMENT_SCRIPT)
     page.goto(ui["url"])
@@ -89,9 +91,16 @@ LAYOUT = """() => {
              drawer_toggle: toggle ? getComputedStyle(toggle).display : 'absent',
              resize_handle: handle ? getComputedStyle(handle).display : 'absent' };
 }"""
-# The app's own way into a Project room (a Project reference raises it).
+# The app's own way into a Project room (a Project reference raises it, and its room is read by its id).
 OPEN_PANEL = """() => window.dispatchEvent(new CustomEvent('ouro:open-project', {
-    detail: { project: { id: 'window-chrome', name: 'A project', chat_id: 101, lifecycle: 'active' } } }))"""
+    detail: { project: { id: 'window-chrome', name: 'A project' } } }))"""
+
+
+def serve_room(page):
+    answer = {"id": "window-chrome", "name": "A project", "chat_id": 101, "lifecycle": "active"}
+    page.route("**/api/projects?id=*", lambda route: answer_projects(route, [answer]))
+
+
 # The real document reader on a delivered copy held inline, as a live chat file card hands it over.
 OPEN_READER = """async (name) => {
     const { createDocumentReader } = await import('/static/modules/document_reader.js');
@@ -362,6 +371,7 @@ def test_band_presses_over_a_scrolled_transcript_are_the_title_bars(request, mon
     name = f"window-chrome-{width}-{room}-{engine}"
     page = ui["new_page"](viewport={"width": width, "height": 722})
     serve_history(page, tmp_path)
+    serve_room(page)
     page.add_init_script(PORT)
     page.add_init_script(DOCUMENT_SCRIPT)
     page.goto(ui["url"])

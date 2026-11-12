@@ -14,7 +14,8 @@ import { TextStub, installDom as installHistoryDom } from './chat_dom_fixture.js
 
 // Source pins below match across line breaks; normalize CRLF so a Windows
 // checkout (core.autocrlf) reads the same bytes the regexes were written for.
-const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8')
+// A text row's bubble is drawn by chat_text_bubble.js (chat.js keeps its identity and place).
+const bubbleSource = readFileSync(new URL('../modules/chat_text_bubble.js', import.meta.url), 'utf8')
     .replace(/\r\n?/g, '\n');
 const styleSource = readFileSync(new URL('../style.css', import.meta.url), 'utf8')
     .replace(/\r\n?/g, '\n');
@@ -420,7 +421,7 @@ test('a completion row carrying the answer renders as an ordinary Ouroboros mess
             globalThis.CustomEvent = priorCustomEvent;
         }
         assert.deepEqual(opened, {
-            type: 'ouro:open-project', detail: { project: { id: 'launch', name: 'Launch' }, task_id: '', quiz_id: '' },
+            type: 'ouro:open-project', detail: { project: { id: 'launch', name: 'Launch' }, task_id: '', quiz_id: '', pointer: false },
         });
     } finally {
         instance?.destroy();
@@ -474,15 +475,15 @@ test('the mirrored answer replays from history exactly as it arrived live', asyn
 });
 
 test('the fold is CSS over the complete answer: clamp always, fade only when folded, tokens only', () => {
-    const block = styleSource.slice(styleSource.indexOf('(chat: Project completion mirror)'));
-    const rules = block.slice(0, block.indexOf('design-system:migrated-end'));
+    const block = styleSource.slice(styleSource.indexOf('"Project completion mirror"'));
+    const rules = block.slice(0, block.indexOf('A block that exists only for open attention'));
     assert.match(rules, /\.chat-bubble\.project-answer > \.message \{ max-height: var\(--project-answer-fold\); overflow: hidden; \}/);
     assert.match(rules, /\.chat-bubble\.project-answer\.is-folded > \.message \{[^}]*mask-image/);
     // The Project is the route to the complete answer; the mirror never expands in place.
     assert.doesNotMatch(rules, /\.project-answer\.is-expanded/);
     assert.doesNotMatch(rules, /user-select|font-size: \d|#[0-9a-fA-F]{3,6}\b/);
-    // chat.js stays a caller: the decoration lives in its own module.
-    assert.match(chatSource, /decorateProjectRow\(bubble, \{ \.\.\.meta, \.\.\.opts, role,/);
+    // The text bubble stays a caller: the decoration lives in its own module.
+    assert.match(bubbleSource, /decorateProjectRow\(bubble, \{ \.\.\.meta, \.\.\.opts, role,/);
 });
 
 test('plain system row renders identically live and after history reload', async () => {
@@ -728,21 +729,26 @@ test('a refused steer leaves the running target card open', () => {
 test('render arm order and enhancement guard are pinned in source', () => {
     // The plain-system arm sits between the dedicated skill_review renderer
     // and the rich arm, whose template carries the content contract.
-    const ternary = chatSource.slice(
-        chatSource.indexOf("const rendered = role === 'user'"),
-        chatSource.indexOf('const timeFmt =', chatSource.indexOf("const rendered = role === 'user'")),
+    const ternary = bubbleSource.slice(
+        bubbleSource.indexOf("const rendered = role === 'user'"),
+        bubbleSource.indexOf('const timeFmt =', bubbleSource.indexOf("const rendered = role === 'user'")),
     );
     assert.match(ternary, /renderSkillReviewDisclosure\(text, opts\.skillReview \|\| null\)/);
     assert.match(ternary, /role === 'system' && markdown !== true\n\s+\? escapeHtml\(painted\)/);
-    assert.match(chatSource, /: renderChatMarkdown\(painted\);/);
+    assert.match(bubbleSource, /: renderChatMarkdown\(painted\);/);
     // `painted` is render-only (host_notice_text.js); Copy keeps the pre-cleanup `shown`.
-    assert.match(chatSource, /const painted = hostRowDisplayText\(\{ text: stored, role, system_type: systemType, narration: opts\.narration \}, text\);/);
-    assert.match(chatSource, /chatMedia\.attachCopyControl\(bubble, String\(shown\)\)/);
-    // The enhancement pass skips exactly the plain-system case.
+    assert.match(bubbleSource, /const painted = hostRowDisplayText\(\{ text: stored, role, system_type: systemType, narration: opts\.narration \}, text\);/);
+    assert.match(bubbleSource, /chatMedia\.attachCopyControl\(bubble, String\(shown\)\)/);
+    // The enhancement pass skips exactly the plain-system case: the bubble says whether its words are rich, and
+    // the room enhances only those once mounted.
     assert.match(
-        chatSource,
+        bubbleSource,
         /const richMarkdown = role !== 'user' && !skillReview && \(role !== 'system' \|\| markdown === true\);/,
     );
+    assert.match(bubbleSource, /return \{ bubble, rich: richMarkdown \};/);
+    const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
+    assert.match(chatSource, /const \{ bubble, rich \} = drawTextBubble\(/);
+    assert.match(chatSource, /if \(rich\) enhanceMountedMarkdown\(bubble\);/);
 });
 
 test('chat bubble heading ladder is scoped in style.css', () => {

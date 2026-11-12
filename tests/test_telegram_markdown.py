@@ -15,12 +15,10 @@ from __future__ import annotations
 
 from xml.etree import ElementTree as ET
 
-import pytest
 
 from tests.test_telegram_format_parity import _load_skill
 
 # The shared skill loader replaces its package entries in sys.modules.
-pytestmark = pytest.mark.serial
 
 
 def _load_converter():

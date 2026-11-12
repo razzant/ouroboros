@@ -31,8 +31,9 @@ export function routingAnnotationText(annotation) {
     const action = String(annotation.action || '');
     const status = String(annotation.status || '');
     const target = String(annotation.target || '');
-    const targetLabel = String(annotation.target_label || '')
-        || (target ? (action === 'project_route' ? tr('routing.generic_project', 'Project') : tr('routing.generic_task', 'Task')) : '');
+    // Words saved for an unnamed work say only that: a placeholder name would name nothing.
+    const targetLabel = String(annotation.target_label || '') || (!target || action === 'mailbox_delivery' ? ''
+        : action === 'project_route' ? tr('routing.generic_project', 'Project') : tr('routing.generic_task', 'Task'));
     if (status === 'pending') return tr('routing.pending', 'Choosing the right destination…');
     if (status === 'needs_manual_target') {
         const optionLabels = (Array.isArray(annotation.options) ? annotation.options : [])

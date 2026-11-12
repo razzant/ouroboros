@@ -12,8 +12,9 @@ from ouroboros import skill_source_catalog as catalog
 from ouroboros import skill_source_install as installer
 from ouroboros.skill_install_record import read_install_record, write_install_record
 from ouroboros.skill_loader import SkillReviewState, save_enabled, save_skill_grants, skill_state_dir
+from tests._extension_loader_shared import extension_tool_answer, version_plugin
 from tests._skill_source_fixtures import (
-    HubFixture, author_repo, builtin_repo, commit_all, git, join_source_refreshes, publish, write_skill,
+    HubFixture, author_repo, builtin_repo, commit_all, entry, git, join_source_refreshes, publish, write_skill,
 )
 
 
@@ -257,6 +258,127 @@ def test_update_detection_replace_keep_and_stale_candidates(drive, hub):
     assert (drive / "skills" / "ouroboroshub" / ".rollback" / "weather.previous" / "SKILL.md").is_file()
 
 
+# --- an accepted update and the running extension: the published tool, never the enabled bit, is the proof ---
+
+@pytest.fixture
+def live_extensions(monkeypatch):
+    from tests._shared import clean_extension_runtime_state
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "false")
+    clean_extension_runtime_state()
+    yield
+    clean_extension_runtime_state()
+
+
+_PINGER = ('---\nname: pinger\ndescription: pinger answers its release\nversion: {version}\ntype: extension\n'
+           'entry: plugin.py\nplugin_api: "2.0"\npermissions: [tool]\n{extra}---\nAbout it.\n')  # 2.0: acceptance needs it
+
+
+def _release_pinger(drive, hub, rows, version, *, plugin="", extra=""):
+    """``pinger`` ``version`` as an Official (trusted) extension of the hub, read by this install."""
+    folder = hub.work / "skills" / "pinger"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "SKILL.md").write_text(_PINGER.format(version=version, extra=extra), encoding="utf-8")
+    (folder / "plugin.py").write_text(plugin or version_plugin(version), encoding="utf-8")
+    digest = catalog.tree_release_digest(folder)
+    hub.entries["pinger"] = entry("pinger", digest, version=version)
+    hub.official = [*[item for item in hub.official if item["name"] != "pinger"],
+                    {"name": "pinger", "digest": digest, "recommended": False}]
+    hub.commit(f"pinger {version}")
+    _refresh(drive, rows[1:2])
+    return digest
+
+
+def _owner(drive, action):
+    from ouroboros.skill_lifecycle_actions import run_skill_action
+    from ouroboros.tools.registry import ToolContext
+
+    result = run_skill_action(ToolContext(repo_dir=drive, drive_root=drive), "pinger", action, _owner_actor="owner_ui")
+    assert result.get("ok") is not False, result
+
+
+def _choice(drive):
+    return (skill_state_dir(drive, "pinger") / "enabled.json").read_bytes()
+
+
+@pytest.mark.parametrize("turn_on_when_ready", [True, False])
+def test_an_accepted_update_brings_an_extension_that_is_on_back_at_its_new_release(drive, hub, live_extensions,
+                                                                                    turn_on_when_ready):
+    rows = hub.rows()
+    _release_pinger(drive, hub, rows, "1.0.0")
+    installed = installer.install_item(drive, "ouroboros/pinger", rows=rows, turn_on_when_ready=turn_on_when_ready)
+    if not turn_on_when_ready:  # the install never asked to turn on: the owner's own Enable did
+        assert installed["acceptance"]["turn_on"] == "not_requested"
+        _owner(drive, "enable")
+    assert extension_tool_answer(drive, "pinger") == "1.0.0"
+    choice = _choice(drive)
+    _release_pinger(drive, hub, rows, "2.0.0")
+    acceptance = installer.update_installed(drive, "pinger", mode="replace", rows=rows)["acceptance"]
+    assert extension_tool_answer(drive, "pinger") == "2.0.0", acceptance  # no manual reconcile, no restart
+    assert acceptance["turn_on"] == ("already_on" if turn_on_when_ready else "not_requested")
+    assert acceptance["extension_action"] == "extension_loaded"
+    assert _choice(drive) == choice
+    assert read_install_record(drive, "pinger")["turn_on_when_ready"] is turn_on_when_ready
+
+
+@pytest.mark.parametrize(("held", "reason"), [("owner_off", "disabled"), ("new_key", "missing_grants")])
+def test_an_accepted_update_leaves_an_extension_held_off_where_it_stands(drive, hub, live_extensions, held, reason):
+    rows = hub.rows()
+    _release_pinger(drive, hub, rows, "1.0.0")
+    installer.install_item(drive, "ouroboros/pinger", rows=rows)
+    if held == "owner_off":
+        _owner(drive, "disable")
+    choice = _choice(drive)
+    _release_pinger(drive, hub, rows, "2.0.0", extra="env_from_settings: [GITHUB_TOKEN]\n" if held == "new_key" else "")
+    acceptance = installer.update_installed(drive, "pinger", mode="replace", rows=rows)["acceptance"]
+    assert extension_tool_answer(drive, "pinger") is None
+    assert _choice(drive) == choice and read_install_record(drive, "pinger")["release"]["version"] == "2.0.0"
+    assert acceptance["extension_reason"] == reason and "setup_error" not in acceptance, acceptance
+
+
+def test_a_start_failure_after_an_accepted_update_keeps_the_files_and_the_owner_choice(drive, hub, live_extensions):
+    import asyncio
+    import time
+
+    from ouroboros.gateway.skill_sources import _start_job
+    from ouroboros.skill_lifecycle_queue import queue_snapshot
+
+    rows = hub.rows()
+    _release_pinger(drive, hub, rows, "1.0.0")
+    installer.install_item(drive, "ouroboros/pinger", rows=rows)
+    choice = _choice(drive)
+    broken = _release_pinger(drive, hub, rows, "2.0.0",
+                             plugin="def register(api):\n    raise RuntimeError('cannot start 2.0.0')\n")
+    seen = {}
+
+    async def owner_update():  # the Skills page's Update: a lifecycle job whose one line the page shows
+        job_id = await _start_job("update", "pinger", "Updating pinger", lambda progress: seen.setdefault(
+            "result", installer.update_installed(drive, "pinger", mode="replace", rows=rows, progress=progress)))
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            events = [item for item in queue_snapshot()["events"] if item["id"] == job_id]
+            if events and events[-1]["status"] not in {"queued", "running"}:
+                return events[-1]
+            await asyncio.sleep(0.1)
+        pytest.fail("the update job did not finish")
+
+    event = asyncio.run(owner_update())
+    result = seen["result"]
+    assert result["ok"] and read_install_record(drive, "pinger")["release"]["digest"] == broken  # the files landed
+    assert event["status"] == "succeeded" and event["error"] == ""
+    assert event["message"].startswith("update pinger: done; It could not start: "), event
+    assert "cannot start 2.0.0" in event["message"]
+    acceptance = result["acceptance"]
+    assert acceptance["extension_action"] == "extension_load_error" and "cannot start 2.0.0" in acceptance["load_error"]
+    assert event["message"] == f"update pinger: done; {acceptance['setup_error']}"
+    assert extension_tool_answer(drive, "pinger") is None and _choice(drive) == choice  # still on: no revert
+    _release_pinger(drive, hub, rows, "3.0.0")  # so the fixed release starts without a new Enable
+    assert installer.update_installed(drive, "pinger", mode="replace", rows=rows)["acceptance"]["extension_action"] == (
+        "extension_loaded")
+    assert extension_tool_answer(drive, "pinger") == "3.0.0"
+
+
 def test_modified_left_source_and_withdrawn_states(drive, hub):
     rows = hub.rows()
     _refresh(drive, rows[1:2])
@@ -361,6 +483,44 @@ def test_legacy_record_without_base_says_original_unknown(drive, hub):
     assert listing["install"]["base_known"] is False and listing["install"]["modified"] is None
 
 
+def test_credential_like_files_survive_git_install_update_and_merge_trees(drive, hub):
+    """The Git copy owner refuses no credential-like name: install and replace land a release's `.env`,
+    `credentials.json` and `id_rsa` byte for byte under its digest, and a merge lays out the new and the
+    base release whole."""
+    files = {".env": b"TOKEN=synthetic-first\n", "config/prod.env": b"MODE=fixture\n",
+             "credentials.json": b'{"fixture": true}\n', "id_rsa": b"SYNTHETIC KEY FIXTURE\n"}
+
+    def release(version):
+        for rel, body in files.items():
+            path = hub.work / "skills" / "keys" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        digest = hub.add_hosted("keys", version, official=True)
+        hub.commit(f"keys {version}")
+        _refresh(drive, rows[1:2])
+        return digest
+
+    rows = hub.rows()
+    first = release("1.0.0")
+    installer.install_item(drive, "ouroboros/keys", rows=rows)
+    target = drive / "skills" / "ouroboroshub" / "keys"
+    assert {rel: (target / rel).read_bytes() for rel in files} == files
+    assert read_install_record(drive, "keys")["release"]["digest"] == first
+    files[".env"] = b"TOKEN=synthetic-second\n"
+    second = release("1.1.0")
+    installer.update_installed(drive, "keys", mode="replace", digest=second, rows=rows)
+    assert {rel: (target / rel).read_bytes() for rel in files} == files
+    assert read_install_record(drive, "keys")["base_digest"] == second
+    base = dict(files)
+    (target / "SKILL.md").write_text((target / "SKILL.md").read_text() + "\nlocal edit\n")
+    files["id_rsa"] = b"SYNTHETIC KEY FIXTURE TWO\n"
+    release("2.0.0")
+    merged = installer.update_installed(drive, "keys", mode="merge", rows=rows, actor="ouroboros")
+    assert merged["base_available"] is True
+    assert {rel: (drive / merged["new_tree"] / rel).read_bytes() for rel in files} == files
+    assert {rel: (drive / merged["base_tree"] / rel).read_bytes() for rel in base} == base
+
+
 def test_copy_refuses_symlinks_and_oversized_trees(tmp_path):
     from ouroboros.marketplace.fetcher import FetchError, copy_tree_checked
 
@@ -459,6 +619,34 @@ def test_registry_hits_name_their_author_and_update_time(monkeypatch):
     # Shared catalog consumes the adapter's normalized facts, not its raw wire keys.
     monkeypatch.setattr(clawhub.ClawHubSkillSummary, "catalog_facts", lambda self: {"owner": "adapter"})
     assert {item["owner"] for item in catalog.registry_items(row, "weather")} == {"adapter"}
+
+
+def test_a_registry_browse_is_one_page_in_its_order_with_search_shaped_items(monkeypatch, tmp_path):
+    from ouroboros.marketplace import clawhub
+
+    asked = []
+
+    def fake_search(query, **kwargs):
+        asked.append((query, kwargs))
+        return {"results": [clawhub._summary_from_record({"name": "self-improving-agent", "ownerHandle": "pskoett",
+                                                          "summary": "Learns.", "stats": {"downloads": 491927}})],
+                "next_cursor": "page-2"}
+
+    monkeypatch.setattr(clawhub, "search", fake_search)
+    row = {"id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "review", "confirmed": True}
+    page = catalog.registry_browse(row)
+    assert page["next_cursor"] == "page-2"
+    assert asked[0][0] == "" and (asked[0][1]["sort"], asked[0][1]["cursor"]) == ("popular", None)
+    assert asked[0][1]["limit"] == catalog.REGISTRY_BROWSE_PAGE
+    item = page["items"][0]
+    assert (item["id"], item["registry_slug"], item["installed"]) == ("clawhub/self-improving-agent", "self-improving-agent", None)
+    assert (item["owner"], item["registry_stats"]) == ("pskoett", {"downloads": 491927})
+    # The install path resolves exactly this id.
+    assert catalog.find_item(tmp_path, item["id"], rows=[row])[1]["registry_slug"] == "self-improving-agent"
+    catalog.registry_browse(row, sort="updated", cursor="abc")
+    assert (asked[1][1]["sort"], asked[1][1]["cursor"]) == ("updated", "abc")
+    catalog.registry_browse(row, sort="stars")
+    assert asked[2][1]["sort"] == "popular", "an order the registry cannot give falls back to its default"
 
 
 def test_the_listing_says_why_and_in_which_task_ouroboros_installed(drive, hub):

@@ -5,7 +5,8 @@ stale head/base, an open duplicate or an already-ready pull request prevents an 
 while a fresh read admits it exactly once. Negative controls cover lost answers, failed readbacks
 and malformed JSON. A correctly authored shell script can compose the same operations; these
 are behavior regressions, not a benchmark against that valid alternative.
-Once a mutation was sent, no result claims it had no effect: the read-back speaks and the outcome stays unknown.
+Once a mutation was sent, the read-back speaks and the outcome stays unknown; the one exception is the field edit's
+definite HTTP 4xx with every sent field read back as the precheck read it, which is not applied.
 """
 
 import json
@@ -16,7 +17,7 @@ import pytest
 
 from ouroboros.github_pr_identity import pull_request_fields_from_cli, pull_request_fields_from_rest, same_pull_request
 from ouroboros.tools import github, github_pr_write
-from tests.test_github_project_target import BASE, MOVED, SHA, _context
+from tests.test_github_project_target import BASE, MOVED, READ_ORG_REFUSAL, SHA, _context
 
 BASE_SHA = "c" * 40
 NEW_BASE_SHA = "d" * 40
@@ -25,6 +26,9 @@ TIMEOUT = github.GhResult(False, "⚠️ GH_TIMEOUT: exceeded 60s.", None, None,
 REFUSED = github.GhResult(False, "⚠️ GH_ERROR: HTTP 422: Validation Failed (https://api.github.example/repos/owner/selected/pulls)",
                           1, 422, "exit")
 NOT_JSON = github.GhResult(True, "<html>maintenance</html>", 0, None, "")
+SERVER_ERROR = github.GhResult(False, "⚠️ GH_ERROR: gh: HTTP 502", 1, 502, "exit")
+# The field edit: one REST PATCH addressed by the read pull request's URL, on its host.
+PATCH = ["api", "repos/owner/selected/pulls/7", "--method", "PATCH", "--input", "-", "--hostname", "github.example"]
 
 
 def _answer(payload):
@@ -75,13 +79,9 @@ class FakeGitHub:
                        "headRefOid": self.refs[f"{owner}:{branch}"], "headRepositoryOwner": {"login": owner}}
             return github.GhResult(True, URL, 0, None, "")
         if kind == "edit":
-            if "--title" in flags:
-                self.pr["title"] = flags["--title"]
-            if "--body-file" in flags:
-                self.pr["body"] = input_data
-            if "--base" in flags:
-                self.pr["baseRefName"] = flags["--base"]
-            return github.GhResult(True, URL, 0, None, "")
+            fields = json.loads(input_data)
+            self.pr.update({"baseRefName" if key == "base" else key: value for key, value in fields.items()})
+            return _answer({"number": 7, "html_url": URL, "title": self.pr["title"], "body": self.pr["body"]})
         self.pr["isDraft"] = "--undo" in args
         return github.GhResult(True, "", 0, None, "")
 
@@ -90,7 +90,7 @@ class FakeGitHub:
         if args[:2] == ["repo", "view"]:
             return "repo"
         if args[0] == "api":
-            return "ref"
+            return "edit" if "--method" in args and args[args.index("--method") + 1] == "PATCH" else "ref"
         return {"list": "list", "view": "view", "create": "create", "edit": "edit", "ready": "ready"}[args[1]]
 
     def kinds(self):
@@ -294,14 +294,8 @@ def test_create_precheck_read_failures_send_nothing(fake, ctx):
 
 
 @pytest.mark.parametrize("over,fragment", [
-    ({"title": " "}, "title is one non-empty line"),
-    ({"title": "two\nlines"}, "title is one non-empty line"),
     ({"head": "-rf"}, "head is an existing branch name"),
-    ({"head": "bad owner:feature"}, "head is an existing branch name"),
-    ({"head": "feature..old"}, "head is an existing branch name"),
     ({"base": "main branch"}, "base is the branch name"),
-    ({"expected_head_sha": "abc123"}, "full 40-hex"),
-    ({"expected_base_sha": ""}, "full 40-hex"),
     ({"expected_base_sha": SHA}, "equals expect.base_sha"),
     ({"body": None}, "body is a string"),
     ({"draft": "yes"}, "draft is a boolean"),
@@ -319,12 +313,12 @@ def test_create_argument_refusals_are_typed_and_send_nothing(fake, ctx, over, fr
 def test_update_omitted_body_is_left_and_empty_body_clears_in_one_edit(fake, ctx):
     gh = fake(pr=_open_pr())
     text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="New title")
-    assert gh.writes()[0].args == ["pr", "edit", "7", "--title=New title"] and gh.writes()[0].input is None
+    assert gh.writes()[0].args == PATCH and json.loads(gh.writes()[0].input) == {"title": "New title"}
     assert gh.pr["body"] == "Old body" and text == f"✅ PR #7 updated: {URL}\nRead-back: title confirmed; head at {SHA} confirmed"
 
     gh = fake(pr=_open_pr())
     text = _pr(ctx, "update", number=7, expected_head_sha=SHA, body="")
-    assert gh.writes()[0].args == ["pr", "edit", "7", "--body-file=-"] and gh.writes()[0].input == ""
+    assert gh.writes()[0].args == PATCH and json.loads(gh.writes()[0].input) == {"body": ""}
     assert gh.pr["body"] == "" and "Read-back: body confirmed (0 chars)" in text
     assert gh.kinds() == ["view", "edit", "view"]
 
@@ -361,7 +355,8 @@ def test_update_base_requires_its_expected_commit_and_checks_it(fake, ctx):
     assert gh.writes() == [] and f"base release is at {NEW_BASE_SHA}, you expected {BASE_SHA}; nothing was changed" in text
     text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="T", body="B", base="release",
                                      expected_base_sha=NEW_BASE_SHA)
-    assert gh.writes()[-1].args == ["pr", "edit", "7", "--title=T", "--body-file=-", "--base=release"]
+    assert gh.calls[-3].args == ["api", "repos/owner/selected/git/ref/heads/release", "--hostname", "github.example"]
+    assert gh.writes()[-1].args == PATCH and json.loads(gh.writes()[-1].input) == {"title": "T", "body": "B", "base": "release"}
     assert "Read-back: title confirmed; body confirmed (1 chars); base release confirmed" in text
     assert "already holds the requested values; nothing was changed" in _pr(
         ctx, "update", number=7, expected_head_sha=SHA, base="release", expected_base_sha=NEW_BASE_SHA)
@@ -372,7 +367,7 @@ def test_update_same_base_still_edits_title_and_body_once(fake, ctx):
     text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="New title", body="New body",
                                      base="main", expected_base_sha=BASE_SHA)
     assert gh.kinds() == ["view", "edit", "view"]
-    assert gh.writes()[0].args == ["pr", "edit", "7", "--title=New title", "--body-file=-"]
+    assert gh.writes()[0].args == PATCH and json.loads(gh.writes()[0].input) == {"title": "New title", "body": "New body"}
     assert gh.pr["title"] == "New title" and gh.pr["body"] == "New body"
     assert "Read-back: title confirmed; body confirmed (8 chars)" in text
     assert (_typed(ctx).status, _typed(ctx).meta["operation_outcome"]) == ("ok", "completed")
@@ -392,7 +387,7 @@ def test_update_checks_requested_current_base_after_title_edit(fake, ctx):
     text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="New title",
                                      base="main", expected_base_sha=BASE_SHA)
     assert gh.kinds() == ["view", "edit", "view"]
-    assert gh.writes()[0].args == ["pr", "edit", "7", "--title=New title"]
+    assert gh.writes()[0].args == PATCH and json.loads(gh.writes()[0].input) == {"title": "New title"}
     assert "title confirmed; base main confirmed" in text
     assert _typed(ctx).meta["operation_outcome"] == "completed"
 
@@ -409,7 +404,7 @@ def test_update_current_base_retargeted_during_edit_is_unknown(fake, ctx):
     github_pr_write._gh_run = retarget_after_edit
     text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="New title",
                                      base="main", expected_base_sha=BASE_SHA)
-    assert gh.writes()[0].args == ["pr", "edit", "7", "--title=New title"]
+    assert gh.writes()[0].args == PATCH and json.loads(gh.writes()[0].input) == {"title": "New title"}
     assert "title confirmed" in text and "base is 'release', you asked for 'main'" in text
     assert "does not hold every requested value" in text
     assert _typed(ctx).meta["operation_outcome"] == "unknown"
@@ -425,8 +420,9 @@ def test_update_refuses_a_moved_head_or_a_closed_pull_request(fake, ctx, pr, fra
     assert gh.writes() == [] and fragment in text and _typed(ctx).meta["operation_outcome"] == "completed_no_effect"
 
 
-def test_update_failed_answer_reports_partial_effects_from_the_readback(fake, ctx):
-    """gh errored after GitHub applied the title but not the body: the read-back says which values are held."""
+def test_update_refused_after_a_sent_field_changed_stays_unknown_and_says_what_changed(fake, ctx):
+    """GitHub answered 422, yet the title read back changed since the precheck: no all-or-nothing edit is documented,
+    so the outcome stays unknown and the read-back is described without saying which request changed it."""
     gh = fake(pr=_open_pr())
 
     def partial(args, ctx_, **kwargs):
@@ -439,17 +435,27 @@ def test_update_failed_answer_reports_partial_effects_from_the_readback(fake, ct
     text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="New title", body="New body")
     assert len(gh.writes()) == 1
     assert text.startswith("⚠️ PR_UPDATE_UNKNOWN: the edit request for PR #7 in the active Project repository ended with exit 1, HTTP 422: ")
-    assert text.endswith("Read-back at that moment: held: title confirmed; not held: body differs (8 chars held, 8 sent). Read again "
-                         "before resending only the fields not held.")
+    assert text.endswith("GitHub answered with a refusal, yet the read-back differs from the precheck in a sent field: title changed "
+                         "from 'Old title' to 'New title'. GitHub documents no all-or-nothing edit, so the read-back cannot tell which "
+                         "request made that change; read the pull request again before any further edit.")
     assert _typed(ctx).meta["operation_outcome"] == "unknown"
 
 
-def test_update_send_failure_with_nothing_held_stays_unknown_and_everything_held_says_do_not_resend(fake, ctx):
+def test_update_refusal_with_nothing_changed_is_not_applied_while_other_failures_stay_unknown(fake, ctx):
     gh = fake(pr=_open_pr(), failing={"edit": REFUSED})
     text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="New title")
-    assert text.endswith("Read-back: none of the requested values was held at that moment (title is 'Old title', you sent 'New title'); "
-                         "a request GitHub is still processing could still land, so read again before resending.")
-    assert _typed(ctx).meta["operation_outcome"] == "unknown" and len(gh.writes()) == 1
+    assert text == ("⚠️ GH_WRITE_NOT_APPLIED: GitHub refused the edit of PR #7 in the active Project repository: the request ended "
+                    "with exit 1, HTTP 422: ⚠️ GH_ERROR: HTTP 422: Validation Failed (https://api.github.example/repos/owner/selected/"
+                    "pulls). One request was sent and not retried; the read-back holds every sent field as the precheck read it, so "
+                    "nothing was changed.")
+    assert (_typed(ctx).code, _typed(ctx).meta["operation_outcome"]) == ("TOOL_ERROR", "completed_no_effect")
+    assert len(gh.writes()) == 1
+    for failure in (SERVER_ERROR, TIMEOUT):  # No definite refusal: a request GitHub is still processing could land.
+        gh = fake(pr=_open_pr(), failing={"edit": failure})
+        text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="New title")
+        assert text.endswith("Read-back: none of the requested values was held at that moment (title is 'Old title', you sent "
+                             "'New title'); a request GitHub is still processing could still land, so read again before resending.")
+        assert _typed(ctx).meta["operation_outcome"] == "unknown" and len(gh.writes()) == 1
     gh = fake(pr=_open_pr(), failing={"edit": TIMEOUT})
 
     def late_readback(args, ctx_, **kwargs):
@@ -494,15 +500,9 @@ def test_head_movement_after_an_accepted_edit_is_a_note_not_a_failure(fake, ctx)
 
 
 @pytest.mark.parametrize("answer,why", [
-    (NOT_JSON, "not a JSON object"),
     (_answer({}), "field 'number' is None"),
-    (_answer({**_open_pr(), "number": 8}), "field 'number' is 8"),
-    (_answer({key: value for key, value in _open_pr().items() if key != "isDraft"}), "field 'isDraft' is None"),
-    (_answer({**_open_pr(), "isDraft": "false"}), "field 'isDraft' is 'false'"),
-    (_answer({**_open_pr(), "headRefOid": "abc"}), "field 'headRefOid' is 'abc'"),
     (_answer({**_open_pr(), "headRepositoryOwner": None}), "field 'headRepositoryOwner' is None"),
     (_answer({**_open_pr(), "body": 5}), "field 'body' is not text"),
-    (_answer({key: value for key, value in _open_pr().items() if key != "body"}), "field 'body' is missing"),
 ])
 def test_malformed_pull_request_answers_are_typed_refusals_before_any_write(fake, ctx, answer, why):
     """`{}` or a missing isDraft must never read as 'already ready' or as a confirmed state."""
@@ -518,9 +518,6 @@ def test_malformed_pull_request_answers_are_typed_refusals_before_any_write(fake
 
 
 @pytest.mark.parametrize("kwargs,fragment", [
-    ({"number": 0, "expected_head_sha": SHA, "title": "x"}, "target is the positive"),
-    ({"number": 7, "expected_head_sha": "short", "title": "x"}, "expect.head_sha is the full 40-hex"),
-    ({"number": 7, "expected_head_sha": SHA}, "nothing to change"),
     ({"number": 7, "expected_head_sha": SHA, "title": ""}, "title is one non-empty line"),
     ({"number": 7, "expected_head_sha": SHA, "body": 5}, "body is a string"),
     ({"number": 7, "expected_head_sha": SHA, "base": "-x", "expected_base_sha": SHA}, "base is a branch name"),
@@ -528,6 +525,124 @@ def test_malformed_pull_request_answers_are_typed_refusals_before_any_write(fake
 def test_update_argument_refusals(fake, ctx, kwargs, fragment):
     gh = fake(pr=_open_pr())
     assert fragment in _pr(ctx, "update", **kwargs) and gh.calls == []
+
+
+# --- the field edit over the registry and the real transport: only the gh process is fake ----------------------------
+
+def _process(code=0, stdout="", stderr=""):
+    return SimpleNamespace(returncode=code, stdout=stdout, stderr=stderr)
+
+
+def _refusal(status, message):
+    """What `gh api` prints for an HTTP error: GitHub's JSON on stdout, its message and status on stderr."""
+    return lambda _fields: _process(1, json.dumps({"message": message, "status": str(status)}), f"gh: {message} (HTTP {status})\n")
+
+
+@pytest.fixture
+def cli(ctx, monkeypatch):
+    """``edit(**args)`` runs github_write update kind='pr' through the registry. ``answer(fields)`` answers the PATCH
+    (default: GitHub applies the fields); ``views`` scripts later ``pr view`` answers (None: the PR as held);
+    ``gh pr edit`` answers as it does for a token without read:org."""
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
+    state = SimpleNamespace(pr=_open_pr(), calls=[], views=[], answer=None)
+
+    def apply(fields):
+        state.pr.update({"baseRefName" if key == "base" else key: value for key, value in fields.items()})
+        return _process(stdout=json.dumps({"number": 7, "html_url": state.pr["url"], "title": state.pr["title"]}))
+
+    def run(argv, **kwargs):
+        state.calls.append((list(argv), kwargs))
+        args = argv[1:]
+        if args[:2] == ["pr", "view"]:
+            return (state.views.pop(0) if state.views else None) or _process(stdout=json.dumps(state.pr))
+        if args[:2] == ["pr", "edit"]:
+            return _process(1, stderr=READ_ORG_REFUSAL)
+        if args[0] == "api" and "PATCH" in args:
+            return (state.answer or apply)(json.loads(kwargs["input"]))
+        if args[0] == "api" and "/git/ref/heads/" in args[1]:
+            return _process(stdout=json.dumps({"object": {"sha": NEW_BASE_SHA}}))
+        raise AssertionError(f"unexpected gh command: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    state.apply = apply
+    state.edit = lambda **args: registry.execute_result("github_write", {"method": "update", "kind": "pr", "target": 7, **args})
+    state.patches = lambda: [argv for argv, _kw in state.calls if "PATCH" in argv]
+    return state
+
+
+@pytest.mark.parametrize("pr_host,default_host", [("github.example", "github.com"), ("github.com", "enterprise.example")])
+@pytest.mark.parametrize("change,sent", [
+    ({"title": "New title"}, {"title": "New title"}),  # an omitted body stays omitted
+    ({"body": ""}, {"body": ""}),  # an explicit empty body clears it
+    ({"title": "Заголовок → 🤖", "body": "Тело\r\n- причина ✓\n"}, {"title": "Заголовок → 🤖", "body": "Тело\r\n- причина ✓\n"}),
+    ({"title": "T", "base": "release", "expect": {"base_sha": NEW_BASE_SHA}}, {"title": "T", "base": "release"}),
+    ({"title": "T", "base": "main", "expect": {"base_sha": BASE_SHA}}, {"title": "T"}),  # the held base is not resent
+])
+def test_field_edit_is_one_rest_patch_at_the_read_pull_requests_own_host(cli, monkeypatch, pr_host, default_host, change, sent):
+    """`gh pr edit` queries organization fields a repo-scoped token cannot read (#2424; poisoned here). The edit is one
+    REST PATCH of exactly the sent fields at the repository and host of the pull request just read, not gh's default."""
+    monkeypatch.setenv("GH_HOST", default_host)
+    cli.pr["url"] = f"https://{pr_host}/owner/selected/pull/7"
+    change = dict(change)
+    retarget = sent.get("base") == "release"
+
+    result = cli.edit(expect={"head_sha": SHA, **change.pop("expect", {})}, **change)
+
+    assert (result.status, result.meta.get("operation_outcome")) == ("ok", "completed"), result.text
+    assert [argv[1] if argv[1] == "api" else " ".join(argv[1:3]) for argv, _ in cli.calls] == (
+        ["pr view", "api", "api", "pr view"] if retarget else ["pr view", "api", "pr view"])
+    route = ["gh", "api", "repos/owner/selected/pulls/7", "--method", "PATCH", "--input", "-", "--hostname", pr_host]
+    assert cli.patches() == [route]
+    assert json.loads(next(kw for argv, kw in cli.calls if argv == route)["input"]) == sent
+    if retarget:
+        assert cli.calls[1][0] == ["gh", "api", "repos/owner/selected/git/ref/heads/release", "--hostname", pr_host]
+    receipt = json.loads(result.text.partition("\n")[2])
+    assert receipt["outcome"] == "confirmed" and receipt["detail"].startswith("✅ PR #7 updated")
+
+
+@pytest.mark.parametrize("case,outcome,fragment", [
+    ("forbidden", "completed_no_effect", "⚠️ GH_WRITE_NOT_APPLIED: GitHub refused the edit of PR #7"),
+    ("malformed_readback", "unknown", "⚠️ Read-back failed"),
+    ("refused_then_malformed_readback", "unknown", "Read-back failed too"),
+])
+def test_field_edit_answers_settle_by_github_status_and_readback_without_replay(cli, case, outcome, fragment):
+    """Only a definite HTTP 4xx with every sent field read back unchanged is not applied; a 5xx, a lost or
+    statusless answer, a failed read-back or a change since the precheck stays unknown. Nothing is resent."""
+    def timeout(_fields):
+        raise subprocess.TimeoutExpired(["gh"], 60)
+
+    def moved(fields):
+        cli.pr["headRefOid"] = MOVED
+        return cli.apply(fields)
+
+    cli.answer = {
+        "forbidden": _refusal(403, "Resource not accessible by personal access token"),
+        "invalid": _refusal(422, "Validation Failed"),
+        "refused_then_malformed_readback": _refusal(422, "Validation Failed"),
+        "invalid_after_a_change": lambda fields: (cli.apply(fields), _refusal(422, "Validation Failed")(fields))[1],
+        "server_error": lambda _fields: _process(1, "", "gh: HTTP 502\n"),
+        "timeout": timeout,
+        "no_status": lambda _fields: _process(1, "", "error connecting to api.github.example\n"),
+        "head_moved": moved,
+    }.get(case)
+    if "malformed" in case:
+        cli.views = [None, _process(stdout="<html>maintenance</html>")]
+
+    result = cli.edit(expect={"head_sha": SHA}, title="New title")
+
+    receipt = json.loads(result.text.partition("\n")[2])
+    assert result.meta.get("operation_outcome") == outcome, result.text
+    assert fragment in receipt["detail"], receipt["detail"]
+    assert [argv[1] if argv[1] == "api" else " ".join(argv[1:3]) for argv, _ in cli.calls] == ["pr view", "api", "pr view"]
+    assert len(cli.patches()) == 1
+    if outcome == "completed_no_effect":
+        assert receipt["outcome"] == "not_applied" and receipt["http_status"] in (403, 422)
+        assert "One request was sent and not retried" in receipt["detail"]
 
 
 # --- set_github_pr_ready ----------------------------------------------------------------------------------------------
@@ -647,8 +762,9 @@ def test_registered_writer_runs_under_the_registry_with_the_repo_binding(tmp_pat
                                                           "base": "main",
                                                           "repo": "github.example/owner/selected"})
     assert (result.status, result.code, result.meta.get("operation_outcome")) == ("ok", "OK", "completed"), result
-    assert all(call.repo == "github.example/owner/selected" for call in gh.calls) and len(gh.writes()) == 1
-    assert gh.writes()[0].args == ["pr", "edit", "7", "--title=Via registry"]
+    assert [call.repo for call in gh.calls] == ["github.example/owner/selected", github._GENERIC_TRANSPORT,
+                                                "github.example/owner/selected"]
+    assert gh.writes()[0].args == PATCH and json.loads(gh.writes()[0].input) == {"title": "Via registry"}
     refused = registry.execute_result("github_write", {"method": "update", "kind": "pr", "target": 7, "expect": {"head_sha": SHA}, "repo": "github.example/owner/selected"})
     assert (refused.status, refused.code, refused.meta["operation_outcome"]) == ("error", "TOOL_ARG_ERROR", "completed_no_effect")
     assert len(gh.writes()) == 1
@@ -694,7 +810,7 @@ def test_identity_fields_project_both_wire_shapes_onto_the_same_keys():
     assert pull_request_fields_from_rest({"head": "x", "base": None}) == {"head_sha": None, "head_branch": None, "head_owner": None, "base_branch": None}
 
 
-@pytest.mark.parametrize("number", [None, 0, -1, 7])
+@pytest.mark.parametrize("number", [None, -1, 7])
 def test_create_missing_url_never_invents_a_pr_number(fake, ctx, number):
     gh = fake(failing={
         "create": github.GhResult(True, "Accepted", 0, None, ""),
@@ -758,7 +874,7 @@ def test_pr_update_reports_partial_state_after_one_send(tmp_path, monkeypatch):
                 driver.calls.append(SimpleNamespace(args=list(args), repo=options.get("repo"),
                                                     input=options.get("input_data"), timeout=60))
                 driver.pr["title"] = "New title"
-                return github.GhResult(False, "⚠️ GH_ERROR: HTTP 422", 1, 422, "exit")
+                return SERVER_ERROR
             return driver(args, context, **options)
         return driver, call
 

@@ -20,6 +20,7 @@ from ouroboros.cost_projection import honest_cost_pair_amount
 from ouroboros.evolution_fingerprint import canonical_objective_fingerprint
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from supervisor.evolution_cleanup import _cleanup_worktree_after_cycle, cleanup_fields, publish_cleanup
 
 log = logging.getLogger(__name__)
 
@@ -144,11 +145,13 @@ def _deliver_pending_owner_report() -> None:
 
 
 def enqueue_evolution_task_if_needed() -> None:
-    """Queue evolution only when idle, enabled, within budget, and not failure-paused."""
+    """Queue evolution only when idle (no conversation turn holds it), enabled and admitted by the global budget limit.
+
+    Failure and repeat counts are evidence for the mind, never a stop (owner, 2026-11-02)."""
     from supervisor import queue as q
 
     q._deliver_pending_owner_report()
-    if q.PENDING or q.RUNNING:
+    if q.PENDING or q.project_running():
         return
     from supervisor.state import StateUnavailable, control_is, update_state
 
@@ -188,44 +191,8 @@ def enqueue_evolution_task_if_needed() -> None:
         q.send_with_budget(int(owner_chat_id), block, role="system", system_type="evolution_notice")
         return
 
-    consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
-    if consecutive_failures >= 3:
-        q.pause_evolution_campaign("paused after consecutive failures")
-        q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"🧬⚠️ Evolution paused: {consecutive_failures} consecutive failures. "
-            f"Use /evolve start to resume after investigating the issue.",
-            role="system", system_type="evolution_notice")
-        return
-
-    # Objective repeats count non-consecutive no-ops by the transaction's canonical
-    # fingerprint, clearing only on absorption. The failure streak cannot catch
-    # these loops because every non-failing cycle resets it (events.py).
-    objective_repeat_counts = campaign.get("objective_repeat_counts") or {}
-    active_objective_fp = canonical_objective_fingerprint(
-        str(campaign.get("objective") or ""),
-    )
-    objective_repeats = (
-        int(objective_repeat_counts.get(active_objective_fp, 0))
-        if active_objective_fp else 0
-    )
-    if objective_repeats >= q.OBJECTIVE_REPEAT_CAP:
-        q.pause_evolution_campaign(
-            "paused: objective re-proposed without ever absorbing",
-        )
-        q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"🧬⚠️ Evolution paused: the current objective ran {objective_repeats} reviewed "
-            f"cycles WITHOUT ever being absorbed — it keeps getting re-proposed and never lands "
-            f"(a self-maintenance loop, not progress). A plain resume won't help; use "
-            f"/evolve start with a DIFFERENT objective.",
-            role="system", system_type="evolution_notice")
-        return
-
-    try:  # on the supervisor loop: ride the snapshot, decide the reserve refusal on the exact read
-        remaining = q.budget_remaining(st, strict=True, allow_stale=True, refuse_below=q.EVOLUTION_BUDGET_RESERVE)
+    try:  # on the supervisor loop: ride the snapshot; an exhausted answer is decided on the exact read
+        remaining = q.budget_remaining(st, strict=True, allow_stale=True)
     except Exception:
         log.error("Evolution scheduling deferred: cost accounting unavailable", exc_info=True)
         q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl", {
@@ -233,15 +200,10 @@ def enqueue_evolution_task_if_needed() -> None:
             "action": "dispatch_deferred", "owner_visible": True,
         })
         return
-    if remaining < q.EVOLUTION_BUDGET_RESERVE:
-        q.pause_evolution_campaign("budget reserve reached")
-        q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"💸 Evolution stopped: ${remaining:.2f} remaining "
-            f"(reserve ${q.EVOLUTION_BUDGET_RESERVE:.0f} for conversations).",
-            role="system", system_type="evolution_notice")
-        return
+    from supervisor.worker_assignment import needs_paid_admission
+
+    if remaining <= 0 and needs_paid_admission({"metadata": {}}):  # an evolution task opens on Main
+        return  # the limit refuses new paid admission; the campaign and its switch stay as they are
     cycle = int(st.get("evolution_cycle") or 0) + 1
     tid = uuid.uuid4().hex[:8]
     transaction = q.begin_evolution_transaction(tid, cycle=cycle, campaign=campaign)
@@ -304,6 +266,7 @@ def _write_evolution_campaign(
 ) -> bool:
     path = _evolution_campaign_path()
     from supervisor import state
+    from supervisor import git_ops
 
     state.assert_test_data_path(path)
     lock_fd = None
@@ -314,35 +277,39 @@ def _write_evolution_campaign(
         if lock_fd is None:
             return False
     try:
-        current = read_json_dict(path)
-        if current is None and path.is_file():   # present but unreadable is NOT "no campaign"
-            log.warning("Refusing evolution campaign write: %s exists but is unreadable", path)
-            return False
-        current = current or {}
-        current_id = str(current.get("id") or "")
-        data_id = str(data.get("id") or "")
-        expected_id = data_id if expected_campaign_id is None else str(expected_campaign_id or "")
-        if current_id and current_id != expected_id:
-            log.warning(
-                "Refusing stale evolution campaign write: current=%s expected=%s",
-                current_id, expected_id,
-            )
-            return False
-        if (
-            current_id == data_id
-            and current.get("status") not in {"active", "paused"}
-            and data.get("status") in {"active", "paused"}
-        ):
-            log.warning("Refusing stale resurrection of terminal evolution campaign %s", data_id)
-            return False
-        if expected_active_transaction is not None:
-            current_tx = current.get("active_transaction", {})
-            if current_tx != expected_active_transaction:
-                log.warning("Refusing stale evolution transaction write for campaign %s", data_id)
+        with git_ops.bootstrap_transition_lock(timeout_sec=float(_lock_timeout_sec)):
+            current = read_json_dict(path)
+            if current is None and path.is_file():   # present but unreadable is NOT "no campaign"
+                log.warning("Refusing evolution campaign write: %s exists but is unreadable", path)
                 return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(path, data, trailing_newline=True)
-        return True
+            current = current or {}
+            current_id = str(current.get("id") or "")
+            data_id = str(data.get("id") or "")
+            expected_id = data_id if expected_campaign_id is None else str(expected_campaign_id or "")
+            if current_id and current_id != expected_id:
+                log.warning(
+                    "Refusing stale evolution campaign write: current=%s expected=%s",
+                    current_id, expected_id,
+                )
+                return False
+            if (
+                current_id == data_id
+                and current.get("status") not in {"active", "paused"}
+                and data.get("status") in {"active", "paused"}
+            ):
+                log.warning("Refusing stale resurrection of terminal evolution campaign %s", data_id)
+                return False
+            if expected_active_transaction is not None:
+                current_tx = current.get("active_transaction", {})
+                if current_tx != expected_active_transaction:
+                    log.warning("Refusing stale evolution transaction write for campaign %s", data_id)
+                    return False
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(path, data, trailing_newline=True)
+            return True
+    except (OSError, RuntimeError, TimeoutError) as exc:
+        log.warning("Refusing evolution campaign write while bootstrap transition owns checkout: %s", exc)
+        return False
     finally:
         if lock_fd is not None:
             state.release_file_lock(state.STATE_LOCK_PATH, lock_fd)
@@ -441,8 +408,8 @@ def pause_evolution_campaign(reason: str = "") -> Dict[str, Any]:
 
     RESUMABLE: a later ``/evolve start`` resumes the SAME campaign in place
     (start_evolution_campaign treats ``paused`` as resumable). Used by the system
-    breakers (light mode, consecutive failures, objective-repeat cap, budget reserve,
-    restart-blocked) — NOT by an owner stop. For an owner stop use
+    breakers (light mode, a refused consciousness admission, blocked bootstrap or
+    restart) — NOT by an owner stop. For an owner stop use
     ``complete_evolution_campaign`` (terminal).
     """
     from supervisor import state
@@ -481,14 +448,14 @@ def complete_evolution_campaign(
         snapshot_tx = snapshot.get("active_transaction")
         cleanup_updates: Dict[str, Any] = {}
         if cleanup_worktree and isinstance(snapshot_tx, dict):
+            task_id = str(snapshot_tx.get("task_id") or "")
             try:
-                _cleanup_worktree_after_cycle(snapshot_tx, str(snapshot_tx.get("task_id") or ""))
-                cleanup_updates = {
-                    key: value for key, value in snapshot_tx.items()
-                    if key.startswith("cleanup_") or key == "recovery_hint"
-                }
-            except Exception:
-                pass
+                _cleanup_worktree_after_cycle(snapshot_tx, task_id)
+            except Exception as exc:  # what it did before raising stays on record with its cause
+                snapshot_tx.update(cleanup_status="error", cleanup_error=f"{type(exc).__name__}: {exc}")
+            cleanup_updates = cleanup_fields(snapshot_tx)
+            # The Git move stands whether or not the campaign write below lands: owed first.
+            publish_cleanup(snapshot_tx, task_id, _evolution_campaign_path().parents[1])
         state.assert_test_data_path(state.STATE_PATH)
         lock_fd = state.acquire_file_lock(
             state.STATE_LOCK_PATH, timeout_sec=0.001 if not cleanup_worktree else 4.0,
@@ -905,9 +872,9 @@ def link_evolution_rescue(drive_root: pathlib.Path, rescue_info: Dict[str, Any])
 def _bump_objective_repeat_count(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
     """BUG3: count one non-absorbing cycle against its objective fingerprint.
 
-    Cumulative PER-FINGERPRINT (not a consecutive streak), so a re-proposed blocked objective
-    still accumulates toward the pause gate. A transaction without an ``objective_fp`` is
-    skipped, never bucketed under the empty key.
+    Cumulative PER-FINGERPRINT (not a consecutive streak), so a re-proposed objective keeps
+    its whole unabsorbed record as evidence; nothing pauses on it. A transaction without an
+    ``objective_fp`` is skipped, never bucketed under the empty key.
     """
     fp = str((tx or {}).get("objective_fp") or "")
     if not fp:
@@ -964,132 +931,6 @@ def update_evolution_transaction(task_id: str, **updates: Any) -> bool:
         state.release_file_lock(state.STATE_LOCK_PATH, lock_fd)
 
 
-def _cleanup_worktree_after_cycle(tx: Dict[str, Any], task_id: str) -> None:
-    """Restore an ended cycle's base, preserving dirty/ahead work in stash/local refs.
-    Unadmitted cycles, other writers, unknown base, live tests or disabled cleanup
-    retain their reason. Never raises (OUROBOROS_EVOLUTION_CYCLE_CLEANUP=false)."""
-    if str(os.environ.get("OUROBOROS_EVOLUTION_CYCLE_CLEANUP", "true") or "true").lower() in {"0", "false", "no", "off"}:
-        tx["cleanup_status"] = "disabled"
-        return
-    if tx.get("admission_refused") and not tx.get("commit_sha"):
-        tx["cleanup_status"] = "skipped_never_admitted"
-        return
-    base_head = str(tx.get("base_head") or "").strip()
-    if not base_head:
-        tx["cleanup_status"] = "skipped_no_base"
-        return
-    from ouroboros import body_adoption, body_candidate
-    candidate = body_candidate.find(str(task_id))
-    if candidate is not None:                         # its work is in the retained candidate;
-        tx["cleanup_status"] = "candidate_retained"    # serving dirt belongs to someone else
-        return body_adoption.abandon(_evolution_campaign_path().parents[1], "evolution_cycle_ended",
-                                     task_id=str(task_id), candidate_id=str(candidate["candidate_id"]))
-    update_lock_fh = None
-    release_update_lock = None
-    try:
-        from supervisor import git_ops, queue
-        from supervisor.update_merge import acquire_update_lock, release_update_lock
-        from supervisor.workers import repo_writer_admission_closed
-
-        try:
-            update_lock_fh = acquire_update_lock()
-        except RuntimeError:
-            tx["cleanup_status"] = "skipped_managed_update_lock_busy"
-            return
-        admission_reason = repo_writer_admission_closed()
-        if admission_reason:
-            tx["cleanup_status"] = "skipped_repo_writer_admission_closed"
-            tx["cleanup_deferred_reason"] = admission_reason
-            return
-
-        # Same protection class as git_ops._guard_live_repo_destructive_git, but
-        # covering the stash too: a unit test that never re-pointed
-        # git_ops.REPO_DIR must not stash/reset the LIVE repo's working tree.
-        if os.environ.get("OUROBOROS_ALLOW_LIVE_REPO_TESTS") != "1":
-            import sys as _sys
-            try:
-                live_repo = git_ops.REPO_DIR.resolve(strict=False) == (pathlib.Path.home() / "Ouroboros" / "repo").resolve(strict=False)
-            except OSError:
-                live_repo = False
-            if live_repo and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in _sys.modules):
-                tx["cleanup_status"] = "skipped_live_repo_test_guard"
-                return
-
-        # Lock-free RUNNING snapshot is safe because this runs on the SAME
-        # single supervisor thread that assigns tasks (dispatch_event ->
-        # assign_tasks are sequential); only cancel paths mutate RUNNING from
-        # HTTP threads, which can only shrink the set.
-        running_others = [tid for tid in list(queue.RUNNING.keys()) if str(tid) != str(task_id)]
-        if running_others:
-            # The live worktree is shared: a reset would destroy concurrent
-            # tasks' work. Leave state for the boot reconcile / next cycle.
-            tx["cleanup_status"] = "skipped_other_tasks_running"
-            return
-
-        rc_status, status_out, _ = git_ops.git_capture(["git", "status", "--porcelain"])
-        rc_head, head_out, _ = git_ops.git_capture(["git", "rev-parse", "HEAD"])
-        if rc_status != 0 or rc_head != 0:
-            tx["cleanup_status"] = "skipped_git_unavailable"
-            return
-        dirty = bool(status_out.strip())
-        head = head_out.strip()
-        if not dirty and head == base_head:
-            tx["cleanup_status"] = "already_clean"
-            return
-
-        if dirty:
-            stash_label = f"evolution-cycle-cleanup-{tx.get('transaction_id') or task_id}"
-            rc_stash, _, stash_err = git_ops.git_capture(
-                ["git", "stash", "push", "--include-untracked", "-m", stash_label]
-            )
-            if rc_stash != 0:
-                from ouroboros.utils import truncate_review_artifact
-
-                # Refuse to reset over unsaved changes (P1: no silent loss).
-                tx["cleanup_status"] = "skipped_stash_failed"
-                tx["recovery_hint"] = (
-                    "worktree dirty and stash failed: "
-                    + truncate_review_artifact(str(stash_err or "").strip(), 400)
-                )
-                return
-            tx["cleanup_stash"] = stash_label
-
-        if head != base_head:
-            preserved, ref_name = git_ops.preserve_local_ref_branch("HEAD", prefix="evolution-leftover")
-            if not preserved:
-                tx["cleanup_status"] = "skipped_preserve_failed"
-                tx["recovery_hint"] = (
-                    "HEAD ahead of base_head and preserve-branch failed; left as-is"
-                    + (f" (dirty files already saved in stash {tx['cleanup_stash']})." if tx.get("cleanup_stash") else ".")
-                )
-                return
-            tx["cleanup_preserved_ref"] = ref_name
-            rc_reset, _, reset_err = git_ops.git_capture(["git", "reset", "--hard", base_head])
-            if rc_reset != 0:
-                from ouroboros.utils import truncate_review_artifact
-
-                tx["cleanup_status"] = "reset_failed"
-                tx["recovery_hint"] = (
-                    f"git reset --hard {base_head[:12]} failed: "
-                    + truncate_review_artifact(str(reset_err or "").strip(), 400)
-                )
-                return
-            tx["cleanup_status"] = "reset_to_base"
-        else:
-            tx["cleanup_status"] = "stashed_dirty"  # HEAD already at base; only the stash happened
-        log.info(
-            "Evolution cycle %s cleanup: worktree restored to base %s (stash=%s, preserved=%s)",
-            tx.get("transaction_id") or task_id, base_head[:12],
-            tx.get("cleanup_stash") or "-", tx.get("cleanup_preserved_ref") or "-",
-        )
-    except Exception:
-        tx["cleanup_status"] = "error"
-        log.debug("Evolution cycle worktree cleanup failed", exc_info=True)
-    finally:
-        if update_lock_fh is not None and release_update_lock is not None:
-            release_update_lock(update_lock_fh)
-
-
 def _persist_evolution_cleanup(campaign_id: str, tx: Dict[str, Any]) -> bool:
     """Patch cleanup evidence into the exact terminal transaction under the state lock."""
     from supervisor import state
@@ -1102,14 +943,7 @@ def _persist_evolution_cleanup(campaign_id: str, tx: Dict[str, Any]) -> bool:
         if str(campaign.get("id") or "") != str(campaign_id or ""):
             return False
         tx_id = str(tx.get("transaction_id") or "")
-        cleanup = {
-            key: tx[key]
-            for key in (
-                "cleanup_status", "cleanup_stash", "cleanup_preserved_ref",
-                "recovery_hint",
-            )
-            if key in tx
-        }
+        cleanup = cleanup_fields(tx)
         updated = False
         for item in list(campaign.get("transaction_history") or []):
             if isinstance(item, dict) and str(item.get("transaction_id") or "") == tx_id:
@@ -1138,8 +972,12 @@ def _resume_evolution_terminal_effects(
     from supervisor import queue
 
     resumed = dict(tx or {})
-    if resumed.get("cleanup_status") == "pending":
+    cleanup_pending = resumed.get("cleanup_status") == "pending"
+    if cleanup_pending:
         _cleanup_worktree_after_cycle(resumed, str(task_id or ""))
+    # Owed before its evidence write: it outlives a lost write, and a replay repeats it.
+    publish_cleanup(resumed, str(task_id or ""), queue.DRIVE_ROOT)
+    if cleanup_pending:
         try:
             if not _persist_evolution_cleanup(campaign_id, resumed):
                 log.warning("Failed to persist evolution cleanup evidence for %s", task_id)

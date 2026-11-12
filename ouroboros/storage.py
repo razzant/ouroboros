@@ -6,11 +6,15 @@ it, the configured working-copy, project and Deliverables roots, the installed p
 metadata walk of every place, with no time, entry or depth bound, run only when the owner asks
 (``POST /api/storage/measure``) in a supervised child process at low CPU and disk priority
 (``python -m ouroboros.storage``), with progress and Stop (``cancel`` kills the child). Only a
-walk that ended by itself writes ``state/storage_measurement.json`` (the latest and the previous
-finished count, so the gauge can show growth); a cancelled, failed or killed count never touches
-it. ``StorageCount`` is the server's owner: it spawns the child through the maintenance-job seam,
-streams its lines, loads the saved file and re-reads it when its identity changes, and never
-walks on a server thread. ``gateway.storage`` mounts the routes.
+walk of every place that ended by itself writes ``state/storage_measurement.json`` (the latest and
+the previous finished count, so the gauge can show growth); a count cancelled, failed or killed
+before that never touches it. ``StorageCount`` is the server's owner: it spawns the child through
+the maintenance-job seam, streams its lines, loads the saved file and re-reads it when its identity
+changes, and never walks on a server thread. ``gateway.storage`` mounts the routes.
+
+The same count sizes the folders deleted Projects left behind (``storage_deleted``): one inside a
+place as the place's walk passes through it, one outside every place afterwards, each saved as it
+ends, so Stop keeps the finished places and what it did not reach reads ``not_measured``.
 
 The walk reads directory entries and ``lstat`` sizes only, never file contents. Depth-first, it
 keeps open only the folders on its current path; a link or junction is never counted and never
@@ -35,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import json
 import logging
 import os
@@ -44,7 +49,7 @@ import stat
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, FrozenSet, List, Literal, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
 
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
@@ -53,6 +58,7 @@ try:  # Python 3.11+
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
 
+from ouroboros.storage_deleted import FolderMark, OpenMarks, StorageDeletedProjects, marks_below, outside_order, read_folders, saved_folders  # their owner
 from ouroboros.storage_free import StorageFree  # the tray's envelope, homed with its owner; resolved for the contract schema
 from ouroboros.storage_removers import StorageRemover  # each place's removers, homed with their reader
 
@@ -74,6 +80,7 @@ PLACES: Tuple[Tuple[str, str, Any], ...] = (
     ("deliverables", "work", "get_deliverables_root"),
     ("work_folders", "temporary", (("task_drives",), ("state", "headless_tasks"))),
     ("working_copies", "temporary", "get_subagent_worktree_root"),
+    ("session_scratch", "temporary", "ouroboros.session_scratch.recorded_scratch_roots"),  # the folders its records name
     ("app_state", "other", (("state",),)),
     ("data_other", "other", ((),)),
     ("program", "other", "REPO_DIR"),
@@ -83,6 +90,7 @@ _LARGEST_PARTS = 8
 _NAMED_PARTS: Dict[str, Tuple[str, ...]] = {"engine": ("projects", "profiles")}
 _PACE_EVERY = 512  # stat calls between one-millisecond sleeps: pacing one disk, not judgment
 _PROGRESS_SEC = 0.25
+OUTSIDE_PHASE = "deleted_projects"  # a running count's ``place`` while it walks folders no place holds
 _LINE_BYTES = 65536
 
 # Directory-relative opening that never follows a link; without it the walk falls back to a
@@ -123,6 +131,7 @@ class StoragePlace(TypedDict):
     rest: StorageRest
     growth_bytes: NotRequired[Optional[int]]  # against the previous finished count, when both have it
     growth_flag: NotRequired[Literal["unreadable"]]  # either count had unreadable items here
+    undecided: NotRequired[str]  # why its default folder cannot be chosen (launch_roots): unknown, never empty
 
 
 class StorageVolume(TypedDict):
@@ -150,10 +159,12 @@ class StorageCount(TypedDict):
     growth_bytes: NotRequired[Optional[int]]
     growth_since: NotRequired[str]
     growth_flag: NotRequired[Literal["unreadable"]]
+    deleted_projects: NotRequired["StorageDeletedProjects"]  # absent on a count saved before it existed: not counted, never none
 
 
 class StorageCounting(TypedDict):
-    """A running count: where it is, and the places already finished in this run."""
+    """A running count: where it is; ``done`` lists only finished places with a known size. In
+    ``OUTSIDE_PHASE`` ``current`` names the Project; ``bytes`` and ``files`` count those folders alone."""
 
     started_at: str
     place: str
@@ -206,10 +217,8 @@ def _close(fd: Optional[int]) -> None:
 
 def _is_reparse(info: os.stat_result) -> bool:
     """A symlink or Windows junction/reparse point is never traversed."""
-    if stat.S_ISLNK(info.st_mode):
-        return True
-    return bool(getattr(info, "st_file_attributes", 0)
-                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0)
+                                             & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
 def _listing_stat(entry: os.DirEntry, directory_fd: Optional[int]) -> os.stat_result:
@@ -236,9 +245,7 @@ def _identity(path: str) -> Optional[Tuple[int, int]]:
         info = os.stat(path)
     except (OSError, ValueError):
         return None
-    if stat.S_ISDIR(info.st_mode) and info.st_ino:
-        return (info.st_dev, info.st_ino)
-    return None
+    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) and info.st_ino else None
 
 
 def _open_root(base: str, parts: Tuple[str, ...]) -> Tuple[str, Optional[int]]:
@@ -271,12 +278,16 @@ def _open_root(base: str, parts: Tuple[str, ...]) -> Tuple[str, Optional[int]]:
 
 class _Walk:
     """What one count shares across its places: linked-file identities, the pacing counter and
-    the progress clock. ``skip`` holds the identities of folders other places own."""
+    the progress clock. ``skip`` maps the identities of folders other places own to those places;
+    ``marks`` holds the registered folders to attribute bytes to, and ``place`` is whose walk this is."""
 
-    def __init__(self, skip: FrozenSet[Tuple[int, int]] = frozenset(), *, seen: Optional[Set[Tuple[int, int]]] = None,
+    def __init__(self, skip: Optional[Dict[Tuple[int, int], str]] = None, *, seen: Optional[Set[Tuple[int, int]]] = None,
+                 marks: Optional[Dict[Tuple[int, int], FolderMark]] = None, place: Optional[str] = None,
                  progress: Optional[Callable[[str, int, int], None]] = None,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> None:
-        self.skip = skip
+        self.skip = skip or {}
+        self.marks = marks or {}
+        self.place = place
         self.seen: Set[Tuple[int, int]] = set() if seen is None else seen
         self.stats = 0
         self._progress = progress
@@ -304,16 +315,22 @@ def _walk_roots(roots: List[Tuple[str, Tuple[str, ...]]], walk: _Walk, named: Tu
     parts: Dict[str, List[int]] = {}
     prefixed = len(roots) > 1
     # Depth-first: only the folders on the current path are open, each as (path, own descriptor
-    # or None, its listing, level, the depth-1 part it belongs to).
-    frames: List[Tuple[str, Optional[int], Any, int, str]] = []
+    # or None, its listing, level, the depth-1 part it belongs to, the marks it counts toward).
+    frames: List[Tuple[str, Optional[int], Any, int, str, OpenMarks]] = []
 
-    def enter(path: str, fd: Optional[int], level: int, part: str) -> None:
-        nonlocal unreadable, listed
+    def unread(marks: OpenMarks) -> None:
+        nonlocal unreadable
+        unreadable += 1
+        for mark, _part in marks:
+            mark.unreadable += 1
+
+    def enter(path: str, fd: Optional[int], level: int, part: str, marks: OpenMarks) -> None:
+        nonlocal listed
         try:
             if fd is None:  # the by-path fallback re-checks the folder just before listing it
                 info = _path_stat(path)
                 if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
-                    unreadable += 1  # it changed into a link or a file while counting
+                    unread(marks)  # it changed into a link or a file while counting
                     return
             listing = os.scandir(fd if fd is not None else path)
         except FileNotFoundError:
@@ -321,13 +338,15 @@ def _walk_roots(roots: List[Tuple[str, Tuple[str, ...]]], walk: _Walk, named: Tu
             return
         except OSError:
             _close(fd)
-            unreadable += 1
+            unread(marks)
             return
         listed = True
-        frames.append((path, fd, listing, level, part))
+        for mark, _part in marks:
+            mark.listed = True
+        frames.append((path, fd, listing, level, part, marks))
 
     def leave() -> None:
-        _path, fd, listing, _level, _part = frames.pop()
+        _path, fd, listing, _level, _part, _marks = frames.pop()
         listing.close()
         _close(fd)
 
@@ -347,16 +366,16 @@ def _walk_roots(roots: List[Tuple[str, Tuple[str, ...]]], walk: _Walk, named: Tu
                 continue
             root_path = os.path.join(base, *rel)
             root_name = ("/".join(rel) if rel else os.path.basename(base.rstrip(os.sep))) if prefixed else ""
-            enter(root_path, fd, 0, "")
+            enter(root_path, fd, 0, "", marks_below((), "", walk.marks.get(_identity(root_path)), walk.place))
             while frames:
-                directory, directory_fd, listing, level, part = frames[-1]
+                directory, directory_fd, listing, level, part, marks = frames[-1]
                 try:
                     entry = next(listing)
                 except (StopIteration, FileNotFoundError):
                     leave()
                     continue
                 except OSError:
-                    unreadable += 1
+                    unread(marks)
                     leave()
                     continue
                 child = os.path.join(directory, entry.name)
@@ -369,14 +388,18 @@ def _walk_roots(roots: List[Tuple[str, Tuple[str, ...]]], walk: _Walk, named: Tu
                         if not info.st_ino:  # a Windows listing has no identity: ask the folder itself
                             info = _path_stat(child)
                             if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
-                                unreadable += 1  # it changed into a link or a file while counting
+                                unread(marks)  # it changed into a link or a file while counting
                                 continue
-                        if (info.st_dev, info.st_ino) in walk.skip:
-                            continue  # another place's root: counted there
+                        identity = (info.st_dev, info.st_ino)
+                        if identity in walk.skip:  # another place's root: counted there
+                            for mark, _part in marks:
+                                mark.holds.add(walk.skip[identity])
+                            continue
                         name = part if level else (f"{root_name}/{entry.name}" if root_name else entry.name)
+                        below = marks_below(marks, entry.name, walk.marks.get(identity), walk.place)
                         child_fd = (os.open(entry.name, _directory_flags(), dir_fd=directory_fd)
                                     if directory_fd is not None else None)
-                        enter(child, child_fd, level + 1, name)
+                        enter(child, child_fd, level + 1, name, below)
                         continue
                     if not stat.S_ISREG(info.st_mode):
                         continue
@@ -391,15 +414,17 @@ def _walk_roots(roots: List[Tuple[str, Tuple[str, ...]]], walk: _Walk, named: Tu
                             continue  # a hard link already counted in this walk
                         walk.seen.add(identity)
                     size = _allocated(info)
-                    counted += info.st_size if size is None else size
+                    size = info.st_size if size is None else size
+                    counted += size
                     logical += info.st_size
                     files += 1
-                    account(part if level else (f"{root_name}/(files)" if root_name else "(files)"),
-                            info.st_size if size is None else size)
+                    account(part if level else (f"{root_name}/(files)" if root_name else "(files)"), size)
+                    for mark, mark_part in marks:
+                        mark.add(mark_part or "(files)", size)
                 except FileNotFoundError:
                     continue  # removed while counting: it holds nothing now
                 except OSError:
-                    unreadable += 1  # includes a folder swapped for a link before it opened
+                    unread(marks)  # includes a folder swapped for a link before it opened
                 walk.tick(part, counted, files)
     finally:
         while frames:
@@ -422,19 +447,28 @@ def _walk_roots(roots: List[Tuple[str, Tuple[str, ...]]], walk: _Walk, named: Tu
 
 def place_roots(data_root: Any) -> List[Dict[str, Any]]:
     """The place table resolved for DATA_ROOT: ``{"id", "group", "roots": [(base, parts)]}`` in
-    walk order; configured roots come from ``config`` getters, never from the client."""
+    walk order; configured roots come from ``config`` getters, never from the client. A default
+    work root that cannot be chosen carries the refusal as ``undecided`` and no root to walk."""
     from ouroboros import config
+    from ouroboros.launch_roots import WorkRootUnavailable
 
     data = os.path.realpath(os.fspath(data_root))
     rows = []
     for place_id, group, spec in PLACES:
-        if isinstance(spec, str):
+        undecided = ""
+        if isinstance(spec, str) and "." in spec:  # a lister of the roots its records name (session_scratch)
+            module, function = spec.rsplit(".", 1)
+            roots = [(path, ()) for path in getattr(importlib.import_module(module), function)(data)]
+        elif isinstance(spec, str):
             configured = getattr(config, spec)
-            configured = configured() if callable(configured) else configured
+            try:
+                configured = configured() if callable(configured) else configured
+            except WorkRootUnavailable as refusal:  # counted as unknown, never guessed
+                configured, undecided = None, str(refusal)
             roots = [(os.path.realpath(os.fspath(configured)), ())] if configured else []
         else:
             roots = [(data, tuple(parts)) for parts in spec]
-        rows.append({"id": place_id, "group": group, "roots": roots})
+        rows.append({"id": place_id, "group": group, "roots": roots, **({"undecided": undecided} if undecided else {})})
     return rows
 
 
@@ -448,10 +482,11 @@ def _volume(path: Any) -> StorageVolume:
 
 
 def measure(data_root: Any, *, places: Optional[List[Dict[str, Any]]] = None, io_priority: str = "unchanged",
-            progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+            progress: Optional[Callable[[Dict[str, Any]], None]] = None, keep: Callable[[StorageCount], None] = lambda _record: None,
             clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> StorageCount:
-    """One complete count of every place (module docstring); the record ``save_count`` keeps.
-    PROGRESS, when given, receives a ``StorageCounting``-shaped dict at most every 250 ms."""
+    """One complete count of every place, then of the deleted Projects' folders no place holds (module
+    docstring); the record ``save_count`` keeps. PROGRESS, when given, receives a ``StorageCounting``-shaped
+    dict at most every 250 ms; KEEP the record as it stands once the places are done and after each outside folder."""
     root = os.path.realpath(os.fspath(data_root))
     if not os.path.isdir(root):
         raise StorageUnavailable("The data folder could not be found.")
@@ -478,44 +513,69 @@ def measure(data_root: Any, *, places: Optional[List[Dict[str, Any]]] = None, io
                 own.add(identity)
             roots.append((base, parts))
         resolved.append((row, roots, own))
-    every = frozenset(claimed)
+    deleted_state, no_folder, folders = read_folders(root, volume_device)
+    marks = {mark.identity: mark for mark in folders if mark.identity is not None}
     done: List[StoragePart] = []
     totals = [0, 0]  # bytes and files of the finished places
 
-    def report(place_id: str) -> Callable[[str, int, int], None]:
+    def report(place_id: str, base: List[int], named: str = "") -> Callable[[str, int, int], None]:
         def send(current: str, counted: int, files: int) -> None:
             if progress is not None:
-                progress({"started_at": started_at, "place": place_id, "current": current,
-                          "places_done": len(done), "places_total": len(table),
-                          "bytes": totals[0] + counted, "files": totals[1] + files, "done": list(done)})
+                progress({"started_at": started_at, "place": place_id, "current": named or current,
+                          "places_done": len(results), "places_total": len(table),
+                          "bytes": base[0] + counted, "files": base[1] + files, "done": list(done)})
         return send
 
     results: List[StoragePlace] = []
     seen: Set[Tuple[int, int]] = set()  # linked files count once across the whole count
     for row, roots, own in resolved:
-        walk = _Walk(every - own, seen=seen, progress=report(row["id"]), clock=clock, sleep=sleep)
+        walk = _Walk({identity: place for identity, place in claimed.items() if identity not in own},
+                     seen=seen, marks=marks, place=row["id"], progress=report(row["id"], totals), clock=clock, sleep=sleep)
         counted = _walk_roots(roots, walk, _NAMED_PARTS.get(row["id"], ()))
         same_volume = all(_same_device(os.path.join(base, *parts), volume_device) for base, parts in roots)
         place: StoragePlace = {"id": row["id"], "group": row["group"],
                                "roots": [os.path.join(base, *parts) for base, parts in roots],
                                "same_volume": same_volume, **counted}
+        if row.get("undecided"):  # a root that could not be chosen: one unread item of unknown size
+            place.update(present=True, bytes=None, unreadable=place["unreadable"] + 1, undecided=row["undecided"])
         results.append(place)
-        done.append({"name": row["id"], "bytes": counted["bytes"] or 0, "files": counted["files"]})
+        if place["bytes"] is not None:
+            done.append({"name": row["id"], "bytes": place["bytes"], "files": place["files"]})
         totals[0] += counted["bytes"] or 0
         totals[1] += counted["files"]
-    return {
-        "started_at": started_at,
-        "finished_at": utc_now_iso(),
-        "duration_seconds": round(max(0.0, clock() - began), 2),
-        "io_priority": io_priority,
-        "basis": basis,
-        "bytes": totals[0],
-        "logical_bytes": sum(place["logical_bytes"] for place in results),
-        "files": totals[1],
-        "unreadable": sum(place["unreadable"] for place in results),
-        "volume": _volume(root),
-        "places": results,
-    }
+
+    def record() -> StorageCount:
+        return {
+            "started_at": started_at,
+            "finished_at": utc_now_iso(),
+            "duration_seconds": round(max(0.0, clock() - began), 2),
+            "io_priority": io_priority,
+            "basis": basis,
+            "bytes": totals[0],
+            "logical_bytes": sum(place["logical_bytes"] for place in results),
+            "files": totals[1],
+            "unreadable": sum(place["unreadable"] for place in results),
+            "volume": _volume(root),
+            "places": results,
+            "deleted_projects": saved_folders(deleted_state, no_folder, folders),
+        }
+
+    # Walk order only (``outside_order``); it cannot spare the count a disk that hangs on `stat`: read_folders stats every
+    # registered folder once, before the first place.
+    outside = outside_order([mark for mark in folders if mark.state == "not_measured" and not mark.reached])
+    if outside:
+        keep(record())  # the places stand whatever an outside folder does next
+    so_far = [0, 0]  # what the outside walks counted, each folder once (an inner one is in its outer walk): never in the headline
+    for mark in outside:
+        if not mark.reached:
+            send = report(OUTSIDE_PHASE, so_far, mark.projects[0]["name"])
+            send("", 0, 0)  # said before its first listing: a disk that hangs there is named on screen
+            walked = _walk_roots([(mark.path, ())], _Walk(claimed, seen=seen, marks=marks, progress=send, clock=clock, sleep=sleep))
+            so_far[0] += walked["bytes"] or 0
+            so_far[1] += walked["files"]
+            mark.reached = True
+            keep(record())
+    return record()
 
 
 def _same_device(path: str, device: Optional[int]) -> bool:
@@ -587,11 +647,13 @@ def _summary(latest: Dict[str, Any]) -> Dict[str, Any]:
 
 def save_count(data_root: Any, latest: StorageCount) -> None:
     """Keep LATEST as the saved count and the count it replaces as ``previous`` (the last two
-    finished counts; only a finished walk calls this, from the child)."""
+    finished counts; only a finished walk calls this, from the child). The same count saved
+    again (its ``started_at``, as its outside folders end) replaces itself and keeps ``previous``."""
     saved = load_saved(data_root)
+    same = saved is not None and saved["latest"]["started_at"] == latest["started_at"]
     atomic_write_json(pathlib.Path(data_root) / MEASUREMENT_FILE, {
         "_schema_version": SCHEMA_VERSION, "latest": latest,
-        "previous": _summary(saved["latest"]) if saved else None,
+        "previous": saved["previous"] if same else _summary(saved["latest"]) if saved else None,
     })
 
 
@@ -889,12 +951,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                        each=lambda row: _emit({"event": "size", **row}))
             _emit({"status": "finished", "io_priority": io_priority, "paths": len(paths)})
             return 0
-        latest = measure(root, io_priority=io_priority, progress=lambda facts: _emit({"event": "progress", **facts}))
-        try:
-            save_count(root, latest)
-        except OSError as exc:
-            _emit({"status": "failed", "message": f"The count could not be saved: {type(exc).__name__}."})
-            return 1
+        def keep(record: StorageCount) -> None:
+            try:
+                save_count(root, record)
+            except OSError as exc:
+                raise StorageUnavailable(f"The count could not be saved: {type(exc).__name__}.") from exc
+
+        latest = measure(root, io_priority=io_priority, keep=keep, progress=lambda facts: _emit({"event": "progress", **facts}))
+        keep(latest)
         _emit({"status": "finished", "finished_at": latest["finished_at"], "bytes": latest["bytes"],
                "files": latest["files"], "unreadable": latest["unreadable"],
                "duration_seconds": latest["duration_seconds"], "io_priority": io_priority})

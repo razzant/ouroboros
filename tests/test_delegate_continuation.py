@@ -24,12 +24,10 @@ from ouroboros import delegate_continuation as continuation, delegate_custody as
 from ouroboros.delegate_registration_policy import (
     CAP_BASIS_DEADLINE_DERIVED,
     CAP_BASIS_LIFETIME_DERIVED,
-    CAP_BASIS_OPERATION_WINDOW,
     CAP_BASIS_REQUESTED,
     CAP_BASIS_REQUESTED_CLAMPED_DEADLINE,
     CAP_BASIS_REQUESTED_CLAMPED_LIFETIME,
-    CAP_BASIS_REQUESTED_CLAMPED_SCHEMA,
-    FINITE_LEAF_CAP_BASES,
+    CAP_BASIS_UNBOUNDED,
 )
 from tests._delegated_transport_shared import (  # noqa: F401 -- autouse transport fixture
     _delegating_ctx,
@@ -49,7 +47,7 @@ LIMIT = "subscription_window_exhausted"
 def _seed(tmp_path, run_id, *, task_id="t-a", root_task_id=None, state="failed", reason=LIMIT, settled=True,
           actor=ACTOR, route=ROUTE, access="readonly", mode="ask", isolation="", snapshot_id="",
           target_root="", execution_root="", continuation_of="", config_fingerprint=CFG,
-          work_order_fingerprint=WORK_ORDER, output="consumed", source="", **extra):
+          work_order_fingerprint=WORK_ORDER, output="consumed", source="", basis=CAP_BASIS_REQUESTED, **extra):
     """Durable rows for one prior run; the memo is cleared so lookups REPLAY them."""
     entry = custody.RunCustody(
         run_id=run_id, task_id=task_id, route_id=route, model="m", selected_subagent_id=actor,
@@ -60,7 +58,7 @@ def _seed(tmp_path, run_id, *, task_id="t-a", root_task_id=None, state="failed",
     )
     assert custody.record_started(tmp_path, entry, shape={
         "access": access, "mode": mode, "isolation": isolation, "delegated": bool(isolation),
-        "root": "/r", "max_seconds": 90, "max_seconds_basis": CAP_BASIS_REQUESTED})
+        "root": "/r", "max_seconds": 90, "max_seconds_basis": basis})
     if settled:
         row = {"run_id": run_id, "task_id": task_id, "route": route, "state": state}
         if reason is not None:
@@ -225,9 +223,11 @@ def test_former_refusals_are_advice_not_gates(tmp_path):
     _seed(tmp_path, "run-partial", work_order_coverage="partial",
           work_order_source_request={"complete_chars": 100, "coverage": "partial"})
     assert "work_order_partial" in _gate(tmp_path, "run-partial")[0]["advice"]
-    # The cap basis no longer matters: any cap's expiry continues.
-    for basis in (CAP_BASIS_DEADLINE_DERIVED, CAP_BASIS_OPERATION_WINDOW):
-        assert basis not in FINITE_LEAF_CAP_BASES
+    # The cap basis no longer matters: any cap's expiry continues, whatever its recorded
+    # basis (the retired FINITE_LEAF_CAP_BASES gate had no reader left), an older row's too.
+    for basis in (CAP_BASIS_DEADLINE_DERIVED, CAP_BASIS_UNBOUNDED, "operation_window"):
+        _seed(tmp_path, f"run-{basis}", basis=basis)
+        assert _gate(tmp_path, f"run-{basis}", canonical=WORK_ORDER)[0]["advice"] == []
     clean = _gate(tmp_path, "run-wo", canonical=WORK_ORDER)[0]
     assert clean["advice"] == []
 
@@ -293,9 +293,10 @@ def test_prompt_states_tree_facts_and_advice_and_no_session_claim():
 
 def _start(tmp_path, monkeypatch, *, acting, run_id, prompt="finish the remaining work", start_kwargs=None,
            capabilities=("continueFrom",), engine_version="3.22.0", start_error=None, task_id=None, access=None,
-           harness_row=None):
+           harness_row=None, prepare=None):
     """Run _delegate_start against a stub engine; returns (last request, payload, ctx, calls).
-    ``harness_row`` adds fields to the route's catalog row (a negotiated access-control grant)."""
+    ``harness_row`` adds fields to the route's catalog row (a negotiated access-control grant);
+    ``prepare`` shapes the starter's context before the start (what it holds of my human's words)."""
     import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gw
 
@@ -324,6 +325,8 @@ def _start(tmp_path, monkeypatch, *, acting, run_id, prompt="finish the remainin
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
     delegate._CUSTODY.clear()
     ctx = _delegating_ctx(tmp_path, acting=acting, task_id=task_id or f"t-nanny-{'write' if acting else 'read'}")
+    if prepare is not None:
+        prepare(ctx)
     if access is None:
         result = delegate._delegate_start(ctx, prompt, **(start_kwargs or {}))
     else:
@@ -416,7 +419,7 @@ def test_readonly_continuation_starts_while_the_writers_patch_awaits_disposition
 
     scratch_parent = tmp_path / "temp"
     scratch_parent.mkdir()
-    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: scratch_parent)
+    monkeypatch.setattr(test_environment, "session_scratch_parent", lambda: scratch_parent)
     row = {"writeMechanism": "fs_sandbox", "accessControl": {
         "auxiliaryWritableRoots": auxiliary_supported}}
     first, _p, ctx, _calls = _start(
@@ -633,6 +636,95 @@ def test_a_configured_session_continues_with_its_note_never_the_canonical_work_o
     assert "the coordination note" not in request["instructions"]
 
 
+def test_a_continuation_carries_the_rows_no_start_of_its_line_held_under_its_own_heading(tmp_path, monkeypatch):
+    """The continuation tail, both directions. A first start's references carry the rows its body does not hold
+    (the start tail); a continuation carries exactly the rows absent from the START bodies of its ``continue_from``
+    line, never the canonical order (the witness above stays), a relayed row dated before the run's start included,
+    under its own heading after the binding and before the caller's note, a row's attachment named; a second
+    continuation carries only the row that arrived after the first; a row a frame delivered live rides the next
+    continuation once, under ``packet`` too, and not the one after; a continuation carries no start-tail row; an
+    unreadable START body carries every row."""
+    from ouroboros import delegate_message_store as frames, owner_words as ow
+    from ouroboros.subagent_work_order import CONTINUATION_TAIL_FACT, START_TAIL_FACT
+
+    heading = ow._HEADINGS["session"]
+    file = {"upload": "u1", "name": "quota.png", "mime": "image/png", "kind": "image", "size": 1234, "sha256": "ab" * 32}
+    rows = [ow._row("Build it", source="initial_user", carrier="ctx", task_id="t-root", ts="2026-10-04T05:00:00+00:00",
+                    ref="chat 1 / msg-a"),
+            ow._row("Before the run started", source="owner_mailbox", carrier="held", task_id="t-root",
+                    ts="2026-10-04T04:00:00+00:00", ref="chat 1 / msg-b"),
+            ow._row("See the file", source="owner_mailbox", carrier="held", task_id="t-root",
+                    ts="2026-10-04T06:00:00+00:00", ref="chat 1 / msg-c", attachments=[file]),
+            ow._row("Delivered live", source="owner_mailbox", carrier="held", task_id="t-root",
+                    ts="2026-10-04T06:30:00+00:00", ref="chat 1 / msg-d"),
+            ow._row("After the first continuation", source="owner_mailbox", carrier="held", task_id="t-root",
+                    ts="2026-10-04T07:00:00+00:00", ref="chat 1 / msg-e")]
+
+    def holding(*held):
+        def prepare(ctx):
+            ctx.task_metadata[ow.FIELD] = [rows[index] for index in held]
+        return prepare
+
+    def section(text, fact):
+        assert text.count(heading) == 1 and text.count(fact) == 1, text
+        return text.split(heading, 1)[1].split(fact, 1)[0]
+
+    _select_transport_access(monkeypatch, "readonly")
+    first, payload, _ctx, _calls = _start(tmp_path, monkeypatch, acting=False, run_id="run-prev", prepare=holding(0))
+    assert payload["status"] == "started"
+    tail = section(first["instructions"], START_TAIL_FACT)  # the start tail: the body held no stamp of row a
+    assert "\nBuild it\n" in tail and "msg-a]" in tail and heading not in first["prompt"]
+    _settle(tmp_path, "run-prev", "t-nanny-read")
+    # A frame delivered live into run-prev: its row is not in any START body, so it rides the next continuation.
+    entry = custody.replay(tmp_path)["run-prev"]
+    live = frames.prepare(_ctx, entry, "starter", "Delivered live", "", None,
+                          owner_words={"address": "row:1@2026-10-04T06:30:00+00:00#abc", "chat_id": 1,
+                                       "ts": "2026-10-04T06:30:00+00:00"})
+    frames.record_outcome(_ctx, "run-prev", live["frame"]["message_id"], "delivered", "")
+    assert frames.placed_words(_ctx, "run-prev")[0]["outcome"] == "delivered"
+    request, payload, _ctx, _calls = _start(
+        tmp_path, monkeypatch, acting=False, run_id="run-next", prompt="the coordination note",
+        start_kwargs={"continue_from": "run-prev", "continue_carrier": "packet"}, prepare=holding(0, 1, 2, 3))
+    assert payload["status"] == "started" and request["continueFrom"] == "run-prev"
+    prompt = request["prompt"]
+    tail = section(prompt, CONTINUATION_TAIL_FACT)
+    assert "Build it" not in tail  # held by run-prev's START body
+    assert "\nBefore the run started\n" in tail and "msg-b]" in tail  # dated before the run, absent from it: rides
+    assert "\nSee the file\n[Host-retained attachments: quota.png (image/png, 1234 bytes)]\n" in tail
+    assert "\nDelivered live\n" in tail  # the live frame's row rides once: the host cannot know what the engine resumes
+    binding, _words = prompt.split("\n\n" + heading, 1)
+    assert "THIS RUN'S ACCESS AND WORKSPACE" in binding and prompt.endswith(CONTINUATION_TAIL_FACT + "\n\nthe coordination note")
+    assert START_TAIL_FACT not in request["instructions"] and heading not in request["instructions"]  # no start tail
+    _settle(tmp_path, "run-next", "t-nanny-read")
+    # The second continuation carries only the row that arrived after the first; the delivered row does not ride again.
+    request, payload, _ctx, _calls = _start(
+        tmp_path, monkeypatch, acting=False, run_id="run-third", prompt="go on",
+        start_kwargs={"continue_from": "run-next"}, prepare=holding(0, 1, 2, 3, 4))
+    assert payload["status"] == "started"
+    tail = section(request["prompt"], CONTINUATION_TAIL_FACT)
+    assert "\nAfter the first continuation\n" in tail and "msg-e]" in tail
+    for held in ("Build it", "Before the run started", "See the file", "Delivered live"):
+        assert held not in tail
+    assert START_TAIL_FACT not in request["instructions"]
+    _settle(tmp_path, "run-third", "t-nanny-read")
+    # The other side: every row held by the line's START bodies, no tail at all; an unreadable body, every row.
+    request, payload, _ctx, _calls = _start(
+        tmp_path, monkeypatch, acting=False, run_id="run-fourth", prompt="and on",
+        start_kwargs={"continue_from": "run-third"}, prepare=holding(0, 1, 2, 3, 4))
+    assert payload["status"] == "started" and heading not in request["prompt"] and request["prompt"].endswith("and on")
+    assert continuation.line_start_bodies(tmp_path, "run-third") is not None
+    assert len(continuation.line_start_bodies(tmp_path, "run-third")) == 3  # run-third, run-next, run-prev
+    import ouroboros.delegate_invocation as invocation
+
+    monkeypatch.setattr(invocation, "invocation_record", lambda *_a, **_k: (_ for _ in ()).throw(OSError("locked")))
+    assert continuation.line_start_bodies(tmp_path, "run-third") is None
+    holding(0, 1, 2, 3, 4)(_ctx)
+    every = continuation.continuation_words(_ctx, tmp_path, "run-third")
+    for row in rows:
+        assert f"\n{row['text']}\n" in every + "\n"
+    assert every.endswith(CONTINUATION_TAIL_FACT) and every.startswith(heading)
+
+
 @pytest.mark.parametrize("prompt", ["add tests", ""])
 def test_a_continuation_retried_after_an_unknown_outcome_replays_its_lineage(tmp_path, monkeypatch, prompt):
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -771,7 +863,8 @@ def test_requested_cap_is_clamped_by_the_deadline_and_the_remaining_lifetime(tmp
     monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: None)
     plain = bounded_max_seconds(_ctx(), 120)
     assert (plain.seconds, plain.basis) == (120, CAP_BASIS_REQUESTED)
-    assert bounded_max_seconds(_ctx(), None).basis == CAP_BASIS_OPERATION_WINDOW
+    unbounded = bounded_max_seconds(_ctx(), None)
+    assert (unbounded.seconds, unbounded.basis) == (0, CAP_BASIS_UNBOUNDED)
     monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: 300.0)
     clamped = bounded_max_seconds(_ctx(), 1000)
     assert clamped.basis == CAP_BASIS_REQUESTED_CLAMPED_LIFETIME and 150 <= clamped.seconds <= 200
@@ -781,7 +874,6 @@ def test_requested_cap_is_clamped_by_the_deadline_and_the_remaining_lifetime(tmp
     monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: 10.0)
     spent = bounded_max_seconds(_ctx(started_ago=100.0), 60)
     assert spent.refusal_code == "task_lifetime_exhausted" and spent.seconds == 0
-    assert FINITE_LEAF_CAP_BASES == frozenset({CAP_BASIS_REQUESTED, CAP_BASIS_REQUESTED_CLAMPED_SCHEMA})
 
 
 def test_no_resume_causes_are_untouched_by_the_continuation_seam():

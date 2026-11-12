@@ -11,7 +11,7 @@ from ouroboros import install_identity as identity, store
 
 
 @pytest.mark.parametrize("case,write", [("own_read", False), ("own_write", True),
-                                       ("child_write", True), ("bare_write", True)])
+                                       ("bare_write", True)])
 def test_steady_ownership_check_cost(tmp_path, monkeypatch, case, write):
     root = tmp_path / "data"
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))

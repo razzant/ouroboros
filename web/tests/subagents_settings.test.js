@@ -427,7 +427,9 @@ test('saved unavailable session route and account remain selectable', () => {
         snapshot: { harnesses: [], profiles: { harnessAccounts: [], profiles: [] } },
     };
     const html = availableSubagentRowMarkup(sessionRow(), state);
-    assert.match(html, /codex \(not in discovery\)/);
+    // The saved harness keeps its display name (the catalog's table), never the raw id (U097).
+    assert.match(html, />Codex \(agent\) · not in discovery</);
+    assert.doesNotMatch(html, />codex \(/);
     assert.match(html, /gpt-5.6-sol-high \(not in discovery\)/);
     assert.match(html, />koshak \(not in discovery\)</);
     assert.match(html, /currently unavailable/);
@@ -487,7 +489,7 @@ test('session status uses model-scoped quota and keeps missing quota as not prov
     state.snapshot.quota = [{
         subject: { harness: 'codex', subject_id: 'koshak' },
         freshness: 'fresh',
-        availability: { state: 'exhausted' },
+        availability: { state: 'exhausted', resets_at: '2099-01-01T00:00:00Z' },
         constraints: [{
             applies_to_models: ['gpt-5.6-sol'], used_ratio: 1, resets_at: '2099-01-01T00:00:00Z',
         }],
@@ -498,7 +500,10 @@ test('session status uses model-scoped quota and keeps missing quota as not prov
 
     state.snapshot.quota[0].constraints[0].applies_to_models = ['other-model'];
     assert.match(availableSubagentRowMarkup(sessionRow(), state), /pinned account koshak limit reached/);
-    state.snapshot.quota[0].availability.state = 'available';
+    state.snapshot.quota[0].availability = { state: 'available', resets_at: null };
+    // A model-scoped window alone witnesses no measurement of this request (OB1851).
+    assert.match(availableSubagentRowMarkup(sessionRow(), state), /quota availability not proven/);
+    state.snapshot.quota[0].constraints.push({ id: 'primary', used_ratio: 0.2 });
     assert.match(availableSubagentRowMarkup(sessionRow(), state), /available now/);
 });
 
@@ -561,6 +566,7 @@ test('session render signature waits for an engine verdict instead of inferring 
     assert.equal(availableSubagentsRenderSignature(state, cooldownUntil + 1), cooling);
     state.snapshot.availability_scope = { model: 'gpt-5.6-sol-high', requestKind: 'text', basis: 'quota_block' };
     state.snapshot.quota[0].availability = { state: 'available' };
+    state.snapshot.quota[0].constraints.push({ id: 'primary', used_ratio: 0.2 });
     assert.notEqual(availableSubagentsRenderSignature(state, cooldownUntil + 1), cooling);
 });
 
@@ -872,7 +878,7 @@ function pinnedAccountState(verification) {
                 profile: { harness_id: 'codex', profile_id: 'koshak', enabled: true }, status: { verification },
             }] },
             quota: [{ subject: { harness: 'codex', subject_id: 'koshak' }, freshness: 'fresh',
-                availability: { state: 'available' }, constraints: [] }],
+                availability: { state: 'available' }, constraints: [{ id: 'primary', used_ratio: 0.2 }] }],
         },
     };
 }
@@ -923,7 +929,7 @@ test('an unpinned verdict intersects the usable accounts with the accounts carry
             { profile: { harness_id: 'codex', profile_id: 'koshak', enabled: true }, status: { verification: 'passed' } },
         ] },
         quota: [{ subject: { harness: 'codex', subject_id: 'koshak' }, freshness: 'fresh',
-                availability: { state: 'available' }, constraints: [] }],
+                availability: { state: 'available' }, constraints: [{ id: 'primary', used_ratio: 0.2 }] }],
     });
     const facets = { catalogKnown: true, accountsKnown: true, quotaKnown: true, statusError: '' };
     const row = { route: { kind: ROUTE_KIND_AGENT_SESSION, target_id: 'codex=gpt-5.4', profile_id: '' } };
@@ -966,7 +972,7 @@ test('the card status is availability alone; saved/draft intent never repeats pe
                 status: { verification: 'passed' },
             }] },
             quota: [{ subject: { harness: 'codex', subject_id: 'koshak' }, freshness: 'fresh',
-                availability: { state: 'available' }, constraints: [] }],
+                availability: { state: 'available' }, constraints: [{ id: 'primary', used_ratio: 0.2 }] }],
         },
     };
     assert.match(availableSubagentRowMarkup(sessionRow(), live, 0),

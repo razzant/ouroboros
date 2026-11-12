@@ -33,13 +33,13 @@ def applied_host(monkeypatch, tmp_path):
     monkeypatch.setattr(local_model, "_manager", local_model.LocalModelManager())
     saved = dict(config.SETTINGS_DEFAULTS)
     server_process.record_applied_restart_settings({key: saved[key] for key in (
-        "OUROBOROS_MAX_WORKERS", "OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT",
+        "OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT",
         "OUROBOROS_SKILLS_REPO_PATH", "OUROBOROS_UI_DIR",
     )}, server_host_source="settings")
     return saved
 
 
-@pytest.mark.parametrize("source", ["settings", "environment", "cli", "launcher"])
+@pytest.mark.parametrize("source", ["settings", "environment", "launcher"])
 def test_known_bind_is_separate_from_host_source(applied_host, tmp_path, source):
     saved = {**applied_host, "OUROBOROS_SERVER_HOST": "0.0.0.0"}
     server_process.record_applied_restart_settings({"OUROBOROS_SERVER_HOST": "127.0.0.1"},
@@ -54,8 +54,8 @@ def test_known_bind_is_separate_from_host_source(applied_host, tmp_path, source)
         assert "to apply" not in state["summary"]
     if source == "launcher":
         assert "Restart may apply" in state["summary"]
-    saved["OUROBOROS_MAX_WORKERS"] += 1
-    assert "OUROBOROS_MAX_WORKERS" in settings._build_restart_state(saved)["restart_keys"]
+    saved["OUROBOROS_HOST_SERVICE_PORT"] += 1
+    assert "OUROBOROS_HOST_SERVICE_PORT" in settings._build_restart_state(saved)["restart_keys"]
     assert settings._build_restart_state(applied_host)["summary"] == ""
 
 

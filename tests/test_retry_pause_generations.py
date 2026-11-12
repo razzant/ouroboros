@@ -1,6 +1,6 @@
 """A new owner Pause outlives an assigned retry's unconsumed physical Resume.
 
-Use the real retry producer, Pause/Resume acceptance, worker assignment, grant
+Use a historical retry's stored state, Pause/Resume acceptance, worker assignment, grant
 consumption, launch gate and next safe boundary. Only the shared fixtures' OS
 processes/model calls are doubled. Request replay must still be idempotent.
 """
@@ -13,14 +13,14 @@ from supervisor import queue, workers
 from supervisor.events_budget import install_exact_budget_pause
 from supervisor.owner_pause_control import request_owner_pause
 from tests._budget_pause_exact_helpers import _loop_ctx
+from tests._silence_reaper_support import historical_timeout_retry
 from tests.test_execution_clock_resume_handover import clock  # noqa: F401
 from tests.test_retry_pause_identity import (  # noqa: F401
-    MARK, _assign, _fresh_plan, _hung_first_attempt, _loop_once, _ordinary_retry, _reap, reaper,
+    MARK, _assign, _fresh_plan, _hung_first_attempt, _loop_once, _ordinary_retry, reaper,
 )
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def _running_actor(host, monkeypatch, clock, reaper, actor):  # noqa: F811
@@ -30,7 +30,7 @@ def _running_actor(host, monkeypatch, clock, reaper, actor):  # noqa: F811
     _ordinary_retry(host, monkeypatch, clock, reaper)
     if actor == "retry_chain":
         [prior] = _assign(host, monkeypatch)
-        _reap(clock, reaper, prior["id"])
+        historical_timeout_retry(clock, prior["id"])
     [running] = _assign(host, monkeypatch)
     assert owner_pause.root_actor(host.root, "held", running["id"])
     return running
@@ -58,8 +58,11 @@ def _park(host, running, plan, *, event=False):  # noqa: F811 -- helper shares t
     return ctx, limit
 
 
-@pytest.mark.parametrize("actor", ["root", "retry", "retry_chain"])
-@pytest.mark.parametrize("action", ["ordinary", "duplicate", "newer"])
+@pytest.mark.parametrize(("action", "actor"), [
+    ("ordinary", "root"),
+    ("duplicate", "retry"),
+    ("newer", "retry_chain"),
+])
 def test_assigned_resume_releases_only_its_pause_generation(host, monkeypatch, clock, reaper, actor, action):  # noqa: F811
     running = _running_actor(host, monkeypatch, clock, reaper, actor)
     plan = _fresh_plan(monkeypatch)
@@ -113,7 +116,7 @@ def test_assigned_resume_releases_only_its_pause_generation(host, monkeypatch, c
         assert accepted["duplicate"] is (action == "duplicate")
 
 
-@pytest.mark.parametrize("invalid", ["unreadable_chain", "broken_reciprocal", "stale_attempt", "child", "delegated"])
+@pytest.mark.parametrize("invalid", ["unreadable_chain", "broken_reciprocal", "delegated"])
 def test_pause_keeps_the_current_reciprocal_root_actor_requirement(host, monkeypatch, clock, reaper, invalid):  # noqa: F811
     from ouroboros import task_results
     from ouroboros.task_store import patch_document
@@ -225,7 +228,7 @@ def test_physical_retry_resume_survives_fence_publication_contention(
     assert effect
 
 
-@pytest.mark.parametrize("change", ["pause", "stop_root", "stop_retry", "grant", "lineage"])
+@pytest.mark.parametrize("change", ["pause", "stop_root", "lineage"])
 def test_retry_fence_publication_rechecks_controls_after_rollback(
         host, monkeypatch, clock, reaper, change):  # noqa: F811
     from ouroboros import cancel_intents

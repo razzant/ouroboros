@@ -188,7 +188,7 @@ def test_update_world_publishes_on_the_canonical_root_with_revision_and_the_host
 
     result = _update_world(ctx, "# WORLD.md\n\n## What lives here\n- new\n", expected_revision=revision)
     assert result.startswith("OK: world map updated") and "revision=" in result
-    text = world.read_text(encoding="utf-8")
+    text = world.read_bytes().decode("utf-8")  # the journal keeps the file's bytes, line ends included
     assert "- new" in text and "- old" not in text and "measured at startup, host" in text
     # The forked drive stayed untouched: the map lives on the canonical root the context reads.
     assert not (drive / "memory" / "WORLD.md").exists()
@@ -221,6 +221,7 @@ def test_refresh_keeps_a_legacy_profile_the_mind_edited_and_journals_the_pre_ima
     legacy = ("# WORLD.md — Environment Profile\n\n## Channels\n- Claude chat X: socket /tmp/x\n\n## System\n"
               "- **OS**: old\n\n*(Generated automatically on first boot)*\n")
     path.write_text(legacy, encoding="utf-8")
+    legacy_raw = path.read_bytes()  # the pre-image as stored (CRLF on Windows)
 
     assert wprof.refresh_world_profile(str(path)) is True
     text = path.read_text(encoding="utf-8")
@@ -228,7 +229,7 @@ def test_refresh_keeps_a_legacy_profile_the_mind_edited_and_journals_the_pre_ima
     assert "- Claude chat X: socket /tmp/x" in text and "- **OS**: old" in text
     assert text.count(wprof.MEASURED_START) == 1 and text.startswith("# WORLD.md")
     rows = [json.loads(line) for line in (tmp_path / "world_journal.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert rows[-1]["source_type"] == "legacy_wrap" and rows[-1]["old_content"] == legacy
+    assert rows[-1]["source_type"] == "legacy_wrap" and rows[-1]["old_content"].encode("utf-8") == legacy_raw
 
 
 def test_insertion_keeps_an_indented_first_line(tmp_path, monkeypatch):
@@ -270,7 +271,7 @@ def test_update_world_mirrors_the_fork_copy_and_names_the_map_on_a_stale_revisio
     (canonical / "memory" / "WORLD.md").write_text(initial, encoding="utf-8")
     (drive / "memory" / "WORLD.md").write_text(initial, encoding="utf-8")
     ctx = _world_ctx(canonical, drive)
-    revision = hashlib.sha256(initial.encode()).hexdigest()
+    revision = hashlib.sha256((canonical / "memory" / "WORLD.md").read_bytes()).hexdigest()  # of the stored bytes
 
     assert _update_world(ctx, f"{wprof.TITLE}\n\n- new\n", expected_revision=revision).startswith("OK")
     canonical_text = (canonical / "memory" / "WORLD.md").read_text(encoding="utf-8")
@@ -302,6 +303,55 @@ def test_measured_block_falls_back_to_username(monkeypatch):
     monkeypatch.setattr(wprof, "get_system_memory", lambda: "m")
     assert "- **User**: winuser" in wprof.measured_block("/r", "/d")
 
+
+
+def test_the_measured_block_names_the_app_copy_and_the_body_it_runs(tmp_path, monkeypatch):
+    """The app is a replaceable host: a moved, translocated or newer app shows at the next start. The line names
+    the body's version only: its commit rides the runtime section, and a commit must not rewrite this cached block."""
+    import platform
+    import subprocess
+    import sys
+
+    for name, value in (("_tools_found", lambda: []), ("get_cpu_info", lambda: "c"), ("get_system_memory", lambda: "m")):
+        monkeypatch.setattr(wprof, name, value)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "VERSION").write_text("7.9.0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"],
+                   cwd=repo, check=True)
+    body, python = "body 7.9.0", platform.python_version()
+
+    def host(block):
+        return next(line for line in block.splitlines() if line.startswith("- **Host**: "))
+
+    for name in ("OUROBOROS_BUNDLE_DIR", "APPIMAGE", "APPDIR"):
+        monkeypatch.delenv(name, raising=False)
+    assert host(wprof.measured_block(str(repo), "/d")) == f"- **Host**: source runtime (Python {python} at {sys.executable}); {body}"
+    import os
+    import types
+
+    real_statvfs = getattr(os, "statvfs", None)
+    for app, read_only, label in ((tmp_path / "Volumes" / "Disk" / "Ouroboros.app", False, ""),  # a writable volume
+                                  (tmp_path / "AppTranslocation" / "X" / "d" / "Ouroboros.app", False, " (translocated)"),
+                                  (tmp_path / "Volumes" / "Ouroboros 1" / "Ouroboros.app", True, " (read-only mount)")):
+        bundle = app / "Contents" / "Frameworks"
+        bundle.mkdir(parents=True)
+        (bundle / "repo_bundle_manifest.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("OUROBOROS_BUNDLE_DIR", str(bundle))
+        monkeypatch.setenv("OUROBOROS_APP_VERSION", "7.10.0")
+        flag = getattr(os, "ST_RDONLY", 1) if read_only else 0
+        monkeypatch.setattr(os, "statvfs", (lambda _path, flag=flag: types.SimpleNamespace(f_flag=flag)) if real_statvfs
+                            else (lambda _path: (_ for _ in ()).throw(OSError("unmeasured"))), raising=False)
+        expected = label if real_statvfs or not read_only else ""  # an unmeasured mount gets no label
+        assert host(wprof.measured_block(str(repo), "/d")) == (
+            f"- **Host**: App 7.10.0 at {app}{expected} (bundled Python {python}); {body}")
+    appimage = tmp_path / "Ouroboros.AppImage"
+    monkeypatch.setenv("APPIMAGE", str(appimage))
+    monkeypatch.setenv("APPDIR", str(tmp_path / ".mount_Editor"))  # another AppImage app's, from its terminal
+    assert host(wprof.measured_block(str(repo), "/d")).startswith(f"- **Host**: App 7.10.0 at {app}")
+    monkeypatch.setenv("APPDIR", str(app))  # this app's own mount
+    assert host(wprof.measured_block(str(repo), "/d")).startswith(f"- **Host**: App 7.10.0 at {appimage}")
 
 def test_startup_verification_refreshes_the_measured_block_in_place(tmp_path, monkeypatch):
     from ouroboros import agent_startup_checks as checks_module

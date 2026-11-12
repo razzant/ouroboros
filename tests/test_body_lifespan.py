@@ -9,7 +9,6 @@ import pytest
 
 from tests.test_delegate_body_collection import _until, started, terminal
 
-pytestmark = pytest.mark.serial
 
 
 def test_lifespan_collects_without_cognitive_supervisor_and_stops_exact_generation(tmp_path, monkeypatch):
@@ -104,7 +103,7 @@ def test_real_body_cold_terminal_wakes_before_money_and_saved_carrier_is_not_orp
             pass
     monkeypatch.setattr(usage_accounting, "record_subscription_session",
                         lambda *a, **kw: (_ for _ in ()).throw(OSError("controlled money store busy")))
-    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway, max_workers=2)
+    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway)
     env.runtime = runtime
     monkeypatch.setattr(sc, "_runtime", body.body_runtime)
     try:

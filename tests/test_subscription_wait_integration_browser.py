@@ -30,7 +30,7 @@ from tests import test_subscription_setup_browser as browser_fixture
 subscription_ui = browser_fixture.subscription_ui
 setup = llm_fixture.setup
 live_wait = wait_fixture.live_wait
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TASK = "task-one"
 MODEL = llm_fixture.MODEL
 
@@ -339,6 +339,7 @@ def test_browser_wait_controls_apply_once_and_only_to_light(integrated_wait, per
     history = flow.client.get("/api/chat/history").json()
     waits = [message for message in history["messages"] if message.get("system_type") == "task_model_wait"]
     assert waits and all(message["task_terminal_status"] == "completed" for message in waits)
+    flow.ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     with page.expect_response(lambda response: urlparse(response.url).path == "/api/chat/history") as loaded:
         page.reload()
     hydrated = loaded.value.json()

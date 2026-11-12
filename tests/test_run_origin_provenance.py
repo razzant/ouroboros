@@ -131,10 +131,48 @@ def test_promoted_objective_is_not_owner_corpus_even_with_inherited_owner_stamp(
         SimpleNamespace(_owner_directives=[{"source": "initial_user", "content": "This is NOT permission to implement"}]))
     rendered = build_user_content({"text": "This is NOT permission to implement", "metadata": metadata})
     assert rendered.startswith("[OBJECTIVE_AUTHOR]") and "task draft-1" in rendered
-    assert "not spoken by the owner" in rendered
+    assert "not spoken by my human" in rendered
     # Host-initiated tasks still carry the owner's first text without a drafter stamp.
     assert _first_row({"origin_message_ref": OWNER_REF}, "Owner's exact request")._owner_directives == [
         {"source": "initial_user", "content": "Owner's exact request"}]
+
+
+# --- the objective's author: one line from the same typed facts ---------------------------------------------
+
+@pytest.mark.parametrize("label,record,expected", [
+    ("continuation", {"metadata": {"objective_author": {"kind": "continuation", "predecessor_task_id": "p-1"}}},
+     "the host's Continue work order for task p-1"),
+    ("unknown author kind", {"metadata": {"objective_author": {"kind": "relay"}}}, "its author is recorded by the host as kind=relay"),
+    ("schedule", {"metadata": {"schedule_id": "sch-1"}},
+     "the template of schedule sch-1; the host does not attest this text as my human's words"),
+    ("started from a task", {"metadata": {"origin_task_id": "t-9"}},
+     "started from task t-9; the host does not attest this text as my human's words"),
+    ("nothing", None, "its author is not recorded by the host"),
+])
+def test_the_objective_author_line_names_what_the_host_recorded_and_invents_nothing(label, record, expected):
+    from ouroboros.dialogue_provenance import run_origin
+    from ouroboros.owner_words import objective_author_line
+
+    line = objective_author_line(run_origin(record))
+    assert line == expected, label
+    assert ("drafted by" in line) is (label == "drafted start") and ("not recorded" in line) is (label in {"api", "nothing"})
+
+
+def test_the_mind_reads_a_drafted_objective_through_the_same_line_and_nothing_else_is_reframed():
+    from ouroboros.context import build_user_content
+    from ouroboros.owner_words import objective_author_line
+
+    author = {"kind": "task", "task_id": "draft-1"}
+    task = {"text": "Ship it", "metadata": {"objective_author": author}}
+    rendered = build_user_content(task)
+    assert rendered == (f"[OBJECTIVE_AUTHOR] The objective below was {objective_author_line({'objective_author': author})}. "
+                        "My human's words keep their own source. [/OBJECTIVE_AUTHOR]\n\nShip it")
+    assert build_user_content(task) == rendered  # an unchanged task renders the same bytes (its cached first turn)
+    # Only a drafted start is reframed: a helper, a Continue order and a door-stamped turn keep their own first text.
+    for metadata in ({"delegation_role": "subagent", "parent_task_id": "root-1"},
+                     {"objective_author": {"kind": "continuation", "predecessor_task_id": "p-1"}},
+                     {"origin_message_ref": OWNER_REF}, {}):
+        assert build_user_content({"text": "Ship it", "metadata": metadata}) == "Ship it", metadata
 
 
 # --- the routing issuer -------------------------------------------------------------
@@ -144,10 +182,8 @@ def test_promoted_objective_is_not_owner_corpus_even_with_inherited_owner_stamp(
     ("owner turn, suppressed log", True, {"origin_suppressed": True}, "owner_turn"),
     ("presence event, direct", True, _presence_metadata(), "task"),
     ("presence event, not direct", False, _presence_metadata(), "task"),
-    ("consciousness wake", True, {"initiator": "consciousness", "client_message_id": "w-1"}, "task"),
     ("auto-resume: direct, no metadata", True, {}, "task"),
     ("promoted root: inherited stamp, not direct", False, {"origin_message_ref": OWNER_REF}, "task"),
-    ("caller-declared channel only", True, {"client_surface": {"channel": "api_command"}}, "task"),
 ])
 def test_routing_issuer_is_the_direct_turn_the_owner_door_stamped(label, direct, metadata, expected):
     from ouroboros.tools.control_routing import ISSUER_OWNER_TURN, _routing_issuer

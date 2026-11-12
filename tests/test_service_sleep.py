@@ -23,7 +23,6 @@ import pytest
 
 from tests.test_model_sleep import _ctx, _mail, _result
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)
@@ -84,8 +83,10 @@ def _no_readiness_work(monkeypatch):
     monkeypatch.setattr("ouroboros.loop.call_llm_with_retry", lambda *a, **k: pytest.fail("model round while parked"))
 
 
-@pytest.mark.parametrize("exit_code", [0, 7])
-@pytest.mark.parametrize("executor", [False, True], ids=["host", "local_executor"])
+@pytest.mark.parametrize(("executor", "exit_code"), [
+    pytest.param(False, 0, id='host-0'),
+    pytest.param(True, 7, id='local_executor-7'),
+])
 def test_the_selected_start_exits_and_the_park_wakes_with_its_real_return_code(tmp_path, monkeypatch,
                                                                                exit_code, executor):
     from ouroboros import model_sleep

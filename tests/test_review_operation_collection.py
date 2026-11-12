@@ -194,7 +194,33 @@ def test_proven_existing_run_is_read_attach_only_and_parsed_locally(tmp_path, fo
     assert actor["operation_state"] not in {"pending_dispatch", "in_flight"}
 
 
-@pytest.mark.parametrize('telemetry', ['observed', 'missing', 'wrong_run', 'duplicate_attempt'])
+def test_a_stopped_run_with_unreadable_output_keeps_that_named_gap_through_its_cold_receipt_and_recollection(
+        tmp_path, forbid_effects, monkeypatch):
+    from ouroboros.observability import read_call_payload
+
+    detail = {"summary": {"state": "failed", "outputConformance": "",
+                          "failure": {"code": "credential_pool_exhausted", "safeMessage": "Account limit reached"},
+                          "resumable": {"cause": "pool_exhausted", "carriers": ["native"]}},
+              "primaryOutput": {"text": "PARTIAL PREVIEW", "truncated": True, "bytes": 4096}}  # no full artifact to verify
+    calls = _observe(monkeypatch, detail)
+    _started(tmp_path, run_id="run-stopped")
+    actor, fact = _collect(_session_run(), tmp_path, _ctx(tmp_path))
+    assert fact == "collected" and actor["status"] == "error" and actor["raw_text"] == ""
+    assert actor["failure_details"]["resumable"]["cause"] == "pool_exhausted"
+    assert actor["operation_state"] != "custody_lost"
+
+    def receipt(row):
+        return read_call_payload(tmp_path, task_id=TASK, call_id=row["response_ref"]["call_id"])[1]["message"]
+    message = receipt(actor)
+    assert message["session_transcript"] == "" and "truncated primary output" in message["session_transcript_gap"], message
+    assert "PARTIAL PREVIEW" not in json.dumps(message)  # a head-cut preview is never stored as the output
+    observed = list(calls)
+    again, fact = _collect(_session_run(), tmp_path, _ctx(tmp_path))  # a later process reads that very receipt
+    assert fact == "collected" and again["response_ref"]["call_id"] == actor["response_ref"]["call_id"]
+    assert receipt(again) == message and calls == observed  # nothing generated, nothing read from the engine again
+
+
+@pytest.mark.parametrize('telemetry', ['observed', 'missing', 'duplicate_attempt'])
 def test_cold_collection_preserves_only_final_attempt_identity(tmp_path, forbid_effects, monkeypatch, telemetry):
     from ouroboros.review_projection import compact_review_projection
 

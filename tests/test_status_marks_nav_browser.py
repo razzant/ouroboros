@@ -18,7 +18,7 @@ from tests._work_projection_shared import work_fields
 from tests.test_design_system_gate_browser import PROJECTS, rest, save_evidence, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 CHATS = {p['id']: p['chat_id'] for p in PROJECTS}
 MENU = 'body > .project-row-menu:not([data-leaving])'  # the open one: a closed menu's picture fades a moment
 
@@ -558,7 +558,7 @@ def test_the_consciousness_chip_says_a_campaign_by_its_word_and_paints_no_tone(n
     ui = nav_ui
     # The host's own sentence for this state (consciousness_view.py): the chip's label says it.
     body = {**snapshot(), 'evolution_enabled': True, 'bg_consciousness_enabled': False,
-            'bg_consciousness_state': {'status': 'disabled', 'detail': 'Background consciousness is off.'}}
+            'bg_consciousness_state': {'status': 'disabled', 'detail': 'Off: no own wakes.'}}
     page, _sync = open_app(ui, 1280, 800, body)
     try:
         chip = page.locator('#page-chat .cx-chip')
@@ -571,5 +571,5 @@ def test_the_consciousness_chip_says_a_campaign_by_its_word_and_paints_no_tone(n
     assert facts['after'] in ('none', 'normal', ''), facts
     assert facts['background'] not in ('rgba(0, 0, 0, 0)', 'transparent'), 'a capsule of the bar'
     assert facts['mark'] == 'none', 'a campaign that goes on by itself draws no mark, never amber'
-    assert facts['label'] == 'Consciousness: Background consciousness is off. · evolution campaign running', facts
+    assert facts['label'] == 'Consciousness: Off: no own wakes. · evolution campaign running', facts
     print(json.dumps(facts))

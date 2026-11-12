@@ -124,16 +124,16 @@ def test_a_later_terminal_row_wins_the_status_while_the_preliminary_row_stays_as
     assert render_row_text(facts) in history and PRELIMINARY in history  # the earlier row, unchanged
 
 
-def test_the_failed_work_draft_reads_the_rows_finality_and_its_stamp(tmp_path):
-    from ouroboros.memory_fallback import build_writer_input
-    from ouroboros.memory_sealing import failed_work_units
+def test_the_off_draft_keeps_the_rows_finality_in_its_stamp(tmp_path):
+    from ouroboros.memory_fallback import build_writer_input, FallbackUnit
 
     _activated(tmp_path)
     _produce(tmp_path, "t-fail", "failed", "provider_unavailable")
     store = ChronicleStore(tmp_path)
-    [unit] = failed_work_units(tmp_path, store)
+    segment = next(mi.open_segments(tmp_path, store, "1"))
+    unit = FallbackUnit("page", "1", "open:1", segment=segment)
     prompt = build_writer_input(tmp_path, store, unit, budget_tokens=None).prompt
-    assert "host facts for t-fail: status=failed; " in prompt and PRELIMINARY in prompt
+    assert PRELIMINARY in prompt
     stamp = prompt[prompt.index("## Tasks of these rows"):]
     assert "- task t-fail: status failed; " in stamp
     assert f"{PRELIMINARY}; stamp from host_task_facts" in stamp
@@ -254,16 +254,71 @@ def test_memory_read_shows_each_page_stamp_with_the_finality_and_authority_it_re
     final = "final=true; authority=canonical_task_result_after_finalization"
     node = _memory_read(ctx, node_id=pages["Both shipped."])
     header = node.split("\n", 1)[0]
-    assert f"stamp: t-ok=completed ({PRELIMINARY}), t-fail=failed ({final});" in header
+    # The header counts the stamp by status and recorded finality (the view's form) and names no task; each task's
+    # own line, with its finality and authority, stands in the record after the words.
+    assert "host stamp: 2 tasks — completed 1 (final=false), failed 1 (final=true);" in header
+    assert "t-ok" not in header and "t-fail" not in header
+    assert node.index("text:\nBoth shipped.") < node.index("stamp t-ok:")
     assert f"stamp t-ok: status=completed; outcome=Done; phase=done; {PRELIMINARY}; from host_task_facts" in node
     assert "stamp t-fail: status=failed; outcome=Failed; phase=error; verdict: " in node
     assert f"; {final}; from terminal_root_projection" in node
     old = _memory_read(ctx, node_id=pages["Old."])
-    assert "stamp: t-old=completed (final=unknown);" in old.split("\n", 1)[0]
+    assert "host stamp: 1 task — completed 1 (final=unknown);" in old.split("\n", 1)[0]
     assert "stamp t-old: status=completed; outcome=Done; phase=done; final=unknown; from host_task_facts" in old
     kept = _memory_read(ctx, node_id=pages["Kept."])
-    assert "t-auth=completed (final=unknown; authority=pre_finalization_host_facts)" in kept
+    assert "stamp t-auth: status=completed; outcome=Done; phase=done; final=unknown; authority=pre_finalization_host_facts" in kept
     assert "final=false" not in old + kept and "final=true" not in old + kept
     listing = _memory_read(ctx, room_id=1)
-    assert f"t-ok=completed ({PRELIMINARY}), t-fail=failed ({final})" in listing
-    assert "t-old=completed (final=unknown)" in listing
+    assert "host stamp: 2 tasks — completed 1 (final=false), failed 1 (final=true)" in listing
+    assert "host stamp: 1 task — completed 1 (final=unknown)" in listing and "t-ok" not in listing
+
+
+def test_one_stamp_summary_counts_pages_and_parts_and_a_large_stamp_keeps_the_words_in_the_first_page(tmp_path):
+    """The view and memory_read share one stamp line (``dialogue_provenance.stamp_summary``): counts by status and
+    recorded finality, never a task id, a part's folded done tasks counted from ``part_stamp``'s counts. A page
+    stamped with thousands of tasks reads its words in the first page; its tasks follow once, one line each."""
+    from ouroboros.dialogue_provenance import stamp_summary
+    from ouroboros.terminal_projection import part_stamp
+    from ouroboros.tools import chronicle
+    from ouroboros.tools.registry import ToolContext
+
+    done = {"status": "completed", "outcome_phase": "done", "source": "terminal_root_projection",
+            "outcome_final": True, "outcome_authority": "canonical_task_result_after_finalization"}
+    failed = {**done, "task_id": "f1", "status": "failed", "outcome_phase": "error"}
+    pages = [{"tasks": [{**done, "task_id": f"d{n}"} for n in range(3)]}, {"tasks": [failed]}]
+    line = stamp_summary(part_stamp(pages))
+    assert line == "host stamp: 4 tasks — failed 1 (final=true), done 3 (terminal, folded)"
+    assert "d0" not in line and "f1" not in line
+    assert stamp_summary(part_stamp(pages[:1])) == "host stamp: 3 tasks — done 3 (terminal, folded)"
+    assert stamp_summary({}) == stamp_summary({"tasks": [], "counts": []}) == ""
+    huge = {"tasks": [{"task_id": f"t{n:04d}", "status": "not_recorded"} for n in range(3000)]}
+    assert stamp_summary(huge) == "host stamp: 3000 tasks — not_recorded 3000"
+
+    _activated(tmp_path)
+    row = {"chat_id": 1, "direction": "in", "text": "Many tasks.", "client_message_id": "many",
+           "ts": "2026-10-26T11:00:00+00:00"}
+    ds.append(tmp_path, "chat", row)
+    store = ChronicleStore(tmp_path)
+    published = store.publish_page(room_id="1", text="THE WORDS OF THIS PAGE.", covers={
+        "rows": [chat_chain.source_row_id(row)], "stream_span": [1, 1], "task_ids": [e["task_id"] for e in huge["tasks"]]},
+        author={"kind": "mind", "task_id": "root0001", "focus": {"role": "root", "task_id": "root0001"}},
+        host_stamp=huge)
+    assert published.ok, published
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root0001", current_chat_id=1)
+    first = chronicle._memory_read(ctx, node_id=published.record["id"])
+    header = first.split("\n", 1)[0]
+    assert len(header) < 400 and "t0000" not in header and "not_recorded 3000" in header
+    assert "text:\nTHE WORDS OF THIS PAGE." in first and "tasks: 3000 (one stamp line each, after the text)" in first
+    assert "stamp t0000: status=not_recorded" in first  # the lists follow the words, on later pages as they fill
+    assert "without a stamp" not in first  # every covered id stands on its stamp line
+    # A page whose covered tasks no stamp names keeps their ids in its coverage line.
+    other = {**row, "text": "Unstamped work.", "client_message_id": "bare", "ts": "2026-10-26T11:01:00+00:00"}
+    ds.append(tmp_path, "chat", other)
+    bare = store.publish_page(room_id="1", text="Unstamped.", covers={
+        "rows": [chat_chain.source_row_id(other)], "stream_span": [2, 2], "task_ids": ["x1", "x2"]},
+        author={"kind": "mind", "task_id": "root0001", "focus": {"role": "root", "task_id": "root0001"}})
+    assert bare.ok, bare
+    assert "tasks: 2, without a stamp: x1, x2; " in chronicle._memory_read(ctx, node_id=bare.record["id"])
+    # A window always advances, even under a header larger than the page.
+    page = chronicle._window("h" * 200, "abcdef", 0, 100, lambda n: f"next {n}")
+    assert "next_start=1 " in page.split("\n")[1]

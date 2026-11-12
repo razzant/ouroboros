@@ -12,7 +12,6 @@ from ouroboros.llm_attempt import _deadline_checked_send, require_physical_dispa
 from ouroboros.task_results import write_task_result
 from tests._usage_store_testing import attempt_rows_in_start_order
 
-pytestmark = pytest.mark.serial
 
 
 def setup_call(tmp_path, monkeypatch):

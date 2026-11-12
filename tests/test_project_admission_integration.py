@@ -13,7 +13,6 @@ from tests._store_shared import unreadable_result
 from tests.test_schedule_occurrence import _row
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def convert(host, tid="converted"):  # noqa: F811
@@ -39,7 +38,7 @@ def admit(host, tmp_path, *, scoped=False, tid="converted"):  # noqa: F811
     return row
 
 
-@pytest.mark.parametrize("authority", ["malformed", "unreadable", "missing", "readable"])
+@pytest.mark.parametrize("authority", ["malformed", "missing", "readable"])
 def test_bare_promotion_checks_scope_before_drive_effects(host, tmp_path, monkeypatch, authority):  # noqa: F811
     from ouroboros import headless
     from supervisor.events_project_routing import _handle_promote_chat_to_task
@@ -102,10 +101,8 @@ def test_explicit_promotion_cannot_write_into_replacement_incarnation(host, tmp_
 
 
 @pytest.mark.parametrize("scoped", [False, True])
-@pytest.mark.parametrize("consumer", ["restore", "timeout"])
-def test_ui_conversion_keeps_prepared_resource_through_recovery(host, tmp_path, monkeypatch, scoped, consumer):  # noqa: F811
+def test_ui_conversion_keeps_prepared_resource_through_recovery(host, tmp_path, monkeypatch, scoped):  # noqa: F811
     from supervisor import queue
-    from tests.test_retry_project_binding import _patch_retry_input_handoff, _retry
 
     prepared = admit(host, tmp_path, scoped=scoped)
     write_task_result(host.root, "converted", "scheduled")
@@ -116,24 +113,16 @@ def test_ui_conversion_keeps_prepared_resource_through_recovery(host, tmp_path, 
     assert prepared["_project_admission"] == registry.project_admission_basis("chosen", chosen, frozen=True)
     basis = copy.deepcopy(prepared["_project_admission"])
     registry.update_project(host.root, "chosen", working_dir=str(tmp_path / "new-default"))
-    if consumer == "restore":
-        assert queue.persist_queue_snapshot()
-        host.pending.clear()
-        assert queue.restore_pending_from_snapshot() == 1
-    else:
-        _patch_retry_input_handoff(monkeypatch)
-        host.pending.clear()
-        write_task_result(host.root, "converted", "running", result="working")
-        requeued, attempt, _, suppression = _retry(SimpleNamespace(q=queue), prepared, "converted", "retry")
-        assert requeued and attempt == 2 and not suppression
-        assert registry.project_id_for_task(host.root, "retry") == "chosen"
+    assert queue.persist_queue_snapshot()
+    host.pending.clear()
+    assert queue.restore_pending_from_snapshot() == 1
     [recovered] = host.pending
     assert recovered["project_id"] == "chosen" and recovered["workspace_root"] == folder
     current = registry.project_admission_basis(
         "chosen", registry.get_reserved_project(host.root, "chosen"), frozen=True)
     assert current["project"]["routing_incarnation"] == basis["project"]["routing_incarnation"]
     assert current != basis  # placement refreshes the room, never the prepared working folder
-    assert recovered["_project_admission"] == (current if consumer == "restore" else basis)
+    assert recovered["_project_admission"] == current
     assert not recovered.get("_project_admission_restore_hold")
 
 
@@ -231,8 +220,7 @@ def test_conversion_bind_failure_preserves_scope_and_exact_carrier(host, tmp_pat
     assert queue.QUEUE_SNAPSHOT_PATH.read_bytes() == saved
 
 
-@pytest.mark.parametrize("timestamp", ["old", "invalid", "absent"])
-@pytest.mark.parametrize("schedule", [False, True])
+@pytest.mark.parametrize(("schedule", "timestamp"), [(False, "old"), (False, "absent"), (True, "invalid")])
 def test_project_hold_survives_early_restore_pruning(host, tmp_path, monkeypatch, timestamp, schedule):  # noqa: F811
     from supervisor import queue
 

@@ -1,4 +1,4 @@
-"""Review projection does not deny Cyber the bytes of an inert skill resource."""
+"""Review projection denies no mode an inert skill resource's bytes; content decides, not a credential-like name."""
 
 import hashlib
 import importlib.util
@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import config
-from ouroboros.skill_loader import SkillPayloadUnreadable, compute_content_hash, load_skill
+from ouroboros.skill_loader import compute_content_hash, load_skill
 from ouroboros.skill_review_packs import (
     _SkillBinaryPayload, _SkillFileUnreadable, _read_skill_file, frozen_payload_files, frozen_payload_source, payload_pack,
 )
@@ -25,8 +25,9 @@ def access(request, monkeypatch):
     config.reset_runtime_mode_baseline_for_tests()
 
 
-@pytest.mark.parametrize("name", [".env", "prod.env", "credentials.json", "id_rsa"])
-def test_sensitive_named_inert_resource_is_hashed_and_read_in_cyber(tmp_path, access, name):
+@pytest.mark.parametrize("name", [".env", "credentials.json", "id_rsa"])
+def test_credential_like_named_inert_resource_is_hashed_and_read_in_every_mode(tmp_path, access, name):
+    """A credential-like name decides nothing in any mode: the same bytes, hash, review pack and load."""
     skill = tmp_path / "demo"
     skill.mkdir()
     manifest = b'{"name":"demo","description":"Resource fixture","type":"instruction"}'
@@ -34,10 +35,6 @@ def test_sensitive_named_inert_resource_is_hashed_and_read_in_cyber(tmp_path, ac
     (skill / "skill.json").write_bytes(manifest)
     resource = skill / name
     resource.write_bytes(payload)
-    if access == "pro":
-        with pytest.raises(SkillPayloadUnreadable, match="credential filename"):
-            compute_content_hash(skill)
-        return
     from ouroboros.skill_identity import release_digest_from_file_digests
 
     expected = release_digest_from_file_digests(
@@ -57,7 +54,6 @@ def test_sensitive_named_inert_resource_is_hashed_and_read_in_cyber(tmp_path, ac
 
 @pytest.mark.parametrize("payload", [
     b"\x7fELF" + b"\0" * 16,  # Valid UTF-8 bytes still represent a binary-format fixture.
-    b"MZ\x90\0" + b"\xff" * 16,
     b"\xcf\xfa\xed\xfe" + b"\0" * 16,
     importlib.util.MAGIC_NUMBER + b"\0" * 16,
 ])
@@ -81,15 +77,15 @@ def test_native_magic_resource_has_exact_descriptor_not_decoded_text(tmp_path, a
     assert compute_content_hash(tmp_path) != content_hash
 
 
-def test_binary_content_and_sensitive_name_share_one_cyber_hash_surface(tmp_path, access):
+def test_native_content_not_a_credential_like_name_decides_the_review_pack(tmp_path, access):
     resource = tmp_path / "credentials.json"
     payload = b"\x7fELF" + b"\0" * 16
     resource.write_bytes(payload)
+    compute_content_hash(tmp_path)  # the name refuses nothing; native bytes were already hashable
     if access == "pro":
-        with pytest.raises(SkillPayloadUnreadable):
-            compute_content_hash(tmp_path)
+        with pytest.raises(_SkillBinaryPayload):  # loader magic stays a review blocker outside Cyber
+            frozen_payload_files(tmp_path)
         return
-    compute_content_hash(tmp_path)  # native bytes were already hashable
     pack = payload_pack(frozen_payload_files(tmp_path))
     assert hashlib.sha256(payload).hexdigest() in pack
     assert "credentials.json (binary file" in pack

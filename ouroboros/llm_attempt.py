@@ -14,8 +14,6 @@ candidate-attached facts rather than provider prose.
 from __future__ import annotations
 
 import copy
-import contextlib
-import contextvars
 import hashlib
 import inspect
 import json
@@ -31,7 +29,9 @@ from ouroboros.context_budget import (
 )
 from ouroboros.request_wire_contract import physical_candidate_bytes as _canonical_candidate_bytes
 from ouroboros.request_wire_recovery import prepare_wire_payload_for_send
-from ouroboros.transport_custody import ProviderNotDispatched, is_loopback_base_url
+from ouroboros.transport_custody import (  # noqa: F401 -- consumers import these two scopes through this module
+    ProviderNotDispatched, is_loopback_base_url, physical_attempt_tracker, single_physical_send,
+    single_physical_send_active, single_send_claim, track_physical_attempts)
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
 from ouroboros.usage_accounting import (
@@ -57,23 +57,6 @@ _CACHE_TTL_SECONDS = {"5m": 300, "1h": 3600}
 
 
 PROVIDER_POLICY_REFUSAL = "provider_policy_refusal"
-
-# The caller owns the allowance; this scope carries its write-ahead claim to
-# every physical lane, without another counter or any accounting authority.
-_SINGLE_SEND = contextvars.ContextVar("single_physical_send", default=None)
-
-
-@contextlib.contextmanager
-def single_physical_send(claim):
-    token = _SINGLE_SEND.set(claim)
-    try:
-        yield
-    finally:
-        _SINGLE_SEND.reset(token)
-
-
-def single_physical_send_active() -> bool:
-    return _SINGLE_SEND.get() is not None
 
 
 class PhysicalDispatchInterrupted(PhysicalAttemptPreconditionFailed):
@@ -120,6 +103,27 @@ def require_physical_dispatch_window() -> Optional[float]:
     if remaining is not None and remaining <= 0:
         raise _PhysicalSendNotStarted("deadline")
     return remaining
+
+
+def refused_by_own_window(error: BaseException, *, own_window_spent: bool) -> bool:
+    """Whether a caller's own spent window explains this unsent refusal, so the caller reports its own result.
+
+    Asked at the caller's seam, after its bound's scope closed: nothing of the call was dispatched, its window
+    (its deadline less its reserve) is spent, and nothing beyond the windows callers imposed refuses a send:
+    no Stop, Pause, finalize request, task deadline or ceiling. A tool window is clamped to that same deadline.
+    Anything else, a dispatched or unknown attempt above all, keeps its own rail."""
+    from ouroboros.model_wait import ModelWaitInterrupted, owner_control_reason
+    from ouroboros.transport_custody import outcome_unknown_on_chain
+
+    capture = getattr(error, "physical_attempt_capture", None)
+    if (not own_window_spent or not isinstance(error, (PhysicalDispatchInterrupted, ModelWaitInterrupted))
+            or getattr(error, "control_reason", "") not in {"deadline", "execution_deadline"}
+            or outcome_unknown_on_chain(error) or getattr(capture, "state", "released") != "released"):
+        return False
+    try:
+        return owner_control_reason() is None
+    except Exception:  # an unreadable control is no evidence that none is set
+        return False
 
 
 def preserve_prior_dispatch(error: BaseException, prior: Any) -> None:
@@ -523,7 +527,11 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
     if window is None:
         return None  # unknown capacity leaves the first full request admissible
     reserve = physical.response_reserve_tokens or context_mode_limits(
-        physical.rendered_mode, "", request.max_completion_tokens)[1]
+        physical.rendered_mode, "", request.max_completion_tokens,
+        working_reserve_tokens=request.working_reserve_tokens)[1]
+    reserve = max(reserve, request.working_reserve_tokens or 0)
+    if getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano":
+        reserve = max(reserve, int(request.max_completion_tokens or 0))  # the reply the view without the book keeps
     exact = request.prompt_tokens_exact is not None
     size = request.prompt_tokens_exact if exact else math.ceil(
         request.prompt_tokens_bounded_estimate * (physical.measurement_density or 1.0))
@@ -695,8 +703,12 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
             {key: source[key] for key in ("system", "messages", "tools", "functions") if key in source}, 0)
         input_tokens = math.ceil(raw * float(getattr(context, "measurement_density", None) or 1.0))
     frame = dict(caller_max_tokens=int(payload[field]), nano=True, input_tokens=input_tokens, window_tokens=window)
-    candidate = {**payload, field: reply_allowance_tokens(
-        owner_nano=context.profile == "owner_nano", raw_input_tokens=raw, exact=exact, **frame)}
+    # A directly required handbook keeps the reply this candidate without it gets; the admission charges both.
+    book = int(getattr(context, "required_book_tokens", 0) or 0)
+    density = 1.0 if exact else float(getattr(context, "measurement_density", None) or 1.0)
+    candidate = {**payload, field: reply_allowance_tokens(owner_nano=context.profile == "owner_nano", exact=exact,
+                                                          **{**frame, "input_tokens": input_tokens - book},
+                                                          raw_input_tokens=raw - book / density)}
     if exact and exact_reply_shortfall(**frame):
         request = _attempt_request(target, candidate)
         error = LocalContextTooLargeError(
@@ -708,18 +720,18 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
     return candidate
 
 
-def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptRequest):
+def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptRequest, *, prepare=None):
     """Close over one final candidate without putting it in accounting rows."""
     predicate = current_physical_attempt_predicate()
 
     def _persist(reservation):
-        fresh = _attempt_request(
-            {"provider": request.provider, "usage_model": request.model}, candidate,
-            source=request.source,
-        )
+        raw = _canonical_candidate_bytes(candidate)
+        context = _canonical_candidate_bytes({
+            key: candidate[key] for key in ("system", "messages", "tools", "functions") if key in candidate
+        })
         identity = (
-            fresh.candidate_raw_sha256, fresh.candidate_raw_size_bytes,
-            fresh.candidate_context_sha256, fresh.candidate_context_size_bytes,
+            hashlib.sha256(raw).hexdigest(), len(raw),
+            hashlib.sha256(context).hexdigest(), len(context),
         )
         expected = (
             request.candidate_raw_sha256, request.candidate_raw_size_bytes,
@@ -729,6 +741,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
             raise PhysicalAttemptPreparationFailed(
                 "physical candidate changed before dispatch", attempt_id=reservation.attempt_id,
             )
+        from ouroboros.context_timing import host_step
         from ouroboros.observability import persist_physical_candidate
 
         scope = current_usage_scope()
@@ -749,6 +762,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 ),
             },
         )
+        host_step("physical_candidate")
         # One frozen send copy and one durable pre-send record. Disk read-back
         # comparison is the explicit historical audit's work, not dispatch IO.
         if predicate is not None:
@@ -769,6 +783,16 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 )
                 failure.candidate_manifest_ref = persisted["manifest_ref"]
                 raise failure
+        if prepare is not None:
+            prepare(reservation, canonical_bytes=raw, sha256=request.candidate_raw_sha256,
+                    size_bytes=request.candidate_raw_size_bytes)
+        tracker = physical_attempt_tracker()  # after admission; durable before mark_dispatched/send
+        if tracker is not None:
+            try:
+                tracker(reservation)
+            except BaseException as exc:
+                exc.candidate_manifest_ref = persisted["manifest_ref"]
+                raise
         return persisted["manifest_ref"]
 
     return _persist
@@ -804,7 +828,7 @@ def _deadline_checked_send(send: Any, before_dispatch: Any):
         except PhysicalDispatchInterrupted as exc:
             exc.candidate_manifest_ref = manifest
             raise
-        claim = _SINGLE_SEND.get()
+        claim = single_send_claim()
         if claim is not None:
             claim(reservation)  # after admission; durable before mark_dispatched/send
         return manifest

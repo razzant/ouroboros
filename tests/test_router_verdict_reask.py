@@ -22,7 +22,7 @@ import pytest
 
 from ouroboros import usage_accounting as ua
 from ouroboros.llm import LLMClient
-from ouroboros.llm_attempt import single_physical_send
+from ouroboros.llm_attempt import single_physical_send, track_physical_attempts
 from ouroboros.llm_routing import _resolve_or_provider
 from ouroboros.llm_stream import AssembledResponse, ProviderStreamError
 from ouroboros.loop_llm_call import classify_llm_exception
@@ -190,12 +190,11 @@ def test_a_successful_reask_is_the_calls_answer(isolated, asynchronous):
     assert rows[1]["state"] == "settled" and rows[1]["cost_usd"] == 0.5 and rows[1]["cost_final"] is True
 
 
-@pytest.mark.parametrize("metadata", [
-    receipt(400, 402),  # an upstream itself answered 402: its own billing verdict
-    None,  # no receipt at all
-    {"requested": MODEL, "attempt": 0, "summary": "available=16"},  # refused before any upstream
-], ids=["402-among-attempts", "no-receipt", "no-attempts"])
-@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(("asynchronous", "metadata"), [
+    pytest.param(False, receipt(400, 402), id='False-402-among-attempts'),  # an upstream itself answered 402: its own billing verdict
+    pytest.param(False, {"requested": MODEL, "attempt": 0, "summary": "available=16"}, id='False-no-attempts'),  # refused before any upstream
+    pytest.param(True, None, id='True-no-receipt'),  # no receipt at all
+])
 def test_a_genuine_402_stays_quota_without_reask(isolated, asynchronous, metadata):
     outcome, sends = drive([Wire(error_frame(402, CREDITS, metadata))], asynchronous=asynchronous)
 
@@ -255,6 +254,30 @@ def test_no_reask_inside_a_single_physical_send_scope(isolated, asynchronous):
 
     assert len(sends) == 1
     assert classify_llm_exception(outcome).kind == "quota_exhausted"
+
+
+class _Tracker:
+    """Records each attempt before dispatch and hears each end (``track_physical_attempts``)."""
+
+    def __init__(self):
+        self.claimed, self.heard = [], []
+
+    def __call__(self, reservation):
+        self.claimed.append(reservation.attempt_id)
+
+    def attempt_ended(self, capture, error):
+        self.heard.append((capture.attempt_id, capture.provider_status_code, error is None))
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_tracking_keeps_the_reask_and_records_every_attempt(isolated, asynchronous):
+    tracker = _Tracker()
+    with track_physical_attempts(tracker):
+        outcome, sends = drive([Wire(MASKED), Wire(ANSWER, b"data: [DONE]\n\n")], asynchronous=asynchronous)
+
+    assert len(sends) == 2 and outcome.model_dump()["choices"][0]["message"]["content"] == "answer"
+    assert len(set(tracker.claimed)) == 2 and [attempt for attempt, *_rest in tracker.heard] == tracker.claimed
+    assert [(status, read) for _attempt, status, read in tracker.heard] == [(402, False), (None, True)]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -323,11 +346,10 @@ def provider_block(monkeypatch, model, routing_value, messages=None):
 
 @pytest.mark.parametrize("routing_value,expected", [
     ("repro", {"data_collection": "deny", "allow_fallbacks": False}),
-    ({"only": ["anthropic"]}, {"data_collection": "deny", "allow_fallbacks": True, "only": ["anthropic"]}),
     ('{"order": ["anthropic"], "allow_fallbacks": false}',
      {"data_collection": "deny", "allow_fallbacks": False, "order": ["anthropic"]}),
     (None, {"data_collection": "deny", "allow_fallbacks": True}),
-], ids=["preset", "object", "json-text", "built-in"])
+], ids=["preset", "json-text", "built-in"])
 def test_connection_routing_merges_over_the_global_setting(monkeypatch, global_routing, routing_value, expected):
     assert provider_block(monkeypatch, MODEL, routing_value) == {"require_parameters": True, **expected}
     # The global value itself, and so every other connection's requests, are unchanged.

@@ -24,10 +24,24 @@ permissions:
 # another. Full manual runs exercise the complete lane regardless of path changes.
 
 jobs:
-  # Exactly one job runs: the complete lane for `full`, otherwise one scenario.
+  # The complete lane's one weight table, frozen once before its first leg, as ci.yml's `shard-plan` does.
+  shard-plan:
+    name: shard-plan
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/shard-plan
+
+  # Exactly one of the next two jobs runs: the complete lane for `full`, otherwise one scenario.
   ui-smoke:
     name: ui-smoke
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
+    needs: shard-plan
     uses: ./.github/workflows/ui-browser.yml
     # A called workflow cannot raise its caller's token: the lane reads this run's
     # shard plan (actions) and the accepted-failure issues (issues), as from ci.yml.
@@ -52,13 +66,14 @@ jobs:
           interpreter: shipped  # the SQLite and journal mode fresh installs run, as the full lane
           install-project: 'false'
         id: setup_python
+      # Bounded downloads with one retry, as the full lane installs them (#2895).
       - name: Install UI smoke Chromium and WebKit
         id: install_browsers
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         timeout-minutes: 45
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-        run: python -m playwright install --with-deps chromium webkit
+        run: python -I -S scripts/ci_browser_install.py chromium webkit
       - name: Run PARTIAL DIAGNOSTIC host UI scenario
         id: ui_diagnostic
         if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
@@ -74,7 +89,8 @@ jobs:
             inflight) target=tests/test_ui_smoke_inflight_indicator.py::test_ui_smoke_chat_inflight_indicator_lifecycle ;;
             *) echo "Unknown UI diagnostic selection" >&2; exit 2 ;;
           esac
-          python -I -S scripts/safe_test.py -- python -m pytest "$target" -m ui_browser -q --tb=short \
+          python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/ui/host" \
+            -- python -m pytest "$target" -m ui_browser -q --tb=short \
             --junitxml="${{ runner.temp }}/ci-private/ui/host.xml" \
             --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
       - name: Upload UI test evidence
@@ -87,6 +103,22 @@ jobs:
           path: ${{ runner.temp }}/ci-evidence/ui/
           retention-days: 30
           if-no-files-found: warn
+      # The run's declared diagnostics, apart from its projection, as the full lane publishes them.
+      - name: Select UI diagnostics for publication
+        id: ui_diagnostics_export
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        continue-on-error: true
+        run: python -m ouroboros.test_evidence export-diagnostics "${{ runner.temp }}/ci-raw/ui" "${{ runner.temp }}/ci-diagnostics/ui"
+      - name: Upload UI diagnostics
+        id: ui_diagnostics
+        if: ${{ !cancelled() && steps.ui_diagnostics_export.outcome != 'skipped' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ui-diagnostics-${{ inputs.diagnostic }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-diagnostics/ui/
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Summarize host UI test results
         id: ui_summary
         if: ${{ !cancelled() }}
@@ -107,7 +139,8 @@ jobs:
         if: >-
           ${{ !cancelled() &&
           (steps.ui_summary.outcome != 'success' ||
-           steps.ui_evidence.outcome != 'success' || steps.ui_evidence.outputs.artifact-url == '') }}
+           steps.ui_evidence.outcome != 'success' || steps.ui_evidence.outputs.artifact-url == '' ||
+           steps.ui_diagnostics_export.outcome == 'failure' || steps.ui_diagnostics.outcome == 'failure') }}
         run: |
           echo "::warning::UI diagnostics are incomplete; see the original test and reporting steps."
           echo "UI diagnostics_incomplete. The original test outcomes are unchanged." >> "$GITHUB_STEP_SUMMARY"

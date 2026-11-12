@@ -249,7 +249,6 @@ def _seals(episode, model):
     return joined
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("selection", ["shared", "declared"])
 def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, monkeypatch, selection):
     evidence = tmp_path / "wire-evidence"
@@ -320,12 +319,11 @@ def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, 
                   "limits": ["Scripted API provider; no vendor or cognitive blindness claim",
                              "Raw HTTP body hash and canonical host-seal hash are distinct byte domains",
                              "Automatic fallback and overflow/compaction not exercised on this wire",
-                             "compact_context is refused by child tool profiles; authored compaction has separate focused coverage"]}
+                             "Authored compaction (compact_context) is not exercised on this wire; it has separate focused coverage"]}
         _write(evidence / "qualification.json", json.dumps(report, ensure_ascii=False, indent=2))
         print(f"HOST_WIRE_EVIDENCE {evidence / 'qualification.json'}")
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("channel", ["tool", "mailbox"])
 def test_pre_position_reads_and_mail_are_visible_broader_inputs(tmp_path, monkeypatch, channel):
     """Selection omits automatic biography; ordinary tools/mail can add sources."""

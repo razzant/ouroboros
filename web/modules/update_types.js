@@ -1,6 +1,7 @@
 /** Dependency-free JSDoc mirror of the managed-update envelopes in `ouroboros/gateway/update_contracts.py`
- *  (`/api/update/preflight`, `/api/update/apply` and the rollback refusal sharing its error shape, the
- *  `update_progress_changed` and `update_status_ready` frames), re-exported by ./api_types.js. */
+ *  (`/api/update/preflight`, `/api/update/apply` and the rollback refusal sharing its error shape,
+ *  `/api/update/description`, the `update_progress_changed` and `update_status_ready` frames),
+ *  re-exported by ./api_types.js. */
 /**
  * @typedef {Object} UpdateMergePlan
  * @property {boolean=} available
@@ -74,6 +75,29 @@
  * @property {string=} stash_note Stash-first prologue disclosure: how stashed local work was unwound.
  * @property {?number=} estimated_wave_usd Wave-floor admission estimate (worst-case review-pack caps).
  * @property {?number=} remaining_usd Remaining model budget the floor compared against.
+ */
+
+/**
+ * @typedef {Object} UpdateDescriptionRequest
+ * @property {'write'|'rewrite'} mode
+ * @property {string} base_sha
+ * @property {string} target_sha
+ */
+
+/**
+ * @typedef {Object} UpdateDescriptionResponse
+ * @property {'queued'} status
+ * @property {string} task_id
+ * @property {Object} key {base_sha, target_sha, update_channel, target_ref}
+ */
+
+/**
+ * @typedef {Object} UpdateDescriptionErrorResponse
+ * @property {string} error
+ * @property {string=} task_id
+ * @property {string=} task_status
+ * @property {Object[]=} legal_ranges
+ * @property {string=} reason
  */
 
 /**

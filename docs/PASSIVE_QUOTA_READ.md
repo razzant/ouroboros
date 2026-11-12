@@ -90,7 +90,21 @@ its exact subject: never a healthy sibling or an unprofiled null window, which
 Auto still sees. The engine owns applicability,
 constraint freshness and `quota_block`; the host neither matches model names
 fuzzily nor derives availability from ratios or money. Missing scope, stale or
-incomplete facts stay unknown. Migration: legacy engines without scope no longer
+incomplete facts stay unknown.
+Rows and absences group by full subject (harness, credential route, subject id).
+One subject's simultaneous rows are constraints, never alternatives: an engine
+exhausted/cooldown verdict whose `resets_at` is a valid, still-future instant wins
+beside stale, free or absent rows (a stale row too: the engine keeps such caps in
+its admission ledger); a malformed, out-of-range (Feb 30, 24:00, +05:60) or passed
+reset is no live block, read alike by both readers. A subject is
+available only when every row is fresh and engine-available, it has no absence,
+and one window is measured (finite `used_ratio`) for every model (no model ids or
+prefixes) and the requested kind; model-scoped-only or other-kind evidence stays
+unknown. Observed subjects (absence-only included) are alternatives: one available
+suffices, one unknown prevents all-blocked, else the earliest reset is a recheck,
+not readiness. The read roster is not the engine's enabled, ready pool.
+`tests/fixtures/quota_subject_matrix` (engine-computed rows) binds the Python and
+card readers. Migration: legacy engines without scope no longer
 certify host-side quota exhaustion from raw ratios; the guard proceeds as unknown
 to engine start admission. The engine POST still owns monetary admission. Neither
 inspection nor this compatibility behavior guarantees a later start will succeed.
@@ -114,8 +128,8 @@ every scoped snapshot and absence row, none dropped: subject, source, `observed_
 freshness, fresh/total windows and the engine's own state and reset, never plan
 labels, ratios, money, roster contents or absence prose. `read: failed` (safe code), `not_read`
 (`observation_deadline_elapsed`) and an empty `ok` stay distinct. Auto rows cover
-every engine subject of the harness, enabled or not, so a fresh row beside a
-stale same-subject source keeps the aggregate unknown. A newer `observed_at`
+every engine subject of the harness, enabled or not. A stale same-subject source
+keeps the aggregate unknown unless a live dated block remains. A newer `observed_at`
 alone is not a changed fact; ageing into unknown is. Nothing refreshes, starts,
 selects or generates; `tests/test_primary_quota_observation.py` drives the loop.
 

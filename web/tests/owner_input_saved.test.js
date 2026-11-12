@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { markIngressSaved } from '../modules/chat_activity.js';
-import { createUnconfirmedSends } from '../modules/chat_attachments.js';
+import { createUnconfirmedSends, placeIngressNote } from '../modules/chat_attachments.js';
 import { createChatInstance } from '../modules/chat.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
@@ -35,7 +35,8 @@ function fixture(history = []) {
     const bubble = (cmid) => messages.children.find((node) => node.dataset.clientMessageId === cmid);
     return {
         instance, messages, bubble,
-        notes: (cmid) => (bubble(cmid)?.children || []).filter((node) => Object.hasOwn(node.dataset, 'ingressSaved')),
+        // The saved note wherever it stands: the quiet tick in the time line, or a row above it.
+        notes: (cmid) => bubble(cmid)?.querySelectorAll('[data-ingress-saved]') || [],
         status: () => document.byId.get('chat-status')?.textContent,
         async send(text) {
             document.byId.get('chat-input').value = text;
@@ -59,14 +60,35 @@ test('the typed flag on my own echo says Input saved once, and Sending... stays'
         const [note] = f.notes('cm-1');
         assert.equal(note?.textContent, 'Input saved');
         assert.equal(note.className, 'msg-pending', 'the quiet delivery-note style, no new chrome');
-        const kids = f.bubble('cm-1').children;
-        assert.equal(kids.indexOf(note), kids.findIndex((node) => node.classList.contains('msg-time')) - 1, 'above the time');
+        const time = f.bubble('cm-1').querySelector('.msg-time');
+        assert.equal(note.parentNode, time, 'a quiet tick in the time line, before its words: no row, no second tick');
+        assert.equal(note.title, 'Input saved', 'its words stay its text and a pointer\'s title');
         assert.equal(f.status(), 'Sending', 'a saved row is not a started turn');
         f.echo({ content: 'please look at the logs', sender_session_id: ME, client_message_id: 'cm-1', ingress_accepted: true,
             ingress_dispatched: true });
         assert.equal(f.notes('cm-1').length, 1, 'a repeated echo keeps one note');
         assert.equal(f.messages.children.filter((node) => node.classList.contains('user')).length, 1);
     } finally { f.close(); }
+});
+
+// Only the plain saved states draw the quiet tick. Any other state keeps its words in a row right above the time: the
+// delivery doubt, a legacy `undispatched` ("Saved, not delivered."), and a note that was never saved at all.
+test('only a plain saved note becomes the tick; every other state keeps its words above the time', () => {
+    const env = installDom();
+    try {
+        for (const [state, where] of [['', 'time'], ['pending', 'time'], ['unconfirmed', 'row'], ['undispatched', 'row'], [undefined, 'row']]) {
+            const bubble = document.createElement('div');
+            bubble.className = 'chat-bubble user';
+            const time = document.createElement('div');
+            time.className = 'msg-time';
+            bubble.appendChild(time);
+            const note = Object.assign(document.createElement('div'), { className: 'msg-pending', textContent: 'words' });
+            if (state !== undefined) note.dataset.ingressSaved = state;
+            placeIngressNote(bubble, note);
+            assert.equal(note.parentNode === time ? 'time' : 'row', where, String(state));
+            if (where === 'row') assert.equal(bubble.children.indexOf(note) + 1, bubble.children.indexOf(time), `${state}: right above the time`);
+        }
+    } finally { restoreDom(env.prior); }
 });
 
 test('no typed flag, no note: absent, untyped, unkeyed, foreign or not an owner row', async () => {
@@ -196,7 +218,7 @@ test('a sent attachment message stays recoverable until the host says it is save
             sender_session_id: ME, client_message_id: 'cm-1', ingress_accepted: true, ingress_dispatched: true, attachments: [view] });
         assert.equal(doubt('cm-1'), undefined, 'the saved echo settles the doubt');
         assert.equal(instance.hasPendingWork(), false, 'the saved echo settles the frame itself');
-        assert.equal(bubble('cm-1').children.filter((node) => Object.hasOwn(node.dataset, 'ingressSaved')).length, 1);
+        assert.equal(bubble('cm-1').querySelectorAll('[data-ingress-saved]').length, 1);
         fire('close');
         assert.equal(doubt('cm-1'), undefined, 'a saved message is never doubted again');
 
@@ -328,7 +350,7 @@ function keptTab() {
             instance, sent, bubble,
             bubbles: (cmid) => messages.children.filter((node) => node.dataset.clientMessageId === cmid).length,
             fire: (type, payload) => [...(handlers.get(type) || [])].forEach((fn) => fn(payload)),
-            notes: (cmid) => (bubble(cmid)?.children || []).filter((node) => node.className === 'msg-pending'),
+            notes: (cmid) => bubble(cmid)?.querySelectorAll('.msg-pending') || [],
             actions: (cmid) => room.notes(cmid).flatMap((note) => note.children.filter((node) => node.tagName === 'BUTTON')),
             // Send again and Discard rejoin or forget the kept frame; `Send as a new message` is the doubt's own action (it only
             // prepares the composer). Tests of the first kind must not read the second as a retry.
@@ -730,11 +752,17 @@ test('an echo sent before a deferred dispatch waits; a close offers Send again, 
         room.echo('cm-1', first, { restarted: true, ingress_pending: true });
         room.echo('cm-2', second, { restarted: true, ingress_pending: true });
         assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-1', 'cm-2']);
+        const time = room.bubble('cm-1').querySelector('.msg-time');
+        assert.equal(room.notes('cm-1')[0].parentNode, time, 'saved and still pending: the quiet tick');
         room.fire('close');
         assert.deepEqual(room.actions('cm-1').map((node) => node.textContent), ['Send again', 'Discard'],
             'the socket closed before the host said: the owner may ask again');
+        const [row] = room.notes('cm-1');
+        assert.deepEqual([row.parentNode, row.textContent], [room.bubble('cm-1'), 'Input saved'], 'with actions it is a row of words again');
+        assert.equal(room.bubble('cm-1').children.indexOf(row) + 1, room.bubble('cm-1').children.indexOf(time), 'right above the time');
         room.press('cm-1', 'Send again');
         assert.deepEqual(room.actions('cm-1'), [], 'resent: the doubt waits for the next fact');
+        assert.equal(room.notes('cm-1')[0].parentNode, time, 'and without its actions the tick again');
         room.echo('cm-1', first);  // the rejoin says the same process dispatched it
         assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-2']);
         // cm-2's host ended before it said: the next read shows its row from an ended process.

@@ -14,6 +14,9 @@ import json
 STUB_MODEL_SLUG = "openai-compatible::mock-model"   # == harness.MOCK_SLUG (asserted in stub_settings)
 STUB_CHILD_SLUG = "openai-compatible::mock-child"
 STUB_MODEL_SLOTS = {"OUROBOROS_MODEL": STUB_MODEL_SLUG, "OUROBOROS_MODEL_LIGHT": STUB_MODEL_SLUG}
+# Carried by every stub attempt row and printed with its verdicts: a pass here says the path ran, never that anyone judged it.
+MACHINERY_ONLY = ("keyless stub: the critics' answers are canned and the author's steps scripted, so this verifies the "
+                  "machinery of the path, not independent semantic review or design quality")
 
 
 def routed_stub_model(script: dict):

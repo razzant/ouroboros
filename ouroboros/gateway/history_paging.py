@@ -31,11 +31,12 @@ from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_positions import skipped_between
+from ouroboros.subagent_messages import DELIVERY_KINDS, is_conversation_card_content as _card_content
 from ouroboros.project_dialogue import (
-    _ANNOTATIONS_NAME, MAIN_PINNED_ROW_TYPES, ORIGIN_ADDRESSED_NOTICE_TYPES, entry_matches_source_ref,
+    _ANNOTATIONS_NAME, MAIN_PINNED_ROW_TYPES, ORIGIN_ADDRESSED_NOTICE_TYPES, WORK_SPEECH_ELSEWHERE_TYPES, entry_matches_source_ref,
 )
 from ouroboros.store import StoreError, StoreMigrating
-from ouroboros.subagent_messages import CARD_ROW_PLACEMENTS, is_task_card_message, subagent_message_meta
+from ouroboros.subagent_messages import subagent_message_meta
 
 _SOURCES = ("chat", "progress")
 # One probe page: each indexed column of the room's facts reads at most this many coordinates, never its history.
@@ -77,12 +78,34 @@ _GAP_NAMES = {"invalid": "malformed_jsonl", "non_object": "invalid_jsonl_row"}
 # Stored kinds chat.js shows as a bubble of their own whoever sent them: it
 # renders them before a child's words are routed to its card, and their
 # producers (message_bus ``send_photo`` ...) count every one.
-_STANDALONE_KINDS = ("document", "links", "photo", "video", "quiz", "card")
+_STANDALONE_KINDS = DELIVERY_KINDS
 # A read around one task (``around=task:<id>``, DESIGN "Room work status") holds a quarter of
 # each stream's quota before the task's earliest row in the room and the rest from it on.
 _AROUND_OLDER_SHARE = 4
 
 log = logging.getLogger(__name__)
+
+
+def chat_quota_predicate(row_matches_thread, stored_chat_id):
+    """Human-row quota predicate shared by the rotated chat read and the
+    window-truncation accounting (must equal the render loop's filter)."""
+
+    def _counts_toward_thread(e):
+        if not isinstance(e, dict):
+            return False
+        if str(e.get("direction", "")).lower() not in ("in", "out"):
+            return False
+        if e.get("type") == "routing_options":
+            # LLM-grounding rows (#198) are skipped by the render loop, so
+            # they must not consume the human-row quota either — a run of
+            # picker refusals would silently evict real messages.
+            return False
+        if is_a2a_chat_id(e.get("chat_id", 1)):
+            return False
+        ec = stored_chat_id(e.get("chat_id"), 1)
+        return row_matches_thread(ec, e)
+
+    return _counts_toward_thread
 
 
 def progress_quota_predicate(row_matches_thread, stored_chat_id):
@@ -281,7 +304,10 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
         keys: list = [("chat_id", thread_id)]
         for task in bound:
             keys.extend((("task_id", task), ("parent_task_id", task), ("root_task_id", task)))
-        keys.extend(("task_id", task) for task in _descendants(data_dir, bound))
+        descendants = _descendants(data_dir, bound)
+        keys.extend(("task_id", task) for task in descendants)
+        # Rows written elsewhere that this room also shows (``room_membership.appearance_keys``).
+        shown = (("appearance", f"room:{thread_id}"), *(("appearance", f"task:{task}") for task in (*bound, *descendants)))
         owners, seqs = [], []
         for ref in source_refs:
             if not isinstance(ref, dict):
@@ -297,7 +323,7 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
                 if chat == 1:
                     candidates += ds.rows_by_identity(data_dir, None, str(ref["ts"]))
                 seqs.extend(row.seq for row in candidates if entry_matches_source_ref(row.row, [ref]))
-        return {"chat": RoomLens((*keys, *dict.fromkeys(owners)), tuple(sorted(set(seqs)))),
+        return {"chat": RoomLens((*keys, *shown, *dict.fromkeys(owners)), tuple(sorted(set(seqs)))),
                 "progress": RoomLens(tuple(keys))}
     if thread_id != 1:
         from ouroboros.place_arrivals import holds_history_import
@@ -665,7 +691,13 @@ def history_page_coverage(page, stream_gaps):
 
 
 def delivered_history_gaps(root, page, stream_gaps):
-    """Recheck narrowed import spans; projection failures have no narrower proof."""
+    """Recheck narrowed import spans; projection failures have no narrower proof. A Project page
+    reaching rows the appearance index has not derived yet (``room_appearances``: a store from
+    before it, an older body's rows) may lack a row written elsewhere: ``appearances_deriving``;
+    one reaching a Reply that could join it but whose saved target cannot be read now:
+    ``reply_target_unreadable`` (``room_appearances.read_gaps``, as memory and evidence reads name them)."""
+    from ouroboros.room_appearances import read_gaps
+
     import_gaps = {*_GAP_NAMES.values(), UNIMPORTABLE}
     for source in _SOURCES:
         if page["before"][source] == page["selections"][source][1]:
@@ -674,6 +706,10 @@ def delivered_history_gaps(root, page, stream_gaps):
                                 physical=page.get("after", False))
         stream_gaps[source] = (stream_gaps[source] - import_gaps) | reader.gaps(
             page["before"][source], page["page_ends"][source])
+    shown = [key for column, key in getattr(page["lens"]["chat"], "keys", ()) if column == "appearance"]
+    if page.get("quotas", {}).get("human", True) and shown:
+        stream_gaps["chat"] = stream_gaps["chat"] | read_gaps(root, page["chat_id"], shown, page["before"]["chat"],
+                                                              page["page_ends"]["chat"])
     return stream_gaps
 
 
@@ -697,7 +733,7 @@ def history_page_tokens(page, messages=(), reads=None):
     # Tasks whose facts the rows show: not an owner's row, a notice naming another room's task or a pointer.
     shown = {str(row.get("task_id")) for row in messages if row.get("task_id") and row.get("role") != "user"
              and row.get("system_type") not in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES,
-                                                *MAIN_PINNED_ROW_TYPES)}
+                                                *MAIN_PINNED_ROW_TYPES, *WORK_SPEECH_ELSEWHERE_TYPES)}
     lifecycle = any(row.get("lifecycle_virtual") for row in messages)
     if page.get("after") and page.get("lifecycle") and not lifecycle:
         raise HistoryCursorError("history_delta_reset")  # the shown operation ended: nothing here says so
@@ -775,15 +811,6 @@ def deferred_before(source, entries, candidates, messages, before):
                           and entry["history_position"]["source"] == source)])
 
 
-def _card_content(row, kind, child=lambda _row: False):
-    """Task-card content: a host placement, or a child's own words (``child``: by the
-    lineage its task result recovers). What a child delivers stands alone, and so does
-    a routing notice: its task_id names the task it refused, never its speaker."""
-    return row.get("card_row") in CARD_ROW_PLACEMENTS or (
-        kind not in _STANDALONE_KINDS and kind not in ORIGIN_ADDRESSED_NOTICE_TYPES
-        and (is_task_card_message(row) or child(row)))
-
-
 def _feed_message(row):
     """A standalone conversation row with a physical chat position.
 
@@ -815,11 +842,26 @@ def _stored_message(row_matches_thread, stored_chat_id, child):
     return message
 
 
+def _arrived_unread(data_dir, chat_id):
+    """Whether a message can be this room's unread arrival: one read in full in another room (its
+    revision here in the room's ``read_ahead_revisions``) or one that never counted here (its
+    ``room_revisions`` stamp names other rooms only) is not where an unread room lands."""
+    from ouroboros.gateway.ui_preferences import read_ahead_spans
+
+    spans = read_ahead_spans(data_dir, chat_id)
+
+    def arrived(row):
+        stamp = row.get("room_revisions")
+        revision = stamp.get(str(chat_id)) if isinstance(stamp, dict) else 0
+        return not isinstance(stamp, dict) or (type(revision) is int and not any(lo <= revision <= hi for lo, hi in spans))
+    return arrived
+
+
 def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, projected_gaps=frozenset(),
                    task_result=lambda _task_id: {}):
-    """``window.latest_message`` of a recent Project read (DESIGN "Unread").
+    """``window.latest_message`` of a recent Main or Project read (DESIGN "Unread").
 
-    The window is ordered and tailed by event time, but a Project message counts
+    The window is ordered and tailed by event time, but a room's message counts
     as unread when it ARRIVES: an answer the terminal outbox delivers late keeps
     its original ``ts``, so it can sort above messages that arrived before it
     (``out_of_order``) or below the window's floor, where the first older page
@@ -869,8 +911,18 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
 
     offset = lambda row: row["history_position"]["offset"]  # noqa: E731
     words = lambda row: _card_content(row, str(row.get("system_type") or ""), child)  # noqa: E731
-    feed = [row for row in rows if _feed_message(row)]
-    spoken = sorted((row for row in feed if row.get("role") != "user" and (
+    arrived = _arrived_unread(data_dir, page["chat_id"])
+    question_chat = getattr(row_matches_thread, "question_project_chat", lambda _row: 0)
+
+    def elsewhere(row):
+        # Main draws a Project's question only as a copy of that room's (it never counted here), and a started or
+        # handed-over Project as its work's portal (work_portal.js ``row``): no message of their own to read. Both are
+        # Main's rows alone (room_membership pins the one; ``question_project_chat`` names nothing off Main).
+        kind = str(row.get("system_type") or row.get("type") or "")
+        return kind == "project_question_pointer" or bool(question_chat(row)) or (
+            kind in ("project_started", "project_handoff") and bool(row.get("task_id") and row.get("project_id")))
+    feed = [row for row in rows if _feed_message(row) and not elsewhere(row)]
+    spoken = sorted((row for row in feed if row.get("role") != "user" and arrived(row) and (
         str(row.get("text") or "").strip() not in ("", "\u200b") or row.get("msg_type"))), key=offset)
     latest = next((row for row in reversed(spoken) if not words(row)), None)
     # The newest time a message this read shows was sent: a later arrival sent before it sorts above
@@ -892,7 +944,8 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
             return {"latest_message": {"history_id": latest["history_id"], "out_of_order": True}}
         return {"latest_absent": True} if start == 0 and not gaps else {}
     if latest is None and start > 0:
-        message = _stored_message(row_matches_thread, stored_chat_id, child)
+        stored = _stored_message(row_matches_thread, stored_chat_id, child)
+        message = lambda entry: stored(entry) and arrived(entry) and not elsewhere(entry)  # noqa: E731
         entries, before, gaps = HistorySource(data_dir, "chat", page["lens"]["chat"], end).older(
             start, 1, message, min(_ARRIVAL_SEARCH_ROWS, _READ_CEILING_ROWS))
         found = next(filter(message, entries), None)  # ``older`` stops at the newest one
@@ -909,15 +962,24 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
         offset(row) < offset(latest) and str(row.get("ts") or "") > ts and not words(row) for row in feed)}}
 
 
-def replay_evidence_rows(messages, evidence):
-    """Carry cross-page evidence only when this page has no equivalent fact."""
+def replay_evidence_rows(messages, evidence, results=None, drive_root=None):
+    """Carry cross-page evidence only when this page has no equivalent fact. A task's ending-row fact stays as it was
+    recorded; when a late review revised the stored outcome since, the row also carries that current outcome
+    (``late_review_marks.late_current_outcome``), read from the results this page already loaded, never a new read."""
     visible = {row.get("history_id") for row in messages if row.get("history_id")}
     settled = {(row.get("task_id"), row["quiz"].get("quiz_id"), row["quiz"].get("state")) for row in messages
                if row.get("msg_type") == "quiz" and row["quiz"].get("state") in {"answered", "closed"}}
     terminals = {row["task_id"]: row["historical_terminal"] for row in messages
                  if row.get("task_id") and row.get("historical_terminal")}
-    return [row for row in evidence if row.get("history_id") not in visible
+    rows = [row for row in evidence if row.get("history_id") not in visible
             and not (row.get("system_type") in {"quiz_answer", "quiz_closed"}
                      and (row.get("task_id"), row["quiz"].get("quiz_id"), row["quiz"].get("state")) in settled)
             and not (row.get("historical_terminal")
                      and terminals.get(row.get("task_id")) == row["historical_terminal"])]
+    from ouroboros.late_review_marks import late_current_outcome  # D11->D15
+
+    for row in rows:
+        loaded = (results or {}).get(row.get("task_id")) if row.get("historical_terminal") else None
+        if isinstance(loaded, dict) and (current := late_current_outcome(drive_root, loaded)):
+            row["current_outcome"] = current
+    return rows

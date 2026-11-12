@@ -7,13 +7,29 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 import { continueNonce, continueOfferView, continueTaskAction, syncContinueAction } from '../modules/task_continue.js';
-import { taskReasonDetail, taskReasonPhrase } from '../modules/log_events.js';
+import { taskReasonDetail, taskReasonPhrase, taskTerminalPhase } from '../modules/log_events.js';
 import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
 
 function memoryStorage() {
     const map = new Map();
     return { getItem: (k) => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)), map };
 }
+
+test('an author-stopped card keeps its reason and Continue in the Stopped phase', () => {
+    const { prior } = installDom();
+    try {
+        const detail = { status: 'completed', reason_code: 'final_message', outcome_axes: {
+            execution: { status: 'ok', task_completion: { action: 'stop', rationale: 'The export is unfinished.' } },
+            objective: { status: 'fail', source: 'task_completion', reason: 'author_stop' } },
+            continuation_offer: { eligible: true, cause: 'author_stop' } };
+        const card = settledRootCard('stopped-root');
+        card.phase = taskTerminalPhase(detail);
+        assert.equal(card.phase, 'cancelled');
+        assert.equal(taskReasonDetail(detail), 'Ouroboros stopped with unfinished work · The export is unfinished.');
+        syncContinueAction(card, detail);
+        assert.equal(card.root.querySelector('[data-continue-task]')?.textContent, 'Continue');
+    } finally { restoreDom(prior); }
+});
 
 test('the action nonce is created once per task and survives a reload (same storage)', async () => {
     const storage = memoryStorage();
@@ -81,7 +97,9 @@ test('a lost answer is retried under the SAME nonce; an already accepted press n
         return { ok: true, successor_task_id: 'root-1-cabc', held: attempt === 2 };
     };
     assert.equal(await continueTaskAction('root-1', { request, storage, toast }), '');
-    assert.match(toasts[0][0], /^Continue not confirmed: network timeout/);
+    // The shared failure words, never the transport's own text (U131).
+    assert.equal(toasts[0][0], "Continue not confirmed. Didn't work.");
+    assert.doesNotMatch(toasts[0][0], /network timeout/);
     assert.equal(await continueTaskAction('root-1', { request, storage, toast }), 'root-1-cabc');
     assert.equal(seen[0][1], seen[1][1], 'the retry carries the same action nonce');
     // Held without named blockers: the fact, never a promise that earlier work is merely settling (#1721). It starts
@@ -95,9 +113,32 @@ test('a lost answer is retried under the SAME nonce; an already accepted press n
     assert.equal(await continueTaskAction('root-9', { request: refused, storage, toast }), 'root-1-cabc');
 });
 
+test('a refused Continue press explains its hard bound and preserves the same action nonce', async () => {
+    for (const cause of ['budget_exhausted', 'deadline', 'execution_budget_exhausted']) {
+        const storage = memoryStorage();
+        const nonces = [], notices = [];
+        const request = async (_id, nonce) => {
+            nonces.push(nonce);
+            throw Object.assign(new Error('continue refused: hard_limit_reached'), {
+                body: { reason_code: 'hard_limit_reached', cause },
+            });
+        };
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            assert.equal(await continueTaskAction(`limited-${cause}`, {
+                storage, request, toast: (...row) => notices.push(row),
+            }), '');
+        }
+        assert.deepEqual(notices, Array.from({ length: 2 }, () => [
+            `Continue not confirmed: ${taskReasonPhrase(cause)}`, 'error',
+        ]));
+        assert.doesNotMatch(notices[0][0], /hard_limit_reached/);
+        assert.equal(nonces[0], nonces[1]);
+    }
+});
+
 test('chat reaches the Continue action through the one settled-card seam', () => {
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    assert.match(chat, /import \{ syncSettledItems \} from '\.\/settled_card\.js';/);
+    assert.match(chat, /import \{[^}]*\bsyncSettledItems\b[^}]*\} from '\.\/settled_card\.js';/);
     const seam = readFileSync(new URL('../modules/settled_card.js', import.meta.url), 'utf8');
     assert.match(seam, /syncContinueAction\(record, detail, options\)/);
     assert.match(seam, /return syncResultFilesItem\(record, detail\)/);
@@ -138,6 +179,29 @@ test('a Continue read late, after its card was drawn, is written through the cal
         await flush();
         assert.deepEqual(seam, ['open', 'close'], 'the late write is one transaction of the caller\'s seam');
         assert.equal(card.root.querySelector('[data-continue-task]')?.textContent, 'Continue');
+    } finally { restoreDom(prior); }
+});
+
+test('a live terminal of an author stop reads the offer once; a clean finish reads nothing', async () => {
+    const { prior } = installDom();
+    try {
+        const reads = [];
+        const read = async (id) => { reads.push(id);
+            return { status: 'completed', continuation_offer: { eligible: true, cause: 'author_stop' } }; };
+        const stopped = settledRootCard('stopped-root');
+        syncContinueAction(stopped, { type: 'task_done', status: 'completed', outcome_axes: { execution: {
+            status: 'ok', task_completion: { action: 'stop', rationale: 'Not ready' } } } }, { read });
+        const legacy = settledRootCard('legacy-stopped-root');
+        syncContinueAction(legacy, { type: 'task_done', status: 'completed', outcome_axes: {
+            execution: { status: 'ok' }, objective: { status: 'fail', reason: 'author_stop' } } }, { read });
+        const clean = settledRootCard('clean-root');
+        syncContinueAction(clean, { type: 'task_done', status: 'completed', outcome_axes: { execution: { status: 'ok' } } }, { read });
+        await flush();
+        assert.deepEqual(reads, ['stopped-root', 'legacy-stopped-root']);
+        const button = stopped.root.querySelector('[data-continue-task]');
+        assert.equal(button?.textContent, 'Continue');
+        assert.equal(button?.title, 'Start a new task that continues this unfinished work');
+        assert.equal(clean.root.querySelector('[data-continue-task]'), null);
     } finally { restoreDom(prior); }
 });
 
@@ -184,6 +248,23 @@ test('a canonical hard-bound refusal remains one readable fact beside the existi
             assert.ok(card.root.querySelector('[data-continue-task]'));
         }
         assert.equal(card.root.querySelector('[data-continue-task]').textContent, 'Continued');
+    } finally { restoreDom(prior); }
+});
+
+test('an unreadable execution budget reads as unknown, never as a spent one or the interruption', () => {
+    const { prior } = installDom();
+    try {
+        const card = settledRootCard('unknown-budget-root');
+        const detail = { status: 'failed', reason_code: 'provider_unavailable',
+            continuation_offer: { eligible: false, refusal: 'execution_budget_unknown', cause: 'provider_unavailable' } };
+        assert.deepEqual(continueOfferView(detail), { kind: 'refusal', refusal: 'execution_budget_unknown' });
+        syncContinueAction(card, detail);
+        const note = card.root.querySelector('[data-continue-refusal]');
+        assert.equal(note.textContent, "Continue unavailable. The time left in this task's execution budget could not "
+            + 'be read from its saved clock, so no new task starts.');
+        assert.doesNotMatch(note.textContent, /exhaust|used up|spent|zero/i);
+        assert.notEqual(note.textContent, `Continue unavailable. ${taskReasonPhrase('provider_unavailable')}`);
+        assert.equal(card.root.querySelector('[data-continue-task]'), null);
     } finally { restoreDom(prior); }
 });
 
@@ -416,10 +497,10 @@ test('a resolved malformed 200 is unconfirmed: no success toast, the same nonce 
     globalThis.fetch = async (_url, init) => { nonces.push(JSON.parse(init.body).action_nonce); return replies.shift(); };
     try {
         assert.equal(await continueTaskAction('malformed-root', { storage, toast }), '');
-        assert.deepEqual(toasts, [['Continue not confirmed: non-json response (HTTP 200)', 'error']]);
+        assert.deepEqual(toasts, [["Continue not confirmed. Didn't work.", 'error']]);
         assert.equal(storage.getItem('ouro_continue_nonce:malformed-root'), nonces[0], 'the unconfirmed action keeps its nonce');
         assert.equal(await continueTaskAction('malformed-root', { storage, toast }), '', 'ok without a successor is not an acknowledgement');
-        assert.deepEqual(toasts[1], ['Continue not confirmed: no acknowledgement', 'error']);
+        assert.deepEqual(toasts[1], ["Continue not confirmed. Didn't work.", 'error']);
         assert.equal(await continueTaskAction('malformed-root', { storage, toast }), 'malformed-root-c1');
         assert.deepEqual(toasts[2], ['Continue accepted.', 'ok']);
         assert.deepEqual(nonces, [nonces[0], nonces[0], nonces[0]], 'every retry is the same admission');

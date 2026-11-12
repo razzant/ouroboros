@@ -9,14 +9,16 @@ from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_owner_continue import _interrupted, _owner_mail, NONCE
 
 
-@pytest.mark.parametrize('fault', ['none', 'readback', 'source_gap'])
+@pytest.mark.parametrize('fault', ['none', 'readback', 'source_gap', 'unrecorded_mode'])
 def test_deferred_call_inventory_and_owner_words_survive_child_retirement(tmp_path, monkeypatch, fault):
+    """The row records the mode its producer prepared, as current producers do; ``unrecorded_mode`` is a historical
+    row that names its retired drive without one: unknown, refused before any claim, never guessed."""
     from supervisor.continuation_admission import admit_continuation
 
     parent, tid = tmp_path / 'parent', 'pred-1'
     _, _, workers = _install_queue(parent, monkeypatch)
     child = headless.prepare_task_drive(parent, tid, 'empty')
-    _interrupted(child)
+    _interrupted(child, **({} if fault == 'unrecorded_mode' else {'memory_mode': 'empty'}))
     _owner_mail(child)
     trace = observability.persist_call(child, task_id=tid, call_id='physical', call_type='tool_call',
                                        payload={'bytes': 'exact physical result'})
@@ -52,8 +54,15 @@ def test_deferred_call_inventory_and_owner_words_survive_child_retirement(tmp_pa
     manifest = observability.read_call_manifest_ref(parent, trace['manifest_ref'], task_id=tid)
     assert observability.read_blob_ref(parent, manifest['full_payload_ref']) == {'bytes': 'exact physical result'}
     resumed = admit_continuation(tid, action_nonce=NONCE)
+    if fault == 'unrecorded_mode':
+        assert stored.get('headless_child_drive_root') and not stored.get('memory_mode')
+        assert resumed == {'ok': False, 'error': 'continuation_drive_mode_unknown'} and not workers.PENDING
+        assert not load_task_result(parent, tid).get('continued_by')
+        return
     assert resumed['ok'], resumed
     [successor] = workers.PENDING
+    assert successor['memory_mode'] == 'empty' and successor['drive_root'] != str(child)
+    assert 'It recorded no memory export.' in successor['text'] and str(child) not in successor['text']
     assert successor['metadata']['billing_group']['billing_group_id'] == tid
     assert successor['deadline_at'].startswith('2099')
     assert [r['content'] for r in successor['metadata']['owner_corpus']] == [

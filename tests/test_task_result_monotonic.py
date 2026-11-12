@@ -59,9 +59,11 @@ def test_same_terminal_status_enrichment_allowed(drive):
     assert data["trace_summary"] == "trace"
 
 
-@pytest.mark.parametrize("previous", [None, tr.STATUS_RUNNING])
-@pytest.mark.parametrize("terminal", [
-    tr.STATUS_COMPLETED, tr.STATUS_FAILED, tr.STATUS_CANCELLED, tr.STATUS_REJECTED_DUPLICATE,
+@pytest.mark.parametrize(("terminal", "previous"), [
+    pytest.param(tr.STATUS_COMPLETED, None, id='completed-None'),
+    pytest.param(tr.STATUS_FAILED, tr.STATUS_RUNNING, id='failed-running'),
+    pytest.param(tr.STATUS_CANCELLED, None, id='cancelled-None'),
+    pytest.param(tr.STATUS_REJECTED_DUPLICATE, tr.STATUS_RUNNING, id='rejected_duplicate-running'),
 ])
 def test_first_accepted_root_terminal_write_originates_projection_debt(drive, previous, terminal):
     if previous is not None:

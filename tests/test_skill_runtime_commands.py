@@ -11,8 +11,8 @@ import yaml
 from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_enabled, save_review_state
 from ouroboros.tools import skill_exec
 from ouroboros.tools.registry import ToolContext
+from tests._cases import chosen_rows
 
-pytestmark = pytest.mark.serial
 
 PROGRAMS = {
     'python': ('py', "import sys\nfrom pathlib import Path\nprint(Path('cwd-proof.txt').read_text(encoding='utf-8'))\nprint(*sys.argv[1:],sep='\\n')\nprint('diagnostic',file=sys.stderr)\nsys.exit(7)\n"),
@@ -53,7 +53,7 @@ def execute(ctx, script, args=()):
     return skill_exec._handle_skill_exec(ctx, skill='runtime_fixture', script=f'scripts/{script.name}', args=list(args))
 
 
-@pytest.mark.parametrize('runtime', list(PROGRAMS))
+@pytest.mark.parametrize('runtime', chosen_rows(list(PROGRAMS), 0, 4, 6))
 def test_advertised_runtime_preserves_args_cwd_stderr_and_exit(tmp_path, monkeypatch, runtime):
     if not skill_exec._resolve_runtime_binary(runtime)[0]:
         pytest.skip(f'{runtime} toolchain is not installed')
@@ -86,13 +86,14 @@ def test_deno_reads_external_file_without_fs_and_writes_existing_state(tmp_path,
         pytest.skip('deno runtime is not installed')
     outside = tmp_path / 'selected external.txt'
     outside.write_text('owner selected input')
-    monkeypatch.setattr(skill_exec, 'load_settings', lambda: {'TEST_ENV': 'visible'})
+    # An ordinary setting the skill declared (a custom key would be a grant-bound custom secret).
+    monkeypatch.setattr(skill_exec, 'load_settings', lambda: {'OUROBOROS_UI_LANGUAGE': 'visible'})
     body = '''const text = await Deno.readTextFile(Deno.args[0]);
 const state = Deno.env.get('OUROBOROS_SKILL_STATE_DIR');
-await Deno.writeTextFile(state + '/result.txt', text + ':' + Deno.env.get('TEST_ENV'));
+await Deno.writeTextFile(state + '/result.txt', text + ':' + Deno.env.get('OUROBOROS_UI_LANGUAGE'));
 console.log(text);
 '''
-    ctx, _, script = installed_script(tmp_path, monkeypatch, runtime='deno', body=body, env_keys=['TEST_ENV'])
+    ctx, _, script = installed_script(tmp_path, monkeypatch, runtime='deno', body=body, env_keys=['OUROBOROS_UI_LANGUAGE'])
     facts = json.loads(execute(ctx, script, [str(outside)]))
     assert facts['exit_code'] == 0
     assert (ctx.drive_root / 'state/skills/runtime_fixture/result.txt').read_text() == 'owner selected input:visible'

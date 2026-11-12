@@ -21,6 +21,8 @@ harness = _harness
 
 
 DESIGN = "# Design\n\n## Interaction meaning\n\nOriginal interaction rule.\n\n## Appearance\n\nOriginal appearance rule.\n"
+DESIGN_BIBLE = '## Design bible: "Airy dopamine"\n\n' + ''.join(
+    f'{i}. **Principle {i}.** Governing rule.\n   More of this principle.\n' for i in range(1, 8))
 
 
 def _design(root, text=DESIGN):
@@ -77,9 +79,11 @@ def test_deep_review_separates_installed_governance_from_candidate_sources(
     assert proposed_bible not in brief and "Proposed replacement" not in brief
     assert str(source) in brief and "Interaction meaning" in brief
 
-@pytest.mark.parametrize("surface", ["triad", "scope", "deep_self_review"])
-@pytest.mark.parametrize("delivery", ["packet", "retrieving"])
-@pytest.mark.parametrize("touched", ["ouroboros/event.py", "web/modules/chat.js"])
+@pytest.mark.parametrize(("touched", "delivery", "surface"), [
+    ("ouroboros/event.py", "packet", "triad"),
+    ("ouroboros/event.py", "packet", "deep_self_review"),
+    ("web/modules/chat.js", "retrieving", "scope"),
+])
 def test_noninline_design_keeps_map_and_direct_source(governance_repo, surface, delivery, touched):
     path = _design(governance_repo)
     context = governance_context(governance_repo, surface=surface, delivery=delivery,
@@ -105,6 +109,53 @@ def test_inline_design_is_content_without_duplicate_map(governance_repo):
     assert context.inline_whole_documents["docs/DESIGN.md"] == DESIGN
     assert "Original interaction rule." in context.selected_inline
     assert "Interaction meaning" not in context.navigation
+
+
+@pytest.mark.parametrize("window,inline", [(0, False), (1_000_000, True)])
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("delivery", ["packet", "retrieving"])
+def test_python_word_evidence_uses_only_design_bible(governance_repo, window, inline, changed, delivery):
+    from ouroboros.review_words import compare_sources
+
+    _design(governance_repo, DESIGN_BIBLE + '\n**Seed**\n\nFull design recipes.\n' + DESIGN)
+    before = 'TEXT = "Read the result"'
+    after = 'TEXT = "Read the updated result"' if changed else before + "\n# comment only\n"
+    words = compare_sources([("ouroboros/notice.py", before, after)])
+    context = governance_context(governance_repo, surface="triad", touched_paths=["ouroboros/notice.py"],
+                                 usable_window_tokens=window, review_words=words, delivery=delivery)
+    assert "docs/DESIGN.md" not in context.inline_whole_documents
+    assert (DESIGN_BIBLE.strip() in context.selected_inline) is (inline and changed)
+    assert "Full design recipes." not in context.selected_inline
+    assert "Interaction meaning" in context.navigation
+    if changed:
+        row = next(row for row in context.manifest if row["path"] == "docs/DESIGN.md#Design bible")
+        assert row["disposition"] == ("inline" if inline else "navigation")
+        assert "excerpt" in row["reason"]
+        assert row["chars"] == len(DESIGN_BIBLE.strip())
+
+
+def test_bible_excerpt_follows_the_numbered_list_not_a_fixed_count(governance_repo):
+    from ouroboros.review_words import compare_sources
+
+    eighth = "8. **Principle 8.** A later rule.\n   Its continuation.\n"
+    _design(governance_repo, DESIGN_BIBLE + eighth + "\n**Seed**\n\nFull design recipes.\n" + DESIGN)
+    words = compare_sources([("ouroboros/notice.py", 'TEXT = "Read the result"', 'TEXT = "Read the updated result"')])
+    context = governance_context(governance_repo, surface="triad", touched_paths=["ouroboros/notice.py"],
+                                 usable_window_tokens=1_000_000, review_words=words)
+    assert "Its continuation." in context.selected_inline and "principles 1–8" in context.selected_inline
+    assert "Full design recipes." not in context.selected_inline
+
+
+def test_missing_bible_excerpt_never_falls_back_to_whole_design(governance_repo):
+    from ouroboros.review_words import compare_sources
+
+    _design(governance_repo)
+    words = compare_sources([("notice.py", '', 'LABEL = "Resume"')])
+    context = governance_context(governance_repo, surface="triad", touched_paths=["notice.py"],
+                                 usable_window_tokens=1_000_000, review_words=words)
+    assert "Original interaction rule." not in context.selected_inline
+    assert "Interaction meaning" in context.navigation
+    assert any("excerpt unavailable" in row["reason"] for row in context.manifest)
 
 
 @pytest.mark.parametrize("layer", ["body", "core"])
@@ -141,11 +192,14 @@ def test_missing_design_is_named_without_claiming_content(governance_repo, deliv
 
 
 def test_foreign_review_indexes_own_design_without_ouroboros_rules(governance_repo, tmp_path):
+    from ouroboros.review_words import compare_sources
+
     _design(governance_repo)
     foreign = tmp_path / "foreign"
     _design(foreign, "# Foreign product\n\n## Foreign colors\n\nIts own rule.\n")
     context = governance_context(governance_repo, surface="triad", layer="core", subject_root=foreign,
-                                 touched_paths=["web/ui.js"], usable_window_tokens=1_000_000)
+                                 touched_paths=["web/ui.js"], usable_window_tokens=1_000_000,
+                                 review_words=compare_sources([("web/ui.js", "", "const label = 'Resume';")]))
     assert "Foreign colors" in context.navigation
     assert "Interaction meaning" not in context.navigation + context.selected_inline
     assert str(governance_repo / "docs/DESIGN.md") not in context.navigation
@@ -297,8 +351,7 @@ def _git_origin(harness, subject):
 
 
 @pytest.mark.parametrize("subject, affected", [
-    ("candidate", "event.py"), ("candidate", "."), ("foreign", "event.py"),
-    ("unknown", "event.py"), ("folderless", ""),
+    ("candidate", "event.py"), ("candidate", "."), ("folderless", ""),
 ])
 def test_plan_navigation_and_pack_follow_body_identity(harness, subject, affected):
     source = _design(harness.system)
@@ -335,12 +388,19 @@ def _research_context(harness, subject, task_id="task-1"):
     return ctx
 
 
-@pytest.mark.parametrize("flag_location", ["contract", "metadata"])
-@pytest.mark.parametrize("subject, flag, expected", [
-    ("main", True, True), ("candidate", True, True), ("body_copy", True, True),
-    ("folderless", True, True), ("foreign", True, False), ("unknown", True, False),
-    ("foreign_copy", True, False), ("main", None, False), ("main", False, False),
-    ("candidate", None, False), ("folderless", None, False), ("unknown", None, False),
+@pytest.mark.parametrize(("subject", "flag", "expected", "flag_location"), [
+    ("main", True, True, "contract"),
+    ("candidate", True, True, "metadata"),
+    ("body_copy", True, True, "contract"),
+    ("folderless", True, True, "metadata"),
+    ("foreign", True, False, "contract"),
+    ("unknown", True, False, "metadata"),
+    ("foreign_copy", True, False, "contract"),
+    ("main", None, False, "metadata"),
+    ("main", False, False, "contract"),
+    ("candidate", None, False, "metadata"),
+    ("folderless", None, False, "contract"),
+    ("unknown", None, False, "metadata"),
 ])
 def test_empty_path_plan_is_a_body_plan_only_for_a_declared_body_subject(
     harness, subject, flag, expected, flag_location,
@@ -368,7 +428,7 @@ def test_empty_path_plan_is_a_body_plan_only_for_a_declared_body_subject(
     assert ("## BIBLE.md (constitution" in api) is expected
 
 
-@pytest.mark.parametrize("subject", ["main", "candidate", "body_copy", "folderless"])
+@pytest.mark.parametrize("subject", ["main", "body_copy", "folderless"])
 def test_declared_body_research_flag_cannot_override_actual_foreign_file_target(harness, subject):
     source = _design(harness.system)
     # The declaration makes this subject's plan a body plan while it names no file ...

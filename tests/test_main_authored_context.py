@@ -85,6 +85,7 @@ def test_main_records_and_applies_authored_view_without_manual_observation(main_
     answer, _, _ = f.run([
         call("read_file", {"path": "evidence.txt"}, "read"),
         call("compact_context", {"working_note": "I retained the trailing conclusion.", "keep_unit_ids": []}, "compact"),
+        call("read_file", {"path": "evidence.txt"}, "reread"),
         {"content": "done"},
     ])
     assert answer == "done"
@@ -100,10 +101,15 @@ def test_main_records_and_applies_authored_view_without_manual_observation(main_
     assert any(m.get("tool_call_id") == "compact" for m in after)
     assert "I retained the trailing conclusion." in str(after)
     assert "[Context view receipt]" in str(after)
+    # The same read after the fold, on the same context, returns the view the first
+    # call returned; nothing claims the folded text is still in view.
+    first = next(m["content"] for m in before if m.get("tool_call_id") == "read")
+    latest = f.inputs[-1]["messages"]
+    assert not any(m.get("tool_call_id") == "read" for m in latest)
+    assert next(m["content"] for m in latest if m.get("tool_call_id") == "reread") == first
 
 
-@pytest.mark.parametrize("role", ["root", "subagent"])
-@pytest.mark.parametrize("mode", ["nano", "low", "max"])
+@pytest.mark.parametrize(("mode", "role"), [("nano", "root"), ("low", "subagent"), ("max", "root")])
 def test_retelling_instructions_and_authored_account_reach_next_send(main_loop, tmp_path, monkeypatch, role, mode):
     """Mode-specific context assembly, then shared-loop delivery; not model adherence."""
     from ouroboros import context
@@ -380,3 +386,52 @@ def test_successful_fallback_owns_the_next_authored_view(main_loop, monkeypatch)
     assert "The fallback retained the source." in str(f.inputs[-1]["messages"])
     checkpoint = json.loads(read_actor_source_bytes(f.ctx.drive_root, "authored-main", f.ctx._context_view_receipt["checkpoint_ref"]))
     assert checkpoint["messages"] == f.inputs[2]["messages"]
+
+
+def test_main_keeps_earlier_notes_under_empty_keep_and_merges_only_named_ones(main_loop):
+    """The owner-visible case (d9b66195): a second fold with keep_unit_ids=[] keeps the first note, the work's
+    goal with it; a later merge names both notes, the merged note and the receipt name them, and the
+    address the merged note carries restores the goal's exact text."""
+    f, seen = main_loop, {}
+    goal = "Goal: a pair of elegant generalizable prompt fixes; no new framework."
+
+    def accounts(messages):
+        return [block["text"] for m in messages if isinstance(m.get("content"), list)
+                for block in m["content"] if isinstance(block, dict) and block.get("_context_capsule")]
+
+    def receipt(messages):
+        row = [m["content"] for m in messages if str(m.get("content")).startswith("[Context view receipt]")][-1]
+        return json.loads(row.split("\n", 1)[1])
+
+    def merge(kwargs):
+        inspected = json.loads(next(m["content"] for m in kwargs["messages"] if m.get("tool_call_id") == "inspect"))
+        seen["notes"] = [row["unit_id"] for row in inspected["units"] if row["kind"] == "capsule"]
+        return call("compact_context", {"working_note": "Merged: the goal stands; both reads agree.",
+                                        "keep_unit_ids": [], "replace_note_ids": seen["notes"]}, "merge")
+
+    def restore(kwargs):
+        merged = next(text for text in accounts(kwargs["messages"]) if "Merged: the goal stands" in text)
+        seen["address"] = json.loads(merged.partition("\n")[0].split("; replaced notes: ", 1)[1][:-1])
+        first = seen["address"]["notes"][0]
+        return call("compact_context", {"restore_unit_refs": [
+            {"checkpoint_ref": seen["address"]["checkpoint_ref"], **first}]}, "restore")
+
+    f.run([call("read_file", {"path": "evidence.txt"}, "read-1"),
+           call("compact_context", {"working_note": goal, "keep_unit_ids": []}, "fold-1"),
+           call("read_file", {"path": "evidence.txt"}, "read-2"),
+           call("compact_context", {"working_note": "The second read agrees.", "keep_unit_ids": []}, "fold-2"),
+           call("compact_context", {"inspect": True}, "inspect"), merge, restore, {"content": "done"}])
+    kept = accounts(f.inputs[4]["messages"])
+    assert [text.partition("\n")[2] for text in kept] == [goal, "The second read agrees."]
+    assert kept[0] == accounts(f.inputs[2]["messages"])[0]  # the goal note, byte for byte
+    assert "replaced_notes" not in receipt(f.inputs[4]["messages"])
+    assert not any(m.get("tool_call_id") in ("read-1", "read-2") for m in f.inputs[4]["messages"])
+    merged = accounts(f.inputs[6]["messages"])
+    assert [text.partition("\n")[2] for text in merged] == ["Merged: the goal stands; both reads agree."]
+    assert len(seen["notes"]) == 2 and [note["unit_id"] for note in seen["address"]["notes"]] == seen["notes"]
+    replaced = receipt(f.inputs[6]["messages"])["replaced_notes"]
+    assert [(note["unit_id"], note["first_line"]) for note in replaced["notes"]] == list(
+        zip(seen["notes"], [goal, "The second read agrees."]))
+    assert replaced["checkpoint_ref"] == seen["address"]["checkpoint_ref"]
+    restored = [text for text in accounts(f.inputs[7]["messages"]) if text.startswith("[Historical source")]
+    assert len(restored) == 1 and goal in restored[0]

@@ -195,13 +195,55 @@ def test_sanction_stamp_is_consumed_by_the_next_observation():
     assert later["sanctioned_by"] is None, "the stamp is one-shot"
 
 
-def test_a_compaction_stamp_never_explains_a_system_rewrite():
+def test_a_stamp_names_only_a_break_of_its_own_scope():
+    """C2 S4 (06.11.2026): a fold's message stamp never names a system-row change; the seam that
+    rebuilt the system view does, a system stamp names no message change, and an unstamped
+    system change says its origin is unknown. Only a message stamp advances the rewrite epoch."""
+    from ouroboros.transcript_prefix import history_change_origin, rewrite_epoch
+
     slot = SimpleNamespace()
     observe_send(slot, [SYSTEM, TASK, ASSISTANT], round_idx=1)
     sanction_rewrite(slot, "compaction")
     fact = observe_send(slot, [{"role": "system", "content": "reprojected"}, TASK, ASSISTANT], round_idx=2)
     assert fact["kind"] == "system_rewritten" and fact["sanctioned_by"] is None
+    assert history_change_origin(fact) == "system view rebuilt, origin unknown"
     assert getattr(slot, transcript_prefix.SANCTION_ATTR) is None, "the stamp is still consumed"
+    sanction_rewrite(slot, "memory_coarsened", scope="system")
+    fact = observe_send(slot, [{"role": "system", "content": "narrowed"}, TASK, ASSISTANT], round_idx=3)
+    assert history_change_origin(fact) == "system view rebuilt (memory_coarsened)"
+    sanction_rewrite(slot, "memory_coarsened", scope="system")
+    fact = observe_send(slot, [{"role": "system", "content": "narrowed"}, TASK, TASK], round_idx=4)
+    assert fact["kind"] == "tail_replaced" and fact["sanctioned_by"] is None
+    assert getattr(slot, transcript_prefix.SCOPED_SANCTION_ATTR) is None and rewrite_epoch(slot) == 1
+
+
+def test_a_restored_continuation_names_its_system_row_and_tool_set(monkeypatch):
+    """The cold wake captures the context again (``owner_wait.rebind_restored_route``): its first
+    send names that system-row change, and a reconciled tool list, instead of an unknown origin."""
+    from ouroboros import continuation_tools, loop, owner_wait
+    from ouroboros.transcript_prefix import history_change_origin
+
+    slot = SimpleNamespace(task_metadata={}, context_fit_plan=None, active_model="m", active_use_local=False,
+                           active_context_mode="max")
+    messages = [SYSTEM, TASK, ASSISTANT]
+    observe_send(slot, messages, round_idx=1, tools=[])
+
+    def recapture(plan, tools, sent, **_kw):
+        sent[0] = {"role": "system", "content": "captured again"}
+        return plan, "max"
+
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", recapture)
+    monkeypatch.setattr(owner_wait, "get_context_mode", lambda: "max", raising=False)
+    monkeypatch.setattr(loop, "get_context_mode", lambda: "max")
+    for reconciled in (False, True):
+        monkeypatch.setattr(continuation_tools, "reconcile_restored_tools", lambda *_a, value=reconciled: value)
+        owner_wait.rebind_restored_route(SimpleNamespace(_ctx=slot), {"tool_schemas": []}, messages)
+        tools = [{"function": {"name": "added"}}] if reconciled else []
+        fact = observe_send(slot, messages, round_idx=2, tools=tools)
+        assert history_change_origin(fact) == ("tool set changed (continuation_restored)" if reconciled
+                                               else "system view rebuilt (continuation_restored)")
+        messages[0] = SYSTEM
+        observe_send(slot, messages, round_idx=3, tools=[])
 
 
 def test_sanctioned_by_rides_through_unchanged():

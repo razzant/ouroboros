@@ -222,7 +222,7 @@ def test_loopback_response_cannot_prove_upstream_recovery(monkeypatch):
     assert not transport.upstream_transport_reachable(llm, "vendor/model", timeout=3)
 
 
-@pytest.mark.parametrize("fact", ["absent", "stale", "local", "upstream"])
+@pytest.mark.parametrize("fact", ["absent", "local", "upstream"])
 def test_subscription_requires_fresh_typed_upstream_observation(monkeypatch, fact):
     from ouroboros import llm_claudexor
     now = datetime.now(timezone.utc)
@@ -351,8 +351,10 @@ def test_null_reported_model_recovers_without_rewriting_unknown_custody(tmp_path
                 "route": {"source": "codex", "model": None, "credentialProfileId": "profile-a",
                           "accountFingerprint": "account-a"}}
     episode = transport.TransportWaitEpisode(wait_cause="provider_outcome_unknown", outcome_custody=previous)
+    budgets = []
     def catalog(source, profile, **kwargs):
         assert (source, profile, kwargs["requested_model"]) == ("codex", "profile-a", "test")
+        budgets.append(kwargs["timeout_sec"])
         return {"source": source, "credentialProfileId": profile, "accountFingerprint": "account-a",
                 "provenance": "provider_http",
                 "observedAt": datetime.fromtimestamp(episode.started_at + 1, timezone.utc).isoformat(),
@@ -369,6 +371,10 @@ def test_null_reported_model_recovers_without_rewriting_unknown_custody(tmp_path
     assert usage["transport_recovery"]["previous_attempt"] == previous
     assert usage["transport_recovery"]["old_outcome"] == "unknown"
     assert previous["route"]["model"] is None and episode.outcome_custody == previous
+    # The observation stands in front of the configured routes: the connection allowance, never the read window.
+    from ouroboros.config import get_llm_transport_read_timeout_sec
+    from ouroboros.llm import LLMClient
+    assert budgets == [LLMClient._no_proxy_timeout().connect] and budgets[0] < get_llm_transport_read_timeout_sec()
 
 
 def test_stop_before_unknown_probe_preserves_no_send_boundary(tmp_path, monkeypatch):

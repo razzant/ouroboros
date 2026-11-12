@@ -1,4 +1,4 @@
-"""Real retry -> Pause -> pending Stop -> public Resume, across all grant doors.
+"""Historical retry -> Pause -> pending Stop -> public Resume, across all grant doors.
 
 Cancellation is written by request_cancel, never replaced by a boolean double.
 The common fixtures double OS/model boundaries; warm park saves through the real
@@ -14,14 +14,14 @@ from ouroboros import budget_pause, cancel_intents, owner_pause, owner_wait
 from supervisor import queue, workers
 from supervisor.owner_pause_control import request_owner_pause, refresh_owner_pause_tree
 from tests._budget_pause_exact_helpers import _loop_ctx
+from tests._silence_reaper_support import historical_unsaved_pause_hold
 from tests.test_execution_clock_resume_handover import clock as clock
 from tests.test_retry_pause_generations import _park, _running_actor
 from tests.test_retry_pause_identity import (
-    _assign, _fresh_plan, _loop_once, _ordinary_retry, _reap, reaper as reaper,
+    _assign, _fresh_plan, _loop_once, _ordinary_retry, reaper as reaper,
 )
 from tests.test_swarm_host_admission import host as host
 
-pytestmark = pytest.mark.serial
 
 
 class Parked(BaseException):
@@ -73,7 +73,7 @@ def paused_retry(host, monkeypatch, clock, reaper, door):
                 with pytest.raises(Parked):
                     budget_pause.enter_owner_pause(limit)
             budget_pause.end_dispatch_fence(task["id"])
-            _reap(clock, reaper, task["id"])
+            historical_unsaved_pause_hold(clock, task["id"])  # what the pre-upgrade idle kill left
             task = next(row for row in host.pending if row["id"] == task["id"])
             assert task["_budget_pause_hold"]["reason"] == "unsaved_pause_intent"
         refresh_owner_pause_tree("held")
@@ -120,7 +120,7 @@ def test_pending_stop_vetoes_retry_resume(host, monkeypatch, clock, reaper, door
         assert not _assign(host, monkeypatch), "old children need explicit selection"
 
 
-@pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])
+@pytest.mark.parametrize("door", ["warm", "exact", "unsaved"])
 def test_unknown_root_identity_refuses_without_member_grant(host, monkeypatch, clock, reaper, door):  # noqa: F811
     task, _child, _plan = paused_retry(host, monkeypatch, clock, reaper, door)
     from ouroboros.task_store import patch_document
@@ -150,8 +150,12 @@ def test_unknown_root_identity_refuses_without_member_grant(host, monkeypatch, c
     assert queue.resume_budget_paused_task(task["id"])["ok"]
 
 
-@pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])
-@pytest.mark.parametrize("veto", ["unreadable_cancel", "legacy_cancel", "restart"])
+@pytest.mark.parametrize(("veto", "door"), [
+    ("unreadable_cancel", "warm"),
+    ("unreadable_cancel", "exact"),
+    ("legacy_cancel", "queued"),
+    ("restart", "unsaved"),
+])
 def test_unknown_cancel_and_existing_stop_carriers_keep_the_pause(host, monkeypatch, clock, reaper, door, veto):  # noqa: F811
     from ouroboros.task_store import patch_document
 

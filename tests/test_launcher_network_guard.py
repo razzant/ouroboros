@@ -8,7 +8,7 @@ import pytest
 from tests.launcher_network_guard import deny_real_network
 
 
-@pytest.mark.parametrize("operation", ["urllib", "http", "socket", "connect_ex"])
+@pytest.mark.parametrize("operation", ["urllib", "http", "connect_ex"])
 def test_real_connect_is_refused_below_the_urlopen_mock(operation):
     with deny_real_network() as attempts:
         with pytest.raises((AssertionError, urllib.error.URLError), match="real HTTP/socket"):

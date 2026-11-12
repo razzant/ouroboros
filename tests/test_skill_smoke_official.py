@@ -7,7 +7,7 @@
 # triggers, red-means-investigate posture): docs/DEVELOPMENT.md "Pytest marker
 # lanes". No fallback-skip on network failure (owner directive); bounded
 # transient retries are the sole flake mitigation. Never add this file to
-# _SERIAL_TEST_FILES or mark it `serial`: the lane runs only in its dedicated
+# _SERIAL_RESOURCES or mark it `serial`: the lane runs only in its dedicated
 # serial CI job, and the `and not skill_smoke` markexprs in quick/full-test
 # are the barrier that keeps it out of those passes — the no-serial rule keeps
 # the lane assignment single and unambiguous (defense-in-depth).

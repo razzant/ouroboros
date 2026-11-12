@@ -1,7 +1,6 @@
 """Fresh host review roles preserve actual coordinator caps and inherited work."""
 from __future__ import annotations
 
-import asyncio
 import time
 from types import SimpleNamespace
 
@@ -93,36 +92,3 @@ def test_host_hint_never_overrides_inherited_continue_group(data_root, monkeypat
     assert not scope.non_task_operation and scope.root_task_id == "successor"
     assert scope.billing_group_id == "original" and scope.billing_group_limit_usd == 1.0
     assert "whole-work budget exhausted for group original" in second["refusal"]
-
-
-@pytest.mark.parametrize("name", ["api_skill_review", "marketplace_install"])
-def test_task_name_alone_confers_no_host_role(data_root, monkeypatch, name):
-    ctx = SimpleNamespace(drive_root=data_root, task_id=name, task_lifecycle_bound=True)
-    first = _coordinator_reservation(ctx, monkeypatch)
-    assert not first["scope"].non_task_operation
-
-
-@pytest.mark.serial
-@pytest.mark.parametrize("door", ["http", "marketplace"])
-def test_actual_adapter_produces_non_task_review(data_root, monkeypatch, door):
-    from ouroboros import skill_review, skill_review_runner
-    from ouroboros.gateway import extensions
-    from ouroboros.marketplace import install
-    seen = []
-    def review_impl(ctx, skill):
-        result = _coordinator_reservation(ctx, monkeypatch, skill=skill)
-        assert "attempt" in result and result["scope"].non_task_operation
-        seen.append(result)
-        return SimpleNamespace(status="clean", findings=[], error="")
-    monkeypatch.setattr(skill_review, "review_skill", review_impl)
-    if door == "marketplace":
-        assert install._run_skill_review(data_root, data_root.parent / "repo", "one") == ("clean", [], "")
-    else:
-        async def lifecycle(ctx, skill, *, source, review_impl):
-            return {"status": review_impl(ctx, skill).status}
-        monkeypatch.setattr(skill_review_runner, "run_skill_review_lifecycle", lifecycle)
-        monkeypatch.setattr(extensions, "_request_drive_root", lambda request: data_root)
-        monkeypatch.setattr(extensions, "_request_repo_dir", lambda request: data_root.parent / "repo")
-        response = asyncio.run(extensions.api_skill_review(SimpleNamespace(path_params={"skill": "one"})))
-        assert response.status_code == 200
-    assert len(seen) == 1

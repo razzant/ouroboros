@@ -154,6 +154,42 @@ def test_model_catalog_registers_openai_compatible_base_url_without_key(monkeypa
     }
 
 
+@pytest.mark.parametrize("settings, expected", [
+    ({"LOCAL_MODEL_SOURCE": "~/models/qwen3-coder-q4.gguf", "LOCAL_MODEL_CONTEXT_LENGTH": 32768},
+     {"id": "qwen3-coder-q4.gguf", "context_window": 32768}),
+    ({"LOCAL_MODEL_SOURCE": "bartowski/Qwen3-GGUF", "LOCAL_MODEL_FILENAME": "sub/qwen3-q8.gguf",
+      "LOCAL_MODEL_CONTEXT_LENGTH": "auto"}, {"id": "qwen3-q8.gguf"}),
+])
+def test_a_configured_local_model_is_one_catalog_row_that_says_it_is_local(monkeypatch, settings, expected):
+    """An install whose only model is local still has a row to choose (a local model has no route prefix)."""
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: settings)
+
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+
+    local = [item for item in payload["items"] if item.get("use_local")]
+    assert len(local) == 1 and payload["items"] == local
+    row = local[0]
+    assert row["use_local"] is True and row["provider_id"] == "local" and row["id"] == expected["id"]
+    assert row["label"] == f'Local · {expected["id"]}'
+    assert row.get("context_window") == expected.get("context_window")
+    # No API source claims the row: every picker that lists a source's models by its route prefix leaves it out.
+    assert row["value"] == f'local::{expected["id"]}'
+    # The published shape declares the field the row is told apart by.
+    from ouroboros.gateway.management_contracts import ModelCatalogItem, ModelCatalogResponse
+    from ouroboros.gateway.schema import validate_ingress
+
+    assert "use_local" in ModelCatalogItem.__annotations__
+    assert not validate_ingress(payload, ModelCatalogResponse)
+
+
+def test_no_local_row_without_a_configured_local_model(monkeypatch):
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"LOCAL_MODEL_SOURCE": "  ", "LOCAL_MODEL_PORT": 8766})
+
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+
+    assert payload["items"] == []
+
+
 def test_openai_compatible_model_fetch_omits_blank_bearer_header():
     captured = {}
 
@@ -312,6 +348,24 @@ def test_account_catalog_matches_the_published_response_shape(account_engine):
     assert not validate_ingress(payload, ModelCatalogResponse)
 
 
+def test_agent_inventory_does_not_supply_an_absent_main_chat_transport(account_engine):
+    gateway, _ = account_engine
+    # Cursor login and agent inventory may succeed independently. Neither is a
+    # raw-model source; borrowing them here would reproduce the false-ready bug.
+    gateway.harness_model_catalog = lambda **_: {"models": [{"id": "cursor-test"}]}
+    gateway.credential_profiles = lambda: {"profiles": [{
+        "profile": {"harness_id": "cursor", "profile_id": "cursor-default"},
+        "status": {"verification": "passed", "verification_source": "vendor"},
+    }]}
+    assert gateway.credential_profiles()["profiles"][0]["status"]["verification"] == "passed"
+    assert gateway.harness_model_catalog()["models"]
+    result = model_catalog_api._subscription_model_catalog("cursor", "cursor-default")
+    assert result["items"] == []
+    assert result["errors"][0]["code"] == "model_source_unavailable"
+    assert gateway.calls == []  # no unrelated/default model request
+    assert model_catalog_api._subscription_model_catalog("codex")["items"]
+
+
 def test_auto_catalog_keeps_every_account_and_independent_capabilities(account_engine):
     gateway, accounts = account_engine
     payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body)
@@ -362,7 +416,6 @@ def test_one_failed_source_preserves_other_account_catalogs(account_engine):
 
 
 @pytest.mark.parametrize("change", [{"method": "POST"}, {"path": "/wrong"},
-    {"parameters": [{"name": "view", "location": "header", "enum": ["accounts"]}]},
     {"parameters": [{"name": "view", "location": "query", "enum": ["selected"]}]}])
 def test_account_view_requires_the_exact_declared_query(change):
     path = "/v2/model-sources/:id/models"
@@ -388,3 +441,20 @@ def test_model_catalog_reports_a_bad_extra_ca_bundle_instead_of_a_bare_500(monke
     assert [item["value"] for item in payload["items"]] == ["engine-model"]
     trust = [row for row in payload["errors"] if row.get("provider_id") == "extra_ca_bundle"]
     assert trust and "not readable" in trust[0]["error"] and trust[0]["stage"] == "trust"
+
+
+@pytest.mark.parametrize("program", [None, {"path": "/vendor/program", "version": "2.1.319"}, {"path": "/vendor/program", "version": None}])
+def test_catalog_producer_survives_flattening_without_borrowing_a_version(account_engine, program):
+    gateway, accounts = account_engine
+    for account in accounts:
+        if account["catalog"]:
+            account["catalog"]["sourceProgram"] = program
+    payload = model_catalog_api._subscription_model_catalog("codex")
+    assert payload["items"]
+    assert all("sourceProgram" not in item for item in payload["items"])
+    assert all("credentialHarness" not in item for item in payload["items"])
+    assert payload["model_sources"][0]["credentialHarness"] == "codex"
+    accounts[0]["catalog"]["models"] = []
+    payload = model_catalog_api._subscription_model_catalog("codex", "a")
+    assert payload["items"] == []
+    assert payload["account_catalogs"][0]["accounts"][0]["catalog"]["sourceProgram"] == program

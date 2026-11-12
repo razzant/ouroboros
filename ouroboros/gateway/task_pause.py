@@ -35,7 +35,8 @@ from ouroboros.utils import utc_now_iso
 
 _REQUEST_ID_MAX = 128
 _FIELDS = frozenset({"request_id", "actor", "reason"})
-_CONFLICTS = frozenset({"not_a_root_task", "cancel_pending", "task_terminal", "root_result_missing"})
+_CONFLICTS = frozenset({"not_a_root_task", "cancel_pending", "task_terminal", "root_result_missing",
+                        "realtime_pause_unsupported", "presence_pause_unsupported"})
 
 
 async def api_task_pause(request: Request) -> JSONResponse:
@@ -78,6 +79,8 @@ def owner_tree_control_routes() -> list:
     from starlette.routing import Route
 
     from ouroboros.gateway.task_continue import api_task_continue
+    from ouroboros.gateway.task_owner_keep import api_task_owner_keep
 
     return [Route("/api/tasks/{task_id}/pause", endpoint=api_task_pause, methods=["POST"]),
-            Route("/api/tasks/{task_id}/continue", endpoint=api_task_continue, methods=["POST"])]
+            Route("/api/tasks/{task_id}/continue", endpoint=api_task_continue, methods=["POST"]),
+            Route("/api/tasks/{task_id}/owner-keep", endpoint=api_task_owner_keep, methods=["POST"])]

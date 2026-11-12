@@ -17,7 +17,7 @@ import pytest
 from ouroboros import platform_layer as pl
 from ouroboros import process_scope as ps
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="POSIX census contract")]
+pytestmark = [pytest.mark.skipif(os.name == "nt", reason="POSIX census contract")]
 REPO = Path(__file__).resolve().parents[1]
 BIRTH = "Sat Oct 10 20:10:23 2026"
 OLD, NEW, TASK, ENGINE = 120001, 120002, 120003, 120004

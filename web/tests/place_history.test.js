@@ -4,10 +4,11 @@ import test from 'node:test';
 import { installCardDom, TextNode } from './helpers/card_dom.js';
 import { applyPayload, createTranslator, setMissTransport } from '../modules/i18n.js';
 import { normalizePlace, readPlaceRooms } from '../modules/consciousness_api.js';
-import { wakesForText } from '../modules/consciousness_words.js';
-import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeRoomsHtml, shownTime } from '../modules/place_history.js';
+import { wakeFactWord } from '../modules/consciousness_words.js';
+import { mountPlaceHistory, capturedWindowNote, historySpeaker, historyFactWords, placeHistoryState, placeRoomsHtml, shownTime } from '../modules/place_history.js';
 import { openPlaceSheet } from '../modules/place_sheet.js';
 import { mountConnectorPlaces } from '../modules/connector_places.js';
+import { PREVIEW_KEY } from '../modules/chat_preview.js';
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const unsafeText = '<img src="x" onerror="bad()"> & "hello"';
@@ -59,11 +60,26 @@ function mount(f, options = {}, currentPlace = place) {
     return reader;
 }
 
+test('the conversation\'s state card says a place only hears while consciousness is off; Paused keeps its words', () => {
+    // Owner 06.11: Off left 28 places hearing while every card still said it «hears, wakes, speaks and acts here».
+    const off = (state) => placeHistoryState(normalizePlace({ ...rawPlace(), state, only_hears: true }));
+    assert.equal(off('active'), 'Active, consciousness off: it only hears here.');
+    assert.equal(off('silent'), 'Silent, consciousness off: it only hears here.');
+    assert.equal(off('paused'), 'Paused now: it does not wake or act here; what the connector still reports is saved.');
+    assert.equal(placeHistoryState(place), 'Active now: it hears, wakes, speaks and acts here.');
+    assert.equal(placeHistoryState(normalizePlace({ ...rawPlace(), state: 'silent' })),
+        'Silent now: it still hears and wakes here; what it would say or change here is held.');
+});
+
 test('role-first names and facts never infer delivery or exact wake', () => {
     assert.deepEqual(['user', 'assistant', 'system'].map((role) => historySpeaker({role, sender_label: 'Alice'})), ['Alice', 'Ouroboros', 'System']);
     assert.deepEqual(historyFactWords({role: 'assistant'}), []);
     assert.deepEqual(historyFactWords({place_history: {delivery_state: 'authored'}}), ['Delivery not confirmed']);
     assert.deepEqual(historyFactWords({place_history: {attention: {decision:'focus_started'}}}), ['Focus started']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'current_author'}}}), ['Passed to the current author']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'own_account'}}}), ['Heard; written by the account it sends as']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'conversation_work', recipient:'work-7'}}}), ['Passed to work work-7']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'conversation_work'}}}), ['Passed to work in this conversation']);
 });
 
 test('a retained row without new fields renders byte for byte as on e3bd98c20', async (t) => {
@@ -92,6 +108,47 @@ test('delivery rows stamp the recorded account, as you for its owner, and nothin
     assert.doesNotMatch(metas[2].textContent, /as you|as /);
     assert.ok(metas.every((meta) => meta.textContent.includes('Ouroboros') && meta.textContent.includes('Delivered')));
     assert.equal(f.q('img'), null);
+    reader.close();
+});
+
+test('a reaction row reads as its fact, never as an empty or spoken message', async (t) => {
+    const f = fixture(t);
+    const heard = { kind: 'message', attention: { decision: 'heard', reason: 'reaction_context_only' } };
+    const reader = mount(f, { readHistory: async () => page([
+        { ...row('anonymous'), text: '', sender_label: 'Anonymous reactions', place_history: { ...heard, reaction: { summary: 'counts observed: 👍 3 on message 7' } } },
+        { ...row('mine'), text: '', role: 'assistant', markdown: true, place_history: { kind: 'delivery', delivery_state: 'delivered', reaction: { summary: 'set reaction 👍, requested on message 7' } } },
+        { ...row('plain'), text: '', place_history: { kind: 'message' } },
+    ]) });
+    await tick();
+    const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
+    const word = (node) => node.querySelector('.place-convo-reaction')?.textContent;
+    assert.deepEqual(rows.map(word), ['Reaction: counts observed: 👍 3 on message 7', 'Reaction: set reaction 👍, requested on message 7', undefined]);
+    assert.ok(rows[0].querySelector('.place-convo-who').textContent.includes('Anonymous reactions'));
+    assert.ok(rows[0].querySelector('.place-convo-meta').textContent.includes('Heard as context'));
+    assert.equal(rows[1].querySelector('.chat-markdown'), null, 'no markdown body is mounted for a receipt');
+    reader.close();
+});
+
+test('words a receipt carries beside its reaction stay its speech, and only the prefix translates', async (t) => {
+    const f = fixture(t);
+    setMissTransport(() => Promise.resolve(null));
+    applyPayload({ language: 'fr', english: false, entries: {
+        'code:places.history.reaction': { text: 'Réaction :' }, Settings: { text: 'Réglages' },
+    } });
+    t.after(() => applyPayload({ language: '', english: true, entries: {} }));
+    const reader = mount(f, { readHistory: async () => page([
+        { ...row('mine', 'On it.'), role: 'assistant', markdown: true, place_history: { kind: 'delivery', delivery_state: 'delivered', reaction: { summary: 'Settings' } } },
+        { ...row('failed', ''), role: 'system', place_history: { kind: 'delivery', delivery_state: 'failed', reaction: { summary: 'failed: Settings' } } },
+    ]) });
+    await tick();
+    createTranslator({ skipRoots: '[data-i18n-authored]', userContent: '', excludeSelector: '' }).applyTo(f.doc.body);
+    const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
+    assert.equal(rows[0].querySelector('.chat-markdown').textContent.trim(), 'On it.', 'the words are mounted as speech');
+    assert.equal(rows[0].querySelector('.place-convo-reaction').textContent, 'Réaction : Settings');
+    assert.equal(rows[0].querySelector('.place-convo-reaction').querySelector('[data-i18n-authored]')?.textContent, 'Settings', 'the summary stays authored');
+    assert.equal(rows[1].className, 'place-convo-row is-system', 'a failed receipt keeps its System row');
+    assert.equal(rows[1].querySelector('.chat-markdown'), null);
+    assert.equal(rows[1].querySelector('.place-convo-reaction').textContent, 'Réaction : failed: Settings');
     reader.close();
 });
 
@@ -143,8 +200,9 @@ test('heard core facts describe one message while wake sentences keep their poli
     assert.deepEqual([...f.doc.body.querySelectorAll('[data-heard-fact]')].map((node) => node.textContent),
         ['addressed to it', 'group message', 'mentions it', 'reply to it', 'in its thread', 'new issue',
             'new pull request', 'review requested', 'assigned to it', 'from a bot', 'addressed to it']);
-    assert.equal(wakesForText(facts.map((fact) => ({ fact }))),
-        'wakes for direct messages, group messages, mentions, replies, replies in its threads, new issues, new pull requests, review requests addressed to me, assignments addressed to me, every message and messages addressed to it · also wakes on bot messages');
+    assert.deepEqual(facts.map((fact) => wakeFactWord(fact)), ['direct messages', 'group messages', 'mentions', 'replies',
+        'replies in its threads', 'new issues', 'new pull requests', 'review requests addressed to me', 'assignments addressed to me',
+        'every message', 'also wakes on bot messages', 'messages addressed to it'], 'the wake choices keep their policy words');
     reader.close();
 });
 
@@ -154,7 +212,8 @@ for (const late of [false, true]) test(`the sheet reader merges status labels ($
         facts: ['direct_message', 'from_bot', { id: 'signal.words', label: 'PR words' }], labels: { direct_message: 'Declared mail' } });
     const heard = { ...row('heard'), place_history: { kind: 'message', attention: { decision: 'heard' },
         facts: ['any_message', 'direct_message', 'from_bot', 'signal.words'] } };
-    f.reply(({ url }) => url === current.source.url ? status.promise : page([heard]));
+    const statusUrl = `${current.source.url}?account_id=${encodeURIComponent(current.accountId)}`;
+    f.reply(({ url }) => url === statusUrl ? status.promise : page([heard]));
     const sheet = openPlaceSheet(current, { readRooms: async () => index() });
     t.after(() => sheet.close());
     const payload = { text: 'Ready', tone: 'ok', labels: { any_message: 'Every arrival', direct_message: unsafeText } };
@@ -171,7 +230,7 @@ for (const late of [false, true]) test(`the sheet reader merges status labels ($
     assert.ok(f.q('[data-heard-fact="direct_message"]').hasAttribute('data-i18n-authored'));
     assert.equal(f.q('img'), null);
     assert.deepEqual(sheet.place.labels, { direct_message: 'Declared mail' });
-    assert.equal(f.requests.filter(({ url }) => url === current.source.url).length, 1);
+    assert.equal(f.requests.filter(({ url }) => url === statusUrl).length, 1);
 });
 
 test('reader labels return to core words when absent without replacing the retained message', async (t) => {
@@ -228,7 +287,7 @@ test('new reader words translate while the sending account, signal and held word
     const rows = [...f.doc.body.querySelectorAll('.place-convo-row')];
     assert.match(rows[0].textContent, /comme Settings/);
     assert.deepEqual([...rows[1].querySelectorAll('[data-heard-fact]')].map((node) => node.textContent), ['adressé à vous', 'd’un bot', 'Settings']);
-    assert.equal(wakesForText([{ fact: 'direct_message' }]), 'wakes for messages directs');
+    assert.equal(wakeFactWord('direct_message'), 'messages directs');
     assert.match(rows[2].textContent, /retenu, non vérifiéSettings/);
     assert.ok(rows.every((node) => !node.textContent.includes('Réglages')));
     reader.close();
@@ -242,6 +301,17 @@ test('page, pending import, range gaps and unknown coverage have distinct words'
     assert.match(capturedWindowNote({}), /not fully reported/);
     assert.match(placeRoomsHtml({rooms:[],coverage}), /No saved conversation found in this index/);
     assert.match(placeRoomsHtml({rooms:[],coverage:{...coverage,importing:true}}), /still being imported/);
+});
+
+test('a thread row says it is a thread in its one meta line; the raw thread id stays off its face', () => {
+    const thread = { room_chat_id: 7, label: 'joi-eva_agentic-bots', last_at: '2026-11-02T10:14:00Z', unanswered_count: 0,
+        thread_id: '1793546052.282509' };
+    const html = placeRoomsHtml({ rooms: [thread], coverage: {} });
+    const face = html.replace(/<[^>]+>/g, ' ');
+    assert.doesNotMatch(face, /1793546052|Thread:/, 'no id on the row');
+    assert.match(face, /thread ·/);
+    assert.match(html, /title="Thread 1793546052\.282509"/, 'the id is still there for whoever looks for it');
+    assert.doesNotMatch(placeRoomsHtml({ rooms: [{ ...thread, thread_id: '' }], coverage: {} }), /thread ·|title=/);
 });
 
 test('reader forwards large IDs, retries exact cursor and excludes progress/evidence', async (t) => {
@@ -299,28 +369,32 @@ test('Back disposal aborts pending read and ignores its late answer', async (t) 
     pending.resolve(page([row('late')])); await tick(); assert.equal(f.q('.place-convo'),null);
 });
 
-test('connector section lists zero/one/many without selecting or writing, and aborts on disposal', async (t) => {
+test('connector section counts its own places without listing them, and aborts on disposal', async (t) => {
     const f=fixture(t);
-    for(const count of [0,1,2]) {
+    for(const [count, words] of [[0,'No place yet'],[1,'1 place'],[2,'2 places']]) {
         const host=f.doc.createElement('section'); f.doc.body.append(host);
         const supplied=Array.from({length:count},(_,i)=>normalizePlace(rawPlace(String(i))));
         let signal;
         const dispose=mountConnectorPlaces(host,'telegram-user-session',{read:async (request)=>{signal=request.signal;return {places:[...supplied,normalizePlace({...rawPlace('foreign'),connector:'elsewhere'})]}}});
-        await tick(); assert.equal(host.querySelectorAll('[data-place-open]').length,count);
-        assert.equal(Boolean(host.querySelector('[data-place-connect]')),count===0);
-        assert.equal(f.q('[data-place-state]'),null); dispose(); assert.equal(signal.aborted,true); host.remove();
+        await tick();
+        assert.match(host.textContent, new RegExp(`${words} · Circles ›`), 'another connector\'s place is not counted');
+        assert.equal(host.querySelectorAll('[data-place-open]').length,0,'the places are listed once, on Circles');
+        assert.equal(host.querySelector('[data-place-connect]'),null);
+        dispose(); assert.equal(signal.aborted,true); host.remove();
     }
 });
 
-test('an empty connector section uses the shared Connect control, filtered to its own connector', async (t) => {
+test('the connector section\'s one door leads to Circles, leaving the sheet first', async (t) => {
     const f=fixture(t); const host=f.doc.createElement('section'); f.doc.body.append(host); let left=0;
+    // This window double has no dispatchEvent of its own: record what the door asks the shell for.
+    const asked=[]; f.doc.defaultView.dispatchEvent=(event)=>{ if (event.type==='ouro:open-circles') asked.push(event.detail); };
+    t.after(()=>{ delete f.doc.defaultView.dispatchEvent; });
     const dispose=mountConnectorPlaces(host,'telegram-user-session',{leave:()=>{left+=1;},read:async ()=>({places:[]})});
     await tick();
-    f.reply(()=>({places:[],connectors:[{connector:'telegram-user-session'},{connector:'elsewhere'}]}));
-    host.querySelector('[data-place-connect]').click(); await tick();
-    assert.equal(left,1,'the connector sheet leaves before Connect opens');
-    assert.deepEqual([...f.doc.body.querySelectorAll('[data-connect-act]')].map((button)=>button.dataset.connector),['telegram-user-session']);
-    assert.deepEqual(f.requests.map((request)=>request.url),['/api/places']);
+    host.querySelector('[data-circles-open]').click(); await tick();
+    assert.equal(left,1,'the connector sheet leaves before Circles opens');
+    assert.deepEqual(asked,[{}]);
+    assert.deepEqual(f.requests.map((request)=>request.url),[],'nothing else is read or written');
     dispose();
 });
 
@@ -424,4 +498,27 @@ test('a row shows the send time its arrival recorded; the title keeps when it wa
     const times = [...f.doc.body.querySelectorAll('time')];
     assert.deepEqual(times.map((node) => node.getAttribute('datetime')), [imported.ts, '2026-10-26T08:00:00+00:00', receipt.ts]);
     assert.match(times[0].textContent, /2024/); reader.close();
+});
+
+test('a current refused read takes the saved conversation text; a failed one, or one the closed sheet left, does not', async (t) => {
+    // The Place sheet reads history outside any room (chat_preview.js previewsRefused): the session's refusal is the same.
+    const f = fixture(t), values = new Map(), prior = globalThis.localStorage;
+    globalThis.localStorage = { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)),
+        removeItem: (key) => values.delete(key) };
+    t.after(() => { globalThis.localStorage = prior; });
+    const seed = () => values.set(PREVIEW_KEY, '{"v":2,"rooms":[]}');
+    const failing = (status) => async () => { throw Object.assign(new Error('Authentication required.'), { status }); };
+    seed();
+    let reader = mount(f, { readHistory: failing(500) }); await tick();
+    assert.equal(values.has(PREVIEW_KEY), true, 'a failed read is no statement about the session');
+    reader.close();
+    reader = mount(f, { readHistory: failing(401) }); await tick();
+    assert.equal(values.has(PREVIEW_KEY), false, 'a current refusal takes it at once');
+    reader.close();
+    seed();
+    const pending = deferred();
+    reader = mount(f, { readHistory: () => pending.promise.then(failing(403)) });
+    f.q('[data-history-back]').click(); reader.close();
+    pending.resolve(); await tick(); await tick();
+    assert.equal(values.has(PREVIEW_KEY), true, 'a read the closed sheet abandoned decides nothing');
 });

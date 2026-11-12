@@ -79,6 +79,25 @@ test('gaps stay at the feed edge with a once-per-document notice while failure a
     assert.equal(note.textContent, 'Beginning of saved history');
 });
 
+test('a room tells its history gap at the edge it concerns, never as a notice over its newest rows (U021)', () => {
+    const doc = { byId: new Map(), createElement: tag => new ElementStub(tag, doc) };
+    const messages = new ElementStub('div', doc);
+    messages.isConnected = true;
+    const announced = [];
+    const prior = globalThis.document;
+    // Any toast the default path raised would land in this document's body.
+    globalThis.document = { ...doc, getElementById: () => null, body: { appendChild: (node) => announced.push(node) } };
+    try {
+        const controls = createHistoryControls(messages, null, { isVisible: () => true });
+        controls.render({ initialized: true, canOlder: true }, { gaps: true });
+        controls.showNotice();
+        assert.deepEqual(announced, [], 'the room raises no notice of its own');
+        assert.equal(messages.children[0].classList.contains('chat-load-older'), true, 'the fact heads the loaded window');
+        assert.match(messages.querySelector('.chat-load-older-note').textContent, /may have gaps/);
+        controls.destroy();
+    } finally { globalThis.document = prior; }
+});
+
 test('a status moved into persistent chrome leaves no empty history control padding while gaps stay at the feed edge', () => {
     const doc = { byId: new Map(), createElement: tag => new ElementStub(tag, doc) };
     const messages = new ElementStub('div', doc), chrome = new ElementStub('div', doc);
@@ -361,10 +380,13 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // spent its timer on a window fetched before the arm) keeps the deadline alive.
     // It is gated on !destroyed: a joined sync that settles after teardown must not
     // install a fresh timer on a dead instance (the disposer invariant).
-    assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 3);
+    // The fourth is a live terminal receipt landing on a card that already settled (an
+    // evolution cleanup a later campaign Stop ran): the card's stored line changed after
+    // its terminal, and a row replayed from history never asks.
+    assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 4);
     assert.match(
         chatSource,
-        /if \(!destroyed && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
+        /if \(!destroyed && !leaving && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
     );
     assert.doesNotMatch(chatSource, /_historyReplayActive[^\n]*scheduleHistorySync/);
 });
@@ -570,6 +592,29 @@ test('a restore that finds its node in place writes nothing to the feed', () => 
     bubble.bounds = { top: 70, width: 600, height: 80 }; // a card above grew 30 px
     assert.equal(restoreVisibleTimelineAnchor({ node: bubble, offset: 40 }), true);
     assert.deepEqual({ writes, scrollTop }, { writes: 1, scrollTop: 530 }, 'a moved node is put back');
+});
+
+test('scaled drawer restoration uses scroll pixels and ignores subpixel rounding noise', () => {
+    let scale = .96, top = 3458, writes = 0;
+    const feed = layoutNode({ height: 780, scroll: 6000 });
+    feed.offsetHeight = 780;
+    const row = layoutNode({ classes: ['chat-bubble'], data: {'data-history-id':'row'}, y:3401, height:150, parent:feed });
+    // Model WebKit's integer scroll offset while CSS scales its entire room.
+    const box = (y,h) => ({top:y*scale,bottom:(y+h)*scale,height:h*scale,width:390*scale});
+    feed.getBoundingClientRect = () => box(0,780);
+    row.getBoundingClientRect = () => box(3401-top,150);
+    const messages = Object.create(feed);
+    Object.defineProperty(messages,'scrollTop',{get:()=>top,set:v=>{writes++;top=Math.floor(v);}});
+    messages.contains = n => n === row;
+    const anchors=createTimelineAnchors({messagesDiv:messages,liveCardRecords:new Map()});
+    const saved=anchors.captureVisibleTimelineAnchor();
+    assert.ok(Math.abs(saved.offset+57)<.001);
+    top=0;
+    anchors.restoreVisibleTimelineAnchor(saved);
+    assert.equal(top,3458);
+    for (let i=0;i<30;i++) {scale=.96+i*.04/29; anchors.restoreVisibleTimelineAnchor(saved);}
+    assert.equal(top,3458);
+    assert.equal(writes,1);
 });
 
 // A small layout model: a child's top follows its parent's top, the parent's own

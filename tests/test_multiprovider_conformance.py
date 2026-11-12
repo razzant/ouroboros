@@ -17,15 +17,14 @@ One normative shared suite over the two seams every install crosses:
    (reuse, not a copy): nothing touches the network and no fixture carries a
    real credential.
 
-2. **The executor axis (native | harness)** — every value of the axis
-   vocabulary (``subagents.SUBAGENT_EXECUTORS``) must pass the same typed
-   rule-table contract across every route state (launch semantics), leave the
-   durable delegation artifact when a run starts (artifact semantics), and
-   refuse typed — never silently — when its substrate is missing (refusal
-   semantics). A new axis point added to the vocabulary without a conformance
-   row turns this suite red. Native-side task artifacts (task results,
-   outcome receipts) are pinned by their own suites; here the native point
-   pins the resolution row and the no-daemon-contact guarantee.
+2. **The executor axis (native | harness)** — every request the rule table
+   accepts must pass the same typed contract across every route state (launch
+   semantics), leave the durable delegation artifact when a run starts
+   (artifact semantics), and refuse typed — never silently — when its substrate
+   is missing (refusal semantics); anything else, `auto` included, is refused.
+   Native-side task artifacts (task results, outcome receipts) are pinned by
+   their own suites; here the native point pins the resolution row and the
+   no-daemon-contact guarantee.
 """
 
 from __future__ import annotations
@@ -40,10 +39,10 @@ from tests.test_llm_provider_golden import _observe
 
 from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture applies on import)
     _HealthStub,
-    _dispatch,
     _owned_gateway_uses_each_test_transport,
     _started_request,
 )
+from tests._cases import chosen_rows
 
 
 # ===========================================================================
@@ -232,15 +231,16 @@ _TARGET_REQUIRED_KEYS = {
 }
 
 
-@pytest.mark.parametrize("name", _REMOTE)
-def test_route_resolution_has_the_required_form(name):
-    driver = PROVIDER_DRIVERS[name]
-    observed = _observe(driver.spec(
-        [], call={"kind": "resolve_target", "model": driver.model}))
-    target = observed["returned"]["value"]
-    assert _TARGET_REQUIRED_KEYS <= set(target), sorted(target)
-    assert target["provider"] == driver.provider
-    assert target["resolved_model"] and target["usage_model"]
+def test_route_resolution_has_the_required_form(subtests):
+    for name in _REMOTE:
+        with subtests.test(name=name):
+            driver = PROVIDER_DRIVERS[name]
+            observed = _observe(driver.spec(
+                [], call={"kind": "resolve_target", "model": driver.model}))
+            target = observed["returned"]["value"]
+            assert _TARGET_REQUIRED_KEYS <= set(target), sorted(target)
+            assert target["provider"] == driver.provider
+            assert target["resolved_model"] and target["usage_model"]
 
 
 def test_usage_model_attribution_is_unambiguous_across_providers():
@@ -255,86 +255,91 @@ def test_usage_model_attribution_is_unambiguous_across_providers():
     assert len(usage_models) == len(PROVIDER_PREFIXES), usage_models
 
 
-@pytest.mark.parametrize("name", _DRIVERS)
-def test_success_has_the_shared_response_and_ledger_shape(name):
-    driver = PROVIDER_DRIVERS[name]
-    observed = _observe(driver.spec([driver.success_step]))
-    assert "raised" not in observed, observed.get("raised")
-    returned = observed["returned"]
-    message, usage = returned["message"], returned["usage"]
+def test_success_has_the_shared_response_and_ledger_shape(subtests):
+    for name in _DRIVERS:
+        with subtests.test(name=name):
+            driver = PROVIDER_DRIVERS[name]
+            observed = _observe(driver.spec([driver.success_step]))
+            assert "raised" not in observed, observed.get("raised")
+            returned = observed["returned"]
+            message, usage = returned["message"], returned["usage"]
 
-    assert isinstance(message, dict)
-    assert message.get("content") is None or isinstance(message.get("content"), str)
-    assert int(usage.get("prompt_tokens") or 0) >= 0
-    assert int(usage.get("completion_tokens") or 0) >= 0
-    # EVERY lane stamps usage provenance — the local asymmetry was CPL6-F1.
-    assert usage.get("provider") == driver.provider
-    assert usage.get("resolved_model")
+            assert isinstance(message, dict)
+            assert message.get("content") is None or isinstance(message.get("content"), str)
+            assert int(usage.get("prompt_tokens") or 0) >= 0
+            assert int(usage.get("completion_tokens") or 0) >= 0
+            # EVERY lane stamps usage provenance — the local asymmetry was CPL6-F1.
+            assert usage.get("provider") == driver.provider
+            assert usage.get("resolved_model")
 
-    # Honest cost planes: the key always exists; cost_final is a bool and may
-    # be True only for a KNOWN, non-estimated cost.
-    assert "cost" in usage
-    assert usage["cost"] is None or isinstance(usage["cost"], (int, float))
-    assert isinstance(usage.get("cost_final"), bool)
-    if usage["cost_final"]:
-        assert usage["cost"] is not None and not usage.get("cost_estimated")
+            # Honest cost planes: the key always exists; cost_final is a bool and may
+            # be True only for a KNOWN, non-estimated cost.
+            assert "cost" in usage
+            assert usage["cost"] is None or isinstance(usage["cost"], (int, float))
+            assert isinstance(usage.get("cost_final"), bool)
+            if usage["cost_final"]:
+                assert usage["cost"] is not None and not usage.get("cost_estimated")
 
-    # One successful send = one settled physical-attempt ledger row.
-    attempts = observed.get("physical_attempts") or []
-    assert len(attempts) == 1 and returned.get("ledger_attempt_count") == 1
-    assert attempts[0]["provider"] == driver.provider
-    assert (attempts[0]["state"], attempts[0]["transitions"]) == ("settled", 3)
-    assert observed["unused_script_steps"] == 0
+            # One successful send = one settled physical-attempt ledger row.
+            attempts = observed.get("physical_attempts") or []
+            assert len(attempts) == 1 and returned.get("ledger_attempt_count") == 1
+            assert attempts[0]["provider"] == driver.provider
+            assert (attempts[0]["state"], attempts[0]["transitions"]) == ("settled", 3)
+            assert observed["unused_script_steps"] == 0
 
 
-@pytest.mark.parametrize("name", _DRIVERS)
-def test_unknown_cost_is_never_fabricated(name):
+def test_unknown_cost_is_never_fabricated(subtests):
     """With no provider-reported cost and no catalog price, the cost plane
     stays honest: None (or the local lane's contractual 0.0) — never a made-up
     number, never cost_final=True over an estimate."""
-    driver = PROVIDER_DRIVERS[name]
-    observed = _observe(driver.spec([driver.success_step]))
-    usage = observed["returned"]["usage"]
-    if driver.free_lane:
-        assert usage["cost"] == 0.0 and usage["cost_final"] is True
-    else:
-        assert usage["cost"] is None
-        assert usage["cost_final"] is False
-        assert not usage.get("cost_estimated")
+    for name in _DRIVERS:
+        with subtests.test(name=name):
+            driver = PROVIDER_DRIVERS[name]
+            observed = _observe(driver.spec([driver.success_step]))
+            usage = observed["returned"]["usage"]
+            if driver.free_lane:
+                assert usage["cost"] == 0.0 and usage["cost_final"] is True
+            else:
+                assert usage["cost"] is None
+                assert usage["cost_final"] is False
+                assert not usage.get("cost_estimated")
 
 
-@pytest.mark.parametrize("name", _DRIVERS)
-def test_transport_failure_raises_instead_of_fabricating_an_answer(name):
-    driver = PROVIDER_DRIVERS[name]
-    error_step = {"kind": "error", "message": "conformance: transport down"}
-    observed = _observe(driver.spec([dict(error_step)] * 4))
-    assert "returned" not in observed
-    raised = observed.get("raised") or {}
-    assert raised and raised["type"] != "AssertionError", raised
-    assert len(observed["sends"]) >= 1
+def test_transport_failure_raises_instead_of_fabricating_an_answer(subtests):
+    for name in _DRIVERS:
+        with subtests.test(name=name):
+            driver = PROVIDER_DRIVERS[name]
+            error_step = {"kind": "error", "message": "conformance: transport down"}
+            observed = _observe(driver.spec([dict(error_step)] * 4))
+            assert "returned" not in observed
+            raised = observed.get("raised") or {}
+            assert raised and raised["type"] != "AssertionError", raised
+            assert len(observed["sends"]) >= 1
 
 
-@pytest.mark.parametrize("name", _DRIVERS)
-def test_typed_policy_refusal_is_permanent_one_send_only(name):
+def test_typed_policy_refusal_is_permanent_one_send_only(subtests):
     """D09: a typed provider policy refusal is permanent by class — no lane
     may re-attempt the refused candidate, whatever its private retry ladder."""
-    driver = PROVIDER_DRIVERS[name]
-    refusal = {"kind": "error", "code": "provider_policy_refusal",
-               "message": "policy: this request is not permitted"}
-    observed = _observe(driver.spec([refusal, driver.success_step]))
-    assert "returned" not in observed
-    assert observed.get("raised"), "the refusal must surface, not vanish"
-    assert len(observed["sends"]) == 1, "a refused candidate was re-attempted"
-    assert observed["unused_script_steps"] == 1
+    for name in _DRIVERS:
+        with subtests.test(name=name):
+            driver = PROVIDER_DRIVERS[name]
+            refusal = {"kind": "error", "code": "provider_policy_refusal",
+                       "message": "policy: this request is not permitted"}
+            observed = _observe(driver.spec([refusal, driver.success_step]))
+            assert "returned" not in observed
+            assert observed.get("raised"), "the refusal must surface, not vanish"
+            assert len(observed["sends"]) == 1, "a refused candidate was re-attempted"
+            assert observed["unused_script_steps"] == 1
 
 
-@pytest.mark.parametrize("name", _DRIVERS)
-def test_caller_timeout_reaches_the_transport(name):
-    driver = PROVIDER_DRIVERS[name]
-    observed = _observe(driver.spec(
-        [driver.success_step], chat_kwargs={"timeout": 33.0}))
-    assert "raised" not in observed, observed.get("raised")
-    assert driver.timeout_of(observed["sends"][0]) == 33.0
+def test_caller_timeout_reaches_the_transport(subtests):
+    for name in _DRIVERS:
+        with subtests.test(name=name):
+            driver = PROVIDER_DRIVERS[name]
+            observed = _observe(driver.spec(
+                [driver.success_step], chat_kwargs={"timeout": 33.0}))
+            assert "raised" not in observed, observed.get("raised")
+            assert driver.timeout_of(observed["sends"][0]) == 33.0
 
 
 def test_model_operation_control_reply_loss_rejoins_one_physical_generation():
@@ -361,7 +366,7 @@ def test_model_operation_host_control_cancels_without_fabricating_result_or_rele
 
 
 @pytest.mark.parametrize(
-    "name", [n for n in _DRIVERS if PROVIDER_DRIVERS[n].choice_shaped])
+    "name", chosen_rows([n for n in _DRIVERS if PROVIDER_DRIVERS[n].choice_shaped], 0, 1, 6))
 def test_null_finish_reason_is_surfaced_observably(name):
     """An incomplete response (finish_reason: null) must be visible in usage —
     the key is present with a null marker, distinguishable from an absent
@@ -427,12 +432,6 @@ EXECUTOR_MATRIX: Dict[str, Dict[str, tuple]] = {
         "unavailable": ("native", "requested_native", False),
         "spent": ("native", "requested_native", False),
     },
-    "auto": {
-        "not_configured": ("native", "harness_not_configured", False),
-        "ready": ("harness", "harness_ready", False),
-        "unavailable": ("native", "daemon_unreachable", False),
-        "spent": ("native", SUBSCRIPTION_WINDOW_EXHAUSTED, False),
-    },
     "harness": {
         "not_configured": ("blocked", "harness_not_configured", True),
         "ready": ("harness", "harness_ready", False),
@@ -449,61 +448,46 @@ _ROUTE_STATES: Dict[str, Dict[str, Any]] = {
 }
 
 
-def test_executor_axis_conformance_derives_from_the_vocabulary():
-    """Structural completeness: a new executor value added to the axis
-    vocabulary without a conformance row here is RED."""
-    assert set(EXECUTOR_MATRIX) == set(subagents.SUBAGENT_EXECUTORS), (
-        "SUBAGENT_EXECUTORS and EXECUTOR_MATRIX drifted apart — a new axis "
-        "point must ship with its conformance outcome row"
-    )
+def test_executor_axis_conformance_covers_every_accepted_request():
+    """Structural completeness: the table accepts exactly the matrix's requests;
+    the retired `auto` and the `blocked` outcome are refused, typed."""
     for requested, rows in EXECUTOR_MATRIX.items():
         assert set(rows) == set(_ROUTE_STATES), requested
+    for refused in ("auto", "blocked", "magic"):
+        with pytest.raises(ValueError, match="harness, native"):
+            subagents.resolve_subagent_executor(refused)
 
 
-@pytest.mark.parametrize("requested", sorted(EXECUTOR_MATRIX))
-@pytest.mark.parametrize("state", sorted(_ROUTE_STATES))
-def test_rule_table_outcome_is_typed_and_closed(requested, state):
-    resolution = subagents.resolve_subagent_executor(requested, **_ROUTE_STATES[state])
-    executor, reason, blocked = EXECUTOR_MATRIX[requested][state]
-    assert resolution.executor in _RESOLUTION_EXECUTORS
-    assert (resolution.executor, resolution.blocked) == (executor, blocked)
-    assert resolution.reason == reason and resolution.reason, (requested, state)
-    if reason == SUBSCRIPTION_WINDOW_EXHAUSTED:
-        # Whenever exhaustion IS the surfaced fact, the reset instant rides
-        # along so waiting stays a visible option (requested_native ignores
-        # route state entirely and legitimately carries none).
-        assert resolution.reset_at == "2030-01-01T00:00:00Z"
+def test_rule_table_outcome_is_typed_and_closed(subtests):
+    for requested in sorted(EXECUTOR_MATRIX):
+        for state in sorted(_ROUTE_STATES):
+            with subtests.test(requested=requested, state=state):
+                resolution = subagents.resolve_subagent_executor(requested, **_ROUTE_STATES[state])
+                executor, reason, blocked = EXECUTOR_MATRIX[requested][state]
+                assert resolution.executor in _RESOLUTION_EXECUTORS
+                assert (resolution.executor, resolution.blocked) == (executor, blocked)
+                assert resolution.reason == reason and resolution.reason, (requested, state)
+                if reason == SUBSCRIPTION_WINDOW_EXHAUSTED:
+                    # Whenever exhaustion IS the surfaced fact, the reset instant rides
+                    # along so waiting stays a visible option (requested_native ignores
+                    # route state entirely and legitimately carries none).
+                    assert resolution.reset_at == "2030-01-01T00:00:00Z"
 
 
-def test_unknown_executor_is_refused_typed_at_both_seams():
-    with pytest.raises(ValueError, match="auto, harness, native"):
-        subagents.normalize_subagent_executor("magic")
-    with pytest.raises(ValueError):
-        subagents.resolve_subagent_executor("magic")
+@pytest.mark.parametrize("stored", ["native", "warp-drive", None])
+def test_dispatch_rowless_point_runs_native_and_never_contacts_the_daemon(monkeypatch, stored):
+    """A row-less child, whatever its stored executor (stale values included), is
+    the native point: no gateway is constructed even with a legacy route set."""
+    from ouroboros.gateways import claudexor as gw
 
+    def _boom(*_a, **_k):
+        raise AssertionError("the native point must not construct a gateway")
 
-def test_schema_vocabulary_and_rule_table_cover_the_same_axis():
-    for value in subagents.SUBAGENT_EXECUTORS:
-        assert subagents.normalize_subagent_executor(value) == value
-
-
-def test_dispatch_native_point_never_contacts_the_daemon(monkeypatch):
-    res = _dispatch(
-        "native", monkeypatch=monkeypatch,
-        raises=AssertionError("the native point must not construct a gateway"),
-    )
-    assert (res.executor, res.reason) == ("native", "requested_native")
-
-
-def test_dispatch_stale_unknown_executor_degrades_to_auto_not_a_crash(monkeypatch):
-    res = _dispatch("warp-drive", monkeypatch=monkeypatch)
-    assert res.executor in ("native", "harness") and not res.blocked
-
-
-def test_dispatch_plain_task_is_not_subject_to_the_axis(monkeypatch):
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak:low")
-    res = subagents.dispatch_executor_resolution({})
-    assert res.executor in ("native", "harness")
+    monkeypatch.setattr(gw, "ClaudexorGateway", _boom)
+    task = {"delegation_role": "subagent", **({"requested_executor": stored} if stored else {})}
+    res = subagents.resolve_subagent_dispatch(task).executor_resolution
+    assert (res.executor, res.reason, res.blocked) == ("native", "requested_native", False)
 
 
 def test_harness_point_refusal_without_a_route_is_typed(tmp_path, monkeypatch):

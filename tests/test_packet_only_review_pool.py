@@ -15,6 +15,7 @@ import pytest
 
 from ouroboros.configured_subagents import SUBAGENTS_SETTING
 from ouroboros.subagent_runtime import review_facts_block
+from tests._cases import chosen_rows
 
 REPO = Path(__file__).resolve().parents[1]
 # Spelled out so a missing warning fails on behaviour, not on a missing name.
@@ -108,21 +109,56 @@ def _post(monkeypatch, body: dict, stored: dict | None = None, mode: str = "adva
     return response.status_code, json.loads(response.body), saved
 
 
-@pytest.mark.parametrize("catalog", list(PACKET_ONLY.values()), ids=list(PACKET_ONLY))
-def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(monkeypatch, catalog):
-    status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"})
+@pytest.mark.parametrize("saved, warned", [({}, True), ({"OUROBOROS_REVIEW_ENFORCEMENT": "advisory"}, False)],
+                         ids=["environment-only Blocking", "saved Advisory over environment Blocking"])
+def test_the_save_warning_judges_the_enforcement_the_real_loader_makes_effective(tmp_path, monkeypatch, saved, warned):
+    """Blocking set only in the environment warns on a save that never names it; the owner's saved Advisory wins over
+    it and does not. Real document, real ``load_settings`` and real write: the helper's own blank-enforcement branch
+    is unreachable from this caller, because the merged settings always carry the key."""
+    import asyncio
 
-    assert status == 200 and body["status"] == "saved", body
-    assert json.loads(saved[SUBAGENTS_SETTING])["items"] == catalog["items"], "a warning never refuses the save"
-    assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
-    assert WARNING in body.get("warnings", [])
+    from starlette.requests import Request
+
+    import ouroboros.config as cfg
+    import ouroboros.gateway.settings as gws
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    for attribute, value in (("SETTINGS_PATH", path), ("DATA_DIR", tmp_path), ("_BOOT_RUNTIME_MODE", None)):
+        monkeypatch.setattr(cfg, attribute, value)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(gws, "_unrecognised_review_models", lambda models: [])
+    monkeypatch.setattr(gws, "_apply_settings_to_env", lambda *a, **k: None)
+    body = {SUBAGENTS_SETTING: PACKET_ONLY["two Packet reviewers"]}
+
+    async def _receive():
+        return {"type": "http.request", "body": json.dumps(body).encode()}
+
+    request = Request({"type": "http", "method": "POST", "path": "/api/settings", "headers": [("content-type", "application/json")],
+                       "query_string": b"", "app": None}, receive=_receive)
+    response = asyncio.run(gws.api_settings_post(request))
+    answer = json.loads(response.body)
+    assert response.status_code == 200 and answer["status"] == "saved", answer
+    assert (WARNING in answer.get("warnings", [])) is warned
 
 
-@pytest.mark.parametrize("catalog, enforcement, mode", [
+def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(subtests, monkeypatch):
+    for catalog in list(PACKET_ONLY.values()):
+        with subtests.test(catalog=catalog), monkeypatch.context() as monkeypatch:
+            status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"})
+
+            assert status == 200 and body["status"] == "saved", body
+            assert json.loads(saved[SUBAGENTS_SETTING])["items"] == catalog["items"], "a warning never refuses the save"
+            assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+            assert WARNING in body.get("warnings", [])
+
+
+@pytest.mark.parametrize("catalog, enforcement, mode", chosen_rows([
     *[(catalog, "blocking", "advanced") for catalog in READING.values()],
     (PACKET_ONLY["two Packet reviewers"], "advisory", "advanced"),
     (PACKET_ONLY["two Packet reviewers"], "blocking", "cyber_pro"),
-], ids=[*READING, "advisory review", "Cyber Pro"])
+], 0, 2, 3), ids=chosen_rows([*READING, "advisory review", "Cyber Pro"], 0, 2, 3))
 def test_no_warning_with_a_reading_row_under_advisory_or_in_cyber_pro(monkeypatch, catalog, enforcement, mode):
     stored = {"OUROBOROS_RUNTIME_MODE": mode}
     status, body, _saved = _post(
@@ -146,7 +182,7 @@ def test_switching_to_blocking_over_a_stored_packet_pool_warns_and_every_later_s
 def _review_block(monkeypatch, catalog: dict) -> dict:
     import ouroboros.subagent_runtime as runtime
 
-    monkeypatch.setattr(runtime, "_api_review_cost_hint", lambda slot: "cost unknown")
+    monkeypatch.setattr(runtime, "_api_review_cost_hint", lambda slot, *_price: "cost unknown")
     monkeypatch.setenv(SUBAGENTS_SETTING, json.dumps(catalog))
     text = review_facts_block()
     return json.loads(text.split("\n\n", 1)[1])
@@ -160,8 +196,13 @@ def test_review_block_states_an_unanswerable_coupling_part_and_keeps_it_above_fo
     block = _review_block(monkeypatch, five)
     assert block["omitted"] == {"rows": 0}
     assert [row["seat_id"] for row in block["pool"]] == [f"packet-{index}" for index in range(5)]
-    assert all({"seat_id", "model", "effort", "delivery", "cost_hint", "cost_usd", "cost_kind", "last_review"}
-               <= row.keys() and row["delivery"] == "packet" for row in block["pool"])
+    assert all({"seat_id", "model", "effort", "delivery"} <= row.keys() and row["delivery"] == "packet"
+               for row in block["pool"])
+    activity: list = []
+    review_facts_block(activity_out=activity)
+    seats = json.loads(activity[0].split("\n\n", 1)[1])["seats"]
+    assert [seat["seat_id"] for seat in seats] == [row["seat_id"] for row in block["pool"]]
+    assert all({"cost_hint", "cost_usd", "cost_kind", "last_review"} <= seat.keys() for seat in seats)
     assert block["coupling_unanswerable"] is True, "larger pools must keep the coupling fact and full rows"
 
 

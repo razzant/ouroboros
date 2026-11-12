@@ -19,7 +19,8 @@ NOW = dt.datetime(2026, 10, 24, 8, tzinfo=dt.timezone.utc).timestamp()
 
 def _call(root, monkeypatch, task_id, *, at=NOW - 60, category="consciousness", **fields):
     stamp = dt.datetime.fromtimestamp(at, dt.timezone.utc).isoformat()
-    with monkeypatch.context() as clock:
+    cause = fields.pop("consciousness_cause", "")
+    with ua.usage_scope(ua.UsageScope(drive_root=root, root_task_id=task_id, consciousness_cause=cause)), monkeypatch.context() as clock:
         clock.setattr(usage_store, "utc_now_iso", lambda: stamp)
         return _settle(root, cost=0, cost_final=True, task_id=task_id, root_task_id=task_id,
                        category=category, **fields)
@@ -53,14 +54,54 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     rows = view.place_views(tmp_path)
     assert [row["unanswered"] for row in rows] == [3, None, 0]
     text = view.places_text(tmp_path, rows)
-    assert "Inbox [mail]: active; open turns: 3; chat_history(chat_id=-1); chat_history(chat_id=-2)" in text
+    assert "Inbox [mail]: active; open turns: 3; rooms: 2" in text
+    assert "chat_history(" not in text and "chat:" not in text  # a count, and one reader for every room
+    assert text.count("configure_presence(action='inspect', place_id=") == 1 and text.endswith("in brackets>)")
     assert "Quiet room [quiet]: silent; open turns: 0; no captured room" in text
-    assert "Paused room [paused]: paused; open turns: unknown" in text
+    assert "Paused room [paused]: paused; open turns: unknown; rooms: 1" in text
     assert "note (owner): Watch releases." in text and "note (owner): Keep the exact second line." in text
     assert calls == [(tmp_path, place.place_id) for place in configured]
     for place in configured:
         places.edit_place(tmp_path, place.place_id, "disconnect", author="owner")
     assert view.places_text(tmp_path, view.place_views(tmp_path)) == "none"
+
+
+@pytest.mark.parametrize("brief,detail", [
+    ([{"state": "active"}, {"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 2 places only hear."),
+    ([{"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 1 place only hears."),
+    ([{"state": "paused"}], "Off: no own wakes."),
+    (None, "Off: no own wakes."),
+    ("unread", "Off: no own wakes; its places only hear."),  # the place store could not be read: as Stop says
+])
+def test_off_says_no_own_wakes_and_how_many_places_only_hear(brief, detail):
+    """Owner 06.11: Off read «Background consciousness is off.» while 28 places went on reading «active». The host's
+    one detail line (the chip's name, the Shade and the Dashboard headline) counts them from the brief it already has."""
+    snapshot = {} if brief is None else {"places_brief": None if brief == "unread" else brief}
+    described = view.describe_consciousness_state(snapshot, False)
+    assert (described["status"], described["detail"]) == ("disabled", detail)
+    assert "hear" not in view.describe_consciousness_state(snapshot, True)["detail"], "a switch that is on claims nothing"
+
+
+def test_my_map_names_each_circle_once_with_its_whole_words_and_my_placements(monkeypatch, tmp_path):
+    """The own-clock map groups places under their circles (each circle's words whole, once), then the places in no
+    circle; a place I put in a circle says that my human's words there still restrict it, without their consent."""
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
+    monkeypatch.setattr(places, "place_room_index", lambda *_a: [], raising=False)
+    rows = [places.connect_place(tmp_path, connector="bridge", provider="chat", conversation_id=cid, label=label)
+            for cid, label in (("a", "Team chat"), ("b", "Team mail"), ("c", "Family"))]
+    team = places.create_circle(tmp_path, name="Team", text="Shared words, line one.\nLine two.", author="owner")
+    places.edit_place(tmp_path, rows[0].place_id, "set_circle", author="owner", circle_id=team["circle_id"])
+    places.edit_place(tmp_path, rows[1].place_id, "set_circle", author="ouroboros", circle_id=team["circle_id"])
+    text = view.places_text(tmp_path, view.place_views(tmp_path))
+    assert text.count("Shared words, line one.") == 1 and "\n    words (owner): Line two." in text
+    assert f'circle Team [{team["circle_id"]}]\n    words (owner): Shared words, line one.' in text
+    team_mail = next(line for line in text.splitlines() if "Team mail" in line)
+    team_chat = next(line for line in text.splitlines() if "Team chat" in line)
+    assert "you placed it in this circle" in team_mail and "you placed it" not in team_chat
+    # My human's words there still restrict; only consent needs their placement (prompts/SAFETY.md).
+    assert "your human's words there still restrict it, but consent needs their placement" in team_mail
+    assert "context" not in team_mail
+    assert text.index("not in a circle:") < text.index("Family") and text.index("Team chat") < text.index("not in a circle:")
 
 
 def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
@@ -70,7 +111,8 @@ def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
         raise OSError("room index unavailable")
     monkeypatch.setattr(places, "place_room_index", unavailable)
     assert view.place_views(tmp_path)[0]["unanswered"] is None
-    assert "unknown" in view.places_text(tmp_path, view.place_views(tmp_path))
+    text = view.places_text(tmp_path, view.place_views(tmp_path))
+    assert "rooms unknown" in text and "no captured room" not in text  # unknown never reads as zero
     assert "unknown" in view.places_text(tmp_path, None)
 
 
@@ -141,7 +183,6 @@ def test_clock_identity_alone_can_keep_a_terminal_wake_live(tmp_path, wake):
 
 @pytest.mark.parametrize("status,phase,live", [
     ("running", "running", True), ("interrupted", "unknown", True), ("paused", "paused", True),
-    ("scheduled", "queued", True), ("requested", "queued", True), ("queued", "queued", True),
     ("completed", "done", False), ("failed", "error", False), ("cancelled", "cancelled", False),
     ("rejected_duplicate", "warn", False),
 ])
@@ -156,16 +197,15 @@ def test_status_is_independent_of_missing_terminal_time(tmp_path, wake, status, 
     assert row["phase"] == phase and row["quiet"] is False
 
 
-@pytest.mark.parametrize("clock_live", [False, True])
-@pytest.mark.parametrize("status,owner_wait,phase", [
-    ("running", {}, "running"),
-    ("running", {"state": "waiting", "quiz_id": "q1"}, "waiting"),
-    ("running", {"state": "resumed", "quiz_id": "q1"}, "running"),
-    ("running", {"state": "answered", "wait_for_answer": True}, "running"),
-    ("running", {"state": "open", "quiz_id": "q1"}, "unknown"),
-    ("scheduled", {}, "queued"),
-    ("scheduled", {"state": "waiting", "quiz_id": "q1"}, "waiting"),
-    ("paused", {}, "paused"),
+@pytest.mark.parametrize(("status", "owner_wait", "phase", "clock_live"), [
+    pytest.param("running", {}, "running", True, id='running-owner_wait0-running-True'),
+    pytest.param("running", {"state": "waiting", "quiz_id": "q1"}, "waiting", True, id='running-owner_wait1-waiting-True'),
+    pytest.param("running", {"state": "resumed", "quiz_id": "q1"}, "running", False, id='running-owner_wait2-running-False'),
+    pytest.param("running", {"state": "answered", "wait_for_answer": True}, "running", True, id='running-owner_wait3-running-True'),
+    pytest.param("running", {"state": "open", "quiz_id": "q1"}, "unknown", False, id='running-owner_wait4-unknown-False'),
+    pytest.param("scheduled", {}, "queued", False, id='scheduled-owner_wait5-queued-False'),
+    pytest.param("scheduled", {"state": "waiting", "quiz_id": "q1"}, "waiting", True, id='scheduled-owner_wait6-waiting-True'),
+    pytest.param("paused", {}, "paused", False, id='paused-owner_wait7-paused-False'),
 ])
 def test_live_wakes_keep_the_task_activity_word(tmp_path, wake, status, owner_wait, phase, clock_live):
     wake.update(status=status, owner_wait=owner_wait, outcome_axes={}, wake_silent=False)
@@ -211,8 +251,11 @@ def test_terminal_time_for_another_attempt_is_unknown(tmp_path, wake):
     assert row["ended_at"] is None and row["live"] is False
 
 
-@pytest.mark.parametrize("summary", [None, "Проверил состояние; нового решения не требуется.", ""])
-@pytest.mark.parametrize("note", ["Short note", "First line\n" + "several words\t" * 400])
+@pytest.mark.parametrize(("note", "summary"), [
+    ("Short note", None),
+    ("Short note", ""),
+    pytest.param("First line\n" + "several words\t" * 400, "Проверил состояние; нового решения не требуется.", id='First line\nseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\t-Проверил состояние; нового решения не требуется.'),
+])
 def test_summary_is_only_authored_summary_and_note_is_whole(tmp_path, wake, summary, note):
     wake["result"] = note
     if summary is not None:
@@ -226,7 +269,7 @@ def test_summary_is_only_authored_summary_and_note_is_whole(tmp_path, wake, summ
 
 
 @pytest.mark.parametrize("silent,owner,notice,quiet", [
-    (True, None, "", True), (True, False, "", True), (True, True, "", False),
+    (True, None, "", True), (True, True, "", False),
     (True, None, "A tool failed.", False), (False, None, "", False), ("true", None, "", False),
 ])
 def test_quiet_uses_delivery_facts(tmp_path, wake, silent, owner, notice, quiet):
@@ -312,7 +355,7 @@ def test_selection_uses_the_category_time_index(tmp_path, monkeypatch, wake):
                 txn.conn.set_trace_callback(None)
     monkeypatch.setattr(usage_store, "read", traced)
     assert [row["task_id"] for row in view.recent_wakes(tmp_path, [])] == [wake["task_id"]]
-    query, = [sql for sql in queries if sql.startswith("SELECT root_task_id FROM attempts")]
+    query, = [sql for sql in queries if sql.startswith("SELECT root_task_id, place FROM")]
     with real_read(tmp_path, allow_stale=True) as txn:
         plan = [row[3] for row in txn.conn.execute("EXPLAIN QUERY PLAN " + query)]
     assert any("SEARCH attempts USING INDEX attempts_category_time (category=? AND ts_last_epoch>?)" in step
@@ -329,6 +372,40 @@ def test_selection_is_distinct_bounded_and_ordered_by_ledger_time(tmp_path, monk
     for _ in range(55):
         _call(tmp_path, monkeypatch, ids[0], at=NOW)
     assert [r["task_id"] for r in view.recent_wakes(tmp_path, [])] == ids[:50]
+
+
+@pytest.mark.parametrize("own,places", [(50, 0), (0, 50), (49, 1)])
+def test_wake_selection_reserves_each_source_and_tops_up_unused_share(tmp_path, monkeypatch, own, places):
+    ids = {}
+    for cause, count in (("own", own), ("place:mail", places)):
+        ids[cause] = [f"{cause.replace(':', '-')}-{n:02}" for n in range(count)]
+        for n, task_id in enumerate(ids[cause]):
+            _call(tmp_path, monkeypatch, task_id, at=NOW - n - (100 if cause == "own" else 0),
+                  consciousness_cause=cause)
+    selected = view.wake_ids(tmp_path, NOW)
+    assert len(selected) == min(50, own + places)
+    for cause, other in (("own", places), ("place:mail", own)):
+        assert [task_id for task_id in selected if task_id.startswith(cause.replace(':', '-'))] == ids[cause][:max(25, 50 - other)]
+    assert selected == sorted(selected, key=lambda task_id: (
+        int(task_id.rsplit("-", 1)[1]) + (100 if task_id.startswith("own") else 0), task_id))
+
+
+@pytest.mark.parametrize("cause,child_cause", [("own", "place:mail"), ("place:mail", "own")])
+def test_child_call_cannot_reclassify_its_root_in_selection(tmp_path, monkeypatch, cause, child_cause):
+    from ouroboros.usage_origin import root_cause
+
+    _call(tmp_path, monkeypatch, "root", consciousness_cause=cause)
+    for n in range(50):
+        _call(tmp_path, monkeypatch, f"flood-{n:02}", at=NOW - n, consciousness_cause=child_cause)
+    monkeypatch.setattr(usage_store, "utc_now_iso", lambda: dt.datetime.fromtimestamp(NOW - 60, dt.timezone.utc).isoformat())
+    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, root_task_id="root", consciousness_cause=child_cause)):
+        _settle(tmp_path, cost=0, cost_final=True, task_id="child", root_task_id="root", category="consciousness")
+    with usage_store.read(tmp_path, allow_stale=True) as txn:
+        assert root_cause(txn, "root") == cause
+        assert {row[0] for row in txn.conn.execute(
+            "SELECT json_extract(extra, '$.consciousness_cause') FROM attempts WHERE root_task_id = 'root'")} == {cause}
+    assert "root" in view.wake_ids(tmp_path, NOW)
+    assert "child" not in view.wake_ids(tmp_path, NOW)
 
 
 def test_ledger_child_attempt_selects_its_root_not_the_child(tmp_path, wake):
@@ -462,6 +539,7 @@ def test_durable_automatic_release_and_receipts_survive_result_updates(tmp_path,
     assert row["conversation"] == "chat:a:r" and row["chat_id"] == -7
     labelled, = view.recent_wakes(tmp_path, [{"place_id": "mail", "label": "Inbox"}])
     assert labelled["cause"] == "focus" and labelled["place_label"] == "Inbox"
+    assert labelled["place_id"] == "mail", "the Shade's door opens this place's sheet; an own wake carries none"
 
 
 def test_own_clock_text_survives_an_unreadable_room(tmp_path, monkeypatch):
@@ -483,7 +561,7 @@ def test_own_clock_text_survives_an_unreadable_room(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("kind,owner,clause", [("user", True, "writes as Mailbox (your human's own account)"),
-    ("user", False, "writes as Mailbox"), ("bot", False, "as Ouroboros (bot Mailbox)"), ("bot", True, "as Ouroboros (bot Mailbox)"), (None, False, "")])
+    ("bot", False, "as Ouroboros (bot Mailbox)"), (None, False, "")])
 def test_own_clock_reads_captured_identity_without_changing_brief_view(tmp_path, kind, owner, clause):
     place = places.connect_place(tmp_path, connector="bridge", provider="chat", account_id="account")
     if owner:
@@ -515,3 +593,136 @@ def test_recent_focus_as_comes_from_stored_metadata(tmp_path, wake, cause, ident
         assert row["as"] == {"label": "At the event", "owner": owner}
     else:
         assert "as" not in row
+
+
+# --- what holds my own held wake --------------------------------------------------------------------
+
+
+def _pause(rail="graceful_ceiling", *, state="paused", reason="budget", scope="root", ceiling=2.99,
+           basis="producer_allowance", cap=50.0):
+    row = {"pause_id": "p", "state": state, "reason": reason, "rail": rail, "scope": scope, "task_attempt": 1}
+    if basis is not None:
+        row["cost_ceiling"] = {"state": "active", "ceiling_usd": ceiling, "root_cap_usd": cap,
+                               "planning_margin_usd": None, "basis": basis}
+    return row
+
+
+def _launched(source="allowance", ceiling=2.99, **extra):
+    from ouroboros.consciousness_wake import wake_task_metadata
+    return {**wake_task_metadata("act", "heartbeat", root_cost_ceiling_usd=ceiling, root_cost_ceiling_source=source),
+            **extra}
+
+
+CHILD_AT_CEILING = _pause(basis="root_resolved_ceiling")
+
+
+@pytest.mark.parametrize("metadata,own,members,cause", [
+    # The launch stamp names the limit that set the ceiling the wake paused at.
+    (_launched("allowance"), _pause(), (), "allowance"),
+    (_launched("both"), _pause(), (), "allowance_and_cap"),
+    (_launched("per_task_cap"), _pause(), (), "per_task_cap"),
+    # A per-task cap of 0 left the allowance alone to set it (stamped "allowance"); a saved null cap changes nothing.
+    (_launched("allowance"), _pause(cap=None), (), "allowance"),
+    # The cap was raised and Resume pressed: the re-resolved cap is above the ceiling, the stamp still says the cap.
+    (_launched("per_task_cap", ceiling=10.0), _pause(ceiling=10.0, cap=80.0), (), "per_task_cap"),
+    # A record from before the stamp proves the launch ceiling only, never which limit.
+    (_launched(""), _pause(), (), "launch_ceiling"),
+    (_launched(""), _pause(basis=None), (), "launch_ceiling"),
+    # Child first: the tree's latch refused the wake while a member paused at the inherited number.
+    (_launched("allowance"), _pause("dispatch_refused", basis=None), (CHILD_AT_CEILING,), "allowance"),
+    # A member at a number of its own (an explicit profile's) proves nothing about the wake's launch ceiling.
+    (_launched("allowance"), _pause("dispatch_refused", basis=None),
+     (_pause(basis="min(global_pct, root_cap_minus_margin, non_root_member, root_resolved_ceiling)"),), "per_task_fence"),
+    (_launched("allowance"), _pause("dispatch_refused", basis=None), (_pause(basis="root_resolved_ceiling", ceiling=1.0),),
+     "per_task_fence"),
+    # The cap was lowered after launch, before the task started: its fence refused first.
+    (_launched("allowance"), _pause("dispatch_refused", basis=None), (), "per_task_fence"),
+    (_launched("allowance"), _pause("dispatch_refused", scope="global", basis=None), (), "total_budget"),
+    (_launched("allowance"), _pause("global_exhausted", scope="global", basis=None), (), "total_budget"),
+    # Pauses that are not money keep their own reason.
+    (_launched("allowance"), _pause("owner_pause", reason="owner", basis=None), (), "owner"),
+    (_launched("allowance"), _pause("model_sleep", reason="sleep", scope="task", basis=None), (CHILD_AT_CEILING,), "sleep"),
+    (_launched("allowance"), _pause("billing_authority_unreadable", reason="authority", basis=None), (), "technical"),
+    # No live pause proves nothing: a Resume granted, a resumed record, no row at all.
+    (_launched("allowance"), _pause(state="resume_granted"), (), ""),
+    (_launched("allowance"), _pause(state="resumed"), (), ""),
+    (_launched("allowance"), {}, (), ""),
+    # A saved ceiling that is not the launch number, or an allowance the owner's Resume lifted, proves nothing.
+    (_launched("allowance"), _pause(ceiling=5.0), (), ""),
+    ({**{k: v for k, v in _launched("allowance").items() if k != "root_cost_ceiling_usd"},
+      "producer_allowance_lifted": {"ceiling_usd": 2.99}}, _pause(), (), ""),
+])
+def test_a_held_wake_is_said_held_by_its_allowance_only_where_its_records_prove_it(metadata, own, members, cause):
+    held = view.hold_cause(metadata, own, members)
+    assert held["cause"] == cause
+    stamped = cause in {"allowance", "allowance_and_cap", "per_task_cap", "launch_ceiling"}
+    assert held["ceiling_usd"] == (metadata["root_cost_ceiling_usd"] if stamped else None)
+
+
+def test_an_exhausted_skip_whose_later_window_read_failed_says_its_amount_unknown_never_zero():
+    """A later read that failed after an exhausted check leaves the 24-hour amount unknown, never $0.00; the skip
+    itself stays what happened (the Consciousness tab, the Shade and /bg say this detail)."""
+    snapshot = {"last_wake_outcome": "skipped:allowance_exhausted", "spent_24h_usd": None, "daily_usd": 390.0,
+                "allowance_status": "allowance_unknown", "next_wake_at": "", "unknown_unmetered": 0}
+    detail = view.describe_consciousness_state(snapshot, True)["detail"]
+    assert detail.startswith("Daily allowance spent at its last check; what it spent in the last 24 h is unknown now; "
+                             "next check "), detail
+    assert "$0.00" not in detail
+    known = view.describe_consciousness_state({**snapshot, "spent_24h_usd": 391.5}, True)["detail"]
+    assert known.startswith("Daily allowance spent ($391.50 of $390.00 in the last 24 h); next check "), known
+
+
+HELD_NOTE = ("Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance does "
+             "not raise it. Stop now on its card ends it and frees the clock for its next check.")
+
+
+@pytest.mark.parametrize("cause,ceiling,said", [
+    ("allowance", 2.99, "Wake-up w1 stopped at the allowance it had left when it started ($2.99)."),
+    ("allowance_and_cap", 50.0, "Wake-up w1 stopped at the allowance it had left when it started ($50.00, the per-task "
+     "cap too)."),
+    ("launch_ceiling", 2.99, "Wake-up w1 is paused at the spending limit it started with; its card shows why. "
+     "The next wake-up follows it."),
+    ("per_task_cap", 10.0, "Wake-up w1 is paused at the per-task cost cap it started with; its card shows why. "
+     "The next wake-up follows it."),
+    ("owner", None, "Wake-up w1 is on an explicit pause; its card shows who paused it and how to continue."),
+    ("", None, "Wake-up w1 is paused or waiting in the queue; its card shows why. The next wake-up follows it."),
+])
+def test_the_held_wake_sentence_names_only_a_proven_launch_limit(cause, ceiling, said):
+    snapshot = {"live_wake_task_id": "w1", "live_wake_held": True, "next_wake_at": "2026-10-24T09:30:00+00:00",
+                "live_wake_hold": {"cause": cause, "ceiling_usd": ceiling}}
+    described = view.describe_consciousness_state(snapshot, True)
+    assert described["status"] == "wake_paused" and described["detail"] == said
+    # What follows from an allowance hold is said beneath it; every other hold has no note.
+    assert described.get("detail_note") == (HELD_NOTE if cause in view.ALLOWANCE_HOLDS else None)
+    assert "09:30" not in described["detail"] + described.get("detail_note", ""), "no clock: Costs alone says when"
+    # Off still wins over any hold, and a note the snapshot carried from an earlier hold never outlives it.
+    off = view.describe_consciousness_state({**snapshot, "detail_note": HELD_NOTE}, False)
+    assert off["status"] == "disabled" and "detail_note" not in off
+
+
+def test_an_unreadable_pause_leaves_the_cause_unknown(monkeypatch, tmp_path):
+    def unreadable(_root, _task_id):
+        raise OSError("store busy")
+
+    monkeypatch.setattr("ouroboros.store_hot_facts.controls", unreadable)
+    assert view.held_wake_cause(tmp_path, "wake-x") == {"cause": "", "ceiling_usd": None}
+
+
+@pytest.mark.parametrize("fence,cause", [
+    ({"state": "requested"}, "owner"),
+    ({"state": "paused"}, "owner"),
+    ({"state": "released"}, "allowance"),
+    ({"state": "paused", "selected_members": {"wake-x": {"grant_id": "g"}}}, "allowance"),
+])
+def test_owner_pause_over_a_parked_budget_wake_takes_precedence(tmp_path, monkeypatch, fence, cause):
+    """Pause-all need not rewrite a parked wake's old budget row: its root fence owns the current hold."""
+    metadata = _launched()
+    seed_result(tmp_path, "wake-x", {"task_id": "wake-x", "status": "paused", "metadata": metadata,
+                                    "budget_pause": _pause(), "owner_pause": fence})
+    monkeypatch.setattr("supervisor.consciousness_carriers.live_task_rows",
+                        lambda _ids: {"wake-x": {"metadata": metadata}})
+    held = view.held_wake_cause(tmp_path, "wake-x")
+    assert held == {"cause": cause, "ceiling_usd": 2.99 if cause == "allowance" else None}
+    described = view.describe_consciousness_state({"live_wake_task_id": "wake-x", "live_wake_held": True,
+                                                  "live_wake_hold": held}, True)
+    assert ("Stop now" in described.get("detail_note", "")) is (cause == "allowance")

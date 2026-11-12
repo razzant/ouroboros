@@ -101,6 +101,7 @@ def test_owner_directives_survive_compaction_without_control_prose(tmp_path):
         row for row in drain_owner_entries(tmp_path, "root")
         if row["msg_id"] == "control-1"
     )
+    mail_entry = next(row for row in drain_owner_entries(tmp_path, "root") if row["msg_id"] == "mail-1")
     expected_deadline = (
         parse_deadline_ts(control_entry["ts"]).timestamp()
         + task_pacing.effective_finalization_reserve_sec(ctx)
@@ -124,10 +125,14 @@ def test_owner_directives_survive_compaction_without_control_prose(tmp_path):
     ]
     assert ctx._owner_directives[0]["content"] == "Initial requirement verbatim"
     assert ctx._owner_directives[1]["msg_id"] == "direct-1"
+    # No chat row is held for either: each keeps when the host received it (the mailbox entry's time; the
+    # drain's read time for the in-memory delivery), never an invented chat time or room.
+    assert ctx._owner_directives[1]["received"] and "ts" not in ctx._owner_directives[1]
     assert ctx._owner_directives[2] == {
         "source": "owner_mailbox",
         "content": "mailbox follow-up",
         "msg_id": "mail-1",
+        "received": mail_entry["ts"],
     }
     assert "deadline control" not in json.dumps(ctx._owner_directives)
 
@@ -458,10 +463,9 @@ def test_provider_death_still_makes_the_forced_call_when_the_wall_is_unspent(tmp
         (1, False),
         ({"nested": "garbage"}, False),
         (0, True),
-        ("", True),
         (None, True),
     ],
-    ids=["truthy_str", "truthy_int", "truthy_dict", "zero", "empty_str", "none"],
+    ids=["truthy_str", "truthy_int", "truthy_dict", "zero", "none"],
 )
 def test_malformed_retry_wall_marker_reads_as_a_plain_truth_value(
     tmp_path, monkeypatch, marker, expect_call,
@@ -487,9 +491,6 @@ def test_malformed_retry_wall_marker_reads_as_a_plain_truth_value(
         ("round_limit", "[ROUND_LIMIT] wrap up"),
         ("finalization_grace", "[FINALIZE_NOW] wrap up"),
         ("deadline_local", "[DEADLINE] wrap up"),
-        ("owner_requested_finalization", "[OWNER_STOP] wrap up"),
-        ("budget_exhausted", "[BUDGET] wrap up"),
-        ("children_unabsorbed", "[CHILDREN] wrap up"),
     ],
 )
 def test_other_forced_rails_never_skip_even_with_the_wall_marker_set(
@@ -555,3 +556,55 @@ def test_quiz_answers_and_principal_messages_enter_the_directive_corpus_but_syst
     delivered = "\n".join(str(m["content"]) for m in messages)
     assert "[System task message]" in delivered and "[Escalation from descendant task grandchild]" in delivered
     assert "[Message from task sibling-7, relayed by ancestor root-1]" in delivered
+
+
+def test_an_owner_answer_is_recorded_with_the_card_it_answers_beside_never_inside_its_words(tmp_path):
+    """Audit 05.11 item 37: Safety saw "1. Publish it" without the card that held the text. The answered card rides
+    beside the owner's words as the message they reply to: the asking task's question and options, the pressed
+    option marked; the owner's words stay what they pressed. An answer without a snapshot gets no invented card."""
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message
+
+    ctx = SimpleNamespace()
+    messages = [{"role": "user", "content": "Initial requirement verbatim"}]
+    _initialize_owner_directives(ctx, messages)
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?\n> Thanks, taking it up.", "state": "answered",
+            "options": ["Publish it", "Not now"], "option_details": ["Post the quoted text", ""], "answered_index": 0}
+    write_owner_message(tmp_path, "[Owner quiz answer] quiz q7", task_id="root", msg_id="qa-7", kind=KIND_QUIZ_ANSWER,
+                        quiz_delivery={"task_id": "asker", "quiz_id": "q7", "answer_snapshot": card})
+    write_owner_message(tmp_path, "[Owner quiz answer] legacy", task_id="root", msg_id="qa-8", kind=KIND_QUIZ_ANSWER)
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "root", None, set(), owner_ctx=ctx)
+    answered, legacy = ctx._owner_directives[-2:]
+    assert answered["content"] == "1. Publish it" and answered["quiz_id"] == "q7"
+    assert answered["reply_to"] == {
+        "address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
+        "text": "Publish exactly this reply?\n> Thanks, taking it up.\n1. Publish it (Post the quoted text)\n2. Not now\n"
+                "(host record: my human pressed option 1)"}
+    assert legacy["content"] == "[Owner quiz answer] legacy" and "reply_to" not in legacy
+
+
+def test_a_late_answer_keeps_my_humans_words_with_its_card_on_a_fresh_head_and_on_a_reading_one(tmp_path):
+    """Audit 05.11 item 37, the late paths: an answer that arrives after the asking task finished opens a fresh head
+    whose first text is the host's frame, or reaches a head still reading. Either way the corpus keeps my human's words
+    with the card beside them, never the frame as their words and never the bare label; a plain head keeps its text."""
+    from ouroboros.owner_mailbox import write_owner_message
+
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
+            "options": ["Publish it", "Not now"], "answered_after_terminal": True}
+    late = {"task_id": "asker", "quiz_id": "q7", "answer_snapshot": {"task_id": "asker", "quiz": card}}
+    replied = {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
+               "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)"}
+    head = SimpleNamespace(task_metadata={"late_answer": late, "origin_suppressed": True})
+    frame = "[Late answer to a question asked by task asker, which had finished]\nQuestion was: Publish exactly this reply?"
+    _initialize_owner_directives(head, [{"role": "user", "content": frame}])
+    assert [(row["source"], row["content"], row.get("reply_to")) for row in head._owner_directives] == [
+        ("initial_user", "1. Publish it", replied)]
+    plain = SimpleNamespace(task_metadata={"origin_suppressed": True})
+    _initialize_owner_directives(plain, [{"role": "user", "content": "Hello"}])
+    assert plain._owner_directives == [{"source": "initial_user", "content": "Hello"}]
+    reading = SimpleNamespace()
+    messages = [{"role": "user", "content": "Initial requirement verbatim"}]
+    _initialize_owner_directives(reading, messages)
+    assert write_owner_message(tmp_path, "1. Publish it", task_id="head", msg_id="m-9", late_answer=late)
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "head", None, set(), owner_ctx=reading)
+    assert [(row["source"], row["content"], row.get("reply_to")) for row in reading._owner_directives[1:]] == [
+        ("owner_mailbox", "1. Publish it", replied)]

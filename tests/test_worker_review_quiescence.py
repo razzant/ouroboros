@@ -11,7 +11,6 @@ from tests.test_owner_wait_pool import maintain_capacity, park, pool as pool
 from tests.test_review_operation_lifetime import TASK, env as env, _parent, _request, _slot, _rows, until
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("tail", ["wait_close", "final_pointer"])
@@ -96,11 +95,13 @@ def test_a_later_close_retries_the_failed_final_pointer(env, monkeypatch):
                 review_operation._LIVE.pop(operation.owner_id, None)
 
 
-def test_recovered_final_writer_lets_the_full_cap_resume_progress(env, pool, monkeypatch):
-    """Reviewer counterexample: a transient pointer failure once pinned ``_LIVE`` forever."""
+def test_recovered_final_writer_lets_a_surplus_retirement_progress(env, pool, monkeypatch):
+    """Reviewer counterexample: a transient pointer failure once pinned ``_LIVE`` forever, so an idle process's
+    quiescence probe never answered and its retirement never landed. The parked author's return goes at once on its
+    own process; the replacement left idle is surplus, and its retirement waits only for the review's publication."""
     park(pool)
-    maintain_capacity()
-    replacement = workers.WORKERS[1]
+    maintain_capacity(demand=1)  # the parked slot's replacement is bought by demand (4A: no idle spare)
+    [replacement] = [slot for slot in workers.WORKERS.values() if slot is not pool.original]
     replacement.reaping = False  # the readiness owner opened it
     affirm_ready(replacement)
     attempts, healthy = [], [False]
@@ -116,9 +117,10 @@ def test_recovered_final_writer_lets_the_full_cap_resume_progress(env, pool, mon
         try:
             operation.maybe_close()
             worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
-            worker_owner_wait.maintain_owner_wait_capacity()
+            maintain_capacity()  # the return is granted; the idle replacement is surplus and is probed
+            assert pool.original.in_q.get_nowait()["phase"] == "resume_granted" and pool.original.active_capacity
             probe = replacement.in_q.get_nowait()
-            assert probe["type"] == "worker_quiescence" and replacement.resume_hold == "owner"
+            assert probe["type"] == "worker_quiescence"
             assert not review_operation.local_reviews_settled(), "unknown publication defers the answer"
             healthy[0] = True
             # The writer recovered: the probe's own bounded retry publishes and unregisters.
@@ -126,10 +128,9 @@ def test_recovered_final_writer_lets_the_full_cap_resume_progress(env, pool, mon
             assert attempts == [False, False, True] and operation.owner_id not in review_operation._LIVE
             worker_pool_lifecycle.handle_worker_quiescent({**probe, "worker_id": replacement.wid,
                 "pid": replacement.proc.pid, "process_birth": replacement.process_birth}, workers)
-            worker_owner_wait.maintain_owner_wait_capacity()
+            maintain_capacity()
             assert replacement.retiring
             worker_pool_lifecycle.reap_idle_worker(queue._reap_queue.get_nowait())
-            worker_owner_wait.maintain_owner_wait_capacity()
             assert pool.original.active_capacity and workers.WORKERS == {0: pool.original}
         finally:
             with review_operation._LOCK:

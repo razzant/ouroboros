@@ -24,6 +24,8 @@ on:
     secrets:
       OPENROUTER_API_KEY:
         required: false
+      OPENROUTER_PROVIDER_ROUTES_API_KEY:
+        required: false
       OPENAI_API_KEY:
         required: false
       ANTHROPIC_API_KEY:
@@ -58,6 +60,7 @@ jobs:
         env:
           SCOPE: ${{ inputs.scope }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_PROVIDER_ROUTES_API_KEY: ${{ secrets.OPENROUTER_PROVIDER_ROUTES_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}

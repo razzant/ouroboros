@@ -117,7 +117,7 @@ def test_cold_switched_model_keeps_actual_overflow_recovery_and_retry(tmp_path, 
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     result, usage, _ = loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
     assert result == "Continued saved work"
-    assert sends == ["overflow", "smaller retry"] and steps == ["host_copies", "bodies"]
+    assert sends == ["overflow", "smaller retry"] and steps == ["host_copies", "bodies", "floor"]
     assert registry._ctx.active_context_mode == "max"  # the first pass fit: the floor never lowered Max
     assert registry._ctx.owner_wait_resume is None
     assert usage["cost"] == 10.0  # recorded spend is retained, never re-emitted

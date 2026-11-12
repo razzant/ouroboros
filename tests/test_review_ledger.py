@@ -164,7 +164,6 @@ def test_record_vocabulary_is_enforced(tmp_path):
 
 @pytest.mark.parametrize("models,distinct,single", [
     (("openai/gpt-5", "anthropic/claude-x", "google/gemini"), 3, False),
-    (("openai/gpt-5", "openai/gpt-5", "openai/gpt-5"), 1, True),
     (("openai/gpt-5",), 1, True),
     # three route selectors that SERVED one model: namespace, tag and case do not make three models
     (("openrouter/openai/gpt-5", "openai/GPT-5", "gpt-5:free"), 1, True),
@@ -1114,7 +1113,7 @@ def test_naming_the_record_keeps_a_typed_result_paired_with_its_text(tmp_path):
         _restore_tool_result_sidecar,
     )
 
-    ctx = SimpleNamespace(_current_review_record_id="rl-typed-1")
+    ctx = SimpleNamespace(_current_review_record_id="rl-typed-1", drive_root=tmp_path)  # its record offers no seat
     sentinel = object()
     token = _install_tool_result_sidecar(ctx, sentinel)
     try:

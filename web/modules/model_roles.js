@@ -2,7 +2,7 @@
 // the routing authority; account and context choices belong to the exact role.
 // Catalog arrival only enriches choices. It never authors an assignment.
 import { apiClient, fetchJson } from './api_client.js';
-import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog } from './settings_catalog.js';
+import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
 import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_status_store.js';
 import { parseModelSource, composeModelSource, apiConnections, configuredApiProviders, indexProfilesByHarness,
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
@@ -11,6 +11,7 @@ import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions } from './route_editor_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers, updateModelChooser } from './model_chooser.js';
 
 export const MODEL_ACCOUNTS_KEY = 'OUROBOROS_MODEL_ACCOUNTS';
@@ -61,8 +62,23 @@ export function modelSourceGroups({ sources = [], providers = [], connections = 
     ];
 }
 
+// A window source as the owner says it: where the value comes from, and who says another value.
+const WINDOW_SOURCES = { user_setting: ['set in Settings', 'Settings say'], owner_ack: ['your confirmation', 'your confirmation says'],
+    provider_metadata: ['from the server', 'the server says'], local_health: ['the local serving window', 'the local server says'] };
+const tokenWords = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
+/** The route's window in owner words, from the projection's typed fields (never catalogue arithmetic): the window,
+ *  where it comes from, the usable input, a source that disagrees and an old confirmation no longer used; the
+ *  observation stamps stay in the projection's record. */
 export function modelContextNote(preview) {
-    return preview?.window?.text || 'Context limit not known for this route.';
+    const window = preview?.window;
+    if (!window?.tokens) return 'Context limit not known for this route.';
+    const usable = Number.isFinite(window.usable) ? window.usable : window.tokens - (window.reserve || 0);
+    const other = window.contradiction;
+    const retired = Number(window.retired_ack?.window_tokens) || 0;
+    return `Window ${tokenWords(window.tokens)} tokens (${WINDOW_SOURCES[window.source]?.[0] || window.source}) · ${tokenWords(usable)} usable for input`
+        + (other ? ` · ${WINDOW_SOURCES[other.source]?.[1] || `${other.source} says`} ${tokenWords(other.tokens)}` : '')
+        + (retired ? ` · old confirmation ${tokenWords(retired)} not used` : '');
 }
 
 // The slot an empty role uses: Main, except the Safety Supervisor, which checks with the Light model (and so
@@ -74,16 +90,22 @@ export function modelRolesHost(id) {
     return `<div id="${escapeHtml(id)}" class="model-role-editor"></div>`;
 }
 
-/** In-memory form controller; refreshes have no settings or login side effects. */
+/** Settings shows this under Main, before Save: what a new Main does to work already running (owner, 2026-11-03),
+ *  in one sentence (owner 04.11, 1A: work with its own model is the work's own fact). */
+export const MAIN_FOLLOW_NOTE = 'Running work that follows Main switches at its next call.';
+
+/** In-memory form controller; refreshes have no settings or login side effects. `mainNote`: Settings' Main note. */
 export function createModelRolesEditor({ hostId, store = claudexorStatus,
-    doc = () => document, onChange = () => {}, catalogFetch = fetchJson, showContext = true } = {}) {
+    doc = () => document, onChange = () => {}, catalogFetch = fetchJson, showContext = true, mainNote = false } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     let slots = [];
+    let offeredSlots = [];  // every slot in contract order; a `managed` one (a deployment's checker) is shown, never a row
     let rows = [];
     let settings = {};
     let providerProfiles = {};
     let apiProviders = [];
     let connections = [];
+    let mainChoice = [];  // `_meta.main_connection_choice`: an unauthored Main waits for the owner's key
     let catalog = { items: [], model_sources: [], read_state: 'not_read' };
     let loaded = false;
     let destroyed = false;
@@ -186,10 +208,18 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function keyNote(row) {
         if (row.local || !row.model || row.source === 'inherit' || sourceId(row)
             || apiProviders.some((provider) => provider.id === row.source)) return '';
-        return { off: 'This key is turned off in Accounts; nothing is sent through it.',
+        return choiceNote(row) || { off: 'This key is turned off in Accounts; nothing is sent through it.',
             removed: 'This key was removed in Accounts; nothing is sent through it.',
             'no key': 'This source has no key in Accounts.' }[unavailableConnectionState(row.source, connections)];
     }
+    // Several keys of Main's provider and no built-in one: the owner picks Main's, nothing is guessed (#2969).
+    function choiceNote(row) {
+        const keys = row.slot.slot === 'main' ? mainChoice.map((id) => connections.find((entry) => entry.id === id)?.label || id) : [];
+        return keys.length > 1 ? `Main is not set yet. Choose the key it uses: ${keys.slice(0, -1).join(', ')} or ${keys.at(-1)}.` : '';
+    }
+    const onMaintenanceSettled = () => {
+        for (const row of new Map(rows.map(row => [catalogKey(row), row])).values()) void refreshRow(row, {force: true});
+    };
     function itemsFor(row) {
         return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
             : catalog.items.filter((item) => parseModelSource(item.value || item.id).source === row.source);
@@ -208,30 +238,37 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
 
     function detailsHtml(row) {
         if (!showContext) return '';
-        return `<details class="model-role-details"><summary>Context &amp; processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></summary>
+        return `<details class="model-role-details ui-disclosure"><summary><span>Context &amp; processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></span></summary>
             <label class="ui-field">Processing ${processingSelectHtml(`data-model-role-processing aria-label="${escapeHtml(row.slot.label)} processing"`, row.processing_preference)}</label>
             <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div>
             <div class="ui-field-help" data-processing-capability></div>
             <div class="model-role-context">
                 <label class="ui-field">Window <input id="${escapeHtml(inputIdFor(row))}-context" class="ui-control" data-model-role-context type="number" min="0" step="1"
-                    placeholder="Auto" value="${escapeHtml(row.context || '')}" aria-label="${escapeHtml(row.slot.label)} context window"></label>
-                <span data-model-context-note>${escapeHtml(modelContextNote(row.windowPreview))}</span>
+                    placeholder="Auto" value="${escapeHtml(row.context || '')}" aria-label="${escapeHtml(row.slot.label)} context window">
+                    <span class="ui-field-help" data-model-context-note>${escapeHtml(modelContextNote(row.windowPreview))}</span></label>
                 <button type="button" class="btn btn-default" data-window-clear hidden>Clear confirmation</button>
             </div>
             <div class="model-role-context">
-                <label class="ui-field">Maximum response <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} maximum response"></label>
+                <label class="ui-field">Maximum response <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} maximum response">
+                    <span class="ui-field-help" data-response-note>Auto. Applies to this exact model and server; blank restores metadata.</span></label>
                 <button type="button" class="btn btn-default" data-response-apply>Apply maximum</button>
-                <span class="ui-field-help" data-response-note>Auto. Applies to this exact model and server; blank restores metadata.</span>
             </div></details>`;
     }
+
+    // A role the deployment fixes: its model said in its place, no control to edit and nothing collected.
+    const fixedGroupHtml = (slot) => `<section class="model-role-group" data-model-role-group="${escapeHtml(slot.slot)}" data-model-role-fixed>
+        <div class="model-role-head"><h4>${escapeHtml(slot.label.replace(/ Model$/, ''))}</h4><span class="ui-chip skills-chip" data-tone="neutral">Set by your organization</span></div>
+        <p class="model-role-copy">${escapeHtml(parseModelSource(settings[slot.settingKey]).model || String(settings[slot.settingKey] || ''))}. Its administrator changes it.</p>
+    </section>`;
 
     function rowHtml(row, index, total) {
         const isFallback = row.slot.slot === 'fallback';
         const inputId = inputIdFor(row);
+        const described = mainNote && row.slot.slot === 'main' ? ` aria-describedby="${escapeHtml(hostId)}-main-note"` : '';
         return `<div class="model-role-row" data-model-role="${escapeHtml(row.id)}">
             <div class="model-role-controls">
                 ${selectHtml(`data-model-role-source aria-label="${escapeHtml(row.slot.label)} source"`, sourceGroupsFor(row), sourceChoice(row.source))}
-                ${modelChooserHtml(`id="${escapeHtml(inputId)}" data-model-role-model aria-label="${escapeHtml(row.slot.label)}${isFallback ? ` ${index + 1}` : ''}"`, row.model, `${hostId}-${row.id}-models`, [], { placeholder: row.slot.slot === 'main' ? 'Choose a model' : emptyUsesText(row) })}
+                ${modelChooserHtml(`id="${escapeHtml(inputId)}" data-model-role-model aria-label="${escapeHtml(row.slot.label)}${isFallback ? ` ${index + 1}` : ''}"${described}`, row.model, `${hostId}-${row.id}-models`, [], { placeholder: row.slot.slot === 'main' ? 'Choose a model' : emptyUsesText(row) })}
                 <select class="ui-control" data-model-role-account aria-label="${escapeHtml(row.slot.label)} account" ${sourceId(row) ? '' : 'hidden'}></select>
                 ${isFallback ? `<span class="model-role-order"><button type="button" class="btn btn-default" data-model-up aria-label="Move fallback up" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" class="btn btn-default" data-model-down aria-label="Move fallback down" ${index === total - 1 ? 'disabled' : ''}>↓</button><button type="button" class="btn btn-default" data-model-remove aria-label="Remove fallback">Remove</button></span>` : ''}
             </div>
@@ -247,7 +284,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         element.innerHTML = (showContext ? `<section class="model-role-group"><label class="ui-field">Processing
             ${processingSelectHtml('data-global-processing aria-label="Global processing"', processingPreference, { global: true })}</label>
             <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Economy may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
-            <div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></section>` : '') + slots.map((slot) => {
+            <details class="model-role-details ui-disclosure"><summary>Details</summary><div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></details></section>` : '') + offeredSlots.map((slot) => {
+            if (slot.managed) return fixedGroupHtml(slot);
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
             const local = matching[0]?.local || false;
             return `<section class="model-role-group" data-model-role-group="${escapeHtml(slot.slot)}">
@@ -257,6 +295,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 </div>
                 ${slot.slot === 'fallback' ? '<p class="model-role-copy">Tried in this order when the acting model refuses, cannot be reached or loses its answer. A wait starts only when none of them answers.</p>' : ''}
                 ${matching.map((row, index) => rowHtml(row, index, matching.length)).join('')}
+                ${mainNote && slot.slot === 'main' ? `<p class="model-role-copy" id="${escapeHtml(hostId)}-main-note" data-main-follow-note>${escapeHtml(MAIN_FOLLOW_NOTE)}</p>` : ''}
             </section>`;
         }).join('');
         element.querySelector('[data-global-processing]')?.addEventListener('change', (event) => {
@@ -304,7 +343,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (account.innerHTML !== accountOptions) account.innerHTML = accountOptions;
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
                 ...item, value: parseModelSource(item.value || item.id).model,
-            }))));
+            }))), row.local ? [] : catalogPrograms(catalogs.get(catalogKey(row)), {source: sourceId(row), profile: row.account, sources: catalog.model_sources}));
             if (showContext) node.querySelector('[data-model-context-note]').textContent = modelContextNote(row.windowPreview);
             if (showContext) node.querySelector('[data-processing-summary]').textContent = processingIntentLabel(row.processing_preference, processingPreference);
             if (showContext) node.querySelector('[data-processing-capability]').textContent = processingCapabilityNote(row.processing_preference || processingPreference, currentItem(row)?.processing,
@@ -315,6 +354,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             // sits under the section banner, so it keeps to the compact form.
             const own = Boolean(sourceId(row) && rowCatalog);
             const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !own });
+            const choosing = !row.local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
+            status.classList.toggle('ui-status', choosing);
+            if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
             status.textContent = row.local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
@@ -334,7 +376,11 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     async function refreshRow(row, { force = false } = {}) {
         if (!sourceId(row) || destroyed) return;
         const key = catalogKey(row);
-        if (requests.has(key) || (!force && catalogs.has(key))) return requests.get(key)?.promise;
+        if (requests.has(key)) {
+            if (force) requests.get(key).again = true;
+            return requests.get(key).promise;
+        }
+        if (!force && catalogs.has(key)) return;
         const query = new URLSearchParams({ source_id: sourceId(row) });
         if (row.account) query.set('credential_profile_id', row.account);
         const controller = new AbortController();
@@ -348,7 +394,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             .catch((error) => { if (!destroyed) catalogs.set(key, mergeModelCatalog(catalogs.get(key), {
                 read_state: 'transport', errors: [{ error: error.message || String(error) }],
             })); })
-            .finally(() => { clearTimeout(timer); requests.delete(key); updateCatalogViews(); });
+            .finally(() => {
+                clearTimeout(timer); const again = requests.get(key)?.again; requests.delete(key); updateCatalogViews();
+                if (again && !destroyed) void refreshRow(row, {force: true});
+            });
         requests.set(key, { promise, controller });
         return promise;
     }
@@ -485,10 +534,12 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     return {
         load(value, contract = {}) {
             validationAttempted = false;
-            settings = { ...value }; slots = contract.modelSlots || slots;
+            settings = { ...value }; offeredSlots = contract.modelSlots || offeredSlots;
+            slots = offeredSlots.filter((slot) => !slot.managed);
             processingPreference = String(settings[PROCESSING_PREFERENCE_KEY] || ''); processingTouched = false;
             providerProfiles = contract.providerProfiles || providerProfiles;
             connections = apiConnections(settings, providerProfiles);
+            mainChoice = Array.isArray(settings._meta?.main_connection_choice) ? settings._meta.main_connection_choice : [];
             apiProviders = configuredApiProviders(settings, providerProfiles);
             rows = [];
             for (const slot of slots) {
@@ -500,12 +551,14 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             loaded = true; render();
         },
         mount() {
+            getDoc()?.addEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
             if (!disposeStatus) disposeStatus = bindStatusSurface(store, { elementId: hostId, doc: getDoc,
                 listener: updateCatalogViews });
             render();
         },
-        adoptCatalog(data = {}) {
-            catalog = mergeModelCatalog(catalog, data);
+        adoptCatalog(data = {}, { connectionCatalogs } = {}) {
+            // The wizard supplies its already-merged general snapshot plus unsaved server reads.
+            catalog = connectionCatalogs ? withConnectionCatalogs(data, connectionCatalogs) : mergeModelCatalog(catalog, data);
             if (Array.isArray(data.items)) {
                 for (const row of rows) void refreshRow(row, { force: true });
             }
@@ -518,6 +571,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             return validateAll()[0] || '';
         },
         destroy() {
+            getDoc()?.removeEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
             destroyed = true; disposeStatus?.(); disposeStatus = null;
             disposeChoosers();
             for (const request of requests.values()) request.controller.abort();

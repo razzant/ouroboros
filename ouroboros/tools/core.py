@@ -55,7 +55,6 @@ from ouroboros.tools.core_file_tools import (  # noqa: F401
     _MEMORY_AT_DRIVE_MEMORY,
     _SKILL_OWNER_STATE_FILENAMES,
     _access_or_block,
-    _annotate_reread,
     _coerce_line_window,
     _coerce_start_char,
     _data_list,
@@ -233,30 +232,34 @@ def _str_match_replace(
 
 
 def _check_data_shrink_guard(
-    target: pathlib.Path, new_content: str, force: bool = False
+    target: pathlib.Path, new_content: str, force: bool = False, *, recovery: str = ""
 ) -> "str | None":
     """Block likely accidental truncation of an EXISTING data-plane file on OVERWRITE,
     unless force=True (deferral 5). Mirrors the repo shrink-guard
     (``git._check_shrink_guard``) but WITHOUT the ``git ls-files`` tracking check — the
     data plane is not a git tree. Skips a non-existent target (a fresh create is any
-    size) and appends (the caller only invokes this on overwrite). Never raises."""
+    size) and appends (the caller only invokes this on overwrite). ``recovery``
+    replaces the full-write next step; exact editors pass
+    ``edit_ops.EXACT_EDIT_SHRINK_RECOVERY``. Never raises."""
     from ouroboros.config import get_runtime_mode
     from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 
     if force or mode_has_unrestricted_agency(get_runtime_mode()):
         return None
+    from ouroboros import work_domain  # a work file's previous bytes: the confined intake
+
     try:
-        if not target.exists():
+        if not work_domain.exists(target):
             return None
-        old_len = len(target.read_text(encoding="utf-8"))
+        old_len = len(work_domain.read_text(target))
         new_len = len(new_content)
         if old_len > 0 and new_len < old_len * 0.7:
             pct = round(new_len / old_len * 100)
             return (
                 f"⚠️ WRITE_BLOCKED: new content for '{target.name}' is {pct}% of original "
                 f"({old_len} -> {new_len} chars). This looks like accidental truncation. "
-                f"Use edit_text for surgical edits, or pass force=true to confirm an "
-                f"intentional rewrite."
+                + (recovery or "Use edit_text for surgical edits, or pass force=true to confirm an "
+                   "intentional rewrite.")
             )
     except Exception:
         return None
@@ -392,9 +395,9 @@ def _data_write(
             matches = True
     if matches and not cyber:
         return (
-            "⚠️ DATA_WRITE_BLOCKED: settings.json is the canonical owner-edited "
-            "file. Tool-level writes must route through /api/settings (which "
-            "applies key-by-key policy — OUROBOROS_RUNTIME_MODE is owner-only "
+            "⚠️ DATA_WRITE_BLOCKED: settings.json is the canonical owner-edited file. Tool-level writes must route "
+            "through /api/settings, declaring headers X-Ouroboros-Actor: ouroboros and X-Ouroboros-Task-Id: <your "
+            "task id> (it applies key-by-key policy — OUROBOROS_RUNTIME_MODE is owner-only "
             "and dropped on POST; other keys flow through normally). To change "
             "owner-only values, stop the agent, edit ~/Ouroboros/data/settings.json "
             "directly, then restart."
@@ -478,13 +481,22 @@ def _data_write(
             repair_task=bool(existing_tc and existing_tc.has_selected_skill))
         if _cas:
             return _cas
-    p.parent.mkdir(parents=True, exist_ok=True)
+    from ouroboros import work_domain  # a payload in a work checkout is written as the work domain
+
+    work = work_domain.is_work(p)
+    if not work:
+        p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
         # Deferral 5: block likely-accidental truncation of an existing data-plane file
         # (e.g. settings.json, skill state) unless force=true. Append is exempt.
         if (shrink := _check_data_shrink_guard(p, content, force)):
             return shrink
-        write_text_atomic(p, content)  # crash-safe full overwrite (G)
+        if work:
+            work_domain.write_text(p, content)
+        else:
+            write_text_atomic(p, content)  # crash-safe full overwrite (G)
+    elif work:
+        work_domain.write_text(p, content, append=True)
     else:
         with p.open("a", encoding="utf-8") as f:
             f.write(content)  # append is intentionally NOT atomized
@@ -529,6 +541,23 @@ def _data_write(
     if short_form is not None and short_form.ignored_reason:
         result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
     return result
+
+
+def _land_root_bytes(target: pathlib.Path, content: str, *, append: bool = False) -> None:
+    """Land a non-repository root's file: a work path AS THE WORK DOMAIN (``work_domain.write_text``: made, written
+    and resolved in its container), any other path exactly as before (its folder made, an atomic overwrite or a
+    non-atomic append)."""
+    from ouroboros import work_domain
+
+    if work_domain.is_work(target):
+        work_domain.write_text(target, content, append=append)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if append:
+        with target.open("a", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+    else:
+        write_text_atomic(target, content)
 
 
 def _join_write_results(results: List[str]) -> str:
@@ -653,21 +682,19 @@ def _write_file(
                     if block_reason:
                         results.append(f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}")
                         continue
-                target.parent.mkdir(parents=True, exist_ok=True)
                 body = str(item.get("content") or "")
                 if mode == "append":
                     # Batch items honor the declared mode like the single-file path below:
                     # silently overwriting here destroyed every prior chunk of a chunked
                     # large-file write while reporting success (#447 D2).
-                    with target.open("a", encoding="utf-8", newline="") as fh:
-                        fh.write(body)  # append is intentionally NOT atomized
+                    _land_root_bytes(target, body, append=True)  # append is intentionally NOT atomized
                 else:
                     # Deferral 5: batch items overwrite too — shrink-guard each (parity with the
                     # single-file path), force=true bypasses.
                     if (shrink := _check_data_shrink_guard(target, body, force)):
                         results.append(shrink)
                         continue
-                    write_text_atomic(target, body)  # crash-safe (G)
+                    _land_root_bytes(target, body)  # crash-safe (G)
                 result = f"OK: wrote {_root_display_path(normalized, rel_path)} ({len(body)} chars)"
                 if normalized == "user_files":
                     record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
@@ -682,16 +709,14 @@ def _write_file(
             )
             if block_reason:
                 return f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}"
-        target.parent.mkdir(parents=True, exist_ok=True)
         if mode == "append":
-            with target.open("a", encoding="utf-8", newline="") as fh:
-                fh.write(content)  # append is intentionally NOT atomized
+            _land_root_bytes(target, content, append=True)  # append is intentionally NOT atomized
         else:
             # Deferral 5: shrink-guard the full overwrite (e.g. active_workspace rewrites)
             # — force=true bypasses, matching the tool-schema `force` description.
             if (shrink := _check_data_shrink_guard(target, content, force)):
                 return shrink
-            write_text_atomic(target, content)  # crash-safe full overwrite (G)
+            _land_root_bytes(target, content)  # crash-safe full overwrite (G)
         result = f"OK: wrote {_root_display_path(normalized, path)} ({len(content)} chars)"
         if normalized == "user_files":
             record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
@@ -773,13 +798,18 @@ def _edit_text(
             drive_root=pathlib.Path(ctx.drive_root),
         )
         if short_form.ignored_reason:
-            result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
+            from ouroboros.tools.tool_result import append_published_text
+
+            # The editor's typed receipt (its changed paths) stays paired with the returned text.
+            result = append_published_text(ctx, result, f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}.")
         return result
     selected_payload = normalized == "skill_payload" or bound_skill_payload
     try:
         target = binding.target_path
+        from ouroboros import work_domain  # a work file is read and written as the work domain
+
         try:
-            text = target.read_text(encoding="utf-8")
+            text = work_domain.read_text(target)
         except FileNotFoundError:
             return publish_no_effect(ctx, f"⚠️ EDIT_TEXT_ERROR: file not found: {_root_display_path(normalized, path)}", tool_name="edit_text")
         except OSError as exc:
@@ -808,7 +838,10 @@ def _edit_text(
 
         replacement_offset = text.index(old_str)
         replacement_line = edit_source_line(text, replacement_offset)
-        write_text_atomic(target, new_text)
+        if work_domain.is_work(target):
+            work_domain.write_text(target, new_text)
+        else:
+            write_text_atomic(target, new_text)
         if repair:
             from ouroboros.skill_repair_admission import advance_repair_expected_hash
 
@@ -822,7 +855,12 @@ def _edit_text(
                 "File is on disk but NOT committed.\n"
                 "Run skill_review for this skill before enabling or declaring it ready."
             )
-            return result + (f"\n{newline_note}" if newline_note else "")
+            from ouroboros.tools.git_repo_edit import _with_path_facts
+
+            # A bound payload in active_workspace/system_repo is written here, not by the Git editor: the same
+            # typed receipt of the target this binding resolved names it for the result review.
+            return _with_path_facts(ctx, "edit_text", result + (f"\n{newline_note}" if newline_note else ""),
+                                    binding.base_path, [target.relative_to(binding.base_path).as_posix()])
         result = (
             f"OK: edited {_root_display_path(normalized, path)} "
             f"(line {replacement_line}; resolved_root={binding.base_path}; source={binding.source})"
@@ -921,16 +959,23 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         return protected_root_block
     # An admitted, absent path is an ordinary discovery miss: a typed warning
     # (parity with list_files/read_file), never a denial or an invalid query.
+    from ouroboros import work_domain
     from ouroboros.evidence_packs import materialize_tree
-    materialize_tree(search_root)  # a task's packed checkpoint handles are written back before the walk
-    if not search_root.exists():
+
+    # A work root is searched by held descriptors only (``work_domain``): no service process opens its paths, so the
+    # ripgrep path is the service's own roots' and a link is named, never followed.
+    work = work_domain.is_work(search_root)
+    search_kind = work_domain.kind(search_root) if work else ""
+    if not work:
+        materialize_tree(search_root)  # a task's packed checkpoint handles are written back before the walk
+    if not (search_kind not in ("", "missing") if work else search_root.exists()):
         return f"⚠️ SEARCH_NOT_FOUND: path not found: {display_search_path}"
     protected_root_read_block = block_reason_for_path(
         ctx, search_root, "read_bytes", binding
     )
-    if protected_root_read_block and search_root.is_file():
+    if protected_root_read_block and (search_kind == "file" if work else search_root.is_file()):
         return protected_root_read_block
-    root_resolved = root_path.resolve(strict=False)
+    root_resolved = work_domain.settle(root_path)  # a work root keeps its spelling; any other resolves as before
     _rt_search_root = str(root_resolved) if normalized == "runtime_data" else ""
     # Filter receipt (D3, capinv-447): every file present under the search root
     # but excluded before reading is COUNTED by typed reason, so "No matches"
@@ -969,7 +1014,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     try:
         from ouroboros.code_search_rg import format_search_result, search_with_rg
 
-        if search_root.is_dir():
+        if not work and search_root.is_dir():
             rg_result = search_with_rg(
                 search_root, query, regex=bool(regex), include=include,
                 max_results=max_results, path_allowed=_path_allowed_for_rg,
@@ -1001,10 +1046,10 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     deadline_hit = False
     # search_code on a single FILE: os.walk yields nothing for a file path, which
     # would make the search a silent no-op. Feed the scanner a one-file "walk".
-    if search_root.is_file():
+    if (search_kind == "file") if work else search_root.is_file():
         _walker = [(str(search_root.parent), [], [search_root.name])]
     else:
-        _walker = os.walk(str(search_root))
+        _walker = work_domain.walk(search_root) if work else os.walk(str(search_root))
     # Bound TOTAL (rg attempt + this fallback walk) to one budget, but always grant
     # the fallback a small floor so an rg that ate the budget still makes some progress.
     _search_deadline = max(_search_t0 + _search_wall_clock_sec(), _time.monotonic() + 5.0)
@@ -1060,7 +1105,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             # and _list_dir): a resolved file escaping the root — e.g. an in-tree symlink in an
             # untrusted child project/deliverable tree — must never have its target read out.
             try:
-                fp.resolve(strict=False).relative_to(root_resolved)
+                work_domain.settle(fp).relative_to(root_resolved)
             except (OSError, ValueError):
                 _drop("escapes_root")
                 continue
@@ -1070,7 +1115,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
                 break
 
             try:
-                text, decodable = search_text(fp.read_bytes())
+                text, decodable = search_text(work_domain.read_bytes(fp) if work else fp.read_bytes())
             except Exception:
                 _drop("read_error")
                 continue
@@ -1395,41 +1440,41 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("send_photo", {
             "name": "send_photo",
             "description": (
-                "Send an image to the owner's chat. "
+                "Send an image to this work's room (Presence-bound: local, not the place conversation). "
                 "Preferred: use file_path to send a local file. "
                 "Legacy: use image_base64 with raw base64 or __last_screenshot__. "
                 "Use after browse_page(output='screenshot') or browser_action(action='screenshot')."
             ),
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to image (preferred)"},
+                "file_path": {"type": "string", "description": "Local image path (preferred): relative to the active workspace, or absolute."},
                 "image_base64": {"type": "string", "description": "Base64-encoded image data or __last_screenshot__"},
                 "caption": {"type": "string", "description": "Optional caption for the photo"},
             }, "required": []},
         }, _send_photo),
         ToolEntry("send_video", {
             "name": "send_video",
-            "description": "Send a local video file to the owner's chat, with an optional caption. Requires file_path.",
+            "description": "Send a local video file to this work's room (Presence-bound: local, not the place conversation), with an optional caption. Requires file_path.",
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to the video."},
+                "file_path": {"type": "string", "description": "Local video path: relative to the active workspace, or absolute."},
                 "caption": {"type": "string", "description": "Optional caption for the video"},
             }, "required": ["file_path"]},
         }, _send_video),
         ToolEntry("send_file", {
             "name": "send_file",
             "description": (
-                "Send an arbitrary document/file to the owner's chat (e.g. a report, .md/.csv/.html, "
+                "Send an arbitrary document/file to this work's room (Presence-bound: local, not the place conversation; e.g. a report, .md/.csv/.html, "
                 "PDF, archive, or code file — anything that is not an image or video). "
                 "Requires a local file_path; large files use a captured download reference. Deliver a finished file result "
                 "the owner can download, rather than only describing it or sending a screenshot."
             ),
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to the document/file"},
+                "file_path": {"type": "string", "description": "Local file path: relative to the active workspace, or absolute."},
                 "caption": {"type": "string", "description": "Optional caption for the file"},
             }, "required": ["file_path"]},
         }, _send_file),
         ToolEntry("send_links", {
             "name": "send_links",
-            "description": "Send one or more HTTP(S) links as prominent clickable buttons in the owner's chat.",
+            "description": "Send one or more HTTP(S) links as prominent clickable buttons in this work's room (Presence-bound: local, not the place conversation).",
             "parameters": {"type": "object", "properties": {
                 "title": {"type": "string", "description": "Optional heading above the buttons"},
                 "links": {"type": "array", "minItems": 1, "maxItems": _MAX_LINK_ACTIONS, "items": {

@@ -3,7 +3,11 @@
 Completed trees are addressed by reviewed content and runtime/dependency
 identity. Processes share the bytes, keeping PID references until unload;
 reclamation requires both an obsolete identity and dead owners. Publication,
-reference acquisition and sweeping use the same cross-process lock.
+reference acquisition and sweeping use the same cross-process lock. Under a
+deployment's execution domain a tree is imported only once its files hash to
+the trusted digest (``deployment_extensions.staged_verifier``): a cached tree
+that does not is replaced by a fresh copy, which must pass too. Such trees are
+their own identity, never one a generation without that check left behind.
 """
 
 from __future__ import annotations
@@ -60,14 +64,28 @@ def _stage_extension_import_tree(
     state_dir: pathlib.Path,
     entry_path: pathlib.Path,
 ) -> tuple[pathlib.Path, pathlib.Path]:
-    """Acquire a complete immutable import tree, copying only on a cache miss."""
+    """Acquire a complete immutable import tree, copying only on a cache miss; under an execution domain only a
+    tree that hashes to the trusted bytes (``staged_verifier``) is handed out."""
+    from ouroboros.deployment_extensions import staged_verifier
+
     resolved_root = skill.skill_dir.resolve()
     relative_entry = entry_path.relative_to(resolved_root)
     identity = extension_import_identity(skill)
     import_root = state_dir / "__extension_imports" / identity
+    verify = staged_verifier(skill)
     with extension_cache_lock(state_dir, "imports"):
-        if not (import_root / "complete.json").is_file():
+        if not skill.skill_dir.is_dir():
+            raise RuntimeError(f"extension {skill.name!r} payload was removed before import acquisition")
+        complete = (import_root / "complete.json").is_file()
+        if complete and verify is not None and not verify(import_root / "skill"):
+            log.warning("Staged import of %s does not hash to its trusted bytes; staging it again", skill.name)
+            complete = False
+        if not complete:
             _copy_extension_tree(skill, import_root)
+            if verify is not None and not verify(import_root / "skill"):
+                shutil.rmtree(import_root, ignore_errors=True)
+                raise RuntimeError(f"extension {skill.name!r} changed while it was staged: its copy does not hash to "
+                                   "the bytes its administrator delivered, so nothing of it was imported")
         owners = import_root / "owners"
         owners.mkdir(exist_ok=True)
         (owners / str(os.getpid())).touch()
@@ -77,7 +95,9 @@ def _stage_extension_import_tree(
 
 
 def extension_import_identity(skill: LoadedSkill) -> str:
-    """The installer's fingerprint owns dependency changes, not the review hash."""
+    """The installer's fingerprint owns dependency changes, not the review hash. A generation that checks staged
+    trees against trusted bytes (an execution domain) names that check, so it never reuses an unchecked tree."""
+    from ouroboros.deployment_policy import trusted_extensions
     from ouroboros.marketplace.isolated_deps import FINGERPRINT_FILENAME
 
     executable = pathlib.Path(sys.executable).resolve()
@@ -90,15 +110,21 @@ def extension_import_identity(skill: LoadedSkill) -> str:
     runtime = hashlib.sha256(repr((
         str(executable), st.st_size, st.st_mtime_ns, sys.version,
         sys.prefix, sys.platform, str(skill.skill_dir.resolve()),
+        *(("trusted_bytes_checked",) if trusted_extensions() is not None else ()),
     )).encode("utf-8") + deps).hexdigest()
-    return f"sha256-{skill.content_hash}-{runtime}"
+    # Hash both complete identities into one leaf; spelling both adds 65 path
+    # characters and can make an otherwise usable Windows import cwd invalid.
+    identity = hashlib.sha256(f"{skill.content_hash}\0{runtime}".encode("utf-8")).hexdigest()
+    return f"sha256-{identity}"
 
 
 @contextmanager
 def extension_cache_lock(state_dir: pathlib.Path, purpose: str):
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
-    path = state_dir / f".extension-{purpose}.lock"
+    # Keep the cache lock beside state so deleting a skill cannot replace its inode.
+    path = (state_dir.parent / f".{state_dir.name}-extension-imports.lock"
+            if purpose == "imports" else state_dir / f".extension-{purpose}.lock")
     fd = acquire_exclusive_file_lock(path, timeout_sec=30, owner_aware_stale=True)
     if fd is None:
         raise RuntimeError(f"extension {purpose} cache lock unavailable")
@@ -150,11 +176,10 @@ def release_extension_import_tree(import_root: pathlib.Path) -> None:
 
 
 def declared_catalog_inputs(skill: LoadedSkill) -> dict | None:
-    """An opt-in declaration is exhaustive; unenumerated inputs are not cached.
+    """The settings and environment keys a skill declares its registration reads, narrowing its catalog key.
 
-    Catalog settings are a fixed snapshot of the declared keys (ordinary dispatch reads
-    current settings); registration that depends on files, time, network or side effects
-    must omit the declaration.
+    Without the declaration the key holds every value the host hands the catalog child (``catalog_identity``).
+    Catalog settings are a fixed snapshot either way (ordinary dispatch reads current settings).
     """
     declaration = skill.manifest.raw_extra.get("catalog_inputs")
     if not isinstance(declaration, dict) or set(declaration) != {"settings", "environment"}:
@@ -166,14 +191,20 @@ def declared_catalog_inputs(skill: LoadedSkill) -> dict | None:
 
 
 def catalog_identity(skill: LoadedSkill, settings: dict, environ: dict, grants: dict) -> str | None:
-    from ouroboros.extension_health import code_stamp
+    """The source identity of one catalog dry run: the payload and its runtime, the executing host code, the
+    grants, and the settings and environment the child receives (all of them, or the declared ones). ``None``
+    when the host code has no identity (no executing-source baseline): such a process records and reuses nothing.
+    What a registration reads past these inputs (its own files, the clock, the network) is not in the key: a worker
+    publishes what the last load on the server produced (``catalog_extension_surfaces``)."""
+    from ouroboros.preflight_receipts import capture_executing_source_baseline
 
-    declaration = declared_catalog_inputs(skill)
-    if declaration is None:
+    host = capture_executing_source_baseline()
+    if not host:
         return None
+    declaration = declared_catalog_inputs(skill) or {"settings": list(settings), "environment": list(environ)}
     inputs = {
         "runtime": extension_import_identity(skill),
-        "host": code_stamp(),
+        "host": host,
         "settings": {k: settings[k] for k in declaration["settings"] if k in settings},
         "environment": {k: environ[k] for k in declaration["environment"] if k in environ},
         "grants": grants,

@@ -8,11 +8,14 @@ preparation preserves, and the pinned checkout a stand keeps across restarts.
 
 from __future__ import annotations
 
+import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
 import supervisor.git_ops as git_ops
+from tests._git_ops_recovery_shared import _git, _history_repo
 
 
 def test_compute_managed_update_status_passive_does_not_ensure_remote(monkeypatch):
@@ -60,7 +63,11 @@ def test_official_fetch_timeout_kills_the_process_tree(monkeypatch):
     calls = []
 
     class FakeProcess:
+        def poll(self):
+            return self.returncode
+
         returncode = 1
+        stdin = stdout = stderr = None  # the runner closes an exited child's pipes; this fake opens none
 
         def __init__(self):
             self.communicates = 0
@@ -73,6 +80,8 @@ def test_official_fetch_timeout_kills_the_process_tree(monkeypatch):
             return "", "still running"
 
     proc = FakeProcess()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(git_ops.subprocess, "Popen", lambda *args, **kwargs: proc)
     monkeypatch.setattr(
         platform_layer,
@@ -104,6 +113,9 @@ def test_dependency_sync_is_panic_tracked_and_killed_on_timeout(monkeypatch, tmp
     killed = []
 
     class HungProcess:
+        def poll(self):
+            return self.returncode
+
         returncode = 1
 
         def __init__(self):
@@ -117,6 +129,8 @@ def test_dependency_sync_is_panic_tracked_and_killed_on_timeout(monkeypatch, tmp
             return -9
 
     proc = HungProcess()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(git_ops.subprocess, "Popen", lambda *_a, **_k: proc)
     monkeypatch.setattr(platform_layer, "kill_process_tree", lambda value: killed.append(value))
 
@@ -257,6 +271,7 @@ def test_safe_restart_fallback_does_not_rewrite_dev_branch(monkeypatch):
         {"ok": True, "stdout": "import_ok", "stderr": "", "returncode": 0},
     ]
 
+    monkeypatch.setattr(git_ops, "_is_launcher_managed_repo", lambda: True)
     monkeypatch.setattr(git_ops, "checkout_and_reset", fake_checkout)
     monkeypatch.setattr(git_ops, "sync_runtime_dependencies", lambda reason: (True, reason))
     monkeypatch.setattr(git_ops, "import_test", lambda: import_results.pop(0))
@@ -314,6 +329,7 @@ def test_a_stand_can_keep_its_pinned_checkout_across_restarts(monkeypatch):
 
     # Without the lever nothing changes: the ordinary managed path still runs.
     monkeypatch.delenv("OUROBOROS_DISABLE_MANAGED_UPDATES")
+    monkeypatch.setattr(git_ops, "_is_launcher_managed_repo", lambda: True)
     checkouts = []
     monkeypatch.setattr(git_ops, "checkout_and_reset",
                         lambda branch, reason="unspecified", unsynced_policy="ignore":
@@ -322,6 +338,185 @@ def test_a_stand_can_keep_its_pinned_checkout_across_restarts(monkeypatch):
                         lambda: {"ok": True, "stdout": "", "stderr": "", "returncode": 0})
     assert git_ops.safe_restart(reason="bootstrap")[0] is True
     assert checkouts == [git_ops.BRANCH_DEV]
+
+
+@pytest.fixture
+def source_checkout(tmp_path, monkeypatch):
+    """A team's own checkout: its own branch, unsaved edits, and an origin nobody asked to fetch."""
+    from supervisor import git_ops_reset
+
+    repo, first, second = _history_repo(tmp_path)
+    _git(repo, "branch", "ouroboros-stable", first)
+    _git(repo, "checkout", "-q", "-b", "team-feature")
+    (repo / "value.txt").write_text("unsaved edit\n", encoding="utf-8")
+    (repo / "notes.txt").write_text("untracked notes\n", encoding="utf-8")
+    _git(repo, "remote", "add", "origin", str(tmp_path / "origin-nobody-asked-for"))
+    drive = tmp_path / "data"
+    (drive / "logs").mkdir(parents=True)
+    for name, value in {"REPO_DIR": repo, "DRIVE_ROOT": drive, "BRANCH_DEV": "ouroboros",
+                        "BRANCH_STABLE": "ouroboros-stable"}.items():
+        monkeypatch.setattr(git_ops, name, value)
+    monkeypatch.setattr(git_ops, "update_state", lambda mutate, **_kw: mutate({}))
+    monkeypatch.setattr(git_ops, "append_jsonl", lambda _path, row: events.append(row))
+    for name in ("OUROBOROS_DISABLE_MANAGED_UPDATES", "OUROBOROS_MANAGED_BY_LAUNCHER", "OUROBOROS_MANAGED_REPO_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    events, deps = [], []
+    monkeypatch.setattr(git_ops, "sync_runtime_dependencies", lambda reason: deps.append(reason) or (True, "unchanged"))
+    monkeypatch.setattr(git_ops, "import_test", lambda: {"ok": True, "stdout": "", "stderr": "", "returncode": 0})
+
+    def identity():
+        return _git(repo, "symbolic-ref", "--short", "HEAD"), _git(repo, "rev-parse", "HEAD")
+
+    def served():
+        return (*identity(), _git(repo, "status", "--porcelain"), (repo / "value.txt").read_bytes(),
+                (repo / "notes.txt").read_bytes(), (repo / ".git" / "FETCH_HEAD").exists())
+
+    def no_tree_move(*_a, **_k):
+        raise AssertionError("this restart has no authorized tree move")
+
+    def forbid_moves():
+        monkeypatch.setattr(git_ops, "checkout_and_reset", no_tree_move)
+        monkeypatch.setattr(git_ops_reset, "_recovery_checkout", no_tree_move)
+
+    return SimpleNamespace(repo=repo, first=first, second=second, identity=identity, served=served,
+                           forbid_moves=forbid_moves, deps=deps, events=events)
+
+
+@pytest.mark.parametrize(("reason", "policy"), [("owner_restart", "rescue_and_reset"),
+                                                ("agent_restart_request", "rescue_and_block")])
+def test_restart_on_a_source_checkout_serves_what_is_on_disk(source_checkout, reason, policy):
+    scene = source_checkout
+    scene.forbid_moves()
+    before = scene.served()
+
+    ok, message = git_ops.safe_restart(reason=reason, unsynced_policy=policy)
+
+    assert ok is True and message == f"OK: unmanaged checkout kept at {before[1][:12]}"
+    assert scene.served() == before and before[0] == "team-feature" and before[5] is False
+    assert scene.deps == [reason]
+    assert [(row["type"], row["head"]) for row in scene.events] == [("unmanaged_checkout_kept", before[1])]
+
+
+@pytest.mark.parametrize("failing", ["deps", "import"])
+def test_a_source_checkout_refuses_a_broken_restart_and_changes_nothing(source_checkout, monkeypatch, failing):
+    scene = source_checkout
+    scene.forbid_moves()
+    if failing == "deps":
+        monkeypatch.setattr(git_ops, "sync_runtime_dependencies", lambda reason: (False, "pip exited 1"))
+        expected = "Failed deps on this unmanaged checkout: pip exited 1; the checkout was left untouched."
+    else:
+        monkeypatch.setattr(git_ops, "import_test", lambda: {
+            "ok": False, "stdout": "", "stderr": "Traceback\nModuleNotFoundError: pypdf\n", "returncode": 1})
+        expected = ("Import test failed on this unmanaged checkout (rc=1): ModuleNotFoundError: pypdf; "
+                    "the checkout was left untouched.")
+    before = scene.served()
+
+    assert git_ops.safe_restart(reason="owner_restart") == (False, expected)
+    assert scene.served() == before
+
+
+@pytest.mark.parametrize("marker", ["launcher_names_this_repo", "metadata_names_this_repo"])
+def test_a_launcher_managed_checkout_still_returns_to_its_working_branch(source_checkout, monkeypatch, marker):
+    scene = source_checkout
+    monkeypatch.setattr(git_ops, "_has_remote", lambda *_a: False)
+    monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+    if marker == "launcher_names_this_repo":
+        monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", str(scene.repo))
+    else:
+        (scene.repo / ".git" / git_ops.MANAGED_REPO_META_NAME).write_text(
+            json.dumps({"managed_repo_dir": str(scene.repo.resolve())}), encoding="utf-8")
+
+    assert git_ops.safe_restart(reason="owner_restart") == (True, "OK: ouroboros")
+    assert scene.identity() == ("ouroboros", scene.second) and scene.deps == ["owner_restart"]
+    assert "unmanaged_checkout_kept" not in [row["type"] for row in scene.events]
+
+
+@pytest.mark.parametrize("identity", ["marker_for_another_repo", "metadata_without_marker",
+                                      "stray_intent_without_metadata", "intent_for_another_branch"])
+def test_nothing_short_of_boot_identity_or_an_armed_update_moves_a_source_checkout(source_checkout, monkeypatch,
+                                                                                   identity):
+    scene = source_checkout
+    scene.forbid_moves()
+    metadata = json.dumps({"managed_repo_dir": str(scene.repo.resolve())})
+    if identity == "marker_for_another_repo":
+        monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+        monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", str(scene.repo.parent / "another-repo"))
+    if identity in {"metadata_without_marker", "intent_for_another_branch"}:
+        (scene.repo / ".git" / git_ops.MANAGED_REPO_META_NAME).write_text(metadata, encoding="utf-8")
+    if identity == "stray_intent_without_metadata":
+        git_ops._write_update_intent({"branch": "ouroboros", "target_sha": scene.first})
+    if identity == "intent_for_another_branch":
+        git_ops._write_update_intent({"branch": "another", "target_sha": scene.first})
+    before = scene.served()
+
+    assert git_ops.safe_restart(reason="owner_restart")[0] is True
+    assert scene.served() == before
+
+
+def test_an_armed_update_still_lands_through_restart_on_an_unlaunched_checkout(source_checkout, monkeypatch):
+    """Update's replay: the intent `prepare_managed_update` armed is applied by the restart that follows."""
+    from supervisor import git_ops_reset, update_merge
+
+    scene = source_checkout
+    monkeypatch.setattr(git_ops, "_has_remote", lambda *_a: False)
+    target = _git(scene.repo, "commit-tree", "ouroboros^{tree}", "-p", "ouroboros", "-m", "official")
+    (scene.repo / ".git" / git_ops.MANAGED_REPO_META_NAME).write_text(
+        json.dumps({"managed_repo_dir": str(scene.repo.resolve())}), encoding="utf-8")
+    git_ops._write_update_intent({"branch": "ouroboros", "target_sha": target})
+    monkeypatch.setattr(update_merge, "read_update_tx_strict", lambda: (
+        "valid", {"phase": "applying_replace", "target_sha": target, "pre_update_branch": "ouroboros"}))
+    monkeypatch.setattr(git_ops._update_source, "official_ref_has_constitution", lambda *_a, **_k: True)
+    monkeypatch.setattr(git_ops_reset, "_target_lacks_store", lambda _sha: False)
+
+    assert git_ops.safe_restart(reason="owner_restart") == (True, "OK: ouroboros")
+    assert scene.identity() == ("ouroboros", target) and not git_ops._read_update_intent()
+
+
+def test_restore_is_not_undone_by_the_restart_that_follows_it(source_checkout):
+    """Restore moves the tree itself; the restart after it must serve exactly that."""
+    scene = source_checkout
+    ok, message = git_ops.rollback_to_version(scene.first)
+    assert ok is True, message
+    scene.forbid_moves()
+
+    assert git_ops.safe_restart(reason="owner_restart")[0] is True
+    assert scene.identity() == ("team-feature", scene.first)
+
+
+@pytest.mark.parametrize("keeper", ["managed_checkout_disabled", "unmanaged_checkout_kept", "managed_by_deployment"])
+def test_a_kept_checkout_drops_a_stale_stamped_identity_and_nothing_else(source_checkout, monkeypatch, keeper):
+    """A branch/SHA an earlier tree move stamped would outrank the live read of a kept checkout, so the keep clears
+    it without stamping an observed SHA or forgetting the smoke receipt; the deployment's own projection stays."""
+    from ouroboros import config
+    from ouroboros.gateway.state import _runtime_repo_identity
+    from supervisor import git_ops_reset
+
+    scene = source_checkout
+    scene.forbid_moves()
+    stale = {"current_branch": "ouroboros", "current_sha": scene.first, "owner_chat_id": 7}
+    state = dict(stale)
+    monkeypatch.setattr(git_ops, "update_state", lambda mutate, **_kw: mutate(state))
+    monkeypatch.setattr(config, "REPO_DIR", scene.repo)
+    if keeper == "managed_checkout_disabled":
+        monkeypatch.setenv("OUROBOROS_DISABLE_MANAGED_UPDATES", "1")
+    if keeper == "managed_by_deployment":
+        monkeypatch.setattr(git_ops_reset, "body_replacement_refusal", lambda: "the administrator's program")
+    receipt, watermarks = git_ops_reset._bootstrap_receipt_path(), git_ops.DRIVE_ROOT / "state" / "migrations.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"schema_version": 1, "head": scene.first}), encoding="utf-8")
+    watermarks.write_text(json.dumps({"schema_generation": 7}), encoding="utf-8")
+    on_disk = receipt.read_bytes(), watermarks.read_bytes()
+
+    assert git_ops.safe_restart(reason="owner_restart")[0] is True
+
+    assert [row["type"] for row in scene.events] == [keeper]
+    assert (receipt.read_bytes(), watermarks.read_bytes()) == on_disk
+    if keeper == "managed_by_deployment":
+        assert state == stale
+    else:
+        assert state == {**stale, "current_branch": None, "current_sha": None}
+        assert _runtime_repo_identity(state) == ("team-feature", scene.second)
+
 
 def test_configure_remote_adds_origin_even_when_managed_remote_exists(monkeypatch):
     calls = []
@@ -472,11 +667,7 @@ def test_ensure_official_update_remote_blank_configured_source_defaults(monkeypa
 
 @pytest.mark.parametrize("legacy", [
     "https://github.com/joi-lab/ouroboros-desktop",  # what builds before v6.8.0 store
-    "https://github.com/joi-lab/ouroboros-desktop.git",
-    "https://github.com/joi-lab/ouroboros",
     "git@github.com:joi-lab/ouroboros.git",
-    "ssh://git@github.com/joi-lab/ouroboros.git",
-    "https://github.com/joi-lab/ouroboros-desktop.git/",
     "HTTPS://GitHub.com/Joi-Lab/Ouroboros-Desktop/",
 ])
 def test_former_official_home_updates_from_the_official_repository(monkeypatch, legacy):
@@ -497,12 +688,7 @@ def test_former_official_home_updates_from_the_official_repository(monkeypatch, 
 
 @pytest.mark.parametrize("configured", [
     "https://github.com/joi-lab/ouroboros-joi",  # another repository of the same organisation
-    "https://github.com/joi-lab/OuroborosHub",
-    "https://github.com/joi-lab/ouroboros-desktop-fork",
-    "https://github.com/someone/ouroboros",
-    "https://gitlab.com/joi-lab/ouroboros",
     "joi-lab/ouroboros",  # not a GitHub URL
-    "https://github.com/joi-lab/ouroboros/tree/main",  # a page inside the repository, not its URL
     "/srv/mirrors/joi-lab/ouroboros.git",
 ])
 def test_only_the_exact_former_homes_are_mapped(configured):

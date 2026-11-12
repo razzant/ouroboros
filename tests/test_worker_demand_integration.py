@@ -23,7 +23,7 @@ from tests.system_e2e.harness import (
     wait_durable_result, wait_until,
 )
 
-pytestmark = [pytest.mark.serial, pytest.mark.integration]
+pytestmark = [pytest.mark.integration]
 
 
 def native_worker_census(root):
@@ -97,7 +97,7 @@ def test_small_install_then_repeated_burst_keeps_one_spare_without_lowering_cap(
                     assert wait_until(lambda: len(oracle.running_ids()) == cap and len(calls) == cap, 120)
                     current = census(f"burst_{wave}", before)
                     assert len(current) == cap
-                    assert oracle.queue_snapshot()["active_worker_count"] == cap
+                    assert oracle.queue_snapshot()["acting_worker_count"] == cap
                     release.set()
                     for tid in ids:
                         assert wait_durable_result(oracle, tid)["status"] == "completed"

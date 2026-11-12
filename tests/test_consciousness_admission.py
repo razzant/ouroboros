@@ -79,13 +79,14 @@ def test_an_exhausted_allowance_refuses_with_the_window_facts(door, monkeypatch)
     queue, pending, _running = door
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window", lambda root, now=None: {
         **AVAILABLE, "status": "exhausted", "settled_usd": 21.5, "accounted_usd": 25.5, "remaining_usd": 0.0,
+        "reserved_usd": 1.0, "unresolved_upper_bound_usd": 3.0,
         "unknown_unmetered": 1, "resets_at": "2026-09-17T08:00:00+00:00"})
     refused = queue.enqueue_task(_root("c1"))
     assert refused["_admission_blocked"] == "consciousness_allowance_exhausted"
-    # Known spend decides and is called spent; open holds are shown beside it, uncounted (#1487).
+    # Known spend decides and is called spent; each uncounted part is named beside it (#1487, P8).
     assert refused["_admission_detail"] == (
-        "$21.50 (at least) of $20.00 known spend in the last 24 h (plus $4.00 of open holds, "
-        "not counted); resets at 2026-09-17T08:00:00+00:00")
+        "$21.50 (at least) of $20.00 known spend in the last 24 h (plus $1.00 reserved for calls not yet sent; "
+        "up to $3.00 for calls without a known price, not counted); resets at 2026-09-17T08:00:00+00:00")
     assert pending == []
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window", lambda root, now=None: {
         **AVAILABLE, "status": "exhausted", "limit_usd": 0.0, "settled_usd": 0.0, "accounted_usd": 0.0,

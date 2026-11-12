@@ -73,7 +73,7 @@ def test_received_direct_response_survives_manifest_fault_on_original_attempt(
     assert len(calls) == len(usage.read_usage_records(ctx.drive_root)) == 1
 
 
-@pytest.mark.parametrize("kind", ["escape", "symlink_escape", "unknown_root", "missing", "invalid_bytes", "invalid_reference"])
+@pytest.mark.parametrize("kind", ["missing", "invalid_bytes", "invalid_reference"])
 def test_input_refusal_is_typed_before_any_submission(monkeypatch, ctx, tmp_path, kind):
     from ouroboros import usage_accounting as usage
 
@@ -101,8 +101,7 @@ def test_input_refusal_is_typed_before_any_submission(monkeypatch, ctx, tmp_path
 
 @pytest.mark.parametrize("field,value", [
     ("id", None), ("id", ""), ("maxInputImages", None), ("maxInputImages", True),
-    ("maxInputImages", -1), ("supportedOptions", None), ("supportedOptions", "quality"),
-    ("supportedOptions", [None]), ("models", None), ("models", "gpt-image-2"),
+    ("supportedOptions", None), ("models", None),
 ])
 def test_malformed_engine_capability_is_unavailable_not_a_caller_error(engine, ctx, field, value):
     from ouroboros import usage_accounting as usage

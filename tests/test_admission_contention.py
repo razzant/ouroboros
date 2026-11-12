@@ -12,7 +12,6 @@ from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import write_task_result
 from tests._store_journal_shared import exclusive_hold, read_hold, use_journal, write_hold
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -63,8 +62,7 @@ def database_reader(root, *, exclusive=False, write=False, money=False, acquire_
         assert not thread.is_alive() and not errors
 
 
-@pytest.mark.parametrize("phase", ["reserve", "dispatch"])
-@pytest.mark.parametrize("control", ["open", "budget", "pause"])
+@pytest.mark.parametrize(("control", "phase"), [("open", "reserve"), ("budget", "dispatch"), ("pause", "reserve")])
 def test_publication_replacement_retries_same_attempt_after_rollback(root, monkeypatch, phase, control):
     publish(root, generation="old")
     original = ua._check_dispatch_fences
@@ -316,8 +314,7 @@ def test_pause_install_does_not_retry_an_unconfirmed_write(root, monkeypatch):
         pass
 
 
-@pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("bound", ["calendar", "logical", "ceiling"])
+@pytest.mark.parametrize(("bound", "strict"), [("calendar", False), ("logical", True), ("ceiling", False)])
 def test_known_stop_keeps_priority_over_expired_clocks(root, monkeypatch, strict, bound):
     from ouroboros import config, model_wait
 

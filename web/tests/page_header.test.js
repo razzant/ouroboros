@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { bindHeaderControlPlacement, bindPageHeader, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
+import { createRoomHeader } from '../modules/chat_header.js';
+import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 test('page headers retain their toolbar contract with an optional chrome recipe', () => {
     for (const field of ['toolbarHtml', 'actionsHtml']) {
@@ -99,6 +102,39 @@ test('Restart and the budget are the same nodes, placed by layout: the row on a 
     delete globalThis.window; delete globalThis.document;
 });
 
+test('a room\'s bar ends in one group of capsules, the consciousness chip first, one gap apart (owner seed S3)', () => {
+    const env = installDom();
+    try {
+        // Main's commands (.app-page-actions) and a Project's Panic and × (.app-page-trailing): the chip leads either.
+        for (const slot of ['app-page-toolbar app-page-actions ui-chrome-group', 'app-page-trailing']) {
+            const bar = document.createElement('div');
+            const title = document.createElement('div');
+            title.className = 'app-page-title-block';
+            const group = document.createElement('div');
+            group.className = slot;
+            const panic = document.createElement('button');
+            panic.className = 'chat-header-btn danger ui-chrome-control';
+            group.append(panic);
+            bar.append(title, group);
+            const header = createRoomHeader({ bar, ws: { isConnected: () => true, send: () => ({ status: 'sent' }) } });
+            const chip = group.children[0];
+            assert.ok(chip.classList.contains('cx-chip'), `${slot}: the chip leads the end group`);
+            assert.equal(group.children[1], panic);
+            assert.equal(bar.children.includes(chip), false, 'never a capsule of its own between the title and the group');
+            header.destroy();
+        }
+    } finally { restoreDom(env); }
+    // One gap rule holds the whole row: the group's, with Main's commands laid in it; no second gap inside.
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.match(css, /:is\(\.chat-page-header, \.project-panel-bar\) > :is\(\.app-page-actions, \.app-page-trailing\) \{ gap: var\(--space-2\); \}/);
+    assert.match(css, /\.chat-header-actions \{ display: contents; \}/);
+    assert.equal([...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter(([, head, body]) => head.includes('chat-header-actions') && /gap/.test(body)).length, 0);
+    // The budget's amount keeps the capsule's centre line; its track is out of the line (U004).
+    const track = css.match(/\.chat-budget-bar \{([^}]*)\}/)[1];
+    assert.match(track, /position: absolute/);
+    assert.doesNotMatch(css.match(/\.chat-budget-pill \{([^}]*)\}/)[1], /flex-direction: column/);
+});
+
 test('a page\'s own navigation starts its bar on a desk and goes back under the row in the stack layout', () => {
     // A small DOM: comment marks, and an engine that drops focus from a node it moves.
     const doc = { activeElement: null, createComment: () => el('#comment') };
@@ -192,6 +228,24 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         assert.ok(disconnected);
         // A header with nothing of its own to place (Widgets) binds nothing.
         assert.equal(typeof bindPageHeader(el('app-page-header', el('app-page-title-block', el('app-page-lead')))), 'function');
+        assert.equal(listeners.size, 0);
+        // A bar whose one action is already in it (Circles): nothing moves, yet on a desk it lays out as the band of
+        // every named page, and goes back to the base header in the stack layout.
+        const barOnly = el('app-page-header', el('app-page-title-block', el('app-page-lead')), el('app-page-toolbar', el('new')));
+        barOnly.clientWidth = 900;
+        let barReleased = false;
+        doc.defaultView = { ResizeObserver: class {
+            observe(target) { assert.equal(target, barOnly); }
+            disconnect() { barReleased = true; }
+        }, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {} };
+        const offBar = bindPageHeader(barOnly);
+        assert.ok(barOnly.attrs.has('data-lead'), 'a desk: the desk band');
+        layout('stack');
+        assert.ok(!barOnly.attrs.has('data-lead'), 'the stack layout: the base header');
+        layout('docked');
+        assert.ok(barOnly.attrs.has('data-lead'));
+        offBar();
+        assert.ok(barReleased, 'its disposer releases the observer it took');
         assert.equal(listeners.size, 0);
     } finally { delete globalThis.window; delete globalThis.document; }
 });

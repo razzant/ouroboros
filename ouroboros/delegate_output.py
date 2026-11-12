@@ -176,13 +176,25 @@ def staged_output_address(drive_root: Any, entry: _RunCustody) -> Dict[str, str]
         return {}
 
 
+def _rootless_read(direct: Dict[str, Any]) -> Dict[str, Any]:
+    """A named ``artifact_store`` is the READER's own, which refuses an absolute address outside
+    its lineage. Rootless, dispatch selects whichever root this reader may use that physically
+    holds the same file (``tool_resolution._root_containing_absolute_path``): no new authority."""
+    args = direct.get("arguments")
+    if not (isinstance(args, dict) and args.get("root") == _STAGED_SOURCE_ROOT
+            and pathlib.Path(str(args.get("path") or "")).is_absolute()):
+        return direct
+    return {**direct, "arguments": {key: value for key, value in args.items() if key != "root"}}
+
+
 def project_output_readers(row: Dict[str, Any], publisher_task_id: str = "") -> Dict[str, Any]:
     """Prefer the receipt-bound reader, without changing retained receipt bytes.
 
     ``task_id`` on a source is its staging store, NOT its physical publisher.
     The enclosing task/hop supplies the publisher; Wrap up rows also record it
     as ``owner_task_id``. A legacy source_read is usable when neither is known.
-    Direct staging reads remain available to the owner for D7 acknowledgement.
+    Direct staging reads remain available to the owner for D7 acknowledgement
+    and open for any other actor whose read roots hold the file (``_rootless_read``).
     No source is opened and no read grant or consumption receipt is created.
     """
     projected = dict(row)
@@ -203,7 +215,7 @@ def project_output_readers(row: Dict[str, Any], publisher_task_id: str = "") -> 
             "task_id": publisher, "delegated_output_sha256": digest}}
         direct = ref.get("direct_read") or ref.get("read")
         return {**ref, "read": reader, "source_read": reader,
-                **({"direct_read": direct} if isinstance(direct, dict)
+                **({"direct_read": _rootless_read(direct)} if isinstance(direct, dict)
                    and direct.get("tool") == "read_file" else {})}
 
     for key in ("staged_output", "terminal_observation"):
@@ -279,11 +291,31 @@ def engine_locator(detail: Any) -> Dict[str, Any]:
 # Proven-coverage ledger for staged artifacts: merged, sorted character intervals
 # actually SERVED to the reader, keyed by path, content hash and successor identity. A re-wait
 # re-stages the identical payload and must not void an honest reader's partial proof,
-# while changed content honestly resets it. Process-local by design: the DURABLE fact
-# is the acknowledgement row itself; a restarted worker re-proves coverage by
-# re-reading, it never inherits an unproven claim.
+# while changed content honestly resets it. The DURABLE fact is the acknowledgement row
+# itself; a restarted worker re-proves staged-output coverage by re-reading. An actor's
+# exact wake and hold sources ride its continuation (``read_coverage``): the ranges they
+# count were delivered into the very transcript that continuation saves.
 _READ_COVERAGE: Dict[str, List[List[int]]] = {}
 _READ_COVERAGE_MAX_KEYS = 128
+
+
+def _carried(task_id: str) -> tuple:
+    return (f"wake:{task_id}|", f"held:{task_id}|")
+
+
+def read_coverage(task_id: str) -> Dict[str, List[List[int]]]:
+    """This actor's delivered ranges of its exact wake and hold sources, for its continuation."""
+    return {key: [list(span) for span in spans] for key, spans in _READ_COVERAGE.items()
+            if key.startswith(_carried(str(task_id)))}
+
+
+def restore_read_coverage(task_id: str, saved: Any) -> None:
+    """Merge a restored continuation's delivered ranges into this process's ledger (its own keys only)."""
+    for key, spans in (saved.items() if isinstance(saved, dict) else ()):
+        if isinstance(key, str) and key.startswith(_carried(str(task_id))) and isinstance(spans, list):
+            for span in spans:
+                if isinstance(span, list) and len(span) == 2 and all(type(n) is int for n in span) and 0 <= span[0]:
+                    _covered_whole(key, span[0], span[1], span[1] + 1)
 
 
 def record_output_consumed(drive_root: Any, custody: _RunCustody, *,
@@ -436,6 +468,62 @@ def _delivered_source_ranges(read_view: Dict[str, Any], original: str,
             return None
     ranges = display_intervals_to_source(read_view, original, [(lo, hi) for lo, hi in shown])
     return None if ranges is None else [[lo, hi] for lo, hi in ranges]
+
+
+def credit_exact_source(ctx: Any, row: Dict[str, Any], view: Dict[str, Any], sources: Dict[str, Any],
+                        ledger: str, key: Optional[str] = None) -> Optional[Tuple[str, Dict[str, Any], str]]:
+    """``(key, ref, content)`` once what was delivered of one exact retained source covers all of it, else None.
+
+    ``sources`` maps ``path|sha256`` to the refs one consumer waits to see whole (a shortened hold view's in
+    ``model_sleep``, a shortened or spilled wake's in ``delegate_supervision``); that consumer keeps the
+    consequence and its map. ``key`` names the source a delivered view just added: a shortened ``view``'s own head
+    and tail count, a summary that is no window of it counts nothing new. Otherwise ``row`` is a ``read_file``
+    whose ``read_view`` opened that very file at its exact bytes (target path and ``source_revision``), credited
+    by its actually delivered ranges, a window the delivery cut included. The same bytes under another name,
+    another file or a skipped middle credit nothing. Coverage merges in this process's reading ledger under
+    ``ledger`` and rides the actor's continuation (``read_coverage``). Crediting never breaks delivery."""
+    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path, task_id_for_artifacts
+    from ouroboros.tool_result_delivery import RESULT_VIEW_BASIS, reader_text
+
+    read_view = None if key else ((row.get("result_meta") or {}).get("tool_result_meta") or {}).get("read_view")
+    named = [(key, sources.get(key))] if key else [(name, ref) for name, ref in sources.items() if (
+        isinstance(read_view, dict) and isinstance(ref, dict) and ref.get("sha256")
+        and ref["sha256"] == read_view.get("source_revision"))]
+    if not named or not isinstance(named[0][1], dict):
+        return None
+    drive, owner = pathlib.Path(ctx.drive_root), task_id_for_artifacts(ctx)
+    try:
+        key, ref = named[0]
+        if read_view is not None:
+            store = task_artifact_dir_path(drive, owner)
+            target = pathlib.Path(str(read_view.get("target") or "")).resolve(strict=False)
+            key, ref = next(((name, ref) for name, ref in named if store.joinpath(
+                *pathlib.PurePosixPath(str(ref.get("path"))).parts).resolve(strict=False) == target), (None, None))
+            if ref is None:
+                return None  # the same bytes under another name are not this source
+        content = reader_text(read_actor_source_bytes(drive, owner, ref).decode("utf-8"))
+        if read_view is not None:
+            ranges = _delivered_source_ranges(read_view, str(row.get("result") or ""), view, content)
+        elif not view.get("result_partial"):
+            ranges = []  # a summary, or the same source named again: only what was delivered of it before
+        else:  # the shortened view itself: its head and tail address this same text
+            shown = view.get("result_source_view") or {}
+            ranges = shown.get("shown_ranges") if (
+                shown.get("range_basis") == RESULT_VIEW_BASIS and shown.get("complete_chars") == len(content)
+                and shown.get("complete_sha256") == hashlib.sha256(content.encode("utf-8")).hexdigest()) else None
+            if not isinstance(ranges, list) or not all(
+                    isinstance(span, list) and len(span) == 2 and all(type(n) is int for n in span)
+                    and 0 <= span[0] <= span[1] <= len(content) for span in ranges):
+                return None
+        identity = f"{ledger}:{ctx.task_id}|{key}"
+        spans = _READ_COVERAGE.get(identity) or []
+        complete = not content or bool(spans) and spans[0][0] <= 0 and spans[0][1] >= len(content)
+        for start, end in ranges or ():
+            complete = _covered_whole(identity, start, end, len(content))
+    except Exception:
+        log.warning("Exact source %s of %s not credited; what it holds stays unshown", key, ctx.task_id, exc_info=True)
+        return None
+    return (key, ref, content) if complete else None
 
 
 def acknowledge_staged_output_delivery(ctx: ToolContext, exec_result: Dict[str, Any],

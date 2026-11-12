@@ -59,11 +59,15 @@ def settings_server(request, tmp_path, monkeypatch):
     return request.getfixturevalue("direct_server_with_data")
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
-def test_pending_survives_reconnect_draft_and_restart_request(settings_server, engine, width, free_tcp_port):
+def test_pending_survives_reconnect_draft_and_restart_request(settings_server, engine, width, free_tcp_port, tmp_path):
     from playwright.sync_api import expect, sync_playwright
+
+    # The restart-required field: the skills repository path (the worker cap is read live, never a restart key).
+    first, draft = tmp_path / "skills-first", tmp_path / "skills-draft"
+    first.mkdir()
+    draft.mkdir()
 
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
@@ -95,13 +99,20 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
                 expect(page.locator('#btn-save-settings')).to_be_enabled(timeout=30_000)
                 expect(page.locator('#settings-status')).to_contain_text('saved', timeout=30_000)
 
+            def reconnect():
+                # The same body reconnects, which keeps this document only once the page remembered the served
+                # SHA: dropped before its first read after open, ws.js reloads it as unknown (#2432).
+                page.wait_for_function("() => Boolean(window.__ouroWs?._lastSha)", timeout=30_000)
+                page.evaluate("window.__testSockets[0].close()")
+                page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
+
             open_settings()
-            # Worker application is published only after its real pool starts.
+            # The skills path's application is published only after the real pool starts.
             page.wait_for_function("""async () => {
                 const data = await (await fetch('/api/settings')).json();
-                return !data._meta.restart_state.unknown_keys.includes('OUROBOROS_MAX_WORKERS');
+                return !data._meta.restart_state.unknown_keys.includes('OUROBOROS_SKILLS_REPO_PATH');
             }""", timeout=30_000)
-            fill_value('#s-workers', 2)
+            fill_value('#s-skills-repo-path', first)
             save()
             expect(page.locator('#btn-restart-now')).to_be_visible()
             open_settings()  # a completely new page, no local latch
@@ -110,12 +121,11 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             page.locator('[data-confirm-ok]').click()
             page.wait_for_function('window.restartSent === true')
             expect(page.locator('#btn-restart-now')).to_be_visible()
-            fill_value('#s-workers', 3)  # preserve a draft over reconnect metadata
-            page.evaluate("window.__testSockets[0].close()")
-            page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
-            expect(page.locator('#s-workers')).to_have_value('3')
+            fill_value('#s-skills-repo-path', draft)  # preserve a draft over reconnect metadata
+            reconnect()
+            expect(page.locator('#s-skills-repo-path')).to_have_value(str(draft))
             expect(page.locator('#btn-restart-now')).to_be_visible()
-            fill_value('#s-workers', 1)
+            fill_value('#s-skills-repo-path', '')
             save()
             expect(page.locator('#btn-restart-now')).to_be_hidden()
 
@@ -145,17 +155,16 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             open_settings()
             expect(page.locator('#settings-restart-status')).to_contain_text('Restart may apply')
             expect(page.locator('#btn-restart-now')).to_be_visible()
-            fill_value('#s-workers', 3)
-            page.evaluate("window.__testSockets[0].close()")
-            page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
-            expect(page.locator('#s-workers')).to_have_value('3')
+            fill_value('#s-skills-repo-path', draft)
+            reconnect()
+            expect(page.locator('#s-skills-repo-path')).to_have_value(str(draft))
             expect(page.locator('#btn-restart-now')).to_be_visible()
             page.locator('#settings-restart-status').scroll_into_view_if_needed()
             page.screenshot(path=str(evidence / f'settings-host-source-unknown-{engine}.png'))
             # Reconnect refresh may still be inside fetch/fulfill: drain it
             # before removing interception, rather than continuing its route twice.
             page.unroute_all(behavior='wait')
-            fill_value('#s-workers', 1)
+            fill_value('#s-skills-repo-path', '')
             fill_value('#s-server-host', '127.0.0.1')
             save()
             expect(page.locator('#btn-restart-now')).to_be_hidden()

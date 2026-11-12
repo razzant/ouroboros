@@ -12,6 +12,7 @@ scan are needed per tick.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from ouroboros import delegate_custody as custody
@@ -271,17 +272,18 @@ def _answer_locators(drive_root: Any, row: Any) -> Dict[str, Any]:
     return facts
 
 
-def terminal_custody_notice(result: Mapping[str, Any], *, owner_row: bool = False) -> str:
+def terminal_custody_notice(result: Mapping[str, Any], *, owner_row: bool = False, include_empty: bool = False) -> str:
     """Render current stored custody beside unchanged model-authored history.
 
     No live join, lifecycle mutation or inference from a missing run: only the
     audit's separate execution/invocation/patch and confirmed terminal facts. A run
     confirmed terminal whose accounting is not settled stays in the audit's open
     list (custody unchanged) and reads as terminal with that fact, never as live.
-    ``owner_row`` is the owner's task-card row, which lists only the categories
-    holding something and leaves Wrap up's receipt to its own row
-    (``owner_stop_receipt.retained_work_fields``); the model, CLI and
-    child-result-hash text keeps every category and the receipt.
+    Every reader sees only the categories holding something (#1403). ``owner_row``
+    is the owner's task-card row, which leaves Wrap up's receipt to its own row
+    (``owner_stop_receipt.retained_work_fields``); all other text keeps the receipt.
+    ``include_empty`` is the pre-#1403 text, for what is bound to its bytes and never
+    shown: the child-result hash and recognising a Presence body composed with it.
     """
     audit = result.get("delegate_terminal_reconciliation")
     if not isinstance(audit, Mapping) or not audit:
@@ -318,7 +320,7 @@ def terminal_custody_notice(result: Mapping[str, Any], *, owner_row: bool = Fals
                      + (f" (+{omitted} more in task details)" if omitted > 0 else "") + ".")
     for label, raw in groups:
         values = [str(value) for value in raw] if isinstance(raw, list) else []
-        if owner_row and not values:
+        if not raw and not include_empty:  # present but unreadable is not empty: it keeps its line
             continue
         shown = ", ".join(values[:10]) or "none recorded by the current audit"
         omitted = len(values) - 10
@@ -441,6 +443,7 @@ def refresh_terminal_reconciliation(
     drive_root: Any, task_id: str, *,
     trigger: str = "sweep_refresh",
     snapshot: Optional[Mapping[str, Any]] = None,
+    unchanged: Optional[List[str]] = None,
 ) -> bool:
     """Audit-only refresh of a TERMINAL task's stored custody disclosure.
 
@@ -469,7 +472,8 @@ def refresh_terminal_reconciliation(
     grow events.jsonl on every boot. Returns True only when a row was really
     refreshed: the audit evidence is emitted AFTER — and only after — the
     recorder confirms a changed persisted row, so a lock timeout or a refused
-    write leaves no phantom "refreshed" event behind (R3).    """
+    write leaves no phantom "refreshed" event behind (R3). ``unchanged`` receives
+    the task id only when an audit that knew every receipt found nothing to write.    """
     mine = str(task_id or "")
     if not mine:
         return False
@@ -501,6 +505,8 @@ def refresh_terminal_reconciliation(
     if _stored_disclosure_matches(existing, comparison) and not evidence_stale:
         if acknowledge:
             _ack_current_receipts(drive_root, mine, snapshot)
+            if unchanged is not None:
+                unchanged.append(mine)  # an audit that knew every receipt found nothing to write
         return False
     refreshed = False
     # Disclosure class: the recorder itself re-checks the no-churn gate and the
@@ -703,6 +709,12 @@ def refresh_recently_settled_terminals(drive_root: Any, live_task_ids: Any = Non
     callable. A task whose owner still bills (the post-task synthesis window
     outlives the terminal write) is DEFERRED, not healed under a live writer;
     None means unknown and heals whatever holds a receipt.
+
+    A task whose refresh found nothing to write rests while every input that
+    refresh reads stands (``_owed_inputs``, read before it): a receipt no audit
+    can retire yet costs one indexed read per pass, not its body three times. A
+    receipt still owing money (``cost_revision``) never rests: its owner's end,
+    which releases it, is in no row. A process starts with no rests.
     """
     from ouroboros import store
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
@@ -712,27 +724,68 @@ def refresh_recently_settled_terminals(drive_root: Any, live_task_ids: Any = Non
             # Missing/nonterminal owners keep debt without body reads or refresh
             # attempts each sweep. Their terminal write makes it eligible here.
             slots = ",".join("?" for _ in _TRULY_TERMINAL_STATUSES)
-            owed = [row["id"] for row in txn.conn.execute(
-                "SELECT o.id FROM obligations o JOIN tasks t ON t.task_id=o.id "
-                f"WHERE o.set_name='delegated_runs' AND t.status IN ({slots}) ORDER BY o.id",
-                tuple(_TRULY_TERMINAL_STATUSES))]
+            # ``machine_json`` may write NaN, which ``json_valid`` rejects: such a receipt counts as owing money.
+            rows = txn.conn.execute(
+                "SELECT o.id, o.facts, CASE WHEN json_valid(o.facts) THEN json_extract(o.facts, '$.cost_revision') "
+                "ELSE 1 END AS cost_revision, t.write_seq, t.updated_at FROM obligations o JOIN tasks t "
+                f"ON t.task_id=o.id WHERE o.set_name='delegated_runs' AND t.status IN ({slots}) ORDER BY o.id",
+                tuple(_TRULY_TERMINAL_STATUSES)).fetchall()
+            inputs = _owed_inputs(txn, rows) if rows else {}
     except store.StoreError:
         log.debug("Settled-terminal refresh skipped: custody receipts unavailable", exc_info=True)
         return 0
-    if not owed:
-        return 0
-    live = live_task_ids() if callable(live_task_ids) else live_task_ids
+    with _RESTS_LOCK:
+        rests = {tid: stamp for tid, stamp in _RESTS.get(str(drive_root), {}).items() if inputs.get(tid) == stamp}
+        _RESTS[str(drive_root)] = rests
+    live = (live_task_ids() if callable(live_task_ids) else live_task_ids) if len(rests) < len(inputs) else None
+    due = [row for row in rows if row["id"] not in rests and (live is None or row["id"] not in live)]
+    if not due:
+        return 0  # its owner is still writing (heal after it ends), or nothing it reads moved
     snapshot = custody_audit_snapshot(drive_root)
-    refreshed = 0
-    for tid in owed:
-        if live is not None and tid in live:
-            continue  # its owner is still writing; heal after it ends
+    refreshed, unchanged = 0, []
+    for row in due:
+        tid = row["id"]
         try:
-            if _task_is_terminal(drive_root, tid) and refresh_terminal_reconciliation(drive_root, tid, snapshot=snapshot):
+            if _task_is_terminal(drive_root, tid) and refresh_terminal_reconciliation(
+                    drive_root, tid, snapshot=snapshot, unchanged=unchanged):
                 refreshed += 1
         except Exception:
             log.debug("Settled-terminal refresh failed for %s", tid, exc_info=True)
+        if tid in unchanged and not row["cost_revision"]:
+            with _RESTS_LOCK:
+                _RESTS.setdefault(str(drive_root), {})[tid] = inputs[tid]
     return refreshed
+
+
+# Per data root: the owed tasks whose last refresh found nothing to write, with the inputs it read then.
+_RESTS: Dict[str, Dict[str, tuple]] = {}
+_RESTS_LOCK = threading.Lock()
+
+
+def _owed_inputs(txn: Any, rows: List[Any]) -> Dict[str, tuple]:
+    """Inside the owed read: per task, the stamp of what its refresh reads (its row, its receipt row, its runs,
+    its pending starts, its marks), the stored texts as digests: nothing is decoded. A pending start whose facts
+    SQLite cannot read (``machine_json``'s NaN) has no owner it can name, so it stands in every task's stamp."""
+    import hashlib
+    import json
+
+    def digest(text: Any) -> str:
+        return hashlib.sha256(str(text).encode("utf-8", "surrogatepass")).hexdigest()
+
+    ids, runs, opened, marks = json.dumps([row["id"] for row in rows]), {}, {}, {}
+    for record in txn.conn.execute("SELECT task_id, run_id, write_seq, updated_at FROM custody_runs "
+                                   "WHERE task_id IN (SELECT value FROM json_each(?))", (ids,)):
+        runs.setdefault(record["task_id"], []).append((record["run_id"], record["write_seq"], record["updated_at"]))
+    starter = "CASE WHEN json_valid(facts) THEN CAST(json_extract(facts, '$.request.task_id') AS TEXT) ELSE '*' END"
+    for record in txn.conn.execute(f"SELECT {starter} AS starter, id, facts FROM obligations WHERE set_name='custody_open' "
+                                   f"AND {starter} IN (SELECT value FROM json_each(?) UNION SELECT '*')", (ids,)):
+        opened.setdefault(record["starter"], []).append((record["id"], digest(record["facts"])))
+    for record in txn.conn.execute("SELECT id, facts FROM obligations WHERE set_name='custody_marks' "
+                                   "AND id IN (SELECT value FROM json_each(?))", (ids,)):
+        marks[record["id"]] = digest(record["facts"])
+    unreadable = tuple(sorted(opened.get("*", ())))
+    return {row["id"]: (row["write_seq"], row["updated_at"], digest(row["facts"]), tuple(sorted(runs.get(row["id"], ()))),
+                        tuple(sorted(opened.get(row["id"], ()))), unreadable, marks.get(row["id"], "")) for row in rows}
 
 
 def _task_is_terminal(drive_root: Any, task_id: str) -> bool:

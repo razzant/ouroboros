@@ -6,6 +6,8 @@ core membership, registry and schema visibility, the required-capability
 fail-fast, the top-level control surface under workspace focus, executor-ref
 inheritance, and the capability omission manifest.
 """
+import pytest
+
 from tests._store_shared import read_result
 
 
@@ -305,7 +307,8 @@ def test_schedule_subagent_inherits_workspace_executor_ref(tmp_path, monkeypatch
     assert persisted["task_contract"]["resource_policy"]["protected_artifacts"][0]["paths"] == ["/workspace/executable"]
 
 
-def test_capability_omission_manifest_surfaces_extension_discovery_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize('broken', [False, True])
+def test_capability_omission_manifest_surfaces_extension_discovery_failure(tmp_path, monkeypatch, broken):
     from ouroboros import extension_loader
     from ouroboros.tools import tool_discovery
     from ouroboros.tools.registry import ToolRegistry
@@ -318,12 +321,14 @@ def test_capability_omission_manifest_surfaces_extension_discovery_failure(tmp_p
             return False
 
     registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
-    monkeypatch.setattr(extension_loader, "_lock", BoomLock())
+    if broken:
+        monkeypatch.setattr(extension_loader, "_lock", BoomLock())
 
     registry.schemas()
     monkeypatch.setattr(tool_discovery, "_registry", registry)  # never leak an unrestricted fallback into later tests
     text = tool_discovery._list_available_tools(registry._ctx)
 
-    assert "CAPABILITY_OMISSION_MANIFEST" in text
-    assert "extensions" in text
-    assert "boom" in text
+    assert "Current callable catalog" in text
+    assert ("boom" in text) is broken
+    if broken:
+        assert "CAPABILITY_OMISSION_MANIFEST" in text and "extensions" in text

@@ -18,8 +18,11 @@ log = logging.getLogger(__name__)
 def caller_deadline_scoped(function):
     """Carry caller-owned absolute bounds through preparation and all recovery sends.
 
-    The caller subtracts its finalization reserve once. Relative socket timeouts
-    never create an execution deadline; absent bounds preserve existing defaults.
+    The caller subtracts its finalization reserve once. ``caller_deadline_ts`` also
+    ends the caller's wait, so an accepted operation is cancelled at it;
+    ``caller_dispatch_deadline_ts``, a helper's send window, only refuses new sends
+    and narrows their sockets. Relative socket timeouts never create an execution
+    deadline; absent bounds preserve existing defaults.
     """
     signature = inspect.signature(function)
 
@@ -29,11 +32,11 @@ def caller_deadline_scoped(function):
 
         values = signature.bind(*args, **kwargs).arguments
         with contextlib.ExitStack() as stack:
-            calendar = values.get("caller_deadline_ts")
             execution = values.get("caller_execution_deadline")
-            if calendar is not None:
-                stack.enter_context(calendar_scope(datetime.fromtimestamp(
-                    float(calendar), timezone.utc).isoformat()))
+            for key, dispatch_only in (("caller_deadline_ts", False), ("caller_dispatch_deadline_ts", True)):
+                if values.get(key) is not None:
+                    stack.enter_context(calendar_scope(datetime.fromtimestamp(
+                        float(values[key]), timezone.utc).isoformat(), dispatch_only=dispatch_only))
             if execution is not None:
                 stack.enter_context(execution_deadline_scope(float(execution)))
             yield
@@ -73,12 +76,14 @@ def physical_dispatch_timeout(explicit: Any = None) -> Any:
     return min(llm_transport_timeout_sec(explicit), remaining)
 
 
-def caller_deadline_arguments(deadline_at: Any, execution_deadline: Any, *, reserve_sec: float = 0.0) -> dict:
-    """Project an existing caller's two clocks into the optional LLM arguments."""
+def caller_deadline_arguments(deadline_at: Any, execution_deadline: Any, *, reserve_sec: float = 0.0,
+                              dispatch_only: bool = False) -> dict:
+    """Project an existing caller's two clocks into the optional LLM arguments (a send window if ``dispatch_only``)."""
     deadline = parse_deadline_ts(deadline_at)
     values = {}
     if deadline is not None:
-        values["caller_deadline_ts"] = deadline.timestamp() - reserve_sec
+        values["caller_dispatch_deadline_ts" if dispatch_only else "caller_deadline_ts"] = (
+            deadline.timestamp() - reserve_sec)
     if execution_deadline is not None:
         values["caller_execution_deadline"] = execution_deadline
     return values
@@ -101,6 +106,17 @@ def parse_deadline_ts(value: Any) -> Optional[datetime]:
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def ago_text(seconds: float) -> str:
+    """Elapsed seconds in words for a dated fact, at one-minute granularity ("less than a minute ago" below it):
+    the one formatter of the wake's lines and the round's own focus line."""
+    seconds = max(0, int(seconds))
+    if seconds >= 86400:
+        return f"{seconds // 86400} d {(seconds % 86400) // 3600} h ago"
+    if seconds < 3600:
+        return f"{seconds // 60} min ago" if seconds >= 60 else "less than a minute ago"
+    return f"{seconds // 3600} h {(seconds % 3600) // 60} min ago"
 
 
 def seconds_until(value: Any) -> Optional[float]:
@@ -151,6 +167,41 @@ def window_within_deadline(ctx: Any, requested: int) -> int:
     return max(1, int(min(requested, remaining - float(effective_finalization_reserve_sec(ctx)))))
 
 
+def deadline_clamped_timeout_sec(ctx: Any, base_timeout: Any) -> Any:
+    """``min(base, remaining − finalization reserve)`` for a wait that must return before its task.
+
+    ``remaining`` is the nearer explicit bound: ``deadline_at`` or the explicit execution window
+    (#939); with neither, or one already elapsed (forced finalization owns that), ``base`` is
+    returned unchanged. A ``None`` base (no window of its own) takes the clamped remainder. The
+    clamp never floors PAST the reserve: inside it the wait gets 1 s, a fast typed failure, not a
+    grace-eating floor (review round 1). The plain grace, not a profile's percentage reserve
+    (v6.55.0): clamping out the last pct-of-total strands long tasks idle. One owner for the
+    network tools' outer waits (``loop_tool_execution``) and any command resolution that adopts it.
+    """
+    try:
+        remaining = deadline_remaining_sec(ctx)
+        from ouroboros.model_wait import explicit_execution_window_remaining
+        execution_left = explicit_execution_window_remaining(ctx)  # #939
+        if execution_left is not None:
+            remaining = min(remaining, execution_left) if remaining > 0 else execution_left
+    except Exception:
+        return base_timeout
+    if remaining <= 0:
+        return base_timeout
+    try:
+        from ouroboros.task_pacing import effective_finalization_reserve_sec
+
+        reserve = effective_finalization_reserve_sec(ctx)
+    except Exception:
+        from ouroboros.config import get_finalization_grace_sec
+
+        reserve = float(get_finalization_grace_sec())
+    window = remaining - reserve
+    if base_timeout is not None and window >= base_timeout:
+        return base_timeout
+    return int(max(1.0, window if base_timeout is None else min(float(base_timeout), window)))
+
+
 def llm_transport_timeout_sec(explicit: Any = None) -> float:
     """Return the transport/dead-socket timeout for one LLM request.
 
@@ -199,6 +250,27 @@ def dispatch_window_remaining_sec(
     except (TypeError, ValueError, OverflowError):
         reserve = 0.0
     return max(0.0, remaining - reserve)
+
+
+def dispatch_window_end_ts(
+    *, deadline_at: Any = None, deadline_ts: Any = None, reserve_sec: Any = 0.0,
+) -> Optional[float]:
+    """Where :func:`dispatch_window_remaining_sec`'s window ends, as an epoch instant read from no clock."""
+    deadline: Optional[float] = None
+    try:
+        if isinstance(deadline_ts, (int, float, str)) and not isinstance(deadline_ts, bool):
+            deadline = float(deadline_ts) if math.isfinite(float(deadline_ts)) else None
+    except (TypeError, ValueError, OverflowError):
+        deadline = None
+    parsed = parse_deadline_ts(deadline_at) if deadline is None else None
+    if parsed is not None:
+        deadline = parsed.timestamp()
+    if deadline is None:
+        return None
+    try:
+        return deadline - max(0.0, float(reserve_sec or 0.0))
+    except (TypeError, ValueError, OverflowError):
+        return deadline
 
 
 def owner_deadline_exhausted(
@@ -328,45 +400,55 @@ def review_logical_fallback_timeout_sec() -> Optional[float]:
     return None
 
 
+def task_execution_window_sec() -> Optional[float]:
+    """Execution time an operation of the current task may still use: the bound task's
+    remaining window (its explicit budget or the global lifetime, the narrower, pauses
+    excluded), else the global lifetime; ``None`` when neither exists, never an invented one."""
+    from ouroboros.config import get_task_abs_ceiling_sec
+    from ouroboros.model_wait import current_model_wait
+
+    owner = current_model_wait()
+    remaining = owner.execution_window_remaining() if owner is not None else None
+    if remaining is not None:
+        return remaining
+    lifetime = get_task_abs_ceiling_sec()
+    return None if lifetime is None else float(lifetime)
+
+
 def review_operation_timeout_sec(
     explicit: Any = None,
     *,
-    route: Any = None,
+    retrieves: bool = False,
     deadline_at: Any = None,
     transport_timeout_sec: Any = None,
     reserve_sec: Any = 0.0,
-) -> float:
-    """Resolve a review wait without turning transport into cognition policy.
+) -> Optional[float]:
+    """Resolve a review slot's logical window without turning transport into cognition policy.
 
-    API calls may use their dead-socket bound as the settlement fallback because
-    the physical request itself ends there.  Agent sessions are independent paid
-    processes, so an unset logical window inherits the task's operation window
-    instead (its finite absolute lifetime, else ``OPERATION_WINDOW_FALLBACK_SEC``).
-    Explicit review windows and owner deadlines only narrow it.
+    A packet row (``retrieves`` false, ``review_execution.delivery_retrieves``) is ONE physical
+    request, which ends at its dead-socket bound, so that bound is its settlement fallback. A
+    retrieving row (an agent session, a native episode) sends many requests, each keeping its
+    own socket bound; its window is only what is true: an explicit window, the owner deadline
+    less the reserve, the task's finite execution window. ``None`` = none exists; a session
+    then sends no ``maxSeconds``.
     """
-    route_value = str(getattr(route, "value", route) or "")
     requested = explicit
     if explicit is None or (isinstance(explicit, str) and not explicit.strip()):
         requested = review_logical_fallback_timeout_sec()
-    if route_value == "agent_session":
-        from ouroboros.config import get_task_abs_ceiling_sec, operation_window_sec
-
-        ceiling = operation_window_sec(get_task_abs_ceiling_sec())
-        return min(
-            ceiling,
-            logical_operation_timeout_sec(
-                requested,
-                deadline_at=deadline_at,
-                fallback=ceiling,
-                reserve_sec=reserve_sec,
-            ),
+    if not retrieves:
+        return logical_operation_timeout_sec(
+            requested,
+            deadline_at=deadline_at,
+            fallback=llm_transport_timeout_sec(transport_timeout_sec),
+            reserve_sec=reserve_sec,
         )
-    return logical_operation_timeout_sec(
-        requested,
-        deadline_at=deadline_at,
-        fallback=llm_transport_timeout_sec(transport_timeout_sec),
-        reserve_sec=reserve_sec,
-    )
+    # ``inf`` is the "no window" fallback of the shared parser, returned as ``None``.
+    window = logical_operation_timeout_sec(requested, deadline_at=deadline_at, fallback=math.inf,
+                                           reserve_sec=reserve_sec)
+    execution = task_execution_window_sec()
+    if execution is not None:
+        window = min(window, execution)
+    return None if math.isinf(window) else window
 
 
 def main_transport_timeout_sec(

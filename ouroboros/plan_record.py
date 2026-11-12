@@ -6,17 +6,18 @@ One intention, one record, three kinds of fact the mind writes through ``plan_ta
 * a REVISION — goal, ``done_when`` (the acceptance claim grammar: id / claim /
   support), ``affected_paths`` and the plan prose; omitted fields carry over,
   identical content creates no revision; the body flag is computed at write;
-* an ASK — the revision it carried, the mind's message, the attachments, the
-  participants it was dispatched to (each with the recorded fact whether it was an
-  owner-marked reviewer OF THAT ASK) and the review-ledger record that retains the
-  exact texts;
+* an ASK — the revision it carried (``None``: a reading of the request before any
+  plan), the mind's message, the attachments, the participants it was dispatched to
+  (each with the recorded fact whether it was an owner-marked reviewer OF THAT ASK)
+  and the review-ledger record that retains the exact texts;
 * a REPLY — one participant's parsed ``{prose, objections, withdrawn}``, or its
   typed absence (pending, failed, not dispatched, unparseable).
 
 Everything else is derived here and never stored: the open objections (a fold over
-EACH SEAT'S OWN replies — an objection stands until the same seat lists it under
-``withdrawn``; omission keeps it and flags ``not_adjudicated``; an unparseable reply
-changes nothing), who last saw which revision, the gate projection
+EACH SEAT'S OWN replies to stored revisions — an objection stands until the same seat
+lists it under ``withdrawn``; omission keeps it and flags ``not_adjudicated``; an
+unparseable reply changes nothing; a reading's reply is advice and moves no objection),
+who last saw which revision, the gate projection
 (``gate_projection``), the claims view (``acceptance_view``) and the review
 history the context views read (``record_history``). There is no cycle counter, no
 quorum, no aggregate and no fingerprint routing for plans.
@@ -120,6 +121,15 @@ def revision_by_number(record: Mapping[str, Any], n: Any) -> Optional[Dict[str, 
     return next((r for r in record.get("revisions") or [] if r.get("n") == n), None)
 
 
+READING_SUBJECT = "the reading of the request"
+
+
+def ask_subject(revision: Any, *, plan: bool = False) -> str:
+    """What an ask was about, as every reader names it: ``revision N`` (``plan revision N``),
+    or the reading of the request an ask before any plan carries (``revision: None``)."""
+    return READING_SUBJECT if revision is None else f"{'plan ' if plan else ''}revision {revision}"
+
+
 def revision_delta(previous: Optional[Mapping[str, Any]], current: Mapping[str, Any]) -> Dict[str, Any]:
     """What changed between two revisions: field flags, ``done_when`` by id (added /
     removed / reworded with both texts) and a unified diff of the plan prose."""
@@ -166,7 +176,11 @@ def validate_record(value: Any) -> Dict[str, Any]:
         if not isinstance(ask, dict) or not _ID_RE.fullmatch(str(ask.get("ask_id") or "")) or ask["ask_id"] in seen:
             raise PlanRecordInvalid("PLAN_RECORD_INVALID: ask ids must be unique")
         seen.add(ask["ask_id"])
-        if revision_by_number(value, ask.get("revision")) is None:
+        # ``revision: None`` is a reading of the request before any plan; anything else must be
+        # the number of a stored revision (a bool is not one, though ``True == 1``).
+        if "revision" not in ask or (ask["revision"] is not None and (
+                isinstance(ask["revision"], bool) or not isinstance(ask["revision"], int)
+                or revision_by_number(value, ask["revision"]) is None)):
             raise PlanRecordInvalid("PLAN_RECORD_INVALID: an ask names a revision the record does not hold")
         if not isinstance(ask.get("participants"), list):
             raise PlanRecordInvalid("PLAN_RECORD_INVALID: ask participants must be a list")
@@ -250,7 +264,10 @@ def parse_reply(text: str) -> tuple[Optional[Dict[str, Any]], str]:
 # ------------------------------------------------------------------ folds
 
 def _reply_rows(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Every participant row that carries a reply, in ask order, legacy first."""
+    """Every participant row that carries a reply to a stored revision, in ask order, legacy
+    first. A reading of the request (an ask before any plan, ``revision: None``) is not among
+    them, whenever it settles: its reply is advice that raises, restates and withdraws no
+    standing objection, and its replies, history and panel rows keep showing it."""
     rows: List[Dict[str, Any]] = []
     for objection in (legacy or {}).get("open_objections") or []:
         rows.append({"ask_id": LEGACY_ASK_ID, "revision": 0, "seat_id": str(objection.get("seat_id") or ""),
@@ -258,6 +275,8 @@ def _reply_rows(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] =
                      "reply": {"objections": [{"id": str(objection.get("id") or ""), "text": str(objection.get("text") or "")}],
                                "withdrawn": []}, "legacy": True})
     for ask in record.get("asks") or []:
+        if ask.get("revision") is None:
+            continue
         for participant in ask.get("participants") or []:
             if participant.get("status") == "answered" and isinstance(participant.get("reply"), dict):
                 rows.append({"ask_id": ask.get("ask_id"), "revision": ask.get("revision"),
@@ -576,7 +595,8 @@ def read_view(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = N
         "asks": [{"ask_id": a.get("ask_id"), "ts": a.get("ts"), "revision": a.get("revision"), "message": a.get("message"),
                   "participants": [{**{k: p.get(k) for k in ("seat_id", "model", "owner_marked", "status", "dispatched",
                                                                "not_dispatched_reason", "error", "parse_error",
-                                                               "failure_code", "reported_cause", "reset_at", "unresolved")},
+                                                               "failure_code", "reported_cause", "reset_at", "unresolved",
+                                                               "room_delivery", "room_read_coverage")},
                                     "ignored_items": len((p.get("reply") or {}).get("ignored") or []) if isinstance(p.get("reply"), dict) else 0}
                                    for p in a.get("participants") or []],
                   "record_id": a.get("record_id")} for a in record.get("asks") or []],
@@ -598,6 +618,47 @@ RECORD_HISTORY_RULE = (
     "answer does not close it and nobody votes. Each reply is its participant's own words from its "
     "retained source; silence is neither agreement nor an objection."
 )
+
+
+# Reasons ``plan_evidence.resolve_evidence`` records BESIDE content that still attached: a head cut at the per-item
+# bound, a chat range whose history has a gap. Any other reason on an attached locator (``duplicate_locator``,
+# ``source_unretained:*``) is a note on content that went whole; on a locator that did not attach, it says why.
+_PART_REASONS = ("truncated_to_", "chat_history_gap:")
+
+
+def ask_evidence(ask: Mapping[str, Any]) -> Dict[str, Any]:
+    """One ask's evidence as its row recorded it (``attach``, ``attached``, ``omissions``), one item per locator in
+    declared order: ``whole`` or ``part`` when it attached — prepared for the participants, which proves neither that
+    one was sent it (its own status says that) nor that one read it — ``not_attached`` otherwise, each with every
+    reason recorded for it. A field an older writer did not record is not recorded, never an empty list: without
+    ``attached`` an item's state is ``unknown``; without ``omissions`` an attached item's completeness is unknown."""
+    declared = ask.get("attach") if isinstance(ask.get("attach"), list) else None
+    attached = ask.get("attached") if isinstance(ask.get("attached"), list) else None
+    omissions = ask.get("omissions") if isinstance(ask.get("omissions"), list) else None
+    rows = {str(row.get("locator") or ""): row for row in attached or [] if isinstance(row, Mapping)}
+    reasons: Dict[str, List[str]] = {}
+    for row in omissions or []:
+        if isinstance(row, Mapping):
+            reasons.setdefault(str(row.get("locator") or ""), []).append(str(row.get("reason") or ""))
+    items = []
+    for locator in dict.fromkeys([*(str(raw or "").strip() for raw in declared or []), *rows, *reasons]):
+        row, why = rows.get(locator), reasons.get(locator, [])
+        if not locator:
+            continue
+        if row is not None:
+            state = "attached_unknown" if omissions is None else "part" if any(reason.startswith(_PART_REASONS) for reason in why) else "whole"
+        elif attached is None:
+            state = "unknown"
+        elif why or omissions is None:
+            state = "not_attached"
+        else:  # declared, yet neither attached nor named absent: no row says what became of it
+            state = "unknown"
+        items.append({"locator": locator, "state": state, "reasons": why,
+                      **({key: copy.deepcopy(row[key]) for key in ("bytes", "sha256", "ref") if row.get(key) is not None}
+                         if row is not None else {})})
+    return {"recorded": {"attach": declared is not None, "attached": attached is not None, "omissions": omissions is not None},
+            "items": items, "counts": {state: sum(1 for item in items if item["state"] == state)
+                                       for state in ("whole", "part", "attached_unknown", "not_attached", "unknown")}}
 
 
 def operative_revision(record: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
@@ -633,9 +694,12 @@ def record_history(drive_root: Any, task_id: str, record: Mapping[str, Any]) -> 
                 gaps.append(_gap("reply has no retained source; its typed projection is shown",
                                  plan_ask=ask.get("ask_id"), seat_id=participant.get("seat_id")))
             reviewers.append(seat)
+        # The ask's evidence as recorded: what it declared, attached and named cut or absent, apart (``ask_evidence``);
+        # a field an older writer did not record stays absent, never an empty list.
         rounds.append({"plan_ask": ask.get("ask_id"), "revision": ask.get("revision"), "ts": ask.get("ts"),
                        "message": ask.get("message"), "review_record_id": ask.get("record_id"),
-                       "attached": copy.deepcopy(ask.get("attached") or []), "reviewers": reviewers})
+                       **{key: copy.deepcopy(ask[key]) for key in ("attach", "attached", "omissions") if isinstance(ask.get(key), list)},
+                       "reviewers": reviewers})
     decision_rows = []
     for objection in fold_objections(record):
         if objection.get("unknown_withdrawal"):
@@ -786,7 +850,7 @@ def next_ask_id(record: Mapping[str, Any]) -> str:
 def append_attempt(root: Any, task_id: str, attempt: Mapping[str, Any]) -> Dict[str, Any]:
     """Record one ask that could reach nobody (typed, $0): the mind asked and every named
     route was unavailable, so no participant was called. Not an ask — it dispatches nobody,
-    raises no objection and holds nothing; the Swarm obligation reads it as attempted."""
+    raises no objection and holds nothing; the record shows it as asked, with no route."""
     def _append(record: Dict[str, Any]) -> Dict[str, Any]:
         record["attempts"] = [*record.get("attempts", []), {"ts": utc_now_iso(), **copy.deepcopy(dict(attempt))}]
         return record
@@ -830,12 +894,46 @@ def update_participant(root: Any, task_id: str, *, ask_id: str, seat_id: str, fa
                 if str(participant.get("seat_id") or "") == str(seat_id):
                     if facts.get("status") == "pending" and str(participant.get("status") or "pending") != "pending":
                         return record
+                    if (participant.get("superseded_operation_ids")
+                            and str(facts.get("operation_id") or "") != str(participant.get("operation_id") or "")):
+                        return record  # a reopened seat takes only facts that name its successor; none is not a name
                     participant.update(copy.deepcopy(dict(facts)))
                     _ask_panel_outcomes(ask)
                     return record
         raise PlanRecordInvalid(f"PLAN_RECORD_INVALID: no participant {seat_id!r} in ask {ask_id!r}")
 
     return _update_plan_record(root, task_id, _merge)
+
+
+_STOPPED_FACT_KEYS = ("reply", "parse_error", "error", "failure_code", "reset_at", "http_status", "transport_status",
+                      "reported_cause", "failure_details", "answered_at", "reply_ref", "delegated_run_id", "response_ref",
+                      "not_dispatched_reason", "review_controller", "unresolved", "cost")
+
+
+def reopen_participant(root: Any, task_id: str, *, ask_id: str, seat_id: str, supersedes: str,
+                       facts: Mapping[str, Any]) -> Dict[str, Any]:
+    """The projection of an explicit continuation (``review_continuation``): the stopped participant of the
+    SAME ask turns pending under its successor operation (or takes ``facts["status"]``, a successor settled
+    as never sent); its stopped facts move to ``prior_operations`` and a pending one lets the ask announce
+    its completion again. Repeating it is a no-op; any other state refuses."""
+    def _reopen(record: Dict[str, Any]) -> Dict[str, Any]:
+        ask = next((a for a in record.get("asks", []) if str(a.get("ask_id") or "") == str(ask_id)), {})
+        participant = next((p for p in ask.get("participants") or [] if str(p.get("seat_id") or "") == str(seat_id)), None)
+        current = str((participant or {}).get("operation_id") or "")
+        if participant is not None and current == str(facts.get("operation_id") or ""):
+            return record
+        if participant is None or current != supersedes or participant.get("status") == "pending":
+            raise PlanRecordInvalid(f"PLAN_CONTINUATION_CONFLICT: seat {seat_id!r} of ask {ask_id!r} is no longer {supersedes}")
+        prior = {key: participant.pop(key) for key in _STOPPED_FACT_KEYS if key in participant}
+        participant["prior_operations"] = [*(participant.get("prior_operations") or []), {
+            "operation_id": current, "status": participant.get("status"), **prior}]
+        participant.update(copy.deepcopy(dict(facts)), status=str(facts.get("status") or "pending"))
+        if participant["status"] == "pending":
+            ask.pop("completion_announced", None)
+        _ask_panel_outcomes(ask)
+        return record
+
+    return _update_plan_record(root, task_id, _reopen)
 
 
 def claim_ask_completion(root: Any, task_id: str, ask_id: str, custody: Mapping[str, str]) -> Optional[Dict[str, Any]]:
@@ -871,7 +969,7 @@ def release_ask_completion(root: Any, task_id: str, ask_id: str) -> None:
 
 
 def collection_pending(value: Any) -> bool:
-    """Body-only candidate selection, not a plan verdict or a packing obligation.
+    """Body-only pending-reader fact, not a plan verdict or a retention duty.
     Unknown record/participant shapes stay selectable. No sources or liveness are
     read here: the collector validates the record and checks its task's end."""
     if value is None or value == {}:

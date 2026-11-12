@@ -3,10 +3,20 @@
    server setting: the owner's WebView and each browser retain their own choice, so
    one device can differ from another on purpose.
 
-   `ouroboros.theme` stores the CHOICE, not the painted theme. An absent value
-   means System (the default for a new client); a previously saved 'light' or
-   'dark' keeps its exact old meaning, so an owner who already picked Light is
-   still on Light after this upgrade. */
+   The store keeps the CHOICE, not the painted theme. An absent value means System
+   (the default for a new client); a previously saved 'light' or 'dark' keeps its
+   exact old meaning, so an owner who already picked Light is still on Light.
+
+   Where: a page the core serves itself names its installation's appearance scope
+   before this script (server_web.py). There the choice is one host-only cookie of
+   that scope: the server moving to another port keeps it, another installation on
+   the host keeps its own. The origin's older `ouroboros.theme` is adopted only while
+   that cookie is absent, and removed once the cookie holds the choice: clearing
+   cookies returns every address opened since to System, while an address not opened
+   since still carries its older value over once, and a selected interface directory
+   or an older build reads System where it was removed. A page without a scope (the
+   Telegram Mini App, a selected interface directory, a core whose identity is not
+   minted yet) keeps `ouroboros.theme` itself, as before. */
 (() => {
     'use strict';
     const KEY = 'ouroboros.theme';
@@ -16,12 +26,53 @@
     const root = document.documentElement;
     const isChoice = (value) => CHOICES.includes(value);
 
+    const scope = document.querySelector?.('meta[name="ouroboros-appearance-scope"]')?.content || '';
+    const COOKIE = /^[0-9a-f]{16}$/.test(scope) ? `ouroboros-theme-${scope}` : '';
+    // 400 days, the longest a browser keeps a cookie; each page load renews it.
+    const COOKIE_TAIL = `; Max-Age=${400 * 24 * 60 * 60}; Path=/; SameSite=Lax`;
+    const readCookie = () => {
+        try {
+            for (const pair of String(document.cookie || '').split(';')) {
+                const at = pair.indexOf('=');
+                if (at > 0 && pair.slice(0, at).trim() === COOKIE) {
+                    const value = pair.slice(at + 1).trim();
+                    return isChoice(value) ? value : '';
+                }
+            }
+        } catch { /* this document may not read cookies */ }
+        return '';
+    };
+    // A write counts once it reads back: a client that refuses cookies drops it silently.
+    const writeCookie = (value) => {
+        try { document.cookie = `${COOKIE}=${value}${COOKIE_TAIL}`; } catch { return false; }
+        return readCookie() === value;
+    };
+    const readOrigin = () => {  // throws where the browser blocks storage
+        const saved = localStorage.getItem(KEY);
+        return isChoice(saved) ? saved : '';
+    };
+    const forgetOrigin = () => {
+        try { if (localStorage.getItem(KEY) !== null) localStorage.removeItem(KEY); } catch { /* nothing to consume */ }
+    };
+
+    // 'cookie' while this page keeps the choice in its installation's cookie, else 'origin'.
+    let store = COOKIE && window.navigator?.cookieEnabled !== false ? 'cookie' : 'origin';
     let choice = 'system';
     let storageAvailable = true;
-    try {
-        const saved = localStorage.getItem(KEY);
-        if (isChoice(saved)) choice = saved;
-    } catch { storageAvailable = false; }
+    if (store === 'cookie') {
+        const kept = readCookie();
+        let older = '';
+        if (!kept) { try { older = readOrigin(); } catch { /* blocked: nothing to adopt */ } }
+        choice = kept || older || 'system';
+        if (kept || older) {
+            // Renewed or adopted: the origin's copy is consumed. A client that refuses
+            // the cookie keeps its older copy as its store.
+            if (writeCookie(choice)) forgetOrigin();
+            else if (!kept) store = 'origin';
+        }
+    } else {
+        try { choice = readOrigin() || 'system'; } catch { storageAvailable = false; }
+    }
 
     const query = typeof window.matchMedia === 'function'
         ? window.matchMedia('(prefers-color-scheme: light)')
@@ -41,6 +92,9 @@
 
     const statusText = () => {
         if (!storageAvailable) return 'Appearance applies until this window reloads; this device blocks storage.';
+        if (COOKIE && store === 'origin') {
+            return 'This browser blocks cookies, so the choice stays with this address and is not kept when the port changes.';
+        }
         if (choice === 'system' && !query) return 'This client reports no OS appearance, so System uses Dark.';
         return '';
     };
@@ -89,25 +143,34 @@
        before CSS, so the first paint is already the right shell, and kept current by
        the window's own media-query change (a resize, a rotation). The number lives
        here once; web/modules/layout.js is the ES-module door everything else reads it
-       through (tests/test_shell_layout_static.py). */
+       through (tests/test_shell_layout_static.py).
+       Beside it, `html[data-pointer]` carries the primary input: `coarse` where it is a finger (a tablet, a phone, a
+       Mini App on either), `fine` with a mouse or a trackpad. It never moves the columns; it decides how a room over Main sits:
+       on a docked screen a finger gets the Project in Main's place, a desk keeps it beside Main (owner 06.11). */
     const LAYOUT = Object.freeze({ dockedMinWidth: 720 });
     const layoutQuery = typeof window.matchMedia === 'function'
         ? window.matchMedia(`(min-width: ${LAYOUT.dockedMinWidth}px)`)
         : null;
-    // A client that cannot answer the query is a desktop window: docked.
+    const pointerQuery = typeof window.matchMedia === 'function' ? window.matchMedia('(pointer: coarse)') : null;
+    // A client that cannot answer the queries is a desktop window: docked, with a mouse.
     const resolveLayout = () => (layoutQuery && !layoutQuery.matches ? 'stack' : 'docked');
+    const resolvePointer = () => (pointerQuery?.matches ? 'coarse' : 'fine');
     let layout = resolveLayout();
-    const paintLayout = () => { root.dataset.layout = layout; };
+    let pointer = resolvePointer();
+    const paintLayout = () => { root.dataset.layout = layout; root.dataset.pointer = pointer; };
     const onLayoutQuery = () => {
         const next = resolveLayout();
-        if (next === layout) return;
+        const nextPointer = resolvePointer();
+        if (next === layout && nextPointer === pointer) return;
         layout = next;
+        pointer = nextPointer;
         paintLayout();
-        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
+        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout, pointer } }));
     };
     paintLayout();
     layoutQuery?.addEventListener?.('change', onLayoutQuery);
-    window.ouroLayout = Object.freeze({ ...LAYOUT, get layout() { return layout; } });
+    pointerQuery?.addEventListener?.('change', onLayoutQuery);
+    window.ouroLayout = Object.freeze({ ...LAYOUT, get layout() { return layout; }, get pointer() { return pointer; } });
 
     /* The desktop window's ordinary system caption takes the light or dark tint of
        the painted palette (launcher_appearance.py). Only a top-level document speaks
@@ -130,12 +193,6 @@
             Promise.resolve(api.set_native_appearance(resolved, pageSince, nativeSequence)).catch(() => {});
         } catch { /* the frame keeps its tint; the page is unaffected */ }
     };
-    // Restored from the back-forward cache after a newer page: this one is the window's again.
-    const onPageShow = (event) => {
-        if (!event.persisted || !clock) return;
-        pageSince = clock.timeOrigin + clock.now();
-        syncNativeFrame();
-    };
 
     // Re-resolve, repaint, and tell mounted views only when the PAINTED theme
     // moved. Switching Dark -> System on a dark OS changes the choice without
@@ -149,14 +206,52 @@
             syncNativeFrame();
             window.dispatchEvent(new CustomEvent('ouro:theme-changed', { detail: { theme: resolved, choice } }));
         }
+        return changed;
+    };
+
+    // Same-origin windows (another tab, the setup frame over the shell) hear a new
+    // cookie at once; a page on another port reads it when it is shown or focused.
+    // A document that may not open a channel still paints and keeps the choice.
+    const syncs = store === 'cookie';
+    const channel = (() => {
+        try { return syncs && typeof BroadcastChannel === 'function' ? new BroadcastChannel(COOKIE) : null; }
+        catch { return null; }
+    })();
+
+    const keep = (value) => {
+        if (store === 'cookie') {
+            if (writeCookie(value)) {
+                forgetOrigin();
+                try { channel?.postMessage(value); } catch { /* the others read it when shown */ }
+                return true;
+            }
+            store = 'origin';  // refused now: the origin's store is what this page still has
+        }
+        try { localStorage.setItem(KEY, value); return true; } catch { return false; }
     };
 
     const choose = (value) => {
         if (!isChoice(value)) return;
         choice = value;
-        try { localStorage.setItem(KEY, choice); storageAvailable = true; }
-        catch { storageAvailable = false; }
+        storageAvailable = keep(value);
         settle();
+    };
+
+    // Another window wrote a choice: read this page's own store again, never the
+    // event or message that said so. In cookie mode an `ouroboros.theme` event (a
+    // page from before this store, or another tab consuming that key) moves nothing.
+    const refresh = () => {
+        let next;
+        if (store === 'cookie') {
+            next = readCookie() || 'system';
+        } else {
+            try { next = readOrigin() || 'system'; storageAvailable = true; }
+            catch { storageAvailable = false; syncControls(); return false; }
+        }
+        // Unchanged, the root's attributes stay untouched: the macOS window observes them.
+        if (next === choice) { syncControls(); return false; }
+        choice = next;
+        return settle();
     };
 
     paint();
@@ -184,20 +279,17 @@
 
     // Another window of the same client (browser tab, or the desktop shell's
     // onboarding window next to the main one) wrote a new choice.
-    const onStorage = (event) => {
-        if (event.key !== KEY && event.key !== null) return;
-        let saved = 'system';
-        try {
-            const raw = localStorage.getItem(KEY);
-            if (isChoice(raw)) saved = raw;
-            storageAvailable = true;
-        } catch {
-            storageAvailable = false;
-            syncControls();
-            return;
-        }
-        choice = saved;
-        settle();
+    const onStorage = (event) => { if (event.key === KEY || event.key === null) refresh(); };
+    const onFocus = () => { refresh(); };
+    const onShown = () => { if (document.visibilityState !== 'hidden') refresh(); };
+    const onMessage = () => { refresh(); };
+    // Restored from the back-forward cache: the window's page again, and a page on
+    // another port may have changed the choice meanwhile.
+    const onPageShow = (event) => {
+        if (!event.persisted) return;
+        if (ownsWindow && clock) pageSince = clock.timeOrigin + clock.now();
+        const told = syncs && refresh();  // a repaint already told the frame
+        if (ownsWindow && clock && !told) syncNativeFrame();
     };
 
     const onSystemChange = () => { if (choice === 'system') settle(); };
@@ -208,20 +300,28 @@
         document.removeEventListener('click', onClick);
         document.removeEventListener('keydown', onKeydown);
         document.removeEventListener('DOMContentLoaded', ready);
+        document.removeEventListener('visibilitychange', onShown);
         window.removeEventListener('storage', onStorage);
+        window.removeEventListener('focus', onFocus);
         window.removeEventListener('pywebviewready', syncNativeFrame);
         window.removeEventListener('pageshow', onPageShow);
         window.removeEventListener('pagehide', cleanup);
         query?.removeEventListener?.('change', onSystemChange);
         layoutQuery?.removeEventListener?.('change', onLayoutQuery);
+        pointerQuery?.removeEventListener?.('change', onLayoutQuery);
+        channel?.removeEventListener('message', onMessage);
+        channel?.close();
     };
     document.addEventListener('click', onClick);
     document.addEventListener('keydown', onKeydown);
     document.addEventListener('DOMContentLoaded', ready, { once: true });
     window.addEventListener('storage', onStorage);
-    if (ownsWindow) {
-        window.addEventListener('pywebviewready', syncNativeFrame);
-        window.addEventListener('pageshow', onPageShow);
+    if (ownsWindow) window.addEventListener('pywebviewready', syncNativeFrame);
+    if (ownsWindow || syncs) window.addEventListener('pageshow', onPageShow);
+    if (syncs) {
+        window.addEventListener('focus', onFocus);
+        document.addEventListener('visibilitychange', onShown);
+        channel?.addEventListener('message', onMessage);
     }
     window.addEventListener('pagehide', cleanup);
     query?.addEventListener?.('change', onSystemChange);
@@ -253,7 +353,7 @@
    in Telegram for Android, a desktop engine, a frame inside another page) keeps 100 %: a size is kept only once the
    layout width really became the one asked for the first time; a later miss is a layout still moving (a rotation).
    A new screen width (a rotation, a split screen) is read from the visual viewport where it reads true, without a
-   flash to 100 %, and the owner's choice reapplied as far as the narrower screen allows. Per device, like the theme. */
+   flash to 100 %, and the owner's choice reapplied as far as the narrower screen allows. Stored per origin. */
 (() => {
     'use strict';
     const KEY = 'ouroboros.interface-size';

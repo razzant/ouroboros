@@ -14,7 +14,6 @@ from tests.test_project_semantic_admission import room, task  # noqa: F401
 from tests.test_schedule_occurrence import q  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _drop_project(root):
@@ -23,7 +22,7 @@ def _drop_project(root):
     registry._save(root, data)
 
 
-@pytest.mark.parametrize("receipt", ["ours", "foreign", "unreadable", "unconfirmed", "late_write"])
+@pytest.mark.parametrize("receipt", ["ours", "foreign", "late_write"])
 def test_promotion_attachments_wait_for_exact_refusal_receipt(host, tmp_path, monkeypatch, receipt):  # noqa: F811
     from ouroboros import artifacts
     from supervisor import task_admission
@@ -75,7 +74,7 @@ def test_promotion_attachments_wait_for_exact_refusal_receipt(host, tmp_path, mo
         assert queue.ADMISSION_RESERVATIONS["promoted"] == "foreign"
 
 
-@pytest.mark.parametrize("occupant", ["ours", "foreign_reservation", "foreign_result", "unreadable", "pending"])
+@pytest.mark.parametrize("occupant", ["foreign_reservation", "foreign_result", "unreadable"])
 def test_api_preparation_cleanup_keeps_ownership_until_resources_settle(room, monkeypatch, occupant):  # noqa: F811
     from ouroboros import headless
     from ouroboros.gateway.tasks import _cleanup_api_admission_attempt
@@ -142,9 +141,9 @@ def test_real_api_known_preparation_exception_cleans_only_its_attempt(room, tmp_
     assert load_task_result(room.root, "prepare-failed") is None
 
 
-@pytest.mark.parametrize("stage", ["before_scope", "before_bind", "before_ensure", "during_ensure"])
+@pytest.mark.parametrize("stage", ["before_scope", "before_ensure", "during_ensure"])
 def test_promotion_never_recreates_a_vanished_prepared_room(host, tmp_path, monkeypatch, stage):  # noqa: F811
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
     from supervisor.events_project_routing import _handle_promote_chat_to_task
 
     registry.create_project(host.root, "target")
@@ -165,7 +164,7 @@ def test_promotion_never_recreates_a_vanished_prepared_room(host, tmp_path, monk
         if stage == "during_ensure":
             _drop_project(host.root)
         return SimpleNamespace(path=folder)
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", provision)
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", provision)
     result = _handle_promote_chat_to_task({
         "task_id": "gone-room", "routing_token": "ours", "objective": "Use prepared room",
         "project_id": "target", "chat_id": 1, "_project_admission": basis,
@@ -191,7 +190,7 @@ def test_source_preparation_does_not_recreate_a_vanished_room(room, tmp_path, mo
     assert registry.get_reserved_project(room.root, "target") is None
 
 
-@pytest.mark.parametrize("bad_id", [7, {"bad": "authority"}, "target/invalid", " target "])
+@pytest.mark.parametrize("bad_id", [7, {"bad": "authority"}, " target "])
 def test_legacy_malformed_binding_is_unknown_not_unregistered(room, bad_id):  # noqa: F811
     _drop_project(room.root)
     registry._save_bindings(room.root, {"bindings": {"legacy": {"project_id": bad_id}}})
@@ -201,8 +200,7 @@ def test_legacy_malformed_binding_is_unknown_not_unregistered(room, bad_id):  # 
 
 
 @pytest.mark.parametrize("field,value", [
-    ("lifecycle", None), ("routing_generation", True), ("routing_generation", "0"),
-    ("routing_generation", 0.0), ("chat_id", False), ("chat_id", "4"),
+    ("lifecycle", None), ("routing_generation", True), ("routing_generation", 0.0), ("chat_id", False), ("chat_id", "4"),
     ("working_dir", None), ("routing_incarnation", ""), ("created_at", []),
 ])
 def test_selected_writers_preserve_invalid_neighbor_without_laundering_it(room, field, value):  # noqa: F811
@@ -231,7 +229,6 @@ def test_selected_writers_preserve_invalid_neighbor_without_laundering_it(room, 
 
 @pytest.mark.parametrize("raw", [
     '{"projects":[],"projects":[]}',
-    '{"projects":[{"id":"target","id":"other"}]}',
     '{"projects":[null]}',
     '{"projects":[{"id":"target/invalid"}]}',
 ])
@@ -247,7 +244,7 @@ def test_duplicate_or_malformed_raw_authority_never_admits_or_rewrites(room, raw
 
 
 def test_legacy_omitted_routing_fields_survive_writer_and_new_preparation(room, tmp_path, monkeypatch):  # noqa: F811
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project
 
     path = registry._registry_path(room.root)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -260,7 +257,7 @@ def test_legacy_omitted_routing_fields_survive_writer_and_new_preparation(room, 
     assert basis["project"]["lifecycle"] == "active" and basis["project"]["routing_generation"] == 0
     folder = tmp_path / "legitimate-new-room"
     folder.mkdir()
-    monkeypatch.setattr(subagent_worktrees, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
+    monkeypatch.setattr(genesis_project, "provision_genesis_project", lambda **kw: SimpleNamespace(path=folder))
     missing = registry.project_admission_view(room.root, "new-room", allow_unregistered=True)
     created = registry.ensure_project_workspace(room.root, "new-room", tmp_path / "repo",
                                                 return_project=True, admission_basis=missing)

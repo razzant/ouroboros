@@ -124,3 +124,39 @@ def test_decision_manifest_and_steer_refuse_settled_post_work_root(tmp_path):
                         "routing_token": "t1", "issuer": {"kind": "owner_turn"}}, ctx)
     assert drain_owner_entries(tmp_path, task["id"]) == []
     assert latest_chat_annotations(tmp_path)["late-steer-1"]["reason"] == "target_finished"
+
+
+def test_an_owner_turns_final_drain_reads_what_landed_before_its_close_and_refuses_what_follows(tmp_path, monkeypatch):
+    """Main's owner turn, through the real loop: words its intake admitted while it still read are read by its final
+    drain and answered by another round of the same author; after that close the Main door's append is refused
+    (the words become their own turn), never saved where no round reads them."""
+    import json
+    import threading
+    from types import SimpleNamespace
+
+    from ouroboros.conversation_lease import author_intake_accepting, open_author_intake
+    from ouroboros.owner_mailbox import mailbox_holds, write_owner_message
+    from tests.test_completion_hold_observation import runner
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    turn = runner(tmp_path, monkeypatch, task_id="main-turn")
+    ctx = turn.registry._ctx
+    ctx.task_id, ctx.task_attempt, ctx.task_metadata = "main-turn", None, {}
+    ctx.owner_message_admission_lock = threading.Lock()
+    ctx.owner_message_admission_agent = SimpleNamespace(_accepting_owner_messages=True, _busy=True,
+                                                        _current_task_id="main-turn")
+    assert open_author_intake(tmp_path, "main-turn", "owner:1", attempt=1)  # its carrier's fact (``CarrierTurn``)
+
+    def door(name, text):  # the Main door's locked append (``server_owner_routing._deliver_to_reader``)
+        return write_owner_message(tmp_path, text, "main-turn", msg_id=f"{name}:main-turn", client_message_id=name,
+                                   admit=lambda: author_intake_accepting(tmp_path, "main-turn", "owner:1", attempt=1))
+
+    def answer_while_words_land():
+        assert door("cm-early", "Use the group chat, not the DM")
+        return {"content": "Sent to the DM."}
+
+    text, _usage, _trace = turn.run([answer_while_words_land, {"content": "Sent to the group chat instead."}])
+    assert text == "Sent to the group chat instead." and len(turn.calls) == 2
+    assert "Use the group chat, not the DM" in json.dumps(turn.calls[1], ensure_ascii=False)
+    assert author_intake_accepting(tmp_path, "main-turn", "owner:1", attempt=1) is False
+    assert door("cm-late", "Thanks") is False and not mailbox_holds(tmp_path, "main-turn", "cm-late:main-turn")

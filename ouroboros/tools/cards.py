@@ -29,7 +29,8 @@ _NOT_SHOWN = "The card was not shown."
 SHOW_CARD_TOOL_SCHEMA: Dict[str, Any] = {
     "name": "show_card",
     "description": (
-        "Put an interactive card into your own message in the owner's chat. Use it when a control "
+        "Put an interactive card into your own message in this work's room (Presence-bound: local, not the "
+        "place conversation). Use it when a control "
         "saves the owner work a text answer would leave to them: a choice with details, a small form, "
         "a compact dashboard or checklist, a calculator or simulation. Keep ordinary answers as text.\n\n"
         "Exactly one body. components: a declarative tree the host draws (markdown, metric, callout, kv, "
@@ -162,7 +163,9 @@ def _show_card(ctx: ToolContext, title: str = "", fallback_text: str = "", compo
         return argument_refusal(ctx, "SHOW_CARD_ARG_ERROR", problems, effect=_NOT_SHOWN)
 
     from ouroboros.card_store import CardStoreError, store_app_bytes, write_card
-    from ouroboros.tools.owner_delivery import deliver_owner_event
+    from ouroboros.projects_registry import project_chat_for_task_tree
+    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.tools.owner_delivery import UNDELIVERED, UNSUPPORTED_PEER, deliver_owner_event, named_delivery_receipt
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
     root = pathlib.Path(getattr(ctx, "budget_drive_root", None) or metadata.get("budget_drive_root") or ctx.drive_root)
@@ -171,20 +174,26 @@ def _show_card(ctx: ToolContext, title: str = "", fallback_text: str = "", compo
             body = {"app": store_app_bytes(root, body["app_bytes"])}
         record = write_card(root, chat_id=int(chat_id), task_id=str(getattr(ctx, "task_id", "") or ""),
                             title=title.strip(), fallback_text=fallback_text, kind=kind, body=body,
-                            replace=str(replace or ""))
+                            replace=str(replace or ""), same_room=lambda card: project_chat_for_task_tree(
+                                canonical_data_root(ctx), card.get("task_id")) == int(chat_id))
     except CardStoreError as exc:
         return argument_refusal(ctx, exc.code, [str(exc)], effect=_NOT_SHOWN)
     except (OSError, TimeoutError) as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR",
                                                     text=f"⚠️ The card could not be stored: {exc}"))
-    mode = deliver_owner_event(ctx, {
+    event = {
         "type": "send_card", "chat_id": int(chat_id), "card_id": record["card_id"], "title": record["title"],
         "fallback_text": record["fallback_text"], "kind": kind, "revision": int(record["revision"]),
         "replace": bool(replace), "interactive": interactive,
-    })
-    receipt = {"card_id": record["card_id"], "revision": int(record["revision"]), "shown": mode == "live",
-               **({} if mode == "live" else {"queued": True})}
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=json.dumps(receipt)))
+    }
+    mode = deliver_owner_event(ctx, event)
+    named = named_delivery_receipt(ctx, event, mode, "card")
+    identity = {"card_id": record["card_id"], "revision": int(record["revision"])}
+    if mode in (UNDELIVERED, UNSUPPORTED_PEER):
+        return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=json.dumps(
+            {**identity, "delivery": named}, ensure_ascii=False)))
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=json.dumps(
+        {**identity, "delivery": named, **({} if mode == "live" else {"queued": True})}, ensure_ascii=False)))
 
 
 __all__ = ["SHOW_CARD_TOOL_SCHEMA", "_show_card"]

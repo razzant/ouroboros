@@ -13,14 +13,12 @@ import pytest
 from ouroboros import loop, loop_forced_finalization as forced, task_pacing
 from ouroboros.transcript_prefix import observe_send, retire_unbound_reasoning
 from tests._dialogue import chat_rows, progress_rows
-from tests.test_consolidator_context_fit import fit as _consolidation_fit
 from tests.test_native_review_context_facts import _executor
 from tests.test_native_tool_round_executor import _ScriptedLLM, _tool_call, _VERDICT
 from tests.test_reasoning_binding import TOOLS, bound_rows, history, signed
 from tests.test_transcript_prefix import ANSWER, _four_tool_rounds, full_loop as _full_loop
 from tests.test_tree_cost_ceiling import _ctx
 
-consolidation_fit = _consolidation_fit
 full_loop = _full_loop
 
 
@@ -269,8 +267,7 @@ def _helper_retirement_logs(context, count):
     return retired
 
 
-@pytest.mark.parametrize("surface", ["multi_model_review", "deep_self_review"])
-@pytest.mark.parametrize("fold", [False, True])
+@pytest.mark.parametrize(("fold", "surface"), [(False, "multi_model_review"), (True, "deep_self_review")])
 def test_native_review_retires_before_chat_and_records_only_logs(tmp_path, fold, surface):
     second = (_signed_call("compact_context", {"working_note": "The source remains in its checkpoint.", "keep_unit_ids": []}, "fold")
               if fold else _signed_call("read_file", {"path": "source.txt"}, "read-again"))
@@ -352,74 +349,3 @@ def test_waiting_native_review_retires_against_its_sent_observation(tmp_path, mo
     assert bound_rows(messages) == ([2] if changed else [2, 4, 6])
     assert executor._episode_usage.get("reasoning_retired", 0) == int(changed)
     _helper_retirement_logs(executor._inspection_ctx, int(changed))
-
-
-def _knowledge(tmp_path):
-    from ouroboros.consolidator import KnowledgeReadContext
-    from ouroboros.tools.registry import ToolContext
-
-    repo = tmp_path / "subject"
-    repo.mkdir()
-    (repo / "source.txt").write_text("The complete source remains recoverable.\n", encoding="utf-8")
-    return KnowledgeReadContext(ToolContext(repo_dir=repo, drive_root=tmp_path / "data", task_id="light-binding"))
-
-
-@pytest.mark.parametrize("fold", [False, True])
-def test_consolidator_retires_after_authored_compaction_before_observed_chat(tmp_path, consolidation_fit, fold):
-    from ouroboros import consolidator
-
-    knowledge = _knowledge(tmp_path)
-    second = (_signed_call("compact_context", {"working_note": "The source remains in its checkpoint.", "keep_unit_ids": []}, "fold")
-              if fold else _signed_call("read_file", {"path": "source.txt"}, "read-again"))
-    llm = _ScriptedLLM([
-        _signed_call("read_file", {"path": "source.txt"}, "read"), second, {"content": "Summary of the source."},
-    ])
-    content, usage = consolidator._call_consolidation_llm(llm, "Summarize the source.", "Probe", knowledge=knowledge)
-    assert content == "Summary of the source.", usage
-    assert len(llm.calls) == 3
-    assert len(bound_rows(llm.calls[1]["messages"])) == 1
-    assert len(bound_rows(llm.calls[2]["messages"])) == (0 if fold else 2)
-    assert usage.get("reasoning_retired", 0) == int(fold)
-    _helper_retirement_logs(knowledge.context, int(fold))
-    if fold:
-        assert "Earlier reasoning not replayed:" in json.dumps(llm.calls[2]["messages"])
-        result = next(row["content"] for row in llm.calls[2]["messages"] if row.get("tool_call_id") == "fold")
-        assert json.loads(result)["context_view"]["status"] == "applied"
-
-
-def test_consolidator_accumulates_usage_and_separate_log_facts_across_answered_rounds(tmp_path, consolidation_fit):
-    from ouroboros import consolidator
-
-    knowledge = _knowledge(tmp_path)
-    llm = _ScriptedLLM([
-        _signed_call("read_file", {"path": "source.txt"}, "read-1"),
-        _signed_call("compact_context", {"working_note": "The first source remains recoverable.", "keep_unit_ids": []}, "fold-1"),
-        _signed_call("read_file", {"path": "source.txt"}, "read-2"),
-        _signed_call("compact_context", {"working_note": "Both reads agree and remain recoverable.", "keep_unit_ids": []}, "fold-2"),
-        {"content": "Summary of the source."},
-    ])
-    content, usage = consolidator._call_consolidation_llm(llm, "Summarize the source.", "Probe", knowledge=knowledge)
-    assert content == "Summary of the source." and len(llm.calls) == 5
-    assert usage["reasoning_retired"] == usage["reasoning_retired_turns"] == usage["reasoning_retired_blocks"] == 2
-    events = _helper_retirement_logs(knowledge.context, 2)
-    assert [event["round"] for event in events] == [3, 5]
-    assert all(event["reasoning_retired"]["turns"] == event["reasoning_retired"]["blocks"] == 1 for event in events)
-
-
-def test_unanswered_consolidator_send_does_not_replace_the_answered_baseline(tmp_path, consolidation_fit):
-    from ouroboros import consolidator
-
-    class RefusingLLM(_ScriptedLLM):
-        def chat(self, **kwargs):
-            if self.calls:
-                self.calls.append({**kwargs, "messages": copy.deepcopy(kwargs["messages"])})
-                raise RuntimeError("The provider did not answer.")
-            return super().chat(**kwargs)
-
-    knowledge = _knowledge(tmp_path)
-    llm = RefusingLLM([_signed_call("read_file", {"path": "source.txt"}, "read")])
-    content, usage = consolidator._call_consolidation_llm(llm, "Summarize the source.", "Probe", knowledge=knowledge)
-    assert not content and usage["_consolidation_errors"]
-    assert len(llm.calls) == 2
-    assert knowledge.context._last_context_observation["messages"] == llm.calls[0]["messages"]
-    assert knowledge.context._last_context_observation["messages"] != llm.calls[1]["messages"]

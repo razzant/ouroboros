@@ -1,4 +1,5 @@
 """Requirements changes, targets and failed installs determine dependency sync."""
+import pathlib
 from unittest.mock import Mock
 
 import pytest
@@ -105,3 +106,84 @@ def test_torn_watermarks_never_fail_a_checkout_or_a_sync(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(git_ops_reset.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd) or Mock(wait=lambda **kw: 0))
     assert git_ops_reset.sync_runtime_dependencies("test")[0] and len(calls) == 1  # not known synced: pip runs
+
+
+def _old_fingerprint(req, cmd):
+    """The receipt formula before packaged hosts were keyed by content: a source run must keep it."""
+    import hashlib
+    import json
+    import os
+    import site
+    import sys
+    import sysconfig
+    facts = {"requirements_sha256": hashlib.sha256(req.read_bytes()).hexdigest(), "command": cmd,
+             "interpreter": [sys.executable, sys.version, sys.prefix, sys.base_prefix],
+             "target": [site.getuserbase(), sysconfig.get_path("purelib")],
+             "environment": {key: os.environ.get(key, "") for key in
+                             ("PYTHONUSERBASE", "PIP_TARGET", "PIP_PREFIX", "PIP_USER", "PIP_CONFIG_FILE", "VIRTUAL_ENV")}}
+    return hashlib.sha256(json.dumps(facts, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def test_a_packaged_fingerprint_follows_the_app_content_not_its_path(tmp_path, monkeypatch):
+    """The same app moved, remounted or re-extracted keeps its receipt (no checkout/reset, import smoke or pip
+    re-sync at every start); another build, Python or machine re-syncs; paths outside the bundle stay absolute."""
+    import json
+    import platform
+    import sys
+    import sysconfig
+
+    req = tmp_path / "repo" / "requirements-runtime.lock"
+    req.parent.mkdir()
+    req.write_text("example==1\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_APP_VERSION", "7.9.0")
+
+    def bundle(name, *, sha="b" * 64, dist="1.0", python=None):
+        root = tmp_path / name / "Ouroboros.app" / "Contents" / "Frameworks"
+        purelib = root / "python-standalone" / "lib" / "python3.10" / "site-packages"
+        (purelib / f"pkg-{dist}.dist-info").mkdir(parents=True)
+        (purelib / f"pkg-{dist}.dist-info" / "METADATA").write_text(f"Name: pkg\nVersion: {dist}\n", encoding="utf-8")
+        (root / "repo_bundle_manifest.json").write_text(json.dumps({"source_sha": "a" * 40, "bundle_sha256": sha}))
+        return root, purelib, pathlib.Path(python) if python else root / "python-standalone" / "bin" / "python3"
+
+    def fingerprint(root, purelib, python, userbase=tmp_path / "data" / "state" / "python-userbase"):
+        monkeypatch.setenv("OUROBOROS_BUNDLE_DIR", str(root))
+        monkeypatch.setenv("PYTHONUSERBASE", str(userbase))  # an external destination: never relative
+        monkeypatch.setenv("VIRTUAL_ENV", str(root / "env"))  # inside the bundle, like any field's path
+        monkeypatch.setattr(sys, "executable", str(python))
+        for name in ("prefix", "base_prefix"):
+            monkeypatch.setattr(sys, name, str(python.parent.parent))
+        monkeypatch.setattr(sysconfig, "get_path", lambda key, *a, **k: str(purelib))
+        return git_ops_reset._dependency_fingerprint(
+            req, [str(python), "-m", "pip", "install", "-q", "--target", str(root / "site"), "-r", str(req)])
+
+    here = fingerprint(*bundle("Desktop"))
+    assert fingerprint(*bundle("Applications")) == here, "a moved copy: the old receipt keyed on its path"
+    assert fingerprint(*bundle("Volume"), userbase=tmp_path / "other-userbase") != here, "an external target re-syncs"
+    assert fingerprint(*bundle("other-build", sha="c" * 64)) != here
+    assert fingerprint(*bundle("other-packages", dist="2.0")) != here
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64-other")
+    assert fingerprint(*bundle("other-machine")) != here
+    monkeypatch.undo()
+    monkeypatch.setenv("OUROBOROS_APP_VERSION", "7.9.0")
+    monkeypatch.setattr(sys, "version", sys.version + " other")
+    assert fingerprint(*bundle("other-python")) != here
+    # A container keeps its venv outside the seed bundle: that path stays part of the key.
+    monkeypatch.undo()
+    monkeypatch.setenv("OUROBOROS_APP_VERSION", "7.9.0")
+    seed, _purelib, _python = bundle("seed")
+    venv = [tmp_path / name / "venv" / "lib" / "site-packages" for name in ("body", "other-body")]
+    first = fingerprint(seed, venv[0], venv[0].parents[2] / "bin" / "python")
+    assert fingerprint(seed, venv[0], venv[0].parents[2] / "bin" / "python") == first
+    assert fingerprint(seed, venv[1], venv[1].parents[2] / "bin" / "python") != first
+
+
+def test_a_source_run_keeps_the_receipt_it_had(tmp_path, monkeypatch):
+    import sys
+
+    req = tmp_path / "requirements-runtime.lock"
+    req.write_text("example==1\n", encoding="utf-8")
+    cmd = [sys.executable, "-m", "pip", "install", "-q", "-r", str(req)]
+    monkeypatch.delenv("OUROBOROS_BUNDLE_DIR", raising=False)
+    assert git_ops_reset._dependency_fingerprint(req, cmd) == _old_fingerprint(req, cmd)
+    monkeypatch.setenv("OUROBOROS_BUNDLE_DIR", str(tmp_path))  # a checkout launched from source: no manifest
+    assert git_ops_reset._dependency_fingerprint(req, cmd) == _old_fingerprint(req, cmd)

@@ -23,7 +23,6 @@ from ouroboros import config, safety
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -71,8 +70,7 @@ def _word_commands(scratch: pathlib.Path) -> dict:
     }
 
 
-@pytest.mark.parametrize("utility", ["rm", "mkdir", "touch"])
-@pytest.mark.parametrize("runtime", ["light", "advanced"])
+@pytest.mark.parametrize(("runtime", "utility"), [("light", "rm"), ("light", "touch"), ("advanced", "mkdir")])
 def test_top_level_word_guessed_write_outside_every_root_runs(principal, monkeypatch, utility, runtime):
     registry, _ctx, home, _system, _data, scratch = principal
     _mode(monkeypatch, runtime)

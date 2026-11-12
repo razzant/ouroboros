@@ -9,7 +9,8 @@ import { skillSourcesApi } from './api_client.js';
 import { bindDialogFocus, bindMenu } from './ui_interactions.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import {
-    canUpdateWithoutReview, displayAddress, officialPromise, permissionWords, plural, publicationDisclosure, updateRejectionSentence, versionText,
+    canUpdateWithoutReview, displayAddress, officialPromise, permissionWords, plural, publicationDisclosure, sourceAddressText, statusHtml,
+    updateRejectionSentence, versionText,
 } from './skill_presentation.js';
 
 let activeClose = null;
@@ -105,7 +106,7 @@ export function openChoiceDialog({ title, lead = '', choices = [], selected = ch
             title, wide: true, onSettle: resolve,
             bodyHtml: `${lead ? `<p>${escapeHtml(lead)}</p>` : ''}${choiceCardsHtml(choices, selected, { label: groupLabel })}${note ? `<p class="skills-dialog-note">${escapeHtml(note)}</p>` : ''}${footHtml}`,
         });
-        host.actions.innerHTML = `<button type="button" class="btn btn-default" data-dialog-cancel>${escapeHtml(cancelLabel)}</button><button type="button" class="btn btn-primary" data-dialog-ok></button>`;
+        host.actions.innerHTML = `<button type="button" class="btn btn-default" data-dialog-cancel>${escapeHtml(cancelLabel)}</button><button type="button" class="btn" data-primary data-dialog-ok></button>`;
         const ok = host.actions.querySelector('[data-dialog-ok]');
         const paint = (value) => {
             const choice = choices.find((item) => item.value === value) || choices[0];
@@ -208,7 +209,7 @@ export function openPublishDestinationDialog({ name, choices = [], changed = fal
                 ${error ? `<p class="skills-dialog-note" role="alert">${escapeHtml(error)}</p>` : ''}
                 <p class="skills-dialog-note" data-publication-disclosure></p>
                 <p class="skills-dialog-note">Ouroboros first checks it for secrets and problems.</p>`;
-            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Cancel</button><button type="button" class="btn btn-primary" data-dialog-ok>Check and publish</button>';
+            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Cancel</button><button type="button" class="btn" data-primary data-dialog-ok>Check and publish</button>';
             const disclose = () => { host.body.querySelector('[data-publication-disclosure]').textContent = publicationDisclosure(current()?.private, current()?.repository); };
             bindChoiceCards(host.body.querySelector('[role="radiogroup"]'), (value) => { selected = value; disclose(); });
             disclose();
@@ -305,35 +306,92 @@ export function sourceProbeWarning(probe) {
 }
 
 /**
- * Add source, step 1 (address) then step 2 (what was found, its name, the
- * one-time trust choice). `api` = {probe, add}. Resolves the added source or null.
+ * What the owner typed as the host reads it: every repository address form git takes (scheme://, user@host:path),
+ * else a folder on the computer running Ouroboros. A revision or subfolder goes with either; a folder refuses them.
  */
-export function openAddSourceDialog({ api, initialAddress = '' } = {}) {
+export function sourceTarget(address, { revision = '', subfolder = '' } = {}) {
+    const value = String(address || '').trim();
+    const view = Object.fromEntries(Object.entries({ revision, subfolder })
+        .map(([key, text]) => [key, String(text || '').trim()]).filter(([, text]) => text));
+    const repository = /^(https?|ssh|file):\/\//i.test(value) || /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:\S+$/.test(value);
+    return { [repository ? 'url' : 'path']: value, ...view };
+}
+
+/** What a checked repository source will read: the revision it follows or the commit it stays at, and its folder. */
+export function sourceViewSentence({ revision = '', subfolder = '' } = {}, commit = '') {
+    const short = String(commit || '').slice(0, 7);
+    const now = short ? ` (now at ${short})` : '';
+    const at = /^[0-9a-f]{40}$/i.test(revision) ? `Stays at commit ${revision.slice(0, 7)}: its skills don’t update`
+        : revision ? `Follows ${revision}${now}` : `Follows the default branch${now}`;
+    return `${at}${subfolder ? `, reading the folder ${subfolder}` : ''}.`;
+}
+
+/** What a source could not offer, one press away: a warning count that opens to the exact reasons. */
+export function sourceProblemsHtml(problems = [], { open = false } = {}) {
+    if (!problems.length) return '';
+    return `<details class="skills-source-problems"${open ? ' open' : ''}><summary>${statusHtml(escapeHtml(plural(problems.length, 'problem')), 'warn')}</summary>
+        <ul>${problems.map((problem) => `<li>${escapeHtml(problem)}</li>`).join('')}</ul></details>`;
+}
+
+/** The build's suggested repositories as offered cards; choosing one checks it, nothing is added by itself. */
+function suggestionsHtml(suggestions) {
+    if (!suggestions.length) return '';
+    return `<p class="skills-dialog-lead">Suggested sources</p>
+        <div class="chat-quiz-options skills-suggestions">${suggestions.map((item, index) => `<button type="button" class="chat-quiz-option" data-source-suggestion="${index}">
+            <span class="chat-quiz-option-label">${escapeHtml(item.name)}</span><span class="chat-quiz-option-detail">${escapeHtml([sourceAddressText(item), item.about].filter(Boolean).join('\n'))}</span></button>`).join('')}</div>
+        <p class="skills-dialog-note">This build of Ouroboros suggests them. Choosing one checks it; nothing is added until you add it.</p>`;
+}
+
+/**
+ * Add source, step 1 (address, an optional revision and folder, or a build's suggestion) then step 2 (what
+ * was found, its name, the one-time trust choice). `api` = {probe, add}. Resolves the added source or null.
+ */
+export function openAddSourceDialog({ api, initialAddress = '', suggestions = [] } = {}) {
     return new Promise((resolve) => {
         const host = mountDialog({ title: 'Add a source', wide: true, onSettle: resolve });
+        const offered = suggestions.filter((item) => item && !item.connected && item.url);
         let probe = null;
         let address = initialAddress;
+        let view = { revision: '', subfolder: '' };
+        let picked = null;
         let busy = false;
-        const targetOf = (value) => (/^(https?:\/\/|git@|ssh:\/\/)/i.test(value) ? { url: value } : { path: value });
         const stepOne = (error = '') => {
             host.body.innerHTML = `
                 <p>Paste a link to a skills repository or catalog, or a folder.</p>
                 <label class="ui-field skills-add-field"><span>Address</span>
                     <input class="ui-control" type="text" data-source-address autocomplete="off" spellcheck="false" value="${escapeHtml(address)}" aria-describedby="skills-add-help">
                 </label>
-                <p class="skills-dialog-note" id="skills-add-help">GitHub, GitLab or any git address. A private repository uses your Git sign-in on this computer. A folder on the computer running Ouroboros works too.</p>
-                ${error ? `<p class="ui-status skills-dialog-error" data-tone="danger" role="alert">${escapeHtml(error)}</p>` : ''}`;
-            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Cancel</button><button type="button" class="btn btn-primary" data-add-check>Check</button>';
+                <p class="skills-dialog-note" id="skills-add-help">Any Git address: https://, ssh://, git@host:path or file://. A private repository uses your Git sign-in on this computer. A folder on the computer running Ouroboros works too.</p>
+                <details class="skills-add-more"${view.revision || view.subfolder ? ' open' : ''}><summary>Branch, tag or folder</summary>
+                    <div class="skills-add-more-fields">
+                        <label class="ui-field skills-add-field"><span>Branch, tag or commit</span>
+                            <input class="ui-control" type="text" data-source-revision autocomplete="off" spellcheck="false" placeholder="main, v1.2 or a full commit id" value="${escapeHtml(view.revision)}">
+                        </label>
+                        <label class="ui-field skills-add-field"><span>Folder in the repository</span>
+                            <input class="ui-control" type="text" data-source-subfolder autocomplete="off" spellcheck="false" placeholder="skills/team" value="${escapeHtml(view.subfolder)}">
+                        </label>
+                        <p class="skills-dialog-note">Empty fields read the default branch from the top folder.</p>
+                    </div>
+                </details>
+                ${error ? `<p class="ui-status skills-dialog-error" data-tone="danger" role="alert">${escapeHtml(error)}</p>` : ''}
+                ${suggestionsHtml(offered)}`;
+            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Cancel</button><button type="button" class="btn" data-primary data-add-check>Check</button>';
             const input = host.body.querySelector('[data-source-address]');
+            const field = (name) => host.body.querySelector(`[data-source-${name}]`);
+            const controls = [input, field('revision'), field('subfolder')];
             const check = async () => {
+                // One check at a time, and what it reads is what step two shows and Add sends: its fields stay
+                // read-only until it answers (both answers draw a new step).
+                if (busy || !input.value.trim()) return;
                 address = input.value.trim();
-                if (!address || busy) return;
+                view = { revision: field('revision').value.trim(), subfolder: field('subfolder').value.trim() };
                 busy = true;
+                for (const control of controls) control.readOnly = true;
                 const button = host.actions.querySelector('[data-add-check]');
                 button.disabled = true;
                 button.textContent = 'Checking…';
                 try {
-                    probe = await api.probe(targetOf(address));
+                    probe = await api.probe(sourceTarget(address, view));
                     if (probe?.error || !Array.isArray(probe?.found) || !probe.found.length) {
                         busy = false;
                         return stepOne(probe?.error || 'No skills found here. A source is a repository with skill folders (each with a SKILL.md) or a catalog file.');
@@ -346,15 +404,29 @@ export function openAddSourceDialog({ api, initialAddress = '' } = {}) {
                 }
             };
             host.actions.querySelector('[data-add-check]').addEventListener('click', check);
-            input.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); check(); } });
+            for (const control of controls) {
+                control.addEventListener('input', () => { picked = null; });
+                control.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); check(); } });
+            }
+            host.body.querySelector('.skills-suggestions')?.addEventListener('click', (event) => {
+                const item = offered[Number(event.target.closest('[data-source-suggestion]')?.dataset.sourceSuggestion)];
+                if (!item || busy) return;
+                picked = item;
+                input.value = item.url;
+                field('revision').value = item.commit || item.ref || '';
+                field('subfolder').value = item.path || '';
+                check();
+            });
             host.focus(input);
         };
         const stepTwo = (error = '') => {
             const found = probe.found.slice(0, 12).join(', ') + (probe.found.length > 12 ? ` … +${probe.found.length - 12}` : '');
-            const named = probe.suggested_name || displayAddress(address).split('/').filter(Boolean).at(-1) || 'New source';
+            const named = picked?.name || probe.suggested_name || displayAddress(address).split('/').filter(Boolean).at(-1) || 'New source';
             host.body.innerHTML = `
                 <p class="ui-status" data-tone="ok">Found ${escapeHtml(plural(probe.found.length, 'skill'))}${probe.suggested_name ? ` — “${escapeHtml(probe.suggested_name)}”` : ''}${probe.owner ? ` by ${escapeHtml(probe.owner)}` : ''}</p>
                 <p class="skills-dialog-note">${escapeHtml(found)}</p>
+                ${probe.commit ? `<p class="skills-dialog-note" data-source-view>${escapeHtml(sourceViewSentence(view, probe.commit))}</p>` : ''}
+                ${sourceProblemsHtml(probe.problems || [], { open: true })}
                 ${sourceProbeWarning(probe) ? `<p class="skills-dialog-note" data-source-warning>${sourceProbeWarning(probe)}</p>` : ''}
                 <label class="ui-field skills-add-field"><span>Name</span>
                     <input class="ui-control" type="text" data-source-name value="${escapeHtml(named)}" aria-describedby="skills-add-name-help">
@@ -364,7 +436,7 @@ export function openAddSourceDialog({ api, initialAddress = '' } = {}) {
                 ${choiceCardsHtml(trustChoices(), 'review', { label: 'Trust' })}
                 <p class="skills-dialog-note">You choose once. You can change it later in Sources.</p>
                 ${error ? `<p class="ui-status skills-dialog-error" data-tone="danger" role="alert">${escapeHtml(error)}</p>` : ''}`;
-            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-add-back>Back</button><button type="button" class="btn btn-primary" data-add-ok>Add source</button>';
+            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-add-back>Back</button><button type="button" class="btn" data-primary data-add-ok>Add source</button>';
             const trust = bindChoiceCards(host.body.querySelector('[role="radiogroup"]'));
             host.actions.querySelector('[data-add-back]').addEventListener('click', () => stepOne());
             host.actions.querySelector('[data-add-ok]').addEventListener('click', async () => {
@@ -372,7 +444,7 @@ export function openAddSourceDialog({ api, initialAddress = '' } = {}) {
                 if (!name || busy) return;
                 busy = true;
                 try {
-                    const result = await api.add({ ...targetOf(address), name, trust: trust() });
+                    const result = await api.add({ ...sourceTarget(address, view), name, trust: trust() });
                     busy = false;
                     host.close(result?.source || result || { name });
                 } catch (err) {
@@ -406,7 +478,7 @@ export function openFirstStartDialog(rows = []) {
             title: 'How should skills from the Ouroboros hub install?', wide: true, onSettle: resolve,
             bodyHtml: firstStartTrustHtml(rows),
         });
-        host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Later</button><button type="button" class="btn btn-primary" data-first-ok>Confirm</button>';
+        host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Later</button><button type="button" class="btn" data-primary data-first-ok>Confirm</button>';
         host.body.addEventListener('click', (event) => {
             const button = event.target.closest('[data-trust]');
             if (!button) return;

@@ -32,7 +32,6 @@ STATES = {
 }
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_update_pill_and_panel_name_local_content_not_commit_counts(direct_server_with_data, engine):
@@ -65,15 +64,17 @@ def test_update_pill_and_panel_name_local_content_not_commit_counts(direct_serve
                         pill.click()
                     summary = page.locator("#updates-summary")
                     expect(summary).to_contain_text("Update available", timeout=30_000)
-                    chips = page.locator("#updates-meta").inner_text()
+                    # The record's facts are the card's Details (label, value); the headline keeps one mark.
+                    chips = page.evaluate("() => Object.fromEntries([...document.querySelectorAll('#updates-facts dt')]"
+                                          ".map((dt) => [dt.textContent, dt.nextElementSibling.textContent]))")
                     commits = "1 incoming" if fields.get("ahead") == 0 else f"1 incoming / {status['ahead']} local"
-                    assert f"Commits: {commits}" in chips and f"Local changes: {local_chip}" in chips, chips
-                    assert ("Uncommitted: 3 file(s)" in chips) == (name == "dirty")
-                    dot = page.locator("#updates-dot").get_attribute("data-tone")
+                    assert chips.get("Commits") == commits and chips.get("Local changes") == local_chip, chips
+                    assert (chips.get("Uncommitted") == "3 file(s)") == (name == "dirty")
+                    dot = page.locator(".updates-mark").get_attribute("data-hue")
                     hint_node = page.locator("#updates-hint")
                     if hint:
                         expect(hint_node).to_contain_text(hint)
-                        assert dot == "warn", (name, dot)
+                        assert dot == "owner", (name, dot)  # amber: the owner's move before an unsafe update
                     else:
                         assert hint_node.is_hidden() and dot == "ok", (name, dot)
                     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")

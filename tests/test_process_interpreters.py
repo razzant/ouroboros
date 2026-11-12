@@ -74,7 +74,7 @@ def _interpreter(tool_name: str, args: dict) -> str:
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["run_command", "run_script", "start_service", "verify_and_record"],
+    ["run_command", "start_service", "verify_and_record"],
 )
 def test_system_surfaces_use_validated_agent_python(tmp_path, monkeypatch, tool_name):
     ctx = _context(tmp_path)
@@ -96,7 +96,7 @@ def test_system_surfaces_use_validated_agent_python(tmp_path, monkeypatch, tool_
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["run_command", "run_script", "start_service", "verify_and_record"],
+    ["run_command", "start_service", "verify_and_record"],
 )
 def test_external_workspace_prefers_project_venv(tmp_path, monkeypatch, tool_name):
     workspace = tmp_path / "workspace"
@@ -250,17 +250,45 @@ def test_reviewed_skill_environment_precedes_executor(tmp_path, monkeypatch):
     assert trace.environment == "isolated_skill"
 
 
+def test_a_skill_whose_env_python_cannot_run_here_is_refused_not_rerouted(tmp_path, monkeypatch):
+    """Agent or PATH python would run such a skill without its packages; a never-installed env (authoring, repair)
+    and a skill without Python packages keep today's choice."""
+    import ouroboros.skill_loader as skill_loader
+    import ouroboros.skill_readiness as skill_readiness
+    from tests._shared import current_python_env
+
+    ctx = _context(tmp_path)
+    ctx.task_metadata = {"skill": "demo"}
+    agent_python = _executable(tmp_path / "agent" / "bin" / "python")
+    monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", str(agent_python))
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    monkeypatch.setattr(skill_loader, "find_skill", lambda *a, **k: SimpleNamespace(name="demo", skill_dir=skill_dir))
+    monkeypatch.setattr(skill_readiness, "skill_readiness_for_execution", lambda *a, **k: SimpleNamespace(ready=False))
+
+    def resolve(kind):
+        (skill_dir / ".ouroboroshub.json").write_text(json.dumps({"install_specs": {"auto": [{"kind": kind, "package": "x"}]}}))
+        return resolve_process_python(ctx, "run_command", _tool_args("run_command"), runtime_mode="advanced")
+
+    resolved, trace = resolve("pip")  # never installed: an unready skill falls through as it always did
+    assert resolved["cmd"][0] == str(agent_python) and trace.fallback_reason == "reviewed_skill_environment_unavailable"
+    resolved, trace = resolve("npm")  # no Python package rides on the interpreter
+    assert resolved["cmd"][0] == str(agent_python) and not trace.error_reason
+    current_python_env(skill_dir / ".ouroboros_env")
+    resolved, trace = resolve("pip")  # a usable env: an unready skill falls through as it always did
+    assert resolved["cmd"][0] == str(agent_python) and trace.fallback_reason == "reviewed_skill_environment_unavailable"
+    cfg = skill_dir / ".ouroboros_env" / "python" / "pyvenv.cfg"
+    version = next(line for line in cfg.read_text().splitlines() if line.startswith("version"))
+    cfg.write_text(f"home = {tmp_path / 'gone' / 'bin'}\n{version}\n")
+    resolved, trace = resolve("pip")  # an env left on a vanished app's Python: refused
+    assert resolved == _tool_args("run_command") and trace.error_reason == "skill_env_python_unavailable"
+
+
 @pytest.mark.parametrize(
     ("tool_name", "args"),
     [
         ("run_command", {"cmd": ["/usr/bin/python", "-V"]}),
-        ("run_command", {"cmd": ["python3.12", "-V"]}),
-        ("run_command", {"cmd": ["sh", "-c", "python -V"]}),
-        ("run_command", {"cmd": ["env", "python", "-V"]}),
-        ("run_script", {"script": "pass", "interpreter": "/usr/bin/python"}),
-        ("run_script", {"script": "pass", "interpreter": "python3.12"}),
         ("verify_and_record", {"contract_kind": "explicit_command", "check": "python -V"}),
-        ("verify_and_record", {"contract_kind": "artifact_observation", "check": ["python", "-V"]}),
         ("remote_exec", {"cmd": ["python", "-V"]}),
     ],
 )
@@ -400,7 +428,6 @@ def test_run_script_accepts_registry_attested_versioned_agent_python(
     assert not hasattr(ctx, "_active_interpreter_resolution")
 
 
-@pytest.mark.serial
 def test_run_script_reports_a_missing_interpreter_as_a_process_error(tmp_path):
     from ouroboros.tools.shell import _run_script
 

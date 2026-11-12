@@ -9,6 +9,7 @@ from ouroboros.subagent_metrics import set_name
 
 
 def tree_inputs(root, root_id, *, task=None):
+    from ouroboros.store_hot_facts import tree_requests
     from ouroboros.terminal_time import terminal_time_fact
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
 
@@ -50,8 +51,14 @@ def tree_inputs(root, root_id, *, task=None):
             invocation_id = request["invocation_id"]
             actors["invocation:" + invocation_id] = {"id": "invocation:" + invocation_id,
                 "invocation_id": invocation_id, "task_id": request.get("task_id"),
-                "kind": "delegated_start", "state": "pending", "terminal": False,
+                # A review seat's start is that review's, never a helper's.
+                "kind": "review_custody" if request.get("review_wave_id") else "delegated_start", "state": "pending", "terminal": False,
                 "start": None, "end": None, "accounted_upper_bound_usd": None, "basis": "retained_start_request"}
+        # A definite refusal leaves custody_open with no actor; without this fact it would read as nothing tried.
+        refused_starts = [{"invocation_id": str(request.get("invocation_id") or key), "task_id": request.get("task_id"),
+                           "reason": str((facts.get("failure") or {}).get("reason") or "")}
+                          for name, key, facts in tree_requests(txn, root_id, refused=True)
+                          if name == "custody_refused" and not (request := facts.get("request") or {}).get("review_wave_id")]
         cursor = txn.meta("subagent_metrics_cursor") or {}
     # Receipt refresh runs on ordinary producer threads. It uses retained facts;
     # only an explicit rollup read catches up legacy history.
@@ -65,7 +72,7 @@ def tree_inputs(root, root_id, *, task=None):
         expected = set(facts.get("child_ids") or ())
     except (OSError, ValueError, TypeError, store.StoreError):
         gaps.append("fanout_history_unavailable")
-    if expected - set(ids):
+    if expected - set(ids) - {key.partition(":")[2] for key in actors if key.startswith("run:")}:  # a run's fan-out names its run id
         gaps.append("missing_child_results")
     if not owner:
         gaps.append("root_result_absent")
@@ -81,7 +88,7 @@ def tree_inputs(root, root_id, *, task=None):
         gaps.append("measurement_stream_" + stream)
     if cursor.get("missing_producers"):
         gaps.append("missing_measurement_publications")
-    return {"actors": list(actors.values()), "edges": edges, "waits": waits, "usage": usage,
+    return {"actors": list(actors.values()), "edges": edges, "waits": waits, "usage": usage, "refused_starts": refused_starts,
         "coverage": {"tree": "complete" if not gaps else "unknown", "gaps": gaps,
                      "usage": usage_coverage, "causal_edges": "unknown",
                      "history_before_instrumentation": "unknown"},

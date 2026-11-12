@@ -1,4 +1,4 @@
-/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js. */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js, the Dashboard › Logs compact and Raw envelopes in ./logs_types.js. */
 /** @typedef {Object} CostPresentation
  * @property {'own'|'root_tree'} scope
  * @property {?number} tracked_amount
@@ -11,12 +11,13 @@
  * @property {'available'|'unavailable'} status
  * @property {Array<string>} open_run_ids
  * @property {Array<string>} unrecorded_run_ids
+ * @property {Array<string>=} closed_unrecorded_run_ids
  * @property {Array<string>} pending_invocation_ids
  */
 /** @typedef {Object} StateResponse
  * @property {number} uptime
- * @property {number} workers_alive
- * @property {number} workers_total
+ * @property {number} workers_alive  // live worker slots of both lanes; inline carriers may be thread-backed
+ * @property {number} workers_total  // every slot of both lanes; never the project ceiling or assignable capacity
  * @property {number} pending_count
  * @property {number} running_count
  * @property {?number} spent_usd
@@ -40,11 +41,14 @@
  * @property {"available"|"disabled"|"unsaved"} subagents_availability
  * @property {boolean} context_mode_auto_low  // frozen compatibility field; always false
  * @property {EffortRange} effort_range  // the owner's effort range (POST /api/owner/effort-range), the tolerant read
+ * @property {ChatModelRoute} main_route  // Main itself, written by POST /api/owner/chat-model without project_id
  * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
  * @property {Object} accounting  // physical-attempt ledger projection
- * @property {Array<ProjectEntry>} projects  // active/deleting sidebar projection
+ * @property {Array<ProjectEntry>} projects  // the pins and the 50 newest others by last_message_at
+ * @property {?string} project_messages_revision  // moves with any Project's last_message_at; null until history is dated
+ * @property {?number} project_listable_count
  * @property {Array<number>} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
  * @property {?number=} main_visible_revision  // Main's room revision (its standalone messages, as a Project's visible_revision counts); null while unreadable
  * @property {?Object<string, {project_id: string, chat_id: number, origin_bound?: boolean}>} task_bindings  // null only when task_bindings_unchanged; bound task -> its project: suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4). origin_bound marks a task the host included because its OWNER MESSAGE already has a project (#902), so one message cannot keep a second convertible card
@@ -52,7 +56,7 @@
  * @property {boolean} task_bindings_unchanged  // the request's bindings_since names this revision: keep the held map
  * @property {ActiveDirectTurn[]=} active_direct_turns  // active direct/ephemeral chat turns snapshot
  * @property {boolean=} active_chat_activities_complete
- * @property {ActiveChatActivity[]=} active_chat_activities  // combined snapshot: direct/ephemeral turns + root managed queue tasks
+ * @property {ActiveChatActivity[]=} active_chat_activities  // combined snapshot: direct/ephemeral turns + root managed queue tasks + live inline Presence turns (kind presence)
  * @property {Array<Object>=} current_questions Canonical unanswered questions (Project forms and Main's own, by identity), independent of bounded history.
  * @property {boolean=} current_questions_complete False retains previously observed questions its gaps name.
  * @property {Array<{reason:string,task_id?:string,quiz_id?:string}>=} current_questions_gaps Canonical source availability diagnostics.
@@ -80,10 +84,12 @@
  * Background Consciousness alarm clock (server._describe_bg_consciousness_state over consciousness.status_snapshot). A wake-up is an ordinary Main turn; the direct-activity census owns its liveness.
  * @typedef {Object} BgConsciousnessState
  * @property {boolean} enabled
- * @property {string} status  // disabled | stopped | thinking | due | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
+ * @property {string} status  // disabled | starting | stopped | thinking | due | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
  * @property {string} detail  // one honest owner-readable line (e.g. "Sleeping until 14:05.")
+ * @property {string=} detail_note  // what follows from that state, said beneath it; only a proven allowance hold has one
  * @property {string} level  // observe | act | full
- * @property {string} next_wake_at  // ISO instant; "" when unknown
+ * @property {string} next_wake_at  // next attempt, moved by skips/refusals; ISO instant or ""
+ * @property {string} appointment_at  // scheduled time, retained through retries; "" on legacy state
  * @property {string} last_wake_at  // ISO instant; "" before the first wake of this process
  * @property {string} last_wake_task_id
  * @property {string} last_wake_outcome  // running | done | paused | pausing | unknown | failed | rejected:<reason> | skipped:<reason>
@@ -93,9 +99,14 @@
  * @property {string} allowance_resets_at  // ISO instant the oldest counted spend leaves the 24 h window
  * @property {number} tasks_running  // live roots consciousness started
  * @property {number} max_tasks
- * @property {string} live_wake_task_id  // "" when no wake-up is running
+ * @property {string} live_wake_task_id  // own wake through direct custody, queue and settlement; "" when absent
+ * @property {boolean} live_wake_held  // own wake in PENDING: paused, held or awaiting dispatch
+ * @property {?{cause: string, ceiling_usd: ?number}} live_wake_hold  // what its records prove holds it (consciousness_view.hold_cause); null when not held
  * @property {number} unknown_unmetered  // window rows without a price: spent_24h_usd is then a floor ("at least")
  * @property {boolean} integrity_degraded  // the ledger was quarantined/repaired; the numbers are best-effort
+ * @property {string} allowance_status  // the current window's verdict: available | exhausted | allowance_unknown
+ * @property {?number} allowance_open_rows  // window rows that may still settle; null unknown
+ * @property {string} allowance_room_after  // ISO instant after which known spend falls below the limit if nothing more is charged; "" withheld
  */
 /** @typedef {import('./task_activity_types.js').ActiveDirectTurn} ActiveDirectTurn */
 /** @typedef {import('./task_activity_types.js').ActiveChatActivity} ActiveChatActivity */
@@ -109,15 +120,19 @@
  * @property {string} app_version
  * @property {string=} abi_version  // gateway ABI carrier; absent on cores older than GET /api/contract
  * @property {BootDocument=} boot  // the serving generation's phases; answered while the boot runs
+ * @property {Object=} inline_executors  // turns this process ran on its own threads (degraded carrier, live call): degraded_total, live, recent
  */
 /** @typedef {Object} OpenAICompatibleModelsResponse
  * @property {string[]} models
  * @property {string=} error
  */
-/** @typedef {Object} ProviderTestRequest
+/** `api_key_setting` names the built-in compatible pair under test (its address may then be overridden too);
+ * omitted keeps the historical resolution.
+ * @typedef {Object} ProviderTestRequest
  * @property {string} provider_id
  * @property {Object<string, string>=} overrides
  * @property {string=} connection
+ * @property {('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=} api_key_setting
  */
 /** @typedef {Object} ProviderTestResponse
  * @property {boolean} ok
@@ -150,15 +165,10 @@
  * @property {string[]=} custom_secret_keys
  * @property {Object=} setup_contract
  * @property {AvailableSubagentsSettingsMeta=} available_subagents
- * @property {SettingsPolicyState=} policy_state
+ * @property {import('./client_contract_types.js').SettingsPolicyState=} policy_state
  * @property {{restart_required:boolean,restart_keys:string[],restart_source_unknown_keys:string[],unknown_keys:string[],local_model:Object,summary:string}=} restart_state Component application and source uncertainty.
  * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
- */
-/** @typedef {Object} SettingsPolicyState
- * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access
- * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} supervisor
- * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} review
- * @property {boolean} running_task_snapshot
+ * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
  */
 /**
  * The wizard payload plus two DECLARATIONS about the onboarding run. Settings
@@ -226,20 +236,14 @@
  * @property {boolean} can_skip
  * @property {boolean} saved
  */
-/** @typedef {Object} ChatInbound
- * @property {string=} reply_to
- * @property {"chat"} type
- * @property {string} content
- * @property {string=} sender_session_id
- * @property {string=} client_message_id
- * @property {boolean=} force_plan  // Deprecated for one release; accepted and ignored.
- * @property {Array<Object>=} attachments  // [{filename, display_name, mime}] — image uploads become native blocks (v6.26.0)
- * @property {number=} chat_id     // multi-project thread routing (v6.32.0); main chat = 1
- * @property {string=} project_id  // per-project memory scope (v6.32.0)
- * @property {Object=} client_surface  // raw sending-surface observables measured at send time (pywebview/ua/viewport/matchMedia/captured_at; optional IANA timezone)
- */
+/** @typedef {import('./client_contract_types.js').ChatInbound} ChatInbound */
 /** @typedef {import('./client_contract_types.js').CommandInbound} CommandInbound */
 /** @typedef {import('./client_contract_types.js').PanicAcceptedOutbound} PanicAcceptedOutbound */
+/** @typedef {import('./client_contract_types.js').CallOpenRequest} CallOpenRequest */
+/** @typedef {import('./client_contract_types.js').CallOpenResponse} CallOpenResponse */
+/** @typedef {import('./client_contract_types.js').CallRefusal} CallRefusal */
+/** @typedef {import('./client_contract_types.js').CallSocketContract} CallSocketContract */
+/** @typedef {import('./client_contract_types.js').ConversationFinishedOutbound} ConversationFinishedOutbound */
 /** @typedef {Object} ChatOutbound
  * @property {import('./client_contract_types.js').PresenceContact=} presence_contact
  * @property {{kind:'publication'|'answer'|'closure',state:'owed'|'delivered',reason_code?:string,dismissed?:boolean}=} question_delivery Canonical settlement delivery fact.
@@ -249,6 +253,9 @@
  * @property {string=} closed_actor
  * @property {string=} closed_request_id
  * @property {Array<Object>=} materials Validated existing artifact references with task_id, name, sha256, size and download_url.
+ * @property {import('./decision_types.js').SecretRequestMeta=} secret_request A mirrored secret request's metadata.
+ * @property {import('./decision_types.js').SecretOutcome=} secret_outcome
+ * @property {Object=} secret_save An attempt's claim; state "writing" is an unconfirmed save.
  * @property {string=} quiz_id
  * @property {string=} quiz_state
  * @property {number=} project_chat_id
@@ -380,8 +387,15 @@
  *   card title and the collapsed activity line. Absent = a frame that predates
  *   the fact (an older worker, a supervisor note, a stored row), which keeps
  *   the legacy reading that promoted every progress frame.
+ * @property {boolean=} reasoning
+ *   True only on narration that is the model's display reasoning: a Thinking
+ *   row in the timeline, never the title, collapsed line or census last_line.
+ *   Absent = visible speech (and every row written before the fact).
+ * @property {{call_id:string,item_id:string,played_ms:number,status:'played'|'generated'|'interrupted'}=} spoken
+ *   Generated speech and actual playback evidence; retained on history replay.
  * @property {string=} initiator
  *   The turn's origin label: "consciousness" on every frame and row of a self-initiated wake-up (and the roots it starts); absent on an owner's turn.
+ * @property {('owner'|'ouroboros'|'unknown')=} continue_requester  // Continue's declared requester; unknown if undeclared, absent on other work.
  * @property {boolean=} cancelable
  *   v6.82 (P5): host-attested — this frame's task is a supervisor-queue task that
  *   POST /api/tasks/{id}/cancel can force-cancel: a lineage-resolved pooled root or
@@ -433,6 +447,9 @@
  *   keeps failure_details as an object, and names current sources[] by
  *   {role, part, status, sha256, size, chars}. Pending/displaced sources remain
  *   historical in the record; existing exact selections remain readable.
+ *   panels[].wave_failures (absent when none) is a wave Ouroboros itself stopped:
+ *   [{block_reason, reported_cause (masked, bounded), source}], source naming the
+ *   panel's failure note by {seat_id: "panel", role, part, status, sha256, size, chars}.
  *   v6.74.0 additive keys: panels[].dialogue ({status, votes} — the reviewer-authored
  *   dialogue-status reduction), panels[].single_reviewer_no_diversity (boolean label),
  *   and actors[].dialogue_status ("continue_actionable"|"unreachable_here"|"stable_disagreement"|"").
@@ -456,7 +473,15 @@
  *   there is no panel at all, keyed by its stable incident id, with the REAL host
  *   attempt count; absent when no preparation ever failed. The Reviews group is
  *   its only carrier (no card row, no toast); a `resolved` status clears the
- *   active warning and keeps the row as history.
+ *   active warning and keeps the row as history. A ledger panel's `commit_landings`
+ *   ({commit_sha, tree_sha, parent_sha, author_subject, author_disposition, author_reason, recorded_at,
+ *   reviewed_subject: "same"|"different"|"unknown"}, oldest first) names each commit that landed under that
+ *   record, whether its tree is the one the record reviewed, and the author decision that governed it (its
+ *   subject_hash, disposition and reason, as written when it landed), "" for none; the panel keeps the newest
+ *   16 and `commit_landings_omitted` counts the older ones its record (`source_ref`) keeps. Absent means no
+ *   landing was recorded, never that nothing landed or nobody reviewed.
+ * @property {Object[]=} body_adoptions The task's settled adoptions (TaskDetailResponse), on its summary rows.
+ * @property {Object=} review_overrides The work's review-gate field (TaskDetailResponse), on its summary rows.
  * @property {boolean=} worker_saturation_warning
  * @property {string=} source
  * @property {string=} sender_label
@@ -471,9 +496,7 @@
  * @property {string=} card_row_id  // the row's stable identity across live delivery, outbox replay and history
  * @property {number=} card_row_revision  // canonical source order, independent of delivery timestamp
  * @property {"retained_work"=} terminal_receipt  // a placed row the host types as a terminal receipt (Wrap up's saved work), not progress
- * @property {Object=} late_evidence
- *   Late-review identity, reviewed revision and exact applied source_ref served by
- *   taskSourceDownloadUrl; not an original reviewer transcript or a copy of the row.
+ * @property {Object=} late_evidence  // late-review identity, revision and applied source_ref (taskSourceDownloadUrl); no transcript copy
  * @property {string=} target_label
  * @property {string=} project_id
  * @property {string=} task_name  // structured work title on Project creation/transfer entries
@@ -482,6 +505,7 @@
  * @property {Object=} terminal_time  // host-owned occurrence; ts remains publication time
  * @property {string=} completion_answer  // a Project root's model-authored final answer, mirrored into Main
  * @property {string=} completion_reason One recorded nonclean-outcome fact beside the answer.
+ * @property {string=} wake_summary  // a Project root's own closing sentence, for its Main portal
  * @property {Object=} completion_notice Transport view: neutral/detail/phase/salvage; Main adds cause and undescribed codes.
  * @property {string=} delivery_id Stable logical publication identity across transport retries.
  * @property {string=} set_at  // a `reminder` row: when its words were written (live frame only; the text carries the signature)
@@ -491,10 +515,12 @@
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name (a relay's); client_message_id here names the owner's submission
- * @property {Object=} reply_to
+ * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {string=} kind
+ * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
+ * @property {number[]=} also_rooms  // the other Projects that show this row: the frame is theirs too, one message
  */
 /** @typedef {Object} TypingOutbound
  * @property {"typing"} type
@@ -527,10 +553,11 @@
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
- * @property {Object=} reply_to
+ * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {string=} kind
+ * @property {Object.<string,number>=} room_revisions
  */
 /** @typedef {Object} VideoOutbound
  * @property {"video"} type
@@ -552,16 +579,16 @@
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
- * @property {Object=} reply_to
+ * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {string=} kind
+ * @property {Object.<string,number>=} room_revisions
  */
 /** @typedef {Object} LinkAction
  * @property {string} label
  * @property {string} url
  */
-
 /** @typedef {Object} LinksOutbound
  * @property {"links"} type
  * @property {"assistant"} role
@@ -574,10 +601,11 @@
  * @property {Object=} transport
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
- * @property {Object=} reply_to
+ * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {string=} kind
+ * @property {Object.<string,number>=} room_revisions
  */
 
 /** @typedef {Object} QuizOption
@@ -615,10 +643,13 @@
  * @property {Object=} transport
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
- * @property {Object=} reply_to
+ * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {string=} kind
+ * @property {Object.<string,number>=} room_revisions
+ * @property {number[]=} also_rooms  // a private Main question: its work's Project shows the same row, one frame
+ * @property {import('./decision_types.js').SecretRequestMeta=} secret_request An integration-secret request: answered only by its protected form.
  */
 
 /**
@@ -643,6 +674,7 @@
  * @property {boolean=} wait_for_answer
  *   False once a bounded wait closed and the task resumed; the card stays open and answerable.
  * @property {number=} chat_id
+ * @property {import('./decision_types.js').SecretOutcome=} secret_outcome A secret request's typed completion, metadata only.
  */
 
 /** @typedef {import('./decision_types.js').DecisionRequest} DecisionRequest */
@@ -671,10 +703,11 @@
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
- * @property {Object=} reply_to
+ * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {string=} kind
+ * @property {Object.<string,number>=} room_revisions
  */
 
 /** @typedef {Object} LogOutbound
@@ -688,6 +721,11 @@
  * @property {"projects_changed"} type
  * @property {string=} project_id
  * @property {number=} chat_id  // new project thread; client learns it before /api/state (v6.32.0)
+ */
+
+/** @typedef {Object} UiPreferencesChangedOutbound A committed POST /api/ui/preferences change: read it again.
+ * @property {"ui_preferences_changed"} type
+ * @property {string[]} keys  // the changed groups, e.g. ["contributions"]
  */
 
 /** @typedef {Object} MessageAnnotationOutbound Bubble-free update for an existing owner message.
@@ -706,7 +744,7 @@
  * @property {string=} routing_token
  * @property {string=} cause  // host-authored owner sentence for a REFUSED act; absent on scheduled/delivered/pending and on the picker frame
  * @property {string=} reasoning_effort  // the explicit start a New task picked from this picker card requests
- * @property {"routing_ack"|"system"=} routing_notice_carrier  // this ACK is the selected carrier of the act's owner notice; never delivery proof
+ * @property {"routing_ack"|"system"=} routing_notice_carrier  // the notice's selected carrier: this ACK, or the System row when it answers no chat row; never delivery proof
  * @property {Object=} reply_to  // the owner message that notice answers (host Reply reference)
  * @property {boolean} suppress_bubble
  * @property {string=} ts
@@ -715,12 +753,7 @@
  * @property {string[]=} target_titles
  */
 
-/** Additive history fact: a project-owned Main mirror cannot grant cancel authority.
- * @typedef {Object} ProjectMirrorHistoryFields
- * @property {boolean=} project_mirror
- */
-
-/** @typedef {import('./management_contract_types.js').SkillReviewHistoryDetailResponse} SkillReviewHistoryDetailResponse */
+/** @typedef {import('./client_contract_types.js').ProjectMirrorHistoryFields} ProjectMirrorHistoryFields */
 
 /** Additive /api/chat/history terminality projection.
  * @typedef {Object} TaskOutcomeHistoryFields
@@ -744,6 +777,11 @@
  * @property {boolean=} with_workspace
  */
 
+/** @typedef {Object} ProjectClosure
+ * @property {string} at
+ * @property {string} by  // owner or ouroboros:<focus task id>
+ * @property {string} note
+ */
 /**
  * A registry project row: list rows are the compact projection (with `has_thread_activity`);
  * a create/update answer is the full row (`created: false`: an idempotent repeat create).
@@ -758,8 +796,10 @@
  * @property {string=} trusted_at
  * @property {string=} origin
  * @property {string=} created_at
- * @property {string=} last_active_at
+ * @property {string=} last_active_at  // technical activity (the agent's list order)
+ * @property {string=} last_message_at  // the list order: newest message, else created_at; absent while undated
  * @property {"active"|"deleting"|"tombstoned"=} lifecycle
+ * @property {ProjectClosure=} closed  // absent means open; independent of routing lifecycle
  * @property {number=} routing_generation
  * @property {string=} routing_incarnation
  * @property {number=} visible_revision
@@ -769,6 +809,7 @@
  * @property {string=} last_task_result_id
  * @property {boolean=} created
  * @property {ProjectCognition} cognition
+ * @property {ChatModelChoice=} model_choice  // the room's own model for new owner work; never copied from Main
  */
 
 /** @typedef {Object} ProjectDeleteResponse
@@ -905,17 +946,14 @@
  * @property {EffortRange} effort_range
  */
 
+/** @typedef {import('./client_contract_types.js').ChatModelChoice} ChatModelChoice */
+/** @typedef {import('./client_contract_types.js').ChatModelRoute} ChatModelRoute */
+
 /**
  * @typedef {Object} OwnerSafetyModeResponse
  * @property {boolean} ok
  * @property {string} safety_mode  // full | light | off (v6.54.3)
  */
-
-/** @typedef {import('./management_contract_types.js').InstalledSkill} InstalledSkill */
-
-/** @typedef {import('./management_contract_types.js').SkillToggleResponse} SkillToggleResponse */
-
-/** @typedef {import('./management_contract_types.js').SkillReconcileResponse} SkillReconcileResponse */
 
 /**
  * One Widgets card from `GET /api/widgets` (`gateway/widgets.py::WidgetTab`).
@@ -943,11 +981,13 @@
  */
 
 /**
- * Parent-only controls for a finite widget file lease; the token is a read capability, not API auth.
+ * Parent-only controls for a widget lease; the token is a read capability, not API auth.
  * @typedef {Object} WidgetAssetLeaseRequest
  * @property {string} skill
  * @property {string} tab_id
  * @property {string} generation
+ * @property {'files'|'routes'=} scope  // files (default): ESM declared files; routes: GET/HEAD of the own skill's routes
+ * @property {string=} token  // routes only: re-establish the lease the running frame already uses
  */
 
 /**
@@ -999,8 +1039,6 @@
  * @property {string} summary
  * @property {string} repair_hint
  */
-
-/** @typedef {import('./management_contract_types.js').SkillReviewResponse} SkillReviewResponse */
 
 /**
  * `POST /api/skills/{skill}/grants`; refusals use `SkillActionRefusal`, slow setup {ok, pending: true, job_id, message}.
@@ -1068,6 +1106,7 @@
  * @property {boolean=} allow_partial_attachments Explicit raw-API opt-in; browser/UI task admission remains atomic.
  * @property {Object[]=} acceptance_claims Advisory Observable Acceptance Claims (`claim`/`surface`/`support`/`priority`).
  * @property {string=} answer_protocol  // "" | "final_answer_line" — machine-extractable answer line (v6.60.0)
+ * @property {boolean=} review_answer true: task review Required reviews the whole final answer even without files.
  * @property {Object=} allowed_resources
  * @property {Object=} resource_policy
  * @property {string[]=} disabled_tools Declarative tool-policy denylist: tool names withheld from the agent (independent of allowed_resources).
@@ -1148,28 +1187,7 @@
  * @property {Object=} queue
  * @property {string=} error
  */
-/**
- * Read-time "where did the money go" projection on GET /api/tasks/{task_id}
- * (ROOT tasks only; computed from the physical-attempt ledger at read time,
- * never persisted). own + children + unattributed == subtree. When the object
- * is present every key is present; the WHOLE object is absent — never a
- * confident $0 — when accounting is unavailable or holds no attributable row
- * for the subtree, and on non-root task details.
- * @typedef {Object} TaskCostBreakdown
- * @property {number} own_usd
- * @property {number} children_usd
- * @property {number} unattributed_usd
- * @property {number} delegated_disclosed_usd
- * @property {number} accounted_upper_bound_usd
- *   C2: the explicit subtree total under its honest name — an accounted UPPER
- *   BOUND (own + children + unattributed), not a settled receipt.
- * @property {number} subscription_sessions
- * @property {number} unknown_unmetered
- * @property {number} non_final_rows
- * @property {boolean} cost_final
- * @property {?CostCustody} cost_custody
- * @property {"physical_attempt_ledger"} authority
- */
+/** @typedef {import('./client_contract_types.js').TaskCostBreakdown} TaskCostBreakdown */
 /**
  * GET /api/tasks/{task_id} — the public task-result envelope (open shape;
  * stored task-result keys pass through) plus additive typed projections.
@@ -1205,6 +1223,10 @@
  * @property {OwnerHurryProjection=} owner_hurry
  * @property {OwnerHurryProjection[]=} owner_hurry_history
  * @property {{reason?:string, detail?:string, label?:string}=} project_admission_hold  // while the queue snapshot lists the row: its wait for original Project/scope evidence, or {}
+ * @property {Array<{adoption_id:string, outcome:'adopted'|'not_applied'|'superseded'|'unconfirmed', commit_sha:string, previous_sha:string, branch:string, note:string, settled_at:string, revision:number, commits?:string[], commits_complete?:boolean, commits_omitted?:number}>=} body_adoptions
+ *   Every adoption this task authorized, as boot settled them; `commits` (previous..candidate, newest first, bounded;
+ *   a cut range counts the rest in `commits_omitted`) only when adopted.
+ * @property {{count:number, latest:{at:string, reason:string, task_id:string, text:string}}=} review_overrides  // a root's decisions Blocking would have stopped (review_overrides.py)
  * @property {string=} error
  * @property {ContinuationOffer=} continuation_offer
  */
@@ -1214,6 +1236,7 @@
  * @property {'known'|'unknown'} state
  * @property {number=} chat_id
  * @property {string=} project_id
+ * @property {string[]=} also_project_ids  // a private Main question: the Project that shows the same row
  */
 /**
  * PROVENANCE for each independent facet of GET /api/claudexor/status. An empty collection
@@ -1317,6 +1340,8 @@
  * @property {string} error
  * @property {string=} code
  * @property {Array<string>=} required_actions
+ * @property {Object<string, *>=} context
+ * @property {boolean=} retryable
  */
 /**
  * @typedef {Object} ClaudexorVendorCredentialDisposition
@@ -1343,6 +1368,7 @@
  * @typedef {Object} ScheduleUpsertResponse
  * @property {boolean} ok  // follows schedule.audit: an incomplete audit is not ok
  * @property {Object} schedule
+ * @property {string[]=} ignored_fields  // host facts the request carried, set aside (task.metadata.<key>)
  */
 /**
  * @typedef {Object} ScheduleActionResponse
@@ -1362,6 +1388,10 @@
  * @typedef {Object} ScheduleDeleteResponse
  * @property {boolean} ok
  */
+/** @typedef {import('./task_activity_types.js').KeptService} KeptService */
+/** @typedef {import('./task_activity_types.js').KeptServicesResponse} KeptServicesResponse */
+/** @typedef {import('./task_activity_types.js').KeptServiceStopRequest} KeptServiceStopRequest */
+/** @typedef {import('./task_activity_types.js').KeptServiceStopResponse} KeptServiceStopResponse */
 /** @typedef {import('./task_activity_types.js').TaskPauseRequest} TaskPauseRequest */
 /** @typedef {import('./task_activity_types.js').TaskPauseResponse} TaskPauseResponse */
 /**
@@ -1428,11 +1458,35 @@
  * @property {string=} error
  */
 /**
+ * POST /api/tasks/{task_id}/owner-keep: keep or release the materials of exactly this task; any other field is 400
+ * `unexpected_fields`. No page sends it yet.
+ * @typedef {Object} OwnerKeepRequest
+ * @property {boolean=} keep
+ * @property {string=} note
+ */
+/**
+ * 200; 404 `task_not_found`; 503 `task_unreadable`. `reason` is '' unless inflight (`custody_busy`) or refused.
+ * @typedef {Object} OwnerKeepResponse
+ * @property {string} task_id
+ * @property {boolean} keep  // the fact as it now stands
+ * @property {('kept'|'released'|'partly_retired'|'already_retired'|'release_unconfirmed'|'inflight'|'refused')} status
+ * @property {string} reason
+ * @property {string[]} retained  // material on disk now: paths, `pins:<snapshot>` for result pins, `review_thread:<id>` no recorded release let go
+ * @property {string[]} retired  // gone, accepted for deletion, or managed import ID reuse released; not proof of deleted bytes
+ * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them
+ * @property {Object<string, string>} releases  // `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded; `managed_import:<key>` -> held | release_unconfirmed | future_reuse_released | upload_cancelled | binding_unavailable:<outcome> | release_refused:<code> (not deleted bytes)
+ */
+/**
  * @typedef {Object} LogTailResponse
  * @property {string} name
  * @property {Object[]} entries
  * @property {string=} error
  */
+/** @typedef {import('./logs_types.js').LogRowSource} LogRowSource */
+/** @typedef {import('./logs_types.js').LogRawReference} LogRawReference */
+/** @typedef {import('./logs_types.js').LogRawResponse} LogRawResponse */
+/** @typedef {import('./logs_types.js').CompactLogEntry} CompactLogEntry */
+/** @typedef {import('./logs_types.js').CompactLogTailResponse} CompactLogTailResponse */
 /**
  * `POST /api/skills/{skill}/delete`; a refusal carries only ok, error and status_code.
  * @typedef {Object} SkillDeleteResponse
@@ -1455,13 +1509,15 @@
  * @property {{hidden:string[],order:string[]}} contributions
  * @property {string[]} widget_order
  * @property {Object.<string,'auto'|'manual'|'retain'>} widget_start_mode  // owner per-card launch-policy override, keyed "<skill>:<tab_id>"
- * @property {Object.<string,{w:number,h:number}>} widget_size  // owner Widgets card width: w masonry columns the card spans (12 = full width), h 0 (reserved)
+ * @property {Object.<string,{w:number,h:number}>} widget_size  // owner Widgets card size: w columns spanned (12 = full, 0 = author's), h content px (0 = natural)
  * @property {boolean} nested_subagents_expanded
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
  * @property {Object.<string,number>} project_seen_revision  // monotonic paint ACK
  * @property {?number} main_seen_revision  // Main's monotonic paint ACK; null until a client first reads Main
+ * @property {Object.<string,number[][]>} read_ahead_revisions  // per chat id: revisions read in full in another room (host-owned)
  * @property {{mode:'default'|'hidden'|'custom',text:string}} welcome  // install-wide empty-Main UI copy, not chat history
+ * @property {ChatModelRoute[]} model_recents  // server-written on each owner model act: newest first, at most four distinct routes; a POST may not carry it
  * @property {boolean=} ok
  */
 /**
@@ -1476,30 +1532,40 @@
 /** @typedef {import('./update_types.js').UpdateApplyRequest} UpdateApplyRequest */
 /** @typedef {import('./update_types.js').UpdateApplySuccessResponse} UpdateApplySuccessResponse */
 /** @typedef {import('./update_types.js').UpdateApplyErrorResponse} UpdateApplyErrorResponse */
+/** @typedef {import('./update_types.js').UpdateDescriptionRequest} UpdateDescriptionRequest */
+/** @typedef {import('./update_types.js').UpdateDescriptionResponse} UpdateDescriptionResponse */
+/** @typedef {import('./update_types.js').UpdateDescriptionErrorResponse} UpdateDescriptionErrorResponse */
 /** @typedef {import('./management_contract_types.js').UpdateProgress} UpdateProgress */
 /** @typedef {import('./update_types.js').UpdateProgressChangedOutbound} UpdateProgressChangedOutbound */
 /** @typedef {import('./update_types.js').UpdateStatusReadyOutbound} UpdateStatusReadyOutbound */
 
 /**
- * LLM-written update letter in `/api/update/status` and `/api/update/check`.
- * The additive `letter` is absent/null without a stored letter. It outlives its update;
- * `relation` compares startup source to target so the panel can relabel it instead of deleting it.
+ * The update description in `/api/update/status` and `/api/update/check`, written by Ouroboros as ordinary
+ * work (an owner request from Updates, or its own initiative) and never by a check. The additive `letter` is
+ * absent/null without a stored record, or with neither a description, an offered range nor a request.
+ * It outlives its update; `relation` compares startup source to the description's own range so the panel can
+ * relabel it instead of deleting it.
  *
  * @typedef {Object} UpdateLetter
- * @property {'ready'|'failed'} state
- * @property {'pending'|'applied'|'superseded'|'other'} relation  offered now / included in running source / newer target appeared / source moved elsewhere
- * @property {string} text  markdown; may be empty when a failed write has no previous good letter
+ * @property {'ready'|'failed'|'none'} state  `none`: no description saved; `failed` only on records from before descriptions became ordinary work
+ * @property {''|'pending'|'applied'|'superseded'|'other'} relation  offered now / included in running source / newer target appeared / source moved elsewhere; '' without text
+ * @property {string} text  markdown; empty when nothing is saved
  * @property {string} author_version  the Ouroboros version that wrote it
  * @property {string} target_version  the version it describes
  * @property {string} written_at  ISO 8601
- * @property {''|'no_credentials'|'budget_exhausted'|'context_overflow'|'timeout'|'material_unavailable'|'output_truncated'|'provider_unavailable'|'empty_response'|'runtime_source_unavailable'} error_kind
- * @property {string} error_text  short, secret-free; empty when state is ready
- * @property {{base_sha: string, target_sha: string, update_channel: string, target_ref: string}} key  the exact range the letter was written for
- * @property {boolean} has_last_good  `text` is the previous good letter kept through a failed rewrite; `relation`, `key` and the provenance describe THAT letter, not the range that failed
- * @property {boolean} description_current  successful shown text covers the exact running-source to checked-target range
- * @property {string} failed_at  ISO 8601 time of the failed attempt, independent of the shown text's written_at
- * @property {({base_sha: string, target_sha: string, update_channel: string, target_ref: string}|null)} latest_failed_key  the failed attempt's range, never the provenance of retained text
- * @property {?Object=} qualification - Exact-range commit receipts and observed GitHub checks, including missing evidence.
+ * @property {string} error_kind  a retained old failure, or the last check's `material_unavailable`/`runtime_source_unavailable`
+ * @property {string} error_text  short, secret-free
+ * @property {{base_sha: string, target_sha: string, update_channel: string, target_ref: string}} key  the exact range the text describes ({} without text)
+ * @property {boolean} has_last_good  `text` is an old previous good letter kept through a failed rewrite; `relation`, `key` and the provenance describe THAT letter
+ * @property {boolean} description_current  the shown text covers exactly the running-source to checked-target range; a newer post-merge run never clears it
+ * @property {string} failed_at  ISO 8601 of the retained failure or the check's material error
+ * @property {({base_sha: string, target_sha: string, update_channel: string, target_ref: string}|null)} latest_failed_key  that failure's range, never the provenance of retained text
+ * @property {?Object=} qualification - Exact-range commit receipts and observed GitHub checks of the last check's range (self-keyed by base_sha/target_sha), including missing evidence.
+ * @property {number} revision  compared by every writer; 0 before the first save
+ * @property {{task_id: string, model: string, requested: boolean}|{}} author  host-derived: the task that saved it, its model, whether it was the owner's request
+ * @property {?{base_sha: string, target_sha: string, update_channel: string, target_ref: string}} checked_key  the range the last fetching check offered
+ * @property {?{key: Object, collected_at: string, text_bytes: number, commits: number, bodies_read: number, bodies_omitted: number}} material  the range material beside the record (query_data kind update_material; text_bytes is the max_bytes reading its text whole)
+ * @property {?{task_id: string, current_task_id?: string, mode: 'write'|'rewrite', key: Object, requested_at: string, status: string, saved: boolean}} request  original request, current retry/admitted Continue and whether its own work saved
  */
 
 export const MAX_LINK_ACTIONS = 12;
@@ -1507,7 +1573,7 @@ export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
 // truncates; cards must offer only comments the ingress can deliver verbatim.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.8.1';
+export const GATEWAY_CONTRACT_VERSION = '7.10.2-alpha.0';
 /** @typedef {import('./client_contract_types.js').ChatHistoryPosition} ChatHistoryPosition */
 /** @typedef {import('./client_contract_types.js').ChatHistoryResponse} ChatHistoryResponse */
 

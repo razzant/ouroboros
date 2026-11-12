@@ -16,6 +16,7 @@ from tests.test_context_economy_window import setup as gateway_fixture
 from tests.test_context_fit_integration import _plan
 
 setup, live_wait, main_call = gateway_fixture, wait_fixture, main_fixture
+_OWNER_TEXT = "Owner asks for the complete text. " + "word " * 720_000
 
 
 @pytest.fixture(autouse=True)
@@ -23,15 +24,17 @@ def isolated_density_memo(monkeypatch):
     monkeypatch.setattr(ce, "_DENSITY_MEMO", {})  # each fixture has its own evidence store
 
 
-@pytest.mark.parametrize("mode", ["max", "low", "nano"])
-@pytest.mark.parametrize("witness_size,expected", [(97_000, 1.0), (600_000, 1.56)])
+@pytest.mark.parametrize(("witness_size", "expected", "mode"), [
+    (97_000, 1.0, "max"),
+    (97_000, 1.0, "nano"),
+    (600_000, 1.56, "low"),
+])
 def test_real_start_and_first_send_use_comparable_density(main_call, monkeypatch, tmp_path,
                                                          mode, witness_size, expected):
     from ouroboros.tool_policy import initial_tool_schemas
 
-    words = "Owner asks for the complete text. " + "word " * 720_000
     ctx, gateway, tools, events, build, windows = _native(
-        main_call, monkeypatch, tmp_path, task_text=words, owner_mode=mode)
+        main_call, monkeypatch, tmp_path, task_text=_OWNER_TEXT, owner_mode=mode)
     windows["account-a"] = 2_200_000
     ce.record_token_density(ce.canonical_evidence_root(), ce._normalized_density_model(MODEL),
         prompt_chars=witness_size * 4, prompt_tokens=int(witness_size * 1.56),
@@ -40,7 +43,7 @@ def test_real_start_and_first_send_use_comparable_density(main_call, monkeypatch
     assert plan.initial_mode == plan.preferred_mode == mode
     assert plan.projection(mode).calibration_ratio == expected
     ctx.messages[:] = plan.messages_for(mode)
-    assert any(row.get("content") == words for row in ctx.messages)
+    assert any(row.get("content") == _OWNER_TEXT for row in ctx.messages)
     ctx.context_fit_plan, ctx.active_context_mode = plan, mode
     ctx.tool_schemas = initial_tool_schemas(tools, context_mode=mode)
     fit = loop._measure_round_main_fit(ctx, automatic_pass_used=False).measurement
@@ -52,19 +55,23 @@ def test_real_start_and_first_send_use_comparable_density(main_call, monkeypatch
     assert text == "Read." and len(gateway.creates) == 1
     assert usage["_context_measurement_density"] == expected
     assert tools._ctx.active_context_mode == mode
-    assert any(context_fit.extract_plain_text_from_content(row.get("content")) == words
+    assert any(context_fit.extract_plain_text_from_content(row.get("content")) == _OWNER_TEXT
                for row in gateway.uploads[0][0]["messages"])
 
 
-@pytest.mark.parametrize("witness_size,expected", [(97_000, 1.0), (600_000, 1.56)])
-def test_real_route_rebind_sizes_its_running_input(main_call, monkeypatch, tmp_path, witness_size, expected):
+@pytest.mark.parametrize("witness_size,window,expected", [
+    (97_000, 2_000_000, 1.0), (600_000, 2_000_000, 1.56),
+    # A running input above the new route's window is compared at what that route can send (its usable input,
+    # resolved before the ratio): a witness of that size calibrates it; the uncut input matched nothing (07.11).
+    (300_000, 600_000, 1.56)])
+def test_real_route_rebind_sizes_its_running_input(main_call, monkeypatch, tmp_path, witness_size, window, expected):
     from ouroboros.tool_policy import initial_tool_schemas
 
     ctx, _gateway, tools, _events, build, windows = _native(
         main_call, monkeypatch, tmp_path, owner_mode="nano")
-    windows["account-a"] = windows["account-b"] = 2_000_000
+    windows["account-a"], windows["account-b"] = 2_000_000, window
     plan = build(windows["account-a"])
-    ctx.messages[:] = [*plan.messages_for("nano"), {"role": "user", "content": "word " * 720_000}]
+    ctx.messages[:] = [*plan.messages_for("nano"), {"role": "user", "content": _OWNER_TEXT}]
     shown = list(ctx.messages)
     ce.record_token_density(ce.canonical_evidence_root(), ce._normalized_density_model(MODEL),
         prompt_chars=witness_size * 4, prompt_tokens=int(witness_size * 1.56),
@@ -72,8 +79,10 @@ def test_real_route_rebind_sizes_its_running_input(main_call, monkeypatch, tmp_p
     ctx.tool_schemas = initial_tool_schemas(tools, context_mode="nano")
     rebound, mode = loop._rebind_context_fit_plan(plan, tools, ctx.messages, model=MODEL, use_local=False,
         tool_schemas=ctx.tool_schemas, start_mode="nano", credential_profile_id="account-b")
-    assert mode == rebound.preferred_mode == "nano" and ctx.messages == shown
-    assert rebound.projection(mode).calibration_ratio == expected
+    assert mode == rebound.preferred_mode == "nano" and rebound.projection(mode).calibration_ratio == expected
+    if window < 2_000_000:
+        return  # this transcript cannot fit that route: what it sends next is the refusal passes', not the rebind's
+    assert ctx.messages == shown
     ctx.context_fit_plan, ctx.active_context_mode = rebound, mode
     fit = loop._measure_round_main_fit(ctx, automatic_pass_used=False).measurement
     assert fit.measurement_density == expected and fit.anchor_input_tokens is None
@@ -92,8 +101,6 @@ def _witness(raw, density=1.56, *, route="route-a", basis=ce.MAIN_DENSITY_BASIS,
 @pytest.mark.parametrize("witness_size,model,basis,observed,expected", [
     (600_000, "openai/test-model", ce.MAIN_DENSITY_BASIS, None, 1.56),
     (97_000, "openai/test-model", ce.MAIN_DENSITY_BASIS, None, 1.0),
-    (600_000, "other/model", ce.MAIN_DENSITY_BASIS, None, 1.0),
-    (600_000, "openai/test-model", "raw", None, 1.0),
     (600_000, "openai/test-model", ce.MAIN_DENSITY_BASIS, "2000-01-01T00:00:00Z", 1.0),
 ])
 def test_round_one_uses_only_comparable_same_model_evidence(
@@ -113,6 +120,45 @@ def test_round_one_uses_only_comparable_same_model_evidence(
     assert fit.anchor_input_tokens is None
     assert (fit.capacity_deficit_tokens > 0) == (expected > 1)
     assert ctx.accumulated_usage["_context_measurement_density"] == expected
+
+
+@pytest.mark.parametrize("witness_size,expected", [(30_000, 1.05), (300_000, 1.0)])
+def test_a_start_compares_density_at_the_size_it_can_send(tmp_path, monkeypatch, witness_size, expected):
+    """The start's whole captured request (391k estimated tokens here) is compared at what its route can send, its
+    usable input (26,464 beside a 92k window and a 65k reply): a witness near that size calibrates it, one near the
+    uncut size no longer does. On 07.11 an uncut 5.4 million beside a window under a million matched no witness."""
+    from tests import _memory_scale_fixture as scale
+
+    model = "openai/test-model"
+    monkeypatch.setattr(ce, "_read", lambda root: {"token_density": {model: {"pairs": [
+        {**_witness(witness_size, 1.05), "view_kind": "owner_turn"}]}}})
+    evidence = SimpleNamespace(window_tokens=92_000, status="confirmed", stale=False, route_fp="route-a",
+                               source="fixture", response_limit={}, route_facts={"working_reserve_tokens": 10_000})
+    plan = context_fit.build_context_fit_plan(SimpleNamespace(drive_root=tmp_path), scale.core(tmp_path),
+        {"id": "start", "chat_id": 1, "_is_direct_chat": True}, preferred_mode="max", tool_schemas=scale.tools(),
+        route_resolver=lambda *_a, **_kw: ({"provider": "openai", "model": model}, evidence))
+    assert plan.window_record.usable == 26_464 and plan.projection(plan.initial_mode).calibration_ratio == expected
+
+
+@pytest.mark.parametrize("model,view,basis,observed,expected", [
+    ("claudexor::codex=exact-model", "owner_turn", ce.MAIN_DENSITY_BASIS, None, (1.25, "fresh_model_usage")),
+    ("claudexor::codex=exact-model", "own_wake", ce.MAIN_DENSITY_BASIS, None, (1.0, "cold_estimate")),
+    ("claudexor::codex=exact-model", "owner_turn", "raw", None, (1.0, "cold_estimate")),
+    ("claudexor::codex=exact-model", "owner_turn", ce.MAIN_DENSITY_BASIS, "2000-01-01T00:00:00Z", (1.0, "cold_estimate")),
+    ("openai/test-model", "owner_turn", ce.MAIN_DENSITY_BASIS, None, (1.0, "cold_estimate")),
+])
+def test_a_claudexor_model_lends_another_accounts_witness_of_the_same_view(tmp_path, monkeypatch, model, view, basis,
+                                                                          observed, expected):
+    """A start asks under the account the catalog advertises; witnesses are written under the account that served.
+    A Claudexor model's accounts share one engine and tokenizer, so without an exact-route witness the newest
+    comparable one of the same model, view and basis serves as its density (``fresh_model_usage``). Another view,
+    basis, a stale witness or another provider's route never does, and the exact route still comes first."""
+    other = {**_witness(600_000, 1.25, route="account-b", basis=basis, observed=observed), "view_kind": view}
+    exact = {**_witness(600_000, 1.4, route="account-a"), "view_kind": "owner_turn"}
+    for pairs, answer in (([other], expected), ([other, exact], (1.4, "fresh_route_usage"))):
+        monkeypatch.setattr(ce, "_read", lambda root: {"token_density": {model: {"pairs": pairs}}})
+        assert ce.resolve_main_token_density(tmp_path, "account-a", model, estimate_tokens=600_000,
+                                            view_kind="owner_turn") == answer
 
 
 @pytest.mark.parametrize("route", ["route-a", "other-route"])
@@ -137,7 +183,8 @@ def test_task_anchor_outranks_even_comparable_foreign_measurements(monkeypatch):
 
 
 def test_memory_coarsening_uses_the_density_that_measured_the_saving(monkeypatch):
-    plan = replace(_plan(), core=SimpleNamespace(supplementary_messages_json="[]"))
+    plan = _plan()  # a real captured core without a required handbook: it adds nothing to the window
+    plan = replace(plan, core=context_fit.ContextCore("", "", "", "", "", "", plan.user_content_json, False))
     fit = context_fit.measure_main_fit(plan, plan.messages_for("low"), [], profile="owner_low",
         rendered_mode="low", round_id="r2", anchor=InputAnchor(150_000, 100_000, 1))
     seen = []

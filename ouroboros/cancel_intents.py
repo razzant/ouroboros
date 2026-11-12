@@ -17,10 +17,10 @@ nonterminal ``task_done`` wedged the parent. This module separates the two:
 
 Ownership: every cancel ingress (agent ``cancel_task`` tool, HTTP single, HTTP
 cascade, boot migration of legacy latch files) writes an intent through
-``request_cancel``. The supervisor's ``cancel_task_custody`` is the ONE settle
-owner: it CLAIMS the intent before teardown and SETTLES it with the terminal
-outcome; the supervisor-tick watchdog only re-feeds unclaimed/stale intents back
-into custody. The canonical ``status`` never carries intent again.
+``request_cancel``. ``cancel_task_custody`` claims before teardown and settles
+cancellations with their terminal outcome. Custody and boot restore may instead
+withdraw an obsolete helper-closure intent without cancelling. The tick watchdog
+re-feeds unclaimed/stale intents; canonical ``status`` never carries intent.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import pathlib
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, update_json_locked, utc_now_iso
 
@@ -771,9 +771,17 @@ def active_intents(
     enforcement is degraded) before the read still returns ``{}`` — fail-soft
     read, fail-closed write.
     """
+    return read_active_intents(drive_root, disclose_corruption=disclose_corruption, strict=strict)[0]
+
+
+def read_active_intents(
+    drive_root: Any, *, disclose_corruption: bool = False, strict: bool = False,
+) -> Tuple[Dict[str, Dict[str, Any]], Optional[List[str]]]:
+    """``active_intents`` and, from the same one read, the task ids it could not see: the quarantined
+    malformed rows, or ``None`` when the projection itself is unreadable (every row unseen)."""
     path = _intents_path_read(drive_root)
     if not path.is_file():
-        return {}
+        return {}, []
     try:
         from ouroboros.utils import read_json_dict
 
@@ -793,7 +801,7 @@ def active_intents(
             })
         if strict:
             raise CancelIntentProjectionCorrupt(str(exc)) from exc
-        return {}
+        return {}, None
     malformed = [str(tid) for tid, row in intents.items() if not isinstance(row, dict)]
     if malformed:
         # GR6-3 row strictness on the enforcement read: a malformed per-task
@@ -835,7 +843,7 @@ def active_intents(
         str(tid): dict(row)
         for tid, row in intents.items()
         if isinstance(row, dict)
-    }
+    }, malformed
 
 
 def _intents_path_read(drive_root: Any) -> pathlib.Path:
@@ -1210,6 +1218,44 @@ def settle_intent(
             "expected_generation": expected_generation,
         })
     return None
+
+
+def withdraw_intent(
+    drive_root: Any, task_id: str, *, withdrawable: Callable[[Dict[str, Any]], bool], detail: str = "",
+    expected_generation: Optional[int] = None, request_id: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Retire the caller's own intent WITHOUT a cancellation while its CURRENT row, read under the intent lock, is still
+    ``withdrawable``: ``None`` once withdrawn or already gone; else that row, unchanged and still owed (a Stop or
+    cascade joined it). Unlike ``settle_intent`` nothing is transferred, deferred or released. A row that is no longer
+    the caller's claim (the generation/request fence) raises, so the caller gives its custody back."""
+    tid = _valid_task_id(task_id)
+    seen: Dict[str, Any] = {}
+
+    def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        seen.clear()
+        intents = _load_intents(current, strict=True)
+        row = intents.get(tid)
+        if not isinstance(row, dict):
+            return None
+        seen.update(row, _reason=_generation_mismatch(row, expected_generation, request_id))
+        if seen["_reason"] or not withdrawable(row):
+            return None
+        intents.pop(tid)
+        seen["_withdrawn"] = True
+        return {"schema_version": _SCHEMA_VERSION, "intents": intents}
+
+    try:
+        update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
+    except ValueError as exc:
+        raise _refuse_corrupt(drive_root, tid, "withdraw_intent", exc) from exc
+    reason, withdrawn = seen.pop("_reason", ""), seen.pop("_withdrawn", False)
+    if reason:
+        raise RuntimeError(f"the intent of {tid} is no longer this claim's ({reason})")
+    if withdrawn:
+        _forensic(drive_root, {"event": "settled", "task_id": tid, "request_id": seen.get("request_id"),
+                               "outcome": "withdrawn", "detail": str(detail or "")[:500],
+                               "generation": seen.get("generation")})
+    return dict(seen) if seen and not withdrawn else None
 
 
 def claim_is_stale(intent: Dict[str, Any], *, now: Optional[float] = None) -> bool:

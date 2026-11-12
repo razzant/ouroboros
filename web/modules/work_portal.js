@@ -29,6 +29,7 @@ import { DURABLE_RECEIPTS, receiptNotice } from './project_handoff.js';
 import { nameProjectReference, projectReference } from './project_reference.js';
 import { admittedSuccessor } from './task_episodes.js';
 import { continueControlSuccessor } from './task_continue.js';
+import { closingLine } from './settled_card.js';
 
 const key = (value) => String(value || '').trim();
 export const isPortal = (record) => record?.root?.dataset?.portal === '1';
@@ -129,14 +130,11 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     /** The live activity a card's controls act on when its work runs in another chat (its room). */
     const activity = (record) => (isPortal(record) ? record.portalActivity || undefined : undefined);
 
-    // The census line was the work's present, not its result. When the work leaves the census the portal
-    // lets it go, so a settled portal reads the same whether this page watched the work or opened after
-    // it: a cause line for warnings or failure (the outcome writes it), none for a clean Done (the result
-    // is the author's final row in the feed).
+    // Replace the live census line with the closing sentence or held cause, as on the finished card.
     function dropLine(record) {
-        if (!record.collapsedActivity) return false;
-        record.collapsedActivity = '';
-        return renderCollapsedActivity(record, '');
+        const line = closingLine(record);
+        record.collapsedActivity = line;
+        return renderCollapsedActivity(record, line);
     }
 
     // A portal's title is renamed by its naming owner (task_episodes.js `renamed`), and any other writer is met at the
@@ -146,7 +144,8 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     }
 
     function present(record) {
-        if (!isPortal(record) || record.finished) return false;
+        if (!isPortal(record)) return false;
+        if (record.finished) return dropLine(record);
         relabel(record);
         const row = census.get(record.groupId);
         if (!row) {
@@ -162,8 +161,8 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         const facts = censusTaskFacts(row);
         if (facts.ended) {
             record.portalActivity = null;
-            dropLine(record);
-            return card.finish(record.groupId, facts.outcome);
+            const changed = card.finish(record.groupId, facts.outcome);
+            return dropLine(record) || changed;
         }
         record.portalActivity = row;
         const startedSec = Number(row.started_at);
@@ -442,7 +441,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         if (!actions) return false;
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'btn btn-sm btn-default';
+        btn.className = 'btn btn-sm btn-default ui-hit-area';
         btn.dataset.turnIntoProject = '1';
         btn.textContent = liveCardLabel.turnIntoProject();
         btn.addEventListener('click', (event) => {

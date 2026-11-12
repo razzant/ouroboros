@@ -253,8 +253,9 @@ class WindowsTray(Indicator):
 
         def form_closing(sender, args):
             if args.CloseReason != CloseReason.UserClosing:
-                background.quit.set()  # sign-out, shutdown, Task Manager: never cancelled, never asked
-                background.exit_launcher()
+                background.quit.set()  # sign-out, shutdown, Task Manager: a quit never cancelled, never asked
+                if background.exit_launcher() is False:
+                    args.Cancel = True  # only the form's close: the quit's closer ends the process
             elif background.window_closed() is False:
                 args.Cancel = True
 
@@ -312,11 +313,8 @@ class WindowsTray(Indicator):
             self._disposed.set()
 
         def quit_clicked(sender, args):
-            self._stop.set()
-            try:
-                dispose_icon()  # STA, before the launcher's os._exit (finally may never run)
-            except Exception:
-                log.warning("Tray icon removal failed before Quit.", exc_info=True)
+            # Returns at once: the icon, its Panic and this pump stay until the close body's terminal
+            # exit removes the icon (``stop_tray_before_exit``), which the tick below disposes.
             background.request_quit()
 
         def pump():
@@ -372,7 +370,7 @@ class WindowsTray(Indicator):
                 timer.Interval = 200
 
                 def tick(sender, args):
-                    if self._stop.is_set() or background.shutdown.is_set():
+                    if self._stop.is_set():  # Panic, or an exit's removal; an ordinary shutdown keeps Panic here
                         dispose_icon()
                         Application.ExitThread()
                         return

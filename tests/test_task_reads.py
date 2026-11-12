@@ -21,6 +21,7 @@ from ouroboros import task_store
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.task_reads import TaskReads
 from tests._store_shared import read_result, seed_result
+from tests._cases import chosen_rows
 
 TS = "2026-10-16T10:00:00Z"
 BULK = {  # every dropped path, filled so a reader that used one would change the page
@@ -95,7 +96,7 @@ def test_display_view_drops_only_the_bulky_evidence(tmp_path):
     assert views["task-b"]["artifact_bundle"] == "legacy" and views["task-b"]["task_contract"] == {}
 
 
-@pytest.mark.parametrize("snapshot, expected", [
+@pytest.mark.parametrize("snapshot, expected", chosen_rows([
     ({}, {}),
     ({"loop_outcome": None}, {"loop_outcome": None}),
     ({"loop_outcome": {}}, {"loop_outcome": {}}),
@@ -103,7 +104,7 @@ def test_display_view_drops_only_the_bulky_evidence(tmp_path):
     ({"loop_outcome": {"usage": {}}}, {"loop_outcome": {"usage": {}}}),
     *[({"loop_outcome": {"usage": {"total_rounds": rounds, "extra": "U" * 100_000}, "extra": "L" * 100_000}},
        {"loop_outcome": {"usage": {"total_rounds": rounds}}}) for rounds in (None, 0, 3)],
-], ids=["missing", "null", "empty", "usage-null", "usage-empty", "rounds-null", "zero", "accepted"])
+], 0, 5, 7), ids=chosen_rows(["missing", "null", "empty", "usage-null", "usage-empty", "rounds-null", "zero", "accepted"], 0, 5, 7))
 def test_display_rounds_keep_presence_without_bulk_or_full_reads(tmp_path, monkeypatch, snapshot, expected):
     seed_result(tmp_path, "snapshot", {"task_id": "snapshot", "status": "completed", **snapshot})
     full = read_result(tmp_path, "snapshot")
@@ -128,6 +129,22 @@ def test_a_page_built_from_display_views_is_the_page_full_documents_build(tmp_pa
     monkeypatch.setattr(task_store, "DISPLAY_DROPPED", ())
     monkeypatch.setattr(task_store, "DISPLAY_KEPT", {})
     assert _page(tmp_path)["messages"] == with_views["messages"]
+
+
+@pytest.mark.parametrize("continuation, expected", chosen_rows([
+    ({"predecessor_task_id": "old", "peer_context": ["P" * 100_000], "admission": {"by": {"actor": "owner", "at": "now"}, "x": 1}},
+     {"admission": {"by": {"actor": "owner"}}}),
+    ({"predecessor_task_id": "old"}, {}),
+    ({"admission": {"at": "now"}}, {"admission": {}}),
+], 0, 1, 2), ids=chosen_rows(["recorded", "older", "undeclared"], 0, 1, 2))
+def test_display_keeps_only_who_asked_for_a_continue(tmp_path, continuation, expected):
+    from ouroboros.subagent_messages import initiator_meta
+
+    seed_result(tmp_path, "next", {"task_id": "next", "status": "completed", "metadata": {"continuation": continuation}})
+    full = read_result(tmp_path, "next")
+    view = json.loads(task_store.display_documents(tmp_path, ["next"])["next"])
+    assert view["metadata"]["continuation"] == expected
+    assert initiator_meta(view) == initiator_meta(full)
 
 
 def test_a_page_reads_its_tasks_in_a_few_store_transactions(tmp_path, monkeypatch):

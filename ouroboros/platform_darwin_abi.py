@@ -65,3 +65,32 @@ def kernel_birth(pid: int) -> tuple[int, int, bool] | None:
     if echoed_pid != pid or sec <= 0 or not 0 <= usec < 1_000_000:
         return None
     return sec, usec, raw[36] == _SZOMB
+
+
+def wait_child_status(pid: int, *, nohang: bool) -> tuple[int, int]:
+    """Darwin waitid(WEXITED | WNOWAIT), absent from CPython's macOS os module.
+
+    LP64 siginfo_t is 104 bytes: six int32s, three pointer/long words,
+    seven reserved words (SDK sys/signal.h). Return waitpid-shaped status
+    without consuming the child. Errors, including ECHILD, stay errors.
+    """
+    import ctypes
+    import os
+
+    class Siginfo(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_int) for name in
+                    ("signo", "error", "code", "pid", "uid", "status")] + [
+                        ("tail", ctypes.c_ulong * 10)]
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    waitid = libc.waitid
+    waitid.argtypes = (ctypes.c_int, ctypes.c_uint, ctypes.POINTER(Siginfo), ctypes.c_int)
+    waitid.restype = ctypes.c_int
+    info = Siginfo()
+    # P_PID=1, WEXITED=4, WNOWAIT=32, WNOHANG=1 (SDK sys/wait.h).
+    while waitid(1, pid, ctypes.byref(info), 4 | 32 | int(nohang)) != 0:
+        code = ctypes.get_errno()
+        if code == 4:  # EINTR: match os.waitpid's interrupted-wait retry
+            continue
+        raise OSError(code, os.strerror(code))
+    return info.pid, (info.status << 8 if info.code == 1 else info.status)

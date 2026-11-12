@@ -1,0 +1,40 @@
+name: Freeze this run's shard plan
+description: Publish, once per run, the one weight table every sharded leg and manifest of the run reads.
+
+# The only producer of `shard-plan-<run id>`: ci.yml's and the manual full UI entry's `shard-plan` job call it
+# before their first leg; the shared browser lane only reads the result. scripts/ci_shard_plan.py owns the contract.
+runs:
+  using: composite
+  steps:
+    # A re-run keeps the plan its first attempt published: legs of different attempts of one run
+    # must pack with the same table. A plan this step fails to read fails the upload below, by name.
+    - name: Reuse this run's plan on a re-run
+      id: existing
+      continue-on-error: true
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      with:
+        name: shard-plan-${{ github.run_id }}
+        path: ${{ runner.temp }}/existing-plan
+    - name: Say that this attempt packs by the published plan
+      if: ${{ steps.existing.outcome == 'success' }}
+      shell: bash
+      run: echo "This attempt reuses the run's published shard plan." >> "$GITHUB_STEP_SUMMARY"
+    - name: Freeze the weights from the prior tables
+      if: ${{ steps.existing.outcome != 'success' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        SHA: ${{ github.sha }}
+        PLAN: ${{ runner.temp }}/shard-plan
+      run: python3 -I -S scripts/ci_shard_plan.py --out "$PLAN" --repo "$REPO" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --sha "$SHA"
+    - name: Upload the plan of this run
+      if: ${{ steps.existing.outcome != 'success' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: shard-plan-${{ github.run_id }}
+        path: ${{ runner.temp }}/shard-plan/
+        retention-days: 7
+        if-no-files-found: error

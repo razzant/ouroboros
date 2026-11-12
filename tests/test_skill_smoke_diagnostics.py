@@ -191,6 +191,9 @@ def test_an_answered_seat_without_its_saved_response_is_evidence_loss(tmp_path):
         author.load_review_waves(data, NAME)
 
 
+RETRIES = {"silent_then_retry", "silent_then_silent", "verdict_then_plain_retry"}
+
+
 @pytest.mark.parametrize("case,error", [
     ("in_flight", "still unsettled"), ("custody_lost", "still unsettled"),
     ("pending_dispatch", "still unsettled"), ("late_result_pending", "still unsettled"),
@@ -200,6 +203,8 @@ def test_an_answered_seat_without_its_saved_response_is_evidence_loss(tmp_path):
     ("settled_error", "pending/unknown"), ("late_settled_error", "pending/unknown"),
     ("not_dispatched", "settlement is unknown"), ("unjustified_reroll", "substantive rebuttal"),
     ("clean", ""), ("late_settled_clean", ""), ("grounded_rebuttal", ""),
+    ("silent_then_retry", ""), ("silent_then_silent", "pending/unknown"),
+    ("verdict_then_plain_retry", "substantive rebuttal"),
 ])
 def test_smoke_author_preserves_original_wave_and_requires_settlement(tmp_path, monkeypatch, case, error):
     source = tmp_path / "source"
@@ -211,8 +216,8 @@ def test_smoke_author_preserves_original_wave_and_requires_settlement(tmp_path, 
 
     def finish(*_args, **_kwargs):
         lifecycle.append("wait")
-        status = ("pending" if case in {"settled_error", "late_settled_error"} else
-                  "blockers" if case in {"blockers", "grounded_rebuttal"} else "clean")
+        status = ("pending" if case in {"settled_error", "late_settled_error", "silent_then_retry", "silent_then_silent"}
+                  else "blockers" if case in {"blockers", "grounded_rebuttal"} else "clean")
         operation = case if case in {"in_flight", "custody_lost", "pending_dispatch", "not_dispatched"} else "settled"
         if case in {"late_settled_error", "late_settled_clean"}:
             operation = "late_settled"
@@ -233,6 +238,10 @@ def test_smoke_author_preserves_original_wave_and_requires_settlement(tmp_path, 
             final_id = "rl-reassessment"
             _wave(data, "Independent reassessment", record_id=final_id, rebuttal="source-grounded-argument")
             status = "clean"
+        elif case in RETRIES:  # one plain second review, no rebuttal
+            final_id = "rl-retry"
+            status = "pending" if case == "silent_then_silent" else "clean"
+            _wave(data, "Plain retry", record_id=final_id, status=status)
         _save_review(data, status=status, record_id=final_id)
         for record_id in ("rl-current", final_id):
             path = ledger.record_path(data, record_id)
@@ -271,4 +280,5 @@ def test_smoke_author_preserves_original_wave_and_requires_settlement(tmp_path, 
     assert evidence["server_stopped"] and not evidence["evidence_errors"]
     assert [row["record_id"] for row in evidence["review_history"]] == (
         [] if case == "missing_history" else ["rl-current", "rl-reassessment"]
-        if case in {"grounded_rebuttal", "unjustified_reroll"} else ["rl-current"])
+        if case in {"grounded_rebuttal", "unjustified_reroll"} else ["rl-current", "rl-retry"]
+        if case in RETRIES else ["rl-current"])

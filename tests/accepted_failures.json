@@ -1,5 +1,55 @@
 {
   "format": 1,
   "label": "not-a-product-bug",
-  "entries": []
+  "entries": [
+    {
+      "nodeid": "tests/test_live_stack.py::test_full_stack_languages_barge_in_mail_sharing_attention_and_real_tool[openai-False]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "nodeid": "tests/test_live_stack.py::test_full_stack_languages_barge_in_mail_sharing_attention_and_real_tool[grok-False]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "nodeid": "tests/test_live_stack.py::test_full_stack_languages_barge_in_mail_sharing_attention_and_real_tool[gemini-False]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "nodeid": "tests/test_live_stack.py::test_full_stack_languages_barge_in_mail_sharing_attention_and_real_tool[gemini-True]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "nodeid": "tests/test_live_stack.py::test_captions_beyond_a_peers_control_bound_keep_the_call_and_their_whole_words[openai]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "nodeid": "tests/test_live_stack.py::test_captions_beyond_a_peers_control_bound_keep_the_call_and_their_whole_words[grok]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    },
+    {
+      "nodeid": "tests/test_live_stack.py::test_captions_beyond_a_peers_control_bound_keep_the_call_and_their_whole_words[gemini]",
+      "issue": 2942,
+      "platforms": [
+        "windows"
+      ]
+    }
+  ]
 }

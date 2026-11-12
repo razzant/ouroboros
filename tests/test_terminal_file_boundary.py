@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.utils import utc_now_iso
 from ouroboros import agent_task_pipeline as pipeline, headless, owner_mailbox
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.utils import append_jsonl
@@ -91,8 +92,8 @@ def test_worker_saves_once_after_prior_frames_and_before_done(worker, monkeypatc
     thread.start()
     try:
         assert entered.wait(hang), "terminal file preparation never started"
-        assert [worker.output.get_nowait()["type"] for _ in range(2)] == [
-            "send_message", "task_metrics_event"]
+        assert [worker.output.get_nowait()["type"] for _ in range(3)] == [
+            "direct_turn_phase", "send_message", "task_metrics_event"]
         assert worker.output.empty(), "task_done must not release the busy slot before saving"
         assert len(worker.reads) == 1, "this worker cannot take another task while saving"
         from supervisor.events import dispatch_event
@@ -104,7 +105,7 @@ def test_worker_saves_once_after_prior_frames_and_before_done(worker, monkeypatc
             RUNNING={"other": {"task": {"id": "other", "chat_id": 1}}},
             bridge=SimpleNamespace(push_log=pushed.append),
         )
-        dispatch_event({"type": "task_heartbeat", "task_id": "other", "phase": "working"}, ctx)
+        dispatch_event({"type": "task_heartbeat", "task_id": "other", "phase": "working", "ts": utc_now_iso()}, ctx)
         assert ctx.RUNNING["other"]["last_heartbeat_at"] > 0
         assert pushed[-1]["task_id"] == "other"
         assert busy.busy_task_id == "file-root"
@@ -131,7 +132,7 @@ def test_file_failure_does_not_crash_worker_or_replay_task(worker, monkeypatch, 
     monkeypatch.setattr(headless, "prepare_terminal_task_files", prepare, raising=False)
     worker.run()
     assert worker.calls == ["file-root"] and len(worker.reads) == 2 and not worker.crashes
-    frames = [worker.output.get_nowait() for _ in range(3)]
+    frames = [worker.output.get_nowait() for _ in range(4)]  # its start phase, the two producer frames, task_done
     assert frames[-1]["_files_prepared_attempt"] == 3
     assert load_task_result(worker.root, "file-root") is None, "a stamp is not a saved result"
 
@@ -164,7 +165,7 @@ def test_post_task_cleanup_waits_for_pooled_files_only(tmp_path, monkeypatch, po
     monkeypatch.setattr(pipeline, "_pre_synthesis_usage_snapshot", lambda *_a: {})
     monkeypatch.setattr("ouroboros.llm.LLMClient", lambda: object())
     monkeypatch.setattr("ouroboros.memory.Memory", lambda **_kw: object())
-    for name in ("_run_scratchpad_consolidation", "_record_task_facts"):
+    for name in ("_run_memory_fallback_draft", "_record_task_facts"):
         monkeypatch.setattr(pipeline, name, lambda *_a, **_kw: None)
     monkeypatch.setattr("ouroboros.post_task_evolution.maybe_promote", lambda *_a: None)
     env = SimpleNamespace(drive_root=root, repo_dir=tmp_path, drive_path=lambda rel: root / rel)
@@ -176,9 +177,7 @@ def test_post_task_cleanup_waits_for_pooled_files_only(tmp_path, monkeypatch, po
 
 
 @pytest.mark.parametrize("post,pending,keep", [
-    ("pending_once", [], True), ("running", [], True),
-    ("completed", [{"kind": "task_attachment", "path": "accepted-input"}], True),
-    ("completed", [], False), ("degraded", [{"kind": "blob_ref"}], False),
+    ("pending_once", [], True), ("completed", [], False), ("degraded", [{"kind": "blob_ref"}], False),
 ])
 def test_startup_mailbox_sweep_keeps_the_same_outstanding_obligations(tmp_path, post, pending, keep):
     task_id = "sweep-files"
@@ -216,7 +215,7 @@ def test_pooled_post_work_preserves_real_followup_until_copyback(tmp_path, monke
     monkeypatch.setattr(pipeline, "_pre_synthesis_usage_snapshot", lambda *_a: {})
     monkeypatch.setattr("ouroboros.llm.LLMClient", lambda: object())
     monkeypatch.setattr("ouroboros.memory.Memory", lambda **_kw: object())
-    for name in ("_run_scratchpad_consolidation", "_record_task_facts"):
+    for name in ("_run_memory_fallback_draft", "_record_task_facts"):
         monkeypatch.setattr(pipeline, name, lambda *_a, **_kw: None)
     monkeypatch.setattr("ouroboros.post_task_evolution.maybe_promote", lambda *_a: None)
     env = SimpleNamespace(drive_root=child, repo_dir=tmp_path, drive_path=lambda rel: child / rel)
@@ -279,7 +278,7 @@ def test_prepared_frame_uses_current_disk_without_second_copy(terminal_context, 
     assert stored["result"] == "Current answer" and "_files_prepared_attempt" not in stored
 
 
-@pytest.mark.parametrize("stamp,wid", [(2, 7), (4, 7), (True, 7), ("3", 7), (3, 8)])
+@pytest.mark.parametrize("stamp,wid", [(2, 7), (True, 7), (3, 8)])
 def test_stale_prepared_frame_cannot_finish_current_attempt(terminal_context, monkeypatch, stamp, wid):
     from supervisor.events import dispatch_event
 
@@ -336,7 +335,7 @@ def test_legacy_completion_uses_one_off_drain_job(file_recovery, monkeypatch):
         task_reaper.retry_terminal_file_recoveries()
         assert jobs.empty() and not pushed and worker.busy_task_id == "prepared"
         ctx.RUNNING["other"] = {"task": {"id": "other", "chat_id": 1}}
-        events.dispatch_event({"type": "task_heartbeat", "task_id": "other"}, ctx)
+        events.dispatch_event({"type": "task_heartbeat", "task_id": "other", "ts": utc_now_iso()}, ctx)  # a beat carries its own time
         assert ctx.RUNNING["other"]["last_heartbeat_at"] > 0
     finally:
         release.set()

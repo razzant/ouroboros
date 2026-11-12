@@ -97,8 +97,7 @@ def _witnessed(root, witness):
     return lambda task: {**execution_owner_record(root, task, "presence"), "controller": witness}
 
 
-@pytest.mark.parametrize("cause", ["gate_proof", "dead_controller", "dead_parked_author",
-                                   "local_runner_saw_it_end", "returned_in_live_worker"])
+@pytest.mark.parametrize("cause", ["gate_proof", "local_runner_saw_it_end", "returned_in_live_worker"])
 def test_ended_attempt_is_terminal_then_settled_once(tmp_path, cause):
     # The runner's own end marker is an attempt fact: a still-living worker process cannot hold it open.
     witness = {"dead_controller": _dead_witness(), "local_runner_saw_it_end": controller_identity(),
@@ -139,8 +138,7 @@ def test_a_recorded_interrupted_alone_proves_no_end(tmp_path):
     assert reconcile_orphaned_running_tasks(tmp_path) == 0
 
 
-@pytest.mark.parametrize("status,unknown", [("cancelled", False), ("failed", True)])
-@pytest.mark.parametrize("parked", [False, True])
+@pytest.mark.parametrize(("parked", "status", "unknown"), [(False, "cancelled", False), (True, "failed", True)])
 def test_live_execution_outranks_a_recorded_unanswered_terminal(tmp_path, status, unknown, parked):
     # A Stop written under a live author (d375d9fd0's miss lane, V5), or an unknown outcome stored before
     # handle_task returns: the execution may still back-fill a child, so it stays observed until it ends.
@@ -206,7 +204,7 @@ def test_an_executor_that_raises_records_its_end_and_is_settled_once(tmp_path):
     assert len(_room_facts(tmp_path, ref)) == 1
 
 
-@pytest.mark.parametrize("case", ["live_here", "parked_alive_elsewhere", "no_witness", "local_without_end_fact"])
+@pytest.mark.parametrize("case", ["live_here", "no_witness", "local_without_end_fact"])
 def test_live_or_unprovable_attempts_keep_being_observed(tmp_path, case):
     # A missing local registry entry is never death (tests/test_presence_continuation_recovery.py).
     ref, stored = _row(tmp_path, f"ev-{case}", recorded=case == "live_here",

@@ -133,12 +133,12 @@ class _HealthStub:
     def close(self): pass
 
 
-def _dispatch(requested, *, route="some-route=weak:low", stub=None, monkeypatch=None,
-              raises=None, acting=False):
+def _session_dispatch(*, route="some-route=weak:low", stub=None, monkeypatch=None,
+                      raises=None, acting=False):
+    """The executor resolution of a configured agent-session row at the REAL dispatch
+    entry point, against a daemon double: the one dispatch that health-checks a
+    session route before a token is spent. A read-only child's row says so."""
     from ouroboros.gateways import claudexor as gw
-    from ouroboros.subagents import dispatch_executor_resolution
-
-    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", route)
 
     def _make(*a, **k):
         if raises is not None:
@@ -146,10 +146,12 @@ def _dispatch(requested, *, route="some-route=weak:low", stub=None, monkeypatch=
         return stub if stub is not None else _HealthStub()
 
     monkeypatch.setattr(gw, "ClaudexorGateway", _make)
-    task = {"delegation_role": "subagent", "requested_executor": requested}
+    parsed = subagents.parse_subagent_harness(route)
+    task = {"delegation_role": "subagent", "parent_cognitive_route": {"model": "nanny-model"},
+            "configured_subagent": _transport_snapshot(parsed, None if acting else "readonly")}
     if acting:
         task["task_constraint"] = {"mode": "acting_subagent", "surface": "self_worktree"}
-    return dispatch_executor_resolution(task)
+    return subagents.resolve_subagent_dispatch(task, task_type="task").executor_resolution
 
 
 def _delegating_ctx(tmp_path, *, acting: bool, task_id: str = "t-nanny"):
@@ -330,11 +332,11 @@ def _write_failed_attempt(run_dir, *, attempt="a01"):
 
 
 def _waiting(tmp_path, monkeypatch, *, acting=True, access=""):
-    """One ``delegate_wait`` window over ``run-1``.
+    """One wake's read of ``run-1`` (``tools/delegate._read_run``).
 
     ``access`` records the GRANTED shape on the custody entry, as a STARTED row does
-    (#1609: technical access alone decides it); "" keeps a legacy entry with none, whose
-    wait re-derives its entitlement from the live context.
+    (#1609: technical access alone decides it), whose floor the body holds; "" keeps a
+    legacy entry with none, whose read re-derives its entitlement from the live context.
     """
     import ouroboros.tools.delegate as delegate
 
@@ -347,10 +349,8 @@ def _waiting(tmp_path, monkeypatch, *, acting=True, access=""):
         **({"access": granted.access, "mode": granted.mode, "isolation": granted.isolation,
             "delegated": granted.delegated} if granted else {}),
     )
-    # since_seq=0 so a HEALTHY run records its advance and answers `progress` when the
-    # one-second window expires; a BREACH is what returns immediately, mid-window. The
-    # distinguishing signal is "was this halted as a containment fault", not the timing.
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1, since_seq=0))
+    # since_seq=0 so a HEALTHY run answers `progress`; a BREACH is halted as a containment fault.
+    out = json.loads(delegate._read_run(ctx, "run-1", 0))
     delegate._CUSTODY.clear()
     return out
 

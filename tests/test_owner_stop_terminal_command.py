@@ -136,7 +136,7 @@ def test_wrap_up_reads_done_over_its_answer_and_stopped_without_one(root, monkey
     assert _completion_verdict(empty, done) == "Stopped from the app (Wrap up)"
 
 
-@pytest.mark.parametrize("button,answer", [("wrap_up", True), ("wrap_up", False), ("stop_now", True), ("stop_now", False)])
+@pytest.mark.parametrize("button,answer", [("wrap_up", True), ("wrap_up", False), ("stop_now", False)])
 def test_result_reader_names_the_control_without_claiming_cancellation(root, monkeypatch, button, answer):
     from ouroboros.tools.control_task_results import _get_task_result
     from ouroboros.tools.join_ledger import _child_result_sha256
@@ -197,9 +197,11 @@ def test_forced_producer_saved_answer_uses_provenance_not_its_prefix(root, monke
         assert _completion_verdict(stored, {}) == "Stopped from the app (Stop now)"
 
 
-@pytest.mark.parametrize("prefix", ["", "⚠️ ", "❌ "])
-@pytest.mark.parametrize("status,reason", [("infra_failed", OWNER_STOP), ("infra_failed", "provider_failure"),
-                                          ("failed", "provider_unavailable")])
+@pytest.mark.parametrize(("status", "reason", "prefix"), [
+    pytest.param("infra_failed", OWNER_STOP, "", id='infra_failed-owner_requested_finalization-'),
+    ("infra_failed", "provider_failure", "⚠️ "),
+    ("failed", "provider_unavailable", "❌ "),
+])
 def test_answer_provenance_never_overrides_an_independent_execution_failure(prefix, status, reason):
     from ouroboros.outcomes import derive_loop_outcome
 

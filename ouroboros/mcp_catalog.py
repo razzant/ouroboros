@@ -27,9 +27,13 @@ def catalog_path(server_id: str) -> Path:
 
 
 def identity(cfg: Any) -> str:
-    """Digest credentials too, but never persist their plaintext configuration."""
+    """Digest credentials too, but never persist their plaintext configuration.
+
+    Call-lifetime choices (``task_session``, ``browser_policy``) never change a listing:
+    discovery starts its own process either way, so toggling them keeps the catalog."""
     fields = asdict(cfg)
-    for key in ("enabled", "allowed_tools", "name", "configuration_warnings", "secret_values", "schemas_at_start"):
+    for key in ("enabled", "allowed_tools", "name", "configuration_warnings", "secret_values", "schemas_at_start",
+                "task_session", "browser_policy"):
         fields.pop(key, None)
     return hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 

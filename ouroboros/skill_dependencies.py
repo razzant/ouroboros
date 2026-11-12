@@ -6,6 +6,7 @@ import logging
 import pathlib
 from typing import Any, Dict, List
 
+from ouroboros import work_domain
 from ouroboros.marketplace.install_specs import normalize_install_specs
 from ouroboros.utils import read_json_dict
 
@@ -155,11 +156,12 @@ def skill_deps_not_ready(drive_root: pathlib.Path, loaded: Any, *, strict: bool 
     try:
         from ouroboros.marketplace.install_specs import install_specs_hash as _specs_hash
         from ouroboros.marketplace.isolated_deps import read_deps_state
+        from ouroboros.work_skill_payloads import deps_home
 
         auto_specs = auto_install_specs_for_skill(drive_root, loaded)
         if not auto_specs:
             return "", ""
-        deps_state = read_deps_state(drive_root, loaded.name, loaded.skill_dir)
+        deps_state = read_deps_state(drive_root, loaded.name, deps_home(drive_root, loaded))  # managed: the work copy
         deps_status = str(deps_state.get("status") or "pending")
         if deps_status != "installed":
             return deps_status, "status"
@@ -171,6 +173,21 @@ def skill_deps_not_ready(drive_root: pathlib.Path, loaded: Any, *, strict: bool 
             raise
         log.debug("skill deps readiness probe failed", exc_info=True)
         return "", ""
+
+
+def unusable_python_env(drive_root: pathlib.Path, loaded: Any) -> str:
+    """The binding (``moved``, ``absent``, ...) when ``loaded`` declares Python packages that apply on this host
+    and its env python cannot run them on this interpreter, else ``""``: such a skill never runs on another
+    interpreter (``skill_exec`` and the process-tool resolver refuse); a skill whose Python packages are all
+    for other platforms, or that has none, is unaffected (the installer skips the former, ``spec_applies_here``)."""
+    from ouroboros.marketplace.isolated_deps import python_env_binding, spec_applies_here
+    from ouroboros.work_skill_payloads import deps_home
+
+    if not any(str(spec.get("kind") or "").strip().lower() in {"pip", "pipx", "uv"} and spec_applies_here(spec)
+               for spec in auto_install_specs_for_skill(drive_root, loaded) if isinstance(spec, dict)):
+        return ""
+    binding = python_env_binding(deps_home(drive_root, loaded))
+    return "" if binding == "current" else binding
 
 
 # One owner sentence per typed dependency code (the toast and the card prefix the skill name).
@@ -198,17 +215,29 @@ def ensure_skill_dependencies(drive_root: pathlib.Path, loaded: Any, *, progress
     ``not_required`` (no auto specs), ``installed`` (already recorded for these specs, or
     installed now), ``not_admitted`` (the gate does not admit the bytes: nothing written),
     ``failed`` (the installer's text in ``detail``; ``deps.json`` keeps it, the verdict is
-    untouched, the next call retries). Idempotent; never takes the lifecycle lane.
+    untouched, the next call retries). An environment left on another host's Python
+    (``python_env`` of the reader) is re-pointed without pip when only its base moved and
+    rebuilt by the installer for another major.minor. Idempotent; never takes the lifecycle lane. A deployment's
+    trusted package (execution domain) gets nothing installed or rebound: unrecorded packages are ``failed`` with
+    the administrator's sentence (``deployment_extensions.dependency_refusal``).
     """
     try:
         from ouroboros.marketplace.install_specs import install_specs_hash
-        from ouroboros.marketplace.isolated_deps import install_isolated_dependencies, read_deps_state
+        from ouroboros.marketplace.isolated_deps import install_isolated_dependencies, read_deps_state, rebind_python_env
+        from ouroboros.work_skill_payloads import deps_home
 
         auto_specs = auto_install_specs_for_skill(drive_root, loaded)
         if not auto_specs:
             return "not_required", ""
-        state = read_deps_state(drive_root, loaded.name, loaded.skill_dir)
-        if str(state.get("status") or "") == "installed" and state.get("specs_hash") == install_specs_hash(auto_specs):
+
+        def recorded(state: Dict[str, Any]) -> bool:
+            return str(state.get("status") or "") == "installed" and state.get("specs_hash") == install_specs_hash(auto_specs)
+
+        home = loaded.skill_dir
+        if work_domain.managed():  # an installed skill's packages are built in its reviewed payload's work copy
+            home = deps_home(drive_root, loaded, materialize=loaded.review.gate_for(loaded.content_hash)["executable_review"])
+        state = read_deps_state(drive_root, loaded.name, home)
+        if recorded(state):
             if read_deps_state(drive_root, loaded.name).get("status") != "installed":
                 # A runtime record corroborated the live environment; finish its interrupted publication.
                 from ouroboros.marketplace.isolated_deps import DEPS_STATE_FILENAME
@@ -216,11 +245,19 @@ def ensure_skill_dependencies(drive_root: pathlib.Path, loaded: Any, *, progress
                 from ouroboros.utils import atomic_write_json
                 atomic_write_json(skill_state_dir(drive_root, loaded.name) / DEPS_STATE_FILENAME, state, trailing_newline=True)
             return "installed", ""
+        from ouroboros.deployment_extensions import dependency_refusal
+
+        if managed := dependency_refusal(loaded):  # a trusted package's packages are its administrator's delivery
+            return "failed", managed
         if not loaded.review.gate_for(loaded.content_hash)["executable_review"]:
             return "not_admitted", ""
+        if state.get("python_env") == "moved":
+            rebind_python_env(home)
+            if recorded(read_deps_state(drive_root, loaded.name, home)):
+                return "installed", ""
         if progress is not None:
             progress("Installing packages…")
-        install_isolated_dependencies(drive_root, loaded.name, loaded.skill_dir, auto_specs)
+        install_isolated_dependencies(drive_root, loaded.name, home, auto_specs, review_dir=loaded.skill_dir)
         return "installed", ""
     except Exception as exc:
         log.debug("skill dependency step failed for %s", getattr(loaded, "name", "?"), exc_info=True)

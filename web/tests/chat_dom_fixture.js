@@ -110,6 +110,7 @@ export class ElementStub {
     after(node) { const list = this.parentNode?.children || []; return this.parentNode?.insertBefore(node, list[list.indexOf(this) + 1] || null); }
     insertAdjacentElement(_position, node) { const list = this.parentNode?.children || []; return this.parentNode?.insertBefore(node, list[list.indexOf(this) + 1] || null); }
     insertBefore(node, before) {
+        if (node === before) return node;  // as in a DOM: a node put before itself stays where it is
         if (node?.isDocumentFragment) {
             for (const child of [...node.children]) this.insertBefore(child, before);
             return node;
@@ -131,6 +132,13 @@ export class ElementStub {
         node.parentElement = null;
     }
     remove() { this.parentNode?.removeChild?.(this); this.isConnected = false; }
+    get previousElementSibling() { return this.#sibling(-1); }
+    get nextElementSibling() { return this.#sibling(1); }
+    #sibling(step) {
+        const list = (this.parentNode?.children || []).filter((child) => child.nodeType !== 3);
+        const index = list.indexOf(this);
+        return index < 0 ? null : list[index + step] || null;
+    }
     get firstElementChild() { return this.children.find((child) => child.nodeType !== 3) || null; }
     get lastElementChild() { return this.children.findLast((child) => child.nodeType !== 3) || null; }
     get firstChild() { return this.children[0] || null; }
@@ -178,7 +186,7 @@ export class ElementStub {
 export function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ active_direct_turns: [] }) })) {
     const prior = {
         document: globalThis.document, window: globalThis.window,
-        sessionStorage: globalThis.sessionStorage, fetch: globalThis.fetch,
+        sessionStorage: globalThis.sessionStorage, localStorage: globalThis.localStorage, fetch: globalThis.fetch,
         ResizeObserver: globalThis.ResizeObserver,
         requestAnimationFrame: globalThis.requestAnimationFrame,
         getComputedStyle: globalThis.getComputedStyle,
@@ -226,6 +234,10 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         setItem: (key, value) => storage.set(key, String(value)),
         removeItem: (key) => storage.delete(key),
     };
+    // The origin's persistent store (the saved preview, chat_preview.js), apart from the tab's.
+    const persistent = new Map();
+    globalThis.localStorage = { getItem: (key) => persistent.get(key) ?? null,
+        setItem: (key, value) => persistent.set(key, String(value)), removeItem: (key) => persistent.delete(key) };
     globalThis.fetch = fetchImpl;
     globalThis.ResizeObserver = class { observe() {} disconnect() {} };
     globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };

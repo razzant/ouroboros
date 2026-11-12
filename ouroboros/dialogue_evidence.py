@@ -26,7 +26,8 @@ _ROW_FACTS = (
     "source_task_id", "relayed_from_task_id", "provenance", "client_surface",
     "status", "reason_code", "outcome", "outcome_axes", "terminal_host_notice", "task_terminal_status", "summary_kind",
     "lifecycle", "quiz", "actions", "title", "filename", "caption", "mime",
-    "project_origin_projection", "presence_provenance", "attachment_gap",
+    "project_origin_projection", "presence_provenance", "presence_contact", "attachment_gap",
+    "reply_to", "relay", "reply_to_relay",  # the host-resolved relations: what a row replies to, the owner words a relay quotes
 )
 
 
@@ -39,18 +40,31 @@ def _chat_id(row: dict) -> int:
 
 def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, pos: int | None = None,
                     lineage: dict | None = None) -> dict:
-    from ouroboros.dialogue_provenance import row_author
+    from ouroboros.dialogue_provenance import reaction_fact, reaction_note, row_author
 
     result = {key: row[key] for key in _ROW_FACTS if key in row}
     result.update(stream=stream, source_ordinal=ordinal)
     result["text"] = str(row.get("content", row.get("text", "")) or "")
+    transport = row.get("transport") if isinstance(row.get("transport"), dict) else {}
+    if fact := reaction_fact(transport.get("message")):
+        # A typed reaction keeps its exact fact, who acted and a receipt's state beside the row's own words
+        # (none, unless a receipt sent some), with the shared non-speech words every room reader shows.
+        receipt = row.get("type") == "presence_delivery"
+        actor, delivery = (transport.get(key) if isinstance(transport.get(key), dict) else {} for key in ("actor", "delivery"))
+        result["reaction"] = {"fact": dict(fact), "actor_kind": "ouroboros" if receipt else str(actor.get("kind") or ""),
+                              **({"state": str(delivery.get("state") or "")} if receipt else {}), "words": reaction_note(row)}
     # One attribution source, the row's own fields: a quiz answer is the Owner's, a
     # mailbox delivery keeps its own provenance, every other row is signed by its fields
     # and, for a chat row with a stream position, by the activation's lineage epoch.
-    if stream == "mailbox" and row.get("type") != "quiz_answer":
+    from ouroboros.owner_quiz import secret_outcome_block
+
+    if stream == "mailbox" and secret_outcome_block(row) is not None:
+        result["author"] = "host"  # a secret request's outcome frame, never the owner's words
+    elif stream == "mailbox" and row.get("type") != "quiz_answer":
         result["author"] = str(row.get("provenance") or "Owner")
-    else:
-        result["author"] = row_author(row, pos=pos, **(lineage if pos is not None and lineage else {}))["label"]
+    else:  # the epoch's rule needs the row's stream position; the places' owner snapshot never does
+        keywords = dict(lineage or {}) if pos is not None else {"owner_accounts": (lineage or {}).get("owner_accounts")}
+        result["author"] = row_author(row, pos=pos, **keywords)["label"]
     # Payload bytes are never interpreted as dialogue. Existing attachment
     # manifests carry the owner-visible file names alongside custody handles.
     attachments = row.get("attachment_manifest")
@@ -112,7 +126,7 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     # An activated chronicle records the lineage epoch: an outgoing row before it is signed by
     # its task result, never assumed mine. That rule needs each room row's stream position.
     lineage, positions = row_lineage(root), {}
-    if lineage and coverage["snapshot_stable"]:
+    if lineage.get("lineage_epoch") and coverage["snapshot_stable"]:
         for address, _row, pos in iter_room_rows(root, chat_id):
             positions.setdefault(address["row_sha256"], pos)
     source_rows = []
@@ -227,10 +241,7 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     }
     header = {"chat_id": chat_id, "label": label, "rows": len(unique), "coverage": source_header_coverage}
     text = "\n".join(json.dumps(row, ensure_ascii=False, default=str) for row in [header, *unique]) + "\n"
-    from ouroboros.tools.review_helpers import redact_prompt_secrets
-
-    text, redacted = redact_prompt_secrets(text)
-    return {**header, "coverage": source_coverage, "captured_at": utc_now_iso(), "rows": [json.loads(line) for line in text.split("\n")[1:-1]], "text": text, "secrets_redacted": redacted,
+    return {**header, "coverage": source_coverage, "captured_at": utc_now_iso(), "rows": [json.loads(line) for line in text.split("\n")[1:-1]], "text": text,
             "sha256": sha256(text.encode()).hexdigest(), "bytes": len(text.encode())}
 
 

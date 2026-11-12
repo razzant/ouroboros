@@ -43,7 +43,6 @@ def _run(code: str, tmp_path: pathlib.Path, *, script: bool = False) -> subproce
     return subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True, timeout=180)
 
 
-@pytest.mark.serial
 def test_server_bootstrap_writes_server_log_through_redacting_handlers(tmp_path):
     logs = tmp_path / "logs"
     completed = _run(f"""
@@ -73,7 +72,6 @@ def test_server_bootstrap_writes_server_log_through_redacting_handlers(tmp_path)
     assert "probe" in server_log and "a" * 64 not in server_log
 
 
-@pytest.mark.serial
 def test_httpx_logger_quieted(tmp_path):
     """httpx logs each request URL at INFO; the bootstrap keeps it at WARNING."""
     completed = _run("""
@@ -87,7 +85,6 @@ def test_httpx_logger_quieted(tmp_path):
     assert all(int(level) >= logging.WARNING for level in levels)
 
 
-@pytest.mark.serial
 def test_uncaught_thread_exception_is_one_log_record_not_a_raw_print(tmp_path):
     logs = tmp_path / "logs"
     completed = _run(f"""
@@ -118,7 +115,6 @@ def test_uncaught_thread_exception_is_one_log_record_not_a_raw_print(tmp_path):
     assert completed.stderr.count("ValueError: thread-boom") == 1
 
 
-@pytest.mark.serial
 def test_uncaught_main_thread_exception_is_logged_and_still_exits_nonzero(tmp_path):
     completed = _run("""
         from ouroboros.process_logging import configure_process_logging
@@ -130,7 +126,6 @@ def test_uncaught_main_thread_exception_is_logged_and_still_exits_nonzero(tmp_pa
     assert completed.stderr.count("RuntimeError: main-boom") == 1
 
 
-@pytest.mark.serial
 def test_a_main_thread_hook_installed_earlier_still_runs_after_the_record(tmp_path):
     completed = _run("""
         import sys
@@ -146,7 +141,6 @@ def test_a_main_thread_hook_installed_earlier_still_runs_after_the_record(tmp_pa
     assert completed.stderr.count("RuntimeError: main-chained") == 1
 
 
-@pytest.mark.serial
 def test_a_hook_installed_earlier_still_runs_after_the_record(tmp_path):
     completed = _run("""
         import threading
@@ -168,7 +162,6 @@ def test_a_hook_installed_earlier_still_runs_after_the_record(tmp_path):
     assert "Uncaught exception in thread chained-thread" in completed.stderr
 
 
-@pytest.mark.serial
 def test_without_any_handler_the_interpreter_print_stays_in_charge(tmp_path):
     completed = _run("""
         import threading
@@ -187,7 +180,6 @@ def test_without_any_handler_the_interpreter_print_stays_in_charge(tmp_path):
     assert "ValueError: unconfigured" in completed.stderr
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("start_method", [
     "spawn",
     pytest.param("forkserver", marks=pytest.mark.skipif(sys.platform == "win32", reason="forkserver is POSIX-only")),
@@ -307,12 +299,45 @@ def test_the_launcher_routes_its_uncaught_exceptions_through_the_shared_hooks():
     assert len(calls) == 1
     imports = {alias.name: node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                and node.module == "ouroboros.process_logging" for alias in node.names}
-    assert set(imports) == {"install_exception_hooks", "copy_capped_output"}
+    assert set(imports) == {"install_exception_hooks", "copy_capped_output", "utc_log_formatter"}
+    # Every launcher handler (file and console) gets the shared UTC formatter in the same guarded block
+    # that imports it, so a broken import leaves basicConfig's local-time fallback and never the launcher.
+    guarded = next(node for node in tree.body if isinstance(node, ast.Try)
+                   and imports["utc_log_formatter"] in ast.walk(node))
+    loop = next(node for node in ast.walk(guarded) if isinstance(node, ast.For)
+                and isinstance(node.iter, ast.Name) and node.iter.id == "_handlers")
+    assert [call for call in ast.walk(loop) if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name) and call.func.id == "utc_log_formatter"]
     start_agent = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "start_agent")
     assert imports["copy_capped_output"] in start_agent.body  # Unguarded, before the server is spawned.
 
 
-@pytest.mark.serial
+@pytest.mark.parametrize("zone", ["UTC", "Europe/Moscow", "America/Los_Angeles"])
+def test_text_log_records_carry_the_json_logs_clock(monkeypatch, zone):
+    """A text line and an events.jsonl row of one moment read the same instant: UTC, zone written.
+    Both directions: the time is UTC with ``Z`` under any process zone, and the rest of the record
+    (level, logger, message) renders as before."""
+    import time
+    from ouroboros import process_logging
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("the process zone cannot be changed on this platform")
+    monkeypatch.setenv("TZ", zone)
+    time.tzset()
+    try:
+        record = logging.LogRecord("probe", logging.WARNING, __file__, 1, "hello %s", ("world",), None)
+        record.created, record.msecs = 1762648451.032, 32.0
+        text = process_logging.utc_log_formatter().format(record)
+        local_hour = time.strftime("%H", time.localtime(1762648451))  # read while that zone holds
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+    utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(1762648451))
+    assert text == f"{utc}.032Z [WARNING] probe: hello world"
+    if zone != "UTC":  # that zone's local clock reads another hour: a zone-less local time would have lied
+        assert local_hour != utc[11:13]
+
+
 def test_the_module_loads_only_the_standard_library():
     """The launcher drains and records a server whose own imports are broken (the crash
     output agent_stdout.log exists for), so nothing project-owned loads with the copier."""
@@ -326,7 +351,6 @@ def test_the_module_loads_only_the_standard_library():
     assert completed.stdout.strip() == "False", completed.stderr[-2000:]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("phase", ["init_baseline", "extension_reload"])
 def test_a_nonfatal_worker_startup_failure_keeps_its_exception(worker, monkeypatch, caplog, phase):
     """Both non-fatal startup phases of the real worker loop hand the caught exception

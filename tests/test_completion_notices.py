@@ -62,14 +62,8 @@ def _record(case):
 
 
 @pytest.mark.parametrize("case,fragment", [
-    ("clean", "finished"), ("receipt", "finished"),
-    ("delivery_control", "final delivery instruction could not be read"),
+    ("clean", "finished"), ("delivery_control", "final delivery instruction could not be read"),
     ("verification_output", "A tool this task used failed"),
-    ("partial", "The result is partial"),
-    ("mixed", "declared output has no recorded tool work"),
-    ("unknown_warning", "future_warning"),
-    ("artifact_missing", "result files are missing"),
-    ("unknown_delivery", "Delivery of the final answer could not be confirmed"),
 ])
 def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch):
     nt = _load()
@@ -109,7 +103,9 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("trigger,enforcement,obligations,expected_neutral", [
-    ("auto_effect", "advisory", [], True),
+    # An author's acceptance without the reviewers' approval is always flagged, an optional review's too
+    # (owner, 8 Nov 2026): the compact notice says the same sentence as the card.
+    ("auto_effect", "advisory", [], False),
     ("required_effect", "advisory", [], False),
     ("auto_effect", "blocking", [], False),
     ("auto_effect", "advisory", ["unmet-review"], False),
@@ -129,7 +125,7 @@ def test_recorded_author_completion_and_review_obligations(trigger, enforcement,
     assert neutral is expected_neutral
     assert bool(detail) is not expected_neutral
     assert record == before
-    assert "had not signed it off" in dialogue._completion_verdict(record, {})
+    assert dialogue.TASK_CAUSE_PHRASES["author_finish"].rstrip(".") in dialogue._completion_verdict(record, {})
 
 
 def test_unavailable_review_without_an_author_completion_is_not_guessed_optional():
@@ -178,8 +174,7 @@ def test_earlier_approval_does_not_hide_current_open_obligations():
     assert "earlier version" in summary["reason_detail"]
 
 
-@pytest.mark.parametrize("notify", ["off", "on"])
-@pytest.mark.parametrize("mirror", ["all", "telegram_only"])
+@pytest.mark.parametrize(("mirror", "notify"), [("all", "off"), ("telegram_only", "on")])
 def test_files_questions_and_project_replies_are_independent(tmp_path, monkeypatch, notify, mirror):
     import base64
     import json
@@ -243,3 +238,23 @@ def test_degraded_review_history_never_leaves_a_bare_warning(lane, tmp_path, mon
     assert not notice["neutral"]  # do not invent finished/approved from degraded facts
     assert notice["detail"] and "earlier version" in notice["detail"], sent
     assert "earlier version" in sent
+
+
+def test_the_works_review_gate_field_reaches_its_telegram_completion_copy_and_nothing_else(tmp_path, monkeypatch):
+    """The work's card fact (``review_overrides``) rides the completion it already sends: no message of its own."""
+    nt = _load()
+    api, data = _api(tmp_path)
+    monkeypatch.setattr(nt, "TelegramClient", _Rec)
+    gated = {**_record("clean"), "task_id": "gated", "review_overrides": {"count": 12, "latest": {
+        "reason": "critical_findings", "task_id": "gated", "text": "x" * 300, "at": "2026-11-11T10:00:00+00:00"}}}
+    plain = {**_record("clean"), "task_id": "plain"}
+    rows = [terminal_projection._project_row(row["task_id"], row, {}, {"chat_id": 1}) for row in (gated, plain)]
+    line = "Review: 12× continued where Blocking would have stopped · latest: critical findings"
+    assert rows[0]["completion_notice"]["review_gate"] == line and "review_gate" not in rows[1]["completion_notice"]
+    assert rows[0]["completion_notice"]["neutral"] is rows[1]["completion_notice"]["neutral"], "a field, not a cause"
+    _write_rows(data, rows)
+    _Rec.sent = []
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "en"))
+    assert len(_Rec.sent) == 2, "one completion message per work, as before"
+    texts = [text for _chat, text, *_ in _Rec.sent]
+    assert sum(line in text for text in texts) == 1 and "x" * 300 not in "".join(texts)

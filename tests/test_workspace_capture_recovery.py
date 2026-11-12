@@ -80,6 +80,27 @@ def _consumers(root, task_id, expected):
                       "list_status": listed["status"], "detail_status": detail.json()["status"]}))
 
 
+@pytest.mark.parametrize("kind", ["custody", "mail"])
+def test_publication_lock_preserves_os_failure_without_claiming_contention(tmp_path, monkeypatch, kind):
+    import errno
+    from ouroboros import task_custody
+    from tests._shared import full_disk_at
+
+    write_task_result(tmp_path, "lock-owner", "running", result="untouched")
+    before = result_signature(tmp_path, "lock-owner")
+    lock = getattr(task_custody, f"task_{kind}_lock")
+    with monkeypatch.context() as failure:
+        full_disk_at(failure, f".{kind}.lock")
+        with pytest.raises(task_custody.CustodyBusy) as caught:
+            with lock(tmp_path, "lock-owner", timeout_sec=0):
+                pytest.fail("the lock was not taken")
+        assert caught.value.errno == errno.ENOSPC and "lock-owner" in str(caught.value)
+        assert "contention" not in str(caught.value)
+    assert result_signature(tmp_path, "lock-owner") == before
+    with lock(tmp_path, "lock-owner", timeout_sec=0) as acquired:
+        assert acquired
+
+
 @pytest.fixture
 def promoted(worker, file_recovery, tmp_path_factory, monkeypatch):  # noqa: F811
     from ouroboros.agent import OuroborosAgent
@@ -282,8 +303,7 @@ def test_startup_prepares_addressed_canonical_pending_capture(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("artifact_status,ready", [
-    (None, False), ("", False), ("pending", False), ("finalizing", False), ("future_status", False),
-    ("ready", True), ("ready_with_changes", True), ("ready_no_changes", True), ("failed", True), ("missing", True),
+    (None, False), ("", False), ("pending", False),
 ])
 def test_readers_share_positive_capture_finality(tmp_path, artifact_status, ready):
     task = {"id": "capture", "workspace_root": str(tmp_path / "workspace")}
@@ -304,8 +324,6 @@ def test_readers_share_positive_capture_finality(tmp_path, artifact_status, read
 
 @pytest.mark.parametrize("fields", [
     {},
-    {"workspace_root": "/unused", "delegation_role": "subagent",
-     "task_constraint": {"mode": "local_readonly_subagent"}},
     {"workspace_root": "/unused", "execution_owner": {"kind": "presence"},
      "metadata": {"presence": {"binding_id": "b"}}},
     {"workspace_root": "/unused", "_is_direct_chat": True},

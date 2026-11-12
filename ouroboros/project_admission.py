@@ -7,6 +7,7 @@ occupancy never invalidates admission; each pass parses registry and bindings on
 """
 from __future__ import annotations
 
+import copy
 import json
 from contextlib import contextmanager
 from typing import Any, Optional
@@ -27,6 +28,68 @@ def host_unscoped(task: dict) -> bool:
     """Fresh host admission proved no Project scope; restore never backfills it."""
     return (task.get("_project_scope_none") is True
             and not task.get("project_id") and "_project_admission" not in task)
+
+
+def fresh_seed_unscoped(task: dict) -> bool:
+    """Whether a conversation seed the host minted just now proves no Project scope (#2555).
+
+    No binding can name an id this new, so the membership owner reads only what the
+    seed carries. A room, a resource intent's room or a carried lineage stays
+    uncertain: it is never attested absent here, and nothing is read from disk.
+    """
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if "_project_admission" in task or any(
+            metadata.get(key) for key in ("origin_task_id", "origin_root_task_id", "root_task_id", "parent_task_id")):
+        return False
+    return task_project_membership(None, task, bindings_snapshot={}) == ("", False)
+
+
+def carried_basis(source: dict) -> dict:
+    """The Project basis a row or result carries, copied unchanged (#2547).
+
+    The one definition every writer of a task result and every rebuild of a
+    queue row (snapshot, direct root, restored locator) uses. A missing basis
+    stays missing, so restore still holds the row; nothing is recaptured.
+    Host-attested absence stays a queue-row fact: a Main row rebuilt from a
+    result takes no Project hold that it would release.
+    """
+    return {"_project_admission": copy.deepcopy(source["_project_admission"])} if "_project_admission" in source else {}
+
+
+def returned_basis(task: dict, stored: dict, attempt: int) -> dict:
+    """The basis a returned row lacks, carried from its own result of the same attempt (#2725); else ``{}``.
+
+    A room turn's body records the basis its carrier bound before the frame that teaches the queue row
+    (``conversation_lane.handle_direct_turn_bound``) lands; a stop between them leaves the row without it.
+    Only that gap is filled: the result is this task's, of the row's attempt (a direct first launch records
+    0 for the row's 1, as ``task_admission._working_attempt_unstarted`` reads it), for the room the row names.
+    A basis the row carries, attested absence, another room or attempt, or a result without one adds
+    nothing: restore still holds that row, and the room's current row is never read in its place."""
+    if "_project_admission" in task or task.get("_project_scope_none") is True or not isinstance(
+            stored.get("_project_admission"), dict):
+        return {}
+    pid, recorded, owner = str(task.get("project_id") or "").strip(), stored.get("task_attempt"), stored.get("execution_owner")
+    first_direct = (attempt == 1 and recorded == 0 and "admitted_dispatch_attempt" not in stored and isinstance(owner, dict)
+                    and owner.get("kind") in {"direct", "presence"} and owner.get("task_attempt") == 0)
+    if (not pid or stored.get("task_id") != task.get("id") or stored.get("project_id") != pid
+            or stored["_project_admission"].get("project_id") != pid
+            or type(recorded) is not int or recorded != attempt and not first_direct):
+        return {}
+    return carried_basis(stored)
+
+
+def admitted_folder(basis: Any, project_id: str) -> Optional[str]:
+    """The room folder a carried basis recorded, ``""`` for a room with none (#2547).
+
+    Work admitted on this basis keeps that resource across stops and pooled
+    continuations: a later rebind, or a sibling's first folder for the room, never
+    moves it. ``None`` when nothing usable is carried (no basis, a legacy stamp,
+    another room), and the caller reads the room's current row as before.
+    """
+    if (not isinstance(basis, dict) or basis.get("legacy_basis") or basis.get("project_id") != project_id
+            or not isinstance(basis.get("project"), dict)):
+        return None
+    return str(basis["project"].get("working_dir") or "").strip()
 
 
 def hold_unreadable_result(task: dict) -> bool:
@@ -267,6 +330,21 @@ def project_admission_view(drive_root: Any, project_id: str, *,
     if project is None and not allow_unregistered:
         raise ProjectAdmissionError("project_routing_fence_changed", "The registered Project is missing.")
     return {**project_admission_basis(project_id, project, frozen=frozen), "registry_present": present}
+
+
+def direct_turn_basis(drive_root: Any, project_id: str) -> dict:
+    """The room row a direct turn's binding consumes, frozen as queued work keeps it (#2547).
+
+    A direct turn has no queue append, so its binding is the admission: the caller
+    binds under this basis. An absent room is registered first, as binding always did.
+    """
+    from ouroboros.projects_registry import create_project
+
+    basis = project_admission_view(drive_root, project_id, allow_unregistered=True, frozen=True)
+    if basis["project"] is None:
+        basis = project_admission_basis(
+            project_id, create_project(drive_root, project_id, admission_basis=basis), frozen=True)
+    return basis
 
 
 def _folder_owners(rows: Any, canonical: str) -> list:

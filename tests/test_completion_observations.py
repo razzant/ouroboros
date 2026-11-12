@@ -30,8 +30,12 @@ def _trace():
          "result": f"queued message {i}"} for i in range(40)], "reasoning_notes": []}
 
 
-@pytest.mark.parametrize("mode", ["root", "project", "child", "project_child"])
-@pytest.mark.parametrize("user_file", [False, True])
+@pytest.mark.parametrize(("user_file", "mode"), [
+    (False, "root"),
+    (False, "child"),
+    (True, "project"),
+    (True, "project_child"),
+])
 def test_sealed_observations_survive_copyback_and_recovery_without_global_attribution(tmp_path, monkeypatch, mode, user_file):
     source_root = tmp_path / "execution"
     canonical = tmp_path / "canonical" if "child" in mode else source_root
