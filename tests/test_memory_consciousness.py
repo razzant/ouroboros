@@ -95,9 +95,11 @@ def test_the_accepted_source_roundtrip_reports_only_new_records_and_their_target
     assert following.counts() == {"memory_change": 1} and late["id"] in following.events[0][2]
     last = bind(tmp_path, following, "wake-next")
     assert observe(tmp_path, last).events == ()
-    # The memory position is part of the bound source: an accepted boundary that disagrees with it is not trusted.
+    # The memory position is checked against the journal's record at that sequence: an accepted boundary that
+    # disagrees with it is a disclosed gap with its sequence retained, and nothing is replayed.
     tampered = observe(tmp_path, {**last, "memory": {**last["memory"], "sequence": 1}})
-    assert "unreadable_transition_source: ValueError" in tampered.gaps and tampered.boundary is None
+    assert "memory changes unreadable: ValueError; accepted sequence retained" in tampered.gaps
+    assert tampered.boundary["memory"] == {**last["memory"], "sequence": 1} and tampered.events == ()
 
 
 def test_a_memory_read_failure_is_a_gap_and_keeps_the_accepted_sequence(tmp_path, monkeypatch):

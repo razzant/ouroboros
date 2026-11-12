@@ -1,5 +1,6 @@
 """Production Settings against an isolated server and a tiny local-model HTTP child."""
 
+from ouroboros.local_model import RUNTIME_PROBE
 import os
 import json
 import pathlib
@@ -46,7 +47,7 @@ def settings_server(request, tmp_path, monkeypatch):
                     command = [sys.executable, {str(fake_model)!r}, str(command[command.index("--port") + 1])]
                 super().__init__(command, **kwargs)
         def run(command, **kwargs):
-            if isinstance(command, list) and command[-1] == "import llama_cpp":
+            if isinstance(command, list) and command[-1] == {RUNTIME_PROBE!r}:
                 return subprocess.CompletedProcess(command, 0, "", "")
             return original_run(command, **kwargs)
         subprocess.Popen, subprocess.run = Popen, run
