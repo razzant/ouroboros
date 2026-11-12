@@ -338,7 +338,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
     page = _open(engine_ui, 956, 801)
     try:
         bars = {}
-        for name in ('dashboard', 'settings', 'skills', 'files'):
+        for name in ('dashboard', 'skills', 'files'):
             _goto(page, name)
             bars[name] = page.evaluate(BAR, name)
             bar = bars[name]
@@ -349,21 +349,15 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
             setup_browser.capture(page, f'bar-a-{name}-{engine}-956')
-        # Eight Settings tabs scroll inside the bar; End reveals About without moving the page.
+        # Settings keeps no navigation in its bar: Back is the first row of each page, so its header stays empty.
         _goto(page, 'settings')
-        strip = page.locator('#page-settings .app-page-lead .app-tab-strip')
-        assert strip.evaluate('el => el.scrollWidth > el.clientWidth')
-        page.locator('#page-settings [data-settings-tab]').first.focus()
-        page.keyboard.press('End')
-        about = page.locator('#page-settings [data-settings-tab="about"]')
-        assert about.evaluate("""el => { const s = el.closest('.app-tab-strip').getBoundingClientRect(), r = el.getBoundingClientRect();
-            return r.left >= s.left - 1 && r.right <= s.right + 1; }""")
-        assert page.evaluate("document.querySelector('#page-settings').dataset.activeSettingsTab") == 'about'
+        assert 'data-empty' in page.evaluate(BAR, 'settings')['attrs']
         # The macOS window: the bar is the band, its controls centred on it; an empty header (Widgets) is only the
         # window's handle over the page, and the page's first card sits one inset (not two) under the band.
         _band(page)
-        settings_band = page.evaluate(BAR, 'settings')
-        assert settings_band['height'] == 52 and abs(settings_band['centres'][0] - 26) <= 1, settings_band
+        _goto(page, 'dashboard')
+        dashboard_band = page.evaluate(BAR, 'dashboard')
+        assert dashboard_band['height'] == 52 and abs(dashboard_band['centres'][0] - 26) <= 1, dashboard_band
         _goto(page, 'widgets')
         page.locator('.widgets-card').first.wait_for()
         widgets = page.evaluate("""() => ({bar: document.querySelector('#page-widgets .app-page-header').getBoundingClientRect().height,
@@ -489,7 +483,7 @@ def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_
         assert not page.evaluate(through, False), 'at rest the band is the handle'
         # Another page's scroll body keeps the shared fade.
         _goto(page, 'settings')
-        settings = page.locator('#page-settings .settings-scroll').element_handle()
+        settings = page.locator('#page-settings [data-settings-home]').element_handle()  # the home is the scroll body
         page.wait_for_function("el => el.scrollHeight - el.clientHeight > 200", arg=settings)
         settings.evaluate("el => { el.scrollTop = 200; }")
         page.wait_for_function("el => el.hasAttribute('data-scroll-above')", arg=settings)

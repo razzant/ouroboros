@@ -165,8 +165,8 @@ export function webSearchPreviewWords(data, name = (id) => id) {
 
 /* The one Settings section recipe (DESIGN.md principle 7; the 06.11 convergence): a title, one authored lead in
    owner words, right under it the one Details disclosure that holds the section's former copy unchanged (so it opens
-   next to the line it explains, not screens below in a long section), then the controls. Quiet actions dock in the title row. Every tab's sections come from here, so Models, Agents and
-   Accounts read as one scheme. `titleId` lets a lone control name itself by the title; `card: false` is a section
+   next to the line it explains, not screens below in a long section), then the controls. Quiet actions dock in the title row. Every page's sections come from here, so they
+   read as one scheme. `titleId` lets a lone control name itself by the title; `card: false` is a section
    that already sits inside a card (setup's step), which a second card would outline (DESIGN principle 2). */
 export function settingsSection({ title, lead = '', details = '', body = '', actions = '', id = '', titleId = '', className = '', attrs = '', card = true }) {
     const h3 = `<h3${titleId ? ` id="${titleId}"` : ''}>${title}</h3>`;

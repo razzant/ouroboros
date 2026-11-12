@@ -4,9 +4,9 @@
 // secret-free row `{kind, name: "default", enabled: false}`. GET masks a row's secrets and the save keeps an
 // untouched mask by row identity, so a row travels with its fields as shown. A role names the key it uses: nothing
 // here picks, orders or rotates keys. Two hosts: setup draws every key of a provider as a row with its form in the
-// provider's card and collects them with its other answers (`createConnectionsEditor`); Settings › Accounts and
-// keys draws a head per key in its list and one key's form on that key's own page, and each of them writes at once
-// (`keyHeads`, `mountKeyPage`, below).
+// provider's card and collects them with its other answers (`createConnectionsEditor`);
+// Settings › Accounts and keys draws a head per key in its list and one key's form on that key's own page, and each
+// of them writes at once (`keyHeads`, `mountKeyPage`, below).
 import { apiClient } from './api_client.js';
 import { adoptConnectionLabels, connectionLabel } from './connection_labels.js';
 import { API_PROVIDER_ORDER, apiConnections, apiProviderLabel, compatibleEndpoint, parseModelSource } from './route_editor_primitives.js';

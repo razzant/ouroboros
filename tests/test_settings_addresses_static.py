@@ -8,10 +8,7 @@ LIVING = (
     "Models", "Agents", "Your rules", "Permissions and checks", "Accounts and keys",
     "Tools", "Appearance", "Notifications", "Voice and calls", "This computer",
 )
-# The convener empties this list on the integrated tree; each owner rewrites its files.
-PENDING = {
-    "web/modules/": "B2/C1/C2/D/E1/E2/E3: controls, shell, pages, dashboard and editors",
-}
+PENDING = {}
 # Exact (file, line) exceptions only: protected text and blocked bundled-skill releases.
 # Each entry must explain the debt; new addresses elsewhere in these files still fail.
 PROTECTED_KNOWN = {
