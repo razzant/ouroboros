@@ -33,7 +33,7 @@ _DESKTOP = {"width": 1280, "height": 800}
 
 # An owner-defined top-level secret: uppercase, neither an OUROBOROS_ nor a known
 # settings key, so the settings read lists it in `_meta.custom_secret_keys` and the
-# editor renders one `.settings-custom-secret-row` for it (ouroboros/gateway/settings.py).
+# Accounts page renders one row for it (`[data-setting-row]`, web/modules/settings_accounts.js).
 _CUSTOM_SECRET_KEY = "SLACK_WEBHOOK_URL"
 
 _MEASURE_JS = """
