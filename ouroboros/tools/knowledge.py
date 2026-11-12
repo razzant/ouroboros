@@ -293,11 +293,12 @@ def _knowledge_write(
             if not isinstance(new_str, str):
                 raise ValueError("new_str must be text, the replacement of old_str (empty text deletes it)")
             if mode == "edit" and isinstance(old_str, str) and old_str:
-                if content not in (None, "", new_str):
+                if content and new_str and content != new_str:
                     raise ValueError("new_str and content both give old_str's replacement and differ; pass one")
-                if content == "" and new_str:
-                    notes.append(ignored_argument_note("content", content, "new_str gives the replacement"))
-                content = new_str
+                if content is not None and bool(content) != bool(new_str):  # an empty one beside the other is filler
+                    empty, given = ("content", "new_str") if new_str else ("new_str", "content")
+                    notes.append(ignored_argument_note(empty, "", f"{given} gives the replacement"))
+                content = content or new_str  # both empty: the replacement is empty text, which deletes
             elif new_str:
                 raise ValueError("new_str is the replacement of old_str in mode=edit, the same as content; "
                                  + ("pass old_str with it" if mode == "edit" else f"mode={mode} takes its text as content"))

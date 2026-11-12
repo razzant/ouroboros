@@ -741,8 +741,9 @@ def test_a_version_equal_to_the_calls_expected_revision_asks_for_nothing_outside
 
 
 def test_the_one_pair_edit_takes_its_replacement_as_content_or_new_str(tmp_path):
-    """Other editors spell the replacement new_str: with mode=edit and old_str it is exactly content; both given
-    and different is an argument error; elsewhere an empty new_str is ignored and a non-empty one names content."""
+    """Other editors spell the replacement new_str: with mode=edit and old_str it is exactly content; an empty one
+    beside a non-empty one is filler, ignored and said, either way round; both empty delete; both non-empty and
+    different is an argument error; elsewhere an empty new_str is ignored and a non-empty one names content."""
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="pair")
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry.set_context(ctx)
@@ -759,11 +760,15 @@ def test_the_one_pair_edit_takes_its_replacement_as_content_or_new_str(tmp_path)
     _meta(write(old_str="New two.", content="Newer two.", new_str="Newer two."))  # the same text twice is one
     filled = _meta(write(old_str="Old three.", content="", new_str="New three."))
     assert filled["ignored_arguments"] == ["content='' ignored: new_str gives the replacement"]
+    mirror = _meta(write(old_str="New three.", content="Newest three.", new_str=""))  # the mirror spelling
+    assert mirror["ignored_arguments"] == ["new_str='' ignored: content gives the replacement"]
     _meta(write(old_str="New one.\n", new_str=""))  # an empty new_str deletes, as empty content does
-    assert store.read_knowledge_note(target).text.endswith("# Pair\n\nNewer two.\nNew three.\n")
+    assert store.read_knowledge_note(target).text.endswith("# Pair\n\nNewer two.\nNewest three.\n")
+    both = _meta(write(old_str="Newer two.\n", content="", new_str=""))  # both empty: a deletion, nothing ignored
+    assert "ignored_arguments" not in both and store.read_knowledge_note(target).text.endswith("# Pair\n\nNewest three.\n")
     before = _files(tmp_path)
     for arguments, message in (
-            ({"old_str": "Newer two.", "content": "A", "new_str": "B"}, "new_str and content both give"),
+            ({"old_str": "Newest three.", "content": "A", "new_str": "B"}, "new_str and content both give"),
             ({"summary": "The pair.", "new_str": "B"}, "same as content; pass old_str with it"),
             ({"mode": "append", "content": "x", "new_str": "y"}, "mode=append takes its text as content"),
             ({"mode": "overwrite", "new_str": "# Pair\n"}, "mode=overwrite takes its text as content"),
