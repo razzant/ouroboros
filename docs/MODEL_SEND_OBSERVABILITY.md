@@ -319,8 +319,11 @@ ratios enter; the parts and the cost that could not be shared (no tariff, a toke
 count the row does not have, a write whose lifetime neither the row nor the
 provider's split names) add up to the recorded cost. Input is classed only for calls
 that reported both cache counts; the others are counted apart (`uncounted_calls`,
-`uncounted_input_tokens`), never as uncached. A model none of whose calls has a
-recorded price has `cost: null`. `write_price_in_reads` is how many read tokens one
+`uncounted_input_tokens`), never as uncached. A money figure and the tokens beside it are of
+the same calls: `tokens_shared` are the tokens of the calls whose cost was shared (`tokens`
+counts every call), the cost no tariff or count could share is its own part with
+`unshared_calls`, and a cause row's `write_cost` is of its `shared_write_tokens`. A model
+none of whose calls has a recorded price has `cost: null`. `write_price_in_reads` is how many read tokens one
 written token costs at `write_price_lifetime` (the lifetime most of the model's
 tokens were written at, by the provider's split when it accounts for every write)
 at the model's base price.
