@@ -580,3 +580,21 @@ def test_a_revert_never_crosses_archive_states_while_restore_still_unarchives(tm
                                                  "expected_revision": restored.revision, "reason": "the exact bytes"}))
     assert address.path.read_bytes() == RAW  # inside one archive state the stored bytes come back exactly
     assert history(address)[-1]["reverted_from"] == original.revision
+
+
+def test_lifecycle_receipts_offer_the_read_of_what_they_replaced_and_no_revert(tmp_path):
+    """A revert across archive states always refuses, so an archive or restore receipt offers no revert call (the
+    opposite lifecycle mode is the way back); its read call works, and an edit receipt's revert call succeeds."""
+    _, registry, address, original = setup(tmp_path)
+    for mode in ("archive", "restore"):
+        replaced = store.read_knowledge_note(address)
+        meta = receipt(transition(registry, replaced, mode))
+        assert "knowledge_revert" not in meta and meta["knowledge_previous"]["revision"] == replaced.revision, meta
+        read = registry.execute(meta["knowledge_read_previous"]["tool"], meta["knowledge_read_previous"]["arguments"])
+        assert read.endswith(replaced.text) and "Earlier version, not the current note" in read
+    restored = store.read_knowledge_note(address)
+    assert restored.state == "active" and body(restored) == body(original)
+    edited = receipt(registry.execute("knowledge_write", {"topic": TOPIC, "mode": "edit", "old_str": "Старый берег.",
+                                                          "content": "Новый берег.", "expected_revision": restored.revision}))
+    receipt(registry.execute(edited["knowledge_revert"]["tool"], edited["knowledge_revert"]["arguments"]))
+    assert address.path.read_bytes() == restored.raw

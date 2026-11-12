@@ -373,9 +373,10 @@ def _knowledge_write(
             meta["knowledge_previous"] = result.previous
             meta["knowledge_read_previous"] = {"tool": "knowledge_read",
                                                "arguments": {**where, "version": result.previous_revision}}
-            meta["knowledge_revert"] = {"tool": "knowledge_write", "arguments": {
-                **where, "mode": "revert", "version": result.previous_revision,
-                "expected_revision": result.current.revision}}
+            if not lifecycle:  # a revert across archive states refuses; the opposite lifecycle mode is the way back
+                meta["knowledge_revert"] = {"tool": "knowledge_write", "arguments": {
+                    **where, "mode": "revert", "version": result.previous_revision,
+                    "expected_revision": result.current.revision}}
             if not expected_revision:  # a bare append: earlier text stood unseen
                 meta["knowledge_outline"] = knowledge_versions.render_outline(result.current)
                 meta["knowledge_note"] = "Earlier text was not revised by this write."
@@ -479,8 +480,8 @@ def get_tools() -> List[ToolEntry]:
                 "revert, archive, restore and an append with summary; creating a note and a bare append need none. A "
                 "stale revision writes nothing and returns every change since that version in whole lines when the note's "
                 "history holds it and one reply carries them all, else the current note. A receipt names the version "
-                "it replaced, who wrote it, and the calls that read it and revert to it. The overview always stays "
-                "active. Legacy index prose stays until an authored global overview retires it."),
+                "it replaced, who wrote it, and the calls that read it and, for content writes, revert to it. The "
+                "overview always stays active. Legacy index prose stays until an authored global overview retires it."),
             "parameters": {"type": "object", "properties": {
                 "topic": topic, "scope": scope,
                 "content": {"type": "string", "description": "Markdown, optionally with YAML frontmatter; supplied fields merge with retained ones. The text of overwrite and append, or the replacement of one old_str (empty deletes it). Omit for archive, restore, revert, an edits edit and a summary-only edit. No summary is generated from the body."},
