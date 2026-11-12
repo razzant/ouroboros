@@ -20,7 +20,8 @@ import { accountGroups, destroyHarnessAccounts, initHarnessAccounts, needsSignIn
 import { knownProgram, maintenanceLatestLine } from './harness_maintenance.js';
 import { harnessPresentation } from './harness_presentation.js';
 import { strokeIcon } from './page_icons.js';
-import { editorLine, keyHeads, keyPath, keyTitle, mountKeyPage, parseKeyPath, setKeyEnabled } from './settings_connections.js';
+import { apiConnections } from './route_editor_primitives.js';
+import { editorLine, keyHeads, keyPath, keyTitle, mountKeyPage, parseKeyPath, referencesLine, setKeyEnabled } from './settings_connections.js';
 import { bindSettingRows, doorSign, settingsRow } from './settings_controls.js';
 import { readSkills } from './settings_extension_forms.js';
 import { registerSettingsPage } from './settings_pages.js';
@@ -292,7 +293,8 @@ function mountList(container, { ctx = {} }) {
         const outcome = await setKeyEnabled({ kind, name }, input.checked, { ask: ctx.ask });
         busy.delete(head.dataset.entryId);
         if (gone) return;
-        setResult(find('[data-entry-result]'), landed(outcome) ? {} : editorLine(outcome));
+        const keys = apiConnections(settings || {});
+        setResult(find('[data-entry-result]'), landed(outcome) ? referencesLine(outcome, keys) : editorLine(outcome, 'Saved', keys));
         drawn.keys = '';   // the switch shows what is stored again, whatever the write answered
         await read();
     }
@@ -324,9 +326,10 @@ function mountList(container, { ctx = {} }) {
     paintProviders();
     const mine = list = {
         // What a key's page did, said where the key stands (or stood): the head of a key just added takes the caret.
-        say(note, { added = '', other = false } = {}) {
+        say(note, { added = '', other = false, warning = '' } = {}) {
             reveal = added;
-            setResult(find(other ? '[data-other-result]' : '[data-entry-result]'), { text: note, tone: 'ok' });
+            setResult(find(other ? '[data-other-result]' : '[data-entry-result]'),
+                warning ? { text: `${note} ${warning}`, tone: 'warn' } : { text: note, tone: 'ok' });
         },
     };
     return { unmount() {
@@ -393,9 +396,9 @@ function mountProvider(container, { path }) {
 /* ---- The family ---------------------------------------------------------------------------------------------------- */
 
 /** A key's page tells the list what it did and returns there. */
-const backToList = (ctx, other = false) => (note, added = '') => {
+const backToList = (ctx, other = false) => (note, added = '', warning = '') => {
     ctx.openSettings?.('accounts');
-    list?.say(note, { added, other });
+    list?.say(note, { added, other, warning });
 };
 
 function mount(container, { path, row, ctx = {} }) {
