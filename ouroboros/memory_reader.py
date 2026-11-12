@@ -21,7 +21,9 @@ by their files. ``memory_read`` and this reader share one composition of a recor
   the revision the range belongs to, so a text of any size is read whole and from one revision. A
   record reads as of any of its revisions; a note, file, field or journal entry is refused
   ``revision_mismatch`` once its text changed. A ``field`` of a stored record, journal entry or note
-  front matter reads that value: a string as text, anything else as its JSON.
+  front matter reads that value: a string as text, anything else as its JSON. A knowledge history row
+  that stores a change reads its ``old_content``/``new_content`` as that version's whole text, verified
+  (``knowledge_rows``), and its listing entry names those addresses; ``field: []`` is every line as stored.
 - ``changes`` returns the chronicle records after a position; the position it returns is the last
   record returned, never a newer head. Knowledge and plain files have no change feed: compare
   their ``revision`` on a later read.
@@ -572,7 +574,9 @@ def _journal_page(root: pathlib.Path, journal: str, params: Mapping[str, Any],
     A line that would cross the window starts the next page; a page's first line is read whole however long
     (one record-sized read), so every line is reached and none is cut. The offset advances only over
     complete lines: an unterminated last line (an append in progress) stays for a later read. An
-    unparseable line is an entry marked ``unreadable``, never skipped. Each row is projected (``_project``).
+    unparseable line is an entry marked ``unreadable``, never skipped. Each row is projected (``_project``); a
+    knowledge history row that carries a change also names, by reference only, the address of each text it does not
+    store whole (``old_content``/``new_content``, read through ``_version_text``): no text is rebuilt for a page.
     """
     path, offset, limit = _journal_path(root, journal), _number_cursor(params, "o"), _limit(params)
     if not path.is_file():
@@ -607,7 +611,11 @@ def _journal_page(root: pathlib.Path, journal: str, params: Mapping[str, Any],
             if not isinstance(row, dict):
                 entries.append({"offset": start, "unreadable": True, "bytes": len(raw), "address": {**at, "field": []}})
             elif match is None or match(row):
-                entries.append({"offset": start, "address": {**at, "field": []}, "fields": _project(row, at, [], [ENTRY_BUDGET])})
+                fields = _project(row, at, [], [ENTRY_BUDGET])
+                if journal.startswith("knowledge:") and "change" in row and len(row) <= KEYS_MAX:
+                    fields.update({key: {"ref": "text", "address": {**at, "field": [key]}}
+                                   for key in ("old_content", "new_content") if key not in row})
+                entries.append({"offset": start, "address": {**at, "field": []}, "fields": fields})
     complete = position + tail >= size
     return {"journal": journal, "exists": True, "position": f"o{position}", "unterminated_tail_bytes": tail,
             "entries": entries, "next": None if complete else f"o{position}", "complete": complete}
@@ -812,8 +820,26 @@ def _text_document(root: pathlib.Path, address: Mapping[str, Any], revision: Opt
                                  "journal": {"kind": "journal", "journal": journal} if journal else None}
 
 
+def _version_text(root: pathlib.Path, path: pathlib.Path, journal: str, offset: int, row: Dict[str, Any], side: str) -> str:
+    """The ``old``/``new`` text of a knowledge history row that stores a change, rebuilt and verified by
+    ``knowledge_rows`` (the note's current text closes its newest segment), or ``not_found`` naming the break."""
+    from ouroboros import knowledge_rows
+
+    try:
+        live = _read_note(_note_address(root, journal[len("knowledge:"):], row.get("topic"))).text
+    except (MemoryReadError, OSError):
+        live = None
+    texts = knowledge_rows.Texts(path, live)
+    texts.rows[offset] = row
+    try:
+        return texts.text(offset, side)
+    except knowledge_rows.TextUnavailable as exc:
+        raise MemoryReadError("not_found", f"no verified text of this row's {side} version: {exc}") from None
+
+
 def _entry_document(root: pathlib.Path, address: Mapping[str, Any], revision: Optional[str]) -> Tuple[str, Dict[str, Any]]:
-    """One journal line (``field`` ``[]``: as stored) or one value of it; reading the line is record-sized."""
+    """One journal line (``field`` ``[]``: as stored) or one value of it; reading the line is record-sized, and a
+    knowledge history row's ``old_content``/``new_content`` beside a ``change`` is that version's text (``_version_text``)."""
     journal, offset, field = str(address.get("journal")), address.get("offset"), address.get("field")
     if type(offset) is not int or offset < 0 or not isinstance(field, list):
         raise MemoryReadError("invalid_parameter", "an entry is {journal, offset, field: [keys]}")
@@ -835,7 +861,11 @@ def _entry_document(root: pathlib.Path, address: Mapping[str, Any], revision: Op
         except ValueError:
             raise MemoryReadError("not_found", "the line is not a JSON row; read field [] for it as stored") from None
         at = {"kind": "entry", **context}
-        return _field_document(row, field, revision, {**context, "entry": _project(row, at, [], [ENTRY_BUDGET])})
+        entry = _project(row, at, [], [ENTRY_BUDGET])
+        if journal.startswith("knowledge:") and isinstance(row, dict) and "change" in row and field in (
+                ["old_content"], ["new_content"]):
+            row = {field[0]: _version_text(root, path, journal, offset, row, field[0][:3])}
+        return _field_document(row, field, revision, {**context, "entry": entry})
     text = raw[:-1].decode("utf-8", errors="replace")  # the line as stored; undecodable bytes are replaced
     current = hashlib.sha256(text.encode("utf-8")).hexdigest()
     _bound(revision, current)

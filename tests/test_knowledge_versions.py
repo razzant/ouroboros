@@ -13,7 +13,7 @@ from ouroboros import markdown_source
 from ouroboros import text_change
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests._knowledge_history_shared import applied_blocks
+from tests._knowledge_history_shared import applied_blocks, changed_rows
 
 TOPIC = "notes/река"
 RIVER = ("---\ntype: note\nsummary: When the river matters.\n---\n# Река\n\nБерег 🌊.\n\n## Мост\n\nСтарый мост.\n\n"
@@ -362,3 +362,101 @@ def test_removed_sections_name_heading_size_and_first_line_cut_to_120(tmp_path):
     assert changed.delta["removed_sections"] == [{"heading": "## Gone", "first_line": long_line.strip()[:120],
                                                   "chars": len(f"## Gone\n\n\n{long_line}\nsecond\n")}]
     assert changed.delta["removed_headings"] == ["## Gone"]
+
+
+def test_versions_stored_as_changes_read_back_exactly_and_list_as_stored(tmp_path):
+    """Rows that carry a change against their base read back through the version lookup, the version read and the
+    stale-revision lookup, exactly; the listing counts such a row's text as stored without rebuilding any version."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    bridge = RIVER.replace("Старый мост.", "Новый мост.")
+    texts = [RIVER, bridge, bridge.replace("Две.", "Три.")]
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    changed_rows(journal, texts, TOPIC)
+    target.path.parent.mkdir(parents=True, exist_ok=True)
+    target.path.write_bytes(texts[-1].encode("utf-8"))
+    stored = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert all("change" in row and "new_content" not in row for row in stored[1:])
+    revisions = [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts]
+    for text, revision in zip(texts, revisions):
+        found, row = versions.find_version(target, revision)
+        assert found == text and row["new_sha256"] == revision
+    assert tools._knowledge_read(ctx, TOPIC, version=revisions[1]).endswith(texts[1])
+    held = versions.held_version(journal, target, revisions[1], 1 << 23)
+    assert held["text"] == texts[1] and [item["revision"] for item in held["since"]] == [revisions[2]]
+    listing = versions.render_history(store.read_knowledge_note(target))
+    assert "text not stored" not in listing and [line.split(" · ")[0][2:] for line in listing.splitlines()
+                                                 if line.startswith("- ")] == revisions[::-1]
+
+
+def test_writes_reads_and_a_revert_round_trip_over_rows_that_store_changes(tmp_path):
+    """knowledge_write → knowledge_read(version=…) → mode='revert' when every row after the first stores a change:
+    each earlier version reads back exactly, the revert publishes the first version's bytes, and every version,
+    the ones reverted over included, still reads."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target, sha = address(tmp_path), (lambda text: hashlib.sha256(text.encode("utf-8")).hexdigest())
+    note = store.write_knowledge_note(target, RIVER).current
+    texts = [note.text]
+    for old, new in (("Старый мост.", "Новый мост."), ("Две.", "Три."), ("Всё.", "Всё, до встречи.")):
+        reply = registry.execute("knowledge_write", {"topic": TOPIC, "scope": "global", "mode": "edit", "old_str": old,
+                                                     "content": new, "expected_revision": note.revision})
+        assert reply.startswith("✅"), reply
+        note = store.read_knowledge_note(target)
+        texts.append(note.text)
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert all("change" in row and not {"new_content", "old_content"} & set(row) for row in rows[1:])
+    for text in texts[:-1]:
+        read = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "version": sha(text)})
+        assert read.endswith(text) and "Earlier version, not the current note" in read, read[:400]
+    reverted = registry.execute("knowledge_write", {"topic": TOPIC, "scope": "global", "mode": "revert",
+                                                    "version": sha(texts[0]), "expected_revision": note.revision,
+                                                    "reason": "back to the start"})
+    assert reverted.startswith("✅") and target.path.read_bytes() == texts[0].encode("utf-8"), reverted
+    row = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+    assert (row["reverted_from"], row["base"]["sha256"], row["new_sha256"]) == (sha(texts[0]), sha(texts[-1]), sha(texts[0]))
+    for text in texts:
+        assert versions.find_version(target, sha(text))[0] == text
+    assert registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "version": sha(texts[2])}).endswith(texts[2])
+
+
+def test_a_row_marked_digested_lists_its_text_as_not_stored_whatever_else_it_carries(tmp_path):
+    """The listing and the reader agree on a digest-era mark: a row marked ``content_digested`` holds no text, even
+    beside a change and a base, so it lists as "text not stored" and its version is a typed miss; a change row with a
+    base lists as stored."""
+    target, sha = address(tmp_path), (lambda text: hashlib.sha256(text.encode("utf-8")).hexdigest())
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    texts = [RIVER, RIVER.replace("Старый мост.", "Новый мост.")]
+    changed_rows(journal, texts, TOPIC)
+    change_row = json.loads(journal.read_bytes().splitlines()[-1])
+    assert "change" in change_row and "new_content" not in change_row
+    digested = {**change_row, "new_sha256": sha("a digested version"), "content_digested": True}
+    with journal.open("ab") as stream:
+        stream.write((json.dumps(digested, ensure_ascii=False) + "\n").encode("utf-8"))
+    target.path.parent.mkdir(parents=True, exist_ok=True)
+    target.path.write_bytes(texts[-1].encode("utf-8"))
+    rows = [line for line in versions.render_history(store.read_knowledge_note(target)).splitlines() if line.startswith("- ")]
+    assert rows[0].startswith(f"- {digested['new_sha256']} · ") and rows[0].endswith("text not stored"), rows[0]
+    assert rows[1].startswith(f"- {sha(texts[1])} · ") and "text not stored" not in rows[1], rows[1]
+    with pytest.raises(versions.VersionUnavailable, match=r"holds no text \(digest-era\)"):
+        versions.find_version(target, digested["new_sha256"])
+
+
+def test_a_version_whose_forward_path_is_damaged_reads_through_the_live_note(tmp_path):
+    """The version lookup hands the reader the note's current text: with B's change row damaged, B comes back from the
+    live note through the change of the row after it; with the note gone it is a typed miss that names the line."""
+    target = address(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    b = store.write_knowledge_note(target, "# Река\n\nOne, two.\n", expected_revision=a.revision).current
+    store.write_knowledge_note(target, "# Река\n\nOne, two, three.\n", expected_revision=b.revision)
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    raw = journal.read_bytes()
+    b_at = raw.index(b"\n") + 1
+    end = raw.index(b"\n", b_at)
+    rows = [json.loads(line) for line in raw.splitlines()]
+    assert len(rows) == 3 and all("change" in row and "new_content" not in row for row in rows[1:])
+    journal.write_bytes(raw[:b_at] + b"#" * (end - b_at) + raw[end:])
+    assert versions.find_version(target, b.revision) == (b.text, {})  # from the next row's old side, rebuilt
+    target.path.unlink()
+    with pytest.raises(versions.VersionUnavailable, match=f"the line at byte offset {b_at} is not a JSON row"):
+        versions.find_version(target, b.revision)
