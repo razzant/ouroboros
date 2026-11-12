@@ -86,12 +86,13 @@
  * @property {Array<string>=} ids
  */
 /**
- * @typedef {Object} WorkTurn
- * @property {string} kind  // question | action
+ * @typedef {Object} WorkTurn  // what waits for the owner (gateway/work_contracts.py WorkTurn)
+ * @property {string} kind  // question | open_question | action
+ * @property {string=} work_id  // in a room's turn: the work that holds it; absent for a question no work holds
  * @property {string} task_id
  * @property {string=} quiz_id
  * @property {string=} wait_id
- * @property {string=} code
+ * @property {string=} code  // open_question: delivery_unknown for an answer whose delivery is unknown
  */
 /**
  * @typedef {Object} WorkControl
@@ -149,7 +150,7 @@
  * @property {string} activity  // working | queued | waiting | paused | idle | unknown
  * @property {string} transition
  * @property {string} call
- * @property {Array<Object>} turn
+ * @property {Array<WorkTurn>} turn  // its works' items, and its own questions no work holds
  * @property {boolean} amber
  * @property {string} mark  // moving | still | pause | ring | none
  * @property {boolean} confirmed
@@ -158,7 +159,7 @@
 /**
  * @typedef {Object} WorkSummary
  * @property {Object<string, number>} counts
- * @property {number} turn
+ * @property {number} turn  // each work with a turn, and each standalone question no counted work carries
  * @property {boolean} confirmed
  */
 

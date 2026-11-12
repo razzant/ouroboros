@@ -279,7 +279,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     from ouroboros.gateway.work_projection import works_snapshot
     publication_roots = set()
     works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"],
-                           bindings=task_bindings, publication_roots=publication_roots)
+                           bindings=task_bindings, publication_roots=publication_roots,
+                           questions=decisions["current_questions"])
     # Registered-project facts (never raise): the compact sidebar list, and the
     # COMPLETE (uncapped, all-status) project chat_ids for the live WS fan-out
     # isolation SSOT — distinct from the capped/filtered sidebar list, so
@@ -290,7 +291,11 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
 
         listable = list_sidebar_projects(root := request_drive_root(request))  # one read: the feed and its count
         messages_revision = project_revision(root, listable)  # read before the feed: a later move reads the list again
-        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable, by_message=True)
+        # A listed room that is the owner's turn always has its row: the Projects header's amber stands for a row the
+        # owner can reach, however long ago its work ended (after the recent slice, in the same message order).
+        waiting = {int(chat) for chat, room in (works.get("rooms") or {}).items()
+                   if room.get("amber") and str(chat).isdigit()}
+        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable, by_message=True, keep=waiting)
         project_listable_count = len(listable)
     except Exception:
         projects, messages_revision = [], None
