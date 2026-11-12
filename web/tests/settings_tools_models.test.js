@@ -263,6 +263,28 @@ test('a role\'s Save sends every checker key through the checker and every other
     assert.match(source, /writeModelKeys\(`models:\$\{slot\}`, body, fresh/);
 });
 
+test('a role\'s page reads the catalogue when it opens and when it is shown again; opening and its own "shown" are one read', async (t) => {
+    forgetSettingRows();
+    const env = setup(t);
+    fakeServer(env.routes);
+    const path = 'models/role/main';
+    const ctx = { readSettings, openSettings: () => true, state: { activePage: 'settings', settingsPath: path }, ask: async () => true };
+    const reads = () => env.calls.filter((url) => url === '/api/model-catalog').length;
+    const shown = (to) => env.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: to } });
+    const handle = await settingsPageFor(path).mount(new NodeStub(), { path, row: '', ctx });
+    t.after(() => handle?.unmount?.());
+    shown(path);  // the shell says "shown" as it opens the page
+    await settle();
+    assert.equal(reads(), 1, 'opening and its "shown" are one read');
+    shown('models');
+    await settle();
+    assert.equal(reads(), 1, 'the showing of another page reads nothing');
+    shown(path);
+    await settle();
+    assert.equal(reads(), 2, 'shown again (a return, a reconnect), the page catches the catalogue up');
+    assert.equal(handle.unsaved(), false, 'nothing is typed: the shell lets the page go when it is left');
+});
+
 test('one entry of a per-role map changes and every other role\'s entry stays as the fresh read has it', async (t) => {
     const fresh = structuredClone(VALUES);
     const vision = roleBody(fresh, entryOf('vision', { account: 'studio-09', context: 0, processing: '' }));

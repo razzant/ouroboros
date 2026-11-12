@@ -99,8 +99,14 @@ def test_an_agents_form_renews_its_model_list_when_a_sign_in_settles(subscriptio
     assert words.evaluate("e => e === window.ownerDraftNode && e.value") == "An unsaved description."
     assert sum(url.endswith("/api/settings") for url in ui["reads"]) == settings_reads
     after = catalogue_reads()
+    assert after == quiet + 1, "one catalogue read for one changed answer"
     refresh_accounts()
     assert catalogue_reads() == after
+    # Shown again (a return from another page, a reconnect), the form reads its roster and catches the catalogue up;
+    # the unsaved words stay (the form is drawn again around them).
+    with page.expect_response(lambda response: "/api/model-catalog" in response.url, timeout=5000):
+        page.evaluate("window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }))")
+    expect(words).to_have_value("An unsaved description.")
     assert not ui["posts"], "discovery cannot save or replace the owner's draft"
 
 

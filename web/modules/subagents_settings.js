@@ -1454,14 +1454,17 @@ function mountAgents(container, { path, ctx }) {
         const outcome = await editor.write('', () => null, { busy: delegation, quiet: true, edit: (roster) => ({ ...roster, enabled }) });
         setResult(roster.querySelector('[data-setting-result]'), rosterResult(outcome));
     });
-    const onShown = (event) => { if (event.detail?.path === path) void reload(); };
+    // The model chooser of an agent's form: its catalogue is read when the form opens and whenever it is shown again.
+    let catching = null;
+    const catchUp = () => { if (entry) catching ||= refreshModelCatalog().finally(() => { catching = null; }); };
+    const onShown = (event) => { if (event.detail?.path === path) { void reload(); catchUp(); } };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     editor.mount();
     // A sign-in that settles while an agent's form is open renews its model list, as on a role's page. The watch is
     // armed by the form's first account read, so the answer the form opened with is not a change.
     const accountCatalog = entry ? watchAccountModelCatalog() : null;
     void reload();
-    if (entry) void refreshModelCatalog();  // the model chooser of this agent's form
+    catchUp();
     return { unmount() {
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
         accountCatalog?.dispose();

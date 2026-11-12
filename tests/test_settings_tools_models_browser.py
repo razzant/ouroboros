@@ -371,6 +371,35 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
     page.close()
 
 
+def test_a_role_left_with_unsaved_words_comes_back_as_it_was_left_and_a_saved_one_is_read_again(subscription_ui):
+    """Back from an editor with unsaved words puts its page aside: its path opens it again as it was left, and Save
+    then writes those words. With nothing unsaved the page is let go and shows what is stored the next time."""
+    page, server = _page(subscription_ui, 1087, 740)
+    open_settings(page, "models/role/vision")
+    editor = _settled(page, "models/role/vision")
+    editor.locator("[data-editor-save]").wait_for(state="visible")
+    editor.locator("[data-model-role-source]").select_option("api:openai")
+    _type_model(editor, "gpt-vision")
+    go_back(page)
+    assert not server.posts, "leaving wrote nothing"
+    open_settings(page, "models/role/vision")
+    editor = _settled(page, "models/role/vision")
+    assert editor.locator("[data-model-role-source]").input_value() == "api:openai"
+    assert editor.locator("[data-model-role-model]").input_value() == "gpt-vision"
+    assert editor.locator("[data-editor-discard]").is_visible()
+    assert press_editor_save(page).startswith("Saved")
+    assert server.posts[-1][:2] == ("/api/settings", {"OUROBOROS_MODEL_VISION": "openai::gpt-vision"})
+    # Saved, the page holds nothing of its own: left and opened again, it reads what is stored now.
+    go_back(page)
+    server.values["OUROBOROS_MODEL_VISION"] = "openai::gpt-other"
+    open_settings(page, "models/role/vision")
+    editor = _settled(page, "models/role/vision")
+    page.wait_for_function("() => document.querySelector('#page-settings [data-settings-page=\"models/role/vision\"] "
+                           "[data-model-role-model]')?.value === 'gpt-other'")
+    assert not editor.locator("[data-editor-discard]").is_visible()
+    page.close()
+
+
 def test_the_local_model_page_saves_a_row_for_its_own_restart_and_never_offers_a_restart_of_ouroboros(subscription_ui):
     page, server = _page(subscription_ui)
     open_settings(page, "models")

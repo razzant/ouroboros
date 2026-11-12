@@ -2877,7 +2877,7 @@ secret: `Saved` alone). A change that waits says when in that line, as the serve
 call or wake, to new tasks, after restart, on the local model's restart; while a restart waits the row shows both
 values. A refusal keeps the typed text and says why. Raising Access, lowering a Safety level, opening to the
 network, turning automatic grants on and a removal ask first. An editor of several fields and the owner's rules
-keep their own Save.
+keep their own Save and, left unsaved, their words.
 
 **More and Advanced.** A page's rare rows fold under one `More` that names what it holds; what an install rarely
 changes is This computer › Advanced. One word names one thing on a page. Search is literal over names,

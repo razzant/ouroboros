@@ -145,6 +145,44 @@ test('an address no page registers lands on the home with its last part searched
     assert.deepEqual(pages(), ['test-known']);
 });
 
+test('a page left with unsaved words is put aside and comes back as it was left; without them it is let go and drawn anew', async (t) => {
+    const { content, state, showPage } = world(t);
+    const drawn = [];
+    const letGo = [];
+    let unsaved = false;
+    registerSettingsPage('test-editor', { title: 'Editor', mount(body) {
+        drawn.push(body);
+        body.innerHTML = '<input data-words value="stored">';
+        return { unsaved: () => unsaved, unmount() { letGo.push(body); } };
+    } });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const pages = () => content.querySelectorAll('.settings-page').map((level) => level.dataset.settingsPage);
+    const words = () => content.querySelector('[data-words]');
+    await controls.open('test-editor');
+    await settle();
+
+    // The owner types and presses Back without Save: the page leaves the screen and is not let go.
+    words().setAttribute('value', 'typed');
+    unsaved = true;
+    await content.querySelector('[data-settings-back]').fire('click');
+    await settle();
+    assert.deepEqual([pages(), state.settingsPath, letGo.length], [[], '', 0]);
+    // Its path opens the same page again, as it was left, with Back named anew.
+    await controls.open('test-editor');
+    await settle();
+    assert.deepEqual([pages(), drawn.length, words().getAttribute('value')], [['test-editor'], 1, 'typed']);
+    assert.equal(content.querySelector('[data-settings-back-to]').textContent, 'Settings');
+
+    // Saved or discarded, the page is let go when it is left and drawn anew the next time.
+    unsaved = false;
+    await controls.open('');
+    await settle();
+    assert.deepEqual([pages(), letGo.length], [[], 1]);
+    await controls.open('test-editor');
+    await settle();
+    assert.deepEqual([drawn.length, words().getAttribute('value')], [2, 'stored']);
+});
+
 test('words the shell searched are spent by the first press on their results; words the owner typed stay', async (t) => {
     const { content, state, showPage } = world(t);
     const dashboard = [];

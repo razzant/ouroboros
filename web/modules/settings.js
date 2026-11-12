@@ -57,6 +57,7 @@ export function initSettings(ctx = {}) {
     const homeEl = page.querySelector('[data-settings-home]');
     const levelsEl = page.querySelector('.settings-levels');
     const levels = [];
+    const aside = new Map();  // path → a level put aside with unsaved words
     const layered = new Set();
     const places = new WeakMap();  // a column → where it was scrolled while visible
     let opening = false;
@@ -105,23 +106,30 @@ export function initSettings(ctx = {}) {
     }
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
+    // A level put aside with unsaved words (`close`) comes back as it was left; any other is drawn anew.
     function open(path, { row, back, under, opener }) {
         while (levels.length > under) close(levels.pop());
         const focused = document.activeElement === document.body ? null : document.activeElement;
-        const level = { path, back, id: `settings-level-${++serial}`, opener: opener || focused };
-        level.el = document.createElement('section');
-        level.el.className = 'settings-page';
-        level.el.dataset.settingsPage = path;
-        level.el.setAttribute('aria-labelledby', `${level.id}-title`);
+        const kept = aside.get(path);
+        aside.delete(path);
+        const level = Object.assign(kept || { path, id: `settings-level-${++serial}` }, { back, opener: opener || focused });
+        if (!kept) {
+            level.el = document.createElement('section');
+            level.el.className = 'settings-page';
+            level.el.dataset.settingsPage = path;
+            level.el.setAttribute('aria-labelledby', `${level.id}-title`);
+            level.el.innerHTML = `<div class="settings-back-row"><button type="button" class="settings-back ui-hit-area" data-settings-back>
+                ${SHELL_ICONS.back}<span data-settings-back-to></span></button></div>
+                <div class="settings-column"><h2 class="settings-page-title" id="${level.id}-title">${escapeHtml(settingsTitle(path))}</h2>
+                <div class="settings-page-body"></div></div>`;
+            level.el.querySelector('[data-settings-back]').addEventListener('click', () => backFrom(level));
+        }
         const leadsTo = back?.label || (levels.length ? settingsTitle(top().path) : 'Settings');
-        level.el.innerHTML = `<div class="settings-back-row"><button type="button" class="settings-back ui-hit-area" data-settings-back
-            aria-label="Back to ${escapeHtml(leadsTo)}">${SHELL_ICONS.back}<span>${escapeHtml(leadsTo)}</span></button></div>
-            <div class="settings-column"><h2 class="settings-page-title" id="${level.id}-title">${escapeHtml(settingsTitle(path))}</h2>
-            <div class="settings-page-body"></div></div>`;
-        level.el.querySelector('[data-settings-back]').addEventListener('click', () => backFrom(level));
+        level.el.querySelector('[data-settings-back]').setAttribute('aria-label', `Back to ${leadsTo}`);
+        level.el.querySelector('[data-settings-back-to]').textContent = leadsTo;
         levelsEl.append(level.el);
         levels.push(level);
-        mount(level, row);
+        if (!kept) mount(level, row);
         paint({ row, opened: level });
     }
 
@@ -145,15 +153,18 @@ export function initSettings(ctx = {}) {
         } catch (err) { failed(err); }
     }
 
-    // A level closes: the field it holds is left first (its row commits on that change), then its page is let go.
+    // A level closes: the field it holds is left first (its row commits on that change), then its page is let go. A
+    // page that says it holds unsaved words (an editor with its own Save) is put aside whole instead: its path opens
+    // it again as it was left, while the app is open.
     function close(level) {
         const at = document.activeElement;
         if (at && level.el.contains(at)) at.blur?.();
-        level.closed = true;
         level.watch?.disconnect();
-        try { level.handle?.unmount?.(); } catch (err) { console.error('settings: a page failed to let go', level.path, err); }
         level.el.remove();
         if (layered.delete(level.id)) layers?.remove(level.id);
+        if (level.handle?.unsaved?.()) { aside.set(level.path, level); return; }
+        level.closed = true;
+        try { level.handle?.unmount?.(); } catch (err) { console.error('settings: a page failed to let go', level.path, err); }
     }
 
     function closeLevels(keep, { row = '', quiet = false } = {}) {

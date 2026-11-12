@@ -905,14 +905,18 @@ function mountRole(container, { path, ctx }, slot, index) {
         else if (hit('[data-editor-discard]')) { dirty = false; void read(); }
     };
     const onCatalog = (event) => editor.adoptCatalog(event.detail);
-    const onShown = (event) => { if (event.detail?.path === path) void read(); };
+    // The catalogue this role's model list comes from, read after the settings: when the page opens and whenever it is
+    // shown again (a return, a reconnect). Opening and the shell's "shown" for it are one read.
+    const accountCatalog = watchAccountModelCatalog();
+    let catching = null;
+    const catchUp = () => (catching ||= read().then(() => { accountCatalog.arm(); return refreshModelCatalog(); }).finally(() => { catching = null; }));
+    const onShown = (event) => { if (event.detail?.path === path) void catchUp(); };
     container.addEventListener('click', onClick);
     globalThis.document?.addEventListener('settings-model-catalog:updated', onCatalog);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     editor.mount();
-    const accountCatalog = watchAccountModelCatalog();
-    void read().then(() => { accountCatalog.arm(); return refreshModelCatalog(); });  // the catalogue this role's model list comes from
-    return { unmount() {
+    void catchUp();
+    return { unsaved: () => dirty, unmount() {
         container.removeEventListener('click', onClick);
         globalThis.document?.removeEventListener('settings-model-catalog:updated', onCatalog);
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
@@ -977,7 +981,7 @@ function mountWebSearch(container, { path, ctx }) {
     container.addEventListener('click', onClick);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     void read();
-    return { unmount() { container.removeEventListener('click', onClick); globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown); } };
+    return { unsaved: () => dirty, unmount() { container.removeEventListener('click', onClick); globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown); } };
 }
 
 registerSettingsPage('models', {
