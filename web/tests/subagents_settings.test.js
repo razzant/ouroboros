@@ -23,7 +23,6 @@ import {
     generatedPreviewCanReplace,
     parseAvailableSubagentsSetting,
     reviewerTickCaption,
-    subagentSettingsFingerprint,
     validateAvailableSubagentsSetting,
 } from '../modules/subagents_settings.js';
 import {
@@ -134,13 +133,6 @@ test('a list that could not be loaded says so and is never read as an empty one'
     assert.equal(editor.loaded, false);
     editor.load(setting([apiRow()]), { source: 'configured' });
     assert.deepEqual(editor.validate(), []);
-});
-
-test('object and serialized settings compare as the same new-child-task intent', () => {
-    assert.equal(
-        subagentSettingsFingerprint(setting([apiRow()])),
-        subagentSettingsFingerprint(JSON.stringify(setting([apiRow()]))),
-    );
 });
 
 test('loaded saved rows remain collectible when live status is unavailable', () => {
@@ -914,14 +906,14 @@ test('actor access defaults to full and round-trips an explicit lower choice', (
     const defaults = setting([apiRow(), sessionRow()]);
     const explicit = setting([apiRow(), sessionRow({ access: 'workspace_write' })]);
     assert.deepEqual(parseAvailableSubagentsSetting(explicit).setting, explicit);
-    assert.notEqual(subagentSettingsFingerprint(explicit), subagentSettingsFingerprint(defaults));
+    assert.notDeepEqual(buildAvailableSubagentsSetting(parseAvailableSubagentsSetting(explicit).setting),
+        buildAvailableSubagentsSetting(parseAvailableSubagentsSetting(defaults).setting));
     const readonly = setting([sessionRow({ access: 'readonly' })]);
     assert.deepEqual(buildAvailableSubagentsSetting(parseAvailableSubagentsSetting(JSON.stringify(readonly)).setting), readonly);
     const full = setting([sessionRow({ access: 'full' })]);
     const parsed = parseAvailableSubagentsSetting(JSON.stringify(full));
     assert.equal(parsed.error, '');
     assert.deepEqual(buildAvailableSubagentsSetting(parsed.setting), full);
-    assert.equal(subagentSettingsFingerprint(full), subagentSettingsFingerprint(setting([sessionRow()])));
     for (const access of [null, '', 'FULL', ' full ', false, 'inherit_native']) {
         assert.equal(parseAvailableSubagentsSetting(setting([sessionRow({ access })])).setting, null);
     }
