@@ -124,6 +124,16 @@ def _reads(path, method="GET"):
     return lambda request: urlparse(request.url).path == path and request.method == method
 
 
+def _answers(path, method="GET"):
+    return lambda response: urlparse(response.url).path == path and response.request.method == method
+
+
+def _applied(page, answer):
+    """The page has read `answer` whole and painted what it does with it: a request merely sent proves no repaint."""
+    answer.value.finished()
+    page.evaluate("() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))")
+
+
 def _sideways(page):
     """What scrolls sideways: the page, or a settings card or row wider than its box."""
     return page.evaluate("""() => [document.documentElement.scrollWidth > innerWidth ? 'page' : '',
@@ -148,11 +158,12 @@ def test_a_field_keeps_its_text_and_caret_through_the_tab_refresh_and_leaving_it
     page.fill(f"#{field}", "12")
     page.keyboard.press("ArrowLeft")
     page.evaluate("(id) => { document.getElementById(id).typedHere = true; }", field)
-    with page.expect_request(_reads(read)):
+    with page.expect_response(_answers(read)) as refreshed:
         page.clock.fast_forward(period)
-    with page.expect_request(_reads("/api/settings")):
+    _applied(page, refreshed)
+    with page.expect_response(_answers("/api/settings")) as reread:
         page.evaluate(NOW)
-    page.wait_for_timeout(300)
+    _applied(page, reread)
     caret = page.evaluate("""(id) => { const el = document.getElementById(id);
         return [document.activeElement === el, el.typedHere === true, el.value, el.selectionStart, el.selectionEnd]; }""", field)
     assert caret == [True, True, "12", 1, 1], "the same field keeps the focus, the text and the caret"
@@ -178,9 +189,9 @@ def test_the_update_channel_is_three_choices_and_keeps_its_focused_one_through_a
         "the choices are cards of one width, one under another"
     page.focus(f'{row} [data-setting-value="qa"]')
     page.evaluate("() => { document.activeElement.typedHere = true; }")
-    with page.expect_request(_reads("/api/settings")):
+    with page.expect_response(_answers("/api/settings")) as reread:
         page.evaluate("window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'updates' } }))")
-    page.wait_for_timeout(300)
+    _applied(page, reread)
     assert page.evaluate("() => document.activeElement.typedHere === true && document.activeElement.dataset.settingValue") == "qa"
     page.keyboard.press("Enter")
     page.wait_for_selector(f'{row} [data-setting-value="qa"][aria-pressed="true"]')
