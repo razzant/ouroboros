@@ -59,7 +59,6 @@ if TYPE_CHECKING:
 
 
 _UNDECLARED_OUTPUTS_MARKER = "⚠️ ARTIFACT_OUTPUT_UNDECLARED"
-_UNDECLARED_OUTPUT_NOTE_PATHS = 5
 _UNDECLARED_OUTPUT_META_BYTES = 2048  # the typed result's whole meta is bounded at 8 KB of ASCII-escaped JSON
 _UNDECLARED_OUTPUT_SCAN_MAX_FILES = 5000
 _UNDECLARED_OUTPUT_METADATA_COMMANDS = frozenset({"chmod", "chown", "mkdir", "rm"})
@@ -178,24 +177,30 @@ def _allowed_output_roots(
     return roots
 
 
+# What both notes about undeclared files say next: either door registers the file, neither is required.
+REGISTER_OUTPUT_ADVICE = (
+    "If one is a result for your human, register it (outputs=[...] on a later command captures it as it "
+    "stands; write_file root=artifact_store writes one there); otherwise nothing is needed."
+)
+
+
 def undeclared_outputs_note(paths: list[str]) -> str:
-    """The one sentence both shell tools append to a finished run: an observation with its
-    evidence (named as a write target, changed during the run), never a refusal."""
+    """The one sentence both shell tools append to a finished run: the sensor's evidence (a path the
+    run names as a write target, modified around the time it ran), never a refusal and never a proven
+    write. It names every path: the result keeps the whole list, a view may fold it."""
     if not paths:
         return ""
-    more = len(paths) - _UNDECLARED_OUTPUT_NOTE_PATHS
     return (
-        f"{_UNDECLARED_OUTPUTS_MARKER}: this run names these files as write targets, and they changed "
-        f"during it without being registered as task outputs: {', '.join(paths[:_UNDECLARED_OUTPUT_NOTE_PATHS])}"
-        f"{f' (+{more} more)' if more > 0 else ''}. If one is a result for your human, register it "
-        "(write_file root=artifact_store, or outputs=[...] on the command that writes it); otherwise "
-        "nothing is needed."
+        f"{_UNDECLARED_OUTPUTS_MARKER}: this run names these files as write targets, and they were modified "
+        f"around the time it ran without being registered as task outputs: {', '.join(paths)}. "
+        f"{REGISTER_OUTPUT_ADVICE}"
     )
 
 
 def undeclared_outputs_meta(paths: list[str]) -> dict:
     """The note's typed fact for the journal row, whose text preview may cut the note away: whole
-    paths while their encoded size fits (a cut path would be a false address) and their total."""
+    paths while their encoded size fits (a cut path would be a false address) and their total.
+    The result text names them all."""
     kept: list[str] = []
     for path in paths:
         if len(json.dumps([*kept, path], ensure_ascii=True)) > _UNDECLARED_OUTPUT_META_BYTES:
@@ -429,7 +434,7 @@ def _masked_green_disclosure(ctx: ToolContext, result: str, cmd) -> str:
         or base.text != str(result)
     ):
         # Only an exit-0 PROCESS is a laundered exit: the trusted process fact
-        # decides, never the typed status (an undeclared-output nudge or an
+        # decides, never the typed status (an undeclared-output note or an
         # artifact-registration error is still a green exit that the shape
         # laundered) and never an inspection of the text. A non-zero exit
         # already says what happened.

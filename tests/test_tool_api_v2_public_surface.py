@@ -1020,6 +1020,13 @@ def test_run_command_outputs_block_protected_repo_files(tmp_path, monkeypatch):
     assert not (data / "task_results" / "artifacts" / "task1" / "BIBLE.md").exists()
 
 
+def _assert_the_note_closes_the_text(text: str) -> None:
+    """The note closes a shell result's own text (a cut view keeps a result's tail); only the
+    dispatcher's one-line runtime fact may follow it."""
+    after = text.split("otherwise nothing is needed.", 1)[1].strip()
+    assert not after or (after.startswith("Runtime selection:") and "\n" not in after), after
+
+
 def test_run_command_without_outputs_notes_absolute_user_file_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -1045,12 +1052,19 @@ def test_run_command_without_outputs_notes_absolute_user_file_writes(tmp_path, m
     assert result.startswith("exit_code=0"), result  # the command's own answer leads; the note trails it
     assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
     assert "without being registered as task outputs" in result
-    # The note closes the command's own text (a cut view keeps a result's tail); only the dispatcher's
-    # one-line runtime fact may follow it.
-    after = result.split("otherwise nothing is needed.", 1)[1].strip()
-    assert not after or (after.startswith("Runtime selection:") and "\n" not in after), after
+    _assert_the_note_closes_the_text(result)
     assert target.read_text(encoding="utf-8") == "<h1>ok</h1>"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
+
+    # The sensor reads names and modification times: a file modified just before a run that names it
+    # as a write target in a branch it never takes is reported too, so the sentence states that
+    # evidence and never says the run changed the file.
+    kept = desktop / "kept.html"
+    kept.write_text("before", encoding="utf-8")
+    untouched = registry.execute_result("run_command", {"cwd": str(repo), "cmd": [
+        "python3", "-c", f"if False:\n    open({str(kept)!r}, 'w').write('after')"]})
+    assert untouched.code == "ARTIFACT_OUTPUT_UNDECLARED" and kept.read_text(encoding="utf-8") == "before"
+    assert "they were modified around the time it ran" in untouched.text and "changed during" not in untouched.text
 
 
 def test_run_command_artifact_error_still_invalidates_repo_advisory(tmp_path, monkeypatch):
@@ -1136,9 +1150,10 @@ def test_run_command_without_outputs_notes_absolute_user_file_open_writes(tmp_pa
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
 
 
-def test_undeclared_output_note_and_fact_stay_bounded_and_whole():
-    """The sentence names a handful of paths and counts the rest; the typed fact keeps whole paths only
-    (a cut path is a false address) inside the result's encoded meta budget, with the total beside them."""
+def test_undeclared_output_note_names_every_path_and_its_fact_stays_bounded(tmp_path, monkeypatch):
+    """The sentence names every path, so the result itself keeps the whole list (a script that names only
+    a folder leaves no other record of its files); the typed fact keeps whole paths only (a cut path is a
+    false address) inside the result's encoded meta budget, with the total beside them."""
     import json
 
     from ouroboros.tools.shell_audit import undeclared_outputs_meta, undeclared_outputs_note
@@ -1147,11 +1162,56 @@ def test_undeclared_output_note_and_fact_stay_bounded_and_whole():
     paths = [f"/home/проект-{index}/" + "отчёт" * 60 + ".md" for index in range(9)]
     note = undeclared_outputs_note(paths)
     assert note.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets")
-    assert paths[4] in note and paths[5] not in note and "(+4 more)" in note and "Re-run" not in note
+    assert all(path in note for path in paths) and "Re-run" not in note
     fact = undeclared_outputs_meta(paths)
     assert fact["undeclared_outputs_total"] == 9 and 0 < len(fact["undeclared_outputs"]) < 9
     assert fact["undeclared_outputs"] == paths[:len(fact["undeclared_outputs"])]
     assert len(json.dumps(fact["undeclared_outputs"], ensure_ascii=True)) <= 2048
+
+    # The same through run_script, whose body names only the folder: the result is the one place
+    # that names each file, and its typed fact still fits.
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    registry, _repo, _data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+    folder = desktop / "reports"
+    typed = registry.execute_result("run_script", {"interpreter": "python3", "script": (
+        "from pathlib import Path\n"
+        f"folder = Path({str(folder)!r})\nfolder.mkdir()\n"
+        "for index in range(12):\n    (folder / ('отчёт' * 8 + f'-{index}.md')).write_text('x')\n")})
+    written = [str(path.resolve()) for path in folder.iterdir()]
+    assert typed.code == "ARTIFACT_OUTPUT_UNDECLARED" and len(written) == 12, typed.text
+    assert all(path in typed.text for path in written), typed.text
+    assert typed.meta["undeclared_outputs_total"] == 12 and 0 < len(typed.meta["undeclared_outputs"]) < 12
+    assert set(typed.meta["undeclared_outputs"]) <= set(written)
+
+
+@pytest.mark.parametrize("tool", ["run_command", "run_script"])
+def test_a_run_in_a_user_files_cwd_carries_one_note_about_its_undeclared_files(tmp_path, monkeypatch, tool):
+    """A named write target and a changed user_files cwd are one fact: the run carries the note that names
+    the file, once, and not the cwd note beside it. With no named target the cwd note still speaks, and
+    both give the same advice."""
+    from ouroboros.tools.shell_audit import REGISTER_OUTPUT_ADVICE
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    registry, _repo, _data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+
+    def run(body):
+        call = {"script": body, "interpreter": "python3"} if tool == "run_script" else {"cmd": ["python3", "-c", body]}
+        return registry.execute_result(tool, {"cwd": str(desktop), **call})
+
+    target = desktop / "named.html"
+    named = run(f"from pathlib import Path\nPath({str(target)!r}).write_text('x')\n")
+    assert named.code == "ARTIFACT_OUTPUT_UNDECLARED", named.text
+    assert named.text.count("⚠️ ARTIFACT_OUTPUT_UNDECLARED") == 1 and "ARTIFACT_AUDIT_GAP" not in named.text
+    assert named.meta["undeclared_outputs"] == [str(target.resolve())]
+    assert REGISTER_OUTPUT_ADVICE in named.text
+    _assert_the_note_closes_the_text(named.text)
+
+    unnamed = run("open(chr(117)+'nnamed.dat','w').write('x')\n")
+    assert unnamed.status == "ok" and unnamed.text.count("⚠️ ARTIFACT_AUDIT_GAP") == 1, unnamed.text
+    assert "ARTIFACT_OUTPUT_UNDECLARED" not in unnamed.text and "undeclared_outputs" not in unnamed.meta
+    assert REGISTER_OUTPUT_ADVICE in unnamed.text and "rerun" not in unnamed.text
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
@@ -1202,7 +1262,7 @@ def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, mo
     assert (typed.status, typed.code) == ("ok", "ARTIFACT_OUTPUT_UNDECLARED")
     assert typed.meta["undeclared_outputs"] == [str(target.resolve())]
     assert result.startswith("# script_path="), result  # the script's own answer leads; the note trails it
-    assert result.rstrip().endswith("otherwise nothing is needed.")
+    _assert_the_note_closes_the_text(result)
     assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
     assert "without being registered as task outputs" in result
     assert str(target) in result
@@ -1214,6 +1274,15 @@ def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, mo
     # The write happened (post-exec) but the file is NOT registered as an artifact.
     assert target.read_text(encoding="utf-8") == "<h1>ok</h1>"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
+
+    # A script that wrote a file and then failed is still that failure: its marker owns line 1 and
+    # its code and exit are untouched. The note follows it: the file is on disk whatever the exit says.
+    half = desktop / "half-done.html"
+    failed = registry.execute_result("run_script", {"interpreter": "python3", "script": (
+        f"from pathlib import Path\nPath({str(half)!r}).write_text('x')\nraise SystemExit(3)\n")})
+    assert (failed.code, failed.meta["exit_code"]) == ("SHELL_EXIT_ERROR", 3) and failed.status != "ok", failed.text
+    assert failed.text.startswith("⚠️ SHELL_EXIT_ERROR") and failed.text.count("⚠️ ARTIFACT_OUTPUT_UNDECLARED") == 1
+    assert failed.meta["undeclared_outputs"] == [str(half.resolve())]
 
 
 def test_run_command_without_outputs_detects_shell_redirection_to_user_files(tmp_path, monkeypatch):
