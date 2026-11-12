@@ -633,9 +633,11 @@ def resolve_context_fit_route(
 
 
 def _route_key(task: Dict[str, Any]) -> Optional[str]:
-    """The route a fit's question asks about (``_context_route``: settings, role, pin and carried account), or None."""
+    """The Claudexor route a fit's question asks the engine about (``_context_route``: settings, role, pin and carried
+    account), or None: another route's evidence needs no engine question beside the build."""
     try:
-        return json.dumps(_context_route(task)[0], sort_keys=True, default=str)
+        route = _context_route(task)[0]
+        return json.dumps(route, sort_keys=True, default=str) if route.get("provider") == "claudexor" else None
     except Exception:
         return None
 
