@@ -126,7 +126,7 @@ def _triad_prompt(tmp_path, monkeypatch, kind: str) -> tuple[str, int, str]:
     ctx = SimpleNamespace(
         repo_dir=tmp_path, drive_root=tmp_path, task_id="root", _review_iteration_count=0,
         _last_review_block_reason="", _last_triad_models=[], _last_review_critical_findings=[],
-        _last_triad_raw_results=[], _review_degraded_reasons=[], _review_history=[], **_attrs(kind))
+        _last_triad_raw_results=[], _review_degraded_reasons=[], _review_history=[], _review_advisory=[], **_attrs(kind))
     review._run_unified_review(ctx, "fix: login timeout", goal="GOAL_SENTINEL", scope="SCOPE_SENTINEL")
     return captured["prompt"], captured["stable"], captured["task"]
 
