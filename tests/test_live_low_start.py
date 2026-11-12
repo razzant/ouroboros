@@ -37,3 +37,19 @@ def test_adopted_call_reports_a_memory_lowered_start_once(tmp_path, sent, room, 
         record_session_view(later, evidence, f'{task}-manifest')
     assert [event['delivery_id'] for _root, event in sent] == ['low_start:call-low:2'] * expected + (
         [] if expected else ['low_start:call-b:2']) + ['low_start:call-d:2']
+
+
+@pytest.mark.parametrize('manifest, expected', [
+    ({'path': 'calls/first.json', 'chronicle_lead_rule': 1}, 1), ({'path': 'calls/first.json'}, None),
+    ('first-manifest', None), (None, None)])
+def test_an_adopted_call_reads_the_lead_fact_only_from_a_send_seal_reference(tmp_path, sent, manifest, expected):
+    """The send seal's manifest reference carries the delivered lead fact; an opaque or older reference names none
+    and is kept as the call's physical source reference, never a reason to fail the adopted connection."""
+    plan = _plan(_room('held'))
+    ctx = SimpleNamespace(drive_root=tmp_path, task_metadata={}, task_id='call-lead', task_attempt=1,
+                          context_fit_plan=plan, active_context_mode='max', emit_progress_fn=None)
+    host = SimpleNamespace(ctx=ctx, plan=plan, messages=[{'role': 'system', 'content': 'Core.'}],
+                           schemas=[], event_queue=None, _session_opened=False)
+    record_session_view(host, {'fit': {'measurement': {}}, 'work_room': {}, 'wire_sha256': 'wire'}, manifest)
+    observation = ctx._last_context_observation
+    assert observation['chronicle_lead_rule'] == expected and observation['physical_source_ref'] == manifest

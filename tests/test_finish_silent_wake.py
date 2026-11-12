@@ -206,7 +206,7 @@ def test_send_family_prevents_a_quiet_finish(wake, live, tool):
 ])
 def test_wake_summary_titles_the_stored_wake_without_changing_its_words(wake, cause, action, silent):
     metadata = {**WAKE, "wake_cause": cause}
-    summary = "Проверил состояние системы; вмешательство не требуется."
+    summary = "Проверил\n состояние\tсистемы; вмешательство не требуется."
     text, usage, trace, bus = wake.run([finish(
         "Whole note.\n\nSecond paragraph stays as written.", action=action,
         silent=silent, rationale="The remaining probe can wait.", summary="  Проверил\n состояние\tсистемы; вмешательство не требуется.  ")], metadata=metadata)
@@ -271,14 +271,15 @@ def test_retry_does_not_inherit_the_previous_attempts_summary(wake, cause, title
     pytest.param("stop", {**SCHEDULE, "presence": {"binding_id": "b1"}}, False, id='stop-metadata1-False'),
     pytest.param("stop", WAKE, False, id='stop-metadata3-False'),
 ])
-def test_child_summary_is_dropped_and_named_and_empty_summary_keeps_ordinary_completion(wake, metadata, direct, action):
+@pytest.mark.parametrize("summary", ["A line", "Completed the check. Saved 42 rows. The parent acts next."])
+def test_child_summary_is_dropped_and_named_and_empty_summary_keeps_ordinary_completion(wake, metadata, direct, action, summary):
     """A child's sentence never vetoes its honest final: the answer is staged, the sentence dropped and named."""
     from ouroboros.tools.control_runtime import _finish_task
 
     wake.ctx.task_metadata, wake.ctx.is_direct_chat = metadata, direct
     wake.ctx.task_id, wake.ctx.parent_task_id = TASK_ID, "parent-task"
     wake.ctx._active_builtin_tool_result = None
-    named = _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary="A line")
+    named = _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary=summary)
     assert json.loads(named) == {"status": "completion_requested", "completion_control": True, "action": action,
                                  "ignored": ["summary"]}
     assert wake.ctx._active_builtin_tool_result is None
@@ -301,7 +302,7 @@ def test_schedule_born_root_may_leave_one_sentence_for_its_human(wake, action, s
                           summary="  Checked\n the disk:  30 GiB free. ", **({"silent": True} if silent else {}))
     assert "completion_requested" in result and "TOOL_ERROR" not in result
     request = wake.ctx._completion_request
-    assert request["wake_summary"] == "Checked the disk: 30 GiB free."
+    assert request["wake_summary"] == "Checked\n the disk:  30 GiB free."
     assert request.get("wake_silent") is (True if silent else None)
     assert request["answer"] == "Internal check result." and request["action"] == action
 
@@ -507,13 +508,15 @@ def test_schedule_born_root_owes_a_reply_to_owner_words_mid_run(wake):
     assert usage.get("wake_silent") is True and len(wake.calls) == 4
 
 
-def test_quiet_project_schedule_through_delivery_and_notifications(wake, monkeypatch):
+@pytest.mark.parametrize("summary", ["", "Проверка завершена.\n\n42 строки в /tmp/result.csv. Следующий шаг за владельцем."])
+def test_quiet_project_schedule_through_delivery_and_notifications(wake, monkeypatch, summary):
     import asyncio
     import shutil
     import subprocess
     from pathlib import Path
 
     from ouroboros.headless import prepare_terminal_task_files
+    from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.projects_registry import bind_task_to_project, create_project
     from supervisor.event_observation import ObservedEventQueue
     from supervisor.events import _handle_task_done
@@ -521,6 +524,7 @@ def test_quiet_project_schedule_through_delivery_and_notifications(wake, monkeyp
     from tests.test_task_done_durable_vs_transport import _mk_ctx
     from tests.test_telegram_notifications import _load, _Rec
 
+    ChronicleStore(wake.root).ensure_activated()
     project = create_project(wake.root, "checks", name="Checks")
     bind_task_to_project(wake.root, TASK_ID, project["id"], project["chat_id"], origin={"absent": "system"})
     task = {"id": TASK_ID, "type": "task", "text": "Check for changes", "title": "Check for changes",
@@ -531,7 +535,7 @@ def test_quiet_project_schedule_through_delivery_and_notifications(wake, monkeyp
     bus = ObservedEventQueue()
     monkeypatch.setattr("supervisor.workers.get_event_q", lambda **_kw: bus)
     internal = "Internal: no changes worth a message."
-    text, usage, trace, _ = wake.run([finish(internal, silent=True)], metadata=SCHEDULE, bus=bus)
+    text, usage, trace, _ = wake.run([finish(internal, silent=True, summary=summary)], metadata=SCHEDULE, bus=bus)
     pending, stored = emit(wake, text, usage, trace, bus=bus, task=task)
     assert stored["result"] == internal and stored["wake_silent"] is True
     assert sends(pending) == [] and sends(drained(bus)) == [] and owed_rows(wake.root) == []
@@ -546,6 +550,13 @@ def test_quiet_project_schedule_through_delivery_and_notifications(wake, monkeyp
     terminal = next(row for row in pushed if row.get("type") == "task_done")
     for row in (done, terminal):
         assert row.get("wake_silent") is True and row.get("quiet_effective") is True, row
+        assert row.get("wake_summary", "") == summary
+    assert stored.get("wake_summary", "") == summary
+    from ouroboros import memory_inventory
+    assert memory_inventory.fill_tail(wake.root, lambda: False)["state"] == "done"
+    chronicle = ChronicleStore(wake.root)
+    _, facts = chronicle.tail_facts(chronicle.tail_state()["source"], terminal_only=True)
+    assert facts and any(fact[4].get("wake_summary", "") == summary for fact in facts)
     assert done["text"] == "Done · no message" and done["chat_id"] == project["chat_id"]
     assert not any(row.get("role") == "assistant" or row.get("direction") == "out" for row in rows)
     assert not any(row.get("type") == "project_completion_summary" for row in rows)

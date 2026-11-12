@@ -17,7 +17,8 @@ import subprocess
 from typing import Iterable
 
 
-# Minimal witnesses of the contracts verification and every install rely on.
+# Minimal witnesses of the contracts verification and every install rely on, and the inventory
+# pin: book chapters, runtime text, tracked paths and UI modules reach it as data no import traces (#3188).
 # Replacing a witness is a verifier change and requires full qualification.
 # The whole Node lane is unconditional in both runners, outside this Python list.
 FLOOR_TESTS = {
@@ -29,6 +30,7 @@ FLOOR_TESTS = {
     "tests/test_preflight_process_containment.py": "a leaked test process cannot pass the gate",
     "tests/test_smoke.py": "the shipped Python modules import",
     "tests/test_safety_policy.py": "every built-in tool has an explicit safety policy",
+    "tests/test_generated_inventories.py": "docs/inventories/ match their regeneration from books, code, paths and UI",
 }
 
 SELECTION_RULE = "floor + changed tests + direct importers of changed code, tests and test helpers + authored widening"

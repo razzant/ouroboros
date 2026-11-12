@@ -152,8 +152,7 @@ test('the footprint leads, free disk is secondary, every folder opens independen
     assert.equal((view.facts.match(/could not be read/g) || []).length, 1, 'the caveat is said once');
     assert.doesNotMatch(view.summary, /Free on this disk|170 GB/);
     assert.match(view.places, /This disk: 170 GB free of 4.0 TB · read/);
-    assert.match(view.auto, /7 days after the task ends/);
-    assert.match(renderStorage(response({ retention_days: 30 })).auto, /30 days/);
+    assert.equal('auto' in view, false, 'how long finished work is kept is the Cleanup row of dashboard_settings.test.js');
     assert.deepEqual(view.measure, { label: 'Refresh sizes', busy: false });
     const rows = [...view.places.matchAll(/data-storage-place="([^"]+)"/g)].map((match) => match[1]);
     assert.equal(new Set(rows).size, 8);
@@ -255,7 +254,6 @@ test('the door is offered whenever an answer exists at rest, before any count to
     assert.doesNotMatch(never.tray, /storage-cleanup-amount|Can be removed/);
     assert.equal(renderStorage(null).tray, '');
     assert.equal(renderStorage(null).door, false);
-    assert.equal(renderStorage(null).auto, '');
     const listing = renderStorage(response({ count: count(), free: { ...free, state: 'listing', plan: 'p', total: 3 } }), { now: NOW });
     assert.equal(listing.door, false);
     assert.match(listing.tray, /Checking for files to remove/);

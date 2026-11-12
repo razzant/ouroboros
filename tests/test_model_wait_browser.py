@@ -8,6 +8,7 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests.test_reconnect_feed_browser import HISTORY_LANDED
+from tests.settings_browser_helpers import settings_page, top_path
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
@@ -230,7 +231,8 @@ def test_auth_opens_existing_accounts_login_for_the_exact_profile(waiting_ui):
     auth.locator('[data-wait-login]').click()
     page.wait_for_selector('[data-login-card]')
     page.wait_for_function("() => document.querySelector('[data-login-card]').textContent.includes('ABCD-1234')")
-    assert page.locator('[data-settings-tab="providers"]').get_attribute('aria-selected') == 'true'
+    assert top_path(page) == 'accounts/codex', 'the sign-in card is on the provider\'s own page'
+    assert settings_page(page, 'accounts/codex').locator('[data-login-card]').count() == 1
     assert ui['logins'][0]['harness'] == 'codex'
     assert ui['logins'][0]['profile_id'] == 'work'
     capture(page, 'waiting-auth-accounts')
@@ -329,7 +331,8 @@ def test_mixed_access_wait_replays_and_opens_accounts_without_automatic_login(wa
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
     capture(page, 'waiting-mixed-access-narrow')
     mixed.locator('[data-wait-settings]').click()
-    page.wait_for_selector('[data-settings-tab="providers"][aria-selected="true"]')
+    settings_page(page, 'accounts').wait_for(state='visible')
+    assert top_path(page) == 'accounts'
     assert ui['logins'] == []
 
 
