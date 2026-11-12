@@ -1163,7 +1163,8 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
     ten-minute record, or a live failure that kept an exact prior record stale) is named by it, so neither is
     repeated. After a failed read a fetching probe of an unpinned
     Auto route plans by the pool's smallest fresh statement (``_pool_bound``); a reader that may not fetch keeps it unknown.
-    A pin keeps the fresh record of its profile and account fingerprint instead (``_pinned_record``).
+    A pin keeps the fresh record of its profile and account fingerprint instead (``_pinned_record``), and that
+    account's output limit only from its own records: the failed read is the pin's, never written as that account's.
 
     ``ask``: the route's own question (Auto, or the pin) when ``options`` name the exact account a send will prefer
     (its identity). That account's fresh record answers without a question; otherwise ``ask`` is asked, so a
@@ -1181,8 +1182,11 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
     if is_known(evidence, require_fresh=True):
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
                                       source=evidence.source, observed_at=evidence.ts)
+    lent = None  # the pin's own record after a failed read: that account's output is read only from its records
     if read_failed and route.get("allow_fetch", True):  # after the server's word: the pool's bound or the pin's record
-        evidence = _pool_bound(drive_root, evidence, route) or _pinned_record(drive_root, route, identity) or evidence
+        pool = _pool_bound(drive_root, evidence, route)
+        lent = None if pool else _pinned_record(drive_root, route, identity)
+        evidence = pool or lent or evidence
     ack = _read(drive_root).get("owner_acks", {}).get(evidence.route_fp)
     options = {**(route.get("options") or {}), **{key: getattr(evidence, key) for key in (
         "source_id", "credential_profile_id", "account_fingerprint") if getattr(evidence, key)}}
@@ -1196,7 +1200,8 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
             ts=str(ack.get("ts") or ""), detail=f"owner-ack by {ack.get('owner') or 'owner'}",
             **{key: str(options.get(key) or "") for key in (
                 "source_id", "credential_profile_id", "account_fingerprint")})
-    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed, read=stated))
+    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route if lent is None else {
+        **route, "allow_fetch": False}, read_failed=read_failed, read=stated))  # this read's failure is never that account's
     evidence.read = read
     return evidence
 

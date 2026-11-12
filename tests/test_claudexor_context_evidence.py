@@ -966,3 +966,42 @@ def test_the_receipt_names_what_sized_the_window(tmp_path, sized_by):
     record = resolve_window(evidence, 16_384, root=tmp_path, observation_fp="scope")
     refused = ((ce._read(tmp_path).get("main_windows") or {}).get("scope") or {}).get("observations", [{}])[-1].get("ts")
     assert ce.window_evidence(evidence, record) == (("live", evidence.ts) if stated else ("recorded", refused))
+
+
+@pytest.mark.parametrize("output", ["stated", "expired"])
+def test_a_pins_lent_record_answers_its_output_only_from_that_accounts_records(tmp_path, monkeypatch, output):
+    """Fix round 2 (Carbon B1, reproduction 2b): after a failed read the pin plans by its account's own record, and that
+    account's output limit comes only from its own records: a fresh stated maximum answers; an expired one stays
+    unknown, and the failed read writes nothing under that account, so its next read of the output limit is not held
+    back for ten minutes."""
+    import datetime
+    from ouroboros import response_limits
+    from ouroboros.llm import LLMClient
+
+    start = ce.utc_now()
+    clock = {"now": start}
+    monkeypatch.setattr(ce, "utc_now", lambda: clock["now"])
+    monkeypatch.setattr(ce, "utc_now_iso", lambda: clock["now"].isoformat())
+
+    def answers(maximum, observed):
+        value = {**_catalog(), "observedAt": observed.isoformat()}
+        value["models"][0].update(contextWindow=110_000, maxContextWindow=110_000, maxOutputTokens=maximum)
+        monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda *_a, **_kw: copy.deepcopy(value)))
+
+    pinned = {"source_id": "test-source", "credential_profile_id": "account-a"}
+    exact = {**pinned, "account_fingerprint": "identity-a"}
+    answers(16_384 if output == "stated" else None, start)
+    _probe(tmp_path, options=pinned)  # identity-a: window 110K, its output stated or not
+    clock["now"] = start + datetime.timedelta(minutes=15)
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+        lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+    kept = _probe(tmp_path, options=pinned)
+    fp = response_limits._response_fingerprint(provider="claudexor", model=MODEL, options=exact)
+    held = ce._read(tmp_path)["response_limits"][fp]
+    assert kept.window_tokens == 110_000 and not held["source"].endswith(response_limits.FAILED_READ)
+    if output == "stated":
+        assert kept.response_limit["max_output_tokens"] == 16_384  # that account's own fresh statement
+        return
+    assert not kept.response_limit["max_output_tokens"]  # expired: unknown, and nothing written under identity-a
+    answers(16_384, start + datetime.timedelta(minutes=10))  # the engine answers again
+    assert _probe(tmp_path, options=exact).response_limit["max_output_tokens"] == 16_384  # read at once, not held back
