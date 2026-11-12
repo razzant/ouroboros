@@ -113,7 +113,8 @@ CLOCKS: Dict[str, float] = {
     # young (#2961: B2's 16 reads of the project bindings, a stat each or an open each). A file's identity (inode, size,
     # nanosecond times) still names every write the process meets. Held below zero, not at it: with 0 a file written
     # in its reader's own tick still reads as just written where ``time.time_ns`` ticks at 15.6 ms (Windows), and how
-    # many reads fall in that tick is timing (T:main's capability evidence: one or two more opens).
+    # many reads fall in that tick is timing (T:main's capability evidence: one or two more opens). It holds every
+    # boundary through ``hold_clocks`` and the stand's turns; the live set resets only ``utils`` to 0 (``_live_set``).
     "racy_ns": -2_000_000_000,
     # ``task_status._SNAPSHOT_OWNERSHIP_FRESH_SEC``, 10 s: the held supervisor never refreshes its queue stamp, so a
     # pass that outlasts it takes every queued task for live (B7: three evidence tasks wait, 336 VM steps and 16
@@ -376,8 +377,8 @@ def _install_checkpoints(meter: CostMeter, srv: Any, result: Dict[str, Any], roo
         return {**_summary(meter, "B2"), "child_headers": _summary(meter, "B2_child_headers")}
 
     def publication_steps(root, *steps):
-        # What waits on the store's publication is B2 wherever it runs: on the import thread, or on
-        # the lifespan's own thread when the import already finished (then it also delays health).
+        # What waits on the store's publication is B2 wherever it runs (the product's ``when_ready`` runs
+        # it on the import thread, never the caller's).
         result.setdefault("when_ready_threads", []).append(threading.current_thread().name)
         return when_ready(root, *[functools.partial(tagged, "B2", step) for step in steps])
 
@@ -595,7 +596,10 @@ def _owner_turn(srv: Any, ctx: Any, chat_id: int, message_id: str) -> int:
     records of the new turn against the body's first writes of its task: whether the loop's lineage read finds the
     task absent, as its placeholder (``create_only``, no room yet) or admitted, and whether it runs before the turn's
     request at all, would be the scheduler's choice, and this process keeps what that read found
-    (``projects_registry._TASK_LINEAGE``)."""
+    (``projects_registry._TASK_LINEAGE``). The hold is class-wide: any carrier built while the handling runs waits
+    for it, not only the turn's; in the stand no other carrier is built then. Neither wait has a timeout: the handling
+    must not wait on the body it starts, and the usage hold (``_install_checkpoints``) assumes no boot step before the
+    usage import waits for the store's publication; both hold in the product today."""
     from supervisor.inline_carrier import InlineCarrier
 
     update = {"update_id": next(_UPDATE_IDS), "message": {

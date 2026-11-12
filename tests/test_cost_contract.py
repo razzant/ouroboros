@@ -365,7 +365,9 @@ ROUND = ("connect", "begins", "statements", "lock_acquired", "open", "os_open", 
 # turn before made (the lease's, not a constant). A lock, a connection, a file or a child per room, root or row is
 # a breach.
 ROWS_PER_PAGE = 500  # the memory's chat reader reads rows a page at a time (``chat_chain``)
-MAIN_TURNS = ("T:main", "T:mainw", "T:main:foreign")
+TAIL_PAGE = 2_000  # the stored tail is read a page of rows at a time (``chronicle_store._TAIL_PAGE``)
+ARCHIVES_BACKFILLED = 3  # the recent sections open at most this many newest archives of a log (``jsonl_tail``)
+MAIN_TURNS =("T:main", "T:mainw", "T:main:foreign")
 BREADTH_TURNS = ("T:main:broad", "T:main:rows", "T:main:archive:first", "T:main:archive")  # the k=1 root only
 
 
@@ -382,24 +384,30 @@ def _growth(before: Dict[str, Any], after: Dict[str, Any], keys: Iterable[str]) 
 
 
 def _round_trips(measured: Dict[Any, Any], tag: str, k: int) -> Dict[str, Any]:
-    """``tag``'s count at its request at size ``k`` apart from two terms of the root, each checked exactly first and
-    neither one read per unit of history: the stored tail's page reads (the whole-tail debt named by L7d), one
-    statement per page plus the empty end page; and the recent sections' archive backfill (``Memory.read_task_recent``):
-    a turn's own task is new, so each log they read opens its newest archives, as many as the boot's listing holds up
-    to ``jsonl_tail.ARCHIVE_BACKFILL_MAX`` (the small root holds two of the tools log, a larger one dozens)."""
+    """``tag``'s count at its request at size ``k`` apart from two terms of the root, each checked exactly first at the
+    sizes pinned above. The stored tail's page reads: one statement per ``TAIL_PAGE`` stored rows plus the empty end
+    page. That is the whole-tail read, which grows with the stored tail for every integrating turn; L7d names it as
+    debt for Main's first turns only. The recent sections' archive backfill (``Memory.read_task_recent``): a turn's own
+    task is new, so each log they read opens its newest archives, as many as the boot's listing holds up to
+    ``ARCHIVES_BACKFILLED`` (the small root holds two of the tools log, a larger one dozens). Both sizes are pinned
+    here, not read from the product: a smaller page or a larger backfill is more work per unit of history."""
     from ouroboros.chronicle_store import _TAIL_PAGE
     from ouroboros.jsonl_tail import ARCHIVE_BACKFILL_MAX
 
+    assert (_TAIL_PAGE, ARCHIVE_BACKFILL_MAX) == (TAIL_PAGE, ARCHIVES_BACKFILLED), (
+        "L2 sets the stored tail's pages and the archive backfill apart at the sizes pinned here; a smaller page or a "
+        "larger backfill is more work per unit of history, so a change of either is judged here, not followed",
+        _TAIL_PAGE, ARCHIVE_BACKFILL_MAX)
     entry = at_request(measured, tag, k)
     work = entry["view"]["work"]
     stored = work["rows_read"] - work["rows_new"]
     pages = sum(amount for source, amount in entry["callers"].items()
                 if source.startswith("statements <- ") and "ouroboros.chronicle_store._tail_rows" in source.split(" <- "))
-    assert pages == -(-stored // _TAIL_PAGE) + 1, ("stored tail pages", pages, stored, _TAIL_PAGE)
+    assert pages == -(-stored // TAIL_PAGE) + 1, ("stored tail pages", pages, stored, TAIL_PAGE)
     held = measured[k]["turn_shapes"]["steady"]["listings"]["archives"]
     backfill = sum(amount for source, amount in entry["callers"].items() if source.startswith("open:archive <- ")
                    and "ouroboros.memory.read_task_recent" in source.split(" <- "))
-    assert backfill == sum(min(ARCHIVE_BACKFILL_MAX, count) for count in held.values()), (
+    assert backfill == sum(min(ARCHIVES_BACKFILLED, count) for count in held.values()), (
         "archive backfill", backfill, held, {source: amount for source, amount in entry["paths"].items()
                                              if source.startswith("open archive/")})
     counts = {**entry["counts"]}
