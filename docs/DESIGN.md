@@ -488,7 +488,7 @@ that can lead a work (those Settings offers the Main role, never agent sessions)
 under its own name without a source step; when Main has a row above, its model is omitted from this section.
 A recent may also appear under its source. A row is one model through one source, however many accounts list it, never an account: the source, whether
 it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one and
-Main is not on Fast or Economy:
+neither Main's processing tier nor the default one, which every lead pays, is Fast or Economy:
 `OpenRouter · $4 in / $20 out`), its window when known (an unknown window is omitted), `Unavailable` when no
 account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
 and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps

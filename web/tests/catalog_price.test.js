@@ -254,13 +254,29 @@ test('in the composer list the price follows the language of each paint, not of 
     }
 });
 
-test('a circle or a room chooses its model with the same price beside the name', async () => {
+test('a circle or a place names the price beside a model only while its lead pays the catalog one', async () => {
     const { modelSuggestions } = await import('../modules/place_sheet.js');
+    const { createModelCatalogStore } = await import('../modules/model_catalog_store.js');
     const direct = { provider_id: 'openai', id: 'gpt-6', value: 'openai::gpt-6', name: 'gpt-6' };
-    const [priced, plain] = modelSuggestions({ items: [OPUS, direct, { id: 'local', use_local: true }] });
-    assert.equal(priced.meta, '$4 in / $20 out');
-    assert.equal(plain.meta, undefined, 'a model without a catalog price reads as before');
-    assert.match(modelChooserHtml('aria-label="Model"', '', 'room-models', [priced, plain]), /ui-model-option-meta" data-i18n-skip>\$4 in \/ \$20 out</);
+    const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}),
+        readSettings: async () => ({}) });
+    const said = () => modelSuggestions({ items: [OPUS, direct, { id: 'local', use_local: true }] }, { tierPriced: store.tierPriced('lead') });
+    assert.equal(said()[0].meta, undefined, 'before the settings document is read the tier is unknown');
+    // A lead pays the default tier: Main's own tier changes nothing here.
+    for (const settings of [{}, { OUROBOROS_PROCESSING_PREFERENCE: 'standard', OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}' }]) {
+        store.adoptSettings(settings);
+        const [priced, plain] = said();
+        assert.equal(priced.meta, '$4 in / $20 out', JSON.stringify(settings));
+        assert.equal(plain.meta, undefined, 'a model without a catalog price reads as before');
+        assert.match(modelChooserHtml('aria-label="Model"', '', 'room-models', [priced, plain]), /ui-model-option-meta" data-i18n-skip>\$4 in \/ \$20 out</);
+    }
+    for (const settings of [{ OUROBOROS_PROCESSING_PREFERENCE: 'fast' },
+        { OUROBOROS_PROCESSING_PREFERENCE: 'economy', OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"standard"}' }]) {
+        store.adoptSettings(settings);
+        const [offered] = said();
+        assert.equal(offered.meta, undefined, JSON.stringify(settings));
+        assert.equal(offered.value, OPUS.value, 'the model is still offered');
+    }
 });
 
 test('the capsule strip and the Change Main sheet say the price where "paid by key" stood', async () => {
@@ -314,7 +330,7 @@ test('the Agents editor paints again for another language: its prices are compos
     assert.equal(availableSubagentsRenderSignature(state, 0), english);
 });
 
-test('while Main is on Fast or Economy the composer list names no catalog price; on Standard it does', async () => {
+test('while Main or the default tier is on Fast or Economy the composer list names no catalog price; on Standard it does', async () => {
     assert.equal(describeRoute(buildModelIndex({ catalog: { items: [OPUS] }, tierPriced: true }), { model: OPUS.value }).price, '');
     const { createModelCatalogStore } = await import('../modules/model_catalog_store.js');
     const shown = async (settings) => {
@@ -328,6 +344,6 @@ test('while Main is on Fast or Economy the composer list names no catalog price;
     assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' }), '$4 in / $20 out');
     assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' }), '');
     assert.equal(await shown({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), '');
-    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }),
-        '$4 in / $20 out', "Main's own choice outranks the global one");
+    // The list serves Main and its rooms alike: a room's new work, a lead, would pay the default tier's price.
+    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }), '');
 });

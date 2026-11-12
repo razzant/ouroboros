@@ -137,7 +137,7 @@ export function buildModelIndex({ catalog = {}, connections = null, tierPriced =
         if (typeof item?.availability === 'string') row.states.add(item.availability);
         row.prices.set(JSON.stringify(item?.price ?? null), item?.price ?? null);
     }
-    let priced = false;  // whether the catalog states any price: only then does Main's processing tier change a word
+    let priced = false;  // whether the catalog states any price: only then do the processing tiers change a word
     for (const row of rows.values()) {
         // Any account that can serve it makes the row available; unavailable only when every account says so.
         row.available = row.states.has('available') ? true

@@ -284,7 +284,7 @@ test('Search is a field in the row and its suggestions stand outside it: Main, t
     assert.equal(r.list(), null, 'the list goes with its capsule');
 });
 
-test('where the catalog states prices the list reads Main\'s processing once: on Fast or Economy it names none', async () => {
+test('where the catalog states prices the list reads the processing tiers once: on Fast or Economy it names none', async () => {
     const priced = { ...CATALOG, items: CATALOG.items.map((item) => (item.value === KIMI ? { ...item, price: { input: 0.6, output: 2.5 } } : item)) };
     const kimi = async (settings) => {
         const r = room({ storeOptions: { catalog: priced, settings, connections: [{ id: 'openrouter', enabled: true, configured: true }] } });
@@ -299,6 +299,9 @@ test('where the catalog states prices the list reads Main\'s processing once: on
     assert.deepEqual(await kimi({}), ['moonshotai/kimi-k3 OpenRouter · $0.60 in / $2.50 out', 1], 'a price to qualify: the tier is read once');
     assert.deepEqual(await kimi({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' }), ['moonshotai/kimi-k3 OpenRouter · paid by key', 1]);
     assert.deepEqual(await kimi({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), ['moonshotai/kimi-k3 OpenRouter · paid by key', 1]);
+    // New work here runs as a lead on the default tier, whatever Main's own one is.
+    assert.deepEqual(await kimi({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"standard"}' }),
+        ['moonshotai/kimi-k3 OpenRouter · paid by key', 1]);
 });
 
 test('Settings\' own document reaches the list without a read, and a failed read is not repeated by every paint', async () => {
@@ -311,7 +314,7 @@ test('Settings\' own document reaches the list without a read, and a failed read
     await store.readConnections();
     assert.equal(reads.settings, 1, 'one failed read, not one per paint');
     const price = () => store.index().row({ model: GLM }).price;
-    assert.deepEqual(price(), { input: 1, output: 2 });
+    assert.equal(price(), null, 'a tier never read names no price');
     store.adoptSettings({ OUROBOROS_PROCESSING_PREFERENCE: 'economy' });
     assert.equal(price(), null);
     store.adoptSettings({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' });
