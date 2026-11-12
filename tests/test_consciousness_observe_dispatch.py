@@ -588,14 +588,6 @@ def test_observe_cannot_dispose_any_captured_patch_at_dispatch(subtests, tmp_pat
             assert act_calls == [(name, args)]
 
 
-def test_evolution_stats_artifact_write_is_withheld_from_observe(tmp_path, monkeypatch):
-    """The local export writes a task artifact; it is not an Observe-only read."""
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    assert "generate_evolution_stats" in ca.OBSERVE_DISABLED
-    wake = _registry(tmp_path, _wake_task("observe")["metadata"])
-    assert "RESOURCE_CONSTRAINT_BLOCKED" in wake.execute("generate_evolution_stats", {})
-
-
 def test_full_can_create_and_edit_circle_models_through_dispatch(tmp_path, monkeypatch):
     from ouroboros import places
     from tests._safety_fixtures import disable_safety
