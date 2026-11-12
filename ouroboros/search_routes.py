@@ -31,7 +31,9 @@ MODELLESS_SOURCES = ("ddgs", "deepseek")  # they send no model, so no call can n
 _LEG_FACTS = {"deepseek": {"query_max_chars": QUERY_MAX_CHARS}}  # a transport's own limit, said on its leg
 # A saved DeepSeek Model that starts like its connection head but is not one (deepseek@work, deepseek@work:,
 # DeepSeek@work::, deepseek@work:: (local)) is refused: never the built-in key for a connection it misnames.
+# Settings' Key select writes only deepseek[@name]:: and shows such a value as not readable (deepseekSearchKey).
 _DEEPSEEK_HEAD_LIKE = re.compile(r"deepseek\s*[@:]", re.IGNORECASE)
+_CHOOSE_KEY = "choose its key under Web search in Settings"
 
 
 def resolve_web_search_route(*, backend=None, model=None, settings=None, per_call=False) -> dict:
@@ -76,14 +78,12 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
         head = sep and prefix == "deepseek"  # deepseek[@name]:: names the connection, never a model
         # Never the built-in key in place of a connection the owner tried to name.
         if head and not parsed.valid:
-            return {**result, "error": f"DeepSeek connection name {parsed.connection!r} is not valid: a name is 1-32 "
-                                       "lowercase letters, digits, '-' or '_', starting with a letter or digit"}
+            return {**result, "error": f"The saved DeepSeek choice ({selected}) has an invalid connection name; {_CHOOSE_KEY}"}
         if head and native.strip():
-            return {**result, "error": "A DeepSeek search Model names only its connection: deepseek:: or "
-                                       "deepseek@name::, with nothing after ::"}
+            return {**result, "error": f"DeepSeek search takes no model, but the saved choice ({selected}) names one; "
+                                       f"{_CHOOSE_KEY}"}
         if not head and _DEEPSEEK_HEAD_LIKE.match(selected):
-            return {**result, "error": "Write a DeepSeek connection exactly as deepseek:: or deepseek@name:: "
-                                       "(lowercase, ending in ::)"}
+            return {**result, "error": f"The saved DeepSeek choice ({selected}) names no key; {_CHOOSE_KEY}"}
         if selected and not head:
             result["unapplied_model"] = selected
             result["note"] += " DeepSeek search takes no model, so the saved model is not applied."

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { syncPolicyState } from '../modules/settings_policy.js';
-import { collectCustomSecretDraft, paintSettingsFieldErrors, settingsWriteFailure, syncSearchModelWords,
-    webSearchPreviewWords } from '../modules/settings_controls.js';
+import { collectCustomSecretDraft, deepseekSearchKey, paintSettingsFieldErrors, searchModelAfterSourceSwitch, searchModelForKey,
+    settingsWriteFailure, syncSearchKey, syncSearchModelWords, webSearchPreviewWords } from '../modules/settings_controls.js';
 
 const draft = (overrides = {}) => ({
     key: '', value: '', appliedValue: '', originalKey: '', clear: false, removed: false,
@@ -156,6 +156,48 @@ test('the search Model help and placeholder change with the Source only, so typi
         'placeholder: Recommended for each source']);
     syncSearchModelWords(null, field, help);  // a page without the section changes nothing
     assert.equal(writes.length, 4);
+});
+
+test('a DeepSeek key is chosen from the keys of Accounts and spelled only by the editor', () => {
+    // The saved Model as the Key select reads it: a key, or null for a misspelt head the resolver refuses.
+    assert.deepEqual(['', 'deepseek::', 'deepseek@default::', 'deepseek@work::', 'gpt-5.5', 'openai@work::gpt-5.5']
+        .map(deepseekSearchKey), ['deepseek', 'deepseek', 'deepseek', 'deepseek@work', 'deepseek', 'deepseek']);
+    assert.deepEqual(['deepseek@work', 'deepseek@work:', 'DeepSeek@work::', 'deepseek@work:: (local)', 'deepseek::deepseek-chat']
+        .map(deepseekSearchKey), [null, null, null, null, null]);
+    assert.deepEqual([searchModelForKey('api:deepseek', 'gpt-5.5'), searchModelForKey('api:deepseek@work', ''),
+        searchModelForKey('saved', 'deepseek@work')], ['', 'deepseek@work::', 'deepseek@work']);
+    // Leaving DeepSeek drops only the spelling written for it; another source's model stays the owner's.
+    assert.deepEqual([searchModelAfterSourceSwitch('auto', 'deepseek@work::'), searchModelAfterSourceSwitch('openai', 'gpt-5.5'),
+        searchModelAfterSourceSwitch('deepseek', 'deepseek@work::'), searchModelAfterSourceSwitch('auto', 'deepseek@work')],
+    ['', 'gpt-5.5', 'deepseek@work::', 'deepseek@work']);
+
+    const key = (id, label, extra = {}) => ({ id, label, kind: id.split('@')[0], name: id.split('@')[1] || '', enabled: true,
+        configured: true, ...extra });
+    const connections = [key('deepseek', 'DeepSeek'), key('deepseek@work', 'DeepSeek · Work'),
+        key('deepseek@old', 'DeepSeek · old', { enabled: false }), key('openai', 'OpenAI')];
+    const keys = { connections, providers: connections.filter((entry) => entry.enabled).map(({ id, label }) => ({ id, label })) };
+    const label = () => ({ hidden: false });
+    const page = (saved, source = 'deepseek') => ({ source: { value: source }, field: { value: saved, labels: [label()] },
+        select: { innerHTML: '', value: '', labels: [label()] } });
+    const shown = (select) => [...select.innerHTML.matchAll(/<option value="([^"]*)"( selected)?( disabled)?>([^<]*)</g)]
+        .map(([, value, selected, disabled, text]) => `${text}${selected ? ' *' : ''}${disabled ? ' -' : ''}`);
+    for (const [saved, expected] of [
+        ['', ['DeepSeek *', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+        ['deepseek@work::', ['DeepSeek', 'DeepSeek · Work *', 'Add a key in Accounts for more -']],
+        ['deepseek@old::', ['DeepSeek', 'DeepSeek · Work', 'DeepSeek · old (off) *', 'Add a key in Accounts for more -']],
+        ['deepseek@gone::', ['DeepSeek', 'DeepSeek · Work', 'DeepSeek · gone (removed) *', 'Add a key in Accounts for more -']],
+        ['deepseek@work', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+    ]) {
+        const { source, field, select } = page(saved);
+        syncSearchKey(source, field, select, keys);
+        assert.deepEqual(shown(select), expected, saved);
+        assert.equal(select.value, saved === 'deepseek@work' ? 'saved' : `api:${deepseekSearchKey(saved)}`);
+        assert.deepEqual([field.hidden, field.labels[0].hidden, select.hidden, select.labels[0].hidden], [true, true, false, false]);
+        assert.equal(field.value, saved);  // showing a choice never rewrites the saved Model
+    }
+    const { source, field, select } = page('gpt-5.5', 'openai');  // every other Source keeps its Model field
+    syncSearchKey(source, field, select, keys);
+    assert.deepEqual([field.hidden, select.hidden, field.value], [false, true, 'gpt-5.5']);
 });
 
 test('a policy line says one value once and spells the facts out only where they differ', () => {

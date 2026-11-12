@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 41 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1028** | **0** |
+| **total** | | **1029** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 

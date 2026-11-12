@@ -5,7 +5,7 @@ export { accountCatalogRefreshKey } from './settings_catalog.js';
 import { getNotifier } from './notifications.js';
 import { mountDesktopShell } from './desktop_shell.js';
 import { bindEffortSegments, syncEffortSegments, readCustomSecretDraft, collectCustomSecretDraft, paintSettingsFieldErrors, setButtonBusy, settingsWriteFailure,
-    syncSearchModelWords, webSearchPreviewWords } from './settings_controls.js';
+    searchModelAfterSourceSwitch, searchModelForKey, syncSearchKey, syncSearchModelWords, webSearchPreviewWords } from './settings_controls.js';
 import { applyLocalModelPolicy, bindLocalModelControls } from './settings_local_model.js';
 import { bindAutostartControl } from './settings_autostart.js';
 import { applyMcpSettings, collectMcpSettings, initMcpSettings, mcpDraftSnapshot, validateMcpSettings } from './mcp_settings.js';
@@ -34,7 +34,7 @@ import { skillTitle } from './skill_presentation.js';
 import { APP_SETTINGS_ORIGIN, apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
 import { claudexorStatus } from './claudexor_status_store.js';
 import { createModelRolesEditor } from './model_roles.js';
-import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
+import { PROCESSING_PREFERENCE_KEY, apiConnections, configuredApiProviders } from './route_editor_primitives.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow, copyTextWithToast } from './ui_helpers.js';
 import { clearResultOnEdit, errorWords, setResult } from './ui_primitives.js';
 import { extensionActionStatus } from './extension_status_text.js';
@@ -546,7 +546,7 @@ export function initSettings({ state, setBeforePageLeave, ws, openDashboardTab =
     let currentSettings = {};
     // A change signalled while a draft is open (its reason): said, never applied over the draft; a new baseline ends it.
     let draftOutdatedBy = '';
-    let searchSelectionEdited = false;
+    let searchSelectionEdited = false, searchKeys = {};  // searchKeys: the DeepSeek keys the Key select offers
     let extensionRefreshPending = false;
     let settingsLoaded = false;
     let settingsBaseline = '';
@@ -825,6 +825,8 @@ export function initSettings({ state, setBeforePageLeave, ws, openDashboardTab =
         syncPostTaskEvolutionUi();
         applySafetySettings(page, s);  // owner-only safety values, facts and lines (settings_safety.js)
         applyConsciousnessSettings(page, s);
+        const profiles = setupContract.providerProfiles || {};
+        searchKeys = { connections: apiConnections(s, profiles), providers: configuredApiProviders(s, profiles), providerProfiles: profiles };
         void refreshSearchPreview();  // fire-and-forget; describes the applied search Source/Model
     }
 
@@ -1206,6 +1208,7 @@ export function initSettings({ state, setBeforePageLeave, ws, openDashboardTab =
         const target = byId('s-websearch-preview');
         if (!target?.isConnected) return;
         syncSearchModelWords(byId('s-websearch-source'), byId('s-websearch-model'), byId('s-websearch-model-help'));
+        syncSearchKey(byId('s-websearch-source'), byId('s-websearch-model'), byId('s-websearch-key'), searchKeys);
         try {
             const data = await apiClient.webSearchPreview(searchSelectionEdited ? collectSearchSelection() : {});
             if (sequence !== searchPreviewSequence || !target.isConnected) return;
@@ -1216,7 +1219,9 @@ export function initSettings({ state, setBeforePageLeave, ws, openDashboardTab =
         } catch (_) { if (sequence === searchPreviewSequence && target.isConnected) target.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     }
     const onSearchSelectionEdited = () => { searchSelectionEdited = true; void refreshSearchPreview(); };
-    byId('s-websearch-source')?.addEventListener('change', onSearchSelectionEdited);
+    const searchModelBecomes = (value) => { byId('s-websearch-model').value = value; onSearchSelectionEdited(); };
+    byId('s-websearch-source')?.addEventListener('change', (event) => searchModelBecomes(searchModelAfterSourceSwitch(event.target.value, byId('s-websearch-model').value)));
+    byId('s-websearch-key')?.addEventListener('change', (event) => searchModelBecomes(searchModelForKey(event.target.value, byId('s-websearch-model').value)));
     byId('s-websearch-model')?.addEventListener('input', onSearchSelectionEdited);
     page.addEventListener('input', onServerSettingEdited);
     page.addEventListener('change', onServerSettingEdited);

@@ -149,11 +149,11 @@ function accountsPanel() {
 }
 
 // The web search Model field's help (one text, which the interface language translates whole) and placeholder, in
-// English: the page's own, and DeepSeek's, which takes no model. syncSearchModelWords (settings_controls.js) switches them.
+// English: the page's own, and DeepSeek's, whose Key select stands in for the field (settings_controls.js switches).
 const SEARCH_MODEL_SCOPE = 'Built-in <code>web_search</code> only. Skills, MCP and browser tools remain independent choices.';
 const SEARCH_MODEL_HELP = `${SEARCH_MODEL_SCOPE} Empty follows the model Ouroboros recommends for each source.`;
 const SEARCH_MODEL_PLACEHOLDER = 'Recommended for each source';
-const DEEPSEEK_MODEL_HELP = `${SEARCH_MODEL_SCOPE} DeepSeek search takes no model: leave it empty for the built-in key, or enter <code>deepseek@name::</code> for a named connection.`;
+const DEEPSEEK_MODEL_HELP = `${SEARCH_MODEL_SCOPE} DeepSeek search takes no model: choose the key it uses.`;
 
 function modelsPanel() {
     return `
@@ -179,11 +179,13 @@ function modelsPanel() {
             body: `<div class="form-grid two">
                 <div class="form-field ui-field">
                     <label for="s-websearch-source">Source</label>
-                    <select id="s-websearch-source" class="ui-control" data-model-help="${SEARCH_MODEL_HELP}" data-model-placeholder="${SEARCH_MODEL_PLACEHOLDER}"><option value="auto">Auto</option><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option><option value="anthropic">Anthropic</option><option value="ddgs">DuckDuckGo</option><option value="deepseek" data-model-help="${DEEPSEEK_MODEL_HELP}" data-model-placeholder="Built-in DeepSeek key">DeepSeek</option></select>
+                    <select id="s-websearch-source" class="ui-control" data-model-help="${SEARCH_MODEL_HELP}" data-model-placeholder="${SEARCH_MODEL_PLACEHOLDER}"><option value="auto">Auto</option><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option><option value="anthropic">Anthropic</option><option value="ddgs">DuckDuckGo</option><option value="deepseek" data-model-help="${DEEPSEEK_MODEL_HELP}">DeepSeek</option></select>
                 </div>
                 <div class="form-field ui-field">
                     <label for="s-websearch-model">Model</label>
                     <input id="s-websearch-model" placeholder="${SEARCH_MODEL_PLACEHOLDER}" class="ui-control" name="s-websearch-model" type="text" aria-describedby="s-websearch-model-help">
+                    <label for="s-websearch-key" hidden>Key</label>
+                    <select id="s-websearch-key" class="ui-control" aria-describedby="s-websearch-model-help" hidden></select>
                     <div class="settings-inline-note ui-field-help" id="s-websearch-model-help">${SEARCH_MODEL_HELP}</div>
                 </div>
             </div>

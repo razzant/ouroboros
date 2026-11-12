@@ -849,15 +849,15 @@ def test_the_deepseek_source_sends_no_model_and_takes_its_connection_only_from_a
     assert route.get('unapplied_model') == unapplied and ('not applied' in route['note']) == bool(unapplied)
 
 
-_HEAD_DIAGNOSES = ('names only its connection', 'is not valid', 'exactly as deepseek:: or deepseek@name::')
+_HEAD_DIAGNOSES = ('names one', 'invalid connection name', 'names no key')
 
 
 @pytest.mark.parametrize('saved,diagnosis', [
-    ('deepseek::deepseek-chat', 'names only its connection'), ('deepseek@work::x', 'names only its connection'),
-    ('deepseek@Work::', "name 'Work' is not valid"), ('deepseek@::', "name '' is not valid"),
+    ('deepseek::deepseek-chat', 'names one'), ('deepseek@work::x', 'names one'),
+    ('deepseek@Work::', 'invalid connection name'), ('deepseek@::', 'invalid connection name'),
     # Typos of a connection head: no ::, one colon, another case, a lane suffix.
-    ('deepseek@work', 'exactly as'), ('deepseek@work:', 'exactly as'), ('DeepSeek@work::', 'exactly as'),
-    ('deepseek@work:: (local)', 'exactly as'),
+    ('deepseek@work', 'names no key'), ('deepseek@work:', 'names no key'), ('DeepSeek@work::', 'names no key'),
+    ('deepseek@work:: (local)', 'names no key'),
 ])
 def test_a_deepseek_head_naming_a_model_or_a_malformed_connection_is_refused_before_any_send(monkeypatch, saved, diagnosis):
     monkeypatch.setenv('OUROBOROS_WEBSEARCH_BACKEND', 'deepseek')
@@ -867,6 +867,7 @@ def test_a_deepseek_head_naming_a_model_or_a_malformed_connection_is_refused_bef
     route = resolve_web_search_route()
     assert diagnosis in route['error'] and route['legs'] == route['unavailable'] == []
     assert len([said for said in _HEAD_DIAGNOSES if said in route['error']]) == 1  # one cause, named as itself
+    assert f'({saved})' in route['error'] and route['error'].endswith('choose its key under Web search in Settings')
     result = json.loads(search._web_search(SimpleNamespace(pending_events=[], task_metadata={}), 'q'))
     assert result['error'] == route['error'] and result['legs_tried'] == []
 
@@ -899,8 +900,8 @@ def test_a_deepseek_connection_that_cannot_serve_refuses_and_never_uses_the_buil
     ('deepseek@work::', {'OUROBOROS_CONNECTIONS': [_DEEPSEEK_WORK]}, None),
     # No call can name another connection or a model for this Source, so the built-in key never makes it offered.
     ('deepseek@work::', {'DEEPSEEK_API_KEY': 'synthetic'}, ('missing_credential', 'web_search_backend: deepseek@work no_credentials')),
-    ('deepseek::deepseek-chat', {'DEEPSEEK_API_KEY': 'synthetic'}, ('unsupported_selection', 'names only its connection')),
-    ('deepseek@work', {'DEEPSEEK_API_KEY': 'synthetic'}, ('unsupported_selection', 'exactly as deepseek::')),
+    ('deepseek::deepseek-chat', {'DEEPSEEK_API_KEY': 'synthetic'}, ('unsupported_selection', 'names one')),
+    ('deepseek@work', {'DEEPSEEK_API_KEY': 'synthetic'}, ('unsupported_selection', 'names no key')),
 ])
 def test_the_registry_offers_an_explicit_deepseek_source_only_when_its_own_connection_serves(
         tmp_path, monkeypatch, saved, keys, withheld):

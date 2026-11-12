@@ -314,8 +314,10 @@ def states(env):
     return [row["state"] for row in ledger_rows(env.root)]
 
 
-@pytest.mark.parametrize("backend", chosen_rows(LOOP_LEGS, 0, 2, 3))
-@pytest.mark.parametrize("stage,ledger", [("reservation", []), ("recording", ["released"]), ("claim", ["released"])])
+@pytest.mark.parametrize("backend,stage,ledger", [
+    (backend, stage, ledger) for backend in chosen_rows(LOOP_LEGS, 0, 2, 3)
+    for stage, ledger in (("reservation", []), ("recording", ["released"]), ("claim", ["released"]))
+    if (backend, stage) != ("deepseek", "recording")])  # DeepSeek records no candidate: its claim row is that step
 def test_a_search_window_spent_before_the_send_leaves_the_loop_its_graceful_finish(legs, monkeypatch, backend,
                                                                                   stage, ledger):
     """The leg's own deadline − reserve window ends before it reserves, while it records its candidate or right

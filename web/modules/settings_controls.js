@@ -1,3 +1,5 @@
+import { API_CHOICE_PREFIX, connectionParts, parseModelSource, routeChoiceGroups, selectHtml } from './route_editor_primitives.js';
+
 export function bindEffortSegments(root) {
     root.querySelectorAll('[data-effort-group]').forEach((group) => {
         const targetId = group.dataset.effortTarget;
@@ -168,7 +170,7 @@ export function webSearchPreviewWords(data, name = (id) => id) {
 const searchModelHelpShown = new WeakMap();  // help element → the English it was last given here
 
 /** The web search Model field's help and placeholder: the chosen option's own (DeepSeek, which takes no model, carries
- *  `data-model-help` and `data-model-placeholder`), else the Source select's, which the page renders first. Written
+ *  `data-model-help`), else the Source select's, which the page renders first. Written
  *  from that static English only when it changes (a Source switch), never read back from a page the interface
  *  language may have translated, so typing never rewrites a standing translation; no route grammar is read here. */
 export function syncSearchModelWords(source, field, help) {
@@ -178,6 +180,54 @@ export function syncSearchModelWords(source, field, help) {
     searchModelHelpShown.set(help, own.modelHelp);
     help.innerHTML = own.modelHelp ?? '';
     field.placeholder = own.modelPlaceholder ?? '';
+}
+
+/** The DeepSeek key a saved web search Model chooses: `deepseek` (the built-in key) for a blank value or another
+ *  source's model (not applied), `deepseek@name` for `deepseek@name::`; null for a misspelt head, which the resolver
+ *  refuses (search_routes._DEEPSEEK_HEAD_LIKE) instead of sending it on another key. */
+export function deepseekSearchKey(saved) {
+    const text = String(saved || '').trim();
+    const { source, model } = parseModelSource(text);
+    if (text && connectionParts(source).kind === 'deepseek' && !model) return source;
+    return /^deepseek\s*[@:]/i.test(text) ? null : 'deepseek';
+}
+
+/** The saved Model a chosen DeepSeek key writes (blank for the built-in key, `deepseek@name::` for a named one), or
+ *  the saved value itself for its not-readable entry: the owner chooses a key, this editor spells it (DESIGN.md). */
+export function searchModelForKey(choice, saved) {
+    if (!String(choice || '').startsWith(API_CHOICE_PREFIX)) return saved;
+    const id = choice.slice(API_CHOICE_PREFIX.length);
+    return id === 'deepseek' ? '' : `${id}::`;
+}
+
+/** After a Source switch away from DeepSeek, the key spelling written for it is dropped; any other model stays. */
+export function searchModelAfterSourceSwitch(source, saved) {
+    const { source: head, model } = parseModelSource(saved);
+    return source !== 'deepseek' && String(saved || '').trim() && connectionParts(head).kind === 'deepseek' && !model ? '' : saved;
+}
+
+const searchKeyOptionsShown = new WeakMap();  // key select → the English options it was last given here
+
+/** Under DeepSeek, which takes no model, the Model field gives way to the key it uses: one entry per DeepSeek key of
+ *  Accounts, labelled as every source select labels keys (`keys`: apiConnections()/configuredApiProviders() output),
+ *  and a saved key that cannot send stays chosen and says why, so a save never moves the search to another key. */
+export function syncSearchKey(source, field, select, keys = {}) {
+    if (!source || !field || !select) return;
+    const deepseek = source.value === 'deepseek';
+    [field, ...(field.labels || [])].forEach((el) => { el.hidden = deepseek; });
+    [select, ...(select.labels || [])].forEach((el) => { el.hidden = !deepseek; });
+    const key = deepseekSearchKey(field.value);
+    const choice = key ? `${API_CHOICE_PREFIX}${key}` : 'saved';
+    const [group] = routeChoiceGroups({ ...keys, currentChoice: key ? choice : '', includeSessions: false,
+        includeSubscriptions: false, providers: (keys.providers || []).filter(({ id }) => connectionParts(id).kind === 'deepseek') });
+    if (!key) group.options.unshift({ value: 'saved', label: 'Saved choice (not readable)' });
+    const html = selectHtml('', [group], choice);
+    const options = html.slice(html.indexOf('>') + 1, html.lastIndexOf('</select>'));
+    if (searchKeyOptionsShown.get(select) !== options) {
+        searchKeyOptionsShown.set(select, options);
+        select.innerHTML = options;
+    }
+    select.value = choice;
 }
 
 /* The one Settings section recipe (DESIGN.md principle 7; the 06.11 convergence): a title, one authored lead in
