@@ -222,8 +222,8 @@ def _list(page, out, label, heads):
 # A short name: its temporary directory holds the server's TMPDIR, and the multiprocessing manager's socket
 # below it must stay within macOS's 104-byte AF_UNIX path limit (#2517).
 def test_frames(direct_server_with_data, monkeypatch):
-    """Both heads, their rows in Main's work list and both receipts name what the heads answer, live and after a
-    reload, 1148x808 and 390 wide, light and dark."""
+    """Both heads and their rows in Main's work list name what the heads answer while both receipts say only saved,
+    live and after a reload, 1148x808 and 390 wide, light and dark."""
     from playwright.sync_api import sync_playwright
 
     server, url = direct_server_with_data, direct_server_with_data["url"]

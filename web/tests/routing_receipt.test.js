@@ -140,13 +140,14 @@ test('words saved for Main\'s turn say saved and never its name; a Project room\
         assert.equal(note(bubble).classList.contains('has-reference'), false, 'Main is no other room');
         // The turn's name tells its first request (here an old card's question), never the words that joined it: a
         // stored row from before this rule (live or replayed) says saved and nothing more in Main.
-        const joined = { ...saved, status: 'read', project_name: 'Main', target_label: 'Two new blockers from the report…',
+        const joined = { ...saved, project_name: 'Main', target_label: 'Two new blockers from the report…',
             target_titles: ['Two new blockers from the report…'] };
         renderRoutingAnnotation(bubble, joined, 1);
         assert.equal(note(bubble).textContent, 'Message saved for task');
-        const own = owner(env);  // the same stored fields shown in their Project room name that room's work
-        renderRoutingAnnotation(own, joined, 7);
-        assert.equal(note(own).textContent, 'Message saved for task · Two new blockers from the report…');
+        // A Project room's own receipt from before rows carried their Project address names that room's work.
+        const own = owner(env);
+        renderRoutingAnnotation(own, { ...saved, target_label: 'Audit room › Audit' }, 7);
+        assert.equal(note(own).textContent, 'Message saved for task · Audit room › Audit');
         assert.equal(routingAnnotationText({ action: 'steer_task', status: 'delivered', target: 't-1', target_label: 'Ship' }, 1),
             'Steered task · Ship', 'a steer in Main names the work it chose');
         assert.equal(routingAnnotationText({ action: 'steer_task', status: 'delivered', target: 't-1' }), 'Steered task · Task',
