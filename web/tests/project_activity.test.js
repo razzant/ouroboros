@@ -232,6 +232,43 @@ test('a carried amber room keeps its feed row and the header its amber; a comple
     assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, rooms.has('42')], [['recent'], false, false]);
 });
 
+test('a feed the server could not read keeps the rows the page showed; a read that names the feed replaces them', () => {
+    let rooms = new Map();
+    let index = buildProjectActivityIndex();
+    let feed = [];
+    const snapshots = createStateSnapshotSequencer((data) => {
+        rooms = reconcileProjectRooms(rooms, data).rooms;
+        feed = data.projects;
+        index = buildProjectActivityIndex(rooms, data.project_chat_ids, data.projects);
+    });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    const old = { id: 'old', chat_id: 42 };
+    // The work still stands on its question: the room is amber in every body, carried or not.
+    const asked = { activity: 'waiting', transition: 'none', call: '', turn: [{ kind: 'question', task_id: 't', quiz_id: 'q' }],
+        amber: true, mark: 'still', confirmed: true, works: [] };
+    const read = (extra) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: { 42: asked },
+        projects: [old], project_listable_count: 1, project_chat_ids: [42], current_questions_complete: true, ...extra });
+    apply(read());
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['old'], true]);
+    // The registry unreadable: the feed comes empty with an unknown count, the room set unknown, the question still held.
+    apply(read({ projects: [], project_listable_count: null, project_chat_ids: null, current_questions_complete: false,
+        current_questions_gaps: [{ reason: 'project_registry_unavailable' }] }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['old'], true], 'unknown is not empty');
+    // A read that names the feed again is the feed, empty included.
+    apply(read({ rooms: {}, projects: [], project_listable_count: 0, project_chat_ids: [] }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [[], false]);
+});
+
+test('the header counts a room the feed shows even when the reserved set the page holds does not name it yet', () => {
+    const rooms = new Map([['41', summary('held_continue')], ['43', summary('spending_limit')]]);
+    // The page holds [41]; a new Project 43 is the owner's turn and has its row: it counts.
+    const held = buildProjectActivityIndex(rooms, [41], [{ chat_id: 41 }, { chat_id: 43 }]);
+    assert.deepEqual([held.aggregate.owner, held.byChat.has('43')], [true, true]);
+    // Without its row it is not counted by the owner part (no row to reach), as before.
+    const unfed = buildProjectActivityIndex(rooms, [41], [{ chat_id: 41 }]);
+    assert.deepEqual([unfed.aggregate.owner, unfed.byChat.has('43')], [false, false]);
+});
+
 test('a mark\'s words: its place\'s label and new messages, in one phrase', () => {
     assert.equal(markWords(summary('paused_by_owner')), `Paused · You paused it · ${PRESSED}`);
     assert.equal(markWords(summary('paused_by_owner'), true), `Paused · You paused it · ${PRESSED} · new messages`);

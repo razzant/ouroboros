@@ -75,7 +75,7 @@ export function reconcileProjectRooms(previous = new Map(), data = {}) {
 }
 
 /**
- * Index the Project rooms by chat id (`chatIds`, every reserved room; without them, the rows'). The Projects header's
+ * Index the Project rooms by chat id (`chatIds`, every reserved room, and the rows'). The Projects header's
  * one mark stands for all of them: the strongest shape, and whether any waits for the owner; its label joins their
  * distinct words and what waits for the owner. What waits counts only the rooms the feed's `rows` can show, so an
  * amber header always has an amber row to reach; without rows, every room.
@@ -83,7 +83,10 @@ export function reconcileProjectRooms(previous = new Map(), data = {}) {
 export function buildProjectActivityIndex(rooms = new Map(), chatIds = null, rows = null) {
     const byChat = new Map();
     const shown = Array.isArray(rows) ? new Set(rows.map((row) => String(row?.chat_id))) : null;
-    for (const chat of Array.isArray(chatIds) ? chatIds : (rows || []).map((row) => row?.chat_id)) {
+    // The reserved rooms and the feed's own: a room newer than a held set still counts by its row (the isolation
+    // set itself stays app.js's).
+    for (const chat of new Set([...(Array.isArray(chatIds) ? chatIds : []), ...(rows || []).map((row) => row?.chat_id)]
+        .map(String))) {
         const summary = rooms instanceof Map ? rooms.get(String(chat)) : null;
         if (summary) byChat.set(String(chat), summary);
     }
