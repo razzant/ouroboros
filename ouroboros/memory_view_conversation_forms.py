@@ -396,7 +396,7 @@ def folded_rooms(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterabl
     of other people alone never enters, as it owes no page (``owed``): a page there would seal words nobody
     considered. Unread words, reactions and repeats are host facts wherever they yield: alone (F6w), in their room's
     or conversation's line, or in the window's global count. A group line owes a telling unless that count names the
-    room's unread words; past that the room owes one for a yielded word of my human or of a work."""
+    room's unread words; past that the room owes one for a yielded word that is not unread, a reaction or a repeat."""
     words = {ident.removeprefix("bare:") for ident in gone.get("F6w", ())}
     lined = {g["key"] for g in groups if group_form(g, gone) or g["key"] in gone.get("F6a", ())}
     def needs_telling(group, room):
