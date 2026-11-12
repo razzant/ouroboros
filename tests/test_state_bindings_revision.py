@@ -118,6 +118,18 @@ def test_a_registry_that_vouches_for_no_room_sends_the_map_without_a_revision(re
     assert read()["task_bindings_revision"] == healthy["task_bindings_revision"]
 
 
+def test_the_registry_witness_alone_moves_the_publication_stamp(read_state):
+    """A registry lost beside its commit witness is an unknown room set; with the witness gone too it is a fresh
+    install's empty one. The publication's stamp follows the witness, so a held answer never outlives it."""
+    root, read = read_state
+    (root / "state" / "projects.json").unlink()
+    lost = registry.bindings_revision(root)
+    assert lost and registry.bindings_revision(root) == lost and read()["project_chat_ids"] is None
+    (root / "state" / "projects.json.committed").unlink()
+    assert registry.bindings_revision(root) not in ("", lost), "the witness's removal is a new production"
+    assert read()["project_chat_ids"] == []
+
+
 def test_a_store_changed_within_a_clock_tick_names_the_map_it_sent(read_state, monkeypatch):
     root, read = read_state
     revision = read()["task_bindings_revision"]

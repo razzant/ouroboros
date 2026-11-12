@@ -237,9 +237,11 @@ test('a feed the server could not read keeps the rows the page showed; a read th
     let rooms = new Map();
     let index = buildProjectActivityIndex();
     let feed = [];
+    let revision = null;
     const snapshots = createStateSnapshotSequencer((data) => {
         rooms = reconcileProjectRooms(rooms, data).rooms;
         feed = data.projects;
+        revision = data.project_messages_revision;
         index = buildProjectActivityIndex(rooms, data.project_chat_ids, data.projects);
     });
     const apply = (data) => snapshots.apply(snapshots.begin(), data);
@@ -248,16 +250,18 @@ test('a feed the server could not read keeps the rows the page showed; a read th
     const asked = { activity: 'waiting', transition: 'none', call: '', turn: [{ kind: 'question', task_id: 't', quiz_id: 'q' }],
         amber: true, mark: 'still', confirmed: true, works: [] };
     const read = (extra) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: { 42: asked },
-        projects: [old], project_listable_count: 1, project_chat_ids: [42], current_questions_complete: true, ...extra });
+        projects: [old], project_listable_count: 1, project_chat_ids: [42], current_questions_complete: true,
+        project_messages_revision: 'r1', ...extra });
     apply(read());
-    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['old'], true]);
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [['old'], true, 'r1']);
     // The registry unreadable: the feed comes empty with an unknown count, the room set unknown, the question still held.
     apply(read({ projects: [], project_listable_count: null, project_chat_ids: null, current_questions_complete: false,
-        current_questions_gaps: [{ reason: 'project_registry_unavailable' }] }));
-    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['old'], true], 'unknown is not empty');
+        current_questions_gaps: [{ reason: 'project_registry_unavailable' }], project_messages_revision: null }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [['old'], true, 'r1'],
+        'unknown is not empty: the rows stay with the revision they were read at');
     // A read that names the feed again is the feed, empty included.
-    apply(read({ rooms: {}, projects: [], project_listable_count: 0, project_chat_ids: [] }));
-    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [[], false]);
+    apply(read({ rooms: {}, projects: [], project_listable_count: 0, project_chat_ids: [], project_messages_revision: 'r0' }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [[], false, 'r0']);
 });
 
 test('the header counts a room the feed shows even when the reserved set the page holds does not name it yet', () => {
