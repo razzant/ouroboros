@@ -14,7 +14,8 @@ import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_sta
 import { parseModelSource, composeModelSource, apiConnections, configuredApiProviders, indexProfilesByHarness,
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
-    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords } from './route_editor_primitives.js';
+    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords, KEY_PROBLEM_WORDS,
+    routeKeyProblem } from './route_editor_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { catalogPrograms } from './model_program.js';
@@ -216,9 +217,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function keyNote(row) {
         if (row.local || !row.model || row.source === 'inherit' || sourceId(row)
             || apiProviders.some((provider) => provider.id === row.source)) return '';
-        return choiceNote(row) || { off: 'This key is turned off in Accounts; nothing is sent through it.',
-            removed: 'This key was removed in Accounts; nothing is sent through it.',
-            'no key': 'This source has no key in Accounts.' }[unavailableConnectionState(row.source, connections)];
+        return choiceNote(row) || KEY_PROBLEM_WORDS[unavailableConnectionState(row.source, connections)];
     }
     // Several keys of Main's provider and no built-in one: the owner picks Main's, nothing is guessed (#2969).
     function choiceNote(row) {
@@ -784,24 +783,40 @@ function mountModels(container, { path, ctx }) {
         if (span && span.textContent !== text) span.textContent = text;
         if (span && follows) span.setAttribute('data-follows', ''); else span?.removeAttribute('data-follows');
     };
+    // A role whose key cannot send says so in its line, in place of its description, until it can again.
+    const warn = (id, text) => {
+        const meta = container.querySelector(`[data-setting-row="${id}"] [data-setting-meta]`);
+        if (!meta) return;
+        meta.dataset.plain ??= meta.textContent;
+        meta.textContent = text || meta.dataset.plain;
+        if (text) meta.dataset.tone = 'warn'; else delete meta.dataset.tone;
+    };
     const paint = (settings) => {
         const slots = Object.fromEntries(slotsOf(settings).map((slot) => [slot.slot, slot]));
         const accounts = modelRoleMap(settings[MODEL_ACCOUNTS_KEY]);
-        const route = (slot, follows) => routeWords(settings[slots[slot]?.settingKey], { follows, account: accounts[slot],
-            local: Boolean(slots[slot]?.settingsToggleId) && truthy(settings[`USE_LOCAL_${slot.toUpperCase()}`]) });
+        const local = (slot) => Boolean(slots[slot]?.settingsToggleId) && truthy(settings[`USE_LOCAL_${slot.toUpperCase()}`]);
+        const route = (slot, follows) => routeWords(settings[slots[slot]?.settingKey], { follows, account: accounts[slot], local: local(slot) });
+        const profiles = settings._meta?.setup_contract?.providerProfiles || {};
+        const keyWords = (value, onLocal) => (onLocal ? '' : KEY_PROBLEM_WORDS[routeKeyProblem(value, settings, profiles)] || '');
+        // Several keys of Main's provider and no built-in one: Main waits for the owner's choice (#2969), said here too.
+        const choice = Array.isArray(settings._meta?.main_connection_choice) ? settings._meta.main_connection_choice : [];
+        const labels = choice.length > 1 ? choice.map((id) => apiConnections(settings, profiles).find((entry) => entry.id === id)?.label || id) : [];
         const main = route('main');
+        const mainNote = labels.length ? `Choose the key it uses: ${labels.slice(0, -1).join(', ')} or ${labels.at(-1)}.`
+            : keyWords(settings[slots.main?.settingKey], local('main'));
         container.querySelector('.models-main').innerHTML = `<span class="settings-head-glyph models-main-glyph" aria-hidden="true">${markHtml(main.mark)}</span>
             <div class="models-main-words"><span class="models-kicker">${escapeHtml(wordsOf('models:main').name)}</span>
-                <span class="models-main-name">${escapeHtml(main.follows ? 'Not chosen yet' : main.name)}</span><span class="models-main-meta">${escapeHtml(main.source)}</span></div>
+                <span class="models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span><span class="models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${escapeHtml(mainNote || main.source)}</span></div>
             <button type="button" class="btn btn-default" data-entry-open>Change</button>`;
         const list = fallbackEntries(settings);
         shown = list.map((entry) => entry.value).join(',');
         const localFallback = truthy(settings.USE_LOCAL_FALLBACK);
         const fallbackHtml = list.map((entry, index) => {
             const words = routeWords(entry.value, { account: entry.account, local: localFallback });
+            const note = keyWords(entry.value, localFallback);
             return `<div class="ui-row settings-head" data-entry-id="fallback/${index + 1}" data-actions>
                 <span class="settings-head-glyph settings-head-order" aria-hidden="true">${index + 1}</span>
-                <button type="button" class="settings-head-open ui-hit-area" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta">${escapeHtml(words.source)}</span></button>
+                <button type="button" class="settings-head-open ui-hit-area" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta"${note ? ' data-tone="warn"' : ''}>${escapeHtml(note || words.source)}</span></button>
                 <div class="ui-row-actions"><button type="button" class="btn btn-ghost btn-sm" data-fallback-move="-1" aria-label="Move fallback ${index + 1} up" ${index ? '' : 'disabled'}>↑</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-move="1" aria-label="Move fallback ${index + 1} down" ${index < list.length - 1 ? '' : 'disabled'}>↓</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-remove>Remove</button>${doorSign()}</div></div>`;
@@ -810,6 +825,7 @@ function mountModels(container, { path, ctx }) {
         for (const slot of ROLE_ORDER) {
             const words = route(slot, slot === 'safety' ? 'Light' : 'Main');
             say(`models:${slot}`, words.name, words.follows);
+            warn(`models:${slot}`, keyWords(settings[slots[slot]?.settingKey], local(slot)));
         }
         say('models:websearch', Object.fromEntries(SEARCH_SOURCES)[settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto'] || String(settings.OUROBOROS_WEBSEARCH_BACKEND));
         say('models:context', CONTEXT_WORDS[String(settings.OUROBOROS_CONTEXT_MODE || '').toLowerCase()] || String(settings.OUROBOROS_CONTEXT_MODE || ''));

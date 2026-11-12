@@ -20,7 +20,7 @@ import { accountGroups, destroyHarnessAccounts, initHarnessAccounts, needsSignIn
 import { knownProgram, maintenanceLatestLine } from './harness_maintenance.js';
 import { harnessPresentation } from './harness_presentation.js';
 import { strokeIcon } from './page_icons.js';
-import { editorLine, keyHeads, keyPath, keyTitle, mountKeyPage, parseKeyPath, setKeyEnabled } from './settings_connections.js';
+import { editorLine, keyHeads, keyPath, keyTitle, mountKeyPage, parseKeyPath, referencesLine, setKeyEnabled } from './settings_connections.js';
 import { bindSettingRows, doorSign, settingsRow } from './settings_controls.js';
 import { readSkills } from './settings_extension_forms.js';
 import { registerSettingsPage } from './settings_pages.js';
@@ -292,7 +292,7 @@ function mountList(container, { ctx = {} }) {
         const outcome = await setKeyEnabled({ kind, name }, input.checked, { ask: ctx.ask });
         busy.delete(head.dataset.entryId);
         if (gone) return;
-        setResult(find('[data-entry-result]'), landed(outcome) ? {} : editorLine(outcome));
+        setResult(find('[data-entry-result]'), landed(outcome) ? referencesLine(outcome) : editorLine(outcome));
         drawn.keys = '';   // the switch shows what is stored again, whatever the write answered
         await read();
     }

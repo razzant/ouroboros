@@ -33,6 +33,7 @@ const VALUES = {
     [MODEL_PROCESSING_PREFERENCES_KEY]: { consciousness: 'economy' },
     OUROBOROS_WEBSEARCH_BACKEND: 'auto', OUROBOROS_WEBSEARCH_MODEL: '', OUROBOROS_CONTEXT_MODE: 'max', OUROBOROS_IMAGE_INPUT_MODE: 'auto',
     OUROBOROS_PROCESSING_PREFERENCE: '', OUROBOROS_PROMPT_CACHE_TTL: '1h', OUROBOROS_MODEL_MAX_CONCURRENCY: 3, OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC: 45,
+    OPENAI_API_KEY: 'sk-...', ANTHROPIC_API_KEY: 'sk-...', OPENROUTER_API_KEY: 'sk-...',
 };
 const EFFECT_OF = (key) => (key.startsWith('LOCAL_MODEL_') ? 'local_model' : key.startsWith('MCP_') ? 'now'
     : key === MODEL_CONTEXT_KEY ? 'next_task' : /MODEL|USE_LOCAL|WEBSEARCH|PROCESSING/.test(key) ? 'next_call' : 'next_task');
@@ -77,10 +78,12 @@ function fakeServer(routes, values = {}) {
     return server;
 }
 
-async function open(t, path, { values = {} } = {}) {
+async function open(t, path, { values = {}, meta = {} } = {}) {
     forgetSettingRows();
     const env = setup(t);
     const server = fakeServer(env.routes, values);
+    const document = server.document;
+    server.document = () => { const read = document(); Object.assign(read._meta, meta); return read; };
     applyMcpSettings({ MCP_SERVERS: [] });
     const opened = [];
     const asked = [];
@@ -358,6 +361,28 @@ test('the Models list shows each role\'s route in the picture\'s order, and the 
     await page.press(inside(head(page.container, 'fallback/2'), '[data-entry-open]'));
     await page.press(page.container.querySelector('[data-fallback-add]'));
     assert.deepEqual(page.opened.slice(1), ['models/role/vision', 'models/role/fallback/2', 'models/role/fallback/4']);
+});
+
+test('a role whose key cannot send says so on the Models list, and Main waiting for a key choice says which; a key that sends says nothing', async (t) => {
+    // The Anthropic key is turned off and OpenRouter's is gone: the fallbacks on them and Light (OpenAI, still on) differ.
+    const page = await open(t, 'models', { values: { OPENROUTER_API_KEY: '',
+        OUROBOROS_CONNECTIONS: [{ kind: 'anthropic', name: 'default', enabled: false }] } });
+    const meta = (id) => inside(head(page.container, id), '.ui-row-meta');
+    assert.equal(meta('fallback/1').textContent, 'This key is turned off in Accounts; nothing is sent through it.');
+    assert.equal(meta('fallback/1').dataset.tone, 'warn');
+    assert.equal(meta('fallback/2').textContent, 'This source has no key in Accounts.');
+    assert.equal(meta('fallback/3').textContent, 'OpenAI · by API key', 'a key that sends keeps its plain line');
+    assert.equal(meta('fallback/3').dataset.tone, undefined);
+    const light = inside(page.container.querySelector('[data-setting-row="models:light"]'), '[data-setting-meta]');
+    assert.ok(light.textContent && !light.dataset.tone, 'Light on a working key keeps its description');
+    // Main on a Codex subscription has no key to lose; Main waiting for one of two OpenAI keys names both.
+    assert.ok(!inside(page.container.querySelector('.models-main'), '.models-main-meta').dataset.tone);
+    const waiting = await open(t, 'models', { values: { OUROBOROS_MODEL: 'openai::gpt-main',
+        OUROBOROS_CONNECTIONS: [{ kind: 'openai', name: 'work', api_key: 'sk-w' }, { kind: 'openai', name: 'home', api_key: 'sk-h' }] },
+        meta: { main_connection_choice: ['openai@work', 'openai@home'] } });
+    const card = waiting.container.querySelector('.models-main');
+    assert.equal(inside(card, '.models-main-name').textContent, 'Not chosen yet');
+    assert.equal(inside(card, '.models-main-meta').textContent, 'Choose the key it uses: OpenAI · work or OpenAI · home.');
 });
 
 test('the fallbacks\' order and removal are written on the list: the order through the generic save, their windows through the checker; Remove asks first', async (t) => {

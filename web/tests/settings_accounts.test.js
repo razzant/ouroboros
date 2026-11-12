@@ -9,7 +9,7 @@ import test from 'node:test';
 import { claudexorStatus } from '../modules/claudexor_status_store.js';
 import { accountGroups, destroyHarnessAccounts, harnessFamilyMarkup } from '../modules/harness_accounts.js';
 import { otherKeyRows, providerRowFacts, quotaBars, quotaLeft } from '../modules/settings_accounts.js';
-import { editorLine, keyHeads, keyPath, keyTitle, parseKeyPath, setKeyEnabled } from '../modules/settings_connections.js';
+import { editorLine, keyHeads, keyPath, keyTitle, parseKeyPath, referencesLine, setKeyEnabled } from '../modules/settings_connections.js';
 import { forgetSettingRows, readSettings } from '../modules/settings_controls.js';
 import { settingsPageFor } from '../modules/settings_pages.js';
 import { PROVIDER_CARDS, providerSettingsCard } from '../modules/settings_provider_cards.js';
@@ -548,3 +548,17 @@ test('the wizard\'s provider step renders and collects as before', async (t) => 
     assert.equal(world.posts().length, 0);
     editor.destroy();
 });
+
+test('a key saved, turned off or removed names the rows that still point at a key which cannot send; none, nothing is added', () => {
+    const references = [{ setting: 'OUROBOROS_MODEL_LIGHT', route: 'openai@work::gpt-light', connection: 'openai@work' },
+        { setting: 'OUROBOROS_MODEL_FALLBACKS', entry: '2', route: 'anthropic::claude-a', connection: 'anthropic' }];
+    const saved = { state: 'saved', effect: 'next_call', withheld: 'structure', message: '', code: '', references };
+    assert.deepEqual(referencesLine(saved), { tone: 'warn',
+        text: 'Still naming a removed or disabled key, so they cannot send: Light (OpenAI · work), Fallback 2 (Anthropic)' });
+    assert.match(editorLine(saved).text, /^Saved.*Still naming a removed or disabled key, so they cannot send: Light \(OpenAI · work\)/);
+    assert.equal(editorLine(saved).tone, 'warn');
+    const clean = { ...saved, references: [] };
+    assert.deepEqual(referencesLine(clean), {});
+    assert.doesNotMatch(editorLine(clean).text, /Still naming/);
+});
+

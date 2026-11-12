@@ -214,7 +214,8 @@ function effectOf(row) {
 /** The server's answer to a write that landed, as an Outcome. `changes` is the receipt (old, new, token per key);
  *  without it (an older server, `receipt: 'unavailable'`) the outcome carries no old value and no token. */
 function savedOutcome(row, value, data = {}) {
-    const base = { effect: effectOf(row), withheld: '', message: (data?.warnings || []).join(' '), code: '' };
+    const base = { effect: effectOf(row), withheld: '', message: (data?.warnings || []).join(' '), code: '',
+        references: Array.isArray(data?.connection_references) ? data.connection_references : [] };
     const ignored = data?.ignored_keys;
     if (row.keys.some((key) => (Array.isArray(ignored) ? ignored.includes(key) : Boolean(ignored && Object.hasOwn(ignored, key))))) {
         return { ...base, state: 'refused', code: 'ignored_key', message: 'This setting is not changed from here.' };

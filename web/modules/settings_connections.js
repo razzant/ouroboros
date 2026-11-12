@@ -9,7 +9,7 @@
 // of them writes at once (`keyHeads`, `mountKeyPage`, below).
 import { apiClient } from './api_client.js';
 import { adoptConnectionLabels, connectionLabel } from './connection_labels.js';
-import { API_PROVIDER_ORDER, apiConnections, apiProviderLabel, compatibleEndpoint, parseModelSource } from './route_editor_primitives.js';
+import { API_PROVIDER_ORDER, apiConnections, apiProviderLabel, compatibleEndpoint, connectionReferencesText, parseModelSource } from './route_editor_primitives.js';
 import { CONFIRMS, bindSettingRows, commitSetting, outcomeLine, readSettings, setButtonBusy, settingsRow } from './settings_controls.js';
 import { checkerFieldsNote, checkerReads, checkerUses, deploymentOf } from './settings_policy.js';
 import { rowById } from './settings_rows.js';
@@ -593,7 +593,16 @@ export function editorLine(outcome, saved = 'Saved') {
     const line = outcomeLine({ keys: [], control: { kind: 'secret' } }, { ...outcome, old: undefined, withheld: outcome.withheld || 'structure' });
     if (!line) return {};
     const text = outcome.state === 'saved' ? line.text.replace(/^Saved/, saved) : line.text;
-    return { text: line.note ? `${text}. ${line.note}` : text, tone: line.tone, details: line.details };
+    const words = { text: line.note ? `${text}. ${line.note}` : text, tone: line.tone, details: line.details };
+    const references = referencesLine(outcome);
+    return references.text ? { ...words, text: `${words.text}. ${references.text}`, tone: 'warn' } : words;
+}
+
+/** A key saved, turned off or removed: the rows that still name a key which cannot send, as the save's answer lists
+ *  them (`connection_references`), or nothing. */
+export function referencesLine(outcome, connections = []) {
+    const text = connectionReferencesText(outcome?.references, connections);
+    return text ? { text, tone: 'warn' } : {};
 }
 
 /** Write the list of added keys from a fresh read: `change(rows, fresh)` answers the next list, or null when the key
@@ -815,7 +824,7 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         const outcome = await setKeyEnabled({ kind, name: key.name }, !on, { ask: ctx.ask });
         if (gone) return;
         await reload();
-        say(landed(outcome) ? {} : editorLine(outcome));
+        say(landed(outcome) ? referencesLine(outcome) : editorLine(outcome));
     }
 
     async function remove() {
