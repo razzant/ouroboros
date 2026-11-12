@@ -312,6 +312,31 @@ test('one entry of a per-role map changes and every other role\'s entry stays as
     assert.deepEqual(server.values[MODEL_ACCOUNTS_KEY], VALUES[MODEL_ACCOUNTS_KEY]);
 });
 
+test('Web search saves only what the owner changed: the source or the model chosen elsewhere meanwhile stays', async (t) => {
+    const page = await open(t, 'models/role/websearch');
+    const [source, model] = ['#s-websearch-source', '#s-websearch-model'].map((selector) => page.container.querySelector(selector));
+    const save = async () => page.press(page.container.querySelector('[data-editor-save]'));
+    const elsewhere = (key, value) => { page.server.values[key] = value; page.server.tokens[key] = (page.server.tokens[key] || 0) + 1; };
+    // The model typed; the source moves elsewhere before Save: only the model is written, and the page shows the source.
+    model.value = 'gpt-search';
+    await model.fire('input', { target: model });
+    elsewhere('OUROBOROS_WEBSEARCH_BACKEND', 'openrouter');
+    await save();
+    assert.deepEqual(page.server.posts.map((post) => post.settings), [{ OUROBOROS_WEBSEARCH_MODEL: 'gpt-search' }]);
+    assert.deepEqual([page.server.values.OUROBOROS_WEBSEARCH_BACKEND, source.value], ['openrouter', 'openrouter']);
+    // The source chosen; the model moves elsewhere: only the source is written, and the other model stays.
+    source.value = 'ddgs';
+    await source.fire('change', { target: source });
+    elsewhere('OUROBOROS_WEBSEARCH_MODEL', 'gpt-other');
+    await save();
+    assert.deepEqual(page.server.posts.at(-1).settings, { OUROBOROS_WEBSEARCH_BACKEND: 'ddgs' });
+    assert.deepEqual([page.server.values.OUROBOROS_WEBSEARCH_MODEL, model.value], ['gpt-other', 'gpt-other']);
+    // Nothing changed since the read: nothing is sent.
+    await save();
+    assert.equal(page.server.posts.length, 2);
+    assert.equal(page.container.querySelector('[data-editor-result]').textContent, 'Nothing to save.');
+});
+
 test('the fallbacks keep their per-role entries through an order change, a removal and one fallback\'s own Save', () => {
     const list = fallbackEntries(VALUES);
     assert.deepEqual(list.map((entry) => [entry.value, entry.context]), [['anthropic::claude-a', 0], ['moonshotai/kimi', 128000], ['openai::gpt-b', 0]]);
