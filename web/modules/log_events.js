@@ -467,13 +467,17 @@ function custodyDebtReason(record) {
 
 // The headline's objective warning: a nonempty current debt list warns, and an older row's custody warning
 // stops counting once that list is known empty; other warnings, and one beside an absent list, keep the word.
-// Twin: outcomes.objective_warned.
+// A detail-only fact (nothing checked the result, a red check) asks nothing of the owner (9 Nov 2026).
+// Twin: outcomes.objective_warned / DETAIL_ONLY_WARNINGS.
+const DETAIL_ONLY_WARNINGS = ['receipt_absent', 'verification_red_unreconciled', 'children_undecided'];
 function objectiveWarned(record) {
     const objective = record?.outcome_axes?.objective || {};
     const debt = record?.delegated_runs_unreconciled;
+    const codes = [objective.warning, ...(Array.isArray(objective.warnings) ? objective.warnings : [])]
+        .filter((code) => code && !DETAIL_ONLY_WARNINGS.includes(code));
     if (Array.isArray(debt) && debt.length) return true;
-    if (!Array.isArray(debt) || objective.warning !== CUSTODY_DEBT_REASON) return Boolean(objective.warning);
-    return (Array.isArray(objective.warnings) ? objective.warnings : []).some((code) => code && code !== CUSTODY_DEBT_REASON);
+    if (!Array.isArray(debt) || codes[0] !== CUSTODY_DEBT_REASON) return codes.length > 0;
+    return codes.some((code) => code !== CUSTODY_DEBT_REASON);
 }
 
 // outcome_axes.execution.plan_review picks its sentence by lookup, never by its spelling; absent classes keep fallback.

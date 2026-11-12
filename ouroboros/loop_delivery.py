@@ -90,11 +90,9 @@ class DeliveryCandidate:
 # Host continuations retain the answer and require an explicit next selection.
 # These states retain the concrete action/handover reason, not another protocol.
 _SKILL_ACTION_HOLD_CONTROL = "skill_action_or_revision_required"
-_CHILD_ABSORPTION_HOLD_CONTROL = "child_absorption_or_revision_required"
 _AUTHORING_HANDOVER_HOLD_CONTROL = "authoring_handover_recovery_required"
 _DELIVERY_HOLD_CONTROLS = frozenset({
     _SKILL_ACTION_HOLD_CONTROL,
-    _CHILD_ABSORPTION_HOLD_CONTROL,
     _AUTHORING_HANDOVER_HOLD_CONTROL,
 })
 # After these host-shown rounds (an owner follow-up, a routeless final's note) the answer is fresh, owing no selection.
@@ -1245,7 +1243,9 @@ def _no_tool_final_answer(
             ):
                 return held("plan_gate")
             handoff_msg = _loop()._compute_subagent_handoff(tools, limit_ctx.drive_root, limit_ctx.task_id, content)
-            if handoff_msg:
+            if handoff_msg:  # the pre-delivery notice rides the same door: one door, one return
+                notice = _loop()._claim_pre_delivery_notice(tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace)
+                handoff_msg = f"{handoff_msg}\n\n{notice}" if notice else handoff_msg
                 if content and content.strip():
                     messages.append({"role": "assistant", "content": content})
                 _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{handoff_msg}")
@@ -1265,17 +1265,6 @@ def _no_tool_final_answer(
                 _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
                 tools._ctx._completion_pair_appended = bool(explicit_candidate)
                 return held("review_update")
-            absorption_result = _loop()._maybe_enforce_child_absorption_gate(
-                tools, limit_ctx, content, messages, emit_progress, llm_trace,
-            )
-            if absorption_result == "continue":
-                # Preserve the child action reason until disposition or explicit stop.
-                _hold_delivery_for_skill_action(
-                    tools, llm_trace, control=_CHILD_ABSORPTION_HOLD_CONTROL,
-                )
-                return held("child_absorption")
-            if absorption_result is not None:
-                return absorption_result
             skill_finalization_was_injected = bool(
                 getattr(tools._ctx, "_skill_finalization_injected", False)
             )
