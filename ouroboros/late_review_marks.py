@@ -28,11 +28,12 @@ releases it, with a reason (``chronicle_store._rule_mark_release``). Showing it,
 mailbox acknowledgement of a notice is not that release.
 
 A left wave's mark also keeps what its record said when it was published (``review.outcome``, from
-``outcome_facts``: the verdict word, the findings of each kind and how many asked answers arrived),
-because its words print a seat's PASS the same with or without notes. The waiting line counts the
-marks whose recorded outcome is a ``clean_pass`` and the marks that carry no such facts; the list
+``outcome_facts``: the verdict word, the findings of each kind, how many asked answers arrived and how
+many advisers gave none), and its head says the same in words. The waiting line counts the marks whose
+outcome is a ``clean_pass`` and those of a verdict-bearing review that keep no outcome; the list
 prints each mark's outcome, reading the review record of an older mark as it stands now
-(``mark_outcome``). These are facts beside the words: nothing is released, hidden or ranked by them.
+(``mark_outcome``), and what landed of a commit review's change (``mark_landing``). These are facts
+beside the words: nothing is released, hidden or ranked by them.
 
 A result review its author finished before (``pending_review=finish``) whose late verdict is a PASS of exactly
 the delivered subject also resolves that task's missing-conclusion warning (``resolve_pending_result_review``).
@@ -160,8 +161,9 @@ def _mark(mark_id: str, room: str, facts: Mapping[str, Any]) -> Dict[str, Any]:
 
 def outcome_facts(record: Any) -> Optional[Dict[str, Any]]:
     """What a review record says at this moment, as the scalars a late mark keeps beside its words: the verdict
-    word, how many findings of each kind the record holds, and how many of the answers asked of its counted
-    seats arrived (one per seat and question; the seat count for a record that keeps no per-question tally). A
+    word, how many findings of each kind the record holds, how many of the answers asked of its counted seats
+    arrived (one per seat and question; the seat count for a record that keeps no per-question tally) and how
+    many advisers, heard outside the count, gave no readable answer (``unheard``). A
     record that is not settled formed no verdict: ``{"verdict": ""}``, never a guessed PASS. A plan council's
     record is asked no verdict question: ``{"advice": True}``, never its missing findings read as none. No record
     at all says nothing (``None``): a mark published without one keeps no outcome, so its list line reads the
@@ -172,21 +174,25 @@ def outcome_facts(record: Any) -> Optional[Dict[str, Any]]:
         return {"advice": True}
     if record.get("state") != "settled":
         return {"verdict": ""}
+    from ouroboros.review_ledger import ANSWERED_STATUSES  # D15->D06 is lazy-only
+
     verdict = record.get("verdict") or {}
     quorum = verdict.get("quorum") or {}
     tallies = [part for part in (quorum.get("parts") or {}).values() if isinstance(part, Mapping)] or [quorum]
     return {"verdict": str(verdict.get("aggregate") or ""),
             **{name: len(verdict.get(f"{name}_findings") or []) for name in ("critical", "advisory", "additional")},
             "asked": sum(int(tally.get("assigned") or 0) for tally in tallies),
-            "answered": sum(int(tally.get("responded") or 0) for tally in tallies)}
+            "answered": sum(int(tally.get("responded") or 0) for tally in tallies),
+            "unheard": sum(1 for row in record.get("rows") or [] if isinstance(row, Mapping)
+                           and row.get("additional") and row.get("status") not in ANSWERED_STATUSES)}
 
 
 def clean_pass(outcome: Any) -> bool:
-    """A PASS with nothing left to read: every answer asked of a counted seat arrived and the record holds no
-    finding of any kind. A PASS with notes, a PASS short of an answer, a FAIL and a missing verdict are all
-    something else."""
+    """A PASS with nothing left to read: every answer asked of a counted seat arrived, every adviser answered
+    and the record holds no finding of any kind. A PASS with notes, a PASS short of an answer, a FAIL and a
+    missing verdict are all something else."""
     return (isinstance(outcome, Mapping) and outcome.get("verdict") == "PASS"
-            and not any(outcome.get(name) for name in ("critical", "advisory", "additional"))
+            and not any(outcome.get(name) for name in ("critical", "advisory", "additional", "unheard"))
             and int(outcome.get("asked") or 0) > 0 and outcome.get("answered") == outcome.get("asked"))
 
 
@@ -199,9 +205,10 @@ def outcome_words(outcome: Any) -> str:
     if not outcome.get("verdict"):
         return "no verdict formed"
     kinds = [f"{outcome[name]} {name}" for name in ("critical", "advisory", "additional") if outcome.get(name)]
-    short = int(outcome.get("asked") or 0) - int(outcome.get("answered") or 0)
+    short, unheard = int(outcome.get("asked") or 0) - int(outcome.get("answered") or 0), int(outcome.get("unheard") or 0)
     return (str(outcome["verdict"]) + ", " + (", ".join(kinds) if kinds else "no findings")
-            + (f", {short} asked answer{'' if short == 1 else 's'} missing" if short > 0 else ""))
+            + (f", {short} asked answer{'' if short == 1 else 's'} missing" if short > 0 else "")
+            + (f", {unheard} adviser answer{'' if unheard == 1 else 's'} missing" if unheard else ""))
 
 
 def mark_outcome(mark: Mapping[str, Any], drive_root: Any = None) -> Optional[Dict[str, Any]]:

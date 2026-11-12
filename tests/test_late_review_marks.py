@@ -1051,7 +1051,8 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
     from ouroboros.review_ledger import ledger_dir, record_path
 
     clean = outcome_facts(_settled("PASS"))
-    assert clean == {"verdict": "PASS", "critical": 0, "advisory": 0, "additional": 0, "asked": 4, "answered": 4}
+    assert clean == {"verdict": "PASS", "critical": 0, "advisory": 0, "additional": 0, "asked": 4, "answered": 4,
+                     "unheard": 0}
     assert clean_pass(clean) and outcome_words(clean) == "PASS, no findings"
     seats_only = outcome_facts(_settled("PASS", parts=False))  # a record that keeps no per-question tally
     assert (seats_only["asked"], seats_only["answered"]) == (2, 2) and clean_pass(seats_only)
@@ -1062,6 +1063,14 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
               "no verdict formed": _settled("PASS", state="pending")}
     for words, record in others.items():
         assert outcome_words(outcome_facts(record)) == words and not clean_pass(outcome_facts(record)), words
+    # An adviser is heard outside the count: one that gave no answer leaves something unread, one that answered
+    # with nothing to say does not, and a counted seat's missing answer is told as an asked answer, not here.
+    def advised(status, additional=True):
+        return outcome_facts({**_settled("PASS"), "rows": [{"seat_id": "s1", "status": "responded"},
+                                                           {"seat_id": "adv", "status": status, "additional": additional}]})
+    assert outcome_words(advised("failed")) == "PASS, no findings, 1 adviser answer missing"
+    assert not clean_pass(advised("failed")) and not clean_pass(advised("custody_lost"))
+    assert clean_pass(advised("responded")) and clean_pass(advised("failed", additional=False))
     assert outcome_facts(None) is None and not clean_pass(None), "no record says nothing, never a verdict"
     advice = outcome_facts({**_settled("NOT_PERFORMED"), "surface": "intention"})  # a plan council asks no verdict
     assert advice == {"advice": True} and outcome_words(advice) == "advice, not a verdict" and not clean_pass(advice)
