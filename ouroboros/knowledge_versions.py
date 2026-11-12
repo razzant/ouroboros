@@ -298,6 +298,14 @@ def removed_sections(old: Any, new: Any) -> list[dict[str, Any]] | None:
     return out
 
 
+def _listed(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The facts a listing line shows, without the row's note texts (a long history is not held whole)."""
+    text = row.get("new_content")
+    stored = isinstance(text, str) and not row.get("content_digested") and bool(text or not row.get("new_sha256"))
+    return {**{key: row.get(key) for key in ("new_sha256", "old_sha256", "ts", "focus", "mode", "reason", "delta",
+                                             "old_chars", "new_chars", "reverted_from")}, "text_stored": stored}
+
+
 def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
     delta = row.get("delta") if isinstance(row.get("delta"), Mapping) else {}
     parts = [str(row.get("new_sha256") or "(no revision recorded)"), str(row.get("ts") or "time unknown"),
@@ -317,8 +325,7 @@ def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
         parts.append("headings removed: " + "; ".join(str(item) for item in headings))
     if row.get("reverted_from"):
         parts.append(f"reverted_from {row['reverted_from']}")
-    text = row.get("new_content")
-    if row.get("content_digested") or not isinstance(text, str) or (not text and row.get("new_sha256")):
+    if not row["text_stored"]:
         marks.append("text not stored")
     return "- " + " · ".join(parts + marks)
 
@@ -326,7 +333,7 @@ def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
 def render_history(note: Any) -> str:
     """This note's versions, newest first, one line each, with the current one marked."""
     history = NoteHistory(note.address)
-    rows = [row for _offset, row in history]
+    rows = [_listed(row) for _offset, row in history]
     address = note.address
     lines = [f"History of {address.topic!r} ({address.scope}): {len(rows)} recorded version(s), newest first. "
              f"Current revision: {note.revision}."]

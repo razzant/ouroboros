@@ -165,9 +165,8 @@ def _meta_bytes(meta: dict) -> int:
     return len(json.dumps(meta, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
-def _omitted(value) -> dict:
-    return {"omitted": True, "chars": len(value) if isinstance(value, str) else len(json.dumps(value, ensure_ascii=False)),
-            "sha256": hashlib.sha256((value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)).encode("utf-8")).hexdigest()}
+def _omitted(text: str) -> dict:
+    return {"omitted": True, "chars": len(text), "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
 
 
 def _bound_delta_meta(meta: dict) -> None:
