@@ -449,6 +449,7 @@ export function createRoomWork({
         if (attempt) lines.push([row.work.last_resume.by?.actor === 'host' ? tr('room_work.detail.last_start', 'Last start')
             : tr('room_work.detail.last_resume', 'Last Resume'), attempt]);
         const what = row.kind === 'pending' ? tr('room_work.what.pending', 'Your message, being sent')
+            : row.kind === 'question' ? tr('room_work.what.question', 'A question that waits for you')
             : row.kind === 'direct' ? (row.cmid ? tr('room_work.what.reply', 'A reply to your message')
                 : tr('room_work.what.turn', 'A turn in this chat'))
                 : tr('room_work.what.task', 'A task');
@@ -509,6 +510,8 @@ export function createRoomWork({
 
     function activateRow(row) {
         if (!row) return;
+        // A question's own row leads where its View question does: it is no task whose message history could find.
+        if (row.kind === 'question') { if (row.question) void viewQuestion(row); return; }
         if (row.target?.isConnected) navigate(row);
         else if (row.kind === 'pending') return;
         else if (history && !['absent', 'moved', 'loading'].includes(row.lookup)) void reveal(row);
@@ -525,9 +528,11 @@ export function createRoomWork({
         const view = viewFor(row);
         view.row = row;
         const { el, main } = view;
-        const navigable = Boolean(row.target?.isConnected);
+        const asks = row.kind === 'question' && Boolean(row.question);
+        const navigable = asks || Boolean(row.target?.isConnected);
         // An unloaded row asks the room's history on its press: until then it claims nothing about where its message is.
-        const lookable = !navigable && row.kind !== 'pending' && Boolean(history) && !['absent', 'moved'].includes(row.lookup);
+        const lookable = !navigable && !['pending', 'question'].includes(row.kind) && Boolean(history)
+            && !['absent', 'moved'].includes(row.lookup);
         // Opened details survive a census change; a press then asks again where its message is.
         const detailable = !navigable && row.kind !== 'pending' && (!history || Boolean(row.lookup) || expanded.has(row.key));
         const isOpen = detailable && expanded.has(row.key);
@@ -541,8 +546,8 @@ export function createRoomWork({
         if (navigable || lookable || detailable) {
             main.setAttribute('role', 'button');
             main.tabIndex = 0;
-            main.setAttribute('aria-label', navigable
-                ? fmt(row.card ? 'Go to task: {name}, {state}' : 'Go to message: {name}, {state}', { name: full, state })
+            main.setAttribute('aria-label', asks ? fmt('View question: {name}, {state}', { name: full, state })
+                : navigable ? fmt(row.card ? 'Go to task: {name}, {state}' : 'Go to message: {name}, {state}', { name: full, state })
                 : lookable ? fmt('Open: {name}, {state}', { name: full, state })
                     : fmt('Details: {name}, {state}', { name: full, state }));
             if (row.lookup === 'loading') main.setAttribute('aria-busy', 'true');
@@ -557,7 +562,7 @@ export function createRoomWork({
         } else {
             for (const name of ['role', 'tabindex', 'aria-label', 'aria-expanded', 'aria-controls', 'aria-busy']) main.removeAttribute(name);
         }
-        main.dataset.target = navigable ? 'card' : lookable ? 'history' : detailable ? 'details' : 'none';
+        main.dataset.target = asks ? 'question' : navigable ? 'card' : lookable ? 'history' : detailable ? 'details' : 'none';
         // The whole name is in the DOM; CSS clamps it to two lines, focus and open details show it whole.
         if (view.full !== full) { view.full = full; view.nameEl.textContent = full; }
         // The work's shape in its word's ink; something in it that waits for the owner takes the owner's hue as

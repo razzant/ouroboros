@@ -286,6 +286,47 @@ test('a known question keeps a door while its work is unconfirmed; a confirmed w
     } finally { shade?.destroy(); restoreDom(prior); }
 });
 
+test('a question row\'s name leads to its question, never to a history read; a work row\'s name still reads its task', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade = null;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge thinking', node('div', 'app-page-actions ui-chrome-group', header));
+        const messages = node('div', 'chat-messages', page);
+        const asked = [], reveals = [];
+        const historyPager = { pageOf: () => 'replay:recent', revisit: async () => ({ status: 'applied' }),
+            around: async (address) => { asked.push(address); return { status: 'anchor', anchor: { state: 'absent', task_id: address.slice(5) } }; } };
+        const item = { kind: 'open_question', task_id: 't-ended', quiz_id: 'format' };
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { stick: false, cancel() {}, scroll() {}, claim: () => () => true }, historyPager,
+            captureVisibleTimelineAnchor: () => null,
+            works: () => workState([running('t-run')], room('working', { turn: [item] })),
+            liveCardRecords: new Map(), pendingSubmissions: new Map(),
+            revealQuestion: async (...args) => { reveals.push(args); return true; } });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const main = (id) => list.children.find((el) => el.dataset.id === id).querySelector('.rw-main');
+        const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+        trigger.click();
+        assert.equal(main('question:t-ended:format').dataset.target, 'question');
+        assert.match(main('question:t-ended:format').getAttribute('aria-label'), /^View question: /);
+        main('question:t-ended:format').click();
+        await settle();
+        assert.deepEqual([reveals, asked], [[['t-ended', 'format', { focus: 'question' }]], []]);
+        // A work row's name still reads the page around its task.
+        trigger.click();
+        main('t-run').click();
+        await settle();
+        assert.deepEqual(asked, ['task:t-run']);
+        assert.equal(reveals.length, 1);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
 test('a question row says its own words as long as its turn item makes the row, read or no read', () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
     let shade = null;
