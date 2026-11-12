@@ -6,7 +6,8 @@ import threading
 
 import pytest
 
-from ouroboros.context_timing import collector_rests, counted, measured_sections, section_spans, timed, timed_section
+from ouroboros.context_timing import (adopt, apart, collector_rests, counted, measured_sections, section_spans, timed,
+                                      timed_section)
 
 
 @timed_section("demo")
@@ -98,6 +99,21 @@ def test_another_threads_window_does_not_see_this_ones_work():
         worker.join()
         assert section_spans()["work"] == {"reads": 1}
     assert seen["spans"] == {}
+
+
+def test_work_counted_apart_joins_a_measured_window_only_when_adopted():
+    """Fix round 1 (Fable 1): ``apart`` keeps work run beside a window in a window of its own; ``adopt`` adds its counts
+    and keys (a repeat there counts as done again) to the window being measured. Outside one, or with nothing counted
+    apart, it changes nothing."""
+    with apart() as holder:
+        counted("reads", key="k")
+    adopt(holder)  # no window is measured here: nothing to add to
+    with measured_sections():
+        adopt({})  # a question that never opened its window
+        assert section_spans()["work"] == {}
+        adopt(holder)
+        counted("reads", key="k")
+        assert section_spans()["work"] == {"reads": 2, "reads_again": 1}
 
 
 def test_the_collector_rests_for_a_block_and_resumes_after_it():
