@@ -10,6 +10,8 @@ import { tr, fmt } from './i18n.js';
 import { fetchJson } from './api_client.js';
 import { catalogPrograms } from './model_program.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
+import { priceWords } from './route_editor_primitives.js';
+import { modelCatalog } from './model_catalog_store.js';
 import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
 import {
@@ -353,10 +355,13 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
 }
 
 /** What one `/api/model-catalog` answer suggests for a place's or a circle's Model field. Both store a route string,
- *  and the local model has none (its row says `use_local`), so that row is left out. Throws for an unread catalog. */
-export function modelSuggestions(data) {
+ *  and the local model has none (its row says `use_local`), so that row is left out. Throws for an unread catalog.
+ *  Each model's catalog price stands beside its name (`meta`, never part of the route) unless `tierPriced`
+ *  (model_catalog_store.js): the model runs as a lead, and on a Fast or Economy tier that price is not the one paid. */
+export function modelSuggestions(data, { tierPriced = true } = {}) {
     if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error('The model catalog could not be read.');
-    return data.items.filter((item) => !item?.use_local);
+    return data.items.filter((item) => !item?.use_local)
+        .map((item) => (item?.price && !tierPriced ? { ...item, meta: priceWords(item.price) } : item));
 }
 
 /** The one write a press on the sheet asks for, as the contract's change; null when it needs no write. */
@@ -434,7 +439,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
     function onCatalog(event) {
         const data = event.detail;
         if (sheet.closed) return;
-        ui.models = modelSuggestions(data);
+        ui.models = modelSuggestions(data, { tierPriced: modelCatalog.tierPriced('lead') });
         ui.catalog = data;
         updateModelChooser(body.querySelector('[data-model-chooser]'), ui.models, catalogPrograms(data, {sources: data.model_sources}));
     }
@@ -609,7 +614,8 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         if (!ui.moreOpen || modelsRead) return;
         modelsRead = true;
         try {
-            const data = await readModels({ cache: 'no-store', signal: abort.signal });
+            // The window's settings document says the tier the place's lead pays, read once (model_catalog_store.js).
+            const [data] = await Promise.all([readModels({ cache: 'no-store', signal: abort.signal }), modelCatalog.readConnections()]);
             onCatalog({detail: data});
         } catch { ui.status.more = { text: tr('places.models.unavailable', 'Model suggestions could not be read; your model is kept.'), tone: 'warn' }; paint(); }
     }, true);

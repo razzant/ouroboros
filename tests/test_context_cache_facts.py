@@ -131,6 +131,8 @@ def test_no_clause_without_a_change_before_that_request(tmp_path):
 @pytest.mark.parametrize("call, money", [
     ({"provider": "openrouter", "cost": 0.2154924, "cost_final": True}, "; write 4,625 tokens; cost $0.2155 reported |"),
     ({"provider": "openrouter", "cost": 0.2154924, "cost_final": False}, "; write 4,625 tokens; cost $0.2155 estimated |"),
+    # An estimated zero (nothing to price it by) is no proven zero: unknown.
+    ({"provider": "openrouter", "cost": 0.0, "cost_final": False}, "; write 4,625 tokens; cost unknown (not in known spend) |"),
     # A proven zero is a number; a charge below the printed precision is never that zero.
     ({"provider": "openrouter", "cost": 0.0, "cost_final": True}, "; write 4,625 tokens; cost $0.0000 reported |"),
     ({"provider": "openrouter", "cost": 0.00003, "cost_final": True}, "; write 4,625 tokens; cost <$0.0001 reported |"),

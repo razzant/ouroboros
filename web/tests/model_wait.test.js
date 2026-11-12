@@ -232,6 +232,21 @@ test('each wait reason has the one label its row shows, and a route whose access
     assert.equal(modelWaitReasonLabel('connection_unavailable', false), 'Key unavailable', 'a key that is off is off, watched or not');
 });
 
+test('the picker tells its role editor the tier the waiting call pays, and no other setting', async () => {
+    const { pickerDocument } = await import('../modules/model_wait.js');
+    const settings = { OPENROUTER_API_KEY: 'k', OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL: 'anthropic/claude-opus-5.5' };
+    const tier = (patch) => pickerDocument(settings, row(patch)).OUROBOROS_PROCESSING_PREFERENCE;
+    assert.equal(tier({ processing_preference: 'economy' }), 'economy', 'a Fast or Economy call: the editor names no catalog price');
+    assert.equal(tier({ processing_preference: 'standard' }), 'standard', 'the call pays Standard although the default is Fast');
+    assert.equal(tier({ processing_preference: '' }), '', 'the route default, as captured');
+    assert.equal(tier({}), 'fast', 'a row from before the field takes the default tier');
+    const loaded = pickerDocument(settings, row({ processing_preference: 'standard' }));
+    assert.equal(loaded.OPENROUTER_API_KEY, 'k');
+    assert.equal(loaded.model, row().model);
+    assert.deepEqual(loaded.OUROBOROS_MODEL_ACCOUNTS, { main: 'personal' });
+    assert.equal('OUROBOROS_MODEL' in loaded, false, 'no other setting reaches the draft');
+});
+
 test('Sign in again opens the provider page that holds the sign-in card; Settings opens Accounts', async (t) => {
     const env = installDom();
     t.after(() => restoreDom(env.prior));

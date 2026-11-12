@@ -12,7 +12,7 @@ import pytest
 
 import ouroboros.loop_tool_execution as execution
 from ouroboros.observability import read_call_payload
-from ouroboros.tool_call_log import logical_calls, worker_phrase, worker_position
+from ouroboros.tool_call_log import HOST_SETTLED_STATUSES, logical_calls, worker_phrase, worker_position
 from ouroboros.tools.tool_result import ToolResult
 
 
@@ -352,7 +352,7 @@ def test_the_recent_tools_header_counts_calls_not_rows(tmp_path):
     assert tools.count("✓ read_file path=") == 10
 
 
-@pytest.mark.parametrize("stub", ["host_error", "interrupted"])
+@pytest.mark.parametrize("stub", sorted(HOST_SETTLED_STATUSES))  # a new host status reaches both readers or fails here
 @pytest.mark.parametrize("real_first", [True, False])
 def test_a_duplicate_host_error_settlement_never_hides_the_real_one(real_first, stub):
     real, host = _log_row("tool_call", "i", status="ok"), _log_row("tool_call", "i", status=stub)
