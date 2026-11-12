@@ -240,10 +240,14 @@ def _own_section(heading: Any) -> Any:
     return heading.section if own else None
 
 
+def _first_line(text: str) -> str:
+    """A text's first line without its LF or CRLF end: a setext heading's title may span lines."""
+    return text.split("\n", 1)[0].removesuffix("\r")
+
+
 def heading_line(raw: bytes, heading: Any) -> str:
     """The heading's first line as the note spells it (spacing, closing hashes, indentation), without its line end."""
-    line = raw[heading.span.start_byte:heading.span.end_byte].split(b"\n", 1)[0]
-    return (line[:-1] if line.endswith(b"\r") else line).decode("utf-8")
+    return _first_line(raw[heading.span.start_byte:heading.span.end_byte].decode("utf-8"))
 
 
 def _char_offsets(raw: bytes, positions: set[int]) -> dict[int, int]:
@@ -334,15 +338,16 @@ def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
         parts.append(f"net change {delta['change_chars']:+d} chars")
     elif isinstance(row.get("old_chars"), int) and isinstance(row.get("new_chars"), int):
         parts.append(f"{row['old_chars']} → {row['new_chars']} chars")
+    # A stored heading is '#' * level + ' ' + title; a setext title that spans lines is named by its first line.
     sections, headings = delta.get("removed_sections"), delta.get("removed_headings")
     if isinstance(sections, list) and sections:
-        parts.append("sections removed: " + "; ".join(
-            f"{item.get('heading')} ({item.get('chars')} chars)" for item in sections if isinstance(item, Mapping)))
+        parts.append("sections removed: " + "; ".join(f"{_first_line(str(item.get('heading')))} ({item.get('chars')} chars)"
+                                                      for item in sections if isinstance(item, Mapping)))
     elif isinstance(headings, list) and headings:
-        parts.append("headings removed: " + "; ".join(str(item) for item in headings))
+        parts.append("headings removed: " + "; ".join(_first_line(str(item)) for item in headings))
     added = delta.get("added_headings")  # recorded at write time: no earlier version is parsed again here
     if isinstance(added, list) and added:
-        parts.append("headings added: " + "; ".join(str(item) for item in added))
+        parts.append("headings added: " + "; ".join(_first_line(str(item)) for item in added))
     if row.get("reverted_from"):
         parts.append(f"reverted_from {row['reverted_from']}")
     if not row["text_stored"]:
@@ -394,7 +399,8 @@ def render_changes(note: Any, held: Mapping[str, Any]) -> str:
 
     After the rows written since that version, each block is the whole lines it touches: ``- `` every
     line of the held version, then ``+ `` every line of the current one, with where each side's lines
-    begin and the heading the block sits under in the current note; then the outline and the full
+    begin and the heading the block sits under in the current note (its line as the outline prints it,
+    so a header stays one line under a setext heading whose title spans lines); then the outline and the full
     read. Putting each block's ``+`` lines in place of its ``-`` lines in the held version gives the
     current note (``text_change.line_blocks``). Nothing here is cut: a reply that cannot carry all of
     it sends the complete current note instead (``tools/knowledge.py``)."""
@@ -404,7 +410,7 @@ def render_changes(note: Any, held: Mapping[str, Any]) -> str:
     body = []
     for old_start, old_end, new_start, new_end, removed, added in blocks:
         under = next((h for h in reversed(headings) if h.span.start_byte <= new_start), None)
-        where = f"under {'#' * under.level} {under.title}" if under else "before the first heading"
+        where = f"under {heading_line(note.raw, under)}" if under else "before the first heading"
         (old_count, old_lines), (new_count, new_lines) = (_lines(old_raw, old_start, old_end, "-"),
                                                           _lines(new_raw, new_start, new_end, "+"))
         old_line, new_line = old_raw.count(b"\n", 0, old_start) + 1, new_raw.count(b"\n", 0, new_start) + 1

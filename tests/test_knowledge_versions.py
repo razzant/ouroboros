@@ -5,6 +5,8 @@ import hashlib
 import json
 import re
 
+import pytest
+
 from ouroboros import knowledge as store
 from ouroboros import knowledge_versions as versions
 from ouroboros import markdown_source
@@ -282,6 +284,31 @@ def test_the_changes_since_a_held_version_show_every_block_whole(tmp_path):
     assert rendered.count("\n@ yours: 1 line(s) from line ") == 7 and "not shown" not in rendered
     assert applied_blocks(held.text, rendered) == current.text
     assert rendered.endswith("The complete current text is knowledge_read(topic='notes/река', scope='global').\n")
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+def test_a_heading_whose_title_spans_lines_is_named_by_its_first_line_in_block_headers_and_history_rows(tmp_path, eol):
+    """A paragraph followed by --- is a level-2 heading whose title spans lines. A stale reply's block header names
+    it by its first line as the note writes it (the outline's form), so each header stays one line and the reply
+    still applies; a history row names it by its first line too."""
+    setext = f"The review runs weekly{eol}and the owner reads it first.{eol}---{eol}"
+    target = address(tmp_path, "notes/weekly")
+    held = store.write_knowledge_note(target, f"# Notes{eol}{eol}Intro.{eol}{eol}{setext}{eol}Timeout: 3.{eol}").current
+    current = store.write_knowledge_note(target, held.text.replace("Timeout: 3.", "Timeout: 5."),
+                                         expected_revision=held.revision).current
+    stale = tools._knowledge_write(context(tmp_path), "notes/weekly", "Mine.", scope="global",
+                                   expected_revision=held.revision)
+    assert "revision_conflict" in stale and "1 block(s)" in stale, stale
+    line = held.text[:held.text.index("Timeout: 3.")].count("\n") + 1  # after the frontmatter the writer adds
+    assert (f"\n@ yours: 1 line(s) from line {line} → current: 1 line(s) from line {line}, under The review runs "
+            "weekly: 1 chars removed, 1 added\n") in stale
+    assert all(line.endswith(" added") for line in stale.split("\n") if line.startswith("@ yours: ")), stale
+    assert applied_blocks(held.text, stale) == current.text
+    gone = store.write_knowledge_note(target, current.text.replace(setext + eol, ""), expected_revision=current.revision)
+    listing = versions.render_history(gone.current)
+    assert all(line.startswith(("History of ", "- ", "Read one: ")) for line in listing.splitlines()), listing
+    assert f"sections removed: ## The review runs weekly ({len(setext)} chars) · current\n" in listing, listing
+    assert "headings added: # Notes; ## The review runs weekly\n" in listing, listing
 
 
 def test_removed_sections_name_heading_size_and_first_line_cut_to_120(tmp_path):
