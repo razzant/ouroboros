@@ -10,9 +10,11 @@ change that does not fit the text they are given.
 out, ``difflib.SequenceMatcher`` pairs the remaining lines, and every replaced block is tightened
 by the characters its two sides share at their edges. Line ends are ordinary characters, so CRLF,
 a missing final newline and multibyte text need no special case. The diff is only as good as
-``difflib`` makes it, and its work is bounded for transport (``_LINE_PAIRS``): past that bound the
-middle is one replaced block. ``exact_change`` is what a caller stores or shows as exact: it
-rebuilds both sides and falls back to one span that replaces everything. Pure: no I/O, no clock.
+``difflib`` makes it, and its work has a deterministic bound, ``_MATCH_PAIRS``: a bound on diff
+work inside the storage code, not a judgment rule. Past it the diff only grows coarser (popular
+lines stop seeding matches, then the middle is one replaced block), never inexact.
+``exact_change`` is what a caller stores or shows as exact: it rebuilds both sides and falls back
+to one span that replaces everything. Pure: no I/O, no clock.
 """
 from __future__ import annotations
 
