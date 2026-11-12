@@ -213,7 +213,8 @@ def test_pending_recovery_reuses_held_original_request_without_history_scan(tmp_
                     "access": "readonly"}, "processing": {"requested": "economy", "submitted": None}}
     monkeypatch.setattr(custody, "_CUSTODY", {})
     custody.record_start_requested(tmp_path, **record)
-    monkeypatch.setattr(custody, "invocation_record", _no_history_scan)
+    # Binding the replayed start re-reads this one invocation's addressed row under its decision lock;
+    # a history scan stays forbidden.
     monkeypatch.setattr(custody, "_iter_rows", _no_history_scan)
 
     class Gateway:
