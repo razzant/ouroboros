@@ -160,9 +160,9 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             # `auto` is the provider-safe spelling of omission (a strict schema may fill it).
             "description": (
                 "This child's reasoning effort: auto/omitted = this room's primary clamped into its "
-                "helper bounds; a request outside those bounds runs at the nearest bound. A level in its "
-                "model name always wins; otherwise a row my human pinned keeps its level unless I request "
-                "another in Cyber Pro; the result says so. For a session row this is the delegated run's level."
+                "helper bounds. A level in the model name always holds; otherwise a row my human pinned keeps "
+                "its level and a request beyond the bounds runs at the nearest bound; in Cyber Pro my request is "
+                "applied as asked. The result says so. For a session row this is the delegated run's level."
             ),
         },
         "deadline_at": {

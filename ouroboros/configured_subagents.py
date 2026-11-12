@@ -109,8 +109,8 @@ class ConfiguredSubagent:
     # ``native``/``packet`` on an api_model row (see REVIEW_DELIVERIES); "" on a
     # session row, which always retrieves. Absent in saved bytes means native.
     delivery: str = ""
-    # ``review_lane``/``factory_default`` when the runtime minted the row; empty
-    # does not establish authorship. Round-trips as saved.
+    # ``review_lane``/``factory_default`` on some runtime-minted rows; empty does
+    # not establish authorship. Round-trips as saved.
     minted_from: str = ""
 
 
@@ -326,7 +326,7 @@ def configured_subagents_dict(config: ConfiguredSubagents) -> dict[str, Any]:
         if not row.enabled:
             payload["enabled"] = False
         # The review fields follow the same rule: defaults (unmarked, native,
-        # owner-authored) are not written, so a document saved before they
+        # no birth marker) are not written, so a document saved before they
         # existed serializes to the same bytes.
         if row.review_eligible:
             payload["review_eligible"] = True

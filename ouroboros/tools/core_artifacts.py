@@ -415,8 +415,8 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
     "name": "escalate",
     "description": (
         "Escalate one decision outside your authority, or one your human asked you to ask, to the nearest "
-        "mind that holds it; within your authority, decide and say so. A root task asks its human through a quiz "
-        "card; a subagent asks its parent through a typed mailbox frame, which the parent answers with forward_to_worker "
+        "mind that holds it; within your authority, decide. A root task asks its human through a quiz card; a "
+        "subagent asks its parent through a typed mailbox frame, which the parent answers with forward_to_worker "
         "or escalates higher verbatim. From Presence work answering a place conversation, the card goes privately to Main. "
         "In a private place conversation with your human, briefly tell them through its connector what you asked and where "
         "before any requested wait, so they can find the question. In a shared conversation, judge what is appropriate for that audience.\n\n"
