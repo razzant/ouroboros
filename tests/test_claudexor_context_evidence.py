@@ -895,3 +895,35 @@ def test_a_silent_engine_keeps_a_pins_record_only_while_its_account_is_the_newes
         assert (plan.window_tokens, plan.model_route.get("accountFingerprint")) == (70_000, "identity-a")
     else:
         assert (plan.window_tokens, plan.initial_mode, plan.window_witness_bound) == (0, "max", False)
+
+
+@pytest.mark.parametrize("repeat", ["guard", "within-one-pass"])
+def test_the_guards_repeat_is_a_pass_of_its_own_not_work_done_again(tmp_path, monkeypatch, catalog, repeat):
+    """Fix round 2 (Carbon S1): the horizon guard asks and walks again by design: its receipt names exactly the work done
+    again that the same build asked once names (the target's single pass), so the health block says nothing more. A
+    read repeated within one pass still counts as done again, and the health block names it."""
+    from ouroboros import context_fit as cf
+    from ouroboros.context_health import _host_work_line
+    from ouroboros.transcript_prefix import _running_code
+
+    guard = repeat == "guard"
+    window = 70_000 if guard else 872_000
+    catalog["value"]["models"][0].update(contextWindow=window, maxContextWindow=window)
+
+    def twice(task, *, allow_fetch):  # one pass that reads the same catalog twice
+        cf.resolve_context_fit_route(task, allow_fetch=allow_fetch)
+        return cf.resolve_context_fit_route(task, allow_fetch=allow_fetch)
+
+    def receipt(resolver_for, root):
+        plan, spans = _built(monkeypatch, root, resolver_for)
+        again = {verb: n for verb, n in spans["work"].items() if verb.endswith("_again")}
+        return plan, spans["work"], again, _host_work_line([{"code": _running_code(), "work": spans["work"]}])
+
+    _plan, _work, once, once_line = receipt(lambda _task: cf.resolve_context_fit_route, tmp_path / "once")
+    plan, work, again, line = receipt(lambda task: cf.RouteQuestion(task, cf.resolve_context_fit_route if guard else twice),
+                                      tmp_path / "early")
+    assert work["catalog_calls"] == 2 and (plan.initial_mode != "max") is guard  # asked twice: by the guard, or in one pass
+    if guard:
+        assert again == once and line == once_line  # the guard's repeat adds no work done again, and no health fact
+    else:
+        assert again == {**once, "catalog_calls_again": 1} and "catalog_calls 1" in line

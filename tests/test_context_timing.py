@@ -6,8 +6,8 @@ import threading
 
 import pytest
 
-from ouroboros.context_timing import (adopt, apart, collector_rests, counted, measured_sections, section_spans, timed,
-                                      timed_section)
+from ouroboros.context_timing import (adopt, another_pass, apart, collector_rests, counted, measured_sections,
+                                      section_spans, timed, timed_section)
 
 
 @timed_section("demo")
@@ -114,6 +114,23 @@ def test_work_counted_apart_joins_a_measured_window_only_when_adopted():
         adopt(holder)
         counted("reads", key="k")
         assert section_spans()["work"] == {"reads": 2, "reads_again": 1}
+
+
+def test_a_pass_repeated_by_design_counts_again_only_what_one_pass_repeats():
+    """Fix round 2 (Carbon S1): a second pass the window makes by design (``another_pass``) adds its counts; a key counts
+    as done again only when one pass repeats it, or when work after both passes does."""
+    with measured_sections():
+        counted("reads", key="k")
+        with another_pass():
+            counted("reads", key="k")  # the repeat by design
+            assert section_spans()["work"] == {"reads": 2}
+            counted("reads", key="k")  # done twice within that pass
+        assert section_spans()["work"] == {"reads": 3, "reads_again": 1}
+        counted("reads", key="k")  # done again after both passes
+        assert section_spans()["work"] == {"reads": 4, "reads_again": 2}
+    with another_pass():  # outside a measured window it counts nothing and fails nothing
+        counted("reads", key="k")
+    assert section_spans() == {}
 
 
 def test_the_collector_rests_for_a_block_and_resumes_after_it():

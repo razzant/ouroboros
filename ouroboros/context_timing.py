@@ -157,6 +157,24 @@ def apart() -> Iterator[Dict[str, Any]]:
             holder["window"] = _WORK.get()
 
 
+@contextlib.contextmanager
+def another_pass() -> Iterator[None]:
+    """Work the measured window repeats by design (the fit's second route question and walk) as a pass of its own: its
+    counts add to the window, a key it repeats itself counts ``_again``, and its keys join the window's afterwards, so
+    only work done twice within one pass, or after both, reads as done again."""
+    window = _WORK.get()
+    if window is None:
+        yield
+        return
+    keys: Set[Tuple[str, Hashable]] = set()
+    token = _WORK.set((window[0], keys))
+    try:
+        yield
+    finally:
+        _WORK.reset(token)
+        window[1].update(keys)
+
+
 def adopt(holder: Optional[Dict[str, Any]]) -> None:
     """Add work counted ``apart`` (its counts and seen keys) to the window being measured, on that window's thread."""
     window, target = (holder or {}).get("window"), _WORK.get()

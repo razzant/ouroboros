@@ -37,7 +37,7 @@ from ouroboros import context_budget
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
-from ouroboros.context_timing import adopt, apart, counted, timed, timed_section
+from ouroboros.context_timing import adopt, another_pass, apart, counted, timed, timed_section
 
 log = logging.getLogger(__name__)
 
@@ -1085,9 +1085,10 @@ def build_context_fit_plan(
         # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view, or none,
         # is asked again here, at the usual point, and that answer is used (its refusal is final); a walk that reads
         # the same frame is not repeated unless it was refused.
-        late = frame(*answer(lambda: route_resolver.again(task)))
-        if refused is not None or late.walked != state.walked:
-            contents, initial_mode, delivered = walk(late)
+        with another_pass():  # a repeat by design, not work done again (``context_health`` names only the latter)
+            late = frame(*answer(lambda: route_resolver.again(task)))
+            if refused is not None or late.walked != state.walked:
+                contents, initial_mode, delivered = walk(late)
         state = late
     route, evidence, window_record, known_window = state.route, state.evidence, state.window_record, state.known_window
     output_reserve, working_reserve, window_basis, ratio = (state.output_reserve, state.working_reserve,
