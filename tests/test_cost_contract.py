@@ -367,7 +367,7 @@ ROUND = ("connect", "begins", "statements", "lock_acquired", "open", "os_open", 
 ROWS_PER_PAGE = 500  # the memory's chat reader reads rows a page at a time (``chat_chain``)
 TAIL_PAGE = 2_000  # the stored tail is read a page of rows at a time (``chronicle_store._TAIL_PAGE``)
 ARCHIVES_BACKFILLED = 3  # the recent sections open at most this many newest archives of a log (``jsonl_tail``)
-MAIN_TURNS =("T:main", "T:mainw", "T:main:foreign")
+MAIN_TURNS = ("T:main", "T:mainw", "T:main:foreign")
 BREADTH_TURNS = ("T:main:broad", "T:main:rows", "T:main:archive:first", "T:main:archive")  # the k=1 root only
 
 

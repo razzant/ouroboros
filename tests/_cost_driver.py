@@ -378,7 +378,7 @@ def _install_checkpoints(meter: CostMeter, srv: Any, result: Dict[str, Any], roo
 
     def publication_steps(root, *steps):
         # What waits on the store's publication is B2 wherever it runs (the product's ``when_ready`` runs
-        # it on the import thread, never the caller's).
+        # it on a background thread, the import's or ``store-ready-steps``, never the caller's).
         result.setdefault("when_ready_threads", []).append(threading.current_thread().name)
         return when_ready(root, *[functools.partial(tagged, "B2", step) for step in steps])
 
