@@ -4173,7 +4173,7 @@ html[data-layout="stack"] #primary-sidebar {
    at every scroller, so it is declared on the scrollers themselves; a code block or a table inside scrolls sideways
    as its own scroller. */
 html[data-layout="stack"] :is(#chat-messages, .chat-messages, .files-list, .files-sidebar, .files-preview-content,
-    .skills-scroll, .widgets-scroll, .settings-scroll, .dashboard-body) {
+    .skills-scroll, .widgets-scroll, .dashboard-body) {
     touch-action: pan-y pinch-zoom;
 }
 /* Outside the scrollers too (a header, the composer's row of capsules, the attach button): the page itself only pans
@@ -5614,12 +5614,12 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
    fill, so fills never stack and its rows part by space alone. Neither has an edge: the transparent 1px border only
    keeps each box's size. */
 :is(.agent-family-card, .harness-account-row, .harness-login-card, .settings-effort-card,
-    .settings-model-card, .settings-custom-secret-row, .settings-extension-section, .mcp-server-card) {
+    .settings-model-card, .settings-extension-section) {
     border: 1px solid transparent; background: var(--surface-tray); border-radius: var(--radius-inner); box-shadow: none;
 }
 :is(.agent-family-card, .harness-login-card, .settings-effort-card, .settings-model-card,
-    .settings-extension-section, .mcp-server-card) :is(.harness-account-row, .harness-login-card, .settings-effort-card,
-    .settings-model-card, .settings-custom-secret-row) {
+    .settings-extension-section) :is(.harness-account-row, .harness-login-card, .settings-effort-card,
+    .settings-model-card) {
     background: transparent;
 }
 
@@ -5926,19 +5926,6 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     background: rgba(var(--neutral-rgb), 0.03);
 }
 
-/* Settings LAN reachability hint. */
-/* The hint is a tray with its words in their own ink: a warning takes the hue's word, nothing takes an outline. */
-.settings-lan-hint {
-    margin-top: 8px;
-    padding: 8px 12px;
-    border-radius: var(--radius-inner);
-    font-size: var(--type-meta);
-    background: var(--surface-tray);
-    border: 1px solid transparent;
-    color: var(--text-secondary);
-}
-.settings-lan-hint[data-tone="warn"] { color: var(--status-warn-word, var(--text-secondary)); }
-.settings-lan-hint a { color: inherit; text-decoration: underline; opacity: 0.9; }
 /* Dashboard Evolution (evolution.js): the campaign object, then one time line of versions with the chosen version
    beneath it. Both are .ui-card objects on the shared materials. The chart's inks: the line and its area, milestone
    dots ringed in the object's own colour, ticks for every version and a dashed bridge over a break in the axis. */
@@ -9397,9 +9384,8 @@ html[data-layout="stack"] .project-panel {
 .ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }
 .ui-model-footer { flex: 0 0 auto; padding: var(--space-2) var(--space-3); overflow-wrap: anywhere; }
 
-/* Account rows are purpose-built (identity left, actions right), not the
-   settings key/value grid — .settings-custom-secret-row's 0.65fr/1.35fr
-   columns inverted the proportions and its align-items:end sank the text.
+/* Account rows are purpose-built (identity left, actions right), not a
+   key/value grid, whose columns inverted the proportions and sank the text.
    Two lines: the account and its status on top, muted metadata below, actions
    docked right across both (docs/DESIGN.md "Account group / row anatomy"). No
    row is privileged: the default CLI login uses this exact layout. */

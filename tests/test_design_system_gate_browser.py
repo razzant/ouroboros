@@ -96,7 +96,7 @@ MEASURE = """root => {
         // A page body scrolls sideways only when it CAN scroll (overflow-x auto/scroll); a clipping container
         // (overflow: hidden) with a clipped child, such as a closed Effort strip, is not a page scroll.
         const pageBody = ['auto','scroll'].includes(s.overflowX) &&
-            (e.matches('.page, .settings-scroll, .skills-scroll, .widgets-scroll, .files-list, .dashboard-panel') ||
+            (e.matches('.page, .skills-scroll, .widgets-scroll, .files-list, .dashboard-panel') ||
              ['auto','scroll'].includes(s.overflowY));
         if (pageBody && !local(e) && e.scrollWidth > e.clientWidth + 1)
             overflow.push({node:name(e),extra:e.scrollWidth-e.clientWidth});

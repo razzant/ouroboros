@@ -1036,20 +1036,16 @@ details.ui-disclosure > :not(summary) { margin-top: var(--space-2); }
 
 .ui-status[data-tone="ok"],
 .ui-result[data-tone="ok"],
-.settings-inline-status[data-tone="ok"],
-.settings-test-result[data-tone="ok"] { color: var(--status-ok-fg); }
+.settings-inline-status[data-tone="ok"] { color: var(--status-ok-fg); }
 .ui-status[data-tone="warn"],
 .ui-result[data-tone="warn"],
-.settings-inline-status[data-tone="warn"],
-.settings-test-result[data-tone="warn"] { color: var(--status-warn-fg); }
+.settings-inline-status[data-tone="warn"] { color: var(--status-warn-fg); }
 .ui-status[data-tone="danger"],
 .ui-status[data-tone="error"],
 .ui-result[data-tone="danger"],
 .ui-result[data-tone="error"],
 .settings-inline-status[data-tone="danger"],
-.settings-inline-status[data-tone="error"],
-.settings-test-result[data-tone="danger"],
-.settings-test-result[data-tone="error"] { color: var(--status-error-fg); }
+.settings-inline-status[data-tone="error"] { color: var(--status-error-fg); }
 /* `muted` is a tone the code emits but no rule named. */
 .ui-status[data-tone="neutral"],
 .ui-status[data-tone="muted"],

@@ -388,7 +388,7 @@ async def _run_settings_writer(fn: Any, context: Any, body: Any) -> JSONResponse
         )
         return json_error(
             f"the settings save is still running in the server after {2 * bound_sec}s "
-            "and was left to finish on its own; reload Settings to see what landed",
+            "and was left to finish on its own; open Settings again to see what landed",
             503, code="settings_save_timeout", saved=None,
         )
 

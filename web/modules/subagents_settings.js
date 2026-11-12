@@ -394,11 +394,6 @@ export function buildAvailableSubagentsSetting(setting) {
     return { enabled: Boolean(setting?.enabled), items: (setting?.items || []).map(canonicalRow) };
 }
 
-export function subagentSettingsFingerprint(value) {
-    const parsed = parseAvailableSubagentsSetting(value);
-    return JSON.stringify(parsed.setting ? buildAvailableSubagentsSetting(parsed.setting) : value ?? null);
-}
-
 export function availableSubagentsSavePayload({ loaded = false, parseError = '', setting, allowEmptyReviewPool = false } = {}) {
     if (!loaded || parseError) return {};
     const built = buildAvailableSubagentsSetting(setting);

@@ -36,8 +36,6 @@ export const SAFETY_LEVELS = Object.freeze([
     { value: 'light', label: 'Outgoing', note: 'Messages, posts, skills, connectors and starting work are read first.' },
     { value: 'full', label: '+ Commands', note: 'Shell commands and scripts are read first too. File edits are not.' },
 ]);
-export const SAFETY_RANK = Object.freeze({ off: 0, light: 1, full: 2 });
-export const SAFETY_KINDS = Object.freeze({ your_work: 'Your work', consciousness: 'Consciousness' });
 
 /** The typed facts of `places.WAKE_FACTS`: wake choices and observations about one message. */
 const FACT_WORDS = Object.freeze({

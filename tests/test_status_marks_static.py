@@ -55,7 +55,6 @@ owner | web/room_work.css | .rw-row .rw-pill-question:not(:disabled):hover | bac
 # work, Logs events, widget tones, account quota and spent windows, unsaved settings and file drafts, and a work that
 # went to a fallback route by itself (`.model-fallback`: its card's model fact and its word in the Main sheet).
 warning | web/ui.css | .settings-inline-status[data-tone="warn"] | color
-warning | web/ui.css | .settings-test-result[data-tone="warn"] | color
 warning | web/ui.css | .ui-chip[data-tone="warn"] | background, color
 warning | web/ui.css | .ui-status[data-tone="warn"] | color
 warning | web/ui.css | .ui-result[data-tone="warn"] | color
@@ -75,7 +74,6 @@ warning | web/style.css | .message-share-status[data-tone="warn"] | color
 warning | web/style.css | .model-fallback | color
 warning | web/style.css | .msg-attachment-outcome | color
 warning | web/style.css | .new-project-trust-note | background, color
-warning | web/style.css | .settings-lan-hint[data-tone="warn"] | color
 warning | web/style.css | .skills-skip-glyph | color
 warning | web/style.css | .toast-warn | border-color, color
 warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
