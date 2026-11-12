@@ -494,8 +494,9 @@ def _pass(root: pathlib.Path, row: Dict[str, Any], should_stop: Callable[[], boo
         facts["witness"] = {"generation": generation, "chains": job.witness}
     if job.holds:  # the log plane judged its chains in this run: what it holds, since when
         facts["holds"] = maintenance_jobs._with_since(job.holds, row.get("holds"), utc_now_iso())
-    # A supported run ends another platform's verdict; a log plane that holds nothing leaves no ``holds`` field
-    # (Storage reads any, an empty list too, as a pass's report).
+    # A supported run ends another platform's verdict; a log plane that judged its chains and holds nothing (``[]``)
+    # leaves no ``holds`` field (Storage reads any, an empty list too, as a pass's report), while one that did not
+    # judge them (``None``: not walked, or an archive it could not list) leaves the field as it stands.
     ended = [field for field, over in (("unsupported", True), ("holds", job.holds == [])) if over and field in row]
     with store.open_store(root, write=True) as txn:
         if "witness" in facts:
