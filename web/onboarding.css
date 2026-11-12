@@ -1350,6 +1350,11 @@ textarea::placeholder {
   .footer-copy {
     display: none;
   }
+
+  /* With the aside gone the buttons stay on the right at any window size, not only below the viewport rule. */
+  .footer-actions {
+    margin-inline-start: auto;
+  }
 }
 
 /* A short window: each pill as wide as its own title, so five titles stay on one line where they fit. */
