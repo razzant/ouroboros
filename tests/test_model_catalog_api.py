@@ -686,9 +686,20 @@ def test_the_spend_gaps_follow_the_runtime_lane_of_each_role():
         "Main", "Light", "Safety Supervisor", "Consciousness"]
     routed = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
     helper = {"route": {"kind": "api_model", "target_id": "deepseek::deepseek-v4"}}
-    assert known_spend_gaps(routed, {"enabled": False, "items": [helper]}) == [], "a switched-off catalog runs no helper"
-    assert known_spend_gaps(routed, {"enabled": False, "items": [{**helper, "review_eligible": True}]}) == ["Agents"]
+    assert known_spend_gaps(routed, {"enabled": False, "items": [helper]}) == ["Agents"], (
+        "a review names any enabled row with the catalog switched off")
+    assert known_spend_gaps(routed, {"enabled": False, "items": [{**helper, "enabled": False}]}) == []
+    # An empty Consciousness with its own flag set wakes on that flag alone; Light keeps Main's lane too.
+    priced = {"OUROBOROS_MODEL_LIGHT": "anthropic/claude-opus-5.5", "OUROBOROS_MODEL_VISION": "anthropic/claude-opus-5.5"}
+    assert known_spend_gaps({**priced, "OUROBOROS_MODEL": "openai::gpt-6", "USE_LOCAL_CONSCIOUSNESS": True,
+                             "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["Main"]
+    # An empty Vision runs Main's lane whatever its own flag says (slot_lane_label).
+    assert known_spend_gaps({**priced, "OUROBOROS_MODEL_VISION": "", "OUROBOROS_MODEL": "openai::gpt-6",
+                             "USE_LOCAL_CONSCIOUSNESS": True, "USE_LOCAL_VISION": True,
+                             "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["Main", "Vision"]
     rouble = {"OUROBOROS_RUB_USD_RATE": "0.012", "CLOUDRU_FOUNDATION_MODELS_API_KEY": "k", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
     assert known_spend_gaps({**rouble, "OUROBOROS_MODEL": "cloudru::GigaChat-2-Max"}) == []
+    assert known_spend_gaps({**rouble, "OUROBOROS_MODEL": "cloudru@work::GigaChat-2-Max"}) == [], "one catalog for every connection"
+    rouble.pop("CLOUDRU_FOUNDATION_MODELS_API_KEY")
     assert known_spend_gaps({**rouble, "OUROBOROS_MODEL": "cloudru@work::GigaChat-2-Max"}) == ["all model roles"], (
-        "the rouble catalog is read with the built-in key only")
+        "the catalog is read with the built-in key")

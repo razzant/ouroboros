@@ -437,6 +437,7 @@ def price_source(provider: Any, settings: Optional[Mapping[str, Any]] = None) ->
             rate = float(read("OUROBOROS_RUB_USD_RATE") or 0)
         except (TypeError, ValueError):
             rate = 0.0
+        # One catalog for every Cloud.ru connection, read with the built-in key (llm_pricing.fetch_cloudru_pricing).
         return "catalog" if rate > 0 and str(read("CLOUDRU_FOUNDATION_MODELS_API_KEY") or "").strip() else "unknown"
     return "catalog" if kind in CATALOG_PROVIDERS else "unknown"
 
@@ -449,9 +450,9 @@ _SPEND_ROLES = (("main", "Main"), ("light", "Light"), ("safety", "Safety Supervi
 def _role_routes(settings: Mapping[str, Any], role: str) -> List[Tuple[str, bool]]:
     """The ``(model, local)`` routes a role's calls may take by this document, as the runtime resolves them (a model
     labelled `` (local)`` parses as the local lane). A slot naming its own model takes its own flag
-    (route_choice.model_role_slot_override); an empty one runs Main's model on Main's flag and, when its own flag is
-    set, on that one too (Light's summaries keep Main's: the runtime splits). Safety runs its own slot, else a set
-    Light, else Main, on that slot's flag (safety_config)."""
+    (route_choice.model_role_slot_override). An empty one runs Main's model: Consciousness on its own flag when set,
+    Vision on Main's (slot_lane_label), Light on both (its helpers keep Main's flag: the runtime splits). Safety runs
+    its own slot, else a set Light, else Main, on that slot's flag (safety_config)."""
     from ouroboros.model_slots import MODEL_ROLE_SETTINGS
 
     def flag(key: str, words: Tuple[str, ...] = ("true", "1")) -> Optional[bool]:
@@ -479,20 +480,21 @@ def _role_routes(settings: Mapping[str, Any], role: str) -> List[Tuple[str, bool
     local = flag(f"USE_LOCAL_{role.upper()}")
     if own(role):
         return [route(own(role), local)]
-    return list(dict.fromkeys([main, route(own("main"), local) if local is not None else main]))
+    if local is None or role == "vision":
+        return [main]
+    return list(dict.fromkeys([route(own("main"), local)] + ([main] if role == "light" else [])))
 
 
 def _subagent_rows(value: Any) -> List[Mapping[str, Any]]:
-    """The helper rows that can run: a switched-off catalog keeps only its review rows (reviewer_slot_config)."""
+    """The catalog's rows: each enabled one can run even with the catalog switched off, since a review names any
+    enabled row (reviewer_slot_config.catalog_review_row)."""
     if isinstance(value, str):
         try:
             value = json.loads(value or "null")
         except ValueError:
             return []
     items = value.get("items") if isinstance(value, Mapping) else value
-    rows = [row for row in items if isinstance(row, Mapping)] if isinstance(items, list) else []
-    off = isinstance(value, Mapping) and value.get("enabled") is False
-    return [row for row in rows if row.get("review_eligible")] if off else rows
+    return [row for row in items if isinstance(row, Mapping)] if isinstance(items, list) else []
 
 
 def known_spend_gaps(settings: Mapping[str, Any], subagents: Any = None) -> List[str]:
@@ -500,12 +502,7 @@ def known_spend_gaps(settings: Mapping[str, Any], subagents: Any = None) -> List
     no known price (``all model roles`` when none of the configured ones has), the first leg of built-in web
     search, and enabled API helpers (``Agents``; ``subagents`` is the resolved list, else the document's)."""
     def unpriced(model: str, local: bool) -> bool:
-        if not model:
-            return False
-        parsed = parse_model_route(model)
-        # Cloud.ru's catalog is read with the built-in connection's key only (llm_pricing.fetch_cloudru_pricing).
-        named_cloudru = parsed.kind == "cloudru" and bool(parsed.connection)
-        return named_cloudru or price_source("local" if local else parsed.kind, settings) == "unknown"
+        return bool(model) and price_source("local" if local else parse_model_route(model).kind, settings) == "unknown"
 
     routed = [(label, _role_routes(settings, role)) for role, label in _SPEND_ROLES]
     routed = [(label, routes) for label, routes in routed if any(model for model, _ in routes)]
