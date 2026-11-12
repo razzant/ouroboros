@@ -28,9 +28,7 @@ from ouroboros.llm_attempt import _PhysicalSendNotStarted, _attempt_request, _ca
 from ouroboros.llm_capability_policy import model_catalog as model_catalog, catalog_admits_model as catalog_admits_model
 from ouroboros.send_clock import stamp_clock_note
 from ouroboros.llm_substitution import (
-    AccountRotation, CapabilityRetry, SubstitutionBudget, capability_refusal_text, substitution_fact, failed_account_preference,
-    take_failed_account_preference)
-from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
+    AccountRotation, CapabilityRetry, SubstitutionBudget, capability_refusal_text, substitution_fact, send_account)
 from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope, current_model_wait,
                                   dispatch_deadline_remaining_sec, prepared_call_scope)
 from ouroboros.observability import persist_call, update_call_manifest_metadata
@@ -293,28 +291,11 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
             isinstance(block, dict) and block.get("type") == "text" for block in content
         ):
             message["content"] = context_fit.extract_plain_text_from_content(content)
-    role = parameters.get("model_role", "")
-    override = parameters.get("model_account_override")
-    if override is not None and not isinstance(override, str):
-        raise ValueError("model_account_override must be a profile name, empty Auto, or None")
-    pin = override.strip() if override is not None else model_role_option(MODEL_ACCOUNTS_KEY, role)
-    account = {"mode": "pin", "profileId": pin} if pin else {"mode": "auto"}
-    # The next matching-route DISPATCH only; Pin still consumes it. A prospective
-    # build reads the same fact without spending it, so the priced candidate and
-    # the send it admits stay identical.
-    failed_profile = (take_failed_account_preference if not parameters.get("prospective")
-                      else failed_account_preference)(target, parameters)
-    if not pin and not parameters.get("_no_account_preference"):
-        # Carry the conversation's last account as a preference, not admission;
-        # the engine still chooses. A round already answered by the wrong model
-        # carries none, so its ranking decides where every redo lands.
-        for message in reversed(prepared):
-            native = message.get("nativeContinuation") or {}
-            route = native.get("route") or {}
-            if route.get("source") == target["source"] and route.get("model") == target["resolved_model"]:
-                if route.get("credentialProfileId") and route["credentialProfileId"] != failed_profile:
-                    account["preferredProfileId"] = route["credentialProfileId"]
-                break
+    # The conversation's account, else the account this task's plan rests on, as a preference the engine may overrule
+    # (``send_account``). The failed account is spent by the next matching DISPATCH only; Pin still consumes it. A
+    # prospective build reads that fact without spending it, so the priced candidate and the send it admits stay identical.
+    plan = getattr(getattr(current_model_wait(), "tool_context", None), "context_fit_plan", None)
+    account = send_account(target, prepared, parameters, plan=plan, consume=not parameters.get("prospective"))[0]
     options = {wire: parameters[key] for key, wire in (
         ("reasoning_effort", "reasoningEffort"), ("temperature", "temperature"),
         ("cache_affinity", "cacheKey"),
