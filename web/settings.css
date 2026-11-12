@@ -392,26 +392,6 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
     overflow-wrap: anywhere;
 }
 
-/* "More providers" (the shared disclosure, ui.css details.ui-disclosure): rarely used provider cards stay mounted
-   inside it whether it is open or not; the summary names them in meta ink, its caret says it opens. */
-.settings-more-providers > summary { flex-wrap: wrap; padding: var(--space-2) 0; }
-.settings-more-providers > summary .settings-provider-title { flex: 1 1 auto; }
-.settings-more-providers > summary .settings-provider-hint { flex: 1 1 100%; padding-left: calc(6px + 2px + var(--space-1) + var(--space-2)); }
-
-.settings-more-providers-body {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-}
-
-/* A collapsed subsection inside a section (Agents → Delegation → Advanced) is the same shared disclosure. */
-.settings-subsection-body {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-1) 0 var(--space-2);
-}
-
 .settings-extension-sections {
     display: flex;
     flex-direction: column;
@@ -992,14 +972,6 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
 
 .local-toggle[data-warning="1"] {
     color: var(--status-warn-fg);
-}
-
-.settings-test-result {
-    display: none;
-    margin-top: 4px;
-    color: var(--text-meta);
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
 }
 
 @media (max-width: 980px) {
