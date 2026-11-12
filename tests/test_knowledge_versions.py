@@ -36,13 +36,18 @@ def test_outline_ranges_read_back_exactly_their_sections(tmp_path):
     for fact in ("Summary: When the river matters.", f"Revision: {note.revision}", "State: active",
                  f"Total: {len(note.text)} characters", "a parent's range contains its children's"):
         assert fact in outline
-    ranges = {}
-    for title in ("# Река", "## Мост", "### Опоры", "## Конец"):
+    ranges, bytes_differ = {}, False
+    for heading in note.source.headings:  # the parser's sections, whose spans are UTF-8 byte offsets
+        title = "#" * heading.level + " " + heading.title
         line, start, end, size = map(int, re.search(
             rf"^{re.escape(title)} — line (\d+), chars (\d+)\.\.(\d+) \((\d+) chars\)$", outline, re.M).groups())
         assert note.text.splitlines()[line - 1] == title and size == end - start
-        assert tools._knowledge_read(ctx, TOPIC, start_char=start, end_char=end).endswith(note.text[start:end])
+        read = tools._knowledge_read(ctx, TOPIC, start_char=start, end_char=end)
+        # The printed range reads back exactly that section, byte for byte, in start_char/end_char coordinates.
+        assert body(read).encode("utf-8") == note.raw[heading.section.start_byte:heading.section.end_byte]
+        bytes_differ = bytes_differ or (start, end) != (heading.section.start_byte, heading.section.end_byte)
         ranges[title] = (start, end)
+    assert bytes_differ  # a Cyrillic note, frontmatter included: byte offsets would name other text
     assert note.text[slice(*ranges["## Конец"])] == "## Конец\n\nВсё.\n"
     assert ranges["## Мост"][0] < ranges["### Опоры"][0] < ranges["### Опоры"][1] == ranges["## Мост"][1]
     assert tools._knowledge_read(ctx, TOPIC).endswith(note.text)  # the default read is the note, unchanged
