@@ -233,14 +233,13 @@ def swallowed(snapshot, step, ident, selected):
         or step == "F6g" and ident != "last:" + key and ("F6g", "last:" + key) in selected)
 
 
-def _unread_return_prices(snapshot):
+def _unread_return_prices(snapshot, price):
     """The shared unread form hides these local rows in addition to each group's original saving."""
     cached = snapshot.__dict__.get("_unread_return_prices")
     if cached is None:
         from ouroboros.memory_view_conversation_forms import counted_unread_lines
-        from ouroboros.memory_floor import view_tokens
         index = conversations.source_index(snapshot)
-        cached = {g["key"]: view_tokens("\n".join(counted_unread_lines(g, index[g["key"]])))
+        cached = {g["key"]: price("\n".join(counted_unread_lines(g, index[g["key"]])))
                   for g in snapshot.conversations}
         object.__setattr__(snapshot, "_unread_return_prices", cached)
     return cached
@@ -276,7 +275,7 @@ def _return_counted_prefix(batch, taken, current, target, failed, level, measure
     return current
 
 
-def restore(snapshot, table, taken, added, target, current, level, measure):
+def restore(snapshot, table, taken, added, target, current, level, measure, price):
     """Probe a stage's affordable prefix together; unread count batches search prefix lengths on failure.
 
     Return order and blocking stay local to a stage. The accumulated price is
@@ -286,7 +285,7 @@ def restore(snapshot, table, taken, added, target, current, level, measure):
     if target is None:
         return current
     for _stage, entries in groupby(reversed(added), key=lambda item: table.stages[item[0]]):
-        extra = _unread_return_prices(snapshot) if _stage == "remote_count" and ("F6a", "unread") in taken else {}
+        extra = _unread_return_prices(snapshot, price) if _stage == "remote_count" and ("F6a", "unread") in taken else {}
         pending = deque((pair, delta + extra.get(pair[1], 0)) for pair, delta in entries)
         while pending:
             batch, cost = [], 0

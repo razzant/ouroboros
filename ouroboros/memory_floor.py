@@ -418,7 +418,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
         if step == "F6a" and ident != "unread":
             counted_groups.add(ident)
     current = measure(level(taken))
-    current = restore(snapshot, table, taken, added, target, current, level, measure)
+    current = restore(snapshot, table, taken, added, target, current, level, measure, view_tokens)
     physical = allowances.get("physical")
     for step, ident, _whole, _short in uncovered:
         if physical is None or current <= physical:
