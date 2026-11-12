@@ -357,8 +357,18 @@ def test_verify_and_record_handler_fail_closed(tmp_path):
     from ouroboros.tools.verify import _verify_and_record
 
     ctx = _verify_ctx(tmp_path)
-    assert "TOOL_ARG_ERROR" in _verify_and_record(ctx, contract_kind="some_future_kind")
-    assert "requires `check`" in _verify_and_record(ctx, contract_kind="explicit_command")
+    unknown = _verify_and_record(ctx, contract_kind="some_future_kind")
+    assert "TOOL_ARG_ERROR" in unknown and "contract_kind='some_future_kind' must be one of" in unknown
+    assert "expected_match='fuzzy' must be one of" in _verify_and_record(
+        ctx, contract_kind="explicit_command", check=["true"], expected_match="fuzzy")
+    # A run kind without a command names what arrived, a ready call and the kinds that need none.
+    absent = _verify_and_record(ctx, contract_kind="explicit_command", expected="OK", cwd=".")
+    assert "requires `check`, and this call sent none" in absent
+    assert 'check=["pytest","-q"]' in absent and "no_visible_machine_contract" in absent
+    assert absent.endswith("Nothing ran; no receipt was written.")
+    for blank in ("   ", [], [""], {"cmd": "pytest"}):
+        refused = _verify_and_record(ctx, contract_kind="explicit_command", check=blank)
+        assert f"check={blank!r} holds no command" in refused, refused
 
 
 def test_verify_and_record_handler_artifact_and_declared(tmp_path):
@@ -404,6 +414,10 @@ def test_configured_actor_can_record_typed_zero_run_only_before_leaf(tmp_path):
         "work_order_fingerprint": "a" * 64,
         "physical_started": False,
     }
+    # A decision outside the list is refused by naming what arrived, and records nothing.
+    refused = _verify_and_record(ctx, contract_kind="delegation_zero_run", zero_run_decision="Maybe", zero_run_basis="x")
+    assert "zero_run_decision='maybe' must be one of" in refused
+    assert "zero_run_receipt_recorded" not in ctx._configured_actor_bootstrap
     result = _verify_and_record(
         ctx,
         contract_kind="delegation_zero_run",

@@ -466,9 +466,9 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
         from ouroboros.projects_registry import task_presentation_name
         from ouroboros.terminal_time import terminal_time_fact
 
-        # The executor's own terminal fact or nothing: generic ts is never an answer time.
-        display["late_work"] = {"title": task_presentation_name(data),
-                                "answered_at": terminal_time_fact(data).get("occurred_at") or ""}
+        # The executor's own terminal fact or nothing: neither generic ts nor a cancel is an answer time.
+        answered = terminal_time_fact(data)
+        display["late_work"] = {"title": task_presentation_name(data), "answered_at": (answered["occurred_at"] if answered["source"] == "executor_terminal" else None) or ""}
     facts = {"card": card_facts(data), "display": display, "resume_attempt": data.get("resume_attempt"),
              # An answered root's census row carries only its own routing identity.
              "row": {key: data[key] for key in ("chat_id", "project_id", "_is_direct_chat", "queued_at")
