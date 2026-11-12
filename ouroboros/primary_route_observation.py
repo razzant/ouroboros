@@ -56,6 +56,8 @@ def call_cost_words(call: dict) -> str:
     cost = call.get("cost")
     if not isinstance(cost, (int, float)) or isinstance(cost, bool):
         return ""
+    if cost == 0 and call.get("cost_final") is not True:
+        return ""  # an estimated zero (no counters to price) is no proven zero: unknown
     amount = "<$0.0001" if 0 < cost < 0.00005 else f"${float(cost):.4f}"
     return f"cost {amount} {'reported' if call.get('cost_final') is True else 'estimated'}"
 

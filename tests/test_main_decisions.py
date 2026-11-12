@@ -236,10 +236,18 @@ def test_mains_own_unanswered_questions_are_named_by_identity_and_other_rooms_st
     waited, calm = asked
     expected = {
         "waited": {"task_id": "author", "quiz_id": "waited", "chat_id": 1, "native": True, "quiz_state": "open",
-         "ts": waited["asked_at"], "owner_wait_state": "waiting"},
+         "ts": waited["asked_at"], "owner_wait_state": "waiting", "wait_for_answer": True},
         "calm": {"task_id": "author", "quiz_id": "calm", "chat_id": 1, "native": True, "quiz_state": "open",
          "ts": calm["asked_at"]}}
     assert snapshot["current_questions"] == [expected[quiz_id] for quiz_id in order]
+    # A bound that closed is said on the row too, as a Project's pointer says it: never a wait nobody holds.
+    from ouroboros.owner_quiz import mark_wait_ended
+
+    assert mark_wait_ended(tmp_path, "author", "waited") is True
+    set_owner_wait(tmp_path, "author", {"quiz_id": "calm", "wait_id": "w2", "state": "waiting"})
+    ended = {row["quiz_id"]: row for row in main_decisions_snapshot(tmp_path, [], {})["current_questions"]}
+    assert ended["waited"]["wait_ended_at"] and ended["waited"]["owner_wait_state"] == "resumed"
+    assert ended["calm"]["owner_wait_state"] == "waiting" and "wait_ended_at" not in ended["calm"]
     # Unanswered stays current after its author finishes; an answered one leaves once delivered.
     reconcile_terminal(tmp_path, "author")
     rows = main_decisions_snapshot(tmp_path, [], {})["current_questions"]

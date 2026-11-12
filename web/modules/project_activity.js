@@ -34,7 +34,13 @@ export const MARK_RANK = Object.freeze(['moving', 'still', 'pause', 'ring', 'non
  * room that is not at rest with a shape this client does not know is drawn unconfirmed, never as something it is not.
  */
 export function summarizeRoom(room, works = []) {
-    if (!room || typeof room !== 'object' || room.activity === 'idle') return IDLE_SUMMARY;
+    if (!room || typeof room !== 'object') return IDLE_SUMMARY;
+    if (room.activity === 'idle') {
+        // A room at rest shows nothing, unless a question of it still waits for the owner: then only the owner's mark.
+        if (!room.amber) return IDLE_SUMMARY;
+        const waits = amberNote(roomAmber(room));
+        return { mark: 'none', owner: true, word: '', note: waits, label: waits };
+    }
     const mark = MARK_RANK.includes(room.mark) ? room.mark : 'ring';
     const word = activityWord(room);
     const speaker = roomSpeaker(room, works, word);
@@ -69,12 +75,18 @@ export function reconcileProjectRooms(previous = new Map(), data = {}) {
 }
 
 /**
- * Index the Project rooms by chat id. The Projects header's one mark stands for all of them: the strongest shape,
- * and whether any waits for the owner; its label joins their distinct words and what waits for the owner.
+ * Index the Project rooms by chat id (`chatIds`, every reserved room, and the rows'). The Projects header's
+ * one mark stands for all of them: the strongest shape, and whether any waits for the owner; its label joins their
+ * distinct words and what waits for the owner. What waits counts only the rooms the feed's `rows` can show, so an
+ * amber header always has an amber row to reach; without rows, every room.
  */
-export function buildProjectActivityIndex(rooms = new Map(), chatIds = []) {
+export function buildProjectActivityIndex(rooms = new Map(), chatIds = null, rows = null) {
     const byChat = new Map();
-    for (const chat of chatIds) {
+    const shown = Array.isArray(rows) ? new Set(rows.map((row) => String(row?.chat_id))) : null;
+    // The reserved rooms and the feed's own: a room newer than a held set still counts by its row (the isolation
+    // set itself stays app.js's).
+    for (const chat of new Set([...(Array.isArray(chatIds) ? chatIds : []), ...(rows || []).map((row) => row?.chat_id)]
+        .map(String))) {
         const summary = rooms instanceof Map ? rooms.get(String(chat)) : null;
         if (summary) byChat.set(String(chat), summary);
     }
@@ -82,11 +94,12 @@ export function buildProjectActivityIndex(rooms = new Map(), chatIds = []) {
     if (!summaries.length) return { byChat, aggregate: IDLE_SUMMARY };
     const mark = summaries.map((summary) => summary.mark)
         .sort((a, b) => MARK_RANK.indexOf(a) - MARK_RANK.indexOf(b))[0];
-    const distinct = (key) => [...new Set(summaries.map((summary) => summary[key]).filter(Boolean))];
-    const [words, notes] = [distinct('word'), distinct('note')];
+    const reachable = shown ? [...byChat].filter(([chat]) => shown.has(chat)).map(([, summary]) => summary) : summaries;
+    const distinct = (key, from = summaries) => [...new Set(from.map((summary) => summary[key]).filter(Boolean))];
+    const [words, notes] = [distinct('word'), distinct('note', reachable)];
     return {
         byChat,
-        aggregate: { mark, owner: summaries.some((summary) => summary.owner), word: words[0] || '',
+        aggregate: { mark, owner: reachable.some((summary) => summary.owner), word: words[0] || '',
             note: notes.join(' · '), label: [...words, ...notes].join(' · ') },
     };
 }

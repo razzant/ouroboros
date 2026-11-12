@@ -251,3 +251,85 @@ only; nothing decides by them.
 
 About a kilobyte a round lands in the events archive kept for good (~14 MB a
 day at the 14,000 rounds a busy install made on 09.11).
+
+## 9. What a request did to its route's cached start
+
+A provider keeps one cache per model and reads it in the wire order tools, system
+blocks, messages. A cache mark closes a reuse scope: the shared blocks (tool schemas,
+governance A′, the handbook D, resident memory B) are reused across captures and so
+are bytes of their sources alone; the changing context C and the transcript are
+reused within one captured view (DEVELOPMENT "Cache-friendliness invariant"). Before
+a Main candidate is dispatched, the host compares it with
+the last ANSWERED request of the same route in this task and writes the result on
+the attempt's ledger row (`transcript_prefix.attempt_prefix_fact` →
+`PhysicalAttemptContext.prefix` → `attempts.extra.physical_context.prefix`). It is an
+observation of the authored prefix by `message_digest`'s identity (cache markers,
+reasoning, outer whitespace and image detail are not in it), never the provider's
+verdict: the row's measured `cached_tokens` and `cache_write_tokens` are that fact,
+and an `append` beside a large write is not a contradiction this record resolves.
+
+- `departs`: `first` (no answered request on the slot yet), `route` (answered
+  requests, none on this route), `tools`, `system` (with `index`, `of` and `block`,
+  the block's name as the round facts name it), `messages` (with `index`, `of`),
+  `append` (the candidate only extends that request) or `unrecorded` (a slot
+  restored from before the record, or a route whose full record was let go: the
+  slot keeps four, in memory and in a checkpoint alike, and an older route keeps
+  its name alone).
+- `origins`: every seam that rewrote the view since the last answered request, in
+  order (compaction, a restored continuation, a route or tool change, …).
+- `from_route`: the route of the last answered request when it was another one.
+- `base_at`: when this route's last answered request was answered (epoch seconds).
+  Its start was earlier, so the time from `base_at` to an attempt's own dispatch is at
+  most the time between the two starts (a cache lifetime runs from a request's start).
+
+A candidate becomes its route's base when an answer of that route that read its
+input arrives (`note_prefix_answer`, where the response arrives: input tokens
+reported or output generated, no provider error; a body error read nothing): the accepted answer (it must
+start with the candidate that waited for it; a send adds its own later rows, as its
+clock line), or, at the next measurement, an answer the loop did not accept (an empty
+or output-limited reply was still written and charged); the waiting candidate and the
+answer ride a continuation checkpoint. A candidate never answered moves no base; an
+answer of another route, or a route sent unmeasured, ends its wait. A retry inside one
+call after its own answer extends that answered request (`refresh_attempt_prefix`);
+a retry after a failed send keeps its call's fact. Seams named after the measurement
+stay for the next request.
+Sends outside Main's loop (helpers, reviews) carry no fact; the forced final takes its
+fact from the input it measured. The routes' records ride the continuation
+checkpoint with the observer's other state (`OBSERVER_STATE_ATTRS`).
+
+One reader names the class (`transcript_prefix.prefix_class`), in the provider's
+own order: `first_request`, `entered_model`, `tools_changed` (a reworded tool
+description or parameter rewrites every running task's start once), `system_changed`
+(which block), `history_rewritten` (origins); then, for pure extensions, `paused`
+(from `base_at` to the row's own `ts_dispatched` is longer than the lifetime the
+row's `prompt_cache_ttl` names, so the previous start was longer ago still:
+arithmetic over recorded facts, said as time, never as "expired", and never derived
+for `default`, an absent lifetime or an undispatched row), `returned_to_model`,
+`append`; a row without a fact is `not_recorded`. Nothing decides by the fact or the
+class.
+
+The Costs page's period view (`gateway/cost_period.py`,
+`GET /api/cost-breakdown?period=24h|7d|30d`) reads the calls reserved in a period
+(membership by the reservation instant; the slices are found by position,
+`usage_store.Txn.period_bounds`, in point reads; each slice is one short read, and the
+tariffs are looked up outside it) and shares
+each call's RECORDED cost among cache writes, cache reads, output and uncached
+input by what the route's tariff charges for that call's own tokens. Only price
+ratios enter; the parts and the cost that could not be shared (no tariff, a token
+count the row does not have, a write whose lifetime neither the row nor the
+provider's split names) add up to the recorded cost. Input is classed only for calls
+that reported both cache counts; the others are counted apart (`uncounted_calls`,
+`uncounted_input_tokens`), never as uncached. A money figure and the tokens beside it are of
+the same calls: `tokens_shared` are the tokens of the calls whose cost was shared (`tokens`
+counts every call), the cost no tariff or count could share is its own part with
+`unshared_calls`, and a cause row's `write_cost` is of its `shared_write_tokens`. A model
+none of whose calls has a recorded price has `cost: null`. `write_price_in_reads` is how many read tokens one
+written token costs at `write_price_lifetime` (the lifetime most of the model's
+tokens were written at, by the provider's split when it accounts for every write)
+at the model's base price.
+Delegated subscription sessions and unmetered dispatches carry no reservation time
+and are not in a period.
+The tariff is read without a fetch: what the process holds, else the install's
+dated catalogue record (`state/openrouter_models.json`), whose date the view
+names. Cache writes are listed by `prefix_class`. Nothing is stored and no
+verdict, threshold or signal is derived.

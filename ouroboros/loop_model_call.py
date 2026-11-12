@@ -31,7 +31,7 @@ from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_add
 from ouroboros.observability import new_execution_id
 from ouroboros.primary_route_observation import unasked_refusal_row, with_refusal_facts
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.transcript_prefix import rewrite_epoch, rewrite_view
+from ouroboros.transcript_prefix import forget_attempt_prefix, remember_attempt_prefix, rewrite_epoch, rewrite_view, with_attempt_prefix
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
 
 
@@ -754,6 +754,7 @@ def _remember_main_fit(ctx: _RoundModelCallContext, disposition: Any) -> None:
     usage["_context_predicted_capacity_miss"] = disposition.predicted_capacity_miss
     for name in ("anchor_input_tokens", "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "window", "required_book_tokens"):
         usage[f"_context_{name}"] = getattr(measurement, name)  # the estimate's provenance and the window floor
+    remember_attempt_prefix(ctx)  # what this candidate does to its route's cached start, for its ledger row
 
 
 def _measure_round_main_fit(
@@ -763,7 +764,7 @@ def _measure_round_main_fit(
 ) -> Any:
     plan = ctx.context_fit_plan
     if plan is None or str(ctx.active_model or "") != str(getattr(plan, "model", "") or ""):
-        return None
+        return forget_attempt_prefix(ctx)  # unmeasured: no fact, and no earlier candidate waits for this answer
     from ouroboros.context_fit import measure_main_fit
 
     rendered_mode = str(ctx.active_context_mode) if str(ctx.active_context_mode) in {"max", "low", "nano"} else "max"
@@ -907,7 +908,7 @@ def _dispatch_round_model(
             stop_retry_check=(lambda: transport_repeat_stop_requested(ctx.tools._ctx, mailbox_peek=mailbox_peek)) if attempt_cap is None else None,
             owner_input_check=(lambda: sorted(_pending_owner_input_kinds(ctx.tools._ctx, ids=True))) if attempt_cap is None else None,
             allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
-            physical_context=(_physical_context_for_fit(disposition) if disposition is not None else None),
+            physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage) if disposition is not None else None),
             candidate_predicate=candidate_predicate, physical_fit_predicate=admit, model_role=role, model_account_override=account,
             processing_preference=task_processing_preference(
                 {"task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})}, model_role=role),
@@ -1045,7 +1046,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
                                          and not use_local and provider_for_model(model) != "claudexor")
     if provider_for_model(model) == "claudexor":
         kwargs["bypass_response_cache"] = False
-    physical = _physical_context_for_fit(disposition) if disposition else None
+    physical = with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage) if disposition else None
     if physical is not None:  # the remaining attempts of this call send under the new route's measurement
         ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = physical
     return PreparedModelCall(kwargs, physical, current_physical_attempt_predicate())

@@ -22,12 +22,14 @@ const OUTCOME_HUES = Object.freeze({
 /**
  * The mark for one place. `mark` is the work's shape, `owner` whether something waits for the owner (a question or
  * an action: the server's `turn`, or a proved census fact), `unread` whether the place has new messages, `outcome` a
- * known result shown beside its word. The owner's move outranks everything and stands alone; an outcome is a dot in
- * its tone; new messages tint the work's shape, or are a dot where nothing works; else the shape in the ink.
+ * known result shown beside its word. The owner's move outranks everything: it tints a moving work's shape, so the
+ * motion stays visible, and stands alone as the dot wherever nothing moves; an outcome is a dot in its tone; new
+ * messages tint the work's shape, or are a dot where nothing works; else the shape in the ink. An aggregate mark (the
+ * Projects header, the ☰) passes no moving shape while the owner's move stands, so it stays the dot.
  */
 export function markView({ mark = 'none', owner = false, unread = false, outcome = '' } = {}) {
     const shape = MARK_SHAPES.includes(mark) && mark !== 'dot' ? mark : 'none';
-    if (owner) return { shape: 'dot', hue: 'owner' };
+    if (owner) return { shape: shape === 'moving' ? 'moving' : 'dot', hue: 'owner' };
     if (outcome && OUTCOME_HUES[outcome]) return { shape: 'dot', hue: OUTCOME_HUES[outcome] };
     if (unread) return { shape: shape === 'none' ? 'dot' : shape, hue: 'unread' };
     return { shape, hue: 'ink' };

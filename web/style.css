@@ -4158,6 +4158,7 @@ html[data-layout="stack"] #primary-sidebar {
     inset: 0 auto 0 0;
     z-index: var(--z-sidebar);  /* under the room: the room is the card that moves */
     width: var(--drawer-w);
+    border-right: 0;  /* the room card's curved edge is the drawer's edge; the desk's hairline would draw a straight double */
     /* Closed it lies under the room a little to the left and faded (p = 0), and comes up from there as the room
        slides away; it closes in 280ms and opens in 340ms on the iOS sheet curve, or at the finger's speed after a
        drag (--drawer-settle, drawer_drag.js). */
@@ -6075,6 +6076,38 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
         padding-block-end: max(0px, calc((var(--touch-target-min) - var(--type-meta) * var(--line-meta)) / 2));
     }
 }
+/* Costs "By period" (cost_period.js): a period's cost per model as one thin bar of four classes (and a fifth part
+   outside them: by tokens the input in no class, by money the cost not split) with their amounts
+   listed under it (identity is never colour alone), then the cache writes by what they followed. Neither the
+   crimson nor the amber series is used, so no class reads as an alarm or a warning: cache is the blue series (what
+   was written in full, what was read in its tint), output the green one, uncached input the neutral ink. */
+.costs-period { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.costs-period-choice { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.costs-period-status:empty, .costs-period-models:empty, .costs-period-writes-host:empty, .costs-period-note:empty { display: none; }
+.costs-period-models { display: grid; gap: var(--space-5); }
+.costs-period-model { display: grid; gap: var(--space-2); min-width: 0; }
+.costs-period-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
+.costs-period-name { color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+.costs-period-sum { color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.costs-period-bar { display: flex; gap: 2px; height: 10px; border-radius: var(--pill-radius); overflow: hidden; }
+.costs-period-bar > i { flex: var(--share) 0 0; min-width: 2px; }
+.costs-period-parts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: var(--space-1) var(--space-5); margin: 0; }
+/* A part's amount keeps to one line; where the card is too narrow for both, it moves under its name, still at the end. */
+.costs-period-parts > div { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 var(--space-3); min-width: 0; }
+.costs-period-parts dt { display: flex; align-items: center; gap: var(--space-2); color: var(--text-secondary); white-space: nowrap; }
+.costs-period-parts dt > i { flex: none; width: 8px; height: 8px; border-radius: 2px; }
+.costs-period-parts dd { margin: 0 0 0 auto; color: var(--text-primary); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.costs-period-subtitle { margin: var(--space-2) 0 0; color: var(--text-primary); font-size: var(--type-body); font-weight: 600; }
+[data-cost-class="cache_write"] { background: var(--chart-series-2); }  /* only the bar and swatch marks carry it */
+[data-cost-class="cache_read"] { background: var(--chart-series-2); opacity: 0.42; }  /* older WebKit has no color-mix() */
+[data-cost-class="output"] { background: var(--chart-series-3); }
+[data-cost-class="uncached_input"] { background: var(--text-meta); }
+[data-cost-class="unclassified"], [data-cost-class="unsplit"] { background: var(--text-meta); opacity: 0.4; }  /* outside the four classes */
+.costs-period-writes td:first-child { overflow-wrap: anywhere; }
+/* The period choice wraps on a narrow card: under a finger it takes the touch minimum as its height. */
+@media (pointer: coarse) {
+    .costs-period-choice { --control-h: var(--touch-target-min); }
+}
 .costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }
 .cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cost-table .cost-cell-right { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -6097,6 +6130,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     .cost-table :is(th, td) { border-bottom: 0; }
     .cost-table tr > :first-child { grid-column: 1 / -1; }
     .cost-table tr > :nth-child(2) { text-align: left; }
+    /* Its three figures share one line, in columns every row shares; a figure wraps between words, never inside one. */
+    .costs-period-writes tr { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr); }
+    .cost-table.costs-period-writes :is(th, td) { white-space: normal; }
     .cost-table .cost-cell-name { width: auto; max-width: none; padding-bottom: 0; }
     .cost-table .cost-cell-note { white-space: normal; }
 }

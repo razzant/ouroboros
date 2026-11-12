@@ -1416,7 +1416,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                 log.warning("mutation baseline advance failed after commit", exc_info=True)
         if not _managed_tx:  # a managed merge records its success after its post-commit phase
             record_bound_commit_success(ctx, commit_message, _commit_start, pre_fingerprint, post_fingerprint, commit_sha)
-            note_override_landing(ctx, commit_sha)  # landed over a decision Blocking would have stopped?
+            note_override_landing(ctx, commit_sha)  # landed over a review FAIL or no verdict?
             ctx._coupling_review_history = {}  # the subject's coupling rounds end with its commit (the attempt rows keep them)
     finally:
         _release_git_lock(lock)

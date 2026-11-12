@@ -32,7 +32,7 @@ from ouroboros.model_wait import (
 )
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
 from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal, single_physical_send, track_physical_attempts
-from ouroboros.observability import new_call_id, new_execution_id, persist_call
+from ouroboros.observability import mark_last_answer, new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, infer_model_category, normalize_usage_cost as _normalize_usage_cost
 from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
@@ -42,6 +42,7 @@ from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIM
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture, physical_attempt_capture_from_exception
 from ouroboros.physical_attempt_context import observe_dispatch
 from ouroboros.primary_route_observation import note_content_refusal
+from ouroboros.transcript_prefix import note_prefix_answer, refresh_attempt_prefix, served_account_fields, settle_rewrite_reread
 from ouroboros.contracts.record_contract import RECORD_CONTRACT_VERSION
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, event_token_counts
 from ouroboros.utils import (
@@ -1190,7 +1191,6 @@ def _record_round_cache_facts(
     duration_ms = round(max(0.0, now - float(started["at"])) * 1000) if isinstance(started, dict) and started.get("round_id") == round_id else None
     accumulated_usage["_last_llm_round_finished_monotonic"] = now
     accumulated_usage["_last_prompt_cache_ttl"] = prompt_cache_ttl
-    from ouroboros.transcript_prefix import served_account_fields, settle_rewrite_reread
     earlier = accumulated_usage.get("_last_round_cache_usage") or {}
     accumulated_usage["_last_round_cache_usage"] = {  # also this accepted call's own money, as its producer stated it
         "round": round_idx, "model": model, "provider": provider, "billing": (usage.get("cost_evidence") or {}).get("billing"),
@@ -1451,16 +1451,17 @@ def call_llm_with_retry(
             repeat = TIMEOUT_REPEAT_KEY in accumulated_usage
             if repeat: kwargs["wait_for_resources"] = False
             strict = single_physical_send(lambda reservation: _claim_timeout_repeat(accumulated_usage, call_ids, reservation)) if repeat else contextlib.nullcontext()
+            physical_context = refresh_attempt_prefix(physical_context, accumulated_usage, model, use_local)  # a retry after its own answer
             with strict, track_physical_attempts(physical_send_claim), observe_dispatch(
                     lambda capture, identity=call_identity: _emit_main_llm_call_state(event_queue, identity, "dispatched", capture=capture)):
                 msg, usage = _send_main_candidate(
                     llm, kwargs, model=model, use_local=use_local, deadline_ts=deadline_ts,
                     physical_context=physical_context, candidate_predicate=candidate_predicate if attempt == 0 else None,
                     physical_fit_predicate=physical_fit_predicate, send_clock_policy=send_clock_policy, canonical_messages=messages)
-            from ouroboros.observability import mark_last_answer
             mark_last_answer(accumulated_usage)
             host_route = usage.get("model_role_route") or {}
             model, use_local = host_route.get("model", model), host_route.get("use_local", use_local)
+            note_prefix_answer(accumulated_usage, usage, model, use_local)  # a reply that read its input moves its route's base
             physical_context = accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, physical_context)
             context_fit_event_fields = _context_fit_event_fields(accumulated_usage) if physical_context is not None else {}
             _take_response_facts(usage, msg, accumulated_usage)
@@ -1487,7 +1488,7 @@ def call_llm_with_retry(
                 writer=persist_call,
             )
             _remember_llm_call(
-                accumulated_usage, call_ids=call_ids, model=model,
+                accumulated_usage, call_ids={**call_ids, "physical_attempt_id": (usage.get("ledger_attempt_ids") or [None])[-1]}, model=model,
                 display_model=display_model, provider=provider, request_ref=request_ref,
                 response_ref=response_ref, reported_model=usage.get("resolved_model"), use_local=bool(use_local),
                 requested_profile=(usage.get("claudexor") or {}).get("requested_profile", host_route.get("credential_profile_id", model_account_override)),

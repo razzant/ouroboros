@@ -8,6 +8,7 @@ import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
 import { allowanceHold, allowanceText } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
+import { mountCostPeriod } from './cost_period.js';
 import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon } from './page_icons.js';
@@ -297,9 +298,11 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             <p class="dashboard-settings-lead">Quotas of your accounts. They are not dollars, and no limit above counts them.</p>
             <div data-costs-subscriptions><p class="dashboard-settings-lead">Reading…</p></div>
         </section>
+        <div id="costs-period"></div>
         <div class="costs-tables">${TABLES.map(tableCardHtml).join('')}</div>
     `;
     mount.appendChild(page);
+    const periodCard = mountCostPeriod(page.querySelector('#costs-period'));  // its own read: the period governs that card alone
     const budgetCard = page.querySelector('.costs-budget');
     // The rows are drawn once and never redrawn: a refresh of the tab repaints the spend, the tables and the allowance's
     // facts around them, and `limits.paint()` only writes a fresh value into a field the owner is not in.
@@ -439,7 +442,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         limits.paint();
     }
 
-    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); loadSubscriptions(); });
+    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); loadSubscriptions(); periodCard.reload(); });
     // Each door opens its Settings page, which leads back here.
     page.querySelector('.costs-subscriptions').addEventListener('click', (event) => {
         const path = event.target.closest?.('[data-costs-account]')?.dataset.costsAccount;
@@ -468,7 +471,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     // A result the owner saw ends when the tab or the Dashboard is left.
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab !== 'costs') limits.leave();
-        else if (state.activePage === 'dashboard') { refreshCostsPanel(); loadSubscriptions(); }
+        else if (state.activePage === 'dashboard') { refreshCostsPanel(); loadSubscriptions(); periodCard.reload(); }  // the period is read when the tab is looked at
     });
     window.addEventListener('ouro:page-shown', (event) => { if (event.detail?.page !== 'dashboard') limits.leave(); });
     window.addEventListener('ouro:settings-updated', (event) => {
