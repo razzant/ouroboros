@@ -14,7 +14,7 @@ record file ``data/state/private_copies/<name>.json``, written BEFORE the effect
 it names and removed after it. There is no shared list and no machine-wide lock:
 a record is locked only while that one copy changes, and git serializes its own
 metadata (``worktree add`` marks a new worktree "initializing" against ``prune``).
-The legacy whole-file registry ``state/subagent_worktrees.json`` is imported once.
+The legacy whole-file registry ``state/subagent_worktrees.json`` is imported at startup.
 
 Snapshot blobs live in the source's object database; once a pin goes they are
 ordinary unreachable objects that the repository's own ``git gc`` removes.
@@ -39,7 +39,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.force_remove import force_rmtree as _force_rmtree  # the shared permission-granting removal
-from ouroboros.utils import atomic_write_json, utc_now_iso
+from ouroboros.utils import atomic_write_json, utc_now_iso, write_bytes_atomic
 from ouroboros.config import DATA_DIR, get_subagent_worktree_root
 from ouroboros.retention import age_cutoff, get_gc_retention_days
 from ouroboros.unindexed import copy_path  # new checkouts are born where desktop search skips them
@@ -203,7 +203,6 @@ def _read_record(file: Path, *, op: str = "", data_dir: Optional[Any] = None) ->
 def _records(data_dir: Optional[Any] = None, *, op: str = "", strict: bool = False) -> List[Dict[str, Any]]:
     """Every readable copy record, never rewritten or removed: the copy it names stays. An unreadable record is reported
     and skipped; ``strict`` raises instead, listing with ``os.listdir`` (``Path.glob`` reads an unlistable directory as empty)."""
-    _import_legacy_registry(data_dir)
     rows: List[Dict[str, Any]] = []
     directory = _records_dir(data_dir)
     try:
@@ -222,7 +221,6 @@ def _records(data_dir: Optional[Any] = None, *, op: str = "", strict: bool = Fal
 
 def _record_at(path: Any, data_dir: Optional[Any] = None, *, op: str = "") -> Optional[Dict[str, Any]]:
     """The record of the copy at ``path`` (raises when that record is unreadable)."""
-    _import_legacy_registry(data_dir)
     return _read_record(_record_file(path, data_dir), op=op, data_dir=data_dir)
 
 
@@ -237,49 +235,45 @@ def _drop_record(path: Any, data_dir: Optional[Any] = None) -> None:
         _record_file(path, data_dir).unlink()
 
 
-_imported_roots: set = set()
+def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+    """The startup import of the legacy whole-file registry (``startup_migrations``), its one reader.
 
-
-def _import_legacy_registry(data_dir: Optional[Any] = None) -> None:
-    """Move the legacy whole-file registry's rows into per-copy records, once.
-
-    Each row becomes its record unless one already exists; a receipt names how
-    many rows moved and the legacy bytes' digest, then the legacy file goes. An
-    unreadable legacy file is reported and kept: its copies have no record and
-    show as unregistered in the owner's Free action."""
-    key = str(_data_dir(data_dir))
-    if key in _imported_roots:
-        return
-    legacy = _legacy_registry_path(data_dir)
+    Each row becomes its record unless one already exists. The receipt names the rows, how many
+    moved, the legacy bytes' digest and where those bytes are kept; the file then leaves its working
+    place for ``archive/``, byte for byte. Its absence there is what "imported" means, so a restored
+    snapshot or an older body's write is imported at the next start. Unreadable bytes are reported
+    and kept the same way (``rows: None``): their copies have no record and show as unregistered in
+    the owner's Free action. Returns the receipt; ``None`` with no file or while another process imports."""
+    legacy, root = _legacy_registry_path(data_dir), _data_dir(data_dir)
     if not legacy.is_file():
-        _imported_roots.add(key)
-        return
+        return None
     lock = _records_dir(data_dir) / ".legacy-import.lock"
     fd = acquire_exclusive_file_lock(lock, timeout_sec=_LOCK_TIMEOUT_SEC, stale_sec=_LOCK_STALE_SEC,
                                      metadata=f"pid={os.getpid()} op=legacy_import", owner_aware_stale=True)
     if fd is None:
-        return  # another process is importing; the next read retries
+        return None
     try:
         if not legacy.is_file():
-            _imported_roots.add(key)
-            return
+            return None
         data = legacy.read_bytes()
+        digest, rows, moved = hashlib.sha256(data).hexdigest(), None, 0
         try:
             entries = _legacy_entries(data)
         except ValueError as exc:
             _report_unreadable(legacy, "legacy_import", exc, data_dir)
-            _imported_roots.add(key)
-            return
-        moved = 0
-        for row in entries:
-            if _names_copy(row) and not _record_file(row["path"], data_dir).exists():
-                _put_record(row, data_dir)
-                moved += 1
-        atomic_write_json(_records_dir(data_dir) / ".legacy-import.json", {
-            "at": utc_now_iso(), "rows": len(entries), "moved": moved,
-            "legacy_sha256": hashlib.sha256(data).hexdigest()}, trailing_newline=True)
+        else:
+            rows = len(entries)
+            for row in entries:
+                if _names_copy(row) and not _record_file(row["path"], data_dir).exists():
+                    _put_record(row, data_dir)
+                    moved += 1
+        kept = root / "archive" / f"subagent_worktrees_{digest[:12]}.json"
+        write_bytes_atomic(kept, data)  # a copy, then the unlink below: ``archive/`` may sit on another volume
+        receipt = {"at": utc_now_iso(), "rows": rows, "moved": moved, "legacy_sha256": digest,
+                   "kept": kept.relative_to(root).as_posix()}
+        atomic_write_json(_records_dir(data_dir) / ".legacy-import.json", receipt, trailing_newline=True)
         legacy.unlink()
-        _imported_roots.add(key)
+        return receipt
     finally:
         release_exclusive_file_lock(lock, fd)
 

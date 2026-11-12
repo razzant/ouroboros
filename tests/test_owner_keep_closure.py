@@ -458,3 +458,11 @@ def test_a_record_unreadable_under_custody_claims_nothing_about_its_pin_and_save
     answer = _keep_with(monkeypatch, root, lambda: sw._record_file(handle.path, root).write_text("{", encoding="utf-8"))
     assert "pins:snap" not in answer["retained"] + answer["retired"] and "private_copies" in answer["unknown"]
     assert answer["keep"] is True and load_task_result(root, "finished")[owner_keep.OWNER_KEEP]
+
+
+def test_a_legacy_registry_awaiting_the_startup_import_leaves_the_copies_unknown(copies):  # noqa: F811
+    root = copies[0]
+    assert "private_copies" not in owner_keep.inventory(root, "finished", {})[1]
+    sw._legacy_registry_path(root).parent.mkdir(parents=True, exist_ok=True)
+    sw._legacy_registry_path(root).write_text('{"worktrees": []}', encoding="utf-8")
+    assert "private_copies" in owner_keep.inventory(root, "finished", {})[1]

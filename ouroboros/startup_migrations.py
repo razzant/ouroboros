@@ -12,6 +12,9 @@ its historical seal audit (no audit watermark). An owner-held obligation set who
 this body retired (``RETIRED_SETS``) has no reader or remover left, so the first boot of its
 generation deletes the rows an older body kept there. Its unsent outbox lines become exhausted
 with ``producer_retired`` through the shared storage owner; payloads remain, no delivery is invented.
+A stored format an older body wrote is imported here by its owner, never by a working reader: the
+private-copy registry (``subagent_worktrees.import_legacy_registry``), whose mark is the old file's
+absence from its working place, so a restored snapshot or an older body's write runs it again.
 """
 from __future__ import annotations
 
@@ -222,7 +225,15 @@ def _prepare_startup_state(root, *, rebuild, repo_dir=None, initialize_journal=F
                               capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         head = ""  # unknown current body is recorded; never substitute the previous body's SHA
+    copies = None
+    try:  # before the store, so its failure never skips this; on a failure here the registry stays for the next boot
+        from ouroboros.subagent_worktrees import import_legacy_registry
+        copies = import_legacy_registry(root)
+    except Exception:
+        log.warning("Legacy private-copy registry not imported; the next start repeats it", exc_info=True)
     report = ensure_current_store(root, rederive=rebuild, body_sha=head, initialize_journal=initialize_journal)
+    if copies:
+        report["private_copies"] = copies
     if rebuild:
         from ouroboros.delegate_custody_current import rebuild as rebuild_custody
         report["custody_open"] = rebuild_custody(root, replace=True)

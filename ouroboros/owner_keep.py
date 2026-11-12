@@ -194,7 +194,7 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
     unknown: List[str] = []
     pins: Dict[str, str] = {}
     read = read_records(root)
-    if read.unlistable or read.unreadable:
+    if read.unlistable or read.unreadable or read.import_pending:
         unknown.append("private_copies")
     for copy in read.rows:
         if str(copy.get("task_id") or "") != task_id:

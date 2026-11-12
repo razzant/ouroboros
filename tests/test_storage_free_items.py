@@ -841,10 +841,11 @@ def test_the_passive_reader_follows_the_owners_rule_for_a_record_and_a_legacy_fi
     monkeypatch.setattr(sw, "_parse_record", lambda _file: (_ for _ in ()).throw(ValueError("a new rule")))
     assert read_records(root).unreadable == {sw._record_file(handle.path, root).name}
     monkeypatch.undo()
+    monkeypatch.setattr(sw, "_legacy_entries", lambda _raw: pytest.fail("a passive read parsed the legacy registry"))
+    assert not read_records(root).import_pending
     sw._legacy_registry_path(root).write_text(json.dumps({"worktrees": [{"path": "/elsewhere/copy"}, {"path": ""}, 3]}), encoding="utf-8")
-    assert "/elsewhere/copy" in {row["path"] for row in read_records(root).rows}
-    monkeypatch.setattr(sw, "_legacy_entries", lambda _raw: (_ for _ in ()).throw(ValueError("a new rule")))
-    assert read_records(root).legacy_unreadable
+    read = read_records(root)  # the legacy registry is the startup import's: this reader only says it waits
+    assert read.import_pending and "/elsewhere/copy" not in {row["path"] for row in read.rows}
 
 
 def test_the_genesis_owner_imports_one_way_and_the_old_names_still_answer():
