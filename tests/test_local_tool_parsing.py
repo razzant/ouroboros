@@ -379,6 +379,28 @@ class TestCurrentQwenToolCalls(unittest.TestCase):
             self.assertIs(LLMClient._parse_tool_calls_from_content(msg, {"get_time"}), msg, reply)
 
 
+    def test_a_json_argument_may_hold_the_closing_tag_itself(self):
+        from ouroboros.llm import LLMClient
+
+        body = {"name": "write_file", "arguments": {"path": "t.py", "content": "x = '</tool_call>'\n"}}
+        reply = "<tool_call>\n" + json.dumps(body) + "\n</tool_call>"
+        parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"write_file"})
+        self.assertEqual(json.loads(parsed["tool_calls"][0]["function"]["arguments"]), body["arguments"])
+        msg = {"content": reply + " and done", "tool_calls": []}
+        self.assertIs(LLMClient._parse_tool_calls_from_content(msg, {"write_file"}), msg)
+
+    def test_a_parameter_that_may_be_a_string_keeps_the_text_written(self):
+        from ouroboros.llm import LLMClient
+
+        reply = '<tool_call>\n<function=note>\n<parameter=body>\n{"a": 1}\n</parameter>\n</function>\n</tool_call>'
+        schemas = {"note": {"type": "object", "properties": {"body": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}}
+        parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"note"}, schemas)
+        self.assertEqual(json.loads(parsed["tool_calls"][0]["function"]["arguments"]), {"body": '{"a": 1}'})
+        typed = {"note": {"type": "object", "properties": {"body": {"anyOf": [{"type": "object"}, {"type": "null"}]}}}}
+        parsed = LLMClient._parse_tool_calls_from_content({"content": reply}, {"note"}, typed)
+        self.assertEqual(json.loads(parsed["tool_calls"][0]["function"]["arguments"]), {"body": {"a": 1}})
+
+
 class TestSplitLeadingReasoning(unittest.TestCase):
 
     def test_leading_reasoning_in_either_shape_is_split_off_and_other_text_is_left_whole(self):

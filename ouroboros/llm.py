@@ -141,19 +141,64 @@ log = logging.getLogger(__name__)
 DEFAULT_LIGHT_MODEL = OPENROUTER_DEFAULTS["light"]
 
 
+def _declared_types(schema: Any) -> Set[str]:
+    """The JSON types a parameter schema allows, through ``anyOf``/``oneOf`` branches too."""
+    if not isinstance(schema, dict):
+        return set()
+    kinds = schema.get("type")
+    found = {kinds} if isinstance(kinds, str) else {kind for kind in kinds or () if isinstance(kind, str)}
+    for key in ("anyOf", "oneOf"):
+        for branch in schema.get(key) or ():
+            found |= _declared_types(branch)
+    return found
+
+
 def _xml_tool_argument(value: str, schema: Any) -> Any:
     """One ``<parameter>`` value typed as the tool declares it: the template writes strings raw, other values as
-    JSON. An undeclared value stays text unless it is a JSON object or array."""
-    kind = schema.get("type") if isinstance(schema, dict) else None
-    if kind == "string":
+    JSON. A value a string may hold stays text; an undeclared one stays text unless it is a JSON object or array."""
+    kinds = _declared_types(schema)
+    if "string" in kinds:
         return value
     try:
         parsed = json.loads(value)
     except ValueError:
         return value
-    if kind is None and not isinstance(parsed, (dict, list)):
+    if not kinds and not isinstance(parsed, (dict, list)):
         return value
     return parsed
+
+
+def _tool_call_bodies(text: str) -> Optional[List[str]]:
+    """The bodies of a reply that is nothing but ``<tool_call>`` blocks, else None. A JSON body is read by the JSON
+    decoder, so a string argument may itself contain ``</tool_call>``."""
+    decoder, bodies, i, n = json.JSONDecoder(), [], 0, len(text)
+    while True:
+        while i < n and text[i].isspace():
+            i += 1
+        if i == n:
+            return bodies or None
+        if not text.startswith("<tool_call>", i):
+            return None
+        i += len("<tool_call>")
+        while i < n and text[i].isspace():
+            i += 1
+        end = None
+        if text.startswith("{", i):
+            try:
+                end = decoder.raw_decode(text, i)[1]
+            except ValueError:
+                end = None  # a double-brace or malformed object: its own reader decides below
+        if end is None:
+            end = text.find("</tool_call>", i)
+            if end < 0:
+                return None
+        body, j = text[i:end], end
+        while j < n and text[j].isspace():
+            j += 1
+        if not text.startswith("</tool_call>", j):
+            return None
+        bodies.append(body.strip())
+        i = j + len("</tool_call>")
 
 
 def _parse_tool_call_block(body: str, tool_schemas: Optional[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
@@ -517,16 +562,15 @@ class LLMClient(
             return msg
 
         # Upgrade only pure tool-call output; mixed prose stays plain text.
-        block = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
-        matches = block.findall(stripped)
-        if not matches or block.sub("", stripped).strip():
+        matches = _tool_call_bodies(stripped)
+        if not matches:
             return msg
 
         allowed = {name for name in (allowed_tool_names or set()) if name}
         tool_calls = []
         for i, raw in enumerate(matches):
             try:
-                name, args = _parse_tool_call_block(raw.strip(), tool_schemas)
+                name, args = _parse_tool_call_block(raw, tool_schemas)
                 if not name:
                     raise ValueError("tool_call missing function name")
                 if allowed and name not in allowed:
