@@ -25,7 +25,7 @@ const OLD_COSTS_EXCERPT = `
         else if (data.immediate_changed && nextTask) {
         if (data.restart_required) text = 'Saved. Restart required.';`;
 
-function costsPage(t, values = {}) {
+function costsPage(t, values = {}, meta = {}) {
     forgetSettingRows();
     const env = setup(t);
     const stored = { TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50, OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20,
@@ -35,7 +35,7 @@ function costsPage(t, values = {}) {
     env.routes.set('/api/consciousness', response({ enabled: true, spent_24h_usd: 1, daily_usd: 20 }));
     env.routes.set('/api/settings', (_url, init = {}) => {
         if (init.method !== 'POST') {
-            return response({ ...stored, _meta: { effects: { TOTAL_BUDGET: 'now' }, setup_contract: { budgetFields: [
+            return response({ ...stored, _meta: { ...meta, effects: { TOTAL_BUDGET: 'now' }, setup_contract: { budgetFields: [
                 { stateKey: 'totalBudget', settingKey: 'TOTAL_BUDGET', min: '0.01', note: 'Budget limits use known spend: the root task tree.' },
                 { stateKey: 'perTaskCostUsd', settingKey: 'OUROBOROS_PER_TASK_COST_USD', min: '0.01' }] } } });
         }
@@ -157,4 +157,27 @@ test('a refresh never rewrites a field the owner is in or typed into; the other 
     assert.equal(page.posts.length, 0);
     page.window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'logs' } }));
     assert.equal(allowance.value, '', 'leaving the tab keeps an unsaved draft where it is');
+});
+
+test('under the limits one line names what they cannot count, in the page language; none when every route is priced', async (t) => {
+    const { applyPayload, setMissTransport } = await import('../modules/i18n.js');
+    setMissTransport(() => Promise.resolve(null));
+    const view = costsPage(t, {}, { known_spend_gaps: ['Web search', 'Agents'] });
+    await view.refresh();
+    const line = view.card.querySelector('#costs-gaps');
+    assert.equal(line.hidden, false);
+    assert.equal(line.textContent, 'Not counted: Web search, Agents (price unknown).');
+    // The words alone: without a document i18n.js leaves the fixture's page unwalked.
+    const language = (payload) => { const kept = globalThis.document; globalThis.document = undefined; try { applyPayload(payload); } finally { globalThis.document = kept; } };
+    language({ language: 'ru', english: false, revision: 61, entries: {
+        'Not counted: {roles} (price unknown).': { text: 'Не учитываются: {roles} (цена неизвестна).' }, 'Web search': { text: 'Веб-поиск' } } });
+    try {
+        view.window.dispatchEvent(new CustomEvent('ouro:language-changed'));
+        assert.equal(line.textContent, 'Не учитываются: Веб-поиск, Agents (цена неизвестна).');
+    } finally {
+        language({ language: '', english: true, revision: 62, entries: {} });
+    }
+    const priced = costsPage(t);
+    await priced.refresh();
+    assert.equal(priced.card.querySelector('#costs-gaps').hidden, true, 'every route has a price: the line is not drawn');
 });
