@@ -30,6 +30,7 @@ from ouroboros.review_ledger import CouplingOutcome
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.tools import git, review_helpers
 from ouroboros.tools.registry import ToolContext
+from tests._review_change_fixtures import CONTINUATION_DROPS, LANDING_DECISION, returned_reference
 
 
 def _git(repo: pathlib.Path, *args: str) -> str:
@@ -66,7 +67,6 @@ def task(tmp_path, monkeypatch):
     monkeypatch.setattr(commit_admission, "release_metadata_diagnostics", lambda *a, **kw: {
         "status": "not_applicable", "findings": [], "unavailable": []})
     monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda ctx: False)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     return ctx
 
 
@@ -76,8 +76,9 @@ def _baseline(ctx) -> None:
                               [{"surface_type": "system_repo", "host_root": str(ctx.repo_dir)}])
 
 
-def _commit(ctx, monkeypatch, paths=None, *, verdict="PASS", tests=None, calls=None, door=None, **kwargs):
-    """The production ``_repo_commit_push`` (or the public ``door``) under an inert panel."""
+def _commit(ctx, monkeypatch, paths=None, *, verdict="PASS", tests=None, calls=None, door=None, land=True, **kwargs):
+    """The production ``_repo_commit_push`` (or the public ``door``) under an inert panel. A PASS returns
+    before Git like every outcome; ``land`` continues on it as the author would (``land_after_review``)."""
     from ouroboros.review_dispatch import invoke_review_paid_stamp
 
     def reviewer(_ctx, message, **kw):
@@ -96,7 +97,13 @@ def _commit(ctx, monkeypatch, paths=None, *, verdict="PASS", tests=None, calls=N
     monkeypatch.setattr(git, "_run_review_preflight_tests", tests or (lambda *a, **kw: None))
     monkeypatch.setattr(git, "_post_commit_result", lambda *a, **kw: None)
     monkeypatch.setattr(git, "_auto_push", lambda *a, **kw: "")
-    return (door or git._repo_commit_push)(ctx, "candidate", paths=paths, skip_advisory_review=True, **kwargs)
+    commit = door or git._repo_commit_push
+    first = commit(ctx, "candidate", paths=paths, skip_advisory_review=True, **kwargs)
+    if not (land and verdict == "PASS" and str(first).startswith("Review outcome returned before commit")):
+        return first
+    return commit(ctx, "candidate", skip_advisory_review=True, review_reference=returned_reference(first),
+                  author_disposition=dict(LANDING_DECISION),
+                  **{key: value for key, value in kwargs.items() if key not in CONTINUATION_DROPS})
 
 
 def test_attributed_commit_lands_staged_and_unstaged_deletions_and_renames(task, monkeypatch):
@@ -393,7 +400,7 @@ def test_exits_without_a_baseline_unstage_only_the_named_paths(task, monkeypatch
             (repo / "late.txt").write_text("staged meanwhile by someone else\n", encoding="utf-8")
             _git(repo, "add", "late.txt")
 
-    tests, marker = None, {"tests_refused": "1 failed", "review_blocked": "Critical feedback",
+    tests, marker = None, {"tests_refused": "1 failed",
                            "advisory_handback": "Review outcome returned before commit",
                            "protected_refused": "CORE_PROTECTION_BLOCKED"}[exit_kind]
     if exit_kind == "tests_refused":
@@ -403,20 +410,17 @@ def test_exits_without_a_baseline_unstage_only_the_named_paths(task, monkeypatch
         monkeypatch.setattr(git, "_current_runtime_mode",
                             lambda: (name in _index(repo) and stage_late()) or "advanced")
     else:
-        status, record = ("blocked" if exit_kind == "review_blocked" else "reviewed"), git._record_commit_attempt
+        record = git._record_commit_attempt
 
         def recorded(*args, **kw):
-            if args[2] == status and kw.get("phase") in {"blocking_review", "review_only"}:
+            if args[2] == "reviewed" and kw.get("phase") == "review_only":
                 stage_late()
             return record(*args, **kw)
 
         monkeypatch.setattr(git, "_record_commit_attempt", recorded)
-        if exit_kind == "advisory_handback":
-            monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     head = _git(repo, "rev-parse", "HEAD")
 
-    result = _commit(task, monkeypatch, paths=[name], verdict="FAIL" if exit_kind == "review_blocked" else "PASS",
-                     tests=tests)
+    result = _commit(task, monkeypatch, paths=[name], tests=tests, land=False)
 
     assert marker in result and late and _git(repo, "rev-parse", "HEAD") == head, result
     assert _index(repo) == {"late.txt": "A"}
@@ -486,7 +490,8 @@ def test_rejoin_of_a_pending_wave_keeps_the_uncertain_path_its_selection_named(t
     monkeypatch.setattr(git, "_post_commit_result", lambda *a, **kw: None)
     monkeypatch.setattr(git, "_auto_push", lambda *a, **kw: "")
     first = git._repo_commit_push(task, "candidate", paths=["maybe.txt", "own.txt"], skip_advisory_review=True)
-    assert "REVIEW_PENDING" in first and waves == [{"maybe.txt": "A", "own.txt": "M"}], first
+    assert first.startswith("Review outcome returned before commit: reviewers are still running"), first
+    assert waves == [{"maybe.txt": "A", "own.txt": "M"}], first
     entries, head = _git(repo, "ls-files", "-s", "-z"), _git(repo, "rev-parse", "HEAD")
 
     second = git._repo_commit_push(task, "candidate", skip_advisory_review=True)
@@ -494,7 +499,7 @@ def test_rejoin_of_a_pending_wave_keeps_the_uncertain_path_its_selection_named(t
     # Rejoined, not refused: the same wave's record answers (its double has no process-local
     # custody, so the rejoin reports it lost and starts no second dispatch); its reconcile read
     # the same retained index, and the index and HEAD are unchanged.
-    record = re.search(r'"record_id": "([^"]+)"', first).group(1)
+    record = re.search(r'"review_record_id": "([^"]+)"', first).group(1)
     assert "GIT_INDEX_OUTSIDE_SELECTION" not in second and record in second, second
     assert waves[1:] and all(wave == waves[0] for wave in waves)
     assert _git(repo, "ls-files", "-s", "-z") == entries
@@ -548,11 +553,8 @@ def test_rejoined_index_must_stay_inside_the_task_candidates(task):
 # --- #2680: an author continuation lands what its reference reviewed ---------------------------
 
 def _advisory_review(ctx, monkeypatch, paths, *, calls=None) -> dict:
-    """The first public call under Advisory: the outcome and its exact reference return before Git."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    first = _commit(ctx, monkeypatch, paths=paths, calls=calls)
-    assert first.startswith("Review outcome returned before commit"), first
-    return json.loads(first.split("\n", 1)[1])["review_reference"]
+    """The first public call: the outcome and its exact reference return before Git."""
+    return returned_reference(_commit(ctx, monkeypatch, paths=paths, calls=calls, land=False))
 
 
 def _continue(ctx, monkeypatch, reference, *, door=None, **kwargs):
@@ -950,11 +952,10 @@ def test_a_finished_review_holding_a_stale_start_token_admits_the_authors_next_i
     before = next(row for row in load_state(task.drive_root).attempts if row.attempt == source.attempt)
     verdict = review_ledger.load_record(review_ledger.ledger_root(task), source.review_record_id)["verdict"]
     assert _attempt_has_active_review_custody(before) == (shape == "live_adviser"), "only a running seat holds"
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory" if mode == "cyber_pro" else "blocking")
     (repo / "a.txt").write_text("the author's next intent\n", encoding="utf-8")
     head = _git(repo, "rev-parse", "HEAD")
 
-    result = _commit(task, monkeypatch, paths=["a.txt"], calls=calls)
+    result = _commit(task, monkeypatch, paths=["a.txt"], calls=calls, land=mode == "pro")
 
     assert "this other intent waits" not in result and "REVIEWED_ATTEMPT_IN_PROGRESS" not in result, result
     assert len(calls) == 2 and calls[-1] == {"a.txt": "M"}, "the new intent got its own panel"
@@ -1116,10 +1117,10 @@ def test_a_staged_merge_lands_with_both_parents_on_the_first_call(task, monkeypa
 @pytest.mark.parametrize("staging", ["whole_tree", "selected", "attributed"])
 @pytest.mark.parametrize("shape", ["diverged", "ancestor"])
 def test_a_staged_merge_survives_each_refusing_exit_and_lands_with_its_parents(task, monkeypatch, shape, staging):
-    """Through the public commit_reviewed handler, real Git throughout: a red tests preflight, a blocked review and
-    the free refusal of its identical retry each undo this call's staging and keep MERGE_HEAD, MERGE_MODE and
-    MERGE_MSG byte for byte; the rebutted retry lands one commit with the reviewed ordered parents and the
-    contributor's commit as its second parent. Omitted paths stage the whole tree without a baseline, or the task's
+    """Through the public commit_reviewed handler, real Git throughout: a red tests preflight, a FAIL returned before
+    Git and its identical retry (the same outcome collected again) each undo this call's staging and keep MERGE_HEAD,
+    MERGE_MODE and MERGE_MSG byte for byte; the rebutted retry's PASS, continued by the author, lands one commit with
+    the reviewed ordered parents and the contributor's commit as its second parent. Omitted paths stage the whole tree without a baseline, or the task's
     attributed paths with a baseline taken before the merge; named paths stage just those."""
     repo, door = task.repo_dir, _public_door()
     parents = _staged_merge(task, shape, before_merge=(lambda: _baseline(task)) if staging == "attributed" else None)
@@ -1130,7 +1131,8 @@ def test_a_staged_merge_survives_each_refusing_exit_and_lands_with_its_parents(t
              _commit(task, monkeypatch, paths, verdict="FAIL", door=door),
              _commit(task, monkeypatch, paths, verdict="FAIL", door=door)]
 
-    for result, marker in zip(exits, ("1 failed", "Critical feedback", "IDENTICAL_DIFF_REFUSED")):
+    returned = "Review outcome returned before commit"
+    for result, marker in zip(exits, ("1 failed", returned, returned)):
         assert marker in result, result
     assert _git(repo, "rev-parse", "HEAD").strip() == parents[0] and _index(repo) == {}
     assert _merge_state(repo) == merging
@@ -1147,9 +1149,8 @@ def test_an_advisory_handback_keeps_the_merge_for_the_authors_continuation(task,
     parents = _staged_merge(task, shape)
     merging = _merge_state(repo)
     paths = ["contrib/feature.txt"] if staging == "selected" else None
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
 
-    first = _commit(task, monkeypatch, paths, door=door)
+    first = _commit(task, monkeypatch, paths, door=door, land=False)
 
     assert first.startswith("Review outcome returned before commit"), first
     assert _merge_state(repo) == merging and _git(repo, "rev-parse", "HEAD").strip() == parents[0]

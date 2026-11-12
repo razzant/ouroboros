@@ -597,8 +597,9 @@ def test_exact_pending_commit_retry_reconciles_before_cycle_cap(tmp_path, monkey
         git_tools, "check_review_cycles_ceiling",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("cap must not gate reconciliation")),
     )
+    import ouroboros.review_state as review_state
     monkeypatch.setattr(
-        git_tools, "check_identical_verdict_refusal",
+        review_state, "settle_completed_round",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("replay gate must not run")),
     )
 
@@ -618,7 +619,8 @@ def test_exact_pending_commit_retry_reconciles_before_cycle_cap(tmp_path, monkey
 
 
 def test_commit_pending_retry_reconciles_same_paid_attempt(tmp_path, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    """A pending wave returns to the author open; the exact retry rejoins the same paid attempt, past
+    the cycle cap, without a second wave, and returns the settled outcome."""
     import subprocess
     from types import SimpleNamespace
 
@@ -705,15 +707,14 @@ def test_commit_pending_retry_reconciles_same_paid_attempt(tmp_path, monkeypatch
 
     monkeypatch.setattr(git_tools, "_run_parallel_review", wave)
     first = git_tools._run_non_committing_review_cycle(ctx, "same message")
-    assert first["status"] == "blocked", first
-    assert first["block_reason"] == "review_late_result_pending"
+    assert first["status"] == "reviewed" and "reviewers are still running" in first["message"], first
 
     monkeypatch.setattr(
         git_tools, "check_review_cycles_ceiling",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("cap must not gate exact custody")),
     )
     second = git_tools._run_non_committing_review_cycle(ctx, "same message")
-    assert second["status"] == "passed"
+    assert second["status"] == "reviewed" and "reviewers are still running" not in second["message"], second
     assert waves == 2
     assert len(reserved_reconciliations) == 1
 

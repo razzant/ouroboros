@@ -178,7 +178,6 @@ def test_triad_prompt_keeps_distinct_goal_and_scope_in_production_wiring(
     from tests.review_pool_rosters import set_review_pool
 
     set_review_pool(monkeypatch, ["test/reviewer"])
-    monkeypatch.setattr(review._cfg, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr(review, "_handle_multi_model_review", capture_review)
     ctx = SimpleNamespace(
         repo_dir=tmp_path,

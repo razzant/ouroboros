@@ -3,15 +3,14 @@ authority-preserving attempt-ledger eviction.
 
 Contract under test (accepted panel fixes F1-F2, fable P3-2/P3-3):
 * F1 — trimming the commit-attempt ledger never evicts paid rows or the
-  verdict anchors of the identical-diff refusal streak: a capped root cannot
-  loop free refusals until the ceiling and the quoted verdict forget
-  themselves;
+  verdict anchors a legacy ledger still carries: a capped root cannot loop
+  free calls until the ceiling forgets itself;
 * F2 — the commit gate's paid fact lands WRITE-AHEAD at the first PHYSICAL
   reviewer dispatch (either side): an attempt where both packs refuse at
   assembly spends $0 and consumes no ceiling cycle, while one dispatched side
   makes the cycle paid;
-* P3-3 — under advisory enforcement each free-replay reason drives the full
-  stage cycle to a passing commit with its own honest progress note and a
+* P3-3 — the free replay drives the full stage cycle to an outcome returned
+  for the author's decision, with its own honest progress note and a
   disclosure that lands in the commit result formatting.
 """
 
@@ -33,12 +32,12 @@ KEY = "OUROBOROS_REVIEW_MAX_CYCLES"
 # F1 — authority-preserving attempt-ledger eviction
 
 
-def test_free_refusal_flood_cannot_evict_paid_rows_or_the_verdict_anchor(
+def test_free_replay_flood_cannot_evict_paid_rows_or_the_verdict_anchor(
     tmp_path, monkeypatch,
 ):
-    """60+ free refusals after the cap is reached change NOTHING: the paid
-    count stays, and the identical-diff refusal still quotes the original
-    verdict — only the refusal noise is trimmed."""
+    """60+ calls after the cap is reached change NOTHING: each is a free replay
+    of the outcome (never a refusal), the paid count stays, and the recorded
+    rows, the legacy verdict anchor included, are left as they were."""
     import ouroboros.tools.git as git_mod
     from ouroboros.review_state import (
         CommitAttemptRecord,
@@ -49,7 +48,6 @@ def test_free_refusal_flood_cannot_evict_paid_rows_or_the_verdict_anchor(
     )
     from ouroboros.tools.commit_gate import count_paid_review_cycles
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv(KEY, "2")
     monkeypatch.setattr(git_mod, "commit_review_contract_fingerprint", lambda: "cf-1")
     monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **k: "")
@@ -88,24 +86,23 @@ def test_free_refusal_flood_cannot_evict_paid_rows_or_the_verdict_anchor(
         outcome = git_mod._free_cycle_gate(
             ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="",
         )
-        assert outcome is not None and outcome["status"] == "blocked"
-        assert outcome["block_reason"] == "identical_diff_refused"
-        assert "bug_original" in outcome["message"]  # the anchor is still quoted
+        assert outcome is not None and "status" not in outcome
+        assert outcome["replay_reason"] == "review_cycles_exhausted"
 
     assert count_paid_review_cycles(ctx, root_task_id="root-1") == 2
     state = load_state(pathlib.Path(tmp_path))
     rows = state.filter_attempts(repo_key=repo_key)
-    # The authority rows survived the flood; the noise portion stayed capped.
+    # The authority rows survived the flood untouched; the replays wrote no rows.
     assert any(r.paid and r.status == "succeeded" for r in rows)
     assert any(r.block_class == "verdict" and r.pre_review_fingerprint == "fp-1" for r in rows)
-    assert len([r for r in rows if not r.paid and r.block_class != "verdict"]) <= 50
+    assert len(rows) == 2
 
 
 def test_ledger_growth_stays_bounded_while_accounting_authority_survives(tmp_path):
     """F1 follow-up (strip-not-evict): flooding far past the 50-row window with
     HEAVY paid rows plus refusal noise must keep the serialized ledger bounded
     — over-window preserved rows lose their raw payloads (raw_stripped=True) —
-    while every accounting fact and the refusal-quote behavior survive."""
+    while every accounting fact survives."""
     from ouroboros.review_state import (
         CommitAttemptRecord,
         load_state,
@@ -113,10 +110,7 @@ def test_ledger_growth_stays_bounded_while_accounting_authority_survives(tmp_pat
         update_state,
         _utc_now,
     )
-    from ouroboros.tools.commit_gate import (
-        check_identical_verdict_refusal,
-        count_paid_review_cycles,
-    )
+    from ouroboros.tools.commit_gate import count_paid_review_cycles
 
     repo_key = make_repo_key(pathlib.Path(tmp_path))
     heavy_raw = "HEAVYRAWX" * 600  # ~5.4KB per payload field
@@ -153,10 +147,8 @@ def test_ledger_growth_stays_bounded_while_accounting_authority_survives(tmp_pat
         repo_dir=tmp_path, drive_root=pathlib.Path(tmp_path), task_id="root-1",
         task_metadata={}, _current_review_tool_name="commit_reviewed",
     )
-    # Every paid dispatch is still counted; the refusal still quotes the verdict.
+    # Every paid dispatch is still counted.
     assert count_paid_review_cycles(ctx, root_task_id="root-1") == 60
-    refusal = check_identical_verdict_refusal(ctx, "fp-1", contract_fingerprint="cf-1")
-    assert "IDENTICAL_DIFF_REFUSED" in refusal and "bug_anchor" in refusal
     state = load_state(pathlib.Path(tmp_path))
     rows = state.filter_attempts(repo_key=repo_key)
     over_window, in_window = rows[:-50], rows[-50:]
@@ -306,7 +298,6 @@ def _overflow_wave(dispatch):
 
 
 def test_all_assembly_refused_attempt_stays_unpaid(tmp_path, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     """F2(a): BOTH packs refusing at assembly ($0 spent) must not consume a
     ceiling cycle — with the default cap this used to exhaust a root for free."""
     from ouroboros.tools.commit_gate import count_paid_review_cycles
@@ -314,17 +305,16 @@ def test_all_assembly_refused_attempt_stays_unpaid(tmp_path, monkeypatch):
     git_mod, ctx, _progress = _stage_cycle_harness(tmp_path, monkeypatch, fingerprint="fp-a")
     monkeypatch.setattr(git_mod, "_run_parallel_review", _overflow_wave(dispatch=False))
     outcome = git_mod._run_reviewed_stage_cycle(ctx, "msg", 0.0)
-    assert outcome["status"] == "blocked" and outcome["block_reason"] == "fixed_overflow"
+    assert outcome["status"] == "reviewed"  # the failed review returns to the author, unpaid
     assert count_paid_review_cycles(ctx, root_task_id="root-1") == 0
     from ouroboros.review_state import load_state, make_repo_key
 
     rows = load_state(ctx.drive_root).filter_attempts(
         repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)))
-    assert rows and rows[-1].paid is False and rows[-1].block_class == "infra"
+    assert rows and rows[-1].paid is False and rows[-1].review_override_reason == "fixed_overflow"
 
 
 def test_one_side_dispatched_attempt_counts_as_paid(tmp_path, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     """F2(b): parallel dispatch means one side can spend while the other
     overflows at assembly — any side dispatching makes the cycle paid."""
     from ouroboros.tools.commit_gate import count_paid_review_cycles
@@ -332,7 +322,7 @@ def test_one_side_dispatched_attempt_counts_as_paid(tmp_path, monkeypatch):
     git_mod, ctx, _progress = _stage_cycle_harness(tmp_path, monkeypatch, fingerprint="fp-b")
     monkeypatch.setattr(git_mod, "_run_parallel_review", _overflow_wave(dispatch=True))
     outcome = git_mod._run_reviewed_stage_cycle(ctx, "msg", 0.0)
-    assert outcome["status"] == "blocked"
+    assert outcome["status"] == "reviewed"
     assert count_paid_review_cycles(ctx, root_task_id="root-1") == 1
     assert ctx._review_paid_stamp is None  # the seam never leaks past the wave
     from ouroboros.review_state import load_state, make_repo_key
@@ -345,43 +335,24 @@ def test_one_side_dispatched_attempt_counts_as_paid(tmp_path, monkeypatch):
     assert rows[0].review_retry_key
 
 
-@pytest.mark.parametrize(
-    "seed,expected_reason,expected_note_part",
-    [
-        ("verdict", "identical_diff_refused", "reusing the recorded"),
-        ("ceiling", "review_cycles_exhausted", "no review outcome"),
-    ],
-)
-def test_advisory_replay_reasons_drive_the_stage_cycle_to_a_disclosed_pass(
-    tmp_path, monkeypatch, seed, expected_reason, expected_note_part,
-):
-    """Advisory free replay returns the recorded outcome before an author choice;
+def test_the_ceiling_replay_drives_the_stage_cycle_to_a_disclosed_outcome(tmp_path, monkeypatch):
+    """The spent allowance's free replay returns the outcome before an author choice;
     its precise reason and no-new-dispatch disclosure remain durable."""
     from ouroboros.review_state import CommitAttemptRecord, make_repo_key, update_state, _utc_now
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    expected_reason, expected_note_part = "review_cycles_exhausted", "no review outcome"
     git_mod, ctx, progress = _stage_cycle_harness(tmp_path, monkeypatch, fingerprint="fp-r")
     monkeypatch.setattr(
         git_mod, "_run_parallel_review",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("free replay must not dispatch")),
     )
     repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
-    if seed == "verdict":
-        update_state(ctx.drive_root, lambda s: s.attempts.append(CommitAttemptRecord(
-            ts=_utc_now(), commit_message="m", status="blocked",
-            block_reason="critical_findings", block_class="verdict",
-            repo_key=repo_key, tool_name="commit_reviewed", task_id="root-1",
-            attempt=1, phase="blocking_review", pre_review_fingerprint="fp-r",
-            review_contract_fingerprint="cf-1",
-            critical_findings=[{"item": "bug_q", "reason": "r", "severity": "critical"}],
-        )))
-    else:
-        monkeypatch.setenv(KEY, "1")
-        update_state(ctx.drive_root, lambda s: s.attempts.append(CommitAttemptRecord(
-            ts=_utc_now(), commit_message="m", status="succeeded", repo_key=repo_key,
-            tool_name="commit_reviewed", task_id="root-1", attempt=1, phase="commit",
-            paid=True, root_task_id="root-1", pre_review_fingerprint="fp-old",
-        )))
+    monkeypatch.setenv(KEY, "1")
+    update_state(ctx.drive_root, lambda s: s.attempts.append(CommitAttemptRecord(
+        ts=_utc_now(), commit_message="m", status="succeeded", repo_key=repo_key,
+        tool_name="commit_reviewed", task_id="root-1", attempt=1, phase="commit",
+        paid=True, root_task_id="root-1", pre_review_fingerprint="fp-old",
+    )))
 
     outcome = git_mod._run_reviewed_stage_cycle(ctx, "msg", 0.0)
     assert outcome["status"] == "reviewed"
@@ -391,7 +362,7 @@ def test_advisory_replay_reasons_drive_the_stage_cycle_to_a_disclosed_pass(
     # The loud disclosure reached the advisory channel AND the commit result.
     assert any(expected_reason in w for w in ctx._review_advisory)
     result = git_mod._format_commit_result(ctx, "msg", "", "")
-    assert "no new review wave was bought" in result
+    assert "No new review wave was bought" in result
     assert expected_reason in result
     events = [json.loads(line) for line in
               (ctx.drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -411,7 +382,6 @@ def test_managed_advisory_ceiling_replay_survives_stale_subject_trees(
     dead-ended). The stage cycle now resets the set at every attempt start."""
     from ouroboros.review_state import CommitAttemptRecord, make_repo_key, update_state, _utc_now
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv(KEY, "1")
     git_mod, ctx, progress = _stage_cycle_harness(tmp_path, monkeypatch, fingerprint="fp-m")
     monkeypatch.setattr(

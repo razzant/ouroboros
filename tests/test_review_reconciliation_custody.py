@@ -619,12 +619,9 @@ def test_confirmed_owner_death_terminalizes_custody_loss_and_is_idempotent(tmp_p
     ) == []
 
 
-def test_confirmed_owner_death_keeps_identical_verdict_streak_fail_closed(tmp_path):
-    """A lost paid worker is infra noise, not a new terminal review result.
-
-    The identical-diff refusal must survive owner-death reconciliation so a
-    later retry cannot buy a duplicate paid wave for unchanged bytes.
-    """
+def test_confirmed_owner_death_settles_a_lost_paid_worker_as_infra(tmp_path):
+    """A lost paid worker is infra noise, not a new terminal review result:
+    owner-death reconciliation settles its row as an infrastructure failure."""
     from ouroboros.review_state import (
         AdvisoryReviewState,
         CommitAttemptRecord,
@@ -632,8 +629,6 @@ def test_confirmed_owner_death_keeps_identical_verdict_streak_fail_closed(tmp_pa
         make_repo_key,
         save_state,
     )
-    from ouroboros.tools.commit_gate import check_identical_verdict_refusal
-
     fingerprint = "fp-owner-loss"
     contract = "contract-owner-loss"
     repo_key = make_repo_key(tmp_path)
@@ -664,13 +659,8 @@ def test_confirmed_owner_death_keeps_identical_verdict_streak_fail_closed(tmp_pa
     assert state.attempts[0].status == "failed"
     assert state.attempts[0].phase == "infra"
     save_state(tmp_path, state)
-
-    refusal = check_identical_verdict_refusal(
-        SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="task-owner-loss"),
-        fingerprint,
-        contract_fingerprint=contract,
-    )
-    assert refusal == ""
+    reloaded = load_state(tmp_path).attempts[0]
+    assert (reloaded.status, reloaded.phase, reloaded.paid) == ("failed", "infra", True)
 
 
 def test_confirmed_owner_death_unblocks_a_new_commit(tmp_path):

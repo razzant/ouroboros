@@ -5,9 +5,9 @@ Contract under test:
 * blocked commit attempts are TYPED (verdict vs infra) at record time;
 * the paid fact is recorded at dispatch on the attempt ledger and survives the
   terminal merge; per-root-task counts are derived from it (P7);
-* the free-cycle gate runs BEFORE advisory freshness: blocking → free typed
-  refusal (managed resolvers get MERGE_HEAD repaired), advisory → free replay
-  marker (typed event, commit proceeds, no paid dispatch);
+* the free-cycle gate runs BEFORE advisory freshness: a spent allowance is a
+  free replay marker (typed event, the outcome returns, no paid dispatch); a
+  verdict never refuses an identical resubmission;
 * skill review: panel-contract fingerprint, per-key paid-cycle counting,
   $0 replay of an identical substantive verdict, typed exhaustion refusal,
   and the Max-Review-Cycles facts on terminal history rows.
@@ -21,6 +21,8 @@ import types
 
 import pytest
 
+from tests.test_git_review_preflight_gate import candidate  # noqa: F401
+
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 KEY = "OUROBOROS_REVIEW_MAX_CYCLES"
@@ -29,7 +31,6 @@ KEY = "OUROBOROS_REVIEW_MAX_CYCLES"
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     monkeypatch.delenv(KEY, raising=False)
-    monkeypatch.delenv("OUROBOROS_REVIEW_ENFORCEMENT", raising=False)
     yield
 
 
@@ -237,8 +238,7 @@ def test_stage_cycle_free_gate_runs_before_preflight_gate():
 def test_resolve_root_task_id_ignores_the_followup_chain():
     """machine-3 decision: a follow-up task is a FRESH root for the ceiling —
     origin_root_task_id (the follow-up chain marker) is deliberately not
-    honored; the identical-fingerprint refusal stays the anti-laundering
-    backstop."""
+    honored."""
     from ouroboros.tools.commit_gate import resolve_root_task_id
 
     followup = types.SimpleNamespace(
@@ -253,31 +253,8 @@ def test_resolve_root_task_id_ignores_the_followup_chain():
     assert resolve_root_task_id(subtask) == "tree-root"
 
 
-def test_repair_managed_merge_head_writes_merge_head(tmp_path, monkeypatch):
-    """Behavior test (wording-1): the refusal path's repair helper re-writes
-    the REAL .git/MERGE_HEAD via reestablish_merge_head with the tx target."""
-    import subprocess
-
-    import ouroboros.tools.git as git_mod
-    import supervisor.git_ops as git_ops
-    import supervisor.update_merge as update_merge
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    monkeypatch.setattr(git_ops, "REPO_DIR", repo)
-    target = "a" * 40
-    monkeypatch.setattr(
-        update_merge, "managed_assisted_tx_for",
-        lambda task_id, metadata: ({"target_sha": target}, ""),
-    )
-    ctx = types.SimpleNamespace(task_id="t-1", task_metadata={})
-    git_mod._repair_managed_merge_head(ctx)
-    assert (repo / ".git" / "MERGE_HEAD").read_text(encoding="utf-8") == target + "\n"
-
-
 # ---------------------------------------------------------------------------
-# The free-cycle gate (Δ5.2/Δ5.4): blocking refusals, advisory replay
+# The free-cycle gate (Δ5.2/Δ5.4): the spent allowance replays free; a verdict refuses nothing
 
 
 def _gate_ctx(tmp_path, task_id="root-1"):
@@ -306,52 +283,20 @@ def _seed_verdict_block(tmp_path, fingerprint, contract_fp, **kw):
     update_state(pathlib.Path(tmp_path), lambda s: s.attempts.append(CommitAttemptRecord(**row)))
 
 
-def test_free_cycle_gate_blocking_identical_refusal_repairs_managed_merge_head(
-    tmp_path, monkeypatch,
-):
+def test_free_cycle_gate_spent_ceiling_replays_with_a_typed_event(tmp_path, monkeypatch):
+    """A spent allowance never refuses: the gate returns the replay marker (the outcome reaches the
+    author, nothing is unstaged or recorded as a block) and emits the typed exhaustion event, with
+    the recorded authority ``advisory`` even where the retired key still says ``blocking``."""
     import ouroboros.tools.git as git_mod
+    from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, update_state, _utc_now
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    monkeypatch.setattr(git_mod, "commit_review_contract_fingerprint", lambda: "cf-1")
-    monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **k: "")
-    repaired = []
-    monkeypatch.setattr(git_mod, "_authorized_managed_update_resolver", lambda ctx: True)
-    monkeypatch.setattr(git_mod, "_repair_managed_merge_head", lambda ctx: repaired.append(True))
-
-    ctx = _gate_ctx(tmp_path)
-    _seed_verdict_block(tmp_path, "fp-1", "cf-1")
-    outcome = git_mod._free_cycle_gate(
-        ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="",
-    )
-    assert outcome is not None and outcome["status"] == "blocked"
-    assert outcome["block_reason"] == "identical_diff_refused"
-    assert "IDENTICAL_DIFF_REFUSED" in outcome["message"] and "bug_y" in outcome["message"]
-    assert repaired == [True]  # MERGE_HEAD kept repaired on the free refusal path
-    # The refusal itself is durably recorded and never resets the streak.
-    from ouroboros.review_state import load_state, make_repo_key
-
-    rows = load_state(pathlib.Path(tmp_path)).filter_attempts(
-        repo_key=make_repo_key(pathlib.Path(tmp_path)))
-    assert rows[-1].block_reason == "identical_diff_refused"
-    again = git_mod._free_cycle_gate(
-        ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="",
-    )
-    assert again is not None and again["block_reason"] == "identical_diff_refused"
-    # A fresh diff passes the gate.
-    assert git_mod._free_cycle_gate(
-        ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-2"}, review_rebuttal="",
-    ) is None
-
-
-def test_free_cycle_gate_blocking_ceiling_emits_typed_event(tmp_path, monkeypatch):
-    import ouroboros.tools.git as git_mod
-    from ouroboros.review_state import CommitAttemptRecord, make_repo_key, update_state, _utc_now
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
     monkeypatch.setenv(KEY, "1")
     monkeypatch.setattr(git_mod, "commit_review_contract_fingerprint", lambda: "cf-1")
-    monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **k: "")
-    monkeypatch.setattr(git_mod, "_authorized_managed_update_resolver", lambda ctx: False)
+    monkeypatch.setattr(
+        git_mod, "run_cmd",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no git calls on the replay path")),
+    )
 
     ctx = _gate_ctx(tmp_path)
     repo_key = make_repo_key(pathlib.Path(tmp_path))
@@ -363,60 +308,49 @@ def test_free_cycle_gate_blocking_ceiling_emits_typed_event(tmp_path, monkeypatc
     outcome = git_mod._free_cycle_gate(
         ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-new"}, review_rebuttal="",
     )
-    assert outcome is not None and outcome["block_reason"] == "review_cycles_exhausted"
-    assert "REVIEW_CYCLES_EXHAUSTED" in outcome["message"]
+    assert outcome is not None and "status" not in outcome and "block_reason" not in outcome
+    assert outcome["replay_reason"] == "review_cycles_exhausted"
+    assert "REVIEW_CYCLES_EXHAUSTED" in outcome["advisory_replay"]
+    assert "Decide whether what was reviewed is enough" in outcome["advisory_replay"]
+    assert "escalate to the owner" not in outcome["advisory_replay"]
     events = [json.loads(line) for line in
               (pathlib.Path(tmp_path) / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     exhausted = [e for e in events if e["type"] == "review_cycles_exhausted"]
     assert exhausted and exhausted[0]["surface"] == "commit_gate"
     assert exhausted[0]["cycles_paid"] == 1 and exhausted[0]["cap"] == 1
-    assert exhausted[0]["enforcement"] == "blocking"
-
-
-def test_free_cycle_gate_advisory_returns_replay_marker_not_a_block(tmp_path, monkeypatch):
-    """A.4/A.2 advisory contract: exhaustion/identical-refusal do NOT hard-block
-    — the gate returns a replay marker (typed free-replay event), never a
-    blocked outcome, and dispatches nothing."""
-    import ouroboros.tools.git as git_mod
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    monkeypatch.setattr(git_mod, "commit_review_contract_fingerprint", lambda: "cf-1")
-    monkeypatch.setattr(
-        git_mod, "run_cmd",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no git calls on the advisory replay path")),
-    )
-    ctx = _gate_ctx(tmp_path)
-    _seed_verdict_block(tmp_path, "fp-1", "cf-1")
-    outcome = git_mod._free_cycle_gate(
-        ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="",
-    )
-    assert outcome is not None and "status" not in outcome
-    assert outcome["replay_reason"] == "identical_diff_refused"
-    assert "IDENTICAL_DIFF_REFUSED" in outcome["advisory_replay"]
-    events = [json.loads(line) for line in
-              (pathlib.Path(tmp_path) / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert exhausted[0]["enforcement"] == "advisory"
     replays = [e for e in events if e["type"] == "commit_review_free_replay"]
-    assert replays and replays[0]["reason"] == "identical_diff_refused"
-    assert replays[0]["enforcement"] == "advisory"
+    assert replays and replays[0]["reason"] == "review_cycles_exhausted" and replays[0]["enforcement"] == "advisory"
+    assert [row.status for row in load_state(pathlib.Path(tmp_path)).attempts] == ["succeeded"]
+    # Below the ceiling the same gate lets the paid review run.
+    monkeypatch.setenv(KEY, "2")
+    assert git_mod._free_cycle_gate(
+        ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-new"}, review_rebuttal="",
+    ) is None
 
 
-def test_free_cycle_gate_infra_streak_never_gates_advisory_or_blocking(tmp_path, monkeypatch):
-    """Infra-blocks retry freely: they neither refuse under blocking nor
-    trigger the advisory replay."""
+def test_a_verdict_never_refuses_an_identical_resubmission(tmp_path, monkeypatch):
+    """The free identical-diff refusal left with Blocking: a recorded verdict or infra block of the
+    same staged bytes refuses nothing (whatever the retired key says), and a spent allowance still
+    replays (the control that the gate is live)."""
     import ouroboros.tools.git as git_mod
 
     monkeypatch.setattr(git_mod, "commit_review_contract_fingerprint", lambda: "cf-1")
     monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **k: "")
     ctx = _gate_ctx(tmp_path)
-    _seed_verdict_block(
-        tmp_path, "fp-1", "cf-1",
-        block_reason="review_quorum", block_class="infra", critical_findings=[],
-    )
+    _seed_verdict_block(tmp_path, "fp-1", "cf-1")
+    _seed_verdict_block(tmp_path, "fp-1", "cf-1", attempt=2, block_reason="review_quorum", block_class="infra",
+                        critical_findings=[])
     for enforcement in ("blocking", "advisory"):
         monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
         assert git_mod._free_cycle_gate(
             ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="",
         ) is None
+    _seed_verdict_block(tmp_path, "fp-0", "cf-1", attempt=3, status="succeeded", block_reason="", block_class="",
+                        phase="commit", paid=True, root_task_id="root-1", critical_findings=[])
+    monkeypatch.setenv(KEY, "1")
+    replay = git_mod._free_cycle_gate(ctx, "msg", 0.0, pre_fingerprint={"fingerprint": "fp-1"}, review_rebuttal="")
+    assert replay is not None and replay["replay_reason"] == "review_cycles_exhausted"
 
 
 def test_commit_contract_fingerprint_tracks_resolved_review_efforts(monkeypatch):
@@ -448,3 +382,76 @@ def test_commit_contract_fingerprint_tracks_resolved_review_efforts(monkeypatch)
     assert base == commit_review_contract_fingerprint()
     monkeypatch.setenv("OUROBOROS_EFFORT_SCOPE_REVIEW", "low")
     assert base == commit_review_contract_fingerprint()  # the retired scope-lane effort is not a pool fact either
+
+
+# ---------------------------------------------------------------------------
+# Home of the authority after Blocking left (STEP4 7(iv) item 2): no outcome refuses a commit
+
+
+@pytest.mark.parametrize("outcome", ["critical", "quorum", "not_performed", "owner_stop"])
+def test_no_review_outcome_refuses_a_commit_and_an_owner_stop_still_ends_it(candidate, monkeypatch, tmp_path, outcome):  # noqa: F811
+    """With the retired setting still saying Blocking in the environment and the settings document, a FAIL, a
+    quorum failure and a NOT_PERFORMED all return before Git as ``reviewed``: nothing is committed, the author's
+    bytes stay in the working tree, no ``phase=blocking_review`` row is written, and the author's explicit
+    continuation on the returned reference lands them. The control: an owner Stop of the work still ends the call
+    in ``owner_control`` without a commit."""
+    from ouroboros import config
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.mutation_attribution import capture_mutation_baseline
+    from ouroboros.review_dispatch import invoke_review_paid_stamp
+    from ouroboros.review_ledger import CouplingOutcome
+    from ouroboros.review_state import load_state
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools import git
+
+    ctx = candidate
+    document = tmp_path / "settings.json"
+    document.write_text(json.dumps({"OUROBOROS_REVIEW_ENFORCEMENT": "blocking"}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", document)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
+    ctx.branch_dev = git.run_cmd(["git", "branch", "--show-current"], cwd=ctx.repo_dir).strip()
+    git.run_cmd(["git", "reset", "--hard", "HEAD"], cwd=ctx.repo_dir)
+    (ctx.repo_dir / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    git.run_cmd(["git", "add", "VERSION"], cwd=ctx.repo_dir)
+    git.run_cmd(["git", "commit", "-m", "fixture version"], cwd=ctx.repo_dir)
+    write_task_result(ctx.drive_root, ctx.task_id, "running")
+    capture_mutation_baseline(ctx.drive_root, ctx.task_id, [{"surface_type": "system_repo", "host_root": str(ctx.repo_dir)}])
+    (ctx.repo_dir / "change.py").write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *_a, **_kw: None)
+    monkeypatch.setattr(git, "_post_commit_result", lambda *_a, **_kw: None)
+    monkeypatch.setattr(git, "_auto_push", lambda *_a, **_kw: "")
+    finding = {"item": "budget", "severity": "critical", "verdict": "FAIL", "reason": "wrong amount"}
+
+    def reviewer(_ctx, message, **_kw):
+        invoke_review_paid_stamp(ctx._review_paid_stamp)
+        ctx._last_review_critical_findings = [finding] if outcome == "critical" else []
+        ctx._last_triad_raw_results = [{"slot_id": "critic", "status": "responded", "parsed": [finding] if outcome == "critical" else [],
+                                        "raw_text": "checked"}]
+        if outcome == "quorum":
+            ctx._last_triad_raw_results = [{"slot_id": "critic", "status": "error", "error": "unavailable"}]
+            ctx._last_review_block_reason = "review_quorum"
+            return "⚠️ REVIEW_BLOCKED: quorum", CouplingOutcome(), "review_quorum", []
+        if outcome == "not_performed":
+            return ("⚠️ REVIEW_BLOCKED: review NOT_PERFORMED", CouplingOutcome(blocked=True, status="error"),
+                    "coupling_not_performed", [])
+        if outcome == "owner_stop":
+            request_cancel(ctx.drive_root, ctx.task_id, reason="owner_stopped", source="test")
+        return None, CouplingOutcome(verdict="PASS", status="responded"), "", []
+
+    monkeypatch.setattr(git, "_run_parallel_review", reviewer)
+    head = git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
+    first = git._repo_commit_push(ctx, "Fix amount", skip_advisory_review=True)
+    assert git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir) == head, first
+    assert (ctx.repo_dir / "change.py").read_text(encoding="utf-8") == "value = 2\n", "the author's bytes stay"
+    rows = load_state(ctx.drive_root).attempts
+    if outcome == "owner_stop":
+        assert "REVIEW_STOPPED" in first and "this commit was not made" in first, first
+        assert (rows[-1].phase, rows[-1].block_reason) == ("owner_control", "owner_stopped")
+        return
+    assert first.startswith("Review outcome returned before commit"), first
+    assert all(row.phase != "blocking_review" for row in rows), [(row.phase, row.status) for row in rows]
+    reference = json.loads(first.split("\n", 1)[1])["review_reference"]
+    landed = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition={
+        "disposition": "accepted", "rationale": "I read the returned outcome and accept these bytes."})
+    assert git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir) != head, landed
+    assert git.run_cmd(["git", "show", "HEAD:change.py"], cwd=ctx.repo_dir).strip() == "value = 2"

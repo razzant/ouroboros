@@ -216,7 +216,6 @@ def test_review_lifecycle_installs_deps_after_warnings(tmp_path, monkeypatch):
 
 
 def test_review_result_message_prefers_non_pass_findings_and_marks_omissions(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     long_reason = "x" * 400
     outcome = SkillReviewOutcome(
         skill_name="alpha",
@@ -229,14 +228,14 @@ def test_review_result_message_prefers_non_pass_findings_and_marks_omissions(mon
 
     message = _review_result_message(outcome)
 
-    assert message.startswith("Review blocked: blocker findings (blockers): FAIL extension_namespace_discipline")
+    # Outside Cyber Pro blockers do not stop the skill: the outcome names its findings.
+    assert message.startswith("Review executable with findings (blockers): FAIL extension_namespace_discipline")
     assert "manifest_schema" not in message
     assert "[omitted " in message
     assert "full findings in Skills page" in message
 
 
 def test_review_result_message_allows_warnings_status(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     outcome = SkillReviewOutcome(
         skill_name="alpha",
         status="warnings",
@@ -252,7 +251,6 @@ def test_review_result_message_allows_warnings_status(monkeypatch):
 @pytest.mark.parametrize("status", ["pending", "blockers"])
 def test_review_result_message_keeps_cyber_permission_apart_from_the_critic_outcome(monkeypatch, access, status):
     """The chat summary never calls a pending or blocked review "executable" because Cyber Pro may run it."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     outcome = SkillReviewOutcome(skill_name="alpha", status=status,
                                  findings=[{"item": "bug_hunting", "verdict": "FAIL", "reason": "unsafe path"}])
     message = _review_result_message(outcome)
@@ -261,12 +259,11 @@ def test_review_result_message_keeps_cyber_permission_apart_from_the_critic_outc
         assert message.startswith(expected) and "Review executable" not in message
         assert message.endswith(" | Cyber Pro: execution is Ouroboros's decision, not a review result")
     else:
-        assert message.startswith({"pending": "Review pending", "blockers": "Review blocked: blocker findings"}[status])
+        assert message.startswith({"pending": "Review pending", "blockers": "Review executable with findings (blockers)"}[status])
         assert "Cyber Pro" not in message
 
 
 def test_review_result_message_includes_auto_granted_keys(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     outcome = SkillReviewOutcome(
         skill_name="alpha",
         status="pass",
@@ -280,7 +277,6 @@ def test_review_result_message_includes_auto_granted_keys(monkeypatch):
 
 
 def test_review_result_message_includes_auto_granted_permissions(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     outcome = SkillReviewOutcome(
         skill_name="alpha",
         status="pass",
@@ -1125,9 +1121,8 @@ def access(request):
 
 
 @pytest.mark.parametrize("access", ["advanced", "cyber_pro"], indirect=True)
-@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
 @pytest.mark.parametrize("prior", ["missing", "clean", "author", "stale"])
-def test_duplicate_review_points_at_the_live_job_and_persists_nothing(tmp_path, monkeypatch, access, enforcement, prior):
+def test_duplicate_review_points_at_the_live_job_and_persists_nothing(tmp_path, monkeypatch, access, prior):
     """A second request for the same skill and bytes answers with the live job.
 
     It is a pointer, not an attempt: the job file still belongs to the live
@@ -1146,7 +1141,6 @@ def test_duplicate_review_points_at_the_live_job_and_persists_nothing(tmp_path, 
     from ouroboros.skill_loader import SkillReviewState, save_review_state
     from ouroboros.review_records import build_author_disposition
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     current_hash = outcome("alpha").content_hash
     if prior != "missing":
         author = build_author_disposition(
@@ -1192,9 +1186,9 @@ def test_duplicate_review_points_at_the_live_job_and_persists_nothing(tmp_path, 
     assert "error" not in first and first["payload"]["status"] == "clean"
     assert live["status"] == "running"
     assert duplicate["status"] == "pending"
-    executable = access == "cyber_pro" or prior == "clean" or (prior == "author" and enforcement == "advisory")
+    executable = access == "cyber_pro" or prior in {"clean", "author"}
     assert duplicate["executable_review"] is duplicate["review_gate"]["executable_review"] is executable
-    if access != "cyber_pro" and prior == "author" and enforcement == "advisory":
+    if access != "cyber_pro" and prior == "author":
         assert duplicate["review_gate"]["blocking_reason"] == "author_accepted_advisory"
     assert duplicate["job_id"] == live["job_id"]
     assert duplicate["job_status"] == "running"

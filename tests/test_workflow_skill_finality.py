@@ -20,7 +20,6 @@ from tests.test_skill_exec import _build_skill, _make_ctx
 @pytest.fixture
 def subject(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", "")
     ctx = _make_ctx(tmp_path)
     directory = _build_skill(ctx.drive_root / "skills" / "external", "demo")
@@ -111,14 +110,14 @@ def test_main_receives_terminal_reference_then_finishes_without_second_panel(sub
     save_enabled(ctx.drive_root, "demo", True)
     result = json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))
     assert result["exit_code"] == 0 and "hello from skill" in result["stdout"]
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    assert "SKILL_EXEC_BLOCKED" in skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: the same bytes still run
+    assert json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))["exit_code"] == 0
 
 
-def test_exec_schema_states_the_advisory_author_path_its_gate_permits(subject, monkeypatch):
+def test_exec_schema_states_the_author_path_its_gate_permits(subject, monkeypatch):
     """skill_exec's description is the gate it obeys: outside Cyber Pro a qualified
-    Advisory author acceptance runs the current bytes while the reviewer status is
-    still pending, and enablement, grants and dependencies stay separate conditions."""
+    author acceptance runs the current bytes while the reviewer status is still
+    pending, and enablement, grants and dependencies stay separate conditions."""
     ctx, directory, _ = subject
     assert "error" not in _finish(subject, reference=_unavailable(subject))
     loaded = load_skill(directory, ctx.drive_root)
@@ -127,7 +126,8 @@ def test_exec_schema_states_the_advisory_author_path_its_gate_permits(subject, m
         "pending", True, "author_accepted_advisory")
     description = skill_exec._EXEC_SCHEMA["description"]
     assert "fresh executable review verdict" not in description
-    assert "Advisory author acceptance" in description and "still be pending" in description
+    assert "qualified author acceptance" in description and "still be pending" in description
+    assert "Advisory" not in description and "Blocking" not in description
     assert all(term in description for term in ("must be enabled", "grants", "dependencies", "Cyber Pro"))
     save_enabled(ctx.drive_root, "demo", True)
     result = json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))
@@ -138,36 +138,34 @@ def test_exec_schema_states_the_advisory_author_path_its_gate_permits(subject, m
 
 def test_toggle_schema_states_the_gate_its_enable_owner_obeys(subject, monkeypatch):
     """#1735: toggle_skill enables through the same author-aware gate as skill_exec, so its
-    text names both authorities; Blocking enforcement still refuses the same bytes."""
+    text names both authorities; a leftover Blocking value of the retired setting refuses nothing."""
     ctx, directory, _ = subject
     assert "error" not in _finish(subject, reference=_unavailable(subject))
     assert load_skill(directory, ctx.drive_root).review.status == "pending"
     description = skill_exec._TOGGLE_SCHEMA["description"]
     assert "fresh executable review" not in description
     assert all(term in description for term in (
-        "Advisory author acceptance", "grants", "dependencies", "Cyber Pro"))
+        "qualified author", "acceptance of these exact bytes", "grants", "dependencies", "Cyber Pro"))
     enabled = json.loads(skill_exec._handle_toggle_skill(ctx, skill="demo", enabled=True))
     assert enabled["enabled"] is True and enabled["review_gate"]["blocking_reason"] == "author_accepted_advisory"
     assert json.loads(skill_exec._handle_toggle_skill(ctx, skill="demo", enabled=False))["enabled"] is False
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    refused = skill_exec._handle_toggle_skill(ctx, skill="demo", enabled=True)
-    # Inverted pin: the refusal is typed (code + one owner sentence); the gate's need moved to ``detail``.
-    assert refused.startswith("⚠️ SKILL_TOGGLE_ERROR") and '"code": "acceptance"' in refused and (
-        '"detail": "a current executable reviewer verdict"') in refused
+    again = json.loads(skill_exec._handle_toggle_skill(ctx, skill="demo", enabled=True))
+    assert again["enabled"] is True and again["review_gate"]["blocking_reason"] == "author_accepted_advisory"
 
 
 def test_refusals_name_the_authorities_their_gate_admits(subject, monkeypatch):
-    """#1735: a refused gate names what it still needs. Advisory admits a current reviewer verdict
-    or a qualified author acceptance of these bytes; Blocking admits the verdict only. skill_exec,
-    toggle_skill and the grant owner say the same thing their gate decided."""
+    """#1735: a refused gate names what it still needs: a current reviewer verdict or a qualified
+    author acceptance of these bytes, whatever a leftover value of the retired setting says.
+    skill_exec, toggle_skill and the grant owner say the same thing their gate decided."""
     from ouroboros.skill_lifecycle_actions import prepare_skill_grant
 
     ctx, directory, _ = subject
     # A review of these exact bytes that produced no executable verdict (not a stale one).
     save_review_state(ctx.drive_root, "demo", SkillReviewState(status="pending", content_hash=compute_content_hash(directory)))
-    both = "a current executable reviewer verdict or a qualified Advisory author acceptance of these exact bytes"
-    for enforcement, needed in (("advisory", both), ("blocking", "a current executable reviewer verdict")):
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    needed = "a current executable reviewer verdict or a qualified author acceptance of these exact bytes"
+    for leftover in ("advisory", "blocking"):
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", leftover)
         save_enabled(ctx.drive_root, "demo", True)
         ran = skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py")
         assert ran.startswith("⚠️ SKILL_EXEC_BLOCKED") and f"Execution needs {needed}. " in ran, ran
@@ -182,7 +180,7 @@ def test_refusals_name_the_authorities_their_gate_admits(subject, monkeypatch):
 
 def test_grant_prompt_does_not_ask_for_a_review_the_gate_already_permits(subject, monkeypatch):
     """#1735: the grant prompt is reached only past the executable gate; under a qualified
-    Advisory author acceptance (reviewer still pending) it asks for the grant alone."""
+    author acceptance (reviewer still pending) it asks for the grant alone."""
     ctx, directory, _ = subject
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "false")
     manifest = directory / "SKILL.md"
@@ -254,8 +252,6 @@ def test_pending_author_acceptance_preserves_enable_grants_and_deps(subject, mon
     monkeypatch.setattr(skill_dependencies, "auto_install_specs_for_skill", lambda *a: [{"kind": "pip", "package": "test-only"}])
     readiness = skill_readiness_for_execution(ctx.drive_root, loaded, skills=[loaded])
     assert any(item.startswith("deps_not_ready:") for item in readiness.blockers)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    assert not auto_grant_if_enabled(ctx.drive_root, loaded).granted
 
 
 @pytest.mark.parametrize("basis", ["critic", "unavailable"])
@@ -303,10 +299,6 @@ def test_actual_publish_transaction_binds_author_bytes_and_preserves_provenance(
     assert not any("review" in key for key in catalog["skills"][0])
     assert any(row == ("mutation", "pr") for row in events)
     events.clear()
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    assert not json.loads(skill_publish._submit_skill_to_hub(ctx, "demo", confirm_public_submission=True))["ok"]
-    assert not events
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     assert json.loads(skill_publish._submit_skill_to_hub(ctx, "demo"))["reason_code"] == "confirmation_required"
     monkeypatch.setattr(skill_publish, "scan_named_bytes", lambda *a, **kw: _scan_result(_finding("SKILL.md", confidence="high", disposition="blocker")))
     assert not json.loads(skill_publish._submit_skill_to_hub(ctx, "demo", confirm_public_submission=True))["ok"]
@@ -329,9 +321,6 @@ def test_selected_and_passive_preflight_follow_same_current_authority(subject, m
     assert outcome["publication_ready"] and outcome["state"] == "warnings"
     assert outcome["review"]["status"] == "blockers" and outcome["review"]["stale"]
     assert outcome["review"]["author_accepted"]
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    assert not _build(tmp_path).payload["publication_ready"]
-    assert "fresh review" in _passive_submit_hub(loaded, github_token_configured=True)["reason"]
 
 
 def test_completed_waiter_with_inflight_actor_is_not_unavailable(subject):
@@ -391,9 +380,6 @@ def test_host_service_preserves_token_enablement_and_permission_checks(subject, 
     save_enabled(ctx.drive_root, "demo", True)
     with pytest.raises(HostServiceAuthError, match="token is stale"):
         host._assert_active_token("demo", {**token, "content_hash": "old"})
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    with pytest.raises(HostServiceAuthError, match="executable review"):
-        host.authenticate_token_payload("token")
 
 
 def test_prior_substantive_feedback_still_allows_finish_with_another_actor_pending(subject):

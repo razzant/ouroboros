@@ -30,7 +30,7 @@ from ouroboros.tools.registry import ToolContext
 @pytest.fixture
 def candidate(tmp_path, monkeypatch):
     """One staged change in a fresh repository, its release-metadata and readiness checks
-    and the managed-proof probe stubbed, under blocking enforcement."""
+    and the managed-proof probe stubbed."""
     repo, drive = tmp_path / "repo", tmp_path / "data"
     repo.mkdir()
     drive.mkdir()
@@ -49,7 +49,6 @@ def candidate(tmp_path, monkeypatch):
     monkeypatch.setattr(commit_admission, "release_metadata_diagnostics", lambda *a, **kw: {
         "status": "not_applicable", "findings": [], "unavailable": []})
     monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda ctx: False)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     return ctx
 
 

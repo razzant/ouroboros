@@ -28,7 +28,7 @@ pytestmark = [pytest.mark.ui_browser]
 WIDTHS = {"phone": {"width": 390, "height": 844}, "desktop": {"width": 1280, "height": 900}}
 TASK_ID = "pool-card"
 CARD_LINES = (
-    "Panel: Advisory · chosen by Ouroboros · 2 of 3 ticked reviewers · 1 adviser, not counted",
+    "Panel: chosen by Ouroboros · 2 of 3 ticked reviewers · 1 adviser, not counted",
     "Why these reviewers: two engines are enough for a docs fix",
     "Not reached: critic (engine refused token ***REDACTED***)",
     "Wave total: $0.42 for the priced seats · 1 seat on a subscription · 1 seat cost unknown",
@@ -36,8 +36,6 @@ CARD_LINES = (
 TICK = {
     "advisory": "Counts when chosen: for each check Ouroboros asks one, several or all reviewers"
                 " and writes why; it never skips a check that is owed.",
-    "blocking": "Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself,"
-                " each skill and each required result; a critical finding stops it.",
 }
 NO_SIDEWAYS = "el => el.scrollWidth <= el.clientWidth + 1"
 
@@ -124,27 +122,19 @@ def test_review_pool_card_and_reviewer_caption_at_phone_and_desktop_widths(direc
                     card.screenshot(path=str(evidence / f"review-pool-card-{name}.png"))
                     page.close()
 
-                # Desktop: the saved Advisory, then the saved Blocking. (LANE C2: on the integrated tree the
-                # strictness is chosen on Permissions and checks; here the saved value is written directly.)
+                # Desktop: the caption of the saved Access (outside Cyber Pro).
                 page = browser.new_page(viewport=WIDTHS["desktop"])
                 caption = _reviewer_caption(page, url)
                 assert caption.inner_text() == TICK["advisory"]
-                assert page.evaluate("""async () => (await fetch('/api/settings', { method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ OUROBOROS_REVIEW_ENFORCEMENT: 'blocking' }) })).status""") == 200
-                open_settings(page, "agents")
-                caption = _reviewer_caption(page)
-                page.wait_for_function("""t => [...document.querySelectorAll('#page-settings .agent-use .ui-row-meta')]
-                    .some((el) => el.getClientRects().length && el.textContent === t)""", arg=TICK["blocking"], timeout=30_000)
                 _assert_contained(page, caption, WIDTHS["desktop"]["width"])
                 caption.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / "reviewer-caption-desktop.png"))
                 page.close()
 
-                # Phone: a fresh page reads the saved Blocking and the line wraps inside the row.
+                # Phone: a fresh page reads the same caption and the line wraps inside the row.
                 page = browser.new_page(viewport=WIDTHS["phone"])
                 caption = _reviewer_caption(page, url)
-                assert caption.inner_text() == TICK["blocking"]
+                assert caption.inner_text() == TICK["advisory"]
                 assert "each of them reviews every change" not in page.locator("#page-settings").inner_text()
                 _assert_contained(page, caption, WIDTHS["phone"]["width"])
                 caption.scroll_into_view_if_needed()

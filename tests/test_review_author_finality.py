@@ -110,7 +110,6 @@ def test_skill_author_finish_uses_existing_review_without_dispatch_same_hash(
         base_path=skill_dir, target_path=skill_dir, source="test",
         skill_name="demo", state_drive_root=tmp_path,
     )
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setattr(skill_exec_mod, "build_resolved_resource_binding", lambda *a, **k: binding)
     monkeypatch.setattr(skill_exec_mod, "_skill_tool_preflight", lambda *a, **k: "")
     prior_hash = compute_content_hash(skill_dir)
@@ -151,7 +150,6 @@ def test_skill_author_finish_binds_changed_hash_after_preflight_without_panel(
         base_path=skill_dir, target_path=skill_dir, source="test",
         skill_name="demo", state_drive_root=tmp_path,
     )
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setattr(skill_exec_mod, "build_resolved_resource_binding", lambda *a, **k: binding)
     monkeypatch.setattr(skill_exec_mod, "_skill_tool_preflight", lambda *a, **k: "")
     old_hash = compute_content_hash(skill_dir)
@@ -178,8 +176,7 @@ def test_skill_author_finish_binds_changed_hash_after_preflight_without_panel(
     assert loaded.is_stale_for(current_hash)
     assert loaded.gate_for(current_hash)["executable_review"]
     assert loaded.gate_for(current_hash)["author_accepted"] is True
-    assert loaded.gate_for(current_hash, enforcement="blocking")["author_accepted"] is False
-    assert loaded.gate_for(current_hash, enforcement="blocking")["executable_review"] is False
+    assert loaded.gate_for("other-bytes")["author_accepted"] is False  # bound to these exact bytes
     assert loaded.author_disposition["subject_hash"] == current_hash
     assert loaded.status == "blockers"
     assert "raw reviewer findings" in out
@@ -204,7 +201,7 @@ def test_ordinary_advisory_commit_does_not_invent_author_finish(tmp_path):
 
 
 @pytest.mark.parametrize(("kind", "status"), [("script", "clean"), ("extension", "warnings")])
-def test_repeated_skill_finish_preserves_critic_and_independent_blocking(tmp_path, monkeypatch, status, kind):
+def test_repeated_skill_finish_preserves_critic_evidence_and_runs_the_current_bytes(tmp_path, monkeypatch, status, kind):
     from ouroboros.skill_loader import SkillReviewState, compute_content_hash, load_skill, save_enabled, save_review_state
     from ouroboros.tool_access_types import ResolvedResourceBinding
     from ouroboros.tools import skill_exec
@@ -230,7 +227,6 @@ def test_repeated_skill_finish_preserves_critic_and_independent_blocking(tmp_pat
     save_enabled(ctx.drive_root, "demo", True)
     binding = ResolvedResourceBinding(profile="self_modification", root="skill_payload", operation="review",
         base_path=directory, target_path=directory, source="test", skill_name="demo", state_drive_root=ctx.drive_root)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     for revision in (1, 2):
         changed.write_text(f"print('author-{revision}')\n" if kind == "script" else f"def register(api):\n    value = {revision}\n")
         result = skill_exec._author_finish_existing_skill_review(ctx, binding, "demo",
@@ -250,13 +246,7 @@ def test_repeated_skill_finish_preserves_critic_and_independent_blocking(tmp_pat
             assert f"author-{revision}" in actual["stdout"]
         else:
             assert _extension_runtime_state(loaded, drive_root=ctx.drive_root, skills=[loaded])["desired_live"]
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     loaded = load_skill(directory, ctx.drive_root)
-    assert not loaded.review.gate_for(loaded.content_hash)["executable_review"]
-    if kind == "script":
-        assert "SKILL_EXEC_BLOCKED" in skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py")
-    else:
-        assert not _extension_runtime_state(loaded, drive_root=ctx.drive_root, skills=[loaded])["desired_live"]
     save_review_state(ctx.drive_root, "demo", SkillReviewState(status="clean", content_hash=loaded.content_hash))
     refreshed = load_skill(directory, ctx.drive_root)
     assert refreshed.review.gate_for(refreshed.content_hash)["executable_review"]

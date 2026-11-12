@@ -277,7 +277,6 @@ def h(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     _install_seams(monkeypatch, harness)
     monkeypatch.setattr(rc, "run_parallel_review", harness.wave)
     monkeypatch.setattr(rc, "get_runtime_mode", lambda: "advanced")
-    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "advisory")
     # The shipped cycle cap is the ceiling test's subject; every other test pays freely.
     monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: None)
     # The pool: two natively retrieving seats (asked both parts) and one packet seat; an
@@ -360,7 +359,6 @@ def test_a_foreign_base_head_is_core_untested_and_locks_nothing(h: Harness, monk
     base = _git(h.project, "rev-parse", "HEAD")
     head = _commit(h.project, "feature.py", "print('feature')\n")
     h.wave.failing = {pool[0]}  # a retrieving seat: both of its answers carry the defect
-    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
     result = h.run(subject="base..head", base=base, head=head, goal="Add the feature")
 
     [call] = h.wave.calls
@@ -372,23 +370,22 @@ def test_a_foreign_base_head_is_core_untested_and_locks_nothing(h: Harness, monk
     assert result["tests"] == {"policy": "NOT_RUN", "result": "unknown"}
     assert result["aggregate"] == rl.VERDICT_FAIL and {f["seat_id"] for f in result["findings"]["critical_findings"]} == {pool[0]}
     assert sorted(f["part"] for f in result["findings"]["critical_findings"]) == ["change", "coupling"]
-    assert (result["enforcement"], result["enforcement_blocks"]) == ("blocking", False)
+    assert (result["enforcement"], result["enforcement_blocks"]) == ("advisory", False)
     assert (result["subject"]["base"], result["subject"]["head"], result["subject"]["root"]) == (
         base, head, str(h.project.resolve()))
     assert _git(h.project, "rev-parse", "HEAD") == head and _git(h.project, "status", "--porcelain") == ""
     assert [attempt.status for attempt in h.attempts(h.project)] == ["reviewed"]
 
-    # The same verdict on the body is enforced by the record.
+    # The same verdict on the body is recorded and binds nothing either: the author decides.
     _stage(h.system, "body.py", "x = 1\n")
     body = h.run(root="system_repo", subject="index")
-    assert (body["aggregate"], body["enforcement"], body["enforcement_blocks"]) == (rl.VERDICT_FAIL, "blocking", True)
+    assert (body["aggregate"], body["enforcement"], body["enforcement_blocks"]) == (rl.VERDICT_FAIL, "advisory", False)
     assert _git(h.system, "diff", "--cached", "--name-only") == "body.py"
 
 
 def test_treat_as_body_raises_only_an_unknown_root_to_the_body_layer(
         h: Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
     pool = _pool()
-    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
     # A recognized foreign root (its remote reaches neither the managed remote nor the
     # install's origin) stays on the core layer whatever the flag says; the flag is recorded.
     _stage(h.project, "a.py", "a = 1\n")
@@ -399,15 +396,15 @@ def test_treat_as_body_raises_only_an_unknown_root_to_the_body_layer(
     assert foreign["checklist"] == {"layer": "core", "body_fact": "false", "how": "remote_chain", "treat_as_body": True}
     assert foreign["enforcement_blocks"] is False
 
-    # A root git cannot place (no remote, no copy binding) is raised: the body layer, the
-    # owner's panel outside Cyber Pro, enforcement binding; ``how`` keeps the fact's value.
+    # A root git cannot place (no remote, no copy binding) is raised: the body layer, where a
+    # narrowed panel outside Cyber Pro carries its reason; ``how`` keeps the fact's value.
     local = _repo(tmp_path / "work" / "local", "local")
     _stage(local, "b.py", "b = 2\n")
     raised = h.run(subject="index", workspace_root=str(local), treat_as_body=True, reviewers=[pool[0]], reason="own-body check")
     call = h.wave.calls[-1]
-    assert call.subject.spec.layer == "body" and (call.triad, call.coupling) == (pool, [])
+    assert call.subject.spec.layer == "body" and (call.triad, call.coupling) == ([pool[0]], [])
     assert raised["checklist"] == {"layer": "body", "body_fact": "true", "how": "unknown", "treat_as_body": True}
-    assert raised["panel"]["reviewers_subset_ignored"] is True and raised["enforcement_blocks"] is True
+    assert raised["panel"]["reason"] == "own-body check" and raised["enforcement_blocks"] is False
 
     _stage(local, "c.py", "c = 3\n")
     plain = h.run(subject="index", workspace_root=str(local), reviewers=[pool[0]], reason="one seat")
@@ -477,32 +474,6 @@ def test_no_list_seats_every_configured_seat(h: Harness) -> None:
     assert result["panel"]["composition"] == "full_pool" and result["panel"]["reason_missing"] is False
 
 
-def test_a_body_subset_is_widened_only_under_blocking_and_recorded(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    pool = _pool()
-    _stage(h.system, "body.py", "x = 1\n")
-    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
-    ignored = h.run(root="system_repo", subject="index", reviewers=[pool[0]])
-    assert ignored["panel"]["widened_from"] == [pool[0]]
-    assert (h.wave.calls[-1].triad, h.wave.calls[-1].coupling) == (pool, [])
-    assert (ignored["panel"]["composition"], ignored["panel"]["reviewers_subset_ignored"]) == ("full_pool", True)
-
-    _stage(h.system, "more.py", "y = 2\n")
-    named_all = h.run(root="system_repo", subject="index", reviewers=pool)
-    assert named_all["panel"]["reviewers_subset_ignored"] is False
-
-    # An enabled row outside the pool is heard beside the owner's pool, not counted.
-    _stage(h.system, "extra.py", "e = 3\n")
-    added = h.run(root="system_repo", subject="index", reviewers=["scout"])
-    assert (h.wave.calls[-1].triad, h.wave.calls[-1].coupling) == (pool, ["scout"])
-    assert added["panel"]["additional"] == ["scout"] and added["panel"]["reviewers_subset_ignored"] is True
-    assert {row["seat_id"]: row["additional"] for row in added["rows"]} == {**{seat: False for seat in pool}, "scout": True}
-
-    monkeypatch.setattr(rc, "get_runtime_mode", lambda: "cyber_pro")
-    composed = h.run(root="system_repo", subject="index", reviewers=[pool[0]], reason="cyber pro chooses")
-    assert h.wave.calls[-1].triad == [pool[0]] and h.wave.calls[-1].coupling == []
-    assert (composed["panel"]["composition"], composed["panel"]["reviewers_subset_ignored"]) == ("composed", False)
-
-
 def test_a_composed_panel_counts_pool_seats_only_and_hears_an_unmarked_row_as_a_critic(
         h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     """D1-02 / V02, decision 1A: the marked rows are the menu the author composes from.
@@ -549,13 +520,13 @@ def test_an_added_critic_is_any_enabled_catalog_row_and_a_switched_off_row_is_re
     assert _pool() == pool, "unmarked rows do not change the pool"
 
     _stage(h.system, "body.py", "x = 1\n")
-    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
-    below = h.run(root="system_repo", subject="index", reviewers=["session-critic"], coupling_only=["scout"], reason="session checks coupling")
+    below = h.run(root="system_repo", subject="index", reviewers=[*pool, "session-critic"], coupling_only=["scout"],
+                  reason="session checks coupling")
     call = h.wave.calls[-1]
     assert (call.triad, call.coupling) == (pool, ["session-critic", "scout"])
     assert rl.PART_CHANGE in call.parts["session-critic"] and call.parts["scout"] == (rl.PART_COUPLING,)
     assert call.efforts["session-critic"] == "xhigh"
-    assert (below["panel"]["composition"], below["panel"]["additional"]) == ("full_pool", ["session-critic", "scout"])
+    assert (below["panel"]["composition"], below["panel"]["additional"]) == ("composed", ["session-critic", "scout"])
     assert {row["seat_id"]: row["additional"] for row in below["rows"]} == {
         **{seat: False for seat in pool}, "session-critic": True, "scout": True}
 
@@ -845,24 +816,12 @@ def _as_child(h: Harness) -> None:
     h.ctx.task_metadata = {"parent_task_id": "parent-task", "root_task_id": "parent-task"}
 
 
-def test_required_root_blocking_widens_a_named_result_subset(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    pool = _pool()
-    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
-    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
-    result = h.run(subject="result", reviewers=[pool[0], "scout"], _frozen_result=_frozen_result(h, "root report\n"))
-    assert h.wave.calls[-1].triad == pool
-    assert h.wave.calls[-1].coupling == ["scout"]
-    assert set(h.wave.calls[-1].parts.values()) == {("result",)}
-    assert result["panel"]["widened_from"] == [pool[0], "scout"] and result["panel"]["chosen_by"] == "ouroboros"
-
-
 def test_a_childs_required_result_review_keeps_the_named_rows(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     pool = _pool()
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
-    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
     _as_child(h)
     result = h.run(subject="result", reviewers=[pool[0]], _frozen_result=_frozen_result(h, "child report\n"))
-    assert h.wave.calls[-1].triad == [pool[0]] and result["panel"]["widened_from"] == []
+    assert h.wave.calls[-1].triad == [pool[0]] and result["panel"]["composition"] == "composed"
 
 
 def test_advisory_required_root_refuses_a_subset_without_a_reason(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -878,19 +837,17 @@ def test_advisory_required_root_refuses_a_subset_without_a_reason(h: Harness, mo
 
 def test_auto_and_cyber_pro_compose_a_named_result_subset(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     pool = _pool()
-    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
     auto = h.run(subject="result", reviewers=[pool[0]], _frozen_result=_frozen_result(h, "auto report\n"))
-    assert h.wave.calls[-1].triad == [pool[0]] and auto["panel"]["widened_from"] == []
+    assert h.wave.calls[-1].triad == [pool[0]] and auto["panel"]["composition"] == "composed"
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
     monkeypatch.setattr(rc, "get_runtime_mode", lambda: "cyber_pro")
     cyber = h.run(subject="result", reviewers=[pool[0]], _frozen_result=_frozen_result(h, "cyber report\n"))
-    assert h.wave.calls[-1].triad == [pool[0]] and cyber["panel"]["widened_from"] == []
+    assert h.wave.calls[-1].triad == [pool[0]] and cyber["panel"]["composition"] == "composed"
 
 
 def test_the_caller_records_who_chose_the_result_panel(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     pool = _pool()
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
-    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
     host = h.run(subject="result", _chosen_by="host", _frozen_result=_frozen_result(h, "host report\n"))
     mind = h.run(subject="result", _frozen_result=_frozen_result(h, "mind report\n"))
     assert host["panel"]["chosen_by"] == "host" and host["panel"]["composition"] == "full_pool"

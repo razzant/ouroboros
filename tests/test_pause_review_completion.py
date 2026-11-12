@@ -465,7 +465,6 @@ def direct_commit(paused_env, monkeypatch):
     """
     from types import SimpleNamespace
 
-    from ouroboros import config
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.tools import git, parallel_review, review
     from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
@@ -512,7 +511,6 @@ def direct_commit(paused_env, monkeypatch):
     monkeypatch.setattr(git, "_publish_reviewed_commit", lambda _ctx, _msg, _sha, tag, _warning, _paths, push: "committed" + tag + push)
     monkeypatch.setattr(git, "record_bound_commit_success", lambda *_a: None)
     monkeypatch.setattr("ouroboros.body_candidate.record_reviewed_commit", lambda *_a, **_kw: None)
-    monkeypatch.setattr(config, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr("ouroboros.tools.review_admission.admit_commit_gate_wave", lambda *_a: None)
     # The one commit wave: a retrieving seat asked both parts of the one brief (contract B).
     plan = {"models": ["m"], "routes": [ReviewRouteKind.API_CHAT], "efforts": ["high"],
@@ -520,7 +518,7 @@ def direct_commit(paused_env, monkeypatch):
             "session_targets": [""], "session_profiles": [""], "retrieves": [True],
             "parts": [("change", "coupling")], "session_tasks": ["Review this candidate."],
             "session_policies": [{"output_contract": REVIEW_TWO_PART_OBJECT_CONTRACT}], "brief_shas": ["brief-sha"]}
-    prepared = {"blocking_review": True, "prompt": "Review this candidate.", "models": ["m"],
+    prepared = {"prompt": "Review this candidate.", "models": ["m"],
                 "stable_prefix_len": 0, "routes": plan["routes"], "session_task": "", "target_repo": f.ctx.repo_dir,
                 "row_plan": plan, "layer": "core", "brief_texts": {"brief-sha": "Review this candidate."}}
     monkeypatch.setattr(review, "_prepare_unified_review", lambda *_a, **_kw: (dict(prepared), None, False))

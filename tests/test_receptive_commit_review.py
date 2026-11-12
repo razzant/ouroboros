@@ -101,7 +101,6 @@ def author(tmp_path, monkeypatch):
 
     config.reset_runtime_mode_baseline_for_tests()
     config.initialize_runtime_mode_baseline("pro")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv("TOTAL_BUDGET", "1000")
     monkeypatch.setattr(review_pause, "DETACH_POLL_SEC", 0.05)
     repo, data = tmp_path / "repo", tmp_path / "data"
@@ -147,10 +146,8 @@ def author(tmp_path, monkeypatch):
             "brief_shas": ["brief-sha"] * 2}
 
     def prepared(ctx, commit_message, review_rebuttal="", repo_dir=None, goal="", scope="", subject=None):
-        from ouroboros.tools.review_helpers import review_enforcement_blocks
         root = subject.review_root if subject is not None else ctx.repo_dir
-        return ({"blocking_review": review_enforcement_blocks(config.get_review_enforcement()),
-                 "prompt": "Review this candidate.", "models": list(plan["models"]), "stable_prefix_len": 0,
+        return ({"prompt": "Review this candidate.", "models": list(plan["models"]), "stable_prefix_len": 0,
                  "routes": list(plan["routes"]), "session_task": "", "target_repo": root,
                  "row_plan": json.loads(json.dumps(plan, default=str)) | {"routes": list(plan["routes"])},
                  "layer": "core", "brief_texts": {"brief-sha": "Review this candidate."}}, None, False)
@@ -447,13 +444,13 @@ def test_a_synchronous_caller_keeps_its_wait_and_the_mail_stays_unread(author):
     assert _commit_count(a) == 1, "the outcome still returns before any Git effect"
 
 
-@pytest.mark.parametrize("mode,enforcement", [("pro", "blocking"), ("cyber_pro", "advisory"), ("cyber_pro", "blocking")])
-def test_enforcement_keeps_its_authority_while_the_author_hears_mail(author, monkeypatch, mode, enforcement):
+@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
+def test_the_outcome_returns_while_the_author_hears_mail_in_every_access(author, monkeypatch, mode):
     from ouroboros import config
 
     config.reset_runtime_mode_baseline_for_tests()
     config.initialize_runtime_mode_baseline(mode)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
     a, outcome = author, {}
     thread = _commit(a, outcome)
     assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
@@ -461,29 +458,24 @@ def test_enforcement_keeps_its_authority_while_the_author_hears_mail(author, mon
     _join(thread)
     result = outcome["result"]
     assert _commit_count(a) == 1 and not a.pushes, result
-    # Both commit returns (the blocking late wait, the Cyber Pro handback): the notice only while this task runs, the
-    # record always, collection by this task or its recorded Continue successor (``review_collection.resolve_reference``).
+    assert result.startswith("Review outcome returned before commit."), result
+    # The returned outcome: the notice only while this task runs, the record always, collection by this task or its
+    # recorded Continue successor (``review_collection.resolve_reference``).
     for fact in ("while this task runs", "stays in its record", "recorded Continue successor"):
         assert fact in result, (fact, result)
-    if mode == "pro":  # ordinary Blocking: the pending wave blocks; its collected PASS commits in one call
-        assert "REVIEW_PENDING" in result and "An addressed message ended your wait" in result
-        a.reviewer.release()
-        until(lambda: _notices(a))
-        _read_mail(a)
-        again = {}
-        _join(_commit(a, again))
-        assert _commit_count(a) == 2, again
-    else:  # Cyber Pro: an explicit continuation may commit now; the left review stays collectible
-        reference = json.loads(result.split("\n", 1)[1])["review_reference"]
-        _read_mail(a)
-        final = {}
-        _join(_commit(a, final, review_reference=reference, author_disposition={
-            "disposition": "deferred", "rationale": "Proceeding now; the open review stays collectible."}))
+    reference = json.loads(result.split("\n", 1)[1])["review_reference"]
+    _read_mail(a)
+    final = {}
+    _join(_commit(a, final, review_reference=reference, author_disposition={
+        "disposition": "deferred", "rationale": "Proceeding now; the open review stays collectible."}))
+    if mode == "cyber_pro":  # an explicit continuation may commit now; the left review stays collectible
         assert _commit_count(a) == 2, final
-        a.reviewer.release()
-        assert until(lambda: _notices(a))
-        time.sleep(0.3)
-        assert _commit_count(a) == 2, "a settling review never commits by itself"
+    else:  # outside Cyber Pro the decision waits for feedback it has received
+        assert "needs received feedback" in final["result"] and _commit_count(a) == 1, final
+    a.reviewer.release()
+    assert until(lambda: _notices(a))
+    time.sleep(0.3)
+    assert _commit_count(a) == (2 if mode == "cyber_pro" else 1), "a settling review never commits by itself"
     assert sorted(a.reviewer.rounds) == ["m1", "m2"]
 
 
@@ -1183,10 +1175,9 @@ def test_refused_author_continuation_preserves_source_and_corrected_reference(au
     assert a.reviewer.rounds == rounds
 
 
-@pytest.mark.parametrize("mode,enforcement", [("pro", "advisory"), ("pro", "blocking"), ("cyber_pro", "advisory")])
-def test_a_settled_left_wave_frees_the_corrected_candidate_and_reads_back_without_its_bytes(author, monkeypatch,
-                                                                                            mode, enforcement):
-    """#2587/#2590 through the public tool, under ordinary Advisory, Blocking and Cyber Pro. The first wave finds a
+@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
+def test_a_settled_left_wave_frees_the_corrected_candidate_and_reads_back_without_its_bytes(author, monkeypatch, mode):
+    """#2587/#2590 through the public tool, outside Cyber Pro and in it. The first wave finds a
     critical bug; mail releases the author and the wave settles FAIL in the background. The unchanged identical call
     collects that FAIL at $0 with no Git effect. With the settled round's checkout released, its reference returns
     the whole old outcome read-only without reverting the author's correction; the corrected candidate gets its own
@@ -1199,7 +1190,6 @@ def test_a_settled_left_wave_frees_the_corrected_candidate_and_reads_back_withou
 
     config.reset_runtime_mode_baseline_for_tests()
     config.initialize_runtime_mode_baseline(mode)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     a, outcome, answered, chat = author, {}, {}, author.reviewer.chat
 
     def first_wave_fails(messages, model, model_role="", **kwargs):
@@ -1248,10 +1238,7 @@ def test_a_settled_left_wave_frees_the_corrected_candidate_and_reads_back_withou
     result = corrected["result"]
     assert "REVIEWED_ATTEMPT_IN_PROGRESS" not in result and "this other intent waits" not in result, result
     assert sorted(a.reviewer.rounds) == ["m1", "m1", "m2", "m2"], "the corrected candidate got its own panel"
-    if (mode, enforcement) == ("pro", "blocking"):
-        assert _git(a.repo, "show", "HEAD:change.py") == "value = 3", result
-    else:
-        assert result.startswith("Review outcome returned before commit."), result
+    assert result.startswith("Review outcome returned before commit."), result
     assert load_record(a.data, left.review_record_id)["verdict"]["aggregate"] == "FAIL"
 
 

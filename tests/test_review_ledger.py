@@ -52,7 +52,7 @@ def _plan(slot_id, model, route="api_chat", parts=CHANGE, **extra):
 def _facts(raws, *, rows=None, task_id="task-1", **over):
     facts = {
         "task_id": task_id, "root_task_id": task_id, "repo_dir": "/nowhere", "goal": "goal", "scope": "scope",
-        "enforcement": "blocking", "enforcement_blocks": True, "blocked": False, "block_reason": "",
+        "enforcement": "advisory", "blocked": False, "block_reason": "",
         "triad_raw": raws,
         "structured": {
             "started_ts": "2026-10-07T00:00:00+00:00", "brief_texts": dict(BRIEFS),
@@ -537,6 +537,11 @@ def _cycle(ctx, message="Review changed candidate"):
     return git._run_reviewed_stage_cycle(ctx, message, 0, skip_advisory_pre_review=True, require_release_tag=False)
 
 
+def _record_id(result):
+    """The record a gate outcome names: on its own when Git ran, inside the returned review_reference otherwise."""
+    return str(result.get("review_record_id") or (result.get("review_reference") or {}).get("review_record_id") or "")
+
+
 def _attempt_rows(ctx):
     return [row for row in load_state(ctx.drive_root).attempts if row.tool_name == "commit_reviewed"]
 
@@ -557,19 +562,19 @@ def test_gate_pass_writes_a_settled_record_bound_to_the_attempt(candidate, monke
 
     _wire(ctx, monkeypatch, reviewer)
     result = _cycle(ctx)
-    assert result["status"] == "passed" and result["review_record_id"]
-    record = rl.load_record(rl.ledger_root(ctx), result["review_record_id"])
+    assert result["status"] == "reviewed" and _record_id(result)  # even a PASS returns to the author before Git
+    record = rl.load_record(rl.ledger_root(ctx), _record_id(result))
     assert record["verdict"]["aggregate"] == "PASS" and record["state"] == "settled" and record["surface"] == "commit_gate"
     assert record["subject"]["tree_sha"] == result["pre_fingerprint"]["binding"]["tree_sha"]
     assert record["subject"]["diff_sha"] == result["pre_fingerprint"]["binding"]["diff_sha256"]
     assert record["fingerprints"]["binding"] == result["pre_fingerprint"]["fingerprint"]
-    assert record["enforcement"] == "blocking" and record["enforcement_blocks"] is True
+    assert record["enforcement"] == "advisory" and not record.get("enforcement_blocks")
     assert record["panel"]["seats"] == 3 and record["panel"]["distinct_models"] == 3
     assert record["review_wave_id"] and record["task_id"] == ctx.task_id
     refs = [ref for row in record["rows"] for ref in row["source_refs"] if ref["role"] == "prompt"]
     assert {rl.read_source(rl.ledger_root(ctx), ctx.task_id, ref) for ref in refs} == {b"CHANGE BRIEF", b"TWO-PART BRIEF"}
-    assert _attempt_rows(ctx)[-1].review_record_id == result["review_record_id"]
-    assert rl.recent_records(rl.ledger_root(ctx), ctx.task_id, 5)[0]["record_id"] == result["review_record_id"]
+    assert _attempt_rows(ctx)[-1].review_record_id == _record_id(result)
+    assert rl.recent_records(rl.ledger_root(ctx), ctx.task_id, 5)[0]["record_id"] == _record_id(result)
 
 
 def test_gate_fail_and_quorum_failed_records_follow_the_gate(candidate, monkeypatch):  # noqa: F811
@@ -595,18 +600,18 @@ def test_gate_fail_and_quorum_failed_records_follow_the_gate(candidate, monkeypa
 
     _wire(ctx, monkeypatch, reviewer)
     failed = _cycle(ctx)
-    assert failed["status"] == "blocked" and failed["review_record_id"]
-    record = rl.load_record(rl.ledger_root(ctx), failed["review_record_id"])
+    assert failed["status"] == "reviewed" and _record_id(failed)
+    record = rl.load_record(rl.ledger_root(ctx), _record_id(failed))
     assert record["verdict"]["aggregate"] == "FAIL" and record["verdict"]["per_question"]["change"] == "FAIL"
     assert record["verdict"]["critical_findings"] == [{"item": "amount", "verdict": "FAIL", "severity": "critical"}]
     assert record["verdict"]["per_row"]["s2"] == "FAIL" and record["verdict"]["per_question"]["coupling"] == "PASS"
-    assert _attempt_rows(ctx)[-1].review_record_id == failed["review_record_id"]
+    assert _attempt_rows(ctx)[-1].review_record_id == _record_id(failed)
 
     (ctx.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
     git.run_cmd(["git", "add", "change.py"], cwd=ctx.repo_dir)
     quorum = _cycle(ctx, "Second candidate")
-    assert quorum["status"] == "blocked" and quorum["review_record_id"] not in ("", failed["review_record_id"])
-    record = rl.load_record(rl.ledger_root(ctx), quorum["review_record_id"])
+    assert quorum["status"] == "reviewed" and _record_id(quorum) not in ("", _record_id(failed))
+    record = rl.load_record(rl.ledger_root(ctx), _record_id(quorum))
     assert record["verdict"]["aggregate"] == "QUORUM_FAILED" and record["verdict"]["quorum"]["parts"]["change"]["responded"] == 1
     assert len(rl.recent_records(rl.ledger_root(ctx), ctx.task_id, 5)) == 2
 
@@ -630,23 +635,24 @@ def test_free_refusal_before_dispatch_is_a_not_dispatched_record(candidate, monk
 
     _wire(ctx, monkeypatch, reviewer)
     first = _cycle(ctx)
-    assert first["status"] == "blocked" and first["block_reason"] == "critical_findings"
-    # the exhausted paid-cycle ceiling refuses the next candidate for free
+    assert first["status"] == "reviewed"
+    assert rl.load_record(rl.ledger_root(ctx), _record_id(first))["verdict"]["aggregate"] == "FAIL"
+    # the exhausted paid-cycle ceiling replays the next candidate for free
     (ctx.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
     git.run_cmd(["git", "add", "change.py"], cwd=ctx.repo_dir)
     git._reset_commit_review_state(ctx)
     second = _cycle(ctx, "Another candidate")
-    assert second["block_reason"] == "review_cycles_exhausted" and len(calls) == 1
-    assert second["review_record_id"] and second["review_record_id"] != first["review_record_id"]
-    record = rl.load_record(rl.ledger_root(ctx), second["review_record_id"])
+    assert second["status"] == "reviewed" and len(calls) == 1
+    assert _record_id(second) and _record_id(second) != _record_id(first)
+    record = rl.load_record(rl.ledger_root(ctx), _record_id(second))
     assert record["verdict"]["aggregate"] == "NOT_DISPATCHED" and record["dispatch_refusal"]["kind"] == "review_cycles_exhausted"
     assert record["rows"] == [] and record["cost"] == {"usd": 0.0, "unknown": False}
-    assert _attempt_rows(ctx)[-1].review_record_id == second["review_record_id"]
-    assert _attempt_rows(ctx)[-1].block_reason == "review_cycles_exhausted"
+    assert _attempt_rows(ctx)[-1].review_record_id == _record_id(second)
+    assert _attempt_rows(ctx)[-1].status == "reviewed"  # the replay returned to the author, nothing refused
 
 
 def test_w2_the_real_cycle_on_an_unmarked_catalog_reviews_on_the_main_seat_alone(candidate, monkeypatch):  # noqa: F811
-    """V17, owner decision B: one real ``_run_reviewed_stage_cycle`` under advisory enforcement
+    """V17, owner decision B: one real ``_run_reviewed_stage_cycle``
     over a catalog with no row marked Reviewer — only the paid fan-out is answered here and the
     tests preflight skipped — reviews on ONE seat, the Main model alone: the fan-out is asked
     for Main's model only, the ledger record's one row is seat ``main`` asked both parts, it is
@@ -657,7 +663,6 @@ def test_w2_the_real_cycle_on_an_unmarked_catalog_reviews_on_the_main_seat_alone
     from tests.review_pool_rosters import FACTORY_MODELS, pool_roster, pool_seat, set_review_pool
 
     ctx = candidate
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv("OUROBOROS_MODEL", "openai/main-model")
     set_review_pool(monkeypatch, pool_roster(pool_seat("helper", FACTORY_MODELS[0], marked=False)))
     git._reset_commit_review_state(ctx)
@@ -687,10 +692,9 @@ def test_w2_the_real_cycle_on_an_unmarked_catalog_reviews_on_the_main_seat_alone
 
 
 def _advisory_push_setup(ctx, monkeypatch):
-    """The Advisory/pro commit surface of ``test_commit_finish_requires_received_outcome``."""
+    """The pro commit surface of ``test_commit_finish_requires_received_outcome``."""
     from ouroboros.mutation_attribution import capture_mutation_baseline
     from ouroboros.task_results import write_task_result
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "unlimited")
     ctx.branch_dev = git.run_cmd(["git", "branch", "--show-current"], cwd=ctx.repo_dir).strip()
@@ -995,7 +999,7 @@ def test_tests_fact_is_passed_only_for_a_candidate_bound_proof(candidate, monkey
     assert facts() == {"policy": "NOT_RUN", "result": "unknown"}
 
 
-def test_the_public_commit_outcome_names_the_record_when_the_review_blocks(candidate, monkeypatch):  # noqa: F811
+def test_the_public_commit_outcome_names_the_record_when_the_review_finds_a_problem(candidate, monkeypatch):  # noqa: F811
     ctx = candidate
 
     def reviewer(_ctx, message, **kw):
@@ -1013,7 +1017,8 @@ def test_the_public_commit_outcome_names_the_record_when_the_review_blocks(candi
     result = _commit_reviewed(ctx, "Review changed candidate", skip_tests=True, skip_advisory_pre_review=True)
     record_id = _attempt_rows(ctx)[-1].review_record_id
     assert record_id and rl.load_record(rl.ledger_root(ctx), record_id)["verdict"]["aggregate"] == "FAIL"
-    assert f"review_record_id: {record_id}" in result, "the actor-facing outcome names the record the canon promises"
+    assert result.startswith("Review outcome returned before commit")
+    assert f'"review_record_id": "{record_id}"' in result, "the actor-facing outcome names the record the canon promises"
 
 
 def test_concurrent_halves_of_one_wave_both_keep_their_execution_rows(tmp_path, monkeypatch):
@@ -1099,8 +1104,11 @@ def test_a_commit_that_fails_after_a_clean_wave_still_names_its_record(candidate
     hook = ctx.repo_dir / ".git" / "hooks" / "pre-commit"
     hook.write_text("#!/bin/sh\necho 'rejected by hook' >&2\nexit 1\n", encoding="utf-8")
     hook.chmod(0o755)
-    result = _commit_reviewed(ctx, "Review changed candidate", skip_tests=True, skip_advisory_pre_review=True)
-    assert result.startswith("⚠️ GIT_ERROR (commit)")
+    from tests._review_change_fixtures import land_after_review
+
+    result = land_after_review(ctx, "Review changed candidate", commit=_commit_reviewed, skip_tests=True,
+                               skip_advisory_pre_review=True)
+    assert result.startswith("⚠️ GIT_ERROR (commit)"), result
     record_id = result.rsplit("review_record_id: ", 1)[1].strip()
     assert rl.load_record(rl.ledger_root(ctx), record_id)["verdict"]["aggregate"] == "PASS"
     assert _attempt_rows(ctx)[-1].review_record_id == record_id

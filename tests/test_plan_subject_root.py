@@ -24,6 +24,8 @@ from ouroboros.tools import review as _review  # noqa: F401 — binds its REPO_R
 from tests.body_candidate_support import git, isolate, make_serving
 from tests.test_plan_task_tool import CLEAN, _call, _reply, _slots, _Substrate, _user_text, _write
 
+WHY = "the session reads the copy itself"  # a first body ask that names fewer than all ticked reviewers says why
+
 BRIEF = ".local/research/brief.md"
 MANAGED_URL = "https://example.invalid/razzant/ouroboros-managed.git"
 
@@ -39,7 +41,6 @@ def env(tmp_path, monkeypatch):
     git(serving, "remote", "add", "managed", MANAGED_URL)  # a source install's maintained update remote
     data = isolate(monkeypatch, tmp_path)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     # A separate clone of the body (recognized through its local origin) and a foreign project.
     clone = tmp_path / "ext-clone"
     git(tmp_path, "clone", "-q", str(serving), str(clone))
@@ -216,7 +217,7 @@ def test_an_unavailable_unused_candidate_does_not_refuse_the_tasks_workspace(env
     ctx = env.ctx("t-vanished", workspace_root=env.clone, workspace_mode="external")
     candidate, _receipt = env.prepare(ctx)
     shutil.rmtree(candidate)  # deleted outside the product while the task runs (its GC keeps a live owner's)
-    text, result = _write(ctx, affected_paths=["ouroboros/mod_a.py"], ask=["sess1"], attach=[BRIEF])
+    text, result = _write(ctx, affected_paths=["ouroboros/mod_a.py"], ask=["sess1"], attach=[BRIEF], reason=WHY)
     assert result.status == "ok", text
     [revision] = _revisions(env, "t-vanished")
     assert revision["body"] is True and f"({env.clone.resolve()})" in revision["body_note"]
@@ -331,7 +332,7 @@ def test_a_rooms_selected_folder_stays_the_subject_and_an_unavailable_one_is_ref
     sub = env.install()
     room = env.ctx("t-room", is_direct_chat=True, meta={"_project_room_dir": str(env.clone)})
     env.prepare(room)
-    _write(room, affected_paths=["ouroboros/mod_a.py"], ask=["sess1"], attach=[BRIEF])
+    _write(room, affected_paths=["ouroboros/mod_a.py"], ask=["sess1"], attach=[BRIEF], reason=WHY)
     [revision] = _revisions(env, "t-room")
     assert revision["body"] is True and f"({env.clone.resolve()})" in revision["body_note"]
     assert [a["locator"] for a in _asks(env, "t-room")[0]["attached"]] == [BRIEF]
@@ -352,7 +353,7 @@ def test_a_rooms_selected_folder_stays_the_subject_and_an_unavailable_one_is_ref
         active_repo_dir_for(noted)
 
     for context, why in ((missing, "moved-away"), (noted, "ROOM_NOTE_FIXTURE")):
-        text, result = _write(context, affected_paths=["ouroboros/mod_a.py"], ask=["s1"])
+        text, result = _write(context, affected_paths=["ouroboros/mod_a.py"], ask=["s1"], reason=WHY)
         assert "PLAN_SUBJECT_ROOT_INVALID" in text and why in text and result.code == "TOOL_ERROR", text
         assert plan_record.load_plan_record(env.data, context.task_id) == plan_record.empty_record()
         # Only the plan refuses: the commit gate's governance never depended on the task's folder.
@@ -384,7 +385,7 @@ def test_without_its_own_folder_a_task_keeps_the_bound_candidate_as_subject(env)
     plain = env.ctx("t-plain")
     plain_candidate, _receipt = env.prepare(plain)
     for context, bound in ((folderless, candidate), (plain, plain_candidate)):
-        _write(context, affected_paths=["ouroboros/mod_a.py"], ask=["sess1"], attach=[BRIEF])
+        _write(context, affected_paths=["ouroboros/mod_a.py"], ask=["sess1"], attach=[BRIEF], reason=WHY)
         [revision] = _revisions(env, context.task_id)
         assert revision["body"] is True and f"({bound})" in revision["body_note"], revision["body_note"]
         assert sub.calls[-1]["request"].session_root == str(bound) and _governed(env, sub.calls[-1]["request"])
@@ -416,7 +417,7 @@ def test_a_late_reply_settles_from_its_recorded_assignment_after_the_candidate_i
     pending = {"status": "pending", "raw_text": "", "operation_state": "pending_dispatch", "late_result_pending": True}
     sub = env.install({"sess1": pending})
     ctx = env.ctx("t-late", workspace_root=env.clone, workspace_mode="external")
-    _write(ctx, affected_paths=["ouroboros/mod_a.py"], ask=["sess1"], attach=[BRIEF])
+    _write(ctx, affected_paths=["ouroboros/mod_a.py"], ask=["sess1"], attach=[BRIEF], reason=WHY)
     sent = _asks(env, "t-late")[0]
     env.prepare(ctx)
     collected = []

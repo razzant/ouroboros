@@ -297,18 +297,17 @@ def test_legacy_hub_conversion_uses_only_the_original_manifest_declaration(tmp_p
 # --- the gate ----------------------------------------------------------------------------
 
 
-def _gate(status="pending", *, enforcement="blocking", acceptance=None, findings=None, stale=True, digest="d" * 64):
+def _gate(status="pending", *, acceptance=None, findings=None, stale=True, digest="d" * 64):
     from ouroboros.skill_review_status import skill_review_gate
 
-    return skill_review_gate(status, stale=stale, enforcement=enforcement, findings=findings or [],
-                             current_hash=digest, acceptance=acceptance)
+    return skill_review_gate(status, stale=stale, findings=findings or [], current_hash=digest, acceptance=acceptance)
 
 
 @pytest.fixture
 def not_cyber(monkeypatch):
     import ouroboros.tools.review_helpers as helpers
 
-    monkeypatch.setattr(helpers, "review_enforcement_blocks", lambda _mode: True)
+    monkeypatch.setattr(helpers, "cyber_review_authority", lambda: False)
 
 
 def test_acceptance_bases_admit_only_their_exact_bytes(not_cyber):
@@ -326,19 +325,18 @@ def test_acceptance_bases_admit_only_their_exact_bytes(not_cyber):
     assert refused["executable_review"] is False  # a fresh preflight failure outranks the basis
 
 
-def test_review_source_blockers_need_the_owner_even_under_advisory(not_cyber):
-    blockers = dict(status="blockers", enforcement="advisory", stale=False)
+def test_review_source_blockers_need_the_owner(not_cyber):
+    blockers = dict(status="blockers", stale=False)
     strict = _gate(acceptance={"basis": "review", "release_digest": "x", "strict_review": True}, **blockers)
     assert strict["executable_review"] is False and strict["blocking_reason"] == "blocker_findings_need_owner"
     for acceptance in (None, {"basis": "review", "strict_review": False}):
         assert _gate(acceptance=acceptance, **blockers)["executable_review"] is True
-    assert _gate(acceptance={"strict_review": True}, status="warnings", enforcement="advisory",
-                 stale=False)["executable_review"] is True
+    assert _gate(acceptance={"strict_review": True}, status="warnings", stale=False)["executable_review"] is True
 
 
 @pytest.mark.parametrize("status", ["blockers", "pending"])
 def test_author_acceptance_is_not_a_basis_for_a_review_source(not_cyber, status):
-    """Under Advisory the author's finish runs ordinary skills' current bytes; a skill from
+    """Outside Cyber Pro the author's finish runs ordinary skills' current bytes; a skill from
     a source that reviews each skill needs a review without blockers or the owner's Skip."""
     from ouroboros.review_records import build_author_disposition
     from ouroboros.skill_review_status import executable_review_requirement, skill_review_gate
@@ -351,7 +349,7 @@ def test_author_acceptance_is_not_a_basis_for_a_review_source(not_cyber, status)
             "surface": "skill", "basis": "unavailable", "job_id": "job-1", "content_hash": digest,
             "finished_at": "2026-10-17T00:00:00Z", "status": "failed", "review_status": "pending",
             "preflight": {"content_hash": digest, "status": "pass"}}
-    kwargs = dict(stale=False, enforcement="advisory", findings=[], author_disposition=author, current_hash=digest)
+    kwargs = dict(stale=False, findings=[], author_disposition=author, current_hash=digest)
     ordinary = skill_review_gate(status, **kwargs)
     assert ordinary["executable_review"] is True and ordinary["blocking_reason"] == "author_accepted_advisory"
     strict = skill_review_gate(status, acceptance={"basis": "review", "strict_review": True}, **kwargs)

@@ -1228,10 +1228,10 @@ def test_merge_settings_payload_preserves_other_keys():
     from ouroboros.gateway import settings as server_mod
 
     old = {"OUROBOROS_RUNTIME_MODE": "advanced", "TOTAL_BUDGET": "10.0"}
-    body = {"TOTAL_BUDGET": "20.0", "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"}
+    body = {"TOTAL_BUDGET": "20.0", "OUROBOROS_TASK_REVIEW_MODE": "required"}
     merged = server_mod._merge_settings_payload(old, body)
     assert merged["TOTAL_BUDGET"] == "20.0"
-    assert merged["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+    assert merged["OUROBOROS_TASK_REVIEW_MODE"] == "required"
     assert merged["OUROBOROS_RUNTIME_MODE"] == "advanced"
 
 

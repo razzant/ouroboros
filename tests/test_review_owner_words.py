@@ -122,7 +122,6 @@ def _triad_prompt(tmp_path, monkeypatch, kind: str) -> tuple[str, int, str]:
     monkeypatch.setattr(review, "_load_checklist_section", lambda *_a, **_k: "checklist")
     monkeypatch.setattr(review, "load_governance_doc", lambda *_args, **_kwargs: "governance")
     monkeypatch.setattr(review, "build_touched_file_pack", lambda *_args, **_kwargs: ("files", []))
-    monkeypatch.setattr(review._cfg, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr(review, "_handle_multi_model_review", capture_review)
     ctx = SimpleNamespace(
         repo_dir=tmp_path, drive_root=tmp_path, task_id="root", _review_iteration_count=0,

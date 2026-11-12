@@ -263,7 +263,7 @@ def test_budget_exhaustion_projects_deferred_child_before_forced_return(
     )
 
 
-def test_blocking_open_plan_round_rail_preserves_useful_candidate(tmp_path, monkeypatch):
+def test_an_open_plan_round_rail_preserves_useful_candidate(tmp_path, monkeypatch):
     from tests.test_plan_gate import _plan, _participant, OBJECTION, SEAT
 
     loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
@@ -275,7 +275,6 @@ def test_blocking_open_plan_round_rail_preserves_useful_candidate(tmp_path, monk
         "Useful verified work completed before the rail.",
         control="candidate",
     )
-    monkeypatch.setattr(loop, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr(
         loop,
         "call_llm_with_retry",
@@ -287,7 +286,7 @@ def test_blocking_open_plan_round_rail_preserves_useful_candidate(tmp_path, monk
     assert text.startswith("Useful verified work completed before the rail.")
     # A real counted objection stays open even when the task-wide rail forces
     # best-effort delivery. It is disclosed without erasing the useful candidate.
-    assert "Blocking plan review is open" in usage["terminal_host_notice"]
+    assert "Plan review is open" in usage["terminal_host_notice"] and "Blocking" not in usage["terminal_host_notice"]
     assert "`round_limit`" in usage["terminal_host_notice"]
     assert usage["reason_code"] == "round_limit"
 

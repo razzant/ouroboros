@@ -40,7 +40,7 @@ def test_two_paid_cycles_and_finite_author_window_are_the_live_consumers_budget(
     settings = author_settings(smoke._REVIEW_MODEL)
     assert REVIEW_CYCLES == smoke._REVIEW_WAVES == settings["OUROBOROS_REVIEW_MAX_CYCLES"] == 2
     assert settings["OUROBOROS_RUNTIME_MODE"] == "advanced"
-    assert settings["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in settings  # retired: the lane reads the verdict itself
     assert smoke._REVIEW_MODEL == "deepseek/deepseek-v4.1-flash"
     assert settings["OUROBOROS_MODEL"] == settings["OUROBOROS_MODEL_LIGHT"] == smoke._REVIEW_MODEL
     roster = json.loads(settings["OUROBOROS_SUBAGENTS"])

@@ -220,7 +220,8 @@ def test_a_catalog_with_no_marked_row_is_an_empty_pool_reviewed_by_the_main_mode
     assert [(row["seat_id"], row["subagent_id"], row["model"], row["delivery"]) for row in block["pool"]] == [
         ("main", "main", "openai/gpt-5.6-sol", "native")]
     assert "default" not in (block["source"], text.split('"rule"')[0]), "no shipped panel is implied"
-    assert block["rule"] and "every ticked reviewer" in block["surfaces"]["commit_gate"]["blocking"]
+    assert block["rule"] and "choose ticked reviewers" in block["surfaces"]["commit_gate"]["advisory"]
+    assert "blocking" not in block["surfaces"]["commit_gate"], "no surface describes a retired mode"
     # No catalog at all is a never-configured install: the read seam mints the factory
     # rows (`factory_review_rows`), so the block shows that pool — not an empty one.
     monkeypatch.delenv(SUBAGENTS_SETTING)
@@ -270,7 +271,7 @@ def test_an_invalid_catalog_is_an_error_with_an_empty_pool_not_an_absent_one(mon
     assert block["error"] == review_pool_state(os.environ[SUBAGENTS_SETTING])["error"] and block["error"]
     assert (block["pool"], block["pool_empty"]) == ([], False)
     assert "main_self_review" not in block, "a malformed catalog refuses; it never falls back to Main"
-    assert block["rule"] and "Advisory requires a ticked reviewer" in block["surfaces"]["plan_review"]
+    assert block["rule"] and "requires a ticked reviewer" in block["surfaces"]["plan_review"]
 
 
 def test_recent_execution_is_a_fact_without_replacing_the_configured_seat(monkeypatch):
@@ -358,23 +359,21 @@ def test_a_settled_review_changes_no_cached_block(tmp_path, monkeypatch):
     assert "0.4321" not in json.dumps([marked_after, system_after], ensure_ascii=False)
 
 
-@pytest.mark.parametrize("enforcement, mode, blocks, opening", [
-    ("blocking", "pro", True, "Blocking:"),
-    ("advisory", "pro", False, "Advisory:"),
-    ("blocking", "cyber_pro", False, "Cyber Pro:"),
-])
-def test_one_rule_sentence_per_effective_authority(monkeypatch, enforcement, mode, blocks, opening):
+@pytest.mark.parametrize("enforcement, mode", [("blocking", "pro"), ("advisory", "pro"), ("blocking", "cyber_pro")])
+def test_one_rule_sentence_per_effective_authority(monkeypatch, enforcement, mode):
+    """The rule follows Access alone: the retired review-enforcement key, whatever it says, changes nothing."""
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
-    block, _ = _block()
+    block, text = _block()
 
-    assert (block["enforcement"], block["mode"], block["enforcement_blocks"]) == (enforcement, mode, blocks)
-    assert block["rule"].startswith(opening) and block["rule"].count(".") == 1
-    if opening == "Blocking:":  # NOT_PERFORMED stops the commit too (an all-Packet pool, a failed coupling part)
-        assert "a review that was not performed" in block["rule"]
-    if opening == "Advisory:":  # the handback before Git effects, never an automatic commit (DEVELOPMENT 05)
+    assert block["mode"] == mode and "enforcement" not in block and "enforcement_blocks" not in block
+    assert '"enforcement' not in text
+    assert block["rule"].count(".") == 1
+    if mode == "cyber_pro":
+        assert block["rule"].startswith("Cyber Pro:")
+    else:  # the handback before Git effects, never an automatic commit (DEVELOPMENT 05)
         assert "before any Git effect" in block["rule"] and "continue explicitly" in block["rule"]
-        assert "commit proceeds" not in block["rule"]
+        assert "commit proceeds" not in block["rule"] and "Blocking" not in block["rule"]
 
 
 def test_a_fourteen_seat_pool_keeps_every_seats_delivery_cost_and_reliability(tmp_path, monkeypatch):

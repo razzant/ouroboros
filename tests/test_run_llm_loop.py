@@ -362,13 +362,11 @@ def test_run_llm_loop_keeps_task_model_override_across_tool_rounds(tmp_path, mon
     assert seen_models == ["subagent-light", "subagent-light"]
     assert seen_use_local == [True, True]
 
-@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
-def test_run_llm_loop_swarm_without_a_plan_finishes_normally(tmp_path, monkeypatch, enforcement):
+def test_run_llm_loop_swarm_without_a_plan_finishes_normally(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_metadata = {"force_plan": True, "force_plan_source": "swarm", "subagents_mode": "swarm"}
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: enforcement)
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", lambda *_a, **_k: (finish("done without a plan"), 0.0))
     result, usage, trace = run_llm_loop(
         messages=[{"role": "user", "content": "ship"}], tools=registry,
@@ -385,7 +383,6 @@ def test_plan_gate_decision_does_not_treat_trace_marker_as_authority(tmp_path, m
         drive_root=tmp_path,
         budget_drive_root=str(tmp_path),
     )
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "blocking")
 
     decision = loop_mod._plan_gate_decision(ctx, {
         "tool_calls": [{
