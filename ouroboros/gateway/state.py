@@ -298,9 +298,9 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     try:
         from ouroboros.projects_registry import reserved_project_chat_ids
 
-        project_chat_ids = sorted(reserved_project_chat_ids(request_drive_root(request)))
-    except Exception:
-        project_chat_ids = []
+        project_chat_ids = sorted(reserved_project_chat_ids(request_drive_root(request), strict=True))
+    except Exception:  # unknown, never "no Projects": a reader keeps the set it holds
+        project_chat_ids = None
     from ouroboros.gateway.ui_preferences import main_room_revision
 
     main_visible_revision = main_room_revision(request_drive_root(request))

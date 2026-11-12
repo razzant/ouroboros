@@ -648,3 +648,18 @@ def test_a_direct_project_roots_own_warm_pause_stays_quiet_in_main(tmp_path, mon
     finally:
         owner_pause.release_fence(tmp_path, "author", reason="test_cleanup")
         parked.join(10)
+
+
+def test_project_chat_ids_is_unknown_never_empty_while_the_registry_cannot_be_read(gateway, monkeypatch):
+    """``[]`` means "no Projects" (a fresh install); a registry that cannot be read is ``null``."""
+    from ouroboros import projects_registry
+
+    assert _state(gateway)["project_chat_ids"] == [], "a fresh install without a registry has no Projects"
+    project = create_project(gateway.root, "known", name="Known")
+    assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]
+    lenient = projects_registry.reserved_project_chat_ids
+    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", lambda root, *, strict=False: (
+        (_ for _ in ()).throw(OSError("registry unreadable")) if strict else lenient(root) - {project["chat_id"]}))
+    assert _state(gateway)["project_chat_ids"] is None
+    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", lenient)
+    assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]
