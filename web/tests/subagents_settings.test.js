@@ -1337,6 +1337,22 @@ test('every card carries the Reviewer box and its Review cost; a marked API row 
         /data-subagent-review-exception>Switched off, so not in the review pool\.</);
 });
 
+test('a helper on Fast or Economy is offered its models without the catalog price; on Standard with it', () => {
+    const opus = { provider_id: 'openrouter', id: 'anthropic/claude-opus-5.5', value: 'anthropic/claude-opus-5.5',
+        name: 'Anthropic: Claude Opus 5.5', price: { input: 4, output: 20 } };
+    const row = (processing) => apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: opus.value },
+        ...(processing ? { processing_preference: processing } : {}) });
+    const markup = (processing, global = '') => availableSubagentRowMarkup(row(processing), { ...QUIET_STATE, apiModels: [opus],
+        processingPreference: global }, 0);
+    assert.match(markup(''), /ui-model-option-meta" data-i18n-skip>\$4 in \/ \$20 out</);
+    assert.match(markup('standard', 'fast'), /ui-model-option-meta/, "the helper's own choice outranks the global one");
+    for (const [processing, global] of [['economy', ''], ['fast', ''], ['', 'fast']]) {
+        const html = markup(processing, global);
+        assert.doesNotMatch(html, /ui-model-option-meta/, `${processing || '-'} / ${global || '-'}`);
+        assert.match(html, /data-model-value="anthropic\/claude-opus-5\.5"/, 'the model is still offered');
+    }
+});
+
 test('a price is what one review measured or plainly unknown, and a seat is spoken as time, never as $0', () => {
     const api = apiRow();
     assert.equal(reviewCostText(sessionRow()), 'uses a session seat and time');

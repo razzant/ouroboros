@@ -761,6 +761,7 @@ export function initSettings({ state, setBeforePageLeave, ws, openDashboardTab =
         // The actor list lives next to it in Agents → Available subagents.
         applySubagentsSettings(s);
         syncProcessingPreference(s);
+        document.dispatchEvent(new CustomEvent('settings-document:applied', { detail: s }));  // the composer's list reads it
         // The editor offers the API providers THIS document has a credential
         // for, named by the setup contract. Derived from the loaded settings,
         // so a key added under Accounts shows up on the next load rather than

@@ -343,8 +343,10 @@ export function createModelControl({
             strip.style.setProperty('--thumb-width', `${Number(on?.offsetWidth) || 0}px`);
             if (rebuilt && open) control.relayout();
         }
-        // A saved API source this catalog read did not list: the settings document says why it cannot send.
-        if (said && store.status().read && !store.status().failed && sourceUnlisted(store.index(), shown())) void store.readConnections();
+        // The settings document, read only when it changes a word: why a saved API source this catalog did not list
+        // cannot send, or Main's processing tier where the catalog states prices (Fast and Economy price otherwise).
+        if (said && store.status().read && !store.status().failed
+            && (sourceUnlisted(store.index(), shown()) || store.index().priced)) void store.readConnections();
         control?.sayHint();
         if (search.on) search.rows.paint();
     }

@@ -80,18 +80,23 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         return state.recentsReading;
     }
 
-    /** The settings document's API connections, read once: which key a saved source names and why it cannot send. */
+    /** What the list takes from a settings document: its API connections and Main's processing tier. */
+    function adoptSettings(settings) {
+        state.connections = apiConnections(settings, settings?._meta?.setup_contract?.providerProfiles || {});
+        // Main on Fast or Economy is priced by its tier's endpoint: the list then names no catalog price.
+        let roles = settings?.[MODEL_PROCESSING_PREFERENCES_KEY];
+        try { roles = typeof roles === 'string' ? JSON.parse(roles) : roles; } catch { roles = null; }
+        state.mainTierPriced = tierPriced(String(roles?.main || settings?.[PROCESSING_PREFERENCE_KEY] || ''));
+        state.connectionsFailed = false;
+    }
+
+    /** The settings document, read once: which key a saved source names and why it cannot send, and Main's tier.
+     *  A failed read is not repeated by every paint; Settings' own load or save brings the document again. */
     function readConnections() {
-        if (state.connections) return Promise.resolve();
+        if (state.connections || state.connectionsFailed) return Promise.resolve();
         state.connectionsReading ||= Promise.resolve().then(readSettings)
-            .then((settings) => {
-                state.connections = apiConnections(settings, settings?._meta?.setup_contract?.providerProfiles || {});
-                // Main on Fast or Economy is priced by its tier's endpoint: the list then names no catalog price.
-                let roles = settings?.[MODEL_PROCESSING_PREFERENCES_KEY];
-                try { roles = typeof roles === 'string' ? JSON.parse(roles) : roles; } catch { roles = null; }
-                state.mainTierPriced = tierPriced(String(roles?.main || settings?.[PROCESSING_PREFERENCE_KEY] || ''));
-            })
-            .catch(() => {})
+            .then(adoptSettings)
+            .catch(() => { state.connectionsFailed = true; })
             .finally(() => { state.connectionsReading = null; notify(); });
         return state.connectionsReading;
     }
@@ -100,6 +105,8 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         read, readRecents, readConnections,
         /** Another reader's `/api/model-catalog` answer (Settings › Models' Refresh). */
         adopt(data) { if (Array.isArray(data?.items)) { adopt(data); notify(); } },
+        /** The settings document Settings loaded or saved: a changed tier or key reaches the list without a read. */
+        adoptSettings(settings) { if (settings && typeof settings === 'object') { adoptSettings(settings); notify(); } },
         /** The catalog as last read (the merged `/api/model-catalog` answer), or null before any read. */
         catalog: () => state.catalog,
         /** The index of the catalog as last read (chat_model_routes.js), built once per change. */
@@ -116,4 +123,5 @@ export const modelCatalog = createModelCatalogStore();
 // A page that can be listened to: the module is also loaded where there is none (a reader of the work state).
 if (typeof globalThis.document?.addEventListener === 'function') {
     document.addEventListener('settings-model-catalog:updated', (event) => modelCatalog.adopt(event?.detail));
+    document.addEventListener('settings-document:applied', (event) => modelCatalog.adoptSettings(event?.detail));
 }

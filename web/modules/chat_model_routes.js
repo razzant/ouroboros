@@ -137,13 +137,16 @@ export function buildModelIndex({ catalog = {}, connections = null, tierPriced =
         if (typeof item?.availability === 'string') row.states.add(item.availability);
         row.prices.set(JSON.stringify(item?.price ?? null), item?.price ?? null);
     }
+    let priced = false;  // whether the catalog states any price: only then does Main's processing tier change a word
     for (const row of rows.values()) {
         // Any account that can serve it makes the row available; unavailable only when every account says so.
         row.available = row.states.has('available') ? true
             : row.states.size === 1 && row.states.has('unavailable') ? false : null;
         // The catalog's price, while every item of the row states that same one (only OpenRouter's rows state any);
         // kept as the figures, so its words follow the language of each paint.
-        row.price = !tierPriced && row.prices.size === 1 ? [...row.prices.values()][0] : null;
+        const price = row.prices.size === 1 ? [...row.prices.values()][0] : null;
+        priced ||= Boolean(price);
+        row.price = tierPriced ? null : price;
         delete row.states;
         delete row.prices;
     }
@@ -182,7 +185,7 @@ export function buildModelIndex({ catalog = {}, connections = null, tierPriced =
         firstOfKind.add(kindKey);
     }
     return {
-        problems, connections,
+        problems, connections, priced,
         sources: sorted,
         source: (id) => sources.get(id) || null,
         rows: ordered,
