@@ -17,6 +17,7 @@ import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import time
 
@@ -332,6 +333,21 @@ def test_the_startup_import_alone_reads_the_legacy_registry_and_keeps_its_bytes(
     assert (data / receipt["kept"]).read_bytes() == raw and not legacy.exists()
     assert sw._record_at(kept["path"], data)["note"] == "already a record"
     assert sorted(row["task_id"] for row in sw.list_worktrees(data)) == ["acting", "t-old", "t-older-body"]
+
+    if os.name != "nt":  # Windows syncs no folder; elsewhere the original leaves only once the kept copy and the names are synced
+        synced = set()
+
+        def no_folder_sync(fd, real=os.fsync):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("this folder cannot be synced")
+            synced.add(os.fstat(fd).st_ino)
+            real(fd)
+
+        legacy.write_bytes(again)
+        with monkeypatch.context() as broken, pytest.raises(OSError):
+            broken.setattr(os, "fsync", no_folder_sync)
+            sw.import_legacy_registry(data)
+        assert legacy.read_bytes() == again and (data / second["kept"]).stat().st_ino in synced
 
 
 @pytest.mark.parametrize("payload", [b'{"worktrees": [', b'{"worktrees": "nope"}', b"\xff\xfe"])

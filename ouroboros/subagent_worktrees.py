@@ -224,10 +224,10 @@ def _record_at(path: Any, data_dir: Optional[Any] = None, *, op: str = "") -> Op
     return _read_record(_record_file(path, data_dir), op=op, data_dir=data_dir)
 
 
-def _put_record(row: Dict[str, Any], data_dir: Optional[Any] = None) -> None:
+def _put_record(row: Dict[str, Any], data_dir: Optional[Any] = None, fsync: bool = False) -> None:
     file = _record_file(row["path"], data_dir)
     file.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(file, row, trailing_newline=True)
+    atomic_write_json(file, row, trailing_newline=True, fsync=fsync)
 
 
 def _drop_record(path: Any, data_dir: Optional[Any] = None) -> None:
@@ -238,12 +238,12 @@ def _drop_record(path: Any, data_dir: Optional[Any] = None) -> None:
 def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str, Any]]:
     """The startup import of the legacy whole-file registry (``startup_migrations``), its one reader.
 
-    Each row becomes its record unless one already exists. The receipt names the rows, how many
-    moved, the legacy bytes' digest and where those bytes are kept; the file then leaves its working
-    place for ``archive/``, byte for byte. Its absence there is what "imported" means, so a restored
-    snapshot or an older body's write is imported at the next start. Unreadable bytes are reported
-    and kept the same way (``rows: None``): their copies have no record and show as unregistered in
-    the owner's Free action. Returns the receipt; ``None`` with no file or while another process imports."""
+    Each row becomes its record unless one already exists; the file then leaves its working place for
+    ``archive/``, byte for byte, once the records, that copy and the receipt (rows, how many moved, the
+    digest, where the bytes are kept) are synced. Its absence is what "imported" means, so a restored
+    snapshot or an older body's write is imported at the next start. Unreadable bytes are reported and
+    kept the same way (``rows: None``): their copies have no record and show as unregistered in the
+    owner's Free action. Returns the receipt; ``None`` with no file or while another process imports."""
     legacy, root = _legacy_registry_path(data_dir), _data_dir(data_dir)
     if not legacy.is_file():
         return None
@@ -265,13 +265,19 @@ def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str,
             rows = len(entries)
             for row in entries:
                 if _names_copy(row) and not _record_file(row["path"], data_dir).exists():
-                    _put_record(row, data_dir)
+                    _put_record(row, data_dir, fsync=True)
                     moved += 1
         kept = root / "archive" / f"subagent_worktrees_{digest}.json"
-        write_bytes_atomic(kept, data)  # named by its digest, so a rewrite is the same bytes; a copy: maybe another volume
+        write_bytes_atomic(kept, data, fsync=True)  # named by its digest, so a rewrite is the same bytes; maybe another volume
         receipt = {"at": utc_now_iso(), "rows": rows, "moved": moved, "legacy_sha256": digest,
                    "kept": kept.relative_to(root).as_posix()}
-        atomic_write_json(_records_dir(data_dir) / ".legacy-import.json", receipt, trailing_newline=True)
+        atomic_write_json(_records_dir(data_dir) / ".legacy-import.json", receipt, trailing_newline=True, fsync=True)
+        for folder in () if os.name == "nt" else (kept.parent, _records_dir(data_dir), legacy.parent, root):
+            sync = os.open(folder, os.O_RDONLY)  # the new names too: a failure keeps the original (Windows syncs no folder)
+            try:
+                os.fsync(sync)
+            finally:
+                os.close(sync)
         legacy.unlink()
         return receipt
     finally:
