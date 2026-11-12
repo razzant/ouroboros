@@ -83,6 +83,8 @@ brew install --cask razzant/ouroboros/ouroboros
 
 To run tasks, choose a connected Codex account as the Main model source, configure a supported remote provider API key, or use a local GGUF model. Claude Code and Cursor subscriptions can run delegated coding and review; they are not Main model sources. The first-run wizard guides model access, review policy, and budget setup.
 
+Spending limits: out of the box, new paid work stops once known spend reaches $200 in total, or $50 for one task and its helpers; charges already in flight can pass a limit. Background consciousness stays off until you start it, and then has $20 for each 24 hours. Settings changes all three.
+
 <details>
 <summary>Optional CLI included with desktop downloads</summary>
 

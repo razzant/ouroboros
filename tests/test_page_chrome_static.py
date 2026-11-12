@@ -42,8 +42,9 @@ def test_settings_secrets_are_generic_and_integrations_tab_removed():
 
 
 def test_onboarding_compact_access_step_keeps_default_width_two_column():
-    # The rendered contract (columns, readable type, hidden explanatory copy
-    # and visible live feedback) lives in test_onboarding_catalog_browser.py::
+    # The rendered contract (columns, readable type, hidden ornament, visible
+    # notes, choice meanings and live feedback) lives in
+    # test_onboarding_catalog_browser.py::
     # test_connection_discovery_feedback_stays_visible_on_compact_screens.
     css = _read("web/onboarding.css")
     assert "@media (max-height: 820px), (max-width: 900px)" in css

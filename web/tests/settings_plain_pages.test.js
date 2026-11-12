@@ -160,6 +160,10 @@ test('Access is four choices, each with its line; its meta says both values whil
     assert.deepEqual(options.map((button) => button.tabIndex), [-1, -1, 0, -1], 'one tab stop: the chosen level');
     assert.equal(page.meta('OUROBOROS_RUNTIME_MODE'), 'How far it reaches into its own code and this computer.');
     assert.deepEqual(access.querySelectorAll('[data-setting-mark]').map((mark) => mark.textContent), ['', '', '', ''], 'nothing waits: no mark');
+    // The setup wizard says the same four sentences: its contract, as the server builds it for a fresh install.
+    const { contract } = JSON.parse(fs.readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
+    assert.deepEqual(contract.runtimeModes.map((mode) => [mode.value, mode.label, mode.copy]),
+        rowById('OUROBOROS_RUNTIME_MODE').control.options.map((option) => [option.value, option.label, option.note]));
 
     // Raising asks first; declined, nothing is sent and nothing changes.
     page.asked.length = 0;
