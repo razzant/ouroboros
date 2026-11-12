@@ -5,53 +5,6 @@ import { isDoorId } from './settings_pages.js';
 import { rowById } from './settings_rows.js';
 import { errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
 
-export function bindEffortSegments(root) {
-    root.querySelectorAll('[data-effort-group]').forEach((group) => {
-        const targetId = group.dataset.effortTarget;
-        const input = root.querySelector(`#${targetId}`);
-        if (!input) return;
-        const buttons = Array.from(group.querySelectorAll('[data-effort-value]'));
-        // A group names itself by its own label, else by the title of the section it is the one control of.
-        const label = input.previousElementSibling;
-        const heading = label?.tagName === 'LABEL' ? label : group.closest('.form-section')?.querySelector('h3');
-        if (heading) {
-            heading.id ||= `${targetId}-label`;
-            group.setAttribute('role', 'group');
-            group.setAttribute('aria-labelledby', heading.id);
-        }
-
-        function sync() {
-            buttons.forEach((button) => {
-                button.classList.toggle('active', button.dataset.effortValue === input.value);
-                button.setAttribute('aria-pressed', String(button.dataset.effortValue === input.value));
-            });
-        }
-
-        buttons.forEach((button) => {
-            button.addEventListener('click', () => {
-                // Presence, not truthiness: '' is a real choice (inherit the Task / Chat effort).
-                input.value = button.dataset.effortValue ?? input.value;
-                input.dataset.effortTouched = '1';
-                sync();
-            });
-        });
-
-        sync();
-    });
-}
-
-export function syncEffortSegments(root) {
-    root.querySelectorAll('[data-effort-group]').forEach((group) => {
-        const targetId = group.dataset.effortTarget;
-        const input = root.querySelector(`#${targetId}`);
-        if (!input) return;
-        group.querySelectorAll('[data-effort-value]').forEach((button) => {
-            button.classList.toggle('active', button.dataset.effortValue === input.value);
-            button.setAttribute('aria-pressed', String(button.dataset.effortValue === input.value));
-        });
-    });
-}
-
 /** Read the complete custom-key draft, including blank and removed rows. No paint. */
 export function readCustomSecretDraft(root) {
     return Array.from(root.querySelectorAll('[data-custom-secret-row]'), (row) => {
@@ -94,35 +47,6 @@ export function collectCustomSecretDraft(rows, knownKeys = []) {
         if (key) seen.set(key, index);
     });
     return { values, errors };
-}
-
-/** Paint only errors owned by the Settings save gate; dirty reads never call this. */
-export function paintSettingsFieldErrors(root, errors) {
-    root.querySelectorAll('[data-settings-validation]').forEach((input) => {
-        input.removeAttribute('aria-invalid');
-        const hint = root.querySelector(`#${input.id}-error`);
-        if (hint) { hint.hidden = true; hint.textContent = ''; }
-        delete input.dataset.settingsValidation;
-    });
-    errors.forEach(({ input, message }) => {
-        if (!input?.id) return;
-        let hint = root.querySelector(`#${input.id}-error`);
-        if (!hint) {
-            hint = input.ownerDocument.createElement('div');
-            hint.id = `${input.id}-error`;
-            hint.className = 'settings-inline-note ui-field-help';
-            hint.dataset.tone = 'error';
-            hint.setAttribute('role', 'status');
-            (input.closest('.form-field') || input.parentElement).appendChild(hint);
-        }
-        input.dataset.settingsValidation = '1';
-        input.setAttribute('aria-invalid', 'true');
-        const described = new Set((input.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean));
-        described.add(hint.id);
-        input.setAttribute('aria-describedby', [...described].join(' '));
-        hint.textContent = message;
-        hint.hidden = false;
-    });
 }
 
 /** A Settings action in flight: disabled and announced busy, the same for Save and a key's Test. */
