@@ -390,7 +390,7 @@ def test_a_closed_bounded_wait_reaches_the_replayed_card(tmp_path):
     assert "wait_for_answer" not in ask["quiz"]
 
 
-def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_be_read(tmp_path):
+def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_be_read(tmp_path, monkeypatch):
     """Main is "every room that is not a Project": decided from an empty set (a registry no row of
     which can be read) it would take the owner's rows typed in Project rooms (#3067's mechanism). It
     answers the typed unavailable refusal instead. An invalid row beside readable ones is no such
@@ -433,6 +433,19 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
     restored = list(pages(tmp_path))
     assert "main owner" in {text for page in restored for text in texts(page)}
     assert not {text for page in restored for text in texts(page)} & room_rows
+
+    # One lenient read decides the request: the rooms it named stay Projects even when a second read would fail
+    # (an open that fails on and off), never "no Projects" within the same request.
+    from ouroboros import projects_registry
+    from ouroboros.gateway import history as history_module
+
+    named, lenient = projects_registry.readable_rooms(tmp_path), projects_registry.reserved_project_chat_ids
+    answers = iter([named])
+    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", lambda root, *, strict=False: (
+        (_ for _ in ()).throw(OSError("too many open files")) if strict else lenient(root)))
+    monkeypatch.setattr(projects_registry, "readable_rooms", lambda root: next(answers, None))
+    context = history_module._project_history_context(tmp_path, 1)
+    assert named and context[0] == named and context[-1] is False
 
 
 def test_main_reads_on_a_fresh_install_without_a_project_registry(tmp_path):
