@@ -253,6 +253,18 @@ def test_an_owner_scale_start_outlines_registry_and_index_only_where_its_folded_
     room = roomy.projection(roomy.initial_mode).memory_facts["max_room"]
     assert roomy.initial_mode == "low" and room["cause"] == "crowded" and room["need"] > room["window"]
     assert _registry(40) in text and index.full_text in text and all(row.get("start_room") for row in rows)
+    # Whether this start moves host sections at all turns on its surroundings (in this test none; under the rev_fable
+    # witness three). A start 100K tighter folds its memory and does move them, only for its start room, with the
+    # registry and the index whole (rev_fable 7: the check of start-room steps must not pass on an empty list).
+    folded = _owner_scale_plan(tmp_path, monkeypatch, 300_000)
+    folded_rows, folded_text = _host_facts(folded), _text(folded)
+    folded_index = next(part for part in folded.core.dynamic_head_sections if part.section_id == "knowledge_index")
+    assert folded_rows and all(row.get("start_room") for row in folded_rows)
+    assert _registry(40) in folded_text and folded_index.full_text in folded_text
+    # A start my memory lowered names what holds the room (S2); one that holds Max has nothing to name (rev_fable F2).
+    assert "Holding the room (tokens):" in text and "Holding the room (tokens):" in folded_text
+    held = _owner_scale_plan(tmp_path, monkeypatch, 1_000_000)
+    assert held.initial_mode == "max" and "Holding the room (tokens):" not in _text(held)
     assert "F7" not in roomy.projection(roomy.initial_mode).memory_facts["floor"]["steps"]
     sent = roomy.projection(roomy.initial_mode).estimated_tokens + fit.tool_schema_tokens(tools())
     assert sent + 10_000 + math.ceil(400_000 / 8) <= 400_000

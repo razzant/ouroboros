@@ -750,7 +750,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         fixed = measure(selected, sent, addressed) if fixed is None else fixed
         return floor.render_view_for_mode(snapshot, mode=selected, owner_mode=preferred, window_tokens=window, **walk,
             known_window=known_window, output_reserve=output_reserve, ratio=ratio, non_memory_tokens=fixed,
-            lowered_from=preferred if selected != preferred else None, max_room=room_fact, start_work=start_work,
+            # The Max room as the receipt settles it (``with_max_room`` decides its cause), so the floor note of a
+            # start memory lowered names what holds the room.
+            lowered_from=preferred if selected != preferred else None, start_work=start_work,
+            max_room=floor.with_max_room({}, room_fact, selected).get("max_room"),
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
             boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed)
 
