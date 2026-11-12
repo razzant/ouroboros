@@ -324,7 +324,7 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
     # The roles in the picture's order, each with its route.
     page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"models:light\"] [data-row-value]')?.textContent")
     assert level.locator("[data-entry-id]").evaluate_all("rows => rows.map((row) => row.dataset.entryId)") == [
-        "main", "fallback/1", "fallback/2", "fallback/3", "light", "safety", "vision", "consciousness", "websearch"]
+        "main", "fallback/1", "fallback/2", "fallback/3", "light", "vision", "consciousness", "safety", "websearch"]
     assert "gpt-test" in level.locator('[data-entry-id="main"]').inner_text()
     values = level.locator("[data-row-value]").evaluate_all("spans => spans.map((span) => span.textContent)")
     assert values[:6] == ["gpt-light", "Light model", "Main model", "Main model", "Auto", "Max"]
