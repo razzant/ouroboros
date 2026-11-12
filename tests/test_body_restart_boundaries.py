@@ -98,7 +98,7 @@ def test_cached_stop_after_late_registration_cannot_arm_adoption(tmp_path, monke
         monkeypatch.setattr(server, 'DATA_DIR', scene.data)
         monkeypatch.setattr(server, '_restart_requested', restart)
         monkeypatch.setattr(server, '_owner_restart_requested', threading.Event())
-        monkeypatch.setattr(server, '_stop_owned_daemon_for_new_pin', lambda: None)
+        monkeypatch.setattr(server, '_stop_owned_daemon', lambda label: True)
         monkeypatch.setattr(workers, 'kill_workers', lambda **kw: None)
         monkeypatch.setattr(workers, 'last_worker_exit_census', lambda: EXITED)
         monkeypatch.setattr(multiprocessing, 'active_children', lambda: [])

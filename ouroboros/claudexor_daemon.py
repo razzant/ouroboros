@@ -14,8 +14,8 @@ Lifecycle belongs to the installation, not the process that first needed it:
 * spawn through ``process_custody`` (daemon scope) from whichever process first
   needs the daemon — a task worker included; every worker tree-kill spares the
   ledger's live daemon roots (``supervisor.worker_pool_lifecycle.kill_worker_tree``)
-  and both server sweeps retain the purpose's legacy session rows, so neither a
-  worker's death nor a server generation change ends the daemon's paid runs;
+  and server sweeps retain legacy session rows. Worker death preserves paid runs;
+  application Exit/Restart ends the engine tree;
 * ATTACH-IF-ALIVE: a live daemon serving our config dir is attached to. A
   custodied startup without a reachable control endpoint is joined across
   managers/processes; caller wait expiry (``daemon_starting``; a silent live listener:
@@ -32,10 +32,9 @@ Lifecycle belongs to the installation, not the process that first needed it:
   invalid discovery and incompatible/malformed replies never permit that
   fallback. Never stop a live responder known only by name or by
   the descriptor port (a foreign daemon on a recycled port stays disclosed, not
-  killed). A runtime pin is never hot-swapped: the live engine keeps serving
-  until a restart onto another pin, not a lower release, ends it
-  (``server_restart._stop_owned_daemon_for_new_pin``), Panic or the owner's
-  Restart Claudexor stops it, or it exits; the next start selects the pin (PERSISTENCE.md).
+  killed). Application Exit/Restart force-stops measured owned custody without a
+  control wait; hide and ordinary worker cleanup do not. The next start selects
+  the pin and still enforces engine storage compatibility (PERSISTENCE.md).
 
 Zero auth logic lives here or anywhere in Ouroboros: login jobs, device-code
 custody, verification and rotation are the daemon's own product surface,
@@ -1070,14 +1069,17 @@ class OwnedClaudexorDaemon:
             self.stop_outcome()
         return requests
 
-    def stop_outcome(self) -> DaemonStopOutcome:
+    def stop_outcome(self, *, force: bool = False) -> DaemonStopOutcome:
         """Stop verified own roots; report every unconfirmed remainder.
 
+        Application Exit/Restart passes ``force=True``: latch this manager against new starts,
+        skip the cooperative CLI wait and stop measured custody before its parent chain is lost.
+        This is process teardown, not the global Panic control or its saved-work policy.
         ``"stopped"`` requires a confirmed stop with no remaining custody;
         ``"nothing_to_stop"`` is the quiet empty case; ``"unconfirmed"`` has
         already been disclosed by ``_report_stop_unconfirmed`` (critical log
         plus the supervisor row) with custody retained, so a caller that must
-        proceed anyway — a pin-changing restart's teardown — needs no private state
+        proceed anyway — the server's exit teardown — needs no private state
         to tell the two non-stops apart. Lock acquisition is bounded separately
         from HTTP connect/read phases and each root's exit wait; there is no
         promised absolute wall-clock deadline for the whole teardown. A
@@ -1105,6 +1107,8 @@ class OwnedClaudexorDaemon:
             return "unconfirmed"
         self._generation += 1
         self._stopping = True
+        if force:
+            self._panic_requested = True  # terminal manager, without a Panic flag or immediate root-only kill
         self._lock.release()
         try:
             root = pathlib.Path(DATA_DIR)
@@ -1116,7 +1120,9 @@ class OwnedClaudexorDaemon:
             self._settle_exited_child()
             ownership_problem = verify_owned_home(require_marker=True)
             endpoint, state = None, ""
-            if not ownership_problem:
+            if force and not ownership_problem:
+                state = _TRANSPORT_UNREACHABLE  # measured own custody needs no responding control socket
+            elif not ownership_problem:
                 endpoint, state, detail = self._classify_liveness(timeout_sec=SHORT_POLL_TIMEOUT_SEC)
                 if detail:
                     self._last_error = detail
@@ -1126,7 +1132,7 @@ class OwnedClaudexorDaemon:
                 expected_entries, observed = [], set()
                 try:
                     expected_entries = ([target["custody"] for target in self._panic_targets]
-                                        if self._panic_requested else process_stop_snapshot(root, purposes))
+                                        if self._panic_requested and not force else process_stop_snapshot(root, purposes))
                     for entry in expected_entries:
                         pid = int(entry["pid"])
                         observed.add(pid)
@@ -1135,7 +1141,7 @@ class OwnedClaudexorDaemon:
                         observed.add(self._proc.pid)
                 except Exception:
                     unconfirmed.append("stop target custody could not be observed")
-                if endpoint is not None and (not self._panic_requested or endpoint == self._panic_endpoint):
+                if not force and endpoint is not None and (not self._panic_requested or endpoint == self._panic_endpoint):
                     operator_stopped = self._request_operator_stop()
                 if operator_stopped:
                     # Lease release confirms clean service shutdown; a Node tail

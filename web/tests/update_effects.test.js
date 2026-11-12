@@ -20,9 +20,9 @@ test('Apply shows shared-engine interruption, current work, and the unchanged in
 
 test('a backward pin explains its cold-start limit and replacement uses its own pin', () => {
     const data = preflight({ action: 'keep', direction: 'backward', target: { version: '4.4.0' } });
-    assert.match(updateEffectsText(data), /keeps the serving engine running/);
+    assert.doesNotMatch(updateEffectsText(data), /keeps the serving engine running/);
     assert.match(updateEffectsText(data), /cold start needs a body pinning 4.5.0 or newer/);
-    assert.doesNotMatch(updateEffectsText(data), /end all its active runs/);
+    assert.match(updateEffectsText(data), /end all its active runs/);
     assert.match(updateEffectsText(data, { replace: true }), /end all its active runs/);
 });
 

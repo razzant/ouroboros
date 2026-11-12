@@ -1,18 +1,17 @@
-"""Pure engine-pin rule shared by Apply disclosure, the Restart Claudexor preview and every restart teardown.
+"""Pin compatibility for Apply disclosure and the Accounts engine-restart preview.
 
-One rule for every restart door, the owner's Restart included (owner 3A, 2026-11-06): a forward
-pin replaces the serving engine, a lower pin keeps the newer live one, an unknown comparison
-preserves the handoff. Restart restarts Ouroboros, never the shared engine by itself; the
-engine's own restart is the Accounts action (``claudexor_restart``).
+This compares selected pins, not physical process lifetime: application Exit/Restart
+always ends the old owned engine. A lower pin still cannot read a newer engine's data.
 """
 
 from ouroboros.claudexor_runtime import release_below
 
 
 def engine_pin_transition(pin, serving: tuple[str, str] | None) -> dict:
-    """Unknown comparisons preserve the handoff; a lower pin keeps a newer live engine.
+    """Compare pins for disclosure, not the application's unconditional process teardown.
 
-    Keeping it does not make its forward-only data readable on a later cold start.
+    Compatibility field action='keep' means no newer engine is selected by this pin;
+    it never promises process survival or makes forward-only data readable by an older pin.
     """
     target = {"version": pin.version, "build_sha": pin.build_sha} if pin is not None else None
     result = {"target": target, "serving": {"version": serving[0], "build_sha": serving[1]} if serving else None,

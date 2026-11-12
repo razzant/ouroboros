@@ -38,9 +38,7 @@ def _rehome_legacy_handoff() -> None:
 if __name__ == "__main__":
     _rehome_legacy_handoff()
 
-# Seal-safe imports: the current interpreter needs the flag before project imports;
-# PYTHONDONTWRITEBYTECODE alone only affects later child interpreters. Bundle writes
-# would invalidate a macOS signature and trigger AppTranslocation.
+# Set before imports: child-only PYTHONDONTWRITEBYTECODE cannot protect this process's macOS seal.
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
@@ -539,16 +537,13 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> Optional[subprocess.Popen]:
         log.info("Agent pid %d assigned to Windows Job Object", proc.pid)
 
     _write_server_process_record(proc, port=port, server_py=server_py, server_host_source=host_source)
-    # The server blocks once its output pipe fills, so the copy drains until the pipe ends.
     threading.Thread(target=copy_capped_output, args=(proc.stdout, DATA_DIR / "logs" / "agent_stdout.log"),
                      kwargs={"report": log}, name="agent-output-copy", daemon=True).start()
     return proc
 
 
 def stop_agent() -> bool:
-    """Ordinarily stop the captured server; True once its exit is confirmed. An unconfirmed stop keeps
-    the Popen, Job and record, so no next generation starts beside a server that may still be live. A
-    child another stop already asked to end (its pipe closed) is only awaited, never signalled again."""
+    """Stop the captured server; unknown keeps Popen/Job/record, a closed stop pipe means await only."""
     global _agent_start, _agent_stopping
     grace, deadline = LAUNCHER_STOP_GRACE_SEC, time.monotonic() + LAUNCHER_STOP_GRACE_SEC
     with _agent_lock:
@@ -562,7 +557,8 @@ def stop_agent() -> bool:
     if proc is None:
         if unpublished:
             log.error("A server start was still inside Popen at the stop's grace; its child is unconfirmed")
-        return not unpublished
+        from ouroboros.server_restart import _stop_owned_daemon
+        return _stop_owned_daemon("Launcher exit without server") and not unpublished
 
     log.info("Stopping agent (pid=%s)...", proc.pid)
     confirmed = False
@@ -586,6 +582,7 @@ def stop_agent() -> bool:
         proc.wait(timeout=grace)
         confirmed = True
     except subprocess.TimeoutExpired:
+        _stop_generation_engine(proc)  # capture the broken-away engine before the server Job dies
         if IS_WINDOWS and job is not None:
             terminate_job(job)
         else:
@@ -605,12 +602,32 @@ def stop_agent() -> bool:
     return _retire_agent(proc, "stop_agent")
 
 
+def _stop_generation_engine(proc) -> bool:
+    """One engine-stop result for forced cleanup and retirement of this captured server."""
+    from concurrent.futures import Future
+    from ouroboros.server_restart import _stop_owned_daemon
+    with _agent_lock:
+        pending = getattr(proc, "_ouroboros_engine_stop", None)
+        if pending is None:
+            proc._ouroboros_engine_stop = result = Future()
+    if pending is not None:
+        return pending.result()  # same generation, same stop: never wait while holding _agent_lock
+    confirmed = False
+    try:
+        confirmed = _stop_owned_daemon("Launcher generation exit")
+        return confirmed
+    finally:
+        result.set_result(confirmed)
+
+
 def _retire_agent(proc, reason: str) -> bool:
-    """A reaped generation: retire its publication, the Job it owned and its record; a later one's stay."""
+    """Only a reaped server may release its publication, Job and serialized record."""
     global _agent_proc, _agent_job, _agent_start, _agent_stopping
+    if not _stop_generation_engine(proc):
+        return False
     with _agent_lock:
         job = _agent_job if _agent_proc is proc else None
-        if _agent_proc is proc:  # no start begins before the loop retired its generation
+        if _agent_proc is proc:
             _agent_proc = _agent_job = _agent_start = _agent_stopping = None
     if IS_WINDOWS and job is not None:
         close_job(job)
@@ -652,12 +669,7 @@ def _reap_same_install_strays(reason: str) -> list[int]:
 
 
 def _pre_generation_cleanup() -> list[int]:
-    """Resolve the previous generation before starting a new one; returns PIDs still unresolved.
-
-    Per GENERATION, not once per launcher: exit-42 and crash restarts are where the observed
-    double-boot collisions began. Recorded cleanup first, then the stray sweep while PPID links
-    are still live. No port sweep: a listener proves no ownership, and the data-root admission
-    lock refuses a second updated server whatever port it would take."""
+    """Each generation reaps records/strays first; ports prove no ownership, data-root admission does."""
     unresolved = _cleanup_recorded_server_process("startup")
     return unresolved + [pid for pid in _reap_same_install_strays("startup") if pid not in unresolved]
 
@@ -708,8 +720,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
     while not _shutdown_event.is_set():
         unresolved = _pre_generation_cleanup()
         if unresolved:
-            # Starting now could put a second generation on the same data directory: a known
-            # predecessor is unconfirmed or unverifiable. The next iteration tries again.
+            # The known predecessor is unconfirmed: no second generation on the same data directory.
             log.error("Not starting the agent: previous server process(es) %s are not confirmed "
                       "stopped. Retrying in 3s.", unresolved)
             time.sleep(3)
@@ -756,7 +767,9 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
                     log.info("No prepared delegated-restart transaction required acknowledgement.")
             except Exception:
                 log.warning("Could not acknowledge delegated restart transaction", exc_info=True)
-        _retire_agent(proc, "agent_exit")
+        if exit_code != PANIC_EXIT_CODE and not _retire_agent(proc, "agent_exit"):
+            _shutdown_event.set()  # an unknown old engine is not a successful restart
+            break
 
         if _shutdown_event.is_set() and exit_code != PANIC_EXIT_CODE:
             break
@@ -765,11 +778,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             log.info("Panic stop (exit code %d) — shutting down completely.", PANIC_EXIT_CODE)
             _shutdown_event.set()
             request_tray_cleanup()  # Panic removes the indicator without waiting for it
-            # The agent (server child) already exited; tear down any orphans and
-            # force-exit the whole process. _webview_window.destroy() from this
-            # supervisor thread cannot end the main-thread Cocoa webview loop on
-            # macOS (it leaves a black frozen window), so exit with parity to the
-            # window-close path: kill orphans, release the pid lock, os._exit(0).
+            # Cocoa's main-thread window loop needs a process exit, not destroy() from this thread.
             try:  # the server's census may not have finished before its hard exit: finish it by identity, bounded
                 from ouroboros.process_scope import complete_pending_panic_sweep
 
@@ -790,9 +799,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             break
 
         if _agent_restart_requested.is_set():
-            # Launcher-requested recycle (first-run configuration): deliberate,
-            # so it skips crash accounting exactly like the agent's own code-42
-            # restart. No dependency sync — nothing about the checkout changed.
+            # First-run recycle skips crash accounting and dependency sync: the checkout is unchanged.
             _agent_restart_requested.clear()
             log.info("Restarting the agent to adopt the saved first-run configuration.")
             continue
@@ -802,10 +809,8 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             _sync_existing_repo_from_bundle()  # a deployment policy's packages are its administrator's: none synced
             if not os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip() and not _install_deps():
                 # Retry dependency sync once before letting imports fail under the crash fuse.
-                log.error(
-                    "Dependency install failed after the restart request; "
-                    "retrying once in %ds.", _DEPS_RETRY_DELAY_SEC,
-                )
+                log.error("Dependency install failed after the restart request; retrying once in %ds.",
+                          _DEPS_RETRY_DELAY_SEC)
                 time.sleep(_DEPS_RETRY_DELAY_SEC)
                 if not _install_deps():
                     log.error(
@@ -830,10 +835,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         time.sleep(3)
 
 def _request_agent_restart() -> None:
-    """Recycle the managed server so it adopts freshly saved settings.
-
-    The lifecycle loop owns the restart; this flags intent and stops the child.
-    """
+    """Recycle for saved settings: flag intent and stop; the lifecycle loop owns the successor."""
     global _generation_port
     if _agent_proc is None:  # one published reference: read without the lock, as Panic reads it
         # Leaving the flag set would make the NEXT ordinary agent exit look like
@@ -1120,9 +1122,7 @@ def _run_headless_main(url: str, port: int, lifecycle_thread: threading.Thread) 
     if _external_host_update is not None:
         lifecycle_thread.join()  # The hook observes shutdown and owns its bounded reap.
     _kill_orphaned_children(reason="headless_shutdown" if requested_shutdown else "crash_fuse")
-    # NO explicit release_pid_lock(): sys.exit runs the atexit-registered
-    # release, and a second release would unconditionally unlink a lock a
-    # NEWER launcher may own (explicit calls stay only on os._exit paths).
+    # atexit alone releases the PID lock; a second unlink could erase a newer launcher's lock.
     sys.exit(0 if requested_shutdown else 1)
 
 

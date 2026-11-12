@@ -1,26 +1,15 @@
-"""Planned restarts replace off-pin engines without stopping a newer release for a downgrade.
+"""Application Exit/Restart stops the owned engine, independently of the next pin.
 
-Self-restart after self-modification and the managed update (or its rollback) share
-one seam, the lifespan teardown of a requested restart; the comparison reads the pin
-the next generation selects and the serving engine's own handshake, and the stop is
-the attested owned-daemon stop, never a veto. The owner's Restart stops no engine of
-its own and takes the same rule (owner 3A, 2026-11-06).
+The old pin-comparison cases are superseded by the application-ending contract;
+cold-start storage compatibility remains the runtime's own admission decision.
 """
-
 import inspect
 import json
-import logging
-import os
-import threading
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import claudexor_daemon as owned, claudexor_runtime, config, server_restart
-from ouroboros.gateways.claudexor import ClaudexorUnavailable
-from tests.test_claudexor_startup_lifetime import startup  # noqa: F401 - fixture reuse (real fake engine)
-
-PIN = SimpleNamespace(version="3.10.0", build_sha="a" * 40)
 
 
 def _rows(root):
@@ -28,204 +17,72 @@ def _rows(root):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
-class _Gateway:
-    """What ``read_owned_gateway`` hands back: a handshaken client that must be closed."""
-
-    def __init__(self, version, sha):
-        self.engine_version, self.engine_build_sha, self.closed = version, sha, False
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        self.closed = True
-
-
-@pytest.fixture
-def planned(tmp_path, monkeypatch):
-    """A provisioned home, the pin the checkout landed, and a recording real manager."""
-    for module in (config, server_restart):
-        monkeypatch.setattr(module, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())  # no owner Restart began here
-    descriptor = owned.owned_descriptor_path()
-    descriptor.parent.mkdir(parents=True)
-    descriptor.write_text("{}")
+@pytest.mark.parametrize("version", ["3.9.8", "3.10.0", "4.3.0", ""])
+def test_application_stop_never_compares_or_provisions_an_engine(tmp_path, monkeypatch, version):
     calls = []
-    manager = owned.OwnedClaudexorDaemon()
-    monkeypatch.setattr(owned, "get_owned_daemon", lambda: manager)
-    monkeypatch.setattr(owned, "ensure_owned_gateway",
-                        lambda **kw: pytest.fail("a restart teardown must never ensure (start) the daemon"))
-    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin", lambda path=None: PIN)
-    real_outcome = manager.stop_outcome
-    monkeypatch.setattr(manager, "stop_outcome", lambda: calls.append("daemon_stop") or real_outcome())
-
-    def serving(version, sha):
-        gateway = _Gateway(version, sha)
-        monkeypatch.setattr(owned, "read_owned_gateway", lambda: gateway)
-        return gateway
-
-    return SimpleNamespace(calls=calls, manager=manager, root=tmp_path, serving=serving)
+    monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(owned, "get_owned_daemon", lambda: SimpleNamespace(
+        stop_outcome=lambda **kw: calls.append(kw) or "stopped", engine_version=version))
+    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin", lambda **kw: pytest.fail("stop reads no pin"))
+    monkeypatch.setattr(owned, "read_owned_gateway", lambda **kw: pytest.fail("stop has no network wait"))
+    assert server_restart._stop_owned_daemon("Restart") is True
+    assert calls == [{"force": True}]
+    assert not (tmp_path / "state" / "panic_stop.flag").exists()
 
 
-def test_off_pin_daemon_is_stopped_and_the_restart_proceeds(planned, monkeypatch, caplog):
-    gateway = planned.serving("3.9.8", "b" * 40)
-    monkeypatch.setattr(planned.manager, "stop_outcome", lambda: planned.calls.append("daemon_stop") or "stopped")
-    with caplog.at_level(logging.INFO):
-        assert server_restart._stop_owned_daemon_for_new_pin() is None
-    assert planned.calls == ["daemon_stop"] and gateway.closed
-    assert "3.9.8" in caplog.text and "3.10.0" in caplog.text and "pinned engine" in caplog.text
-    assert not [r for r in caplog.records if r.levelno >= logging.CRITICAL] and _rows(planned.root) == []
+@pytest.mark.parametrize("outcome,confirmed", [("stopped", True), ("nothing_to_stop", True), ("unconfirmed", False)])
+def test_application_stop_preserves_physical_outcome(tmp_path, monkeypatch, caplog, outcome, confirmed):
+    monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(owned, "get_owned_daemon", lambda: SimpleNamespace(stop_outcome=lambda **kw: outcome))
+    assert server_restart._stop_owned_daemon("Exit") is confirmed
+    assert ("unconfirmed" in caplog.text) is not confirmed
 
 
-@pytest.mark.parametrize("serving", [("3.10.0", "a" * 40)], ids=["same version and build"])
-def test_on_pin_daemon_is_left_serving(planned, caplog, serving):
-    gateway = planned.serving(*serving)
-    with caplog.at_level(logging.INFO):
-        server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == [] and gateway.closed
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+def test_raising_stop_keeps_an_explicit_unconfirmed_receipt(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
+    def fail(**kw):
+        raise RuntimeError("fixture failure")
+    monkeypatch.setattr(owned, "get_owned_daemon", lambda: SimpleNamespace(stop_outcome=fail))
+    assert server_restart._stop_owned_daemon("Exit") is False
+    row = _rows(tmp_path)[-1]
+    assert row["type"] == "process_stop_unconfirmed" and row["purpose"] == owned.CUSTODY_PURPOSE
 
 
-@pytest.mark.parametrize("serving", [("3.10.0", "b" * 40), ("3.9.8", "a" * 40)],
-                         ids=["build differs", "version differs"])
-def test_either_pin_field_differing_counts(planned, monkeypatch, serving):
-    planned.serving(*serving)
-    monkeypatch.setattr(planned.manager, "stop_outcome", lambda: planned.calls.append("daemon_stop") or "stopped")
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == ["daemon_stop"]
+def test_unprovisioned_application_stop_does_not_start_a_runtime(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(owned, "get_owned_daemon", lambda: owned.OwnedClaudexorDaemon())
+    monkeypatch.setattr(owned, "ensure_owned_gateway", lambda **kw: pytest.fail("stop started an engine"))
+    assert server_restart._stop_owned_daemon("Exit") is True
 
 
-def test_unconfirmed_stop_is_the_same_diagnostic_and_the_restart_proceeds(planned, caplog):
-    """The real manager on a home with a descriptor and no marker cannot confirm; nothing vetoes."""
-    planned.serving("3.9.8", "b" * 40)
-    with caplog.at_level(logging.CRITICAL):
-        assert server_restart._stop_owned_daemon_for_new_pin() is None
-    assert planned.calls == ["daemon_stop"]
-    assert "Planned restart: owned Claudexor stop unconfirmed" in caplog.text
-    assert "custody retained" in caplog.text and "next generation attaches" in caplog.text
-    rows = _rows(planned.root)
-    assert rows[-1]["type"] == "process_stop_unconfirmed" and rows[-1]["purpose"] == owned.CUSTODY_PURPOSE
+@pytest.mark.parametrize("restart", [False, True], ids=["quit", "restart"])
+def test_emergency_cleanup_ends_the_engine_on_both_doors(tmp_path, monkeypatch, restart):
+    import threading
+    import server
+    calls = []
+    flags = threading.Event()
+    if restart:
+        flags.set()
+    monkeypatch.setattr(server, "_restart_requested", flags)
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "_managed_update_pending_kwargs", lambda: {})
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: calls.append("workers"))
+    monkeypatch.setattr(server, "_stop_owned_daemon", lambda label: calls.append("engine") or True)
+    monkeypatch.setattr(server, "stop_owned_work", lambda root: calls.append("owned-stop"))
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+    monkeypatch.setattr("ouroboros.body_adoption.arm", lambda *a, **kw: None)
+    monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
+    server._emergency_process_cleanup()
+    assert calls == ["workers", "engine", "owned-stop"]
 
 
-def test_raising_stop_is_recorded_like_panic_and_the_restart_proceeds(planned, monkeypatch, caplog):
-    planned.serving("3.9.8", "b" * 40)
-
-    def fail():
-        raise RuntimeError("fixture stop failed")
-
-    monkeypatch.setattr(planned.manager, "stop_outcome", fail)
-    with caplog.at_level(logging.CRITICAL):
-        assert server_restart._stop_owned_daemon_for_new_pin() is None
-    assert "Planned restart: owned Claudexor stop raised RuntimeError" in caplog.text
-    row = _rows(planned.root)[-1]
-    assert row == {"ts": row["ts"], "type": "process_stop_unconfirmed",
-                   "purpose": owned.CUSTODY_PURPOSE, "reason": "stop raised RuntimeError"}
-
-
-def test_unreachable_foreign_or_stopped_daemon_changes_nothing(planned, monkeypatch, caplog):
-    """Discovery/handshake refusals (typed) keep the existing handoff: the next generation attaches."""
-    def refused():
-        raise ClaudexorUnavailable("daemon_unreachable", "fixture: nothing answers", status_code=503)
-
-    monkeypatch.setattr(owned, "read_owned_gateway", refused)
-    with caplog.at_level(logging.INFO):
-        server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == []
-    assert "keeps the owned Claudexor daemon" in caplog.text and "nothing answers" in caplog.text
-
-
-@pytest.mark.parametrize("pin", [
-    lambda path=None: None,
-    lambda path=None: (_ for _ in ()).throw(
-        claudexor_runtime.ClaudexorRuntimeError("runtime_pin_missing", "fixture: no pin")),
-], ids=["unpublished pin", "unreadable pin"])
-def test_unpublished_or_unreadable_pin_changes_nothing(planned, monkeypatch, pin):
-    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin", pin)
-    monkeypatch.setattr(owned, "read_owned_gateway",
-                        lambda: pytest.fail("no pin to compare against: the daemon is not even read"))
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == []
-
-
-def test_unprovisioned_home_is_never_read(tmp_path, monkeypatch):
-    for module in (config, server_restart):
-        monkeypatch.setattr(module, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin",
-                        lambda path=None: pytest.fail("an unprovisioned home reads no pin"))
-    monkeypatch.setattr(owned, "read_owned_gateway", lambda: pytest.fail("an unprovisioned home is never read"))
-    server_restart._stop_owned_daemon_for_new_pin()
-
-
-def test_pin_is_read_from_the_landed_checkout_not_the_cached_manager(planned, monkeypatch):
-    """The process's runtime manager still holds the pin it booted with; the checkout decides."""
-    planned.serving("3.9.8", "b" * 40)
-    monkeypatch.setattr(planned.manager, "stop_outcome", lambda: planned.calls.append("daemon_stop") or "stopped")
-    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager",
-                        lambda: pytest.fail("the cached manager pin is this process's, not the next generation's"))
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == ["daemon_stop"]
-
-
-def test_a_switch_intent_compares_the_targets_pin_not_the_landed_checkouts(planned, monkeypatch, tmp_path):
-    """S3 fix 14 (Astra M12): with a store switch intent recorded, the seam moves the checkout to
-    the intent's target after this cleanup, so the daemon is compared with THAT tree's pin."""
-    from ouroboros import store_switch
-
-    asked = []
-    target = SimpleNamespace(version="3.11.0", build_sha="b" * 40)
-
-    def pin(path=None, *, data=None):
-        return target if data == b"target-pin" else PIN
-
-    def target_file(repo_dir, sha, rel):
-        asked.append((sha, rel))
-        return b"target-pin" if rel == "ouroboros/claudexor_runtime_pin.json" else None
-
-    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin", pin)
-    monkeypatch.setattr(store_switch, "target_file_bytes", target_file)
-    monkeypatch.setattr(planned.manager, "stop_outcome", lambda: planned.calls.append("daemon_stop") or "stopped")
-    planned.serving("3.10.0", "a" * 40)  # the landed checkout's pin: without the intent nothing would stop
-    store_switch.record_switch_intent(tmp_path, target_sha="c" * 40, target_ref="v1.0", reason="owner rollback", door="ui_rollback")
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == ["daemon_stop"] and asked == [("c" * 40, "ouroboros/claudexor_runtime_pin.json")]
-
-
-@pytest.mark.parametrize("version", ["3.10.1", "4.3.0", "10.0.0"])
-def test_newer_release_survives_lower_checkout_pin(planned, caplog, version):
-    gateway = planned.serving(version, "b" * 40)
-    with caplog.at_level(logging.WARNING):
-        server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == [] and gateway.closed
-    assert "keeps newer owned Claudexor" in caplog.text
-    assert "cold start still requires a compatible pin" in caplog.text
-
-
-def test_switch_downgrade_keeps_newer_engine(planned, monkeypatch, tmp_path):
-    from ouroboros import store_switch
-
-    gateway = planned.serving("4.3.0", "b" * 40)
-    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin",  # the landed checkout alone would stop it
-                        lambda path=None, *, data=None: SimpleNamespace(version="4.4.0", build_sha="d" * 40))
-    monkeypatch.setattr(store_switch, "next_engine_pin",
-                        lambda repo, sha: SimpleNamespace(version="4.2.0", build_sha="c" * 40))
-    store_switch.record_switch_intent(tmp_path, target_sha="c" * 40, target_ref="v1.0",
-                                     reason="owner rollback", door="ui_rollback")
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == [] and gateway.closed
-
-
-def test_an_adopted_candidates_lower_pin_keeps_newer_engine(planned, monkeypatch):
-    """The third pin origin: a bound body adoption's candidate file decides, not the landed checkout."""
-    from ouroboros import body_adoption
-
-    asked = []
-    planned.serving("4.3.0", "b" * 40)
-    monkeypatch.setattr(body_adoption, "bound_candidate_file",
-                        lambda data_dir, rel: asked.append(rel) or b"candidate-pin")
-    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin", lambda path=None, *, data=None: SimpleNamespace(
-        version="4.2.0" if data == b"candidate-pin" else "4.4.0", build_sha="c" * 40))
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == [] and asked == ["ouroboros/claudexor_runtime_pin.json"]
+def test_lifespan_ends_engine_after_worker_custody_before_optional_waits():
+    import server
+    source = inspect.getsource(server.lifespan)
+    kill = source.index("kill_workers(\n                force=True,\n                terminal_status=cleanup_status")
+    stop = source.index('_stop_owned_daemon("Server shutdown")')
+    assert kill < stop < source.index("if extension_reconcile_task is not None:")
+    assert "_stop_owned_daemon_for_new_pin" not in source
 
 
 @pytest.mark.parametrize("version,other,below", [
@@ -234,153 +91,4 @@ def test_an_adopted_candidates_lower_pin_keeps_newer_engine(planned, monkeypatch
     ("4.3.0", "4.3.1\n", False), ("4.3.0", "\u0664.\u0663.\u0661", False), ("v4.3.0", "4.3.1", False),
 ])
 def test_release_order_is_the_engines_plain_semver_only(version, other, below):
-    """Claudexor's root authority orders ASCII x.y.z numerically; every other spelling stays unordered."""
     assert claudexor_runtime.release_below(version, other) is below
-
-
-@pytest.mark.parametrize("serving", ["v4.3.0", "4.4.0-rc.1", ""])
-def test_an_unordered_engine_spelling_keeps_the_existing_stop(planned, monkeypatch, serving):
-    planned.serving(serving, "b" * 40)
-    monkeypatch.setattr(planned.manager, "stop_outcome", lambda: planned.calls.append("daemon_stop") or "stopped")
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == ["daemon_stop"]
-
-
-def _restart_flags(monkeypatch, *modules):
-    """Fresh process restart flags, shared by every module that reads them (as the real imports are)."""
-    from ouroboros import server_process
-
-    flags = SimpleNamespace(requested=threading.Event(), owner=threading.Event())
-    for module in (server_process, server_restart, *modules):
-        monkeypatch.setattr(module, "_restart_requested", flags.requested)
-        monkeypatch.setattr(module, "_owner_restart_requested", flags.owner)
-    return flags
-
-
-def test_owner_rollback_and_update_doors_keep_the_newer_engine(planned, monkeypatch, caplog):
-    """The control doors (Rollback, Apply Update) restart AS the owner but never begin the Restart's stop."""
-    from ouroboros import server_process
-    from ouroboros.gateway import control
-
-    flags = _restart_flags(monkeypatch)
-    planned.serving("4.3.0", "b" * 40)
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        request_restart=server_process._request_restart_exit)))
-    assert control._request_restart(request) is True
-    assert flags.owner.is_set() and flags.requested.is_set()
-    with caplog.at_level(logging.WARNING):
-        server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == [] and "keeps newer owned Claudexor 4.3.0" in caplog.text
-
-
-@pytest.mark.parametrize("serving,stops", [("4.3.0", []), ("3.9.8", ["daemon_stop"])],
-                         ids=["newer engine kept", "older engine replaced"])
-def test_the_owners_restart_takes_the_one_pin_rule(planned, monkeypatch, serving, stops):
-    """Owner Restart no longer stops the engine itself (owner 3A); its teardown takes the one rule every door
-    takes: a newer engine on a lower checkout pin is kept, an older one is replaced by the attested stop."""
-    server_restart._OWNER_STOP_BEGAN.set()  # what ``_stop_owned_work`` records first
-    planned.serving(serving, "b" * 40)
-    monkeypatch.setattr(planned.manager, "stop_outcome", lambda: planned.calls.append("daemon_stop") or "stopped")
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == stops
-
-
-def test_a_stale_restart_marker_does_not_turn_a_rollback_into_a_manual_restart(planned):
-    """A boot that could not persist its holds keeps the durable marker; only this process's own Restart counts."""
-    (planned.root / "state").mkdir()
-    (planned.root / "state" / "owner_restart_no_resume.flag").write_text("owner_restart", encoding="utf-8")
-    planned.serving("4.3.0", "b" * 40)
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert planned.calls == []
-
-
-@pytest.mark.parametrize("manual", [False, True], ids=["owner rollback door", "owner Restart"])
-def test_the_emergency_cleanup_site_makes_the_same_choice(planned, monkeypatch, manual):
-    """The restart exit's fallback cleanup (a hung teardown) calls the same check after the worker kill."""
-    import server
-
-    flags = _restart_flags(monkeypatch, server)
-    flags.requested.set()
-    flags.owner.set()  # every control door restarts as the owner, the Restart button too
-    monkeypatch.setattr(server, "DATA_DIR", planned.root)
-    monkeypatch.setattr(server, "_managed_update_pending_kwargs", lambda: {"preserve_pending": True})
-    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: planned.calls.append("workers"))
-    monkeypatch.setattr(server, "stop_owned_work", lambda root: planned.calls.append("owned-stop"))
-    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
-    monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
-    monkeypatch.setattr(planned.manager, "stop_outcome", lambda: planned.calls.append("daemon_stop") or "stopped")
-    planned.serving("4.3.0", "b" * 40)
-    if manual:
-        server_restart._OWNER_STOP_BEGAN.set()
-    server._emergency_process_cleanup()
-    assert planned.calls == ["workers", "owned-stop"], "a newer engine is kept on both doors (owner 3A)"
-
-
-def test_the_check_lives_in_the_restart_teardown_and_the_handoff_performer_is_untouched(planned, monkeypatch, tmp_path):
-    """Source pin in the file's style: the teardown makes the check after the worker kill and before
-    the bridge goes down, only for a requested restart; ``_perform_supervisor_restart`` keeps its
-    handoff unchanged (an on-pin daemon is never consulted there)."""
-    import server
-
-    source = inspect.getsource(server.lifespan)
-    kill = source.index("kill_workers(\n                force=True,\n                terminal_status=cleanup_status")
-    check = source.index("_stop_owned_daemon_for_new_pin()")
-    assert kill < check < source.index("get_bridge().shutdown()")
-    assert check < source.index("if extension_reconcile_task is not None:")
-    assert check < source.index("stop_owned_work(lifespan_drive_root)")
-    assert source.rindex("if _restart_requested.is_set():", 0, check) > kill
-    assert "_stop_owned_daemon_for_new_pin" not in inspect.getsource(server._perform_supervisor_restart)
-
-    planned.serving("3.10.0", "a" * 40)
-    monkeypatch.setattr(owned, "read_owned_gateway", lambda: pytest.fail("the performer never reads the daemon"))
-    worker_calls = []
-    state = {"owner_chat_id": 0}
-    ctx = SimpleNamespace(
-        load_state=lambda: dict(state), save_state=lambda updated: state.update(updated),
-        safe_restart=lambda **_kwargs: (True, "ok"),
-        kill_workers=lambda **kwargs: worker_calls.append(kwargs),
-        persist_queue_snapshot=lambda **_kwargs: None, DRIVE_ROOT=tmp_path, REPO_DIR=tmp_path, RUNNING={},
-    )
-    def preserve_delegated(root, running, restart_transaction_id="", additional_task_ids=None):
-        assert not additional_task_ids  # This fixture has no native owner-wait participants.
-        return {"sleeping-parent"}
-
-    monkeypatch.setattr("ouroboros.delegate_recovery.prepare_planned_restart_handoffs", preserve_delegated)
-    monkeypatch.setattr(server, "_request_restart_exit", lambda: None)
-    server._perform_supervisor_restart(ctx)
-    assert worker_calls[0]["preserve_running_task_ids"] == {"sleeping-parent"}
-    assert worker_calls[0]["preserve_pending"] is True
-    assert planned.calls == []
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX measured process custody")
-def test_real_engine_ends_only_for_another_pin_that_is_not_lower(startup, monkeypatch):  # noqa: F811
-    """On the real fake engine (9.9.9 / c*40) the same generation keeps it while the pin matches or is a
-    lower release, and ends it, confirmed, when the landed checkout pins a newer engine."""
-    (startup.home / "normal").touch()
-    (startup.home / "publish").touch()
-    manager = owned.OwnedClaudexorDaemon()
-    manager.ensure_running(startup_wait_sec=3)
-    process = manager._proc
-    monkeypatch.setattr(server_restart, "DATA_DIR", startup.root)
-    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())  # a planned door, not a Restart
-    monkeypatch.setattr(owned, "get_owned_daemon", lambda: manager)
-    monkeypatch.setattr(owned, "ensure_owned_gateway",
-                        lambda **kw: pytest.fail("a restart teardown must never ensure (start) the daemon"))
-
-    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin",
-                        lambda path=None: SimpleNamespace(version="9.9.9", build_sha="c" * 40))
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert process.poll() is None, "an unchanged pin leaves the daemon serving"
-
-    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin",
-                        lambda path=None: SimpleNamespace(version="9.8.0", build_sha="d" * 40))
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert process.poll() is None and manager._proc is process, "a lower release pin keeps the newer engine"
-
-    monkeypatch.setattr(claudexor_runtime, "load_runtime_pin",
-                        lambda path=None: SimpleNamespace(version="9.10.0", build_sha="d" * 40))
-    server_restart._stop_owned_daemon_for_new_pin()
-    process.wait(timeout=5)
-    assert not [row for row in _rows(startup.root) if row["type"] == "process_stop_unconfirmed"]
-    assert manager.stop_outcome() == "nothing_to_stop"

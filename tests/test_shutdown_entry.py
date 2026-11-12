@@ -181,7 +181,7 @@ def test_the_emergency_door_records_the_restart_cause_and_still_stops_workers(da
     worker_calls = []
     monkeypatch.setattr(server, "DATA_DIR", data)
     monkeypatch.setattr(server, "stop_owned_work", lambda _root: {"state": "completed"})
-    monkeypatch.setattr(server, "_stop_owned_daemon_for_new_pin", lambda: None)
+    monkeypatch.setattr(server, "_stop_owned_daemon", lambda label: True)
     monkeypatch.setattr(server.body_adoption, "arm", lambda *_a, **_k: None)
     monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: worker_calls.append(kw))
     monkeypatch.setattr("supervisor.workers.last_worker_exit_census", lambda: {"unconfirmed": []})

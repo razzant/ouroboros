@@ -185,9 +185,15 @@ home = pathlib.Path(os.environ['CLAUDEXOR_CONFIG_DIR'])
 home.mkdir(parents=True, exist_ok=True)
 progress = home / 'client-work.txt'
 print('fixture-engine: starting harness', flush=True)
-harness = subprocess.Popen([sys.executable, '-c',
-    "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); n=0\nwhile True:\n n+=1; p.write_text(str(n)); time.sleep(.05)",
-    str(progress)], **subprocess_new_group_kwargs())
+harness_code = "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); n=0\nwhile True:\n n+=1; p.write_text(str(n)); time.sleep(.05)"
+if os.environ.get('OUROBOROS_FIXTURE_HANDLES'):
+    held = (home / 'engine-held.txt').open('a')
+    leaf_code = "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); h=p.open('a'); p.with_suffix('.ready').touch(); time.sleep(120)"
+    harness_code = ("import json,pathlib,subprocess,sys; home=pathlib.Path(sys.argv[1]).parent; "
+        "held=(home/'harness-held.txt').open('a'); "
+        "leaf=subprocess.Popen([sys.executable,'-c'," + repr(leaf_code) + ",str(home/'leaf-held.txt')]); "
+        "(home/'leaf.json').write_text(json.dumps({'leaf_pid':leaf.pid}));\n" + harness_code)
+harness = subprocess.Popen([sys.executable, '-c', harness_code, str(progress)], **subprocess_new_group_kwargs())
 print('fixture-engine: harness spawned', flush=True)
 (home / 'fixture-engine.json').write_text(json.dumps({'pid': os.getpid(), 'harness_pid': harness.pid}))
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -365,6 +371,9 @@ def shared_tree(tmp_path, monkeypatch, request):
         )
         info = json.loads((tmp_path / "ready.json").read_text())
         _wait(lambda: (tmp_path / "claudexor" / "client-work.txt").exists())
+        if os.environ.get("OUROBOROS_FIXTURE_HANDLES"):
+            _wait(lambda: (tmp_path / "claudexor" / "leaf-held.ready").exists())
+            info.update(json.loads((tmp_path / "claudexor" / "leaf.json").read_text()))
         yield parent, info
     finally:
         # Exact fixture PIDs only; on failed startup recover the fixture's own receipt.
@@ -376,7 +385,7 @@ def shared_tree(tmp_path, monkeypatch, request):
         parent.wait(timeout=5)
         if not info:
             custody.stop_ledgered_processes(tmp_path, {daemon.CUSTODY_PURPOSE})
-        for name in ("ordinary_pid", "harness_pid", "worker_pid", "custody_pid", "pid"):
+        for name in ("leaf_pid", "ordinary_pid", "harness_pid", "worker_pid", "custody_pid", "pid"):
             if info.get(name) and not _gone(info[name]):
                 pl.kill_pid_tree(info[name])
                 _wait(lambda: _gone(info[name]))
@@ -461,7 +470,7 @@ def test_prior_session_custody_tree_reap_preserves_shared_daemon(tmp_path, share
     _continues(tmp_path, info)
 
 
-def test_launcher_forced_stop_passes_retained_subtree(monkeypatch):
+def test_launcher_forced_stop_ends_engine_before_server_fallback(monkeypatch):
     import launcher
     calls = []
     class Process:
@@ -473,6 +482,7 @@ def test_launcher_forced_stop_passes_retained_subtree(monkeypatch):
             self.waits += 1
             if self.waits == 1:
                 raise subprocess.TimeoutExpired("server", timeout)
+    monkeypatch.setattr("ouroboros.server_restart._stop_owned_daemon", lambda label: calls.append("engine") or True)
     monkeypatch.setattr(launcher, "IS_WINDOWS", False)
     monkeypatch.setattr(launcher, "_agent_proc", Process())
     monkeypatch.setattr(launcher, "_agent_job", None)
@@ -480,7 +490,7 @@ def test_launcher_forced_stop_passes_retained_subtree(monkeypatch):
     monkeypatch.setattr(launcher, "kill_process_tree", lambda proc, **kw: calls.append((proc.pid, kw)))
     monkeypatch.setattr(launcher, "_cleanup_recorded_server_group_for_pid", lambda *a: None)
     launcher.stop_agent()
-    assert calls == ["graceful", (9990011, {"exclude_pids": {9990022}})]
+    assert calls == ["graceful", "engine", (9990011, {"exclude_pids": {9990022}}), "engine"]
 
 
 def test_recorded_server_cleanup_preserves_daemon_exclusions(tmp_path, monkeypatch):
@@ -574,3 +584,71 @@ def test_windows_first_use_keeps_working_with_legacy_job_or_without_launcher_job
         parent.wait(timeout=5)
         _wait(lambda: _gone(info["worker_pid"]))
         _continues(tmp_path, info)
+
+
+@pytest.fixture
+def windows_handle_tree(monkeypatch, request):
+    monkeypatch.setenv("OUROBOROS_FIXTURE_HANDLES", "1")
+    return request.getfixturevalue("shared_tree")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows tree and deny-delete handles")
+@pytest.mark.parametrize("door", ["quit", "forced", "already_exited", "restart"])
+def test_windows_application_end_releases_daemon_tree_and_directory(
+    tmp_path, monkeypatch, windows_handle_tree, door,
+):
+    import launcher
+    from ouroboros import config, server_restart
+    parent, info = windows_handle_tree
+    for module in (config, launcher, server_restart):
+        monkeypatch.setattr(module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(daemon, "_MANAGER", None)  # daemon was started by a worker, not this controller
+    monkeypatch.setattr(launcher, "_agent_proc", parent)
+    monkeypatch.setattr(launcher, "_agent_job", None)
+    monkeypatch.setattr(launcher, "_agent_start", None)
+    monkeypatch.setattr(launcher, "_agent_stopping", None)
+    monkeypatch.setattr(launcher, "LAUNCHER_STOP_GRACE_SEC", .1)
+    monkeypatch.setattr(launcher, "_server_process_record_path", lambda: tmp_path / "server_process.json")
+    monkeypatch.setattr(daemon.OwnedClaudexorDaemon, "_request_operator_stop",
+                        lambda self: pytest.fail("application exit waited for cooperative CLI"))
+    foreign = subprocess.Popen([_fixture_python(), "-c", "import time;time.sleep(120)"],
+                               **pl.subprocess_new_group_kwargs())
+    try:
+        custody.record_process(tmp_path, pid=foreign.pid, cmd="unrelated", purpose="foreign_fixture", scope="daemon")
+        home, moved = tmp_path / "claudexor", tmp_path / "released-engine"
+        with pytest.raises(OSError):
+            (home / "leaf-held.txt").unlink()  # consumer really holds a deny-delete handle
+        if door == "already_exited":
+            parent.kill()
+            parent.wait(timeout=5)
+            _continues(tmp_path, info)  # server Job closure alone left the engine alive
+        elif door == "forced":
+            monkeypatch.setattr(parent, "terminate", lambda: None)  # controller cannot get graceful server exit
+        if door == "restart":
+            import threading
+            monkeypatch.setattr(launcher, "_agent_restart_requested", threading.Event())
+            launcher._request_agent_restart()
+            assert launcher._agent_restart_requested.is_set()  # successor intent survives teardown
+        else:
+            assert launcher.stop_agent() is True
+        _wait(lambda: all(_gone(info[key]) for key in ("pid", "harness_pid", "leaf_pid", "worker_pid", "ordinary_pid")))
+        home.rename(moved)
+        moved.rename(home)  # all engine directory handles released, not merely an RPC ACK
+        assert foreign.poll() is None
+        assert not (tmp_path / "state" / "panic_stop.flag").exists()
+        assert launcher._agent_proc is None
+    finally:
+        foreign.kill()
+        foreign.wait(timeout=5)
+
+
+def test_forced_application_stop_latches_start_without_a_global_panic(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    daemon._write_ownership_marker()
+    manager = daemon.OwnedClaudexorDaemon()
+    monkeypatch.setattr(manager, "_classify_liveness", lambda **kw: pytest.fail("force probed the engine"))
+    monkeypatch.setattr(manager, "_request_operator_stop", lambda: pytest.fail("force ran CLI"))
+    assert manager.stop_outcome(force=True) == "nothing_to_stop"
+    assert manager._panic_requested
+    assert not (tmp_path / "state" / "panic_stop.flag").exists()

@@ -115,7 +115,7 @@ from ouroboros.server_restart import (  # noqa: F401
     _begin_task_teardown, _live_running_task_ids, _managed_update_pending_kwargs,
     _perform_owner_restart, _safe_restart_serialized,
     _shutdown_supervisor_event_bus, _shutdown_task_cleanup_args,
-    _stop_owned_daemon_for_new_pin, _stop_owned_work,
+    _stop_owned_daemon, _stop_owned_work,
 )
 
 REPO_DIR = pathlib.Path(os.environ["OUROBOROS_REPO_DIR"])
@@ -1289,12 +1289,7 @@ async def lifespan(app):
                 log.debug("Failed to record server_shutdown event", exc_info=True)
         except Exception:
             pass
-        if _restart_requested.is_set():
-            try:
-                _stop_owned_daemon_for_new_pin()
-            except Exception:
-                log.critical("Planned restart: engine pin check raised; the owned daemon is left serving",
-                             exc_info=True)
+        _stop_owned_daemon("Server shutdown")  # Exit and Restart both end the old engine tree
         extension_reconcile_task = boot.extension_reconcile_task
         if extension_reconcile_task is not None:
             extension_reconcile_task.cancel()
@@ -1360,7 +1355,7 @@ app.app.state.start_supervisor_if_needed = _start_supervisor_if_needed  # type: 
 
 
 def _restart_cleanup_kwargs() -> dict:
-    """Owner Restart already asked its delegated runs to stop (the engine is kept): no second reconcile
+    """Owner Restart already asked its delegated runs to stop: no second reconcile
     here; every application stop keeps saved work and accepted queue for the next boot (#1563)."""
     if _owner_restart_requested.is_set():
         return {"reconcile_delegate_custody": False, "retain_saved_work": True}
@@ -1393,12 +1388,7 @@ def _emergency_process_cleanup() -> dict:
         worker_exits = last_worker_exit_census()
     except Exception:
         pass
-    if _restart_requested.is_set():
-        try:
-            _stop_owned_daemon_for_new_pin()
-        except Exception:
-            log.critical("Planned restart: engine pin check raised; the owned daemon is left serving",
-                         exc_info=True)
+    _stop_owned_daemon("Server exit fallback")
     owned_stop = stop_owned_work(DATA_DIR)  # the same one stop: joined until it completes or its deadline
     import multiprocessing
     from ouroboros.platform_layer import force_kill_pid

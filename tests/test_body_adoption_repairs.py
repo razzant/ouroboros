@@ -299,22 +299,17 @@ def test_packaged_launcher_counts_helpers_it_loaded_from_its_bundle(tmp_path, mo
 
 
 # --------------------------------------------------------------------------- #
-# 5. The planned restart compares the engine the NEXT generation selects
+# 5. Application teardown never executes a bound candidate's engine-pin code
 # --------------------------------------------------------------------------- #
-def test_next_generation_pin_comes_from_the_bound_candidate_when_the_switch_changes_it(monkeypatch):
-    from ouroboros import server_restart
-    from ouroboros.claudexor_runtime import _PIN_FILENAME
+def test_application_stop_needs_no_bound_candidate_pin(monkeypatch):
+    from ouroboros import claudexor_daemon, server_restart
 
     calls = []
-    monkeypatch.setattr("ouroboros.claudexor_runtime.load_runtime_pin",
-                        lambda path=None, data=None: calls.append(data) or SimpleNamespace(data=data))
-    monkeypatch.setattr(body_adoption, "bound_candidate_file", lambda data_dir, rel: None)
-    assert server_restart._next_generation_pin().data is None  # the landed checkout's own pin
-    candidate = b'{"schema_version": 1, "release": null}'
-    monkeypatch.setattr(body_adoption, "bound_candidate_file",
-                        lambda data_dir, rel: candidate if rel.endswith(_PIN_FILENAME) else None)
-    pin = server_restart._next_generation_pin()
-    assert pin.data == candidate and calls == [None, candidate]  # the candidate's bytes, through the one loader
+    monkeypatch.setattr(body_adoption, "bound_candidate_file", lambda *a: pytest.fail("stop reads no candidate"))
+    monkeypatch.setattr(claudexor_daemon, "get_owned_daemon", lambda: SimpleNamespace(
+        stop_outcome=lambda **kw: calls.append(kw) or "stopped"))
+    assert server_restart._stop_owned_daemon("Bound adoption restart") is True
+    assert calls == [{"force": True}]
 
 
 # --------------------------------------------------------------------------- #

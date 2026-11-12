@@ -249,7 +249,7 @@ Connect shows URL/code: `credential_profile_required` + `add_named_account` asks
 
 `harness_maintenance.js`: one row per program, accountless families too; engine versions/actions, stable outcome and Details (DESIGN §7). Unknown POSTs retain key/body; receipts rejoin with cancel/partial effects. A provider's page, chooser open and Check latest ask newest; ticks only poll operations. Settlements and changed producers share bounded catalog reads; reopening retries failures, keeping drafts. `model_chooser.js`/`model_program.js` put catalog `sourceProgram` and Update in every shared chooser's opened list. No repeated closed-field line. Clients share controls; inspection never wakes, Update never replays tasks (§6).
 
-**Restart Claudexor** (`claudexor_restart.js`, a provider's page) replaces the engine process after the owner confirms which runs end (DESIGN §7; CLIENT_CONTRACT §13); the header Restart keeps it. The missing-executable banner points here.
+**Restart Claudexor** (`claudexor_restart.js`, a provider's page) replaces the engine process after the owner confirms which runs end (DESIGN §7; CLIENT_CONTRACT §13). Application Exit/Restart ends its owned engine too; hiding and worker exit do not.
 
 #### Available subagents and the review pool
 

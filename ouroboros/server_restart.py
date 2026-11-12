@@ -3,7 +3,7 @@
 The live-task census the restart drain consults, the teardown arguments that
 finalize interrupted tasks with an honest reason, the managed-update guard on
 preserving queued work, the checkout/update serialization gate, the owner's manual
-Restart operation, the planned restart's engine-pin daemon stop,
+Restart operation, the application-ending owned-daemon stop,
 and the event bus shutdown live here. The planned restart also uses this lifecycle; its composition-root bindings
 join the deferred drain record to the performer that raises the exit signal.
 """
@@ -333,10 +333,9 @@ def _stop_owned_work(ctx: Any) -> list:
     stopped tasks' through the public owner-gone seam, both over the attach-only
     gateway, and finally the generation's one bounded stop of its owned processes
     (``stop_owned_work``), which the teardown and the restart watcher later join.
-    The shared Claudexor daemon is KEPT (owner 3A, 2026-11-06): Restart restarts
-    Ouroboros, other programs' runs on the engine are untouched, and the teardown's
-    one pin rule (``_stop_owned_daemon_for_new_pin``) replaces the engine only for
-    a forward pin; the engine's own restart is the Accounts action. Nothing here
+    The lifespan and launcher then end the owned engine tree too (same pin or newer).
+    Saved-work returns remain separate from physical runtime lifetime. Foreign homes
+    are never stopped. Nothing here
     calls ``ensure_owned_gateway``: a stop admits nothing and never starts or
     repairs the engine; every transport only attaches.
 
@@ -433,19 +432,19 @@ def arm_owner_restart_transaction() -> str:
     return ""
 
 
-def _stop_owned_daemon(label: str) -> None:
-    """The attested owned-daemon stop a planned restart's pin change makes; never a veto.
+def _stop_owned_daemon(label: str) -> bool:
+    """Application-ending physical teardown, shared by server and launcher; never a Panic control.
 
     An unconfirmed stop was already disclosed by ``stop_outcome`` (critical log
     plus the ``process_stop_unconfirmed`` supervisor row, custody retained); a
     raising stop gets the same row here, as Panic records it. Either way the
-    restart proceeds and the next generation attaches to a still-live daemon.
+    server exits with the unknown disclosed; the launcher retains its generation until cleanup confirms.
     """
     from ouroboros.claudexor_daemon import CUSTODY_PURPOSE, get_owned_daemon
     from ouroboros.utils import append_jsonl, utc_now_iso
 
     try:
-        outcome = get_owned_daemon().stop_outcome()
+        outcome = get_owned_daemon().stop_outcome(force=True)
     except Exception as exc:
         log.critical("%s: owned Claudexor stop raised %s; custody is unconfirmed", label, type(exc).__name__)
         try:
@@ -455,78 +454,11 @@ def _stop_owned_daemon(label: str) -> None:
             })
         except Exception:
             log.critical("%s: failed to record unconfirmed daemon stop", label)
+        return False
     else:
         if outcome == "unconfirmed":  # stop_outcome already disclosed the remainder
-            log.critical("%s: owned Claudexor stop unconfirmed; custody retained, the "
-                         "restart proceeds and the next generation attaches to the live daemon", label)
-
-
-def _stop_owned_daemon_for_new_pin() -> None:
-    """A restart replaces an off-pin daemon, but never downgrades a newer one.
-
-    Runs in the server lifespan teardown of every requested restart (planned
-    self-restart, managed update or rollback, and the owner's manual Restart,
-    which no longer stops the daemon itself: owner 3A). It compares the pin the
-    next generation selects — ``load_runtime_pin`` reads the checkout that
-    already landed, not this process's cached pin — with the serving engine's
-    handshake through the attach-only ``read_owned_gateway``. An unprovisioned
-    home, an unpublished or unreadable pin and an unreachable, foreign or stopped
-    daemon leave the existing handoff untouched: the next generation attaches. A
-    lower release pin keeps the authenticated newer daemon on every door: its
-    data root may already require that engine's serving floor. This preserves
-    live availability, not cold-start compatibility after that daemon later
-    exits. Other version or build changes make the attested stop
-    (``_stop_owned_daemon``), so the next generation spawns the pinned engine;
-    the delegated runs that daemon served end with it, and the next generation's
-    startup sweep and resumed parents close them as absent (no invented spend).
-    """
-    from ouroboros.claudexor_daemon import owned_daemon_provisioned, read_owned_gateway
-    from ouroboros.engine_pin_policy import engine_pin_transition
-
-    if not owned_daemon_provisioned():
-        return
-    try:
-        pin = _next_generation_pin()
-        if pin is None:
-            return
-        with read_owned_gateway() as gateway:
-            serving = (gateway.engine_version, gateway.engine_build_sha)
-    except Exception as exc:
-        log.info("Planned restart keeps the owned Claudexor daemon: the engine pin comparison is "
-                 "unavailable (%s)", exc)
-        return
-    transition = engine_pin_transition(pin, serving)
-    if transition["action"] == "keep" and transition["direction"] == "backward":
-        log.warning("Planned restart keeps newer owned Claudexor %s: checkout pin %s would downgrade "
-                    "its data root; cold start still requires a compatible pin", serving[0], pin.version)
-        return
-    if transition["action"] != "replace":
-        return
-    log.warning("Planned restart stops the owned Claudexor daemon: engine %s (%s) is serving while the "
-                "checkout pins %s (%s); the next generation starts the pinned engine and the runs "
-                "in flight end with this one", serving[0] or "unknown", serving[1][:12] or "unknown",
-                pin.version, pin.build_sha[:12])
-    _stop_owned_daemon("Planned restart")
-
-
-def _next_generation_pin():
-    """The engine pin the NEXT generation selects.
-
-    Ordinarily the landed checkout's own tracked pin file. When a store switch intent is
-    recorded, the restart exit's seam moves the checkout to the intent's target after this
-    cleanup: that target's pin is the answer (``store_switch.next_engine_pin``). When this
-    restart carries a bound body adoption whose switch changes that file, the next
-    generation boots the candidate commit: its pin is read from that commit
-    (``body_adoption.bound_candidate_file``), through the same validating parser.
-    """
-    from ouroboros import body_adoption, config, store_switch
-    from ouroboros.claudexor_runtime import _PIN_FILENAME, load_runtime_pin
-
-    intent = store_switch.read_switch_intent(DATA_DIR)
-    if intent is not None:
-        return store_switch.next_engine_pin(config.REPO_DIR, intent["target_sha"])
-    raw = body_adoption.bound_candidate_file(DATA_DIR, "ouroboros/" + _PIN_FILENAME)
-    return load_runtime_pin() if raw is None else load_runtime_pin(data=raw)
+            log.critical("%s: owned Claudexor stop unconfirmed; custody retained for the exit fallback", label)
+        return outcome != "unconfirmed"
 
 
 def _live_running_task_ids(ctx: Any) -> list:

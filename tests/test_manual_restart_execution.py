@@ -74,7 +74,7 @@ def owners(restart_root, monkeypatch):
                         lambda root, running_task_ids=None, gateway_factory=None, recoverable_task_ids=None:
                         calls.append(("reconcile", running_task_ids, gateway_factory, recoverable_task_ids)) or [])
     real_outcome = manager.stop_outcome
-    monkeypatch.setattr(manager, "stop_outcome", lambda: calls.append(("daemon_stop",)) or real_outcome())
+    monkeypatch.setattr(manager, "stop_outcome", lambda **kw: calls.append(("daemon_stop",)) or real_outcome(**kw))
     return SimpleNamespace(calls=calls, manager=manager)
 
 
@@ -215,10 +215,8 @@ def test_unconfirmed_worker_shutdown_is_a_diagnostic_and_the_restart_proceeds(
     assert messages == ["♻️ Restarting.", STOP_NOTICE]
 
 
-def test_the_owners_restart_teardown_takes_the_one_pin_rule(owners, restart_root, monkeypatch):
-    """Owner Restart stops no engine of its own (owner 3A); its lifespan teardown takes the one pin rule every
-    restart door takes: a newer engine on a lower checkout pin is kept (quiet), an older one is replaced by
-    the attested stop (fires)."""
+def test_the_owners_restart_teardown_ends_the_engine_after_its_drain(owners, restart_root, monkeypatch):
+    """The drain preserves saved returns; subsequent lifespan teardown ends every owned engine pin."""
     owned._write_ownership_marker()
     owned.owned_descriptor_path().parent.mkdir(parents=True, exist_ok=True)
     owned.owned_descriptor_path().write_text("{}", encoding="utf-8")
@@ -229,23 +227,18 @@ def test_the_owners_restart_teardown_takes_the_one_pin_rule(owners, restart_root
                         lambda path=None: SimpleNamespace(version="4.3.0", build_sha="a" * 40))
     monkeypatch.setattr(owned, "read_owned_gateway", lambda: contextlib.nullcontext(
         SimpleNamespace(engine_version="4.3.1", engine_build_sha="b" * 40)))
-    server_restart._stop_owned_daemon_for_new_pin()  # the lifespan teardown's check
-    assert [c[0] for c in owners.calls].count("daemon_stop") == 0, "a lower pin keeps the newer engine, Restart included"
-    monkeypatch.setattr(owned, "read_owned_gateway", lambda: contextlib.nullcontext(
-        SimpleNamespace(engine_version="4.2.0", engine_build_sha="c" * 40)))
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert [c[0] for c in owners.calls].count("daemon_stop") == 1, "a forward pin replaces the engine"
+    server_restart._stop_owned_daemon("Restart")
+    assert [c[0] for c in owners.calls].count("daemon_stop") == 1, "even the newer engine ends"
 
 
 def test_the_downgrade_note_names_restart_claudexor_as_the_engine_stop():
-    """The test above in words: the header Restart keeps a newer engine, so PERSISTENCE's forward-only store note
-    names the Accounts action that does stop it, never the header Restart."""
+    """Physical Restart ends the engine; selecting an older pin still does not downgrade its data."""
     import pathlib
 
     text = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "PERSISTENCE.md").read_text(encoding="utf-8")
     text = " ".join(text.split())
     assert "Once it stops (Restart Claudexor in Accounts, Panic, exit), the older engine refuses the store" in text
-    assert "manual Restart" not in text
+    assert "Exit and Restart stop the owned engine even on a lower pin" in text
 
 
 def test_the_owners_restart_ends_the_runs_of_the_work_it_returns(owners, restart_root, monkeypatch):

@@ -188,7 +188,7 @@ def test_exit_tail_arms_only_with_the_stop_owners_confirmation(scene, monkeypatc
     monkeypatch.setattr("ouroboros.platform_layer.kill_process_on_port", lambda _port: None)
     monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
     monkeypatch.setattr("ouroboros.gateway.host_service.host_service_port", lambda: 8767)
-    monkeypatch.setattr(server, "_stop_owned_daemon_for_new_pin", lambda: None)
+    monkeypatch.setattr(server, "_stop_owned_daemon", lambda label: True)
     monkeypatch.setattr("multiprocessing.active_children", lambda: [])
     body_adoption.authorize(scene.ctx, scene.cand, reason="adopt it")
     restart_receipt(scene.data, scene.cand, "adopt it")

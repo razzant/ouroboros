@@ -230,7 +230,9 @@ def test_owner_restart_copy_is_explicit_about_stopped_task(tmp_path, monkeypatch
     assert calls == ["checked", "stopped", "notice", ("exit", True)]
     stop = _read("ouroboros/server_restart.py").split("def _stop_owned_work", 1)[1]
     assert (stop.index("request_cancel(") < stop.index("ctx.kill_workers(")
-            < stop.index("reconcile_orphaned_runs(") < stop.index("stop_outcome()"))
+            < stop.index("reconcile_orphaned_runs("))
+    # Application teardown owns physical engine stop after this saved-work drain.
+    assert "get_owned_daemon().stop_outcome(force=True)" in _read("ouroboros/server_restart.py")
 
 
 def test_owner_restart_cleanup_disables_second_custody_reconcile(monkeypatch):
@@ -241,7 +243,7 @@ def test_owner_restart_cleanup_disables_second_custody_reconcile(monkeypatch):
     monkeypatch.setattr(server, "_owner_restart_requested", owner)
     monkeypatch.setattr(server, "_restart_requested", restart)
     monkeypatch.setattr(server, "_managed_update_pending_kwargs", lambda: {})
-    monkeypatch.setattr(server, "_stop_owned_daemon_for_new_pin", lambda: None)
+    monkeypatch.setattr(server, "_stop_owned_daemon", lambda label: True)
     monkeypatch.setattr(server, "stop_owned_work", lambda *a, **k: None)
     monkeypatch.setattr("multiprocessing.active_children", lambda: [])
     monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)

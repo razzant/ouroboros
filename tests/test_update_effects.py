@@ -32,7 +32,6 @@ def scene(tmp_path, monkeypatch):
     monkeypatch.setattr(update_merge, "plan_managed_update_merge", lambda **kw: plan)
     monkeypatch.setattr(update_qualification, "preflight_description",
                         lambda p, **kw: {"letter": None, "qualification": None})
-    monkeypatch.setattr(server_restart, "_next_generation_pin", lambda: update_impact._pin_at(plan["merge_commit"]))
     stops = []
     monkeypatch.setattr(server_restart, "_stop_owned_daemon", lambda label: stops.append(label))
     return repo, plan, stops
@@ -83,8 +82,8 @@ def test_preflight_and_restart_pin_decision_matrix(scene, monkeypatch, serving, 
     assert effects["runtime"]["bundle"]["sqlite"] == "3.53.1"
     assert effects["runtime"]["changed_by_apply"] is False
     assert stops == [] and (gateway is None or gateway.closed)
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert bool(stops) is (action == "replace")
+    server_restart._stop_owned_daemon("Apply Update")
+    assert stops == ["Apply Update"], "pin comparison does not retain the old process"
 
 
 @pytest.mark.parametrize("active", [RuntimeError("cannot read"), {}, {"model": True, "non_model": 0}])
@@ -108,8 +107,8 @@ def test_unknown_target_pin_preserves_the_restart_handoff(scene, monkeypatch, pi
     plan["merge_commit"] = plan["target_sha"] = _commit(repo, "unknown pin", {"ouroboros/claudexor_runtime_pin.json": pin})
     monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda: Gateway(("4.5.0", "b" * 40)))
     assert update_impact.update_effects(plan)["engine"]["action"] == "unknown"
-    server_restart._stop_owned_daemon_for_new_pin()
-    assert stops == []
+    server_restart._stop_owned_daemon("Apply Update")
+    assert stops == ["Apply Update"], "unreadable next pin grants no engine survival"
 
 
 def test_merge_and_replacement_disclose_their_own_pin(scene, monkeypatch):

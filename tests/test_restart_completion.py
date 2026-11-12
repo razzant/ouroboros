@@ -321,7 +321,7 @@ def test_restart_waits_for_cleanup_and_transfers_once(monkeypatch, tmp_path, man
                      *([] if managed else [("reexec", None)]), ("exit", server.RESTART_EXIT_CODE)]
 
 
-def test_restart_fallback_runs_pin_handoff_before_retained_executor_cleanup(monkeypatch, tmp_path):
+def test_restart_fallback_stops_engine_before_retained_executor_cleanup(monkeypatch, tmp_path):
     import server
 
     calls = []
@@ -332,13 +332,13 @@ def test_restart_fallback_runs_pin_handoff_before_retained_executor_cleanup(monk
     monkeypatch.setattr(server, "_managed_update_pending_kwargs", lambda: {"preserve_pending": True})
     monkeypatch.setattr(server, "_restart_cleanup_kwargs", lambda: {})
     monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: calls.append(("workers", kw)))
-    monkeypatch.setattr(server, "_stop_owned_daemon_for_new_pin", lambda: calls.append(("pin", {})))
+    monkeypatch.setattr(server, "_stop_owned_daemon", lambda label: calls.append(("engine", {})) or True)
     monkeypatch.setattr(server, "stop_owned_work", lambda root: calls.append(("owned-stop", {"root": root})))
     monkeypatch.setattr("multiprocessing.active_children", lambda: [])
     monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: calls.append(("companions", {})))
     monkeypatch.setattr("ouroboros.platform_layer.kill_process_on_port", lambda port: pytest.fail("restart must not kill an unrelated listener by port"))
     server._emergency_process_cleanup()
-    assert [name for name, kw in calls] == ["workers", "pin", "owned-stop", "companions"]
+    assert [name for name, kw in calls] == ["workers", "engine", "owned-stop", "companions"]
     assert calls[0][1]["preserve_pending"] is True
     assert calls[2][1] == {"root": tmp_path}
 

@@ -483,12 +483,11 @@ function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) 
         const gap = gapNames ? `${capitalize(gapNames)} were not read` : 'The status answer did not complete';
         return { tone: 'warn', text: `${gap}${daemon.last_error ? `: ${daemon.last_error}` : ''}. Claudexor ${target} is staged and activates after the daemon next restarts.` };
     }
-    // A LOWER pin never activates: planned restarts keep the newer engine, and
-    // after it stops the older one may refuse data the newer one served. The
-    // same facet gate decides whether the line may say what is serving.
+    // A LOWER pin may refuse data the newer engine served after Exit/Restart.
+    // The same facet gate decides whether the line may say what is serving.
     if (runtimeState === 'newer_serving') {
         const pinned = runtime.target_version || '?';
-        const refusal = `After Restart Claudexor, Panic or an engine exit, ${pinned} may refuse data a newer engine served.`;
+        const refusal = `After application Exit/Restart, Restart Claudexor or Panic, ${pinned} may refuse data a newer engine served.`;
         if (!unread.length) {
             return { tone: 'warn', text: `Engine ${daemon.engine_version || '?'} keeps serving; this Ouroboros version pins older Claudexor ${pinned}. ${refusal}` };
         }

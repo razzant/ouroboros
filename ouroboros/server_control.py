@@ -335,8 +335,8 @@ def execute_panic_stop(
     Owner-local request-only APIs signal captured children before settlement.
     Normal admission pins attested daemon identities; ``stop_outcome`` later
     settles custody and attempts same-home CLI shutdown for unresolved targets.
-    The shared daemon survives ordinary close outside the Windows launcher Job,
-    so that Job is not a Panic backstop.
+    The daemon breaks away from the server Job; Exit/Restart explicitly stops
+    its custody, and Panic cannot rely on that Job alone.
     Unconfirmed shutdown remains disclosed with custody retained; names or
     recycled descriptor ports never authorize signalling an unrelated process.
     A managed execution domain's dedicated containers are killed by the identity

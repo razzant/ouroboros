@@ -1,4 +1,4 @@
-// Preflight observations and the restart's fixed effect on tasks: the server's pin rule owns the restart decision.
+// Preflight pin observations and the restart's fixed effects on tasks and the owned engine.
 
 // What an acknowledged Update or Replace restart does to this installation's own tasks: one rule, the same on
 // every surface that shows the dialog (ARCHITECTURE §9 "Shutdown doors", §10 invariant 31;
@@ -19,13 +19,8 @@ export function updateEffectsText(preflight, { replace = false } = {}) {
     const engine = (replace ? effects.replacement_engine : effects.engine) || {};
     const version = (pin) => pin?.version || 'unknown';
     const parts = [...TASK_EFFECTS, `Claudexor: ${version(engine.serving)} → ${version(engine.target)}.`];
-    if (engine.action === 'replace') {
-        parts.push('Restart will replace the shared engine and end all its active runs, including other work.');
-    } else if (engine.action === 'keep') {
-        parts.push('This pin keeps the serving engine running.');
-    } else {
-        parts.push('The engine transition could not be confirmed; active runs may end.');
-    }
+    // Pin compatibility is an observation; stopping the old process is fixed on every Restart door.
+    parts.push('Restart will replace the shared engine and end all its active runs, including other work.');
     const active = effects.active_work;
     parts.push(active?.status === 'known'
         ? `Currently active engine work: ${active.model} model call(s), ${active.non_model} other job(s).`
