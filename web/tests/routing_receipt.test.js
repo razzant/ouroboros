@@ -130,7 +130,7 @@ test('the portal stands for the act that moved its work; words passed on later k
     } finally { env.restore(); }
 });
 
-test('words saved for a Main turn say saved, by its name when it has one, never by a placeholder name', () => {
+test('words saved for Main\'s turn say saved and never its name; a Project room\'s own receipt keeps it', () => {
     const env = installDomDouble();
     try {
         const saved = { action: 'mailbox_delivery', status: 'delivered', target: 't-main' };
@@ -138,8 +138,18 @@ test('words saved for a Main turn say saved, by its name when it has one, never 
         renderRoutingAnnotation(bubble, saved, 1);
         assert.equal(note(bubble).textContent, 'Message saved for task', 'an unnamed turn: saved, nothing more');
         assert.equal(note(bubble).classList.contains('has-reference'), false, 'Main is no other room');
-        renderRoutingAnnotation(bubble, { ...saved, target_label: 'Release note for the reverse chat' }, 1);
-        assert.equal(note(bubble).textContent, 'Message saved for task · Release note for the reverse chat');
+        // The turn's name tells its first request (here an old card's question), never the words that joined it: a
+        // stored row from before this rule (live or replayed) says saved and nothing more in Main.
+        const joined = { ...saved, project_name: 'Main', target_label: 'Two new blockers from the report…',
+            target_titles: ['Two new blockers from the report…'] };
+        renderRoutingAnnotation(bubble, joined, 1);
+        assert.equal(note(bubble).textContent, 'Message saved for task');
+        // A Project room's own receipt from before rows carried their Project address names that room's work.
+        const own = owner(env);
+        renderRoutingAnnotation(own, { ...saved, target_label: 'Audit room › Audit' }, 7);
+        assert.equal(note(own).textContent, 'Message saved for task · Audit room › Audit');
+        assert.equal(routingAnnotationText({ action: 'steer_task', status: 'delivered', target: 't-1', target_label: 'Ship' }, 1),
+            'Steered task · Ship', 'a steer in Main names the work it chose');
         assert.equal(routingAnnotationText({ action: 'steer_task', status: 'delivered', target: 't-1' }), 'Steered task · Task',
             'other acts keep their generic name');
         const room = owner(env);

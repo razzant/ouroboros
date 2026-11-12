@@ -432,7 +432,7 @@ export function restartConfirmBody(activities) {
 }
 
 export const RESTART_FACTS = { summary: 'Details', rows: [
-    { label: 'Running tasks', value: 'They stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.' },
+    { label: 'Running tasks', value: 'They stop, then eligible saved work resumes after the restart. Sleeping tasks wait for Resume. Tasks already paused stay paused. Runs they started in Claudexor end.' },
     { label: 'Queued tasks', value: 'Runnable ones return to the queue. Existing holds and limits still apply.' },
     { label: 'Settings', value: 'Saved settings apply: work that follows a model setting resumes on the current setting; task-specific choices stay.' },
 ] };

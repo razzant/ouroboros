@@ -475,38 +475,44 @@ def test_registered_checkout_never_reads_an_unreadable_record_as_no_record(copie
     assert sw.registered_checkout(copies[2] / "elsewhere", copies[0]) is False
 
 
-def test_the_preview_imports_nothing_and_reports_nothing(copies):
+def test_the_preview_imports_nothing_reports_nothing_and_never_parses_the_legacy_registry(copies, monkeypatch):
     root, _repo, wtroot = copies
-    _unreadable_record_copy(copies)  # the provisioning itself imports: the legacy file arrives after it
+    _unreadable_record_copy(copies)
     known = wtroot / "known"
     known.mkdir(parents=True)
     legacy = sw._legacy_registry_path(root)
     legacy.write_text(json.dumps({"worktrees": [{"path": str(known), "task_id": "known", "branch": ""}]}), encoding="utf-8")
-    sw._imported_roots.discard(str(root))
     sw._reported_unreadable.clear()
     before = tree_state(root, mtimes=True)
     before_legacy = legacy.read_bytes()
-    view = _preview(_owner({"known": False, "finished": False}), root, root.parent)
+    with monkeypatch.context() as working:
+        working.setattr(sw, "_legacy_entries", lambda _raw: pytest.fail("the preview parsed the legacy registry"))
+        view = _preview(_owner({"known": False, "finished": False}), root, root.parent)
     assert tree_state(root, mtimes=True) == before
     assert legacy.read_bytes() == before_legacy and not (root / "logs" / "events.jsonl").exists()
     assert not any(sw._records_dir(root).glob(".legacy-import*"))
-    assert _group(view, "lost_copies")["count"] == 0, "a row of the legacy file still names its folder"
+    assert _group(view, "lost_copies")["count"] == 0, "a folder the waiting legacy file may name is not offered"
 
     from ouroboros.private_copy_read import checkout_registration
 
-    assert checkout_registration(known, root) == "registered" and legacy.is_file()
+    assert checkout_registration(known, root) == "absent", "a registration is the copy's own record, nothing else"
+    sw.import_legacy_registry(root)  # the startup import
+    assert checkout_registration(known, root) == "registered" and not legacy.exists()
+    assert _group(_preview(_owner({"known": False, "finished": False}), root, root.parent), "lost_copies")["count"] == 0
 
 
-def test_a_malformed_legacy_registry_stays_and_its_folders_stay_offered_as_unregistered(copies):
+def test_a_malformed_legacy_registry_is_archived_at_startup_and_its_folders_are_then_offered_as_unregistered(copies):
     root, _repo, wtroot = copies
     folder = wtroot / "dlg_old-task_0123456789abcdef"
     folder.mkdir(parents=True)
     legacy = sw._legacy_registry_path(root)
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_text("{torn", encoding="utf-8")
-    sw._imported_roots.discard(str(root))
-    view = _preview(_owner({"old-task": False}), root, root.parent)
-    assert _group(view, "lost_copies")["count"] == 1 and legacy.read_text(encoding="utf-8") == "{torn"
+    waiting = _preview(_owner({"old-task": False}), root, root.parent)
+    assert _group(waiting, "lost_copies")["count"] == 0 and legacy.read_text(encoding="utf-8") == "{torn"
+    receipt = sw.import_legacy_registry(root)
+    assert (root / receipt["kept"]).read_text(encoding="utf-8") == "{torn" and not legacy.exists()
+    assert _group(_preview(_owner({"old-task": False}), root, root.parent), "lost_copies")["count"] == 1
 
 
 # ---- a body candidate: a name the patch rules leave out proves nothing either ---------------
