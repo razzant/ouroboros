@@ -898,7 +898,7 @@ class ModelCatalogItem(TypedDict, total=False):
     problem: Any
     processing: Any
     use_local: bool
-    price: ModelPrice  # OpenRouter rows only, when the catalog states both token prices and no per-request fee
+    price: ModelPrice  # OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
 
 
 class ModelCatalogResponse(TypedDict, total=False):
@@ -934,7 +934,7 @@ class LocalModelStartRequest(TypedDict):
     filename: NotRequired[str]  # required for a repo
     port: NotRequired[int]  # default 8766
     n_gpu_layers: NotRequired[int]  # default -1
-    n_ctx: NotRequired[int]  # 0 means 16384
+    n_ctx: NotRequired[int]  # 0 means the factory LOCAL_MODEL_CONTEXT_LENGTH
     chat_format: NotRequired[str]
 
 

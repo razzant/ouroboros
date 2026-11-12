@@ -327,6 +327,57 @@ def test_a_retirer_pass_row_is_read_as_its_place_remover_with_its_holds_since_wh
     assert by_remover == {"copy_retirement": {"released": 3, "at": copies["at"], "holds": row["holds"]}}
 
 
+def test_a_closed_recovery_gate_is_the_retirement_job_hold_and_an_open_one_leaves_the_plain_job_line(data):
+    """Task trees and service logs kept behind a closed recovery gate are the retirement job's typed hold beside the
+    place that holds them (the data root's other place) and in the mind's ``storage`` fact; with the gate open the job
+    reads as before everywhere."""
+    from ouroboros import maintenance_retirement
+
+    def retirement():
+        maintenance.run_job(data, "runtime_retirement")
+        found = storage_removers.place_removers(data, engine=False)
+        facts = [next(fact for fact in found[place] if fact["id"] == "runtime_retirement")
+                 for place in ("task_results", "app_state", "data_other")]
+        assert facts[0] == facts[1] == {"id": "runtime_retirement", "state": "done", "at": facts[0]["at"]}, \
+            "the places whose steps no gate stands before carry the plain job line"
+        return facts[2]
+
+    maintenance_retirement.record_startup(data, gaps=True)
+    closed = retirement()
+    assert [(hold["class"], hold["count"], hold["example"]) for hold in closed["holds"]] == [
+        ("source_recovery_pending", None, "startup recovery report missing")], "how many it keeps is unknown, never a number"
+    assert closed["state"] == "done" and closed["held"] == 0 and closed["held_since"] == closed["holds"][0]["since"]
+    assert storage_fact(data)["holds"]["runtime_retirement"]["holds"] == closed["holds"]
+    assert "released" not in closed and "released" not in storage_fact(data)["holds"]["runtime_retirement"], \
+        "the job keeps no released count: none is said, never a zero"
+
+    maintenance_retirement.record_startup(data, gaps=False)
+    opened = retirement()
+    assert opened == {"id": "runtime_retirement", "state": "done", "at": opened["at"]}, "the plain job: no pass fields"
+    assert storage_fact(data).get("holds") is None
+
+
+def test_archives_names_compression_and_reads_its_log_plane_with_its_hold_and_no_released_count(data):
+    """Closed log segments are compressed in place, so Archives names the job: its line carries the log plane's
+    totals and typed hold; the job's other places carry neither that hold nor a released count nobody keeps."""
+    assert storage_removers.PLACE_REMOVERS["archives"] == ("evidence_packing", "record_compression")
+    hold = {"class": "prior_workers_unconfirmed", "count": 4, "example": "events_20261101T000000.jsonl",
+            "since": "2026-11-12T10:00:00+00:00"}
+    maintenance_jobs.record(data, "record_compression", state="done", holds=[hold], totals={
+        "evidence": {"compressed": 12, "saved_bytes": 4096}, "seats": {"compressed": 3, "saved_bytes": None},
+        "logs": {"compressed": 7, "saved_bytes": 1 << 20}})
+    found = storage_removers.place_removers(data, engine=False)
+    [packing, logs] = found["archives"]
+    assert packing["id"] == "evidence_packing"
+    assert logs == {"id": "record_compression", "state": "done", "at": logs["at"], "compressed": 7,
+                    "saved_bytes": 1 << 20, "holds": [hold], "held": 4, "held_since": hold["since"]}
+    for place, compressed in (("task_results", 12), ("app_state", 3)):
+        fact = next(fact for fact in found[place] if fact["id"] == "record_compression")
+        assert fact["compressed"] == compressed and not {"holds", "held", "released"} & set(fact), place
+    assert storage_fact(data)["holds"] == {"record_compression": {"at": logs["at"], "holds": [hold]}}, \
+        "the mind reads the hold once, without a zero for a count the job does not keep"
+
+
 def test_the_custody_sweep_records_the_engine_pass_once_and_the_runtime_fact_reads_that_row(data, monkeypatch):
     from ouroboros import store_import
 

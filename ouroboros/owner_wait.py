@@ -1145,7 +1145,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     same-ID continuation). Python handles (browser, executors, services) are
     NOT restored: they died with the previous process and stay invalidated."""
     from ouroboros.loop_delivery import FRESH_ANSWER_CONTROLS, DeliveryCandidate
-
+    from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY  # a round's refusal record: this process's only
     from ouroboros.model_wait import adopt_handoff_clock, budget_paused_seconds
     from ouroboros.settings_integrity import restore_cognition
 
@@ -1165,7 +1165,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     if loaded is not None:
         loaded.update(state.get("actor_loaded_tool_names") or ())
     trace.update(state["trace"])
-    usage.update(state["usage"])
+    usage.update({key: value for key, value in state["usage"].items() if key != ROUND_REFUSALS_KEY})
     seen.update(state["seen"])
     ctx._loop_mailbox_seen_ids = seen
     ctx._sleep_interaction_seen = dict(state.get("sleep_interaction_seen") or {})

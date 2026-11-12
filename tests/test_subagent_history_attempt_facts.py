@@ -44,7 +44,8 @@ def _settled(index, *, cost, model="openai/gpt-fixture", task_id="history-actor"
             {**base, "state": "settled", "cost_usd": cost, "cost_final": cost is not None, "prompt_tokens": tokens}]
 
 
-def _call(tmp_path, usage, *, pin="", observed="account-a", broken=False, model=TARGET, provider="claudexor", served=""):
+def _call(tmp_path, usage, *, pin="", observed="account-a", broken=False, model=TARGET, provider="claudexor", served="",
+          ledger=""):
     route = {"source": "codex-models", "model": "observed-model", "credentialProfileId": observed} if observed else {}
 
     class Provider:
@@ -56,7 +57,7 @@ def _call(tmp_path, usage, *, pin="", observed="account-a", broken=False, model=
                 raise error
             return {"content": "Useful response"}, {"prompt_tokens": 1, "completion_tokens": 1,
                 "cost": 0.0, "provider": provider, "resolved_model": served or model,
-                "claudexor": {"route": route, "outcome": "succeeded"}}
+                "claudexor": {"route": route, "outcome": "succeeded"}, **({"ledger_attempt_ids": [ledger]} if ledger else {})}
 
     message, _ = call_llm_with_retry(Provider(), [{"role": "user", "content": "work"}], model,
         None, "high", 0, tmp_path / "logs", "history-actor", 1, None, usage, model_account_override=pin)
@@ -463,3 +464,15 @@ def test_a_helpers_measured_first_call_price_changes_no_cached_block(tmp_path, m
     assert system_before == system_after, "the leading system items keep their bytes"
     assert "per first call" not in tail_before and "≈$0.90 per first call (1 measured)" in tail_after
     assert "per first call" not in json.dumps([marked_after, system_after], ensure_ascii=False)
+
+
+def test_the_first_answer_is_priced_by_the_ledger_attempt_that_carried_it(root, monkeypatch):  # noqa: F811
+    """The answer's own ledger attempt prices it: an earlier billed attempt of the same route (an empty glitch
+    retried, a tool's call on the same model) is not its price, and neither is a later round."""
+    write_journal(root, [*_settled(0, cost=0.002), *_settled(1, cost=0.18), *_settled(2, cost=0.9)])
+    ledger_rows(root)
+    usage = {}
+    assert _call(root, usage, model=PAID, provider="openrouter", ledger="first-1")
+    assert usage["llm_call_refs"][0]["physical_attempt_id"] == "first-1"
+    record_task_execution(_paid_task(), usage, drive_root=root)
+    assert [item["usd"] for item in _first_calls(root)] == [0.18]

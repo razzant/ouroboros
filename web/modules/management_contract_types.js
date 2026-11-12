@@ -699,7 +699,7 @@
  * @property {*=} problem
  * @property {*=} processing
  * @property {boolean=} use_local
- * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states both token prices and no per-request fee
+ * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
  */
 
 /**

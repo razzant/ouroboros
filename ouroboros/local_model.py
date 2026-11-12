@@ -47,15 +47,21 @@ def local_artifact_key(source: str = "", filename: str = "", *, model_path: str 
     return f"hf:{source}:{resolved}"
 
 
+# What the owned server imports at start (``local_model_server`` runs ``llama_cpp.server``).
+RUNTIME_PROBE = "import llama_cpp, llama_cpp.server.app"
+
 def local_model_settings(values: dict) -> dict:
     """Effective launch values, shared by execution and saved/applied comparison."""
-    context = int(values.get("LOCAL_MODEL_CONTEXT_LENGTH", 16384))
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+
+    default = int(SETTINGS_DEFAULTS["LOCAL_MODEL_CONTEXT_LENGTH"])
+    context = int(values.get("LOCAL_MODEL_CONTEXT_LENGTH", default))
     return {
         "LOCAL_MODEL_SOURCE": str(values.get("LOCAL_MODEL_SOURCE") or "").strip(),
         "LOCAL_MODEL_FILENAME": str(values.get("LOCAL_MODEL_FILENAME") or "").strip(),
         "LOCAL_MODEL_PORT": int(values.get("LOCAL_MODEL_PORT", _LOCAL_MODEL_DEFAULT_PORT)),
         "LOCAL_MODEL_N_GPU_LAYERS": int(values.get("LOCAL_MODEL_N_GPU_LAYERS", 0)),
-        "LOCAL_MODEL_CONTEXT_LENGTH": context if context > 0 else 16384,
+        "LOCAL_MODEL_CONTEXT_LENGTH": context if context > 0 else default,
         "LOCAL_MODEL_CHAT_FORMAT": str(values.get("LOCAL_MODEL_CHAT_FORMAT") or "").strip(),
     }
 
@@ -183,10 +189,13 @@ class LocalModelManager:
         return {"status": status, "pending_keys": pending, "unknown_keys": unknown, "summary": summary}
 
     def check_runtime(self) -> bool:
-        """Check llama-cpp-python importability and update runtime status."""
+        """Check that the server the runtime is started as can import, and update runtime status.
+
+        Importing ``llama_cpp`` alone passed on an install whose server could not start (its web stack lacked a
+        module); the probe imports the server application, so a broken runtime offers its (upgrading) install."""
         try:
             probe = subprocess.run(
-                [sys.executable, "-c", "import llama_cpp"],
+                [sys.executable, "-c", RUNTIME_PROBE],
                 **_with_hidden_subprocess({
                     "capture_output": True,
                     "text": True,
@@ -510,7 +519,7 @@ class LocalModelManager:
 
             try:
                 probe = subprocess.run(
-                    [python, "-c", "import llama_cpp"],
+                    [python, "-c", RUNTIME_PROBE],
                     **_with_hidden_subprocess({
                         "capture_output": True,
                         "text": True,
