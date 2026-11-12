@@ -195,9 +195,62 @@ test('the Context door shows Main and nothing else: with a project room open it 
     assert.deepEqual(posts, [], 'no POST /api/owner/context-mode, no write of any kind');
     assert.ok(!env.calls.some((call) => String(call).includes('context-mode')));
     assert.deepEqual(dashboard, []);
-    // A door to a Dashboard tab carries the row and the Settings path to return to.
+    // A door to a Dashboard tab asked for from outside Settings (a capsule's limit door) carries its row and no way
+    // back: nobody came from Settings.
     await controls.open('dashboard:costs', { row: 'TOTAL_BUDGET' });
-    assert.deepEqual(dashboard, [['costs', { row: 'TOTAL_BUDGET', back: '' }]]);
+    assert.deepEqual(dashboard, [['costs', { row: 'TOTAL_BUDGET' }]]);
+});
+
+test('a door pressed inside Settings leads back to it: a Dashboard tab by its path, a page of its own by the same first row', async (t) => {
+    const { env, content, state, shown, showPage } = world(t);
+    const dashboard = [];
+    const layered = [];
+    const layers = { push: (layer) => layered.push(`push ${layer.id}`), remove: (id) => layered.push(`remove ${id}`), batch: (fn) => fn() };
+    // Circles keeps the Dashboard's shell; Skills has its tabs and its own parts under the header.
+    const pageOf = (id, html) => {
+        const page = env.document.createElement('div');
+        page.id = id;
+        page.innerHTML = html;
+        content.appendChild(page);
+        return page;
+    };
+    const circles = pageOf('page-circles', '<div class="app-page-header"></div><div class="dashboard-shell"><div class="dashboard-body"></div></div>');
+    const skills = pageOf('page-skills', '<div class="app-page-header"></div><div class="app-page-tabs"></div><div class="skills-search-chrome"></div><div class="skills-scroll"></div>');
+    const controls = initSettings({ state, ws: env.ws, showPage, layers, openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {} });
+    await controls.open('');
+    await settle();
+    const homeEl = content.querySelector('[data-settings-home]');
+    const press = async (to) => { await homeEl.fire('click', { target: homeEl.querySelector(`[data-settings-open="${to}"]`) }); await settle(); };
+    const backOf = (page) => page.querySelector('.settings-back-row');
+
+    // A Dashboard tab: the path the door was pressed on travels with it, and the tab draws the row.
+    await press('dashboard:costs');
+    assert.deepEqual(dashboard, [['costs', { row: '', back: '' }]]);
+
+    // Circles: the row is the first thing in the Dashboard's shell, above what scrolls, with its one layer.
+    await press('page:circles');
+    assert.deepEqual(shown.at(-1), ['circles']);
+    assert.equal(circles.querySelector('.dashboard-shell').children[0], backOf(circles));
+    assert.equal(backOf(circles).querySelector('[data-dashboard-back]').getAttribute('aria-label'), 'Back to Settings');
+    assert.equal(layered.at(-1), 'push settings-door-back', 'Escape and the system\'s Back return to Settings too');
+    // Its press returns to Settings, and the row and its layer are gone.
+    await backOf(circles).querySelector('[data-dashboard-back]').fire('click', {});
+    await settle();
+    assert.deepEqual([shown.at(-1), backOf(circles)], [['settings'], null]);
+    assert.ok(layered.includes('remove settings-door-back'));
+
+    // Skills: under the header and its tabs, above the page's own first part.
+    await press('page:skills');
+    assert.deepEqual(skills.children.map((part) => part.className),
+        ['app-page-header', 'app-page-tabs', 'settings-back-row dashboard-back', 'skills-search-chrome', 'skills-scroll']);
+    // Leaving that page any other way drops the row.
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'files' } }));
+    assert.equal(backOf(skills), null);
+
+    // The same door asked for from outside Settings shows the page and no way back.
+    await controls.open('page:circles');
+    await settle();
+    assert.deepEqual([shown.at(-1), backOf(circles)], [['circles'], null]);
 });
 
 test('Ask Ouroboros puts the words into Main as an unsent draft and replaces no draft that is there', async () => {

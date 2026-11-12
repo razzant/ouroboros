@@ -6469,6 +6469,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .settings-back-row.dashboard-back { position: static; flex: none; margin: var(--space-2) 0 var(--space-1); padding: 0 20px; background: none; }
 .dashboard-back + .dashboard-body { padding-top: var(--space-2); }
 html[data-layout="stack"] .settings-back-row.dashboard-back { padding-inline: var(--space-3); }
+/* The same row on a page a door of Settings opened (settings.js `leave`). Circles keeps the Dashboard's shell, so the
+   rules above place it there too; on Skills it stands right under the header, at that page's own gutter. */
+#page-skills > .settings-back-row.dashboard-back { padding-inline: var(--space-5); }
 /* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
    screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
 html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
