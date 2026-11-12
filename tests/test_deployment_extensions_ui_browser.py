@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.settings_browser_helpers import open_settings
+from tests.settings_browser_helpers import open_settings, settings_page
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -210,12 +210,25 @@ def test_required_extensions_in_skills_settings_and_the_worker(direct_server_wit
             _shot(page, evidence, "unmanaged-skills-light-1400", card)
             _answered(page, data_dir, calls, _ask(page, url, "Reply briefly."))
             _shot(page, evidence, "unmanaged-chat-light-1400")
-            # Unmanaged, the key the tracker asked for is the owner's to add.
-            listing = open_settings(page, "accounts", row="SENTRY_DSN", timeout=30_000)
-            asked = listing.locator('[data-setting-row="SENTRY_DSN"]')
-            asked.wait_for(state="visible", timeout=30_000)  # the skills' requests arrive after the page draws
-            expect(asked.locator("[data-secret-open]")).to_be_visible()
-            expect(asked.locator("[data-secret-state]")).not_to_contain_text("organization")
+            # Unmanaged, SENTRY_DSN is the owner's: a key absent from Settings is no request yet
+            # (skill_loader.requested_core_setting_keys), so the owner adds it as a key of their own; the
+            # tracker then asks for it on its row, which offers Replace and Remove, and Remove clears the value.
+            own = open_settings(page, "accounts/key/custom")
+            own.locator("[data-custom-secret-key]").fill("SENTRY_DSN")
+            own.locator("[data-custom-secret-value]").fill("owner-typed-dsn")
+            own.locator("[data-editor-save]").click()
+            asked = settings_page(page, "accounts").locator('[data-setting-row="SENTRY_DSN"]')
+            expect(asked).to_be_visible(timeout=30_000)
+            expect(asked.locator("[data-setting-meta]")).to_contain_text("error_tracker", timeout=30_000)
+            expect(asked.locator("[data-secret-state]")).to_have_text("Saved")
+            expect(asked.locator("[data-secret-open]")).to_have_text("Replace")
+            asked.locator("[data-secret-open]").click()
+            asked.locator("[data-secret-remove]").click()
+            page.locator("[data-confirm-ok]").click()
+            # The row stays while the page holds its skills read; it now offers Add over an empty value.
+            expect(asked.locator("[data-secret-open]")).to_have_text("Add", timeout=30_000)
+            expect(asked.locator("[data-secret-state]")).to_have_text("")
+            assert not json.loads((data_dir / "settings.json").read_text(encoding="utf-8")).get("SENTRY_DSN")
             page.close()
 
             # --- hold: the tracker is required but not granted, so this worker holds ordinary work ---
