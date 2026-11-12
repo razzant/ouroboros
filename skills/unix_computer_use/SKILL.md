@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.7.1
+version: 0.7.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -86,6 +86,10 @@ Tools:
 - `ax_tree` reads one window as text through the Accessibility API, bounded:
   the frontmost application's window, or `app=`'s without bringing it forward;
   `window=` (a window ID or exact title) reads that window instead.
+  On local macOS, `until_text="expected text"` waits for that literal,
+  case-sensitive substring in a returned title, description, value or URL.
+  It rereads the selected window under the same `timeout_ms` and returns the
+  last tree with `until_text.status` (`matched`, `not_observed`, or `unknown`).
 - `element_act` performs local macOS `press` or text `set_value` through the
   control's own Accessibility interface. It never activates, focuses, injects
   global input, writes the clipboard or falls back to pointer/keyboard input.
@@ -131,6 +135,25 @@ before that line, with or without `observe`, leaves no receipt: the outcome is
 unknown (the action may have run), as below. A call carries one
 action at most. Several independent calls in one response are admitted one by
 one; a step that depends on an earlier step's outcome belongs to the next round.
+
+With `observe=true`, `until_text="expected text"` polls only that observation;
+the action, target selection and AX exposure are each done once. The checkpoint
+still precedes the first observation. Choose a positive piece of expected UI
+text, such as part of the loaded thread, rather than treating a nonempty tree
+as readiness. The match is a literal, case-sensitive substring within one
+returned `title`, `description`, `value` or `url`; it never joins fields or
+matches unseen text beyond `text_limit` (the legacy `label` is not searched).
+Use `text_limit` large enough for the expected text and `include_web=true` when
+it belongs under an AXWebArea. `matched` returns the read it was found in,
+whose `truncated_by`, `errors`, and text length fields still disclose cuts. At
+the deadline, `not_observed` means the last read was whole and did not show the
+text, not that the app lacks it; any cut (skipped web content, `max_nodes`,
+clipped text) leaves `unknown`. A read the deadline or a failed element cut
+short, or one that returned nothing, never replaces an earlier read that
+finished its walk: that tree comes back with `tree_read`, `tree_age_ms` and
+the `latest` read's loss, as `unknown`. A lost window ends with `window_gone`
+and no tree, a read that raised with `read_failed`. Without `until_text`, the
+single-read behavior is unchanged.
 
 On local macOS, `ax_tree` and `element_act` first request app-local accessibility
 exposure with Electron's documented `AXManualAccessibility=true` attribute. The
@@ -258,8 +281,9 @@ Input receipts (the same contract on every backend):
   application or window in front when the input was dispatched: app, pid,
   bundle id or class, window id and title where the backend knows them;
   `"unknown"` when no reader answered), `dispatched` (whether the input helper
-  ran at all: `false` for a refused combo or a failed clipboard write, `true`
-  for a helper that ran, whatever it reported, `null` with `transport_failed`
+  ran at all: `false` for a refused combo, a failed clipboard write or a
+  Command shortcut its program refused before posting anything, `true` for any
+  other helper that ran, whatever it reported, `null` with `transport_failed`
   when a remote call did not answer, so whether it ran is unknown), `front_before` (only when the
   tool switched applications first), `front_after` (who was in front when the tool
   read again after the input: present when that is another place than
@@ -376,7 +400,20 @@ Backend matrix (honest limitations):
   combos the base key is tapped while modifiers are held (`cmd+s` = hold cmd,
   tap s). On a local or SSH Mac and on X11 a letter's case under a modifier adds
   no Shift (`cmd+S` = `cmd+s`; Shift is named: `cmd+shift+s`), and a bare `A` is a
-  capital. `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
+  capital. On local/SSH Macs, Command plus one printable character presses the
+  key that gives that character under Command in the active layout. One only
+  Command and Shift give adds Shift on the key an app reads as it: its
+  Command+Shift character, or its Shift character where the layout ignores
+  Shift under Command (`cmd+?` on ABC is Command, Shift and /). Name a
+  shortcut by that character: under a Cyrillic layout `cmd+g`, while its own
+  letters (`cmd+п`) are refused, never typed. A missing key or posting grant
+  refuses before posting. Other modifiers, named keys and holds still use
+  cliclick, which types the base character on the layout's typing plane: a
+  character that plane lacks is refused, and where the planes differ cliclick
+  may add a modifier (Option on Russian - PC) or press a key that means another
+  shortcut (Dvorak - QWERTY ⌘) under an ok receipt (#2589 measured `v`).
+  `key(cmd+v)` sends only the shortcut, without changing the clipboard.
+  `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
   UTF-8 and told so whatever locale the process inherited, as over SSH) and
   pastes with Command and the key that gives `v` under Command in the active
   keyboard layout, with exactly the Command flag (an `osascript` JavaScript
@@ -456,13 +493,14 @@ Backend matrix (honest limitations):
   letter reaches pyautogui as written (`ctrl+C` = `hotkey('ctrl', 'C')`);
   screenshots are capped at 20 MB and PNG-validated before use.
 - Remote SSH macOS: `screenshot` uses remote `screencapture` + `scp`; input uses
-  `cliclick` on the Mac, wrapped so the same ssh call reads the frontmost
+  `cliclick` (Command-alone shortcuts/paste: the shared JXA helper), wrapped
+  so the same ssh call reads the frontmost
   application before and after and withholds a targeted input when the target
   is no longer in front. `app=` is resolved from the Mac's `lsappinfo list`
   (name, bundle id, `pid:<n>`; nothing is launched) and activated by pid
   through System Events (only the integer pid enters the remote command, never
   the name), verified by polling `lsappinfo front` up to `wait_ms`; an input
-  cliclick cannot express is refused before any switch; a transport failure
+  the selected input helper cannot express is refused before any switch; a transport failure
   after a switch still reports the switch; an ssh call that ended without the
   wrapper's completion marker (a refused connection, a channel broken after
   the input may have run: `ssh_failed`) leaves the outcome unknown

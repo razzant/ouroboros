@@ -559,9 +559,9 @@ _SUMMARY = {"ts": "2026-10-01T05:00:00Z", "direction": "system", "chat_id": 1, "
 
 
 class TestSavedTargetRecovery:
-    """A saved target not found is a fact of the store it was read under, never of the process: once the
-    store gains rows (an import, a repair) the next read decides it again, in every reader, and a gap it
-    disclosed closes. A found target row is immutable and read once."""
+    """A saved target's decision is a fact of the store it was read under, never of the process: once the
+    store gains rows (an import, a repair) or a text is revised the next read decides it again, in every
+    reader, and a gap it disclosed closes. Until then a found target is read once."""
 
     def test_an_unreadable_target_made_readable_joins_its_project_in_the_same_process(self, tmp_path):
         from ouroboros import room_appearances
@@ -627,11 +627,12 @@ class TestSavedTargetRecovery:
         assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {str(written), str(nova)}
         assert ds.row_at(tmp_path, "chat", stored.seq).row == stored.row
 
-    def test_a_target_in_a_planned_segment_is_never_cached_absent_and_is_found_once_imported(self, tmp_path):
+    def test_a_target_in_a_planned_segment_is_never_cached_absent_and_is_found_once_imported(self, tmp_path, monkeypatch):
         """The stream ends are the cache's change counter, and the archive import fills intervals planned before it
         without moving them. While such a segment waits no read can decide its rows absent (the store answers
-        importing and nothing is kept), so its import finds no stale decision. A segment restored later is placed past
-        the ends and imported by the replan itself: the ends move then."""
+        importing and nothing is kept), and a read whose lookup the import's end overtakes looks again before it
+        keeps an absence, so the import leaves no stale decision. A segment restored later is placed past the ends
+        and imported by the replan itself: the ends move then."""
         from ouroboros import dialogue_import, room_membership
         from ouroboros.projects_registry import RoomResolver
         from ouroboros.store import StoreMigrating
@@ -648,7 +649,19 @@ class TestSavedTargetRecovery:
         with pytest.raises(StoreMigrating):
             room_membership._saved_target(RoomResolver(tmp_path), legacy)
         assert (str(tmp_path), legacy["address"]) not in room_membership._SAVED_TARGETS
-        import_all(tmp_path)
+        looked, overtaken = ds.rows_by_identity, []
+
+        def lookup(*args, **kwargs):  # the job imports the last segment right after this read's first lookup
+            rows = looked(*args, **kwargs)
+            if not overtaken:
+                overtaken.append(True)
+                import_all(tmp_path)
+            return rows
+
+        with monkeypatch.context() as racing:
+            racing.setattr(ds, "rows_by_identity", lookup)
+            assert room_membership._saved_target(RoomResolver(tmp_path), legacy)[0] == room_membership.TARGET_WORK
+        assert overtaken and not dialogue_import.pending_segments(tmp_path)
         assert room_membership._stream_ends(tmp_path) == planned  # the import filled the planned interval in place
         assert room_membership._saved_target(RoomResolver(tmp_path), legacy)[0] == room_membership.TARGET_WORK
 
@@ -691,8 +704,9 @@ class TestSavedTargetRecovery:
         assert "Owner words inside" not in _texts(tmp_path, other)
 
     def test_a_target_not_found_is_read_again_only_after_the_store_moved(self, tmp_path, monkeypatch):
-        """The bound of the recovery: a found target is read once; one not found is read again only when a
-        stream's end moved since (an append, a planned segment), never on every read."""
+        """The bound of the recovery: a found target is read again only when a chat text was revised since;
+        one not found, also when a stream's end moved (an append, a planned segment): never on every read.
+        A miss looks twice in each stream (an import may end during its first look)."""
         from ouroboros import chat_chain, room_membership
         from ouroboros.projects_registry import RoomResolver
 
@@ -708,12 +722,82 @@ class TestSavedTargetRecovery:
         for _ in range(3):
             assert room_membership._saved_target(rooms, found)[0] == room_membership.TARGET_WORK
             assert room_membership._saved_target(rooms, missing)[0] == room_membership.TARGET_ABSENT
-        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 2  # chat, then progress
-        ds.append(tmp_path, "chat", {"ts": "2026-10-01T07:00:00Z", "direction": "out", "chat_id": 1, "text": "later"})
+        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 4  # chat, progress: twice
+        later = ds.append(tmp_path, "chat", {"ts": "2026-10-01T07:00:00Z", "direction": "out", "chat_id": 1, "text": "later"})
         for _ in range(3):
             room_membership._saved_target(rooms, found)
             room_membership._saved_target(rooms, missing)
-        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 4
+        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 8
+        ds.revise_text(tmp_path, "chat", later.seq, "later, as corrected")  # any row's address may answer anew
+        for _ in range(3):
+            assert room_membership._saved_target(rooms, found)[0] == room_membership.TARGET_WORK
+            assert room_membership._saved_target(rooms, missing)[0] == room_membership.TARGET_ABSENT
+        assert reads.count(found["address"]) == 2 and reads.count(missing["address"]) == 12
+
+    def test_a_revised_target_is_decided_at_its_exact_address_now_by_a_running_and_a_new_process(self, tmp_path):
+        """Owner decision 2026-11-11: a Reply whose room its target row decides (one saved without
+        ``target_home``, or with a private contact's old "none") is shown where that exact address answers now.
+        A target whose text was revised answers another address, so its Reply stays only where it was written
+        (Main here); one whose text is back puts it in its Project again; a target no one revised keeps it there.
+        This process decided every target before the revisions and answers as an interpreter started after them."""
+        from ouroboros import memory_inventory as mi, room_appearances
+        from ouroboros.chat_references import reference_from_row
+
+        nova = _project(tmp_path, "nova")
+        _born_in(tmp_path, "nova-root", nova)
+        private = {"direction": "out", "type": "main_notice",
+                   "presence_contact": {"task_id": "nova-root", "binding_id": "b", "source_event_id": "e"}}
+        targets, replies = {}, {}
+        for minute, (name, fields) in enumerate((("kept", {}), ("revised", {}), ("restored", {}), ("contact", private))):
+            row = {**_SUMMARY, "ts": f"2026-10-01T05:0{minute}:00Z", "text": f"Nova said {name}.", **fields}
+            targets[name] = ds.append(tmp_path, "chat", row, appearances=None)
+            _legacy, reply = _legacy_reply(row, f"2026-10-01T06:0{minute}:00Z", name)
+            if fields:  # the stamp an older rule gave a Reply to private contact
+                reply["reply_to"] = {**reference_from_row(row), "target_home": "none"}
+            replies[name] = ds.append(tmp_path, "chat", reply, appearances=None).seq
+        ds.revise_text(tmp_path, "chat", targets["restored"].seq, "Nova said restored, as corrected.")
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+
+        def here():
+            facts = mi.membership_facts(tmp_path)
+            return {name: sorted(mi.rooms_of_row(mi.row_meta(ds.row_at(tmp_path, "chat", seq).row), facts))
+                    for name, seq in replies.items()}
+
+        def shown(chat):
+            return {name for name in replies if f"Owner words {name}" in _texts(tmp_path, chat)}
+
+        main, both = ["1"], sorted(["1", str(nova)])
+        assert here() == {"kept": both, "revised": both, "restored": main, "contact": both}
+        assert shown(nova) == {"kept", "revised", "contact"}
+        # Text revisions alone: no row is stored, no cache is cleared and nothing restarts.
+        for name in ("revised", "contact"):
+            ds.revise_text(tmp_path, "chat", targets[name].seq, f"Nova said {name}, as corrected.")
+        ds.revise_text(tmp_path, "chat", targets["restored"].seq, targets["restored"].row["text"])
+        now = {"kept": both, "revised": main, "restored": both, "contact": main}
+        assert _fresh_rooms(tmp_path, replies) == now
+        assert here() == now
+        assert shown(nova) == {"kept", "restored"} and shown(1) == set(replies)  # Main keeps every one
+        assert {name for name in replies if f"Owner words {name}" in _room_rows(tmp_path, nova)} == {"kept", "restored"}
+
+
+def _fresh_rooms(root, seqs):
+    """The rooms an interpreter started now puts the chat rows at ``seqs`` in: it remembers nothing this
+    process decided (``memory_inventory.rooms_of_row``, the rule every reader shares)."""
+    import pathlib
+    import sys
+
+    from tests.group_run import run_in_group
+
+    script = ("import json, sys\n"
+              "from ouroboros import dialogue_store as ds, memory_inventory as mi\n"
+              "root, seqs = sys.argv[1], json.loads(sys.argv[2])\n"
+              "facts = mi.membership_facts(root)\n"
+              "print(json.dumps({name: sorted(mi.rooms_of_row(mi.row_meta(ds.row_at(root, 'chat', seq).row), facts))"
+              " for name, seq in seqs.items()}))\n")
+    done = run_in_group([sys.executable, "-c", script, str(root), json.dumps(seqs)], timeout=300,
+                        cwd=pathlib.Path(__file__).resolve().parents[1])
+    assert done.returncode == 0, done.stderr[-4000:]
+    return json.loads(done.stdout.strip().splitlines()[-1])
 
 
 def test_a_saved_reply_in_memory_agrees_with_history_and_evidence(tmp_path):

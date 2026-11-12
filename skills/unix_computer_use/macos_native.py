@@ -644,6 +644,58 @@ def marks_from(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return marks
 
 
+def wait_for_text(read: Callable[[], dict[str, Any]], text: str, *, deadline: float,
+                  now: Callable[[], float] = time.perf_counter,
+                  pause: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+    """Repeat only the read of an already selected AX root. Match literal, case-sensitive text in returned fields;
+    clipped suffixes and unread subtrees are never inferred; a match answers the read it was found in, cuts included.
+    A read that returned no node, or one the deadline or a failed element cut short, never replaces an earlier read
+    that finished its own walk (max_nodes, skipped web content and clipped text are that walk's bounds): the answer
+    keeps that tree, ``until_text`` numbers it (``tree_read``, ``tree_age_ms``) and holds what the ``latest`` read
+    answered, and the outcome stays unknown. A read that raised (``observe_window`` answers that as
+    ``observation_error``) ends the wait as ``read_failed``; a window gone ends it with that read, no tree or marks."""
+    count, kept, latest = 0, None, None  # kept: (read number, view, rank, done at); latest: a later read ranked below
+    while now() < deadline:
+        try:
+            view = read()
+        except Exception as exc:  # noqa: BLE001 - a failed later AX read does not erase the last view
+            view = {"ok": False, "reason": "observation_error", "error": f"{type(exc).__name__}: {exc}"}
+        if view.get("reason") == "observation_error":
+            latest = view
+            break
+        count += 1
+        view.setdefault("ok", bool(view.get("visited")))
+        for node in view.get("nodes", []):
+            for field in ("title", "description", "value", "url"):
+                if text in str(node.get(field, "")):
+                    view["until_text"] = {"status": "matched", "reads": count, "node_id": node["id"], "field": field}
+                    return view
+        if not view["ok"] and view.get("errors", {}).get("InvalidUIElement"):
+            view["until_text"] = {"status": "unknown", "reason": "window_gone", "reads": count}
+            return view
+        cuts = set(view.get("truncated_by", ()))
+        rank = (view["ok"], "timeout" not in cuts, "read_errors" not in cuts)  # losses a later read need not repeat
+        kept, latest = ((count, view, rank, now()), None) if kept is None or rank >= kept[2] else (kept, view)
+        pause(min(0.15, max(0.0, deadline - now())))
+    failed = bool(latest and latest.get("reason") == "observation_error")
+    if kept is None:  # no read returned: the first one raised, or no time was left for one
+        view = {"ok": False, "reason": "budget_exhausted", "error": "timeout_ms was spent before the window could be read",
+                "nodes": [], "visited": 0, "truncated": True, "truncated_by": ["read_errors" if failed else "timeout"],
+                "errors": {}, **(latest or {})}
+        latest = None
+    else:
+        view = dict(kept[1])
+    until: dict[str, Any] = {"status": "not_observed", "reason": "timeout", "reads": count}
+    if latest is not None:
+        until.update(tree_read=kept[0], tree_age_ms=round((now() - kept[3]) * 1000), latest={
+            k: latest[k] for k in ("reason", "error", "visited", "truncated_by", "errors") if k in latest})
+    if latest is not None or failed or not view.get("ok") or view.get("truncated") or view.get("errors") or any(
+            key.endswith("_len") for node in view.get("nodes", []) for key in node):
+        until.update(status="unknown", reason="read_failed" if failed else "read_incomplete")
+    view["until_text"] = until
+    return view
+
+
 # ----------------------------------------------------------------------------------------------
 # element actions: an element named by identity, one of its own AX actions, a readback (no pointer)
 # ----------------------------------------------------------------------------------------------
@@ -1065,7 +1117,8 @@ def observe_window(ax: Any, win: Any, *, max_nodes: int, deadline: float, includ
 def op_act(pid: int, action: str, selector: Any, max_nodes: int = ACT_DEFAULTS["max_nodes"],
            timeout_ms: int = ACT_DEFAULTS["timeout_ms"], *, ax: Any = None,
            front: Callable[[], dict[str, Any] | None] = front_app, settle: Callable[[float], None] = time.sleep,
-           observe: bool = False, text_limit: int = TEXT_LIMIT["default"], emit: Callable[[dict[str, Any]], None] | None = None,
+           observe: bool = False, text_limit: int = TEXT_LIMIT["default"], until_text: str = "",
+           emit: Callable[[dict[str, Any]], None] | None = None,
            started: float | None = None, now: Callable[[], float] = time.perf_counter) -> dict[str, Any]:
     """``act``: one element of application ``pid``, named by identity, one of its own actions, a readback. Who is in
     front is read before and after and REPORTED (``front_before``, ``front_after``, ``target_in_front``), never
@@ -1118,8 +1171,13 @@ def op_act(pid: int, action: str, selector: Any, max_nodes: int = ACT_DEFAULTS["
     if kept is not None:
         if emit:
             emit(dict(out))  # the receipt leaves the process before the read: a helper stopped during it keeps the receipt
-        out["observation"] = observe_window(ax, kept, max_nodes=max_nodes, deadline=deadline, now=now,
-                                            include_web=sel["include_web"], text_limit=text_limit)
+        def look() -> dict[str, Any]:
+            return observe_window(ax, ax.CFRetain(kept), max_nodes=max_nodes, deadline=deadline, now=now,
+                                  include_web=sel["include_web"], text_limit=text_limit)
+        try:
+            out["observation"] = wait_for_text(look, until_text, deadline=deadline, now=now, pause=settle) if until_text else look()
+        finally:
+            ax.CFRelease(kept)
     return out
 
 
@@ -1128,9 +1186,9 @@ def op_act(pid: int, action: str, selector: Any, max_nodes: int = ACT_DEFAULTS["
 # ----------------------------------------------------------------------------------------------
 
 OBSERVE_OPTIONS = {"app": "", "max_nodes": 150, "timeout_ms": 3000, "root": "window", "include_web": False,
-                   "text_limit": TEXT_LIMIT["default"], "window": ""}
+                   "text_limit": TEXT_LIMIT["default"], "window": "", "until_text": ""}
 ELEMENT_OPTIONS = {"app": "", "do": "", "select": {}, "max_nodes": ACT_DEFAULTS["max_nodes"], "timeout_ms": ACT_DEFAULTS["timeout_ms"],
-                   "observe": False, "text_limit": TEXT_LIMIT["default"]}
+                   "observe": False, "text_limit": TEXT_LIMIT["default"], "until_text": ""}
 
 
 def parse_options(raw: Any, defaults: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -1152,6 +1210,10 @@ def parse_options(raw: Any, defaults: dict[str, Any]) -> tuple[dict[str, Any], s
         kinds = (int, str) if key == "window" else (type(default),)
         if isinstance(value, bool) is not isinstance(default, bool) or not isinstance(value, kinds):
             return {}, f"{key} must be {'a window_id or an exact title' if key == 'window' else type(default).__name__}, not {value!r}"
+    if spec.get("until_text") and len(spec["until_text"]) > TEXT_LIMIT["ceiling"]:
+        return {}, "until_text is longer than the maximum text_limit"
+    if spec.get("until_text") and not spec["until_text"].strip():
+        return {}, "until_text must contain non-whitespace text"
     return spec, ""
 
 
@@ -1175,15 +1237,18 @@ def op_observe(raw: Any, *, ax: Any = None, front: Callable[[], dict[str, Any] |
     spec, err = parse_options(raw, OBSERVE_OPTIONS)
     if err:
         return {"ok": False, "reason": "bad_option", "error": err}
+    started = time.perf_counter()
     target, refusal = resolve_target(spec["app"], front)
     if refusal:
         return refusal
     try:
         out = op_tree(int(target["pid"]), spec["max_nodes"], spec["timeout_ms"], spec["root"], spec["include_web"],
-                      text_limit=spec["text_limit"], window=spec["window"], ax=ax)
+                      text_limit=spec["text_limit"], window=spec["window"], ax=ax, until_text=spec["until_text"], started=started)
     except Exception as exc:  # noqa: BLE001 - the application was resolved; only its read failed
         out = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "op": "observe"}
     out["target"] = target
+    if spec["until_text"] and "until_text" not in out:
+        out["until_text"] = {"status": "unknown", "reason": out.get("reason") or "read_failed", "reads": 0}
     return out
 
 
@@ -1198,6 +1263,8 @@ def op_element(raw: Any, *, ax: Any = None, front: Callable[[], dict[str, Any] |
         err = "app is required: an element action is never aimed at whatever is in front"
     if not err and not spec["observe"] and spec["text_limit"] != TEXT_LIMIT["default"]:
         err = "text_limit shapes the read after the action: pass observe=true or leave text_limit out"
+    if not err and spec["until_text"] and not spec["observe"]:
+        err = "until_text needs observe=true"
     if err:
         return {"ok": False, "reason": "bad_option", "dispatched": False, "error": err}
     target, refusal = resolve_target(spec["app"], front)
@@ -1205,11 +1272,15 @@ def op_element(raw: Any, *, ax: Any = None, front: Callable[[], dict[str, Any] |
         return {**refusal, "dispatched": False, "note": "no action was made"}
     out = op_act(int(target["pid"]), spec["do"], spec["select"], spec["max_nodes"], spec["timeout_ms"], ax=ax, front=front,
                  settle=settle, observe=spec["observe"], text_limit=max(1, min(spec["text_limit"], TEXT_LIMIT["ceiling"])),
-                 emit=(lambda receipt: emit({**receipt, "target": target})) if emit else None, started=started, now=now)
+                 until_text=spec["until_text"], emit=(lambda receipt: emit({**receipt, "target": target})) if emit else None,
+                 started=started, now=now)
     out["target"] = target
     if spec["observe"] and "observation" not in out:
         out["observation"] = {"ok": False, "reason": "no_window",
                               "error": "nothing was read: the call stopped before a window was picked (see reason)"}
+    if spec["until_text"] and "until_text" not in out["observation"]:
+        out["observation"]["until_text"] = {"status": "unknown", "reason": out["observation"].get("reason") or "read_failed",
+                                              "reads": 0}
     return out
 
 
@@ -1346,9 +1417,12 @@ def op_activate(query: str, wait_ms: int = 2000) -> dict[str, Any]:
 
 
 def op_tree(pid: int, max_nodes: int = 150, timeout_ms: int = 3000, root: str = "window", include_web: bool = False, *,
-            text_limit: int = TEXT_LIMIT["default"], window: Any = "", ax: Any = None) -> dict[str, Any]:
+            text_limit: int = TEXT_LIMIT["default"], window: Any = "", ax: Any = None, until_text: str = "",
+            started: float | None = None, now: Callable[[], float] = time.perf_counter,
+            pause: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     """``tree``: a bounded walk of one window of ``pid``: the focused one (else main, else first), the focused element
     with ``root=focused``, or the window ``window`` names exactly (``pick_window``: never a guess among equals)."""
+    started = now() if started is None else started
     ax = ax or _AX()
     if not ax.AXIsProcessTrusted():
         return {"ok": False, "reason": "accessibility_untrusted", "pid": pid}
@@ -1389,10 +1463,14 @@ def op_tree(pid: int, max_nodes: int = 150, timeout_ms: int = 3000, root: str = 
                         "ax_exposure": exposure}
         title, _e = ax.attr(root_ref, "AXTitle")
         window_id = ax.window_id(root_ref) if root_from != "AXFocusedUIElement" else None
-        ref, root_ref = root_ref, None  # the walk owns the root from here and releases it on every exit
-        result = walk(ref, lambda el: ax.multi(el, _WALK_ATTRS), ax.children, max_nodes=max_nodes,
-                      deadline_s=timeout_ms / 1000.0, skip_children=() if include_web else ("AXWebArea",),
-                      release=ax.CFRelease, text_limit=text_limit)
+        # One walk has timeout_ms of its own; until_text rereads the retained root within one budget from ``started``.
+        deadline = (started if until_text else now()) + timeout_ms / 1000.0
+
+        def look() -> dict[str, Any]:  # each walk owns its own retain of the root and releases it on every exit
+            return walk(ax.CFRetain(root_ref), lambda el: ax.multi(el, _WALK_ATTRS), ax.children, max_nodes=max_nodes,
+                        deadline_s=max(0.0, deadline - now()), now=now, skip_children=() if include_web else ("AXWebArea",),
+                        release=ax.CFRelease, text_limit=text_limit)
+        result = wait_for_text(look, until_text, deadline=deadline, now=now, pause=pause) if until_text else look()
     finally:
         if root_ref is not None:
             ax.CFRelease(root_ref)
@@ -1403,8 +1481,9 @@ def op_tree(pid: int, max_nodes: int = 150, timeout_ms: int = 3000, root: str = 
         result["window_id"] = window_id
     if result["visited"] == 0:
         # Not one node could be read: a failed observation, not an empty window.
-        result.update({"ok": False, "reason": "accessibility_read_failed",
-                       "error": "no element of the window could be read: " + json.dumps(result["errors"])})
+        # A wait that read nothing names its own reason and error (budget_exhausted, observation_error).
+        result.update({"ok": False, "reason": result.get("reason") or "accessibility_read_failed", "error": result.get("error")
+                       or "no element of the window could be read: " + json.dumps(result["errors"])})
         return result
     result.update({"ok": True, "marks": marks_from(result["nodes"])})
     return result

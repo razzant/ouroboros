@@ -1111,7 +1111,11 @@ signature line, `Reminder · Ouroboros · written <when> · for <when>` (plus
 never rewritten, summarized or re-timed; the next turn reads the row as a host
 fact (`📋 [reminder]`), so Ouroboros knows what the owner was shown. A skill
 holding the owner's `notify_owner` grant speaks the same way in its own name: a
-`skill_notice` System row signed `Notice · <skill>`.
+`skill_notice` System row signed `Notice · <skill>`. The Safety Supervisor does too, once
+per work and destination: when Ouroboros's identical re-issue goes ahead over a flag whose
+final reading marked the act as one the owner would stop, a `safety_notice` System row
+signed `Safety Supervisor · not Ouroboros's words` names the call, the flag's reason and
+quote, the work and the owner's brakes, and claims no delivery.
 
 Formatting is asymmetric: assistant text always uses the sanitized chat markdown
 renderer regardless of `markdown`; ordinary System text is escaped unless
@@ -2953,7 +2957,7 @@ exceptions.
 | A question or decision is waiting | required | a confirmed lifecycle fact: the question carries a positive wait |
 | A task finished or stopped | required | a positive typed terminal fact on a ROOT task |
 | Messages Ouroboros sends while working | LLM-first | Ouroboros chose to speak outside the turn's answer (a proactive message in its room or as a Main notice, or an optional question) |
-| A note Ouroboros left for this moment, or a granted skill's notice (same toggle) | LLM-first; owner grant | when it wrote the note, Ouroboros chose to leave these words for this time; a skill speaks only under the owner's `notify_owner` grant; the host only shows the signed `reminder`/`skill_notice` row |
+| A note Ouroboros left for this moment, a granted skill's notice, or the Safety Supervisor's notice (same toggle) | LLM-first; owner grant | when it wrote the note, Ouroboros chose to leave these words for this time; a skill speaks only under the owner's `notify_owner` grant; the Supervisor speaks only when a re-issue goes ahead over a flag it marked as one the owner would stop; the host only shows the signed `reminder`/`skill_notice`/`safety_notice` row |
 | Ordinary replies in Main | separate toggle | an ordinary finished reply in the Main thread |
 
 *Required* means the application asks for delivery from its own state rather
