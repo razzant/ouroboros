@@ -100,6 +100,20 @@ def test_the_byte_rule_stores_a_whole_text_when_the_changes_outweigh_it_and_keep
     assert all(read(journal, offset, "new") == texts[index] for index, offset in enumerate(offsets))
 
 
+def test_the_byte_rule_at_its_two_boundaries():
+    """A change exactly as large as the new text is not smaller than it: the text is stored whole; a running sum exactly
+    as large keeps the row a change, and one byte more stores it whole. Two byte counts, compared as signed."""
+    whole_base = (0, {"new_content": "AB", "new_sha256": sha("AB")})
+    equal = rows.encode("AB", "AX", whole_base)  # change ["B" → "X"]: 2 bytes; new text: 2 bytes
+    assert rows.change_bytes(equal["change"]) == 2 and equal["new_content"] == "AX" and "chain_bytes" not in equal
+    smaller = rows.encode("ABC", "AXC", (0, {"new_content": "ABC", "new_sha256": sha("ABC")}))  # 2 bytes < 3
+    assert "new_content" not in smaller and smaller["chain_bytes"] == 2
+    at_limit = rows.encode("ABC", "AXC", (0, {"chain_bytes": 1}))  # a change row's sum 1, plus 2: exactly 3
+    assert "new_content" not in at_limit and at_limit["chain_bytes"] == 3
+    past = rows.encode("ABC", "AXC", (0, {"chain_bytes": 2}))  # 2 + 2 = 4: one byte past the text
+    assert past["new_content"] == "AXC" and "chain_bytes" not in past and past["change"] == [[1, "B", "X"]]
+
+
 def test_a_change_that_does_not_rebuild_both_texts_keeps_both_texts_whole():
     base = (0, {"new_content": "A\n", "new_sha256": sha("A\n")})
     assert rows.encode("A\n", "B\n", base, change=[(0, "Z", "B")]) == {"old_content": "A\n", "new_content": "B\n"}
