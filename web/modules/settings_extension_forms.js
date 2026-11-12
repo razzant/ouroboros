@@ -28,7 +28,7 @@ const pendingExtensionSettings = new Set();
 // to. A route with no GET handler (404/405) cannot say what is stored: its fields start locked
 // behind a warning until the owner chooses Edit anyway; any other failed read keeps Save disabled,
 // and a successful `{}` is a real empty document.
-const EXTENSION_VALUES_UNREADABLE = 'Current values could not be read; Save is disabled so it does not overwrite them. Use Reload to retry.';
+const EXTENSION_VALUES_UNREADABLE = 'Current values could not be read; Save is disabled so it does not overwrite them. Open this page again to retry.';
 const EXTENSION_VALUES_UNAVAILABLE = 'Current values are unavailable. These are defaults. Sending this form may change saved settings.';
 const EXTENSION_EDITING_UNREAD = 'You chose to edit without reading the saved values. Review every field before sending.';
 
