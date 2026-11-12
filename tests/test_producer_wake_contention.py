@@ -250,3 +250,24 @@ def test_a_metrics_mark_wakes_no_failed_row_and_an_unreadable_one_proves_nothing
 
     monkeypatch.setattr(os, "stat", unreadable)
     assert job not in maintenance.due(tmp_path) and stream() == "pending"
+
+
+def test_a_metrics_mark_is_taken_only_under_the_journals_append_lock(tmp_path):
+    """The pass renames the mark under the append lock a publisher holds from its mark to its append, so it never
+    takes a mark whose event is still to come: while another holder has the lock, the mark stays where it is."""
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+    from ouroboros.utils import jsonl_append_lock_path
+
+    owed, taken = tmp_path / "state/subagent_metrics.owed", tmp_path / "state/subagent_metrics.taken"
+    owed.parent.mkdir(parents=True)
+    owed.touch()
+    lock_path = jsonl_append_lock_path(tmp_path / "logs/events.jsonl")
+    lock = acquire_exclusive_file_lock(lock_path, timeout_sec=2.0, stale_sec=10.0, poll_sec=0.01, owner_aware_stale=True)
+    assert lock is not None
+    try:
+        subagent_metrics._take(tmp_path)
+        assert (owed.exists(), taken.exists()) == (True, False), "a publisher between its mark and its append holds it"
+    finally:
+        release_exclusive_file_lock(lock_path, lock)
+    subagent_metrics._take(tmp_path)
+    assert (owed.exists(), taken.exists()) == (False, True), "with the lock free the pass takes the mark"
