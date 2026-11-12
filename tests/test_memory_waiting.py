@@ -523,9 +523,12 @@ def test_unread_host_counts_do_not_create_page_debt_or_restore_it_at_the_window_
     for step, ids in (("F6g", [group["key"]]), ("F6a", [group["key"]]), ("F6a", [group["key"], "unread"])):
         expected = [] if "unread" in ids else [ours["room_id"]]
         assert forms.folded_rooms([group], {step: ids}) == expected
-    # A considered word is still an untold source, even beside unread host facts.
+    # A room of other people alone never reaches the writer, even with a considered word: a page there would seal
+    # the unread words beside it. Where I spoke, a considered word is still an untold source under that count.
     others[0]["words"][0]["rank"] = 1
-    assert forms.folded_rooms([group], {"F6a": [group["key"], "unread"]}) == [others[0]["room_id"]]
+    assert forms.folded_rooms([group], {"F6a": [group["key"], "unread"]}) == []
+    ours["words"][0]["rank"] = 1
+    assert forms.folded_rooms([group], {"F6a": [group["key"], "unread"]}) == [ours["room_id"]]
 
 
 @pytest.mark.parametrize("overheard", [True, False])
@@ -533,7 +536,8 @@ def test_an_unread_word_yielding_alone_through_a_real_fit_owes_no_telling(overhe
     """rev_grok REV1 R2: across a one-token gap the fit took one unread word (F6w) and printed its host line, yet
     ``folded_rooms`` listed the room, so a writer with consciousness off would draft a page sealing words nobody
     considered. Unread words are host facts wherever they yield, in an overheard room and in one where my human or I
-    spoke; a considered word that yields the same way still owes a telling."""
+    spoke; a considered word that yields the same way still owes a telling where my human or I spoke, and a room of
+    other people alone never reaches the writer (rev_opus and rev_fable REV2)."""
     from ouroboros import memory_floor as mf
     from ouroboros.memory_inventory import VIEW_TRACE_KEY, shortage_from_trace
     from tests import _memory_view_synthetic as syn
@@ -555,11 +559,52 @@ def test_an_unread_word_yielding_alone_through_a_real_fit_owes_no_telling(overhe
     assert dict(level.steps) == {"F6w": 1}, level
     assert "No recorded consideration: 1 words;" in mv.render_room(snap, level)
     assert fact["floor"]["folded_rooms"] == [] and shortage_from_trace({VIEW_TRACE_KEY: fact}) is None
-    # The other direction: a considered word yields as its opening, an untold source that owes a telling.
+    # The other direction: a considered word yields as its opening, an untold source that owes a telling where my
+    # human or I spoke; in a room of other people alone the same form gives the writer nothing.
     snap, level, fact, room_id = fitted(1)
     assert dict(level.steps) == {"F6w": 1} and "opening, no retelling" in mv.render_room(snap, level), level
-    assert fact["floor"]["folded_rooms"] == [room_id]
-    assert shortage_from_trace({VIEW_TRACE_KEY: fact}).kind == "other_room"
+    shortage = shortage_from_trace({VIEW_TRACE_KEY: fact})
+    if overheard:
+        assert fact["floor"]["folded_rooms"] == [] and shortage is None
+    else:
+        assert fact["floor"]["folded_rooms"] == [room_id] and shortage.kind == "other_room"
+
+
+def test_a_reaction_beside_unread_words_owes_no_telling_through_a_real_capture_and_fit(tmp_path):
+    """rev_opus REV2 finding 1: a thread of other people alone held three unread words and one reaction. The
+    reaction is a place fact with no words, yet ``folded_rooms`` listed the room once its conversation took its
+    ordinary line, so a writer with consciousness off would draft a page sealing words nobody considered. Such a
+    room never reaches the writer, whatever else it holds (rev_fable REV2: an arrival with no recorded author did
+    the same); the same lined conversation still owes a telling for a room where my human or I spoke."""
+    from ouroboros import dialogue_store as ds, memory_floor as mf, memory_view_conversation_forms as forms
+    from ouroboros.memory_inventory import VIEW_TRACE_KEY, shortage_from_trace
+    shared.world(tmp_path)
+    for i in range(3):
+        ds.append(tmp_path, "chat", _event_row("harbor", "t1", 1 + i, "Ann",
+                                               text=f"Ann question {i}.\n" + "Detail of an unread word. " * 60))
+    reaction = _event_row("harbor", "t1", 9, "Cid")
+    reaction["text"] = ""
+    reaction["transport"]["message"] = {"reaction": {"schema_version": 1, "action": "added", "values": [{"name": "eyes"}]}}
+    ds.append(tmp_path, "chat", reaction)
+    snapshot = view(tmp_path)
+    group = _event_group(snapshot)
+    room = group["rooms"][0]
+    assert room["engaged"] and room["overheard"]
+    alone = dataclasses.replace(snapshot, room=None, story=[], conversations=[group])
+    assert sorted(forms.source_index(alone)[group["key"]]["kinds"].values()) == ["fixed", "unread", "unread", "unread"]
+    ordinary = mf.ordinary_level(alone)
+    budget = mf.tokens_of(mv.room_chars(alone, ordinary)) + mf.tokens_of(mv.story_chars(alone, ordinary))
+    fitted = mf.fit_memory_view(alone, {"margin": budget, "physical": 10**9, "budget": None})
+    assert dict(fitted.steps).get("F6g") == 1 and not mf.form_counts(alone, fitted)["emergency"], fitted
+    fact = mf.view_facts(alone, fitted, window_tokens=budget, mode="max", allowances={"margin": budget})
+    assert fact["floor"]["folded_rooms"] == [] and shortage_from_trace({VIEW_TRACE_KEY: fact}) is None
+    # Neither a considered word nor an arrival with no recorded author changes that for such a room ...
+    lined = {"F6g": [group["key"]]}
+    next(w for w in room["words"] if w.get("kind") == "human")["rank"] = 1
+    assert forms.folded_rooms([group], lined) == []
+    # ... and the other direction: the same lined conversation owes a telling once my human or I spoke in the room.
+    room["overheard"] = False
+    assert forms.folded_rooms([group], lined) == [room["room_id"]]
 
 
 @pytest.mark.parametrize("own_text", ["", "Their own first line.\nTheir later text."])

@@ -123,6 +123,15 @@ def source_index(snapshot):
     return cached
 
 
+def _kind(word):
+    """A word's source kind. The cases are disjoint: repeats and place facts have no word form, then owner
+    authority, consideration, and a work's recorded telling."""
+    return ("fixed" if word.get("again") or word.get("kind") == "place_fact" else
+            "owner" if word["owner_side"] else
+            "unread" if word.get("rank") == 2 and word.get("kind") == "human" else
+            "told" if word.get("gist") else "untold")
+
+
 def _sources(group):
     from ouroboros.memory_view_work import row_range
     words, kinds, rooms, owners, ids = [], {}, {}, [], set()
@@ -132,12 +141,7 @@ def _sources(group):
     for room in group["rooms"]:
         parts = rooms[room["room_id"]] = {k: [] for k in ("owner", "unread", "told", "untold", "fixed")}
         for word in room["words"]:
-            # These cases are disjoint: repeats and place facts have no word form,
-            # then owner authority, consideration, and a work's recorded telling.
-            kind = ("fixed" if word.get("again") or word.get("kind") == "place_fact" else
-                    "owner" if word["owner_side"] else
-                    "unread" if word.get("rank") == 2 and word.get("kind") == "human" else
-                    "told" if word.get("gist") else "untold")
+            kind = _kind(word)
             ident = word["id"]
             kinds[ident] = kind
             parts[kind].append(word)
@@ -387,21 +391,23 @@ def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def folded_rooms(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]]) -> List[str]:
-    """Rooms with a recorded person's words or my reply whose words (F6w) or group (F6g, F6a) yielded beyond host facts,
-    oldest open row first: what a writer may seal where consciousness is off (``memory_inventory.shortage_from_trace``).
-    Unread words are host facts wherever they yield: alone (F6w), in their room's or conversation's line, or in the
-    window's global count. A group line owes a telling for a room where my human or I spoke, unless that count names
-    its unread words; any other room owes one only for a yielded word that is not unread."""
+    """Rooms where my human or I spoke whose words (F6w) or group (F6g, F6a) yielded beyond host facts, oldest open
+    row first: what a writer may seal where consciousness is off (``memory_inventory.shortage_from_trace``). A room
+    of other people alone never enters, as it owes no page (``owed``): a page there would seal words nobody
+    considered. Unread words, reactions and repeats are host facts wherever they yield: alone (F6w), in their room's
+    or conversation's line, or in the window's global count. A group line owes a telling unless that count names the
+    room's unread words; past that the room owes one for a yielded word of my human or of a work."""
     words = {ident.removeprefix("bare:") for ident in gone.get("F6w", ())}
     lined = {g["key"] for g in groups if group_form(g, gone) or g["key"] in gone.get("F6a", ())}
     def needs_telling(group, room):
         counted = group["key"] in gone.get("F6a", ()) and "unread" in gone.get("F6a", ())
-        if group["key"] in lined and not room.get("overheard") and not counted:
+        if group["key"] in lined and not counted:
             return True
-        return any(not _unread(word) and (group["key"] in lined or word["id"] in words) for word in room["words"])
+        return any(_kind(word) in ("owner", "told", "untold") and (group["key"] in lined or word["id"] in words)
+                   for word in room["words"])
     return [room for _first, room in sorted(
-        (item["first"], item["room_id"]) for group in groups for item in group["rooms"] if item["engaged"] and item["words"]
-        and needs_telling(group, item))]
+        (item["first"], item["room_id"]) for group in groups for item in group["rooms"]
+        if item["engaged"] and not item.get("overheard") and item["words"] and needs_telling(group, item))]
 
 
 def owner_items(groups: Iterable[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
