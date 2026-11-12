@@ -428,8 +428,10 @@ def holding_lines(held, *, short=False):
     """Host facts only: kinds, their source counts and the largest addressable units."""
     kinds = []
     for kind, tokens in held["tokens"].items():
+        # Remote untold words are priced whole, what folding them would have to tell, though most stand by count.
+        whole = " at whole-text size" if kind == "untold in other conversations" else ""
         if short:
-            kinds.append(f"{kind} {tokens:,}")
+            kinds.append(f"{kind} {tokens:,}{whole}")
             continue
         detail = []
         if n := held["without_lead"].get(kind):
@@ -437,11 +439,11 @@ def holding_lines(held, *, short=False):
         counts = held["counts"].get(kind, {})
         if "conversations" in counts:
             detail.append(f"{counts['conversations']} conversations")
-        if "counted_rows" in counts:
+        if counts.get("counted_rows"):  # a zero names no omission
             detail.append(f"{counts['counted_rows']} rows by count")
         if kind == "owner words in other rooms":
             detail.append("whole until I close their conversation with a page")
-        kinds.append(f"{kind} {tokens:,}" + (" (" + "; ".join(detail) + ")" if detail else ""))
+        kinds.append(f"{kind} {tokens:,}{whole}" + (" (" + "; ".join(detail) + ")" if detail else ""))
     line = "Holding the room (tokens): " + ", ".join(kinds) + "."
     return [line] if short else [line, *(
         f"{tokens:,} tokens, {description}" for tokens, description in held["largest"])]

@@ -525,6 +525,7 @@ def test_final_counts_and_holding_cover_sources_without_counting_swallowed_forms
 
 
 def test_holding_counts_hidden_untold_words_and_ranks_units_with_readers():
+    from ouroboros.memory_form_facts import holding_lines
     remote = syn.conversation(1, words=2, word_chars=50000)
     for word in remote["rooms"][0]["words"]:
         word["rank"] = 1
@@ -537,6 +538,12 @@ def test_holding_counts_hidden_untold_words_and_ranks_units_with_readers():
         held = forms.holding_room(snap, level)
         assert held["tokens"]["untold in other conversations"] == expected
         assert held["counts"]["untold in other conversations"] == {"conversations": 1, "counted_rows": 2 if level.addressed else 0}
+        # The number is what folding them would tell, the whole text, though most may stand by count (rev_fable 7).
+        rows = "; 2 rows by count" if level.addressed else ""
+        for line in (holding_lines(held)[0], holding_lines(held, short=True)[0]):
+            assert f"untold in other conversations {expected:,} at whole-text size" in line
+            assert line.count("at whole-text size") == 1
+        assert f"at whole-text size (1 conversations{rows})" in holding_lines(held)[0]
         assert list(held["tokens"].values()) == sorted(held["tokens"].values(), reverse=True)
         largest = held["largest"]
         assert [text.split(", ", 1)[0] for _n, text in largest] == [
