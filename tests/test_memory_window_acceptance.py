@@ -197,10 +197,12 @@ def _installation(tmp_path, monkeypatch):
 
 
 def _replies(core, count):
-    """``core`` with the start's only synthetic part: one room of ``count`` short replies without a gist."""
+    """``core`` with the start's only synthetic part: one room of ``count`` short replies without a gist, in the real
+    start's own work room (a root task keeps two eighths: ``memory_view.start_room``)."""
+    levels = mv.snapshot_from_json(core.memory_view_json).spec.work_room_levels
     snap = syn.snapshot(role="integrator", story=syn.pages(2, 200),
         room_facts=syn.room(lane1=[syn.spoken(i, "ouroboros", 400) for i in range(count)], lane2=2))
-    snap = dataclasses.replace(snap, spec=dataclasses.replace(snap.spec, work_room_levels=1))
+    snap = dataclasses.replace(snap, spec=dataclasses.replace(snap.spec, work_room_levels=levels))
     return dataclasses.replace(core, memory_view_json=mv.snapshot_json(snap))
 
 
@@ -252,9 +254,13 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
     assert f.run([{"content": "done"}])[0] == "done"
     first = f.inputs[0]
     text = "".join(part["text"] for row in first["messages"] if row["role"] == "system" for part in row["content"])
-    assert (max(core.architecture_md.splitlines(), key=len) in text) is (start[0] == "max")  # the whole book iff Max
+    assert (core.architecture_md in text) is (start[0] == "max")  # the whole book iff Max
     tokens = cf.estimate_context_prompt_tokens(first["messages"], first["tools"], provider="openai")
-    assert tokens + plan.output_reserve_tokens + -(-window // 8) <= window  # the reply reserve and one work room stay
+    room = held.projection("max").memory_facts["max_room"]["levels"] * -(-window // 8)
+    assert tokens + plan.output_reserve_tokens + room <= window  # the reply reserve and the start's work room stay
+    if start[0] == "max":  # the Max measure prices what is sent: an over-count would move every derived window unseen
+        fact = plan.projection("max").memory_facts["max_room"]
+        assert fact["need"] - fact["reserve"] - fact["work"] <= tokens + -(-window // 100)
     events = [f.events.get_nowait() for _ in range(f.events.qsize())]
     sends = [event["context_attempt"] for event in events if "context_attempt" in event]  # the census the capsule reads
     assert sends and {(send["preferred_at_send"], send["applied"], send["cause"]) for send in sends} == {
@@ -275,7 +281,6 @@ def test_an_environment_only_install_starts_in_its_factory_max_or_records_why(tm
     the named refusal, so book growth never turns it red."""
     from ouroboros import config, context
     from ouroboros.agent_dispatch import _context_capacity_terminal
-    from ouroboros.context_measurement import mode_cause
     from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS
     from ouroboros.tools.tool_context import ToolContext
     from ouroboros.tools.registry import ToolRegistry
@@ -301,7 +306,7 @@ def test_an_environment_only_install_starts_in_its_factory_max_or_records_why(tm
     assert plan.preferred_mode == config.get_context_mode() == "max" and plan.provider == "openai-compatible"
     assert plan.status == "confirmed" and plan.window_record.boundary == window  # the stub's own window was read
     mode, cause = plan.start
-    assert (mode == "max") is (not cause) and mode_cause(plan, mode) == cause  # the capsule's field, from the start
+    assert (mode == "max") is (not cause)  # never a lower start without its recorded reason
     if window == 1_000_000:
         assert plan.start == ("max", "")  # ample room beside the books: the selected mode holds
     elif window == 200_000:

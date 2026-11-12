@@ -64,11 +64,15 @@ test('a lowered start names its recorded reason in the Context capsule\'s own wo
     // Audit item 23(a): the reason a person reads is the recorded one, on the capsule and on the task card alike.
     const row = (extra) => ({ checkpoint_kind: 'context_fit_physical_mode', preferred_mode: 'max', effective_mode: 'low',
         round: 1, ...extra });
-    for (const cause of ['memory', 'route', 'window', 'after_start']) {
+    for (const cause of ['memory', 'route', 'window']) {
         const said = causeOf({ preferred_at_send: 'max', applied: 'low', cause }, 'max');
         assert.ok(said, cause);
         assert.equal(taskCheckpointLabel(row({ cause })), `Context starts in a smaller mode. ${said}`);
     }
+    // A route change after the start lowered the work (the rebind's row): the capsule's sentence alone, never "starts".
+    const moved = causeOf({ preferred_at_send: 'max', applied: 'low', cause: 'after_start' }, 'max');
+    assert.ok(moved);
+    assert.equal(taskCheckpointLabel(row({ cause: 'after_start' })), moved);
     assert.equal(taskCheckpointLabel(row({})), 'Context starts in a smaller mode', 'a row written before the reason was');
     assert.equal(taskCheckpointLabel(row({ cause: '' })), 'Context starts in a smaller mode', 'an unknown start');
 });

@@ -1,4 +1,5 @@
 import { causeOf } from './context_observation.js';
+import { fmt } from './i18n.js';
 import { statusMarkHtml } from './status_mark.js';
 
 // Producer census: loop_model_call/round_limits/nudges/budget, task_pacing,
@@ -167,7 +168,9 @@ export function taskCheckpointLabel(evt = {}) {
     if (kind === 'context_fit_physical_mode') {  // the start's recorded reason, in the Context capsule's words
         const why = causeOf({ preferred_at_send: evt.preferred_mode, applied: evt.effective_mode, cause: evt.cause },
             evt.preferred_mode);
-        return why ? `${CHECKPOINT_LABELS[kind]}. ${why}` : CHECKPOINT_LABELS[kind];
+        if (why && evt.cause === 'after_start') return why;  // a route change after the start: not how it started
+        const label = fmt(CHECKPOINT_LABELS[kind]);  // in the language of the capsule's sentence beside it
+        return why ? `${label}. ${why}` : label;
     }
     const folded = Number(evt.reclaimed_tokens);
     if (kind === 'prompt_prefix_break' && evt.reasoning_retired) {
