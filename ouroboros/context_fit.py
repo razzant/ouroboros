@@ -648,7 +648,7 @@ class RouteQuestion:
     (``_route_key``, compared before and after the wait), so a changed route asks its own question, and it waits on it
     as on its own read, with no timer.
     ``early`` names an answer taken from it, which ``build_context_fit_plan`` asks ``again`` at the usual point when
-    using it would show less memory than the selected view (``narrowed_by_window``).
+    using it would show less memory than the selected view, or none (``narrowed_by_window``, a refused start).
     """
 
     def __init__(self, task: Dict[str, Any], resolver: Optional[Callable[..., Tuple[Dict[str, Any], Any]]] = None):
@@ -1084,10 +1084,8 @@ def build_context_fit_plan(
     if early and route_resolver.early and (refused or narrowed_by_window(contents, initial_mode, preferred, state, delivered)):
         # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view, or none,
         # is asked again here, at the usual point, and that answer is used (its refusal is final); a walk that reads
-        # the same frame is not repeated.
+        # the same frame is not repeated unless it was refused.
         late = frame(*answer(lambda: route_resolver.again(task)))
-        if refused is not None and late.walked == state.walked:
-            raise refused
         if refused is not None or late.walked != state.walked:
             contents, initial_mode, delivered = walk(late)
         state = late
