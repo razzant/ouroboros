@@ -263,13 +263,20 @@ def _times(count: int) -> str:
 
 
 def _failed_money(rows: list) -> str:
-    """One route's failed asks' money in ``_call_money``'s words: the stated amounts summed (reported only when each one
-    was), and how many asks stated none; unknown never reads as zero."""
-    known, billing = [row for row in rows if call_cost_words(row)], {row.get("billing") for row in rows}
-    money = _call_money({"provider": rows[0].get("provider"), "cost": sum(row["cost"] for row in known) if known else None,
+    """One route's failed asks' money in ``_call_money``'s words: none on a local route; else its kept refusals' stated
+    amounts summed (reported only when each one was), how many of them stated none ("cost unknown"), and how many asks'
+    rows keep no cost at all ("no cost in this record"); unknown never reads as zero."""
+    if rows[0].get("use_local") is True:  # the row that names the route "(local)"
+        return _call_money({"provider": "local"})
+    stated = [row for row in rows if "cost" in row]  # a kept refusal's money, unknown included; a call's row keeps none
+    if not stated:
+        return "no cost in this record"
+    known, billing = [row for row in stated if call_cost_words(row)], {row.get("billing") for row in stated}
+    money = _call_money({"provider": stated[0].get("provider"), "cost": sum(row["cost"] for row in known) if known else None,
                          "cost_final": all(row.get("cost_final") is True for row in known),
                          "billing": billing.pop() if len(billing) == 1 else None})
-    return money + (f"; {len(rows) - len(known)} cost unknown" if 0 < len(known) < len(rows) else "")
+    return (money + (f"; {len(stated) - len(known)} cost unknown" if 0 < len(known) < len(stated) else "")
+            + (f"; {len(rows) - len(stated)} with no cost in this record" if len(stated) < len(rows) else ""))
 
 
 def refusal_facts(usage: dict, before_round: int) -> str:
