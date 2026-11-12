@@ -218,3 +218,7 @@ def test_a_failed_extra_read_keeps_the_record_it_had_adopted(catalogue, monkeypa
     client.prefetch_openrouter_catalog()
     assert len(gets) == 1 and not client.metadata_fetch_attempted_and_failed()
     assert client._get_supported_parameters("vendor/known") == {"max_tokens", "tools"}
+    # A reader that needs a live read inside the failed read's TTL is answered by that failure, not by the record.
+    assert client.openrouter_context_length("vendor/new", allow_fetch=True) == 0
+    assert len(gets) == 1 and client.metadata_fetch_attempted_and_failed()
+    assert client._get_supported_parameters("vendor/known") == {"max_tokens", "tools"}

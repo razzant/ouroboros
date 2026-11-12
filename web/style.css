@@ -6103,19 +6103,19 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-period-name { color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
 .costs-period-sum { color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .costs-period-bar { display: flex; gap: 2px; height: 10px; border-radius: var(--pill-radius); overflow: hidden; }
-.costs-period-bar > i { flex: var(--share) 0 0; min-width: 2px; background: var(--class-hue); }
+.costs-period-bar > i { flex: var(--share) 0 0; min-width: 2px; }
 .costs-period-parts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: var(--space-1) var(--space-5); margin: 0; }
 /* A part's amount keeps to one line; where the card is too narrow for both, it moves under its name, still at the end. */
 .costs-period-parts > div { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 var(--space-3); min-width: 0; }
 .costs-period-parts dt { display: flex; align-items: center; gap: var(--space-2); color: var(--text-secondary); white-space: nowrap; }
-.costs-period-parts dt > i { flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--class-hue); }
+.costs-period-parts dt > i { flex: none; width: 8px; height: 8px; border-radius: 2px; }
 .costs-period-parts dd { margin: 0 0 0 auto; color: var(--text-primary); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .costs-period-subtitle { margin: var(--space-2) 0 0; color: var(--text-primary); font-size: var(--type-body); font-weight: 600; }
-[data-cost-class="cache_write"] { --class-hue: var(--chart-series-2); }
-[data-cost-class="cache_read"] { --class-hue: var(--chart-series-2); opacity: 0.42; }  /* older WebKit has no color-mix() */
-[data-cost-class="output"] { --class-hue: var(--chart-series-3); }
-[data-cost-class="uncached_input"] { --class-hue: var(--text-meta); }
-[data-cost-class="unclassified"] { --class-hue: var(--text-meta); opacity: 0.4; }
+[data-cost-class="cache_write"] { background: var(--chart-series-2); }  /* only the bar and swatch marks carry it */
+[data-cost-class="cache_read"] { background: var(--chart-series-2); opacity: 0.42; }  /* older WebKit has no color-mix() */
+[data-cost-class="output"] { background: var(--chart-series-3); }
+[data-cost-class="uncached_input"] { background: var(--text-meta); }
+[data-cost-class="unclassified"] { background: var(--text-meta); opacity: 0.4; }
 .costs-period-writes td:first-child { overflow-wrap: anywhere; }
 /* The period choice wraps on a narrow card: under a finger it takes the touch minimum as its height. */
 @media (pointer: coarse) {

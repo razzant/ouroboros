@@ -159,6 +159,7 @@ class _CapabilityPolicyMixin:
             if cls._CATALOGUE_READS != finished:
                 return
             if cls._CAPABILITIES_FAILED_AT and _age_seconds(cls._CAPABILITIES_FAILED_AT) <= _FAILED_TTL_SEC:
+                cls._SUPPORTED_PARAMS_FETCHED, cls._CAPABILITIES_FETCH_OK = True, False  # that failure answers this reader
                 return
             try:
                 cls._read_openrouter_catalogue()
