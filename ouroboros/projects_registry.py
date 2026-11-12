@@ -824,6 +824,9 @@ def reserved_project_chat_ids(drive_root: Any, *, strict: bool = False) -> set:
     return {project["chat_id"] for project in projects} - {0}
 
 
+_UNREADABLE_SAID: set = set()  # the causes of an unknown room set this process has logged
+
+
 def readable_rooms(drive_root: Any) -> Optional[set]:
     """The chat ids the registry's readable rows reserve (a healthy row survives an invalid neighbour). ``None``
     when the registry names no room it can vouch for: it cannot be read, is lost beside its commit witness, or
@@ -833,7 +836,12 @@ def readable_rooms(drive_root: Any) -> Optional[set]:
         if not rooms:  # empty is "no Projects" only where the strict reader agrees
             _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)
         return rooms
-    except Exception:
+    except Exception as error:
+        # Main's saved history and the room set wait on this answer, and a broken registry can outlast a restart:
+        # its cause is named once a process and cause, where a person reading the log looks.
+        if (said := f"{type(error).__name__}: {error}") not in _UNREADABLE_SAID:
+            _UNREADABLE_SAID.add(said)
+            log.warning("The Project registry vouches for no room; Main's saved history is withheld: %s", said)
         log.debug("readable_rooms failed", exc_info=True)
         return None
 

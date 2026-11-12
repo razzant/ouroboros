@@ -396,10 +396,11 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
     answers the typed unavailable refusal instead. An invalid row beside readable ones is no such
     case: the rooms the readable rows name are still Projects, and Main reads on. The refusal names its cause,
     in its body and once in the server log, since nothing else would say why Main stays empty."""
-    from ouroboros.gateway import history as history_module
+    from ouroboros import projects_registry
     from ouroboros.projects_registry import bind_task_to_project, create_project
 
-    monkeypatch.setattr(history_module, "_WITHHELD_SAID", set())  # this process has named no cause yet
+    monkeypatch.setattr(projects_registry, "_UNREADABLE_SAID", set())  # this process has named no cause yet
+    said = lambda: [r.levelname for r in caplog.records if "vouches for no room" in r.getMessage()]  # noqa: E731
 
     rooms = [create_project(tmp_path, slug, name=slug) for slug in ("alpha", "beta")]
     bind_task_to_project(tmp_path, "bound", rooms[0]["id"], origin={"absent": "system"})
@@ -422,6 +423,7 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
     assert status == 503 and refused["reason_code"] == "history_source_unavailable"
     assert refused["has_more"] is True and refused["window"]["complete"] is False
     assert refused["detail"] == "Project registry unavailable", "the refusal names its cause"
+    assert said() == ["WARNING"] and request(tmp_path)[0] == 503 and said() == ["WARNING"], "once a cause"
 
     data = json.loads(intact)
     registry.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
@@ -435,8 +437,6 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
         status, refused = request(tmp_path)
         assert status == 503 and not texts(refused) & room_rows, unknown
         assert refused["detail"] == "Project registry unavailable", unknown
-    said = [record for record in caplog.records if "is withheld" in record.getMessage()]
-    assert [record.levelname for record in said] == ["WARNING"], "the server log names the cause once"
 
     registry.write_bytes(intact)
     restored = list(pages(tmp_path))
@@ -445,7 +445,6 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
 
     # One lenient read decides the request: the rooms it named stay Projects even when a second read would fail
     # (an open that fails on and off), never "no Projects" within the same request.
-    from ouroboros import projects_registry
     from ouroboros.gateway import history as history_module
 
     named, lenient = projects_registry.readable_rooms(tmp_path), projects_registry.reserved_project_chat_ids
