@@ -54,6 +54,24 @@ def test_outline_ranges_read_back_exactly_their_sections(tmp_path):
     assert tools._knowledge_read(ctx, TOPIC).endswith(note.text)  # the default read is the note, unchanged
 
 
+def test_the_outline_shows_each_heading_line_as_written(tmp_path):
+    """A heading is printed as its own line reads in the note (spacing, closing hashes, indentation, no CR), so the
+    outline's text can be quoted back as an exact old_str."""
+    ctx = context(tmp_path)
+    target = address(tmp_path, "setup")
+    target.path.parent.mkdir(parents=True, exist_ok=True)
+    target.path.write_bytes(b"# Guide\r\n\r\n##  Setup ##\r\n\r\nSteps.\r\n\r\n   ### Indented\r\n\r\nMore.\r\n")
+    note = store.read_knowledge_note(target)
+    outline = tools._knowledge_read(ctx, "setup", view="outline")
+    for written in ("# Guide", "##  Setup ##", "   ### Indented"):
+        found = re.search(rf"^{re.escape(written)} — line (\d+), chars ", outline, re.M)
+        assert found and note.text.splitlines()[int(found[1]) - 1] == written, (written, outline)
+    assert "\r" not in outline and not re.search(r"^## Setup —", outline, re.M)
+    edited = tools._knowledge_write(ctx, "setup", mode="edit", old_str="##  Setup ##", content="## Setup",
+                                    expected_revision=note.revision)
+    assert edited.startswith("✅"), edited
+
+
 def test_history_lists_versions_newest_first_marks_the_current_one_and_names_gaps(tmp_path):
     ctx = context(tmp_path)
     target = address(tmp_path)

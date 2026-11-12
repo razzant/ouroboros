@@ -8,10 +8,10 @@ large journal is never parsed whole; a line naming the note that is not JSON is 
 never fatal. A version is named by its revision (the sha256 of its exact bytes) and its text is
 returned only after it hashes to that revision. Nothing here writes: no index, no cache, no sidecar.
 
-The outline is the one renderer the read, the receipt and the refusal share. Its character ranges
-are the ``start_char``/``end_char`` of ``knowledge_read``; a section is the parser's
-(``MarkdownHeading.section``), nested sections included, and a heading the parser gives no section
-of its own (a setext heading) says so.
+The outline is the one renderer the read, the receipt and the refusal share. It prints each heading
+line as the note spells it; its character ranges are the ``start_char``/``end_char`` of
+``knowledge_read``; a section is the parser's (``MarkdownHeading.section``), nested sections
+included, and a heading the parser gives no section of its own (a setext heading) says so.
 """
 from __future__ import annotations
 
@@ -235,6 +235,12 @@ def _own_section(heading: Any) -> Any:
     return heading.section if heading.section.start_byte == heading.span.start_byte else None
 
 
+def heading_line(raw: bytes, heading: Any) -> str:
+    """The heading's first line as the note spells it (spacing, closing hashes, indentation), without its line end."""
+    line = raw[heading.span.start_byte:heading.span.end_byte].split(b"\n", 1)[0]
+    return (line[:-1] if line.endswith(b"\r") else line).decode("utf-8")
+
+
 def _char_offsets(raw: bytes, positions: set[int]) -> dict[int, int]:
     """Character offsets of byte positions on character boundaries, decoded once."""
     out, at, chars = {}, 0, 0
@@ -259,12 +265,13 @@ def render_outline(note: Any, label: str = "") -> str:
         return "\n".join(lines) + "\n"
     spans = [_own_section(heading) or heading.span for heading in headings]
     chars = _char_offsets(note.raw, {edge for span in spans for edge in (span.start_byte, span.end_byte)})
-    lines.append("Headings (level, title, line, section range as start_char..end_char, size). A section runs "
-                 "to the next heading of its level or higher, so a parent's range contains its children's:")
+    lines.append("Headings (each heading line as written, its line, section range as start_char..end_char, size). "
+                 "A section runs to the next heading of its level or higher, so a parent's range contains its children's:")
     for heading, span in zip(headings, spans):
         start, end = chars[span.start_byte], chars[span.end_byte]
-        own = "" if _own_section(heading) else "; no section of its own (setext heading): the range is its heading"
-        lines.append(f"{'#' * heading.level} {heading.title} — line {heading.span.start_line}, "
+        own = ("" if _own_section(heading) else
+               f"; no section of its own (a level-{heading.level} setext heading): the range is its heading")
+        lines.append(f"{heading_line(note.raw, heading)} — line {heading.span.start_line}, "
                      f"chars {start}..{end} ({end - start} chars{own})")
     return "\n".join(lines) + "\n"
 
