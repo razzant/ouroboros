@@ -6,8 +6,11 @@ stamps (``consciousness_wake._transitions_since``, ``_task_window``). That state
 (``sort_keys``, no spaces, ``ensure_ascii=False``): a base is ``{"version": 3, "scan_at", "inventory", "signatures"}``;
 a change carries the same fields with ``"parent"`` (the link it extends) and only the tasks whose entries differ from
 its parent's state, ``null`` for a task the state no longer holds. The accepted boundary names the newest link
-(``transition_chain``); the wake's observation source keeps its header and events. Every read verifies each file
-against its name; a failure is the caller's unreadable source, never a guess by time.
+(``transition_chain``); the wake's observation source keeps its header and events. A window that changes nothing
+writes no link. A change is written as a new base once the chain's changes, each counted as at least one filesystem
+block, would reach its base's bytes, so reading a chain never costs more than two bases in bytes or files: storage
+mechanics, nothing the mind sees depends on it. Every read verifies each file against its name; a failure is the
+caller's unreadable source, never a guess by time.
 
 A boundary of the previous form names the state in its wake source's header (``transitions.source_ref``); the next
 wake reads it there and writes a base.
@@ -21,6 +24,9 @@ import pathlib
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Optional, Tuple
+
+from ouroboros.store import fsync_directory
+from ouroboros.utils import write_bytes_atomic
 
 CHAIN_REL = pathlib.Path("state") / "consciousness_transitions"
 CHAIN_VERSION = 3  # the files' format and the boundary's ``transition_chain`` reference
@@ -112,3 +118,28 @@ def accepted_transitions(drive_root: Any, accepted: Dict[str, Any]) -> Tuple[Any
     if isinstance(prior, dict) and "source_ref" in prior:
         return read_source_transitions(drive_root, accepted), None
     return prior, None
+
+
+def bind_link(drive_root: Any, chain: Optional[TransitionChain], state: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``transition_chain`` reference a wake that observed ``state`` accepts: ``chain``'s newest link when neither
+    its inventory nor its signatures differ, else a change to that link, or a base when there is no chain or the
+    chain's changes would reach its base's bytes. A link is written as a synced temporary file replaced into its name,
+    the directory synced, then read back byte for byte; any failure raises."""
+    current = {key: state.get(key) or {} for key in _FIELDS}
+    head, data = {"version": CHAIN_VERSION, "scan_at": state.get("scan_at")}, b""
+    if chain is not None:
+        change = {key: {task_id: current[key].get(task_id) for task_id in current[key].keys() | chain.state[key].keys()
+                        if current[key].get(task_id) != chain.state[key].get(task_id)} for key in _FIELDS}
+        if not any(change.values()):
+            return {"version": CHAIN_VERSION, "link": chain.link}
+        delta = _encode({**head, **change, "parent": chain.link})
+        if chain.change_bytes + max(len(delta), BLOCK_BYTES) < chain.base_bytes:
+            data = delta
+    data = data or _encode({**head, **current})
+    name = hashlib.sha256(data).hexdigest()
+    path = pathlib.Path(drive_root) / CHAIN_REL / f"{name}.json"
+    write_bytes_atomic(path, data, fsync=True)
+    fsync_directory(path.parent)
+    if path.read_bytes() != data:
+        raise ValueError("transition link readback mismatch")
+    return {"version": CHAIN_VERSION, "link": name}
