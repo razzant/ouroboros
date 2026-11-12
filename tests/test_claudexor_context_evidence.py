@@ -462,6 +462,28 @@ def test_the_guards_repeat_after_an_early_failed_read_asks_the_engine_again(tmp_
         assert (plan.window_evidence[0], plan.window_tokens) == ("pool", 70_000) and plan.initial_mode != "max"
 
 
+@pytest.mark.parametrize("late", [872_000, 1])
+def test_an_early_window_that_cannot_hold_the_core_yields_to_the_usual_points_answer(tmp_path, monkeypatch, late):
+    """Fix round 1 (Grok B1): an early answer whose window cannot hold the fixed core (a refusal of the start walk) is
+    asked again at the usual point, like one that would narrow the view; only that answer's refusal is final, and it
+    is today's refusal."""
+    from ouroboros import context_fit as cf
+    from ouroboros.llm import LLMClient
+
+    answers = [_catalog("account-a", "identity-a", 1), _catalog("account-b", "identity-b", late)]
+    for value in answers:
+        value["models"][0]["contextWindow"] = value["models"][0]["maxContextWindow"]
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda *_a, **_kw: copy.deepcopy(answers.pop(0))))
+    if late == 1:
+        with pytest.raises(cf.MinimumViewUnfit):
+            _built(monkeypatch, tmp_path, lambda task: cf.RouteQuestion(task, cf.resolve_context_fit_route))
+        assert not answers  # both asked; the usual point's refusal stands
+        return
+    plan, _spans = _built(monkeypatch, tmp_path, lambda task: cf.RouteQuestion(task, cf.resolve_context_fit_route))
+    assert not answers and (plan.window_tokens, plan.initial_mode) == (872_000, "max")
+    assert plan.model_route["credentialProfileId"] == "account-b"
+
+
 def test_a_changed_route_voids_the_early_answer_and_asks_its_own_question(tmp_path, monkeypatch, catalog):
     """One handle per route: the build whose route changed (here the role's pin) after the question started asks its
     own question; the early answer is never applied to it, and the account that just failed is never spent by it."""

@@ -1072,12 +1072,21 @@ def build_context_fit_plan(
     early = isinstance(route_resolver, RouteQuestion)  # it times its own wait (``fit.route_wait``) and read
     state = frame(*answer(lambda: route_resolver(task, allow_fetch=True) if early else timed(
         "fit.route", route_resolver, task, allow_fetch=True)))
-    contents, initial_mode, delivered = walk(state)
-    if early and route_resolver.early and narrowed_by_window(contents, initial_mode, preferred, state, delivered):
-        # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view is asked
-        # again here, at the usual point, and that answer is used; a walk that reads the same frame is not repeated.
+    refused = None
+    try:
+        contents, initial_mode, delivered = walk(state)
+    except MinimumViewUnfit as unfit:  # the early answer's window cannot hold the core: the usual point decides
+        if not (early and route_resolver.early):
+            raise
+        refused, contents, initial_mode, delivered = unfit, {}, "", {}
+    if early and route_resolver.early and (refused or narrowed_by_window(contents, initial_mode, preferred, state, delivered)):
+        # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view, or none,
+        # is asked again here, at the usual point, and that answer is used (its refusal is final); a walk that reads
+        # the same frame is not repeated.
         late = frame(*answer(lambda: route_resolver.again(task)))
-        if late.walked != state.walked:
+        if refused is not None and late.walked == state.walked:
+            raise refused
+        if refused is not None or late.walked != state.walked:
             contents, initial_mode, delivered = walk(late)
         state = late
     route, evidence, window_record, known_window = state.route, state.evidence, state.window_record, state.known_window
