@@ -273,8 +273,10 @@ def _knowledge_write(
 ) -> str:
     notes = []  # a value that means what omission means takes the omitted path, said in the result (tools/arg_feedback)
     blank_version = isinstance(version, str) and not version.strip()  # empty or whitespace: it names no revision
-    if blank_version and mode != "revert":
-        notes.append(ignored_argument_note("version", version, "only mode=revert takes a version"))
+    # Outside revert, a blank version or the revision this call already names as expected_revision asks for nothing.
+    if mode != "revert" and (blank_version or isinstance(version, str) and version == expected_revision):
+        notes.append(ignored_argument_note("version", version, ("" if blank_version else "the same as expected_revision; ")
+                                           + "only mode=revert takes a version"))
         version = None
     if isinstance(edits, list) and not edits:
         notes.append(ignored_argument_note("edits", edits, "an empty list asks for no replacement"))
