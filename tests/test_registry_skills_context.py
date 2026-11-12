@@ -247,8 +247,12 @@ def test_an_owner_scale_start_outlines_registry_and_index_only_where_its_folded_
     roomy = _owner_scale_plan(tmp_path, monkeypatch, 400_000)
     rows, text = _host_facts(roomy), _text(roomy)
     index = next(part for part in roomy.core.dynamic_head_sections if part.section_id == "knowledge_index")
-    # The request this start sends holds both whole beside its whole one-eighth room: nothing calls them physical.
-    assert _registry(40) in text and index.full_text in text and rows and all(row.get("start_room") for row in rows)
+    # Max needs my memory's ordinary forms beside the whole books (B6, decision 2A); here they do not fit, so this
+    # start runs Low. The request it sends holds both whole beside its whole one-eighth room: any host step it takes
+    # is the start room's, and nothing calls them physical.
+    room = roomy.projection(roomy.initial_mode).memory_facts["max_room"]
+    assert roomy.initial_mode == "low" and room["cause"] == "crowded" and room["need"] > room["window"]
+    assert _registry(40) in text and index.full_text in text and all(row.get("start_room") for row in rows)
     assert "F7" not in roomy.projection(roomy.initial_mode).memory_facts["floor"]["steps"]
     sent = roomy.projection(roomy.initial_mode).estimated_tokens + fit.tool_schema_tokens(tools())
     assert sent + 10_000 + math.ceil(400_000 / 8) <= 400_000
@@ -310,8 +314,10 @@ def test_a_start_whose_own_low_view_cannot_fit_takes_the_ordinary_nano_its_own_v
 
 
 def test_a_start_whose_own_nano_view_cannot_fit_refuses_with_that_view(tmp_path):
-    """A few more tokens and even the lowered Nano view overflows: a legitimate refusal naming that last view."""
-    core, _owner, _part = _lowered_start(tmp_path, immune=True, extra=6_300)
+    """A few more tokens and even the lowered Nano view overflows: a legitimate refusal naming that last view. The
+    floor receipt that names reduced forms by kind and what holds the room (plan commit 2, point 10) is 16 tokens
+    shorter than the earlier note with its sealing invitation, so this shape's edge lies 16 tokens further."""
+    core, _owner, _part = _lowered_start(tmp_path, immune=True, extra=6_340)
     with pytest.raises(fit.MinimumViewUnfit, match="Protected owner words and the minimum view") as refused:
         _synthetic_plan(core, 240_000, "max")
     assert refused.value.physical and refused.value.deficit_tokens > 0 and refused.value.memory_view_tokens > 0
