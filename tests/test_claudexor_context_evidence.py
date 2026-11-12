@@ -153,6 +153,36 @@ def test_one_catalog_read_serves_window_and_output_and_a_failed_read_is_not_repe
     assert _probe(tmp_path / "fresh").status == ce.STATUS_UNPROBEABLE and reads[1:] == ["answered"]
 
 
+@pytest.mark.parametrize("output", ["expired", "own_fresh"])
+def test_a_stale_record_kept_after_a_failed_read_starts_no_second_read_for_output(tmp_path, catalog, monkeypatch, output):
+    """H3 (W2, 12.11.2026): an exact account record past its 24 h, kept stale because its refresh failed, carries that
+    failure as a fact of the attempt: the output limit does not read the catalog a second time. Window and output keep
+    their own dates: an expired maximum cools down without a renewed date, an output observed fresh on its own stays."""
+    import datetime
+    from ouroboros import response_limits
+    from ouroboros.llm import LLMClient
+
+    exact = {"source_id": "test-source", "credential_profile_id": "account-a", "account_fingerprint": "identity-a"}
+    day_ago = (ce.utc_now() - datetime.timedelta(hours=30)).isoformat()
+    catalog["value"].update(observedAt=day_ago, models=[{**catalog["value"]["models"][0], "maxOutputTokens": 64_000}])
+    assert _probe(tmp_path).stale  # the account's window and maximum, both recorded 30 h ago
+    if output == "own_fresh":
+        response_limits.record_metadata_limit(tmp_path, provider="claudexor", model=MODEL, options=exact,
+                                              maximum=32_000, observed_at=ce.utc_now_iso())
+    reads = []
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+        lambda *_a, **_kw: reads.append(1) or (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+    kept = _probe(tmp_path, options=exact)
+    assert reads == [1] and kept.stale and kept.window_tokens == 872_000 and kept.ts == day_ago  # one read, kept as it was
+    assert ce._read(tmp_path)["probes"][kept.route_fp]["ts"] == day_ago  # no new FAILED row with a new date
+    limit = kept.response_limit
+    if output == "own_fresh":
+        assert (limit["max_output_tokens"], limit["stale"]) == (32_000, False)
+    else:
+        assert (limit["max_output_tokens"], limit["stale"], limit["observed_at"]) == (64_000, True, day_ago)
+        assert kept.route_fp and ce._read(tmp_path)["response_limit_refresh_failures"]  # cools down, date kept
+
+
 def test_a_failed_auto_catalog_read_plans_by_the_pools_smallest_fresh_statement(tmp_path, catalog, monkeypatch):
     """Window B (owner, 07.11.2026): when the engine's catalog does not answer, an unpinned Auto plan is bounded by the
     smallest window this model's accounts stated within the confirmed TTL, labelled ``pool`` and dated: a bound of one

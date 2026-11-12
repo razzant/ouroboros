@@ -1000,8 +1000,10 @@ def _probe_window(
     allow_fetch: bool = True,
     force: bool = False,
     api_key: Optional[str] = None,
-) -> CapabilityEvidence:
-    """Resolve Capability Evidence for a route, using the cache unless ``force``.
+) -> Tuple[CapabilityEvidence, str]:
+    """Resolve Capability Evidence for a route, using the cache unless ``force``; with the fact of this call's
+    own metadata read: ``answered``, ``failed`` (the failure of the attempt, also when a prior record is kept), or
+    ``""`` when nothing was read.
 
     Local capacity is read from the serving instance on every
     call. Remote routes use fresh cache -> provider metadata -> unprobeable.
@@ -1022,7 +1024,7 @@ def _probe_window(
             window, STATUS_CONFIRMED if window > 0 else STATUS_UNPROBEABLE,
             SOURCE_LOCAL_HEALTH if window > 0 else SOURCE_NONE, fp, model, provider,
             ts=utc_now_iso(), detail="live serving window" if window > 0 else "serving window unknown",
-        )
+        ), ""
 
     cached = data.get("probes", {}).get(fp)
     if subscription and not account_bound and str((cached or {}).get("status") or "") in _KNOWN_STATUS:
@@ -1032,29 +1034,30 @@ def _probe_window(
         age = _age_seconds(str(cached.get("ts") or ""))
         ttl = _CONFIRMED_TTL_SEC if cached.get("status") == STATUS_CONFIRMED else _FAILED_TTL_SEC
         if age <= ttl:
-            return _cached_evidence(cached, fp, model, provider)
+            return _cached_evidence(cached, fp, model, provider), ""
 
     if not allow_fetch:
         # Hot path: never block on the network. Return the (possibly stale) cache
         # marked stale, else unprobeable — both retain unknown sizing evidence.
         if cached:
             return _cached_evidence(cached, fp, model, provider, stale=True,
-                                    detail="stale (no fetch on hot path)")
-        return CapabilityEvidence(0, STATUS_UNPROBEABLE, SOURCE_NONE, fp, model, provider, detail="not probed")
+                                    detail="stale (no fetch on hot path)"), ""
+        return CapabilityEvidence(0, STATUS_UNPROBEABLE, SOURCE_NONE, fp, model, provider, detail="not probed"), ""
 
     if subscription:
         try:
-            ev = _claudexor_metadata_evidence(model, base_url, headers, options, evidence_root=drive_root)
+            ev, read = _claudexor_metadata_evidence(model, base_url, headers, options,
+                                                    evidence_root=drive_root), "answered"
         except Exception as exc:
-            # Prior evidence may survive only on this exact account binding.
-            # Catalog/auth failures never authorize a generation probe or fallback.
+            # Prior evidence may survive only on this exact account binding, as it was: the failed attempt is
+            # this call's fact, never a new dated row. Catalog/auth failures never authorize a probe or fallback.
             if cached and str(cached.get("status") or "") in _KNOWN_STATUS:
                 return _cached_evidence(cached, fp, model, provider, stale=True,
-                                        detail="kept prior account evidence (catalog unavailable)")
-            ev = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider,
-                                    ts=utc_now_iso(), detail=f"model catalog unavailable: {type(exc).__name__}")
+                                        detail="kept prior account evidence (catalog unavailable)"), "failed"
+            ev, read = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider, ts=utc_now_iso(),
+                                          detail=f"model catalog unavailable: {type(exc).__name__}"), "failed"
         _store_evidence(drive_root, "probes", ev.route_fp, ev.to_json())
-        return ev
+        return ev, read
 
     window, observed_at = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch, api_key=api_key)
     if window > 0:
@@ -1062,7 +1065,7 @@ def _probe_window(
                                 ts=observed_at, stale=_age_seconds(observed_at) > _CONFIRMED_TTL_SEC,
                                 detail="provider metadata")
         _store_evidence(drive_root, "probes", fp, ev.to_json())
-        return ev
+        return ev, "answered"
 
     # window <= 0. A provider OUTAGE must NEVER erase a prior confirmed record
     # (the module invariant) — keep it, surfaced as stale, and do not overwrite the
@@ -1074,7 +1077,7 @@ def _probe_window(
     prior_status = str((prior or {}).get("status") or "")
     if prior is not None and prior_status in _KNOWN_STATUS and prior_win > 0:
         return _cached_evidence(prior, fp, model, provider, stale=True,
-                                detail="kept prior evidence (probe blip)")
+                                detail="kept prior evidence (probe blip)"), ""
     if _metadata_fetch_transport_failed(provider, model, use_local):
         ev = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider, ts=utc_now_iso(),
                                 detail="provider unreachable during probe")
@@ -1082,7 +1085,7 @@ def _probe_window(
         ev = CapabilityEvidence(0, STATUS_UNPROBEABLE, SOURCE_NONE, fp, model, provider, ts=utc_now_iso(),
                                 detail="no provider window metadata; sizing evidence is unknown")
     _store_evidence(drive_root, "probes", fp, ev.to_json())
-    return ev
+    return ev, "failed" if ev.status == STATUS_FAILED else ""
 
 
 def with_role_window(evidence: CapabilityEvidence, window: int) -> CapabilityEvidence:
@@ -1116,15 +1119,16 @@ def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, 
 def probe(drive_root: Any, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
 
-    One catalog read serves both: a read that answered also states the output limit, and a read that failed (live, or
-    its ten-minute record) is named by it, so neither is repeated. After a failed read a fetching probe of an unpinned
+    One catalog read serves both: a read that answered also states the output limit, and a read that failed (live, its
+    ten-minute record, or a live failure that kept an exact prior record stale) is named by it, so neither is
+    repeated. After a failed read a fetching probe of an unpinned
     Auto route plans by the pool's smallest fresh statement (``_pool_bound``); a reader that may not fetch keeps it unknown.
     """
     from dataclasses import asdict, replace
     from ouroboros.response_limits import probe_response_limit
 
-    evidence = _probe_window(drive_root, **route)
-    read_failed, read = evidence.status == STATUS_FAILED, dict(evidence.response_limit or {})
+    evidence, read = _probe_window(drive_root, **route)
+    read_failed, stated = read == "failed" or evidence.status == STATUS_FAILED, dict(evidence.response_limit or {})
     if is_known(evidence, require_fresh=True):
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
                                       source=evidence.source, observed_at=evidence.ts)
@@ -1143,7 +1147,7 @@ def probe(drive_root: Any, **route) -> CapabilityEvidence:
             ts=str(ack.get("ts") or ""), detail=f"owner-ack by {ack.get('owner') or 'owner'}",
             **{key: str(options.get(key) or "") for key in (
                 "source_id", "credential_profile_id", "account_fingerprint")})
-    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed, read=read))
+    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed, read=stated))
     return evidence
 
 
