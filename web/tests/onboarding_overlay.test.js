@@ -287,6 +287,7 @@ test('a completion that needs a restart names the chosen access level by its lab
         const card = overlayIn(dom.body).innerHTML;
         assert.match(card, /Cyber Pro access applies from the next start\. Until you restart Ouroboros, it keeps the access level it started with\./);
         assert.doesNotMatch(card, /cyber_pro|<code>/, 'the stored id is not what a person chose');
+        assert.match(card, />Open Ouroboros now</, 'the button opens the app now, whatever it was started with');
     } finally {
         dom.restore();
     }

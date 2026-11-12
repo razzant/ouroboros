@@ -14,6 +14,7 @@ import {
     LADDER_FOOTNOTE,
     MALFORMED_RECEIPT_CODE,
     VALUE_LADDER,
+    accessRowState,
     agentsOnlyAccess,
     agentsOutcomeText,
     agentsStepHtml,
@@ -193,6 +194,30 @@ test('agent-only subscriptions are told what they run and what Main needs; an un
         assert.match(mainSourceReason(connected, sources), /^Could not confirm that a connected account can run .*Retry model discovery,/);
     }
     assert.equal(agentsOnlyAccess([], codex), false, 'nothing connected is not an agents-only install');
+});
+
+test('the access row never offers what Continue refuses, and calls the API section Optional only when it is', () => {
+    const codex = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
+    const row = (facts) => accessRowState({ sources: codex, ...facts });
+    // A preview that failed while Continue is blocked asks for a Retry alone; with Continue open it offers both.
+    assert.match(row({ connected: ['claude'], previewError: 'Down.', continueBlocked: true }).note, /prepared: Down\. Retry\.$/);
+    assert.match(row({ connected: ['codex'], previewError: 'Down.' }).note, /Retry, or Continue to choose models yourself\.$/);
+    // Nothing connected: one of the ways forward, so Optional; connected and not yet known to serve a model
+    // (agents only, an unread or a failed list): no badge; a known model account: Optional; entered access: Configured.
+    assert.equal(row({ connected: [] }).badge, 'Optional');
+    assert.equal(row({ connected: ['claude'] }).badge, '');
+    assert.equal(row({ connected: ['claude'], sources: [], read: 'not_read' }).badge, '');
+    assert.equal(row({ connected: ['codex'], sources: [], read: 'failed' }).badge, '');
+    assert.equal(row({ connected: ['codex'] }).badge, 'Optional');
+    assert.equal(row({ connected: ['claude'], configured: true }).badge, 'Configured');
+    // Retry: hidden with nothing connected and after a healthy agents-only read; a failed preview brings it back.
+    assert.equal(row({ connected: [] }).retryHidden, true);
+    assert.equal(row({ connected: ['claude'] }).retryHidden, true);
+    assert.equal(row({ connected: ['claude'], previewError: 'Down.' }).retryHidden, false);
+    assert.equal(row({ connected: ['codex'] }).retryHidden, false, 'a healthy read can still be read again');
+    assert.match(row({ connected: ['codex'], sources: [], read: 'failed', readErrors: 'Offline.' }).note,
+        /Offline\. Your choices are kept\.$/);
+    assert.equal(row({ connected: ['codex'], checking: true }).note, 'Checking model sources…');
 });
 
 test('the limits warning stands under the rows in every state, before any connection', () => {

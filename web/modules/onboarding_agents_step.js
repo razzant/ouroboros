@@ -133,6 +133,29 @@ export function agentsOnlyAccess(connected = [], sources = []) {
     return connected.length > 0 && serving.size > 0 && !connected.some((harness) => serving.has(harness));
 }
 
+/**
+ * What the Accounts step's access row and its API section badge say for the current reads: facts in, words out.
+ * `continueBlocked` is the Continue button's own state, so the note never offers a step the button refuses.
+ */
+export function accessRowState({ connected = [], sources = [], read = 'ok', checking = false, readErrors = '',
+    previewError = '', configured = false, continueBlocked = false } = {}) {
+    const serves = connected.some((harness) => (sources || []).some((source) => source?.credentialHarness === harness));
+    const agentsOnly = !configured && agentsOnlyAccess(connected, sources);
+    const note = [checking ? 'Checking model sources…' : '',
+        !checking && read !== 'ok' && connected.length
+            ? `Model discovery is ${read === 'not_read' ? 'not available yet' : read}. ${readErrors} Your choices are kept.` : '',
+        previewError ? `Automatic assignments could not be prepared: ${previewError} `
+            + (continueBlocked ? 'Retry.' : 'Retry, or Continue to choose models yourself.') : ''];
+    return {
+        note: note.filter(Boolean).join(' '),
+        // A healthy read that names the connected accounts agents only leaves discovery nothing to retry.
+        retryHidden: (!connected.length || (agentsOnly && read === 'ok')) && !previewError,
+        // A section named beside Continue as a way forward is not "Optional": while no connected account is known to
+        // serve a model (agents only, or not read yet), the badge stays off.
+        badge: configured ? 'Configured' : connected.length && !serves ? '' : 'Optional',
+    };
+}
+
 /** Why Accounts cannot continue while nothing connected can serve a model role, with the way forward. */
 export function mainSourceReason(connected = [], sources = [], { snapshot, catalogKnown = false } = {}) {
     if (!connected.length) return 'Connect Codex, enter an API key, or choose a local model before continuing.';
