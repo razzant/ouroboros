@@ -80,7 +80,7 @@ test('cache writes read by what they followed, in the fact\'s own words', () => 
         'Not recorded',
     ]);
     assert.deepEqual(writes.map((row) => [row.calls, row.tokens, row.cost]), [
-        ['204', '149M', '$1,250.93'], ['444', '146M', '$1,189.29'], ['9', '1.2M', '$9.60 for 900k · 2 not split'], ['5', '700', '—']]);
+        ['204', '149M', '$1,250.93'], ['444', '146M', '$1,189.29'], ['9', '1.2M', '$9.60 for 900k tokens · 2 not split'], ['5', '700', '—']]);
 });
 
 test('an unavailable or empty period says so and invents nothing', () => {

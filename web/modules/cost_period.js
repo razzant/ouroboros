@@ -105,7 +105,7 @@ export function costPeriodPresentation(view) {
         // Its dollars are of the split calls' writes; when some calls are not split, the cell names those tokens.
         cost: row.unshared_calls >= row.calls ? '—'
             : `${formatUsd(row.write_cost)}${row.unshared_calls > 0
-                ? ` for ${compactTokens(row.shared_write_tokens)} · ${number(row.unshared_calls)} not split` : ''}`,
+                ? ` for ${compactTokens(row.shared_write_tokens)} tokens · ${number(row.unshared_calls)} not split` : ''}`,
     }));
     const observed = String(view.tariff_observed_at || '').slice(0, 10);
     return {

@@ -6101,8 +6101,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 [data-cost-class="cache_read"] { background: var(--chart-series-2); opacity: 0.42; }  /* older WebKit has no color-mix() */
 [data-cost-class="output"] { background: var(--chart-series-3); }
 [data-cost-class="uncached_input"] { background: var(--text-meta); }
-[data-cost-class="unclassified"] { background: var(--text-meta); opacity: 0.4; }
-[data-cost-class="unsplit"] { background: repeating-linear-gradient(135deg, var(--text-meta) 0 2px, transparent 2px 5px); }
+[data-cost-class="unclassified"], [data-cost-class="unsplit"] { background: var(--text-meta); opacity: 0.4; }  /* outside the four classes */
 .costs-period-writes td:first-child { overflow-wrap: anywhere; }
 /* The period choice wraps on a narrow card: under a finger it takes the touch minimum as its height. */
 @media (pointer: coarse) {
