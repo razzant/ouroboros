@@ -269,6 +269,7 @@ def _knowledge_write(
     ctx: ToolContext, topic: str, content: str | None = None, mode: str = "overwrite",
     scope: str = "", expected_revision: str | None = None, old_str: str | None = None,
     summary: str | None = None, reason: str = "", edits: list | None = None, version: str | None = None,
+    new_str: str | None = None,
 ) -> str:
     notes = []  # a value that means what omission means takes the omitted path, said in the result (tools/arg_feedback)
     if version == "" and mode != "revert":
@@ -282,6 +283,20 @@ def _knowledge_write(
         old_str = None
     try:
         sanitized = _sanitize_topic(topic)
+        if new_str is not None:  # the one-pair edit's replacement as other editors spell it: content
+            if not isinstance(new_str, str):
+                raise ValueError("new_str must be text, the replacement of old_str (empty text deletes it)")
+            if mode == "edit" and isinstance(old_str, str) and old_str:
+                if content not in (None, "", new_str):
+                    raise ValueError("new_str and content both give old_str's replacement and differ; pass one")
+                if content == "" and new_str:
+                    notes.append(ignored_argument_note("content", content, "new_str gives the replacement"))
+                content = new_str
+            elif new_str:
+                raise ValueError("new_str is the replacement of old_str in mode=edit, the same as content; "
+                                 + ("pass old_str with it" if mode == "edit" else f"mode={mode} takes its text as content"))
+            else:
+                notes.append(ignored_argument_note("new_str", new_str, "only an edit with old_str takes a replacement"))
         lifecycle = mode in ("archive", "restore")
         if mode not in _MODES or not isinstance(content, (str, type(None))):
             raise ValueError("content must be Markdown; mode must be " + ", ".join(_MODES))
@@ -449,9 +464,9 @@ def get_tools() -> List[ToolEntry]:
                 "note's enduring scope and when to open it, and is not a dated log of the latest edit. "
                 "Modes. overwrite replaces the note with content; its frontmatter fields merge with the retained ones. "
                 "append adds content at the end. edit replaces exact body text of the revision you read: one old_str by "
-                "content, or edits, a list of {old_str, new_str} items. Each old_str must occur exactly once in that "
-                "revision's body (never in an earlier item's result); items may touch but not overlap; all apply or "
-                "none; an empty new_str deletes; a refused item is named by its number. "
+                "content (or new_str), or edits, a list of {old_str, new_str} items. Each old_str must occur exactly "
+                "once in that revision's body (never in an earlier item's result); items may touch but not overlap; all "
+                "apply or none; an empty new_str deletes; a refused item is named by its number. "
                 "revert puts back an earlier version byte for byte: version is its revision. Text a write removes stays "
                 "in the note's history, which I can read (knowledge_read with view='history' or version=...) and put "
                 "back (mode='revert'). archive and restore own only the archive field and keep the body bytes; archive "
@@ -471,7 +486,8 @@ def get_tools() -> List[ToolEntry]:
                 "content": {"type": "string", "description": "Markdown, optionally with YAML frontmatter; supplied fields merge with retained ones. The text of overwrite and append, or the replacement of one old_str (empty deletes it). Omit for archive, restore, revert, an edits edit and a summary-only edit. No summary is generated from the body."},
                 "mode": {"type": "string", "enum": list(_MODES), "description": "overwrite, append, edit, revert, archive or restore, as this tool's description explains. Missing notes are created by overwrite/append only. The overview always stays active."},
                 "reason": {"type": "string", "description": "Why this write: optional on every mode and required for archive, which also records it in the archive field. Kept in the note's history, never written into its body; no automatic classification or summarization occurs."},
-                "old_str": {"type": "string", "description": "mode=edit, one pair: non-empty exact body text that occurs once; content replaces it (empty text deletes it). Omit both to change only the summary; edits replaces several places at once."},
+                "old_str": {"type": "string", "description": "mode=edit, one pair: non-empty exact body text that occurs once; content (or new_str) replaces it (empty text deletes it). Omit both to change only the summary; edits replaces several places at once."},
+                "new_str": {"type": "string", "description": "mode=edit with old_str: its replacement, the same as content (empty text deletes it). Pass one of the two."},
                 "edits": {"type": "array", "minItems": 1, "description": "mode=edit: several exact replacements in one revision-checked write, all or nothing. Each item is {old_str, new_str}: old_str is exact body text found once in the revision you read; new_str replaces it, empty deletes. Spans may touch, not overlap.",
                           "items": {"type": "object", "additionalProperties": False, "required": ["old_str", "new_str"],
                                     "properties": {"old_str": {"type": "string"}, "new_str": {"type": "string"}}}},

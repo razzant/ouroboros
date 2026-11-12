@@ -673,6 +673,44 @@ def test_empty_optional_write_values_take_the_omitted_path_and_say_so(tmp_path):
     assert _files(tmp_path) == before
 
 
+def test_the_one_pair_edit_takes_its_replacement_as_content_or_new_str(tmp_path):
+    """Other editors spell the replacement new_str: with mode=edit and old_str it is exactly content; both given
+    and different is an argument error; elsewhere an empty new_str is ignored and a non-empty one names content."""
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="pair")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ctx)
+    target = address(tmp_path, "pair")
+    store.write_knowledge_note(target, "# Pair\n\nOld one.\nOld two.\nOld three.\n")
+
+    def write(**arguments):
+        revision = store.read_knowledge_note(target).revision
+        return registry.execute("knowledge_write", {"topic": "pair", "scope": "global", "mode": "edit",
+                                                    "expected_revision": revision, **arguments})
+
+    assert "ignored_arguments" not in _meta(write(old_str="Old one.", new_str="New one."))
+    _meta(write(old_str="Old two.", content="New two."))
+    _meta(write(old_str="New two.", content="Newer two.", new_str="Newer two."))  # the same text twice is one
+    filled = _meta(write(old_str="Old three.", content="", new_str="New three."))
+    assert filled["ignored_arguments"] == ["content='' ignored: new_str gives the replacement"]
+    _meta(write(old_str="New one.\n", new_str=""))  # an empty new_str deletes, as empty content does
+    assert store.read_knowledge_note(target).text.endswith("# Pair\n\nNewer two.\nNew three.\n")
+    before = _files(tmp_path)
+    for arguments, message in (
+            ({"old_str": "Newer two.", "content": "A", "new_str": "B"}, "new_str and content both give"),
+            ({"summary": "The pair.", "new_str": "B"}, "same as content; pass old_str with it"),
+            ({"mode": "append", "content": "x", "new_str": "y"}, "mode=append takes its text as content"),
+            ({"mode": "overwrite", "new_str": "# Pair\n"}, "mode=overwrite takes its text as content")):
+        reply = write(**arguments)
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply, (arguments, reply)
+    assert _files(tmp_path) == before
+    appended = _meta(registry.execute("knowledge_write", {"topic": "pair", "scope": "global", "mode": "append",
+                                                          "content": "Tail.\n", "new_str": ""}))
+    assert appended["ignored_arguments"] == ["new_str='' ignored: only an edit with old_str takes a replacement"]
+    schema = next(entry for entry in tools.get_tools() if entry.name == "knowledge_write").schema
+    assert schema["parameters"]["properties"]["new_str"]["type"] == "string"
+    assert "one old_str by content (or new_str)" in schema["description"]
+
+
 def test_revert_publishes_the_exact_bytes_of_an_earlier_version(tmp_path):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
     target = address(tmp_path, "shore")
