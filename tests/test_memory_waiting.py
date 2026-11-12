@@ -598,3 +598,39 @@ def test_event_openings_are_bounded_and_an_empty_room_names_its_last_fact(tmp_pa
     event = room["events"]
     assert event["first"]["opening"] == first[:160]
     assert "Event: 1 arrivals" in events.room_line(room) and "no arrivals" not in events.room_line(room)
+
+
+def test_a_conversation_of_several_rooms_reads_its_header_through_its_catalogue_place(tmp_path):
+    """rev_grok REV1 R3: a collapsed conversation's header counted all its rooms but read only the last one. Several
+    rooms read through the conversation's place in the room catalogue, which a real memory_read opens at that header
+    and lists every room's reader; one room keeps its direct reader; tasks without a gist read in their own room."""
+    import copy
+    from ouroboros import dialogue_store as ds, memory_view_conversation_forms as forms
+    shared.world(tmp_path)
+    focus = _event_row("aaa", "focus", 0, "Ann")
+    rows = [focus]
+    for n, thread in enumerate(("one", "two")):  # my reply and Ann's later word in each thread: no events, none overheard
+        rows += [_event_row("harbor", thread, 1 + 2 * n, direction="out", type="presence_delivery", task_id=f"answer0{n}"),
+                 _event_row("harbor", thread, 2 + 2 * n, "Ann", text=f"Ann's word in thread {thread}.")]
+    for row in rows:
+        ds.append(tmp_path, "chat", row)
+    group = _event_group(mv.capture_memory_view(tmp_path, {"id": "root0001", "chat_id": focus["chat_id"]},
+        dataclasses.replace(mv.ROLE_DEFAULTS["integrator"], room_id=str(focus["chat_id"]))))
+    assert len(group["rooms"]) == 2 and not any(r["overheard"] or r.get("events") for r in group["rooms"])
+    header = forms.identity_line(group)
+    assert header in forms.render_group(group, set(), set(), 1) and "rows=true" not in header
+    start = int(re.search(r"memory_read\(room_id='\*', start=(\d+)\)$", header)[1])
+    ctx = _ctx(tmp_path, "root0001", chat=focus["chat_id"])
+    catalogue = _memory_read(ctx, room_id="*", start=start)
+    assert catalogue.splitlines()[2] == header
+    for thread, room in zip(("one", "two"), group["rooms"]):
+        assert f"memory_read(room_id='{room['room_id']}', rows=true)" in catalogue
+        assert f"Ann's word in thread {thread}." in _memory_read(ctx, room_id=room["room_id"], rows=True)
+    single = {**group, "rooms": group["rooms"][:1]}
+    assert forms.identity_line(single).endswith(f"; memory_read(room_id='{group['rooms'][0]['room_id']}', rows=true)")
+    first, last = (room["room_id"] for room in group["rooms"])
+    tasked = copy.deepcopy(group)
+    tasked["rooms"][0]["tasks"] = [{"task": "silent01", "line": "[t; host; task silent01] Done", "pos": 1}]
+    line = forms.render_group(tasked, set(), set(), 1)
+    assert f"1 tasks without a gist; memory_read(room_id='{first}', rows=true)" in line
+    assert f"memory_read(room_id='{last}', rows=true)" not in line

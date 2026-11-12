@@ -215,17 +215,21 @@ def floor_steps(groups: Iterable[Mapping[str, Any]], *, index=None) -> Dict[str,
 
 
 def identity_line(group: Mapping[str, Any]) -> str:
-    """A group as its one line: where, when, what is open there and how to read it."""
+    """A group as its one line: where, when, what is open there and how to read it. One room reads by its rows;
+    several read through this conversation's place in the room catalogue, which names every room's reader (a view
+    saved before every such group kept that place reads the catalogue from its start)."""
     from ouroboros.memory_view import _minute
 
     rooms = group["rooms"]
     engaged = sum(1 for room in rooms if room["engaged"])
     tasks = sum(len(room["tasks"]) for room in rooms)
     running = "".join(f"; running {work}" for work in group["running"])
+    start = group.get("catalogue_start")
+    reader = (f"memory_read(room_id='{rooms[0]['room_id']}', rows=true)" if len(rooms) == 1 else
+              "memory_read(room_id='*'" + (f", start={start})" if start is not None else ")"))
     return (f"- {group['label']}; last activity {_minute(group['latest']) if group['latest'] else 'unknown'}; "
             f"{engaged} room{'' if engaged == 1 else 's'} where a person or I spoke, {len(rooms) - engaged} other; "
-            f"{tasks} task{'' if tasks == 1 else 's'}{running}; "
-            f"memory_read(room_id='{rooms[-1]['room_id']}', rows=true)")
+            f"{tasks} task{'' if tasks == 1 else 's'}{running}; {reader}")
 
 
 def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str], as_line: int, *, data=None,
@@ -258,9 +262,9 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
                 lines.append(fold)
         if overheard := _overheard_line(group, data):
             lines.append(overheard)
-        no_gist = sum(not task.get("gist") for room in group["rooms"] for task in room["tasks"])
-        if no_gist:
-            lines.append(f"{no_gist} tasks without a gist; memory_read(room_id='{group['rooms'][-1]['room_id']}', rows=true)")
+        for room in group["rooms"]:  # each count reads in the room that holds those tasks
+            if no_gist := sum(not task.get("gist") for task in room["tasks"]):
+                lines.append(f"{no_gist} tasks without a gist; memory_read(room_id='{room['room_id']}', rows=true)")
         return "\n".join([*lines, *held])
     running = "".join(f"; running {work}" for work in group["running"])
     lines = [f"### {group['label']}{running}"]

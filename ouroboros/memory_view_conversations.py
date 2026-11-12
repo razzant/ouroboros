@@ -223,8 +223,8 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                         f"memory_read(room_id='{where}', rows=true, from='{first}', to='{first}')")
         item["words"].append({**word, "id": f"{item['room_id']}:{word['address']}", "rank": author["rank"]})
     ordered = [groups[key] for key in sorted(groups)]
-    if event_rooms or any(room["overheard"] for group in ordered for room in group["rooms"]):
-        events.locate_catalogue(ordered)
+    if event_rooms or any(room["overheard"] or len(group["rooms"]) > 1 for group in ordered for room in group["rooms"]):
+        events.locate_catalogue(ordered)  # event, unread and several-room headers read their place in it
     for group in ordered:
         group["rooms"] = [room for room in group["rooms"] if room["room_id"] != str(spec.room_id)]
         group["latest"] = max((str(room["facts"].get("latest") or "") for room in group["rooms"]), default="")
