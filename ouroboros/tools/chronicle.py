@@ -1314,7 +1314,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
         elif str(room_id) == "conversations":
             text = _read_owed(root, store, start, limit)
         elif str(room_id) in {"late_reviews", "notes"}:
-            from ouroboros.late_review_marks import mark_outcome
+            from ouroboros.late_review_marks import mark_landing, mark_outcome
             from ouroboros.memory_view import _notes_by_room, room_labeler
             from ouroboros.memory_waiting import listing
 
@@ -1322,7 +1322,8 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
                 head, body = listing(str(room_id), store.active_marks(None) if room_id == "late_reviews" else (),
                                      _notes_by_room(store) if room_id == "notes" else {},
                                      label=room_labeler(root) if room_id == "late_reviews" else None,
-                                     outcome=lambda mark: mark_outcome(mark, root))
+                                     outcome=lambda mark: mark_outcome(mark, root),
+                                     landing=lambda mark: mark_landing(mark, root))
             text = _window(head, body, start, limit, lambda n: f"memory_read(room_id='{room_id}', start={n})")
         elif node_id:
             text = _read_node(root, str(node_id), start, limit, str(revision or ""))
