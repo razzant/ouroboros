@@ -205,6 +205,10 @@ def windows(agent, monkeypatch, native_guard):
         ("retire record", reason)) or True)
     monkeypatch.setattr(launcher, "kill_process_tree", lambda proc, **kw: calls.append("kill tree"))
     monkeypatch.setattr(launcher, "terminate_job", lambda job: calls.append(("terminate", job)))
+    from ouroboros import launcher_server_reaper as reaper
+    monkeypatch.setattr(reaper._pl, "terminate_job", launcher.terminate_job)
+    monkeypatch.setattr(reaper._pl, "job_has_running_member", lambda job: False)
+    monkeypatch.setattr(reaper._pl, "collect_descendant_pids", lambda pid: [])
     monkeypatch.setattr(launcher, "close_job", lambda job: calls.append(("close", job)))
     monkeypatch.setattr(launcher, "assign_pid_to_job", lambda job, pid: calls.append(("assign", job)) or True)
     monkeypatch.setattr(launcher, "resume_process", lambda pid: calls.append("resume") or True)

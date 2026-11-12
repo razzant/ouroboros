@@ -97,6 +97,46 @@ def kill_runtime_orphans(data_dir, cleanup_recorded_server, *, reason: str, log)
             pass
 
 
+def finish_generation(proc, job, *, windows, stop_engine, kill_tree, retained_roots) -> bool:
+    """Stop captured starters before the final fresh engine-custody sweep.
+
+    Early engine cleanup preserves target capture before parents disappear. It is
+    not a final result: another old-generation worker may spawn during that stop.
+    The launcher singleflights this entire operation, not just its first sweep.
+    """
+    from ouroboros.process_containment import pid_is_zombie
+
+    stop_engine("Launcher before starters")
+    if windows and job is not None:
+        if problem := _pl.terminate_job(job):
+            log.error("Generation starters unconfirmed: %s", problem)
+            return False
+        deadline = time.monotonic() + 5
+        while _pl.job_has_running_member(job) is not False:
+            if time.monotonic() >= deadline:
+                log.error("Generation Job members did not confirm exit")
+                return False
+            time.sleep(.05)
+    elif callable(getattr(proc, "poll", None)) and proc.poll() is not None:
+        pass  # no live captured root to signal; foreign/reused PIDs grant no authority
+    else:
+        retained, starters = retained_roots(), set(_pl.collect_descendant_pids(proc.pid))
+        for root in retained:
+            starters.difference_update({root, *_pl.collect_descendant_pids(root)})
+        kill_tree(proc, exclude_pids=retained)
+        deadline = time.monotonic() + 5
+        while any(not (_pl.pid_provably_gone(pid) or pid_is_zombie(pid)) for pid in starters):
+            if time.monotonic() >= deadline:
+                log.error("Captured generation starters did not confirm exit")
+                return False
+            time.sleep(.05)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return False
+    return stop_engine("Launcher after starters")  # new snapshot, never early-stop reuse
+
+
 def _path_forms(base, leaf: str = "") -> Set[str]:
     """The literal and the symlink-resolved spelling of a path. A command line or an environment
     carries whatever spelling the launcher passed, which `resolve()` may not reproduce (``/var`` vs

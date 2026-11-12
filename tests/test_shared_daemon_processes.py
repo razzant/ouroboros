@@ -254,6 +254,21 @@ info = json.loads((root/'claudexor'/'fixture-engine.json').read_text())
 info.update(worker_pid=os.getpid(), ordinary_pid=ordinary.pid, custody_pid=custody_pid)
 (root/'ready.json.tmp').write_text(json.dumps(info))
 (root/'ready.json.tmp').replace(root/'ready.json')
+if os.environ.get('OUROBOROS_FIXTURE_REPLACEMENT'):
+    while not (root/'replace-engine').exists(): time.sleep(.02)
+    # A different worker has its own, still-unlatched manager in the same generation Job.
+    replacement_code = """
+import json,pathlib,sys,time
+from types import SimpleNamespace
+from ouroboros import claudexor_daemon as daemon,claudexor_runtime
+root=pathlib.Path(sys.argv[1]);command=[sys.executable,'-u','-c',sys.argv[2]]
+claudexor_runtime.get_runtime_manager=lambda:SimpleNamespace(ensure=lambda:command,pin=None,status=lambda:{'version':'3.9.8','build_sha':'a'*40,'source':'fixture'})
+daemon.ensure_owned_gateway(startup_wait_sec=30).close()
+(root/'replacement.json.tmp').write_text((root/'claudexor'/'fixture-engine.json').read_text())
+(root/'replacement.json.tmp').replace(root/'replacement.json')
+time.sleep(120)
+"""
+    subprocess.Popen([sys.executable,'-u','-c',replacement_code,str(root),sys.argv[2]])
 time.sleep(120)
 '''
 
@@ -261,7 +276,7 @@ _LAUNCHER = r'''
 import subprocess, sys, time
 from ouroboros import platform_layer as pl
 kwargs = pl.subprocess_new_group_kwargs()
-use_job = pl.IS_WINDOWS and sys.argv[4] != 'headless'
+use_job = pl.IS_WINDOWS and sys.argv[4] not in ('headless', 'generation')
 if use_job: kwargs.update(pl.subprocess_new_group_kwargs(breakaway_from_job=True, suspended=True))
 worker = subprocess.Popen([sys.executable, '-u', '-c', sys.argv[2], sys.argv[1], sys.argv[3]], **kwargs)
 if use_job:
@@ -343,13 +358,19 @@ def shared_tree(tmp_path, monkeypatch, request):
     for crossing in ("CLAUDEXOR_CONFIG_DIR", "CLAUDEXOR_DAEMON_SOCK", "CLAUDEXOR_CONTROL_PORT"):
         env.pop(crossing, None)
     log_path = tmp_path / "launcher.log"
+    generation_job = None
+    generation = os.name == "nt" and getattr(request, "param", "") == "generation"
     with log_path.open("wb") as log:
         parent = subprocess.Popen(
             [_fixture_python(), "-u", "-c", _LAUNCHER, str(tmp_path), _WORKER, _ENGINE,
              getattr(request, "param", "launcher")], env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
-            **pl.subprocess_new_group_kwargs(),
+            **pl.subprocess_new_group_kwargs(suspended=generation),
         )
+    if generation:
+        generation_job = pl.create_kill_on_close_job(allow_breakaway=True)
+        assert generation_job and pl.assign_pid_to_job(generation_job, parent.pid)
+        assert pl.resume_process(parent.pid)
     info = {}
     try:
         try:
@@ -370,6 +391,8 @@ def shared_tree(tmp_path, monkeypatch, request):
                if (tmp_path / "claudexor" / "daemon.log").is_file() else "<missing>")
         )
         info = json.loads((tmp_path / "ready.json").read_text())
+        if generation_job is not None:
+            info["generation_job"] = generation_job
         _wait(lambda: (tmp_path / "claudexor" / "client-work.txt").exists())
         if os.environ.get("OUROBOROS_FIXTURE_HANDLES"):
             _wait(lambda: (tmp_path / "claudexor" / "leaf-held.ready").exists())
@@ -383,12 +406,14 @@ def shared_tree(tmp_path, monkeypatch, request):
         if parent.poll() is None:
             pl.kill_process_tree(parent)
         parent.wait(timeout=5)
-        if not info:
+        if not info or os.environ.get("OUROBOROS_FIXTURE_REPLACEMENT"):
             custody.stop_ledgered_processes(tmp_path, {daemon.CUSTODY_PURPOSE})
         for name in ("leaf_pid", "ordinary_pid", "harness_pid", "worker_pid", "custody_pid", "pid"):
             if info.get(name) and not _gone(info[name]):
                 pl.kill_pid_tree(info[name])
                 _wait(lambda: _gone(info[name]))
+        if info.get("generation_job"):
+            pl.close_job(info["generation_job"])
 
 
 def _continues(root, info):
@@ -490,7 +515,7 @@ def test_launcher_forced_stop_ends_engine_before_server_fallback(monkeypatch):
     monkeypatch.setattr(launcher, "kill_process_tree", lambda proc, **kw: calls.append((proc.pid, kw)))
     monkeypatch.setattr(launcher, "_cleanup_recorded_server_group_for_pid", lambda *a: None)
     launcher.stop_agent()
-    assert calls == ["graceful", "engine", (9990011, {"exclude_pids": {9990022}})]
+    assert calls == ["graceful", "engine", (9990011, {"exclude_pids": {9990022}}), "engine"]
 
 
 def test_recorded_server_cleanup_preserves_daemon_exclusions(tmp_path, monkeypatch):
@@ -652,3 +677,61 @@ def test_forced_application_stop_latches_start_without_a_global_panic(tmp_path, 
     assert manager.stop_outcome(force=True) == "nothing_to_stop"
     assert manager._panic_requested
     assert not (tmp_path / "state" / "panic_stop.flag").exists()
+
+
+@pytest.fixture
+def replacement_tree(monkeypatch, request):
+    monkeypatch.setenv("OUROBOROS_FIXTURE_REPLACEMENT", "1")
+    return request.getfixturevalue("windows_handle_tree")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native replacement engine and deny-delete handles")
+@pytest.mark.parametrize("shared_tree", ["generation"], indirect=True)
+def test_forced_exit_reaps_engine_started_between_early_stop_and_server_death(
+    tmp_path, monkeypatch, replacement_tree, shared_tree,
+):
+    import launcher
+    from ouroboros import config, server_restart
+    parent, first = replacement_tree
+    for module in (config, launcher, server_restart):
+        monkeypatch.setattr(module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(daemon, "_MANAGER", None)
+    monkeypatch.setattr(launcher, "_agent_proc", parent)
+    job = first["generation_job"]
+    monkeypatch.setattr(launcher, "_agent_job", job)
+    def close_job(handle):
+        result = pl.close_job(handle)
+        first["generation_job"] = None
+        return result
+    monkeypatch.setattr(launcher, "close_job", close_job)
+    monkeypatch.setattr(launcher, "_agent_start", None)
+    monkeypatch.setattr(launcher, "_agent_stopping", None)
+    monkeypatch.setattr(launcher, "LAUNCHER_STOP_GRACE_SEC", .1)
+    monkeypatch.setattr(launcher, "_server_process_record_path", lambda: tmp_path / "server_process.json")
+    monkeypatch.setattr(parent, "terminate", lambda: None)
+    original, stops, replacement = server_restart._stop_owned_daemon, [], {}
+
+    def stop(label):
+        result = original(label)
+        stops.append(result)
+        if len(stops) > 1:
+            assert pl.job_has_running_member(job) is False, "final sweep preceded the starters barrier"
+        if len(stops) == 1:
+            assert result and _gone(first["pid"])
+            (tmp_path / "claudexor" / "leaf-held.ready").unlink()
+            (tmp_path / "replace-engine").touch()  # a separate, still-live worker starts again
+            _wait(lambda: (tmp_path / "replacement.json").exists(), timeout=40)
+            _wait(lambda: (tmp_path / "claudexor" / "leaf-held.ready").exists())
+            replacement.update(json.loads((tmp_path / "replacement.json").read_text()))
+            replacement.update(json.loads((tmp_path / "claudexor" / "leaf.json").read_text()))
+            assert replacement["pid"] != first["pid"] and parent.poll() is None
+            with pytest.raises(OSError):
+                (tmp_path / "claudexor" / "leaf-held.txt").unlink()
+        return result
+
+    monkeypatch.setattr(server_restart, "_stop_owned_daemon", stop)
+    assert launcher.stop_agent()
+    _wait(lambda: all(_gone(replacement[k]) for k in ("pid", "harness_pid", "leaf_pid")))
+    home = tmp_path / "claudexor"
+    home.rename(tmp_path / "released-replacement")
+    assert len(stops) == 2, "successful early cleanup is not a post-starters confirmation"

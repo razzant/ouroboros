@@ -582,18 +582,7 @@ def stop_agent() -> bool:
         proc.wait(timeout=grace)
         confirmed = True
     except subprocess.TimeoutExpired:
-        _stop_generation_engine(proc)  # capture the broken-away engine before the server Job dies
-        if IS_WINDOWS and job is not None:
-            terminate_job(job)
-        else:
-            try:
-                kill_process_tree(proc, exclude_pids=_retained_shared_daemon_pids())
-            except Exception:
-                log.warning("Shared daemon custody unavailable; stopping only the captured server", exc_info=True)
-                proc.kill()
-        with suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=5)
-            confirmed = True
+        return _retire_agent(proc, "forced_stop")  # one owner stops starters, then rechecks engine custody
     except Exception:
         log.warning("Ordinary agent stop failed", exc_info=True)
     if not (confirmed or (callable(getattr(proc, "poll", None)) and proc.poll() is not None)):
@@ -602,36 +591,40 @@ def stop_agent() -> bool:
     return _retire_agent(proc, "stop_agent")
 
 
-def _stop_generation_engine(proc) -> bool:
-    """One engine-stop result for forced cleanup and retirement of this captured server."""
+def _retire_agent(proc, reason: str) -> bool:
+    """Join the whole teardown: early capture, starters gone, fresh engine cleanup, retirement."""
     from concurrent.futures import Future
+    from ouroboros.launcher_server_reaper import finish_generation
     from ouroboros.server_restart import _stop_owned_daemon
+    global _agent_proc, _agent_job, _agent_start, _agent_stopping
     with _agent_lock:
-        pending = getattr(proc, "_ouroboros_engine_stop", None)
+        pending = getattr(proc, "_ouroboros_retirement", None)
+        if pending is not None and pending.done() and pending.result() is False:
+            pending = None  # a later explicit stop may retry retained, unconfirmed custody
         if pending is None:
-            proc._ouroboros_engine_stop = result = Future()
+            proc._ouroboros_retirement = result = Future()
+        job = _agent_job if _agent_proc is proc else None
     if pending is not None:
-        return pending.result()  # same generation, same stop: never wait while holding _agent_lock
+        return pending.result()  # no launcher lock across a physical stop or its wait
     confirmed = False
     try:
-        confirmed = _stop_owned_daemon("Launcher generation exit")
-        return confirmed
+        if not finish_generation(proc, job, windows=IS_WINDOWS, stop_engine=_stop_owned_daemon,
+                                 kill_tree=kill_process_tree, retained_roots=_retained_shared_daemon_pids):
+            return False
+        if not _cleanup_recorded_server_group_for_pid(proc.pid, reason):
+            return False
+        if IS_WINDOWS and job is not None and close_job(job):
+            return False
+        with _agent_lock:
+            if _agent_proc is proc:
+                _agent_proc = _agent_job = _agent_start = _agent_stopping = None
+        confirmed = True
+        return True
+    except Exception:
+        log.exception("Generation teardown unconfirmed; publication retained")
+        return False
     finally:
         result.set_result(confirmed)
-
-
-def _retire_agent(proc, reason: str) -> bool:
-    """Only a reaped server may release its publication, Job and serialized record."""
-    global _agent_proc, _agent_job, _agent_start, _agent_stopping
-    if not _stop_generation_engine(proc):
-        return False
-    with _agent_lock:
-        job = _agent_job if _agent_proc is proc else None
-        if _agent_proc is proc:
-            _agent_proc = _agent_job = _agent_start = _agent_stopping = None
-    if IS_WINDOWS and job is not None:
-        close_job(job)
-    return _cleanup_recorded_server_group_for_pid(proc.pid, reason)
 
 
 def _read_port_file(default: Optional[int] = AGENT_SERVER_PORT) -> Optional[int]:

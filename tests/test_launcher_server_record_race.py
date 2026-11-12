@@ -180,6 +180,25 @@ def test_recycle_and_lifecycle_join_one_generation_retirement(launcher_root, mon
         monitor.join(timeout=5)
     assert not closer.is_alive() and not monitor.is_alive()
     assert joined, "in-progress retirement must not abort the requested successor"
-    assert calls.count("closer") == 1
+    assert calls.count("closer") == 2, "early capture and final sweep share one whole teardown"
     assert starts == ([4242, 4243] if stopped else [4242])
-    assert calls.count("monitor") == (1 if stopped else 0), "only the successor has another retirement"
+    assert calls.count("monitor") == (2 if stopped else 0), "only the successor has another teardown"
+
+
+@pytest.mark.parametrize("members", [False, True, None])
+def test_final_engine_sweep_requires_confirmed_empty_job(monkeypatch, members):
+    from types import SimpleNamespace
+    from ouroboros import launcher_server_reaper as reaper
+    calls, ticks = [], iter([0, 6])
+    monkeypatch.setattr(reaper, "time", SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _: None))
+    monkeypatch.setattr(reaper._pl, "terminate_job", lambda job: calls.append("terminate") or "")
+    monkeypatch.setattr(reaper._pl, "job_has_running_member", lambda job: members)
+    result = reaper.finish_generation(
+        SimpleNamespace(wait=lambda **kw: calls.append("wait")), object(), windows=True,
+        stop_engine=lambda label: calls.append(label) or True,
+        kill_tree=lambda *a, **kw: pytest.fail("Job path used numeric tree fallback"),
+        retained_roots=lambda: set(),
+    )
+    assert result is (members is False)
+    assert calls == (["Launcher before starters", "terminate", "wait", "Launcher after starters"]
+                     if members is False else ["Launcher before starters", "terminate"])
