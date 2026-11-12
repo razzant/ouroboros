@@ -9,7 +9,6 @@ from ouroboros import (
     config,
     model_slots,
     provider_models,
-    review,
     review_model_routes,
     runtime_limits,
     settings_defaults,
@@ -17,7 +16,6 @@ from ouroboros import (
     safety_config,
 )
 
-REPO = pathlib.Path(__file__).parents[1]
 
 _LEAVES = (settings_defaults, settings_scales, model_slots, review_model_routes, runtime_limits, safety_config)
 
@@ -391,14 +389,3 @@ def test_settings_extraction_owner_inventory_is_exact():
             seen[name] = module.__name__
             assert owners.get(name) is module, f"{module.__name__} owns an unmapped name: {name}"
     assert set(seen) == set(owners)
-
-
-def test_settings_extraction_size_bounds_have_meaningful_headroom():
-    """The settings family meets the repository's line contract as the size lane's tip check reads it: a module in
-    the 1001-1500 band or past the cap has its entry in `ouroboros/size_ratchet_manifest.py` (one at 1501-1600 lines
-    needs none). The `size_ratchet` lane is that contract's blocking home; this test keeps no number of its own."""
-    inventory = review.collect_size_ratchet_inventory(REPO, repo_paths=[
-        pathlib.Path(module.__file__).relative_to(REPO).as_posix() for module in (config, *_LEAVES)])
-    manifest = review.load_size_ratchet_manifest(REPO / review.SIZE_RATCHET_MANIFEST_PATH)
-    assert inventory.band_paths <= set(manifest.band_paths)
-    assert inventory.giant_paths <= manifest.giant_paths
