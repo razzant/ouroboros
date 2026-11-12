@@ -29,7 +29,7 @@ mailbox acknowledgement of a notice is not that release.
 
 A left wave's mark also keeps what its record said when it was published (``review.outcome``, from
 ``outcome_facts``: the verdict word, the findings of each kind, how many asked answers arrived and how
-many advisers gave none), and its head says the same in words. The waiting line counts the marks whose
+many answers asked of advisers are unreadable, one per adviser and question), and its head says the same in words. The waiting line counts the marks whose
 outcome is a ``clean_pass`` and those of a verdict-bearing review that keep no outcome; the list
 prints each mark's outcome, reading the review record of an older mark as it stands now
 (``mark_outcome``), and what landed of a commit review's change (``mark_landing``). These are facts
