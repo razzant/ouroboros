@@ -247,10 +247,11 @@ def note_content_refusal(total: dict, usage: dict, msg: dict) -> dict:
 
 
 def _round_rows(usage: dict, round_idx) -> list:
-    """Round ``round_idx``'s calls in ``llm_call_refs`` order, each refusal with its kept facts; [] while none is kept."""
+    """Round ``round_idx``'s calls in ``llm_call_refs`` order, each refusal with its facts where they are kept (a restore
+    drops the record and keeps the rows)."""
     kept = {entry.get("llm_call_id"): entry for entry in usage.get(ROUND_REFUSALS_KEY) or () if entry.get("round") == round_idx}
     return [{**row, **kept.get(row.get("llm_call_id"), {})} for row in usage.get("llm_call_refs") or ()
-            if kept and isinstance(row, dict) and row.get("round") == round_idx]
+            if isinstance(row, dict) and row.get("round") == round_idx]
 
 
 def _ask_route(row: dict) -> str:
@@ -324,8 +325,9 @@ def with_refusal_facts(ctx, pending: str) -> str:
 
 
 def round_failure_words(usage: dict, round_idx) -> str:
-    """Every failure of round ``round_idx`` when its record keeps a provider content refusal, each kind in the host's
-    words with the routes that met it and how often; "" for any other round (the forced final's prompt, the terminal)."""
+    """Every failure of round ``round_idx`` when its calls met a provider content refusal (its rows say so, kept record
+    or not), each kind in the host's words with the routes that met it and how often; "" for any other round (the
+    forced final's prompt, the terminal)."""
     from ouroboros.loop_transport import _failure_words
 
     kinds: dict = {}

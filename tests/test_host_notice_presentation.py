@@ -158,10 +158,11 @@ def test_without_a_provider_sentence_the_host_classifies_and_points_at_logs(tmp_
 def test_a_terminal_names_every_failure_of_a_round_that_met_a_content_refusal():
     """From the ending round's own record (its ``llm_call_refs`` rows, its kept refusals): each failure by its kind
     with its routes and how often, a refusal in its own words and never as an outage, an outage that did happen in its
-    own; another round's rows stay out, a later round's end never reads an earlier round's record as its own, and a
-    round with no refusal kept reads exactly as before."""
+    own; another round's rows stay out, a later round's end never reads an earlier round's record as its own, a round
+    whose kept refusals a restore dropped still names them from its restored rows (the told row still needs them), and
+    a round with no refusal reads exactly as before."""
     from ouroboros.loop_transport import _FAILURE_KIND_WORDS
-    from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY
+    from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY, refusal_facts
 
     rows = [{"llm_call_id": call_id, "round": 4, "model": model, "use_local": False, "failure_code": code}
             for call_id, model, code in (("a", "primary/model", "transport_unavailable"), ("b", "spare/opus", "content_filter"),
@@ -178,8 +179,12 @@ def test_a_terminal_names_every_failure_of_a_round_that_met_a_content_refusal():
     assert generic.endswith(met) and "outage" not in generic
     later = provider_terminal_fallback_text(usage, round_idx=5, is_transport_wait=False, **flags)  # round 4's record kept
     assert later == generic[:-len(met)]
-    del usage[ROUND_REFUSALS_KEY]
-    assert provider_terminal_fallback_text(usage, round_idx=4, is_transport_wait=False, **flags) == generic[:-len(met)]
+    restored = {key: value for key, value in usage.items() if key != ROUND_REFUSALS_KEY}  # as a restore rebinds the usage
+    assert provider_terminal_fallback_text(restored, round_idx=4, is_transport_wait=False, **flags) == generic  # before: no words
+    assert provider_terminal_fallback_text(restored, round_idx=3, is_transport_wait=False, **flags) == generic[:-len(met)]
+    answered = [*rows, {"llm_call_id": "e", "round": 4, "model": "spare/fable", "use_local": False}]
+    assert refusal_facts({**usage, "llm_call_refs": answered}, 5).startswith("This round's asks")
+    assert refusal_facts({**restored, "llm_call_refs": answered}, 5) == ""  # the provider's words and money are the record's
 
 
 def test_a_body_error_inside_an_empty_response_carries_the_providers_sentence(tmp_path):
