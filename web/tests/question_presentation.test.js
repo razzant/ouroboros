@@ -20,19 +20,28 @@ test('whether a question still waits on the owner is one rule on both sides', ()
     assert.equal(questionWaits(lost), false);
 });
 
-test('the head mark beside each word: amber only while the task waits for the answer', () => {
+test('the head mark beside each word: amber exactly while Main\'s pill counts the question', () => {
     const hue = (row) => questionMark(row).hue;
-    // Every row the Python producer emits reads one dot, in the grammar's hues.
-    for (const { case: name, row, status } of cases) {
-        assert.equal(questionMark(row).shape, 'dot', name);
-        assert.equal(hue(row) === 'owner', status === 'Waiting for your answer' || unknownDeliveryRemovable(row), name);
-        assert.ok(['owner', 'ok', 'neutral', 'ink'].includes(hue(row)), name);
+    // Every row the Python producer emits reads one dot, in the grammar's hues: amber exactly where the pill counts it
+    // (the pointer rows are a Project's), whatever its words say; the words themselves do not change.
+    for (const { case: name, row, status, waits } of cases) {
+        const project = { ...row, project_id: 'p' };
+        assert.equal(questionMark(project).shape, 'dot', name);
+        assert.equal(hue(project) === 'owner', waits, name);
+        assert.equal(questionPresentation(project).status, status, name);
+        assert.ok(['owner', 'ok', 'neutral', 'ink'].includes(hue(project)), name);
     }
-    assert.equal(hue({ state: 'open', wait_for_answer: true }), 'owner');
-    assert.equal(hue({ state: 'open', owner_wait_state: 'waiting' }), 'owner');
-    for (const row of [{ state: 'open' }, { state: 'open', wait_for_answer: true, wait_ended_at: 'x' },
-        { state: 'open', owner_wait_state: 'resumed' }, { state: 'expired_terminal', wait_for_answer: true }, {},
-        { state: 'mystery' }]) assert.equal(hue(row), 'neutral', JSON.stringify(row));
+    // Whichever field carries the state, every unanswered question is amber: its task waits, went on or ended.
+    for (const row of [{ state: 'open', wait_for_answer: true }, { state: 'open', owner_wait_state: 'waiting' },
+        { state: 'open' }, { state: 'open', wait_for_answer: true, wait_ended_at: 'x' },
+        { quiz_state: 'open', owner_wait_state: 'resumed' }, { state: 'expired_terminal', wait_for_answer: true }]) {
+        assert.equal(hue(row), 'owner', JSON.stringify(row));
+    }
+    assert.deepEqual(['Unanswered', 'Unanswered · task continued', 'Unanswered · task finished'],
+        [{ state: 'open' }, { state: 'open', owner_wait_state: 'resumed' }, { state: 'expired_terminal' }]
+            .map((row) => questionPresentation(row).status), 'the words stay as they are');
+    // What the pill does not count is not amber.
+    for (const row of [{}, { state: 'mystery' }]) assert.equal(hue(row), 'neutral', JSON.stringify(row));
     assert.equal(hue({ quiz_state: 'answered' }), 'ok');
     // A replaced or closed question wears the head's disabled ink (the swap DESIGN "Quiz card" forbids).
     for (const state of ['superseded', 'closed']) assert.equal(hue({ quiz_state: state }), 'ink', state);

@@ -139,15 +139,18 @@ export function questionPresentation(row = {}, { paused = false } = {}) {
     return { status: tr(`question.status.${key}`, STATUS[key]) };
 }
 
-// The dot beside that word (DESIGN "Quiz card"): the owner's amber only while the task positively waits for the
-// answer, ok once it is answered, the head's own disabled ink for a replaced or closed question, and neutral for
-// every other lifecycle (unanswered, the task continued or finished, status unavailable).
-const MARK_HUES = { waiting: 'owner', answered: 'ok', superseded: 'ink', closed: 'ink' };
+// The dot beside that word (DESIGN "Quiz card"): the owner's amber exactly while Main's pill counts the question
+// (`questionWaits`: unanswered, whether its task waits, went on or ended, or an answer whose delivery is unknown), ok
+// once it is answered, the head's own disabled ink for a replaced or closed question, and neutral for any other
+// lifecycle (status unavailable). The words beside it stay the lifecycle's own.
+const MARK_HUES = { answered: 'ok', superseded: 'ink', closed: 'ink' };
 
 /** The question head's mark as a status-mark view ({ shape, hue }, web/modules/status_mark.js). */
 export function questionMark(row = {}) {
+    // A card carries its state as `quiz_state` or as `state`: the pill's rule reads the one field.
+    const asked = { ...row, quiz_state: row.quiz_state || row.state };
     // An answer whose late delivery became unknown waits for the owner to stop counting it (Remove from pending).
-    if (unknownDeliveryRemovable(row)) return { shape: 'dot', hue: 'owner' };
+    if (questionWaits(asked) || unknownDeliveryRemovable(row)) return { shape: 'dot', hue: 'owner' };
     return { shape: 'dot', hue: MARK_HUES[lifecycleKey(row)] || 'neutral' };
 }
 

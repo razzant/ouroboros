@@ -146,7 +146,8 @@ test('required waiting copy ends when the answer settles, including history repl
         assert.equal(card.querySelector('.chat-quiz-assumption'), null);
         assert.ok(card.querySelectorAll('.chat-quiz-option').every((btn) => btn.disabled));
         assert.deepEqual(markOf(card), ['dot', 'ok', false]);
-        const hues = { answered: 'ok', expired_terminal: 'neutral', superseded: 'ink' };
+        // Still unanswered after its task ended, Main's pill counts it: amber, like every question it counts.
+        const hues = { answered: 'ok', expired_terminal: 'owner', superseded: 'ink' };
         for (const state of ['answered', 'expired_terminal', 'superseded']) {
             const replay = fx.decision.buildQuizCard({
                 task_id: 't-1', text: required.question,
@@ -168,7 +169,7 @@ test('quiz card renders full anatomy from a WS frame', () => {
         assert.match(card.querySelector('.chat-quiz-stake').textContent, /At stake: release timing/);
         assert.match(card.querySelector('.chat-quiz-assumption').textContent, /Continuing meanwhile: continuing with the merge/);
         assert.equal(card.querySelector('.chat-quiz-status-text').textContent, 'Unanswered');
-        assert.deepEqual(markOf(card), ['dot', 'neutral', false], 'no wait evidence, no amber');
+        assert.deepEqual(markOf(card), ['dot', 'owner', false], 'unanswered: the pill counts it, so amber');
         const buttons = card.querySelectorAll('.chat-quiz-option');
         assert.equal(buttons.length, 2);
         assert.equal(buttons[1].querySelector('.chat-quiz-option-detail').textContent, 'wait for CI');
@@ -230,7 +231,7 @@ test('a required card that outlived its task stops claiming the task is waiting'
         assert.equal(card.querySelector('.chat-quiz-wait'), null);
         assert.ok(card.querySelector('.chat-quiz-comment'));
         assert.ok(card.querySelectorAll('.chat-quiz-option').every((btn) => !btn.disabled));
-        assert.deepEqual(markOf(card), ['dot', 'neutral', false], 'answerable, but nothing waits for the owner');
+        assert.deepEqual(markOf(card), ['dot', 'owner', false], 'its task ended, the question still waits for the owner');
     } finally { fx.restore(); }
 });
 
@@ -958,13 +959,13 @@ test('a bounded wait that closed stops saying waiting while the card stays answe
         assert.equal(quizCard.querySelector('.chat-quiz-wait'), null);
         assert.match(quizCard.querySelector('.chat-quiz-assumption').textContent, /wait ended/);
         assert.equal(quizCard.dataset.state, 'open');
-        assert.deepEqual(markOf(quizCard), ['dot', 'neutral', false], 'the bound closed: no longer the owner\'s move');
+        assert.deepEqual(markOf(quizCard), ['dot', 'owner', false], 'the bound closed; the question still waits for the owner');
         // History replay renders the ended wait from the projection (wait_ended_at, no wait_for_answer).
         const replayed = fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-r', wait_ended_at: '2026-08-31T10:05:00Z' });
         const rcard = replayed;
         assert.match(rcard.querySelector('.chat-quiz-assumption').textContent, /wait ended/);
         assert.equal(rcard.querySelector('.chat-quiz-wait'), null);
-        assert.deepEqual(markOf(rcard), ['dot', 'neutral', false]);
+        assert.deepEqual(markOf(rcard), ['dot', 'owner', false]);
     } finally { fx.restore(); }
 });
 
@@ -981,7 +982,7 @@ test('reconciling a replayed row into an existing card projects the closed bound
         assert.equal(fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-m', wait_ended_at: '2026-08-31T10:05:00Z' }), null);
         assert.equal(quizCard.querySelector('.chat-quiz-wait'), null);
         assert.match(quizCard.querySelector('.chat-quiz-assumption').textContent, /wait ended/);
-        assert.deepEqual(markOf(quizCard), ['dot', 'neutral', false]);
+        assert.deepEqual(markOf(quizCard), ['dot', 'owner', false], 'unanswered: still the owner\'s move');
         assert.equal(quizCard.querySelector('.chat-quiz-mark'), mark, 'the same mark is repainted, never replaced');
     } finally { fx.restore(); }
 });
