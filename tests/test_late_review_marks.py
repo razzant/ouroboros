@@ -1026,8 +1026,12 @@ def test_a_late_plan_reply_is_told_in_its_own_terms_never_as_a_verdict(harness, 
 
 # --- outcome facts: what the record said, kept beside the mark's words ----------------------------
 
-def _settled(aggregate, *, critical=0, advisory=0, additional=0, responded=2, assigned=2, state="settled"):
-    return {"state": state, "verdict": {"aggregate": aggregate, "quorum": {"responded": responded, "assigned": assigned},
+def _settled(aggregate, *, critical=0, advisory=0, additional=0, answered=(2, 2), seats=2, state="settled", parts=True):
+    """A settled ledger record as ``reduce_verdict`` leaves it: two counted seats, each asked both questions."""
+    quorum = {"responded": min(answered), "assigned": seats}
+    if parts:
+        quorum["parts"] = {name: {"assigned": seats, "responded": got} for name, got in zip(("change", "coupling"), answered)}
+    return {"state": state, "verdict": {"aggregate": aggregate, "quorum": quorum,
                                         "critical_findings": [{}] * critical, "advisory_findings": [{}] * advisory,
                                         "additional_findings": [{}] * additional}}
 
@@ -1039,16 +1043,19 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
     from ouroboros.review_ledger import ledger_dir, record_path
 
     clean = outcome_facts(_settled("PASS"))
-    assert clean == {"verdict": "PASS", "critical": 0, "advisory": 0, "additional": 0, "responded": 2, "assigned": 2}
+    assert clean == {"verdict": "PASS", "critical": 0, "advisory": 0, "additional": 0, "asked": 4, "answered": 4}
     assert clean_pass(clean) and outcome_words(clean) == "PASS, no findings"
+    seats_only = outcome_facts(_settled("PASS", parts=False))  # a record that keeps no per-question tally
+    assert (seats_only["asked"], seats_only["answered"]) == (2, 2) and clean_pass(seats_only)
     others = {"PASS, 1 advisory": _settled("PASS", advisory=1), "PASS, 2 additional": _settled("PASS", additional=2),
-              "PASS, no findings, 1 seat without an answer": _settled("PASS", assigned=3),
+              "PASS, no findings, 1 asked answer missing": _settled("PASS", answered=(2, 1)),
               "FAIL, 2 critical, 1 advisory": _settled("FAIL", critical=2, advisory=1),
-              "QUORUM_FAILED, no findings, 2 seats without an answer": _settled("QUORUM_FAILED", responded=0),
+              "QUORUM_FAILED, no findings, 4 asked answers missing": _settled("QUORUM_FAILED", answered=(0, 0)),
               "no verdict formed": _settled("PASS", state="pending")}
     for words, record in others.items():
         assert outcome_words(outcome_facts(record)) == words and not clean_pass(outcome_facts(record)), words
     assert outcome_facts(None) == {"verdict": ""} and not clean_pass(None)
+    assert not clean_pass({"verdict": "PASS"}), "a PASS that names no asked answer is not known to be whole"
     assert outcome_words(None) == "outcome not recorded"
 
     shared.world(tmp_path)
