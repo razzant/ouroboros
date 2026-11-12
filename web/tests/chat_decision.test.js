@@ -424,7 +424,8 @@ test('a private Presence question is Main\'s wherever it is drawn: its unknown d
     // From history: the row names its work's Project only as a reference; its contact says it is Main's.
     const history = fixture({ projectId: 'p1', chatId: 23 });
     try {
-        const card = history.decision.buildQuizCard({ ...answered, project_id: 'p1', presence_contact: { kind: 'telegram' } });
+        const card = history.decision.buildQuizCard({ ...answered, project_id: 'p1',
+            presence_contact: { task_id: 't-1', binding_id: 'binding', source_event_id: 'event' } });
         assert.deepEqual(markOf(card), ['dot', 'ok', false]);
     } finally { history.restore(); }
     // Read canonically first (Main's own room, shown in the Project too): building the room's card keeps that fact.

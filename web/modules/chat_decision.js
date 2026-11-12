@@ -720,8 +720,11 @@ export function createChatDecision({
         // private Presence question is Main's ('': its row names its work's Project only as a reference); else its
         // row's, else the Project room this card is drawn in. A later canonical read replaces a guess.
         const seen = observations.get(key);
+        const contact = msg.presence_contact || msg.quiz?.presence_contact;
+        const privateContact = Boolean(contact && String(contact.task_id) === quiz.taskId && contact.binding_id
+            && contact.source_event_id);  // presence_owner_contact.private_main_contact
         const own = seen && Object.hasOwn(seen, 'project_id') ? null : mirror ? String(mirror.row.project_id || '')
-            : msg.presence_contact || msg.quiz?.presence_contact ? '' : String(msg.project_id || projectId || '');
+            : privateContact ? '' : String(msg.project_id || projectId || '');
         const frame = { task_id: quiz.taskId, quiz_id: quiz.quizId, ...(own === null ? {} : { project_id: own }),
             state: quiz.state, ...quiz.waitRow, ...quiz.answerFields, ...(quiz.closedReason ? { closed_reason: quiz.closedReason } : {}) };
         const current = mirror?.needsValidation && !['answered', 'closed', 'superseded'].includes(quiz.state)
