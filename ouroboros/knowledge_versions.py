@@ -231,8 +231,13 @@ def focus_text(focus: Any) -> str:
 
 
 def _own_section(heading: Any) -> Any:
-    """The parser's section when it begins at this heading; a setext heading has none of its own."""
-    return heading.section if heading.section.start_byte == heading.span.start_byte else None
+    """The parser's section when it begins at this heading; a setext heading has none of its own.
+
+    An ATX heading's span is one line, a setext heading's two or more: a setext heading that opens the
+    body starts the parser's implicit preamble section, which is not its own (it ends at the first ATX
+    heading of any level)."""
+    own = heading.section.start_byte == heading.span.start_byte and heading.span.start_line == heading.span.end_line
+    return heading.section if own else None
 
 
 def heading_line(raw: bytes, heading: Any) -> str:

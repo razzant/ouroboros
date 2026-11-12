@@ -72,6 +72,28 @@ def test_the_outline_shows_each_heading_line_as_written(tmp_path):
     assert edited.startswith("✅"), edited
 
 
+def test_a_setext_heading_that_opens_the_body_has_no_section_of_its_own_in_the_outline(tmp_path):
+    """The parser's implicit preamble section begins at a setext heading that opens the body (a plain note, or one
+    whose frontmatter it directly follows) and stops at the first ATX heading, leaving out the child: that is not
+    the heading's own section. An ATX heading there has its whole section, child included."""
+    ctx = context(tmp_path)
+    child = "Body one.\n\n## Sub\n\nChild.\n"
+    for topic, raw in (("plain", "Title\n=====\n\n" + child), ("fronted", "---\ntype: note\n---\nTitle\n=====\n\n" + child),
+                       ("atx", "# Title\n\n" + child)):
+        target = address(tmp_path, topic)
+        target.path.parent.mkdir(parents=True, exist_ok=True)
+        target.path.write_bytes(raw.encode("utf-8"))
+        outline = tools._knowledge_read(ctx, topic, view="outline")
+        found = re.search(r"^#? ?Title — line \d+, chars (\d+)\.\.(\d+) \((\d+) chars(.*)\)$", outline, re.M)
+        assert found, outline
+        section = raw[int(found[1]):int(found[2])]
+        if topic == "atx":
+            assert section == "# Title\n\n" + child and found[4] == ""
+        else:
+            assert section == "Title\n=====\n" and found[4] == (
+                "; no section of its own (a level-1 setext heading): the range is its heading"), (topic, outline)
+
+
 def test_history_lists_versions_newest_first_marks_the_current_one_and_names_gaps(tmp_path):
     ctx = context(tmp_path)
     target = address(tmp_path)
