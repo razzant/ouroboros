@@ -1022,6 +1022,14 @@ def test_a_late_plan_reply_is_told_in_its_own_terms_never_as_a_verdict(harness, 
     assert head.startswith("Plan council reply from m/a (seat s1) to ask a1 on plan revision 1, recorded after its task ended")
     assert "not a verdict; it holds nothing." in head and rest == lines
     assert all(word not in mark["text"] for word in ("PASS", "FAIL", "approved", "rejected"))
+    # The list and the waiting count tell it in the same terms: advice, never an unperformed review with no findings.
+    from ouroboros import memory_waiting
+
+    listed = _memory_read(_ctx(harness.drive, "reader"), room_id="late_reviews")
+    assert listed.startswith("late reviews: 1 in 1 room; 0 PASS with no findings")
+    assert f"plan review of task {PLAN_TASK}; advice, not a verdict; memory_read(node_id='{mark['id']}')" in listed
+    counted = memory_waiting.measure([mark], {}, [])["late_reviews"]
+    assert (counted["count"], counted["clean_pass"], counted["unrecorded"]) == (1, 0, 0)
 
 
 # --- outcome facts: what the record said, kept beside the mark's words ----------------------------
@@ -1055,6 +1063,9 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
     for words, record in others.items():
         assert outcome_words(outcome_facts(record)) == words and not clean_pass(outcome_facts(record)), words
     assert outcome_facts(None) is None and not clean_pass(None), "no record says nothing, never a verdict"
+    advice = outcome_facts({**_settled("NOT_PERFORMED"), "surface": "intention"})  # a plan council asks no verdict
+    assert advice == {"advice": True} and outcome_words(advice) == "advice, not a verdict" and not clean_pass(advice)
+    assert outcome_facts({**_settled("PASS"), "surface": "commit_gate"}) == clean, "a review that asks one keeps it"
     assert not clean_pass({"verdict": "PASS"}), "a PASS that names no asked answer is not known to be whole"
     assert outcome_words(None) == "outcome not recorded"
 

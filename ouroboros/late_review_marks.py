@@ -162,11 +162,14 @@ def outcome_facts(record: Any) -> Optional[Dict[str, Any]]:
     """What a review record says at this moment, as the scalars a late mark keeps beside its words: the verdict
     word, how many findings of each kind the record holds, and how many of the answers asked of its counted
     seats arrived (one per seat and question; the seat count for a record that keeps no per-question tally). A
-    record that is not settled formed no verdict: ``{"verdict": ""}``, never a guessed PASS. No record at all
-    says nothing (``None``): a mark published without one keeps no outcome, so its list line reads the record
-    whenever it can be read."""
+    record that is not settled formed no verdict: ``{"verdict": ""}``, never a guessed PASS. A plan council's
+    record is asked no verdict question: ``{"advice": True}``, never its missing findings read as none. No record
+    at all says nothing (``None``): a mark published without one keeps no outcome, so its list line reads the
+    record whenever it can be read."""
     if not isinstance(record, Mapping):
         return None
+    if record.get("surface") == "intention":
+        return {"advice": True}
     if record.get("state") != "settled":
         return {"verdict": ""}
     verdict = record.get("verdict") or {}
@@ -191,6 +194,8 @@ def outcome_words(outcome: Any) -> str:
     """One mark's outcome for the list of late reviews: facts in words, never advice on what to do with it."""
     if not isinstance(outcome, Mapping):
         return "outcome not recorded"
+    if outcome.get("advice"):
+        return "advice, not a verdict"
     if not outcome.get("verdict"):
         return "no verdict formed"
     kinds = [f"{outcome[name]} {name}" for name in ("critical", "advisory", "additional") if outcome.get(name)]
@@ -201,11 +206,14 @@ def outcome_words(outcome: Any) -> str:
 
 def mark_outcome(mark: Mapping[str, Any], drive_root: Any = None) -> Optional[Dict[str, Any]]:
     """The outcome of one late-review mark: the facts published with it, else (a mark older than those facts,
-    asked with the data root) its review record as it reads now. ``None`` when neither says: a plan reply or
-    the deleted acceptance panel has no verdict by design, and an unreadable record is not a clean one."""
+    asked with the data root) its review record as it reads now. A plan reply is advice by its kind, whatever
+    its council's record holds. ``None`` when nothing says: the deleted acceptance panel kept no record, and an
+    unreadable record is not a clean one."""
     review = mark.get("review") or {}
     if isinstance(review.get("outcome"), dict):
         return review["outcome"]
+    if review.get("surface") == "plan_review":
+        return {"advice": True}
     record_id = str((review.get("subject") or {}).get("record_id") or "")
     if drive_root is None or not record_id:
         return None
