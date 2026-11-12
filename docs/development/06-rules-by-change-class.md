@@ -131,7 +131,7 @@ Enforcement: `tests/test_body_adoption.py` with `tests/test_body_candidate.py`. 
 - Each disposable plane's retirer (`storage_removers.PLACE_REMOVERS`) reports through `maintenance_jobs.pass_report`/`record_pass` (ARCHITECTURE §10 invariant 32), classing holds by its own reason words: an unreadable row or busy lock is a hold, never a pass error; the term's wait is no hold.
 - Durable artifacts are never age-pruned: genesis projects (`OUROBOROS_SUBAGENT_PROJECTS_ROOT`) and forensic observability blobs (packed, never deleted or counted).
 - Test scratch lasts while needed: a test's folder goes only on its processes' proof, never on its exit alone, and one marker never holds a whole root (ARCHITECTURE §9 "Test runs").
-- Review continuations are recovery state, not disposable GC: archive a record (collision-safe move, never delete) only when its owner task is settled, it stayed un-resumed past `task_continuation.RETIRE_SETTLED_CONTINUATION_AFTER_DAYS` and no recorded obligation is open; uncertainty or a move error keeps the live record.
+- Review continuations are recovery state, not disposable GC: archive a record (collision-safe move, never delete) only when its owner task is settled, it stayed un-resumed past `task_continuation.RETIRE_SETTLED_CONTINUATION_AFTER_DAYS` and no obligation mark of it awaits a landing; doubt or a move error keeps it live.
 
 Enforcement: `ouroboros/retention.py` (knob and cutoff math), `tests/test_observability_retention.py` (preserve indefinitely), `tests/test_test_environment.py` and `tests/test_test_storage.py` (test scratch), `tests/test_retirer_holds.py` with `test_persistence_lifetimes.py::SERVER_RETIRERS` (each retirer both ways), cost contract B7 (rest law); the continuation archive rule is review-only.
 
