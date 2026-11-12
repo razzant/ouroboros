@@ -204,7 +204,7 @@ _REVIEW_MODES = _rows(("value", "label", "tone", "className", "copy"), (
 _RUNTIME_MODES = _rows(("value", "label", "tone", "className", "copy"), (
     ("light", "Light", "Safest", "light", "Works on your projects. Never changes its own code."),
     ("advanced", "Advanced", "Default", "advanced", "May grow its own skills and outer layer."),
-    ("pro", "Pro", "Power", "pro", "May change its protected core. Every change goes through review."),
+    ("pro", "Pro", "Power", "pro", "May change its protected core. Reviews work as you set them."),
     ("cyber_pro", "Cyber Pro", "Maximum power", "cyber-pro", "Full say over itself and this computer. Reviews advise, it decides."),
 ))
 

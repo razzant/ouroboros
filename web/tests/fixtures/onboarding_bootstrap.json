@@ -383,7 +383,7 @@
       },
       {
         "className": "pro",
-        "copy": "May change its protected core. Every change goes through review.",
+        "copy": "May change its protected core. Reviews work as you set them.",
         "label": "Pro",
         "tone": "Power",
         "value": "pro"
