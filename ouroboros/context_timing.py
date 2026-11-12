@@ -18,7 +18,8 @@ carries the counts as ``work`` beside the two time maps. A window opens around a
 receipt (a context build, a round's preparation); windows nest and never mix.
 
 ``host_step`` marks where one named step of a round's window ends; ``llm_observability.round_window`` opens
-that window and receipts the steps on the round's ``llm_round``.
+that window and receipts the steps on the round's ``llm_round``. ``carry_spans`` names there the sections of a window
+measured before it (a resumed turn's prologue: restore, route rebind, tools).
 """
 
 from __future__ import annotations
@@ -126,6 +127,35 @@ def collector_rests() -> Iterator[None]:
             _rest[0] -= 1
             if not _rest[0] and _rest[1]:
                 gc.enable()
+
+
+def mark() -> Tuple[float, float, int]:
+    """Now, for ``span_since``: wall clock, this thread's CPU clock and this thread."""
+    return time.perf_counter(), time.thread_time(), threading.get_ident()
+
+
+def span_since(name: str, started: Tuple[float, float, int]) -> None:
+    """Add the time since ``started`` (``mark``) under ``name`` to the window being measured, if any: for work another
+    owner does between two calls of this one (a ledger's reservation). Ending on another thread, it adds no CPU time."""
+    spans = _SPANS.get()
+    if spans is None:
+        return
+    span = spans.setdefault(name, [0.0, 0.0])
+    span[0] += time.perf_counter() - started[0]
+    span[1] += time.thread_time() - started[1] if threading.get_ident() == started[2] else 0.0
+
+
+def carry_spans(prefix: str, receipt: Optional[Dict[str, Dict[str, int]]]) -> None:
+    """Add the sections of a window measured before this one (its ``section_spans``) to the window being measured, each
+    under ``prefix`` (its ``total`` as ``prefix`` itself): work done before a receipt's window opened, named once."""
+    spans = _SPANS.get()
+    if spans is None or not receipt:
+        return
+    cpu = receipt.get("sections_cpu_ms") or {}
+    for name, wall in (receipt.get("sections_ms") or {}).items():
+        span = spans.setdefault(prefix if name == TOTAL else f"{prefix}.{name}", [0.0, 0.0])
+        span[0] += wall / 1000
+        span[1] += cpu.get(name, 0) / 1000
 
 
 def section_spans() -> Dict[str, Dict[str, int]]:

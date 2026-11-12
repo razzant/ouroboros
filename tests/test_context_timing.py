@@ -169,3 +169,22 @@ def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
         agent._prepare_task_context({"id": "timed", "type": "task", "chat_id": 1, "text": "hi"})
     assert seen == [True]
     assert context_timing._SPANS.get() is None and gc.isenabled()
+
+
+def test_a_turns_prologue_rides_on_its_first_rounds_receipt():
+    """W2 H7: the restore, route rebind and tools of a resumed turn run before any round's window; the loop measures them
+    and the first round's receipt names them under ``prologue`` (its total) once, and no later round again."""
+    from types import SimpleNamespace
+    from ouroboros.context_timing import measured_sections, section_spans, timed
+    from ouroboros.llm_observability import round_receipt, round_window
+
+    slot = SimpleNamespace(_round_prep_since=None)
+    with measured_sections():
+        timed("rebind.route", lambda: None)
+        timed("restore.tools", lambda: None)
+        slot._round_prologue = section_spans()
+    with round_window(slot):
+        first = round_receipt()["host_steps"]["sections_ms"]
+    assert {"prologue", "prologue.rebind.route", "prologue.restore.tools"} <= set(first)
+    with round_window(slot):
+        assert not any(name.startswith("prologue") for name in round_receipt()["host_steps"]["sections_ms"])

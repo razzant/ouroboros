@@ -153,9 +153,12 @@ class CapabilityEvidence:
     window_kind: str = "total"  # metadata may explicitly state an input-only limit
     retired_ack: Dict[str, Any] = field(default_factory=dict)
     server_window: Dict[str, Any] = field(default_factory=dict)
+    read: str = ""  # this resolution's own metadata read (``answered``/``failed``/none): a receipt fact, never stored
 
     def to_json(self) -> Dict[str, Any]:
-        return {**asdict(self), "window_tokens": int(self.window_tokens or 0), "stale": bool(self.stale)}
+        stored = {**asdict(self), "window_tokens": int(self.window_tokens or 0), "stale": bool(self.stale)}
+        stored.pop("read")
+        return stored
 
 
 def is_known(evidence: Any, *, require_fresh: bool = False) -> bool:
@@ -1024,7 +1027,7 @@ def _probe_window(
             window, STATUS_CONFIRMED if window > 0 else STATUS_UNPROBEABLE,
             SOURCE_LOCAL_HEALTH if window > 0 else SOURCE_NONE, fp, model, provider,
             ts=utc_now_iso(), detail="live serving window" if window > 0 else "serving window unknown",
-        ), ""
+        ), "answered" if window > 0 else ""
 
     cached = data.get("probes", {}).get(fp)
     if subscription and not account_bound and str((cached or {}).get("status") or "") in _KNOWN_STATUS:
@@ -1185,7 +1188,20 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
             **{key: str(options.get(key) or "") for key in (
                 "source_id", "credential_profile_id", "account_fingerprint")})
     evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed, read=stated))
+    evidence.read = read
     return evidence
+
+
+def window_evidence(evidence: Any, known: bool) -> Tuple[str, str]:
+    """``(kind, observed_at)`` of the evidence a plan's window rests on, for its receipt: ``live`` (this resolution's
+    own metadata read stated it), ``recorded`` (a stored statement, an owner's assertion or accepted sizes), ``pool``
+    (a failed Auto read's pool bound) or ``unknown`` (no known window)."""
+    if not known:
+        return "unknown", ""
+    source = str(getattr(evidence, "source", "") or "")
+    kind = "pool" if source == "pool" else "live" if (
+        getattr(evidence, "read", "") == "answered" and source in {SOURCE_PROVIDER_METADATA, SOURCE_LOCAL_HEALTH}) else "recorded"
+    return kind, str(getattr(evidence, "ts", "") or "")
 
 
 # Cache-inclusive prompt totals are measurable; GigaChat's and MiniMax's

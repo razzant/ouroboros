@@ -32,7 +32,7 @@ from ouroboros.llm_substitution import (
 from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope, current_model_wait,
                                   dispatch_deadline_remaining_sec, prepared_call_scope)
 from ouroboros.observability import persist_call, update_call_manifest_metadata
-from ouroboros.context_timing import host_step, timed
+from ouroboros.context_timing import host_step, mark, span_since, timed
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
@@ -73,7 +73,7 @@ def prepare_processing_target(target: dict) -> dict:
         return target
     prepared = {**target, "processing_preferences": []}
     try:
-        sources = model_sources(processing_view=True)
+        sources = timed("claudexor.processing", model_sources, processing_view=True)
     except ClaudexorUnavailable:
         return prepared
     source = next((row for row in sources.get("sources", [])
@@ -677,6 +677,7 @@ class _ModelInvocation:
                      **({"wire_layout": dict(self.target["wire_layout"])} if isinstance(self.target.get("wire_layout"), dict) else {}),
                      claudexor={"operation_id": self.operation_id, "model_role": self.role,
                                 "requested_profile": str((self.payload.get("account") or {}).get("profileId") or ""),
+                                **_dispatch_facts(self.payload, self.detail, result),
                                 "route": copy.deepcopy(route), "cost_evidence": copy.deepcopy(result.get("cost")),
                                 "outcome": result.get("outcome"), "problem": copy.deepcopy(result.get("problem")),
                                 "requested_options": copy.deepcopy(self.payload.get("options") or {}),
@@ -755,6 +756,23 @@ class _ModelInvocation:
             gateway.close()
 
 
+def _dispatch_facts(payload: dict, detail: dict, result: dict) -> dict:
+    """What the engine's own operation record says of this send's account and start, beside the round's receipt: the
+    profile the send preferred, the engine's ``routing.selectionReason``, and ``engine_until_dispatch_ms``, the time
+    until dispatch started by the engine's record (``startedAt`` to ``dispatch.startedAt``; the dispatch mark precedes
+    the vendor request's bytes, so it is no wire time). An absent field adds nothing."""
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    preferred = (payload.get("account") or {}).get("preferredProfileId")
+    reason = (result.get("routing") or detail.get("routing") or {}).get("selectionReason")
+    started, dispatched = (parse_deadline_ts(value) for value in (detail.get("startedAt"),
+                                                                    (detail.get("dispatch") or {}).get("startedAt")))
+    return {**({"preferred_profile": str(preferred)} if preferred else {}),
+            **({"selection_reason": reason} if isinstance(reason, str) and reason else {}),
+            **({"engine_until_dispatch_ms": round((dispatched - started).total_seconds() * 1000)}
+               if started and dispatched and dispatched >= started else {})}
+
+
 def _reset_native(payload: dict, error: ClaudexorModelNotDispatched, invocation: _ModelInvocation) -> dict | None:
     from ouroboros.llm_messages import reset_native_payload
 
@@ -783,9 +801,14 @@ def _accounted_request(invocation: _ModelInvocation):
     if not invocation.payload.get("retryOfOperationId"):
         invocation.payload = stamp_clock_note(invocation.payload)
     # The engine relays to the vendor: its loopback address is not where the model runs (a not-started receipt is a remote-hop fact).
-    request = replace(_attempt_request(invocation.target, invocation.payload), route_is_loopback=False,
+    request = replace(timed("candidate.measure", _attempt_request, invocation.target, invocation.payload), route_is_loopback=False,
                       force_unknown_reservation=True, max_completion_tokens=invocation.output_reserve)
-    return request, _candidate_before_dispatch(invocation.payload, request, prepare=invocation.prepare)
+    before, handed = _candidate_before_dispatch(invocation.payload, request, prepare=invocation.prepare), mark()
+
+    def reserved(reservation):  # the ledger reserved this attempt between the hand-over and this call
+        span_since("candidate.reserve", handed)
+        return before(reservation)
+    return request, reserved
 
 
 def _unstarted_retry_preparation(target: dict, payload: dict, parameters: dict, error: ClaudexorModelNotDispatched):

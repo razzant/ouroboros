@@ -21,6 +21,7 @@ from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED  # noqa: F401
 from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, reviewable_effect_projection, should_nudge_verification, turn_has_reviewable_effects  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import new_execution_id  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import task_timing_scope, timed_phase
+from ouroboros.context_timing import measured_sections, section_spans
 from ouroboros.llm_observability import round_starts, round_window
 from ouroboros.tool_policy import CAPABILITY_OMISSION_HEADER, format_capability_omissions, initial_tool_schemas, list_non_core_tools  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.tools.registry import ToolRegistry
@@ -578,11 +579,13 @@ def run_llm_loop(
     limit_ctx: Optional[_RoundLimitContext] = None
     ctx._execution_trace = llm_trace
     try:
-        (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan, cost_ceiling,
-         pending_tool_budget, pending_no_tool_budget, free_redial) = _resume_continuation(
-            tools, (saved, saved_pause, saved_working), messages, llm_trace, accumulated_usage, _owner_msg_seen,
-            (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan),
-            cost_ceiling, budget_remaining_usd)
+        with measured_sections():  # restore, route rebind and tools: the first round's receipt names their spans
+            (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan, cost_ceiling,
+             pending_tool_budget, pending_no_tool_budget, free_redial) = _resume_continuation(
+                tools, (saved, saved_pause, saved_working), messages, llm_trace, accumulated_usage, _owner_msg_seen,
+                (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan),
+                cost_ceiling, budget_remaining_usd)
+            tools._ctx._round_prologue = section_spans()
         pending_candidate = resume_delivery_candidate(tools, saved_working, tool_schemas)
         while True:
             if free_redial or pending_tool_budget:

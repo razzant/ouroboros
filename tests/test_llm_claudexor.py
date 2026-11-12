@@ -701,6 +701,36 @@ def test_the_conversation_and_a_failed_account_outrank_the_plans_account(monkeyp
         llm_substitution._FAILED_PROFILE.reset(token)
 
 
+def test_a_round_names_the_engines_account_choice_and_its_time_until_dispatch(setup, monkeypatch):
+    """W2 H7: a round's usage carries the account its send preferred, the engine's ``routing.selectionReason`` and the
+    time until dispatch started by the engine's own record (not bytes left for the vendor); its receipt names the
+    candidate's measurement and reservation. A field the engine leaves out adds nothing."""
+    import json as _json
+    from ouroboros.llm_observability import round_receipt, round_window
+
+    _, gateway, client = setup
+    detail = gateway.detail
+
+    def timed_detail(index):
+        value = detail(index)
+        return {**value, "startedAt": "2026-11-12T10:00:00.000Z", "routing": {"selectionReason": "preferred", "poolEvents": []},
+                "dispatch": {**value["dispatch"], "startedAt": "2026-11-12T10:00:01.930Z"}}
+
+    monkeypatch.setattr(gateway, "detail", timed_detail)
+    with round_window():
+        _, usage = client.chat([result()["message"], {"role": "user", "content": "next"}], MODEL)
+        receipt = round_receipt()
+    named = {key: usage["claudexor"][key] for key in ("preferred_profile", "selection_reason", "engine_until_dispatch_ms")}
+    assert named == {"preferred_profile": "account-a", "selection_reason": "preferred", "engine_until_dispatch_ms": 1930}
+    assert len(_json.dumps(named)) < 120  # what a round's line adds, in archives kept for good
+    assert {"candidate.measure", "candidate.reserve"} <= set(receipt["host_steps"]["sections_ms"])
+    monkeypatch.setattr(gateway, "detail", detail)
+    gateway.results.append(result())
+    gateway.dispatch.append("response_received")
+    _, plain = client.chat([{"role": "user", "content": "hi"}], MODEL)
+    assert not {"preferred_profile", "selection_reason", "engine_until_dispatch_ms"} & set(plain["claudexor"])
+
+
 def test_a_correlated_retry_never_gets_the_plans_account_back(tmp_path):
     """The one engine-granted retry on another account is built from the refused send with ``{"mode": "auto"}``."""
     from ouroboros.llm_substitution import CapabilityRetry

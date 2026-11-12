@@ -1254,6 +1254,7 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     from ouroboros.model_slots import task_model_binding
     from ouroboros.continuation_tools import reconcile_restored_tools
     from ouroboros.context_fit import restored_start
+    from ouroboros.context_timing import timed
 
     ctx = tools._ctx
     ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
@@ -1271,7 +1272,7 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     )
     plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, **route,
         start_mode=ran if owner in MODES and ran in MODES[MODES.index(owner):] else None)
-    if reconcile_restored_tools(tools, state, messages, mode):
+    if timed("restore.tools", reconcile_restored_tools, tools, state, messages, mode):
         plan, mode = _rebind_context_fit_plan(plan, tools, messages, start_mode=mode,  # the first answer, never a second question
                                               **{**route, "model_route": getattr(plan, "model_route", {})})
         sanction_rewrite(ctx, "continuation_restored", scope="tools")

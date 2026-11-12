@@ -521,6 +521,7 @@ def _rebind_context_fit_plan(
             "CONTEXT_FIT_REBUILD_FAILED: immutable context core is unavailable for route switch"
         )
     from ouroboros.context import _context_fit_route
+    from ouroboros.context_timing import timed
     from ouroboros.primary_route_observation import held_primary_view
     from ouroboros.capability_evidence import evidence_model_route
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
@@ -540,7 +541,7 @@ def _rebind_context_fit_plan(
         "credential_profile_id": credential_profile_id,
     }
     try:
-        route, evidence = _context_fit_route(task, allow_fetch=True)
+        route, evidence = timed("rebind.route", _context_fit_route, task, allow_fetch=True)
     except Exception:
         log.debug("Route-switch capability probe failed; preserving unknown Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)

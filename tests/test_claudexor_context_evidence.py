@@ -374,6 +374,31 @@ def test_an_early_answer_that_would_narrow_memory_yields_to_the_usual_points_ans
     assert (plan.initial_mode, plan.model_route["credentialProfileId"]) == ("max", "account-b")
 
 
+def test_the_memory_view_receipt_names_the_kind_and_age_of_its_window_evidence(tmp_path, monkeypatch, catalog):
+    """W2 H7: ``context_memory_view`` says whether the start's window was read live, recorded, a failed Auto read's pool
+    bound or unknown, and how old that statement is."""
+    import json
+    from types import SimpleNamespace
+    from ouroboros import context, context_fit as cf
+    from ouroboros.llm import LLMClient
+
+    live, _ = _built(monkeypatch, tmp_path, lambda _task: cf.resolve_context_fit_route)
+    identity = _binding(ce.probe(tmp_path, provider="claudexor", model=MODEL, allow_fetch=False, options={
+        "source_id": "test-source", "credential_profile_id": "account-a", "account_fingerprint": "identity-a"}))
+    recorded, _ = _built(monkeypatch, tmp_path, lambda _task: cf.resolve_context_fit_route, task={**TASK, "model_route": identity})
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+        lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+    pool, _ = _built(monkeypatch, tmp_path, lambda _task: cf.resolve_context_fit_route)
+    unknown, _ = _built(monkeypatch, tmp_path / "cold", lambda _task: cf.resolve_context_fit_route)
+    assert [plan.window_evidence[0] for plan in (live, recorded, pool, unknown)] == ["live", "recorded", "pool", "unknown"]
+    plan = SimpleNamespace(initial_mode="max", window_evidence=live.window_evidence,
+                           projection=lambda _mode: SimpleNamespace(memory_facts={"role": "integrator"}))
+    context._record_memory_view(None, SimpleNamespace(drive_root=tmp_path), {"id": "t", "budget_drive_root": str(tmp_path)},
+                                None, plan)
+    row = json.loads((tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert row["window_evidence"]["kind"] == "live" and 0 <= row["window_evidence"]["age_s"] < 3600
+
+
 def test_a_changed_route_voids_the_early_answer_and_asks_its_own_question(tmp_path, monkeypatch, catalog):
     """One handle per route: the build whose route changed (here the role's pin) after the question started asks its
     own question; the early answer is never applied to it, and the account that just failed is never spent by it."""

@@ -114,6 +114,7 @@ class ContextFitPlan:
     window_witness_bound: bool = True
     route_base_url: str = ""
     account_pin: str = ""  # the profile the role pins ("": Auto, where an answer naming no route names no account)
+    window_evidence: Tuple[str, str] = ("", "")  # the start's ``capability_evidence.window_evidence``, for its receipt
     start_tool_schemas_json: Optional[str] = None  # what the start fit priced (``null``: none); None: not captured
     # The start fit's own mode and why it is below the owner's (``memory_floor.start_cause``): every reprojection
     # and route rebind keeps it, while ``initial_mode`` follows the current selection. ("", ""): not a built start;
@@ -999,7 +1000,7 @@ def build_context_fit_plan(
     meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
     user_content = json.loads(core.user_content_json)
     governance = {form: _governance_blocks(env, core, mode=form) for form in ("max", "low")}
-    from ouroboros.capability_evidence import evidence_model_route
+    from ouroboros.capability_evidence import evidence_model_route, window_evidence
     from ouroboros.memory_view import start_room, view_role
 
     view_task = {**task, "metadata": task.get("metadata") or meta}
@@ -1150,6 +1151,7 @@ def build_context_fit_plan(
         model_route=evidence_model_route(evidence, route["model"]) if route["provider"] == "claudexor" else {},
         evidence_source=window_record.source, window_record=window_record, window_witness_bound=bound,
         route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
+        window_evidence=window_evidence(evidence, known_window),
         core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
         start=(initial_mode, "" if initial_mode == preferred else start_cause(contents[initial_mode][1])),
     )

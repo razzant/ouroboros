@@ -1140,8 +1140,14 @@ def _record_memory_view(env: Any, memory: Memory, task: Dict[str, Any], ctx: Any
     from ouroboros.utils import append_jsonl
 
     root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
+    from ouroboros.capability_evidence import _age_seconds
+
+    kind, observed = getattr(plan, "window_evidence", ("", ""))  # live, recorded, pool or unknown, and how old
+    age = _age_seconds(observed) if observed else None
+    evidence = {"window_evidence": {"kind": kind, "age_s": round(age) if age is not None and age != float("inf") else None}}
     if not append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "context_memory_view", "code": _running_code(),
-                                                     "task_id": str(task.get("id") or ""), **facts, **section_spans()}):
+                                                     "task_id": str(task.get("id") or ""), **facts,
+                                                     **(evidence if kind else {}), **section_spans()}):
         log.warning("Context memory view receipt could not be written")
     return facts
 
