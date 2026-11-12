@@ -168,7 +168,8 @@ scanned.
 Size is pairwise: a change ends each composed book, entrypoint included,
 `BIBLE.md` and the prompts (`prompts/*.md` as one text) no larger than at its
 event base; what it adds is paid in the same text by a statement that leaves, never by a
-lost fact (03 "Paying down a size cap"). With
+lost fact (03 "Paying down a size cap"). No other document is under this rule, DESIGN and
+PERSISTENCE included. With
 ordinary push/PR CI disabled (ARCHITECTURE §8), manual/tag runs lack a
 per-change base and skip this comparison. Local qualification supplies
 `OURO_SIZE_RATCHET_BASE_REF` explicitly; review checks the actual
@@ -179,18 +180,6 @@ report the balance as a fact. Contribution is measured from the displayed
 merge-base of the cached official development ref; an unknown base stays
 unknown and nothing is fetched. Free diagnostics label book
 bytes as worktree separately from the selected release-metadata source.
-Equivalent historical prose stays review-only under CHECKLISTS item 5.
-
-### Current state first (ARCHITECTURE invariant 10)
-
-Apply ARCHITECTURE §10 invariant 10 (enforcement: 03 "Projection over replay"). Store transactions
-lease the shared core's per-thread connection, capture rows (`store_capture.py`) and end before
-decoding or external work; fork only outside them; lifecycle code quiesces users and calls
-`store.prepare_handoff` before renaming a database or handing it to an older runtime, name-tier
-callers holding their name lock (`tests/test_store_connections.py`, `tests/test_store.py`; the WAL
-gate both ways, FULL unchanged: `tests/test_store_journal.py`). Once per process is not once per
-installation: an installation fact is a durable row; history-sized work is a named job of the
-maintenance child (`ouroboros/maintenance.py`).
 
 ### Generality and emergence (P13)
 

@@ -54,7 +54,7 @@ from ouroboros.server_process import (  # noqa: F401
     _request_restart_exit, _restart_requested,
     _supervisor_stop, _exit_signalled,
     _SignalStopServer, _embedded_uvicorn_server,
-    capture_server_source_baseline, server_stop_cause, log, restart_gate_line,
+    capture_server_source_baseline, server_stop_cause, log, restart_gate_line, restored_queue_sentence,
     FAULT_BUS_LOST, FAULT_LOOP_FAILED, bind_fault_exit, end_generation_on_fault, fault_cancel_reason,
     fault_exit, held_saved_work_count, previous_fault_sentence, end_fault_held_runs, raise_open_file_limit,
 )
@@ -722,7 +722,7 @@ def _run_supervisor(settings: dict) -> None:
                 # durable cancel intent; cancellation custody writes its terminal a watchdog window later (task_lifecycle._INTENT_WATCHDOG_MIN_AGE_SEC).
                 notice = ["♻️"]
                 if restored_pending > 0:
-                    notice.append(f"Restored pending queue: {restored_pending} tasks.")
+                    notice.append(restored_queue_sentence(restored_pending, PENDING, DATA_DIR))
                 if interrupted_running:
                     count = len(interrupted_running)
                     notice.append(f"Settling {count} task{'' if count == 1 else 's'} that "

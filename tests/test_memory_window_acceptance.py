@@ -7,7 +7,7 @@ import pytest
 from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv, capability_evidence as ce
 from ouroboros.context_budget import ContextReclaimRequest, WHOLE_CATEGORY
 from ouroboros import context_compaction as cc
-from ouroboros.context_compaction import emergency_address_view
+from ouroboros.context_source_view import emergency_address_view
 from ouroboros.context_renewal import renewal_seed
 from tests import _memory_view_synthetic as syn
 from tests.test_memory_view_lever import plan as lever_plan
