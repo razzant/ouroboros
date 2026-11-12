@@ -52,7 +52,8 @@ no piece or whole render of the view and no form of the request is produced twic
 texts delivered (the walk builds a piece's text once per key to price it and keeps only its length), whole-request
 serializations equal the request's forms at every size, a capture reads what it shows and what is new, a chronicle
 record is parsed once. A breach in today's code is a ``TURN_GAPS`` row (tests/_turn_law.py): a
-strict xfail with its numbers, its remover or why it has none, and a ceiling its growth may not pass.
+strict xfail (non-strict for a host-dependent row) with its numbers, its remover or why it has none, and a ceiling its
+growth may not pass.
 The first turn's census of the host's processes is the host's, not the history's: tests/test_cost_host.py. The law's second axis,
 every recurring pass against the live set rather than history, is tests/test_cost_live_set.py.
 """
@@ -516,6 +517,24 @@ def test_the_work_law_fails_a_breach_no_gap_names_and_excuses_only_its_own(monke
     for pairs in ({"verb(k=1)": (10, 3)}, {"other(k=1)": (2, 1)}):  # past its ceiling; a pair it does not name
         with pytest.raises(AssertionError, match="unexcused") as caught:
             hold_work_equal("Lx", "tag", pairs)
+        assert not isinstance(caught.value, TurnLawBreach)
+
+
+def test_a_host_dependent_gap_is_a_non_strict_xfail_that_still_fails_other_growth():
+    """The L3 broad row's excused growth depends on the host's own sections (the owner's macOS: open +3; the Ubuntu
+    runner holds the law), so its xfail is not strict; every other row stays strict, and on that row growth it does
+    not name, or past its ceiling, still fails for real (a plain AssertionError)."""
+    from tests._turn_law import HOST_DEPENDENT_GAPS
+    assert HOST_DEPENDENT_GAPS == {("L3", "T:main:broad")}
+    for law, tag in TURN_GAPS:
+        [mark] = turn_gap(law, tag)
+        assert mark.kwargs["raises"] is TurnLawBreach and mark.kwargs["strict"] is ((law, tag) not in HOST_DEPENDENT_GAPS)
+    allowed = {"open": 0, "read_bytes": 0}
+    with pytest.raises(TurnLawBreach):
+        hold_turn_law("L3", "T:main:broad", {"open": 3, "read_bytes": 0}, allowed, [])
+    for growth in ({"open": 4, "read_bytes": 0}, {"open": 0, "read_bytes": 1}):  # past its ceiling; a counter not named
+        with pytest.raises(AssertionError, match="grew past its gap") as caught:
+            hold_turn_law("L3", "T:main:broad", growth, allowed, [])
         assert not isinstance(caught.value, TurnLawBreach)
 
 
