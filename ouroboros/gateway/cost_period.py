@@ -26,9 +26,16 @@ _CLASSES = ("cache_write", "cache_read", "output", "uncached_input")
 
 
 def _tokens_by_class(row: Dict[str, Any]) -> Dict[str, int]:
-    prompt, read, write = (max(0, int(row.get(name) or 0)) for name in ("prompt_tokens", "cached_tokens", "cache_write_tokens"))
-    return {"cache_write": write, "cache_read": read, "output": max(0, int(row.get("completion_tokens") or 0)),
-            "uncached_input": max(0, prompt - read - write)}
+    """A model's summed tokens by class; uncached input only from calls that reported both cache counts."""
+    return {"cache_write": max(0, int(row.get("cache_write_tokens") or 0)), "cache_read": max(0, int(row.get("cached_tokens") or 0)),
+            "output": max(0, int(row.get("completion_tokens") or 0)), "uncached_input": max(0, int(row.get("uncached_tokens") or 0))}
+
+
+def _epoch(stamp: Any) -> Optional[float]:
+    try:
+        return _dt.datetime.fromisoformat(str(stamp)).timestamp() if stamp else None
+    except ValueError:
+        return None
 
 
 def _shares(row: Dict[str, Any], tariff: Optional[tuple]) -> Optional[Dict[str, float]]:
@@ -48,12 +55,15 @@ def _shares(row: Dict[str, Any], tariff: Optional[tuple]) -> Optional[Dict[str, 
 
 
 def _write_price_in_reads(tariff: Optional[tuple], ttl: str) -> Optional[float]:
-    """How many read tokens one written token costs on this tariff at this lifetime (40 on a 1-hour Opus write)."""
-    from ouroboros.pricing import cost_class_weights
-
-    unit = cost_class_weights(tariff, {"prompt_tokens": 2_000_000, "completion_tokens": 0, "cached_tokens": 1_000_000,
-                                       "cache_write_tokens": 1_000_000, "prompt_cache_ttl": ttl})
-    return round(unit["cache_write"] / unit["cache_read"], 1) if unit and unit["cache_read"] > 0 else None
+    """How many read tokens one written token costs at this lifetime at the model's BASE price (40 on a 1-hour Opus
+    write): a prompt-length tier is a property of one call, not of a model. None for an unnamed lifetime."""
+    if not tariff or len(tariff) != 4 or not tariff[1] or tariff[2] is None or ttl not in ("5m", "1h"):
+        return None
+    write = float(tariff[2])
+    if ttl == "1h":
+        extended = getattr(tariff, "cache_write_1h", None)
+        write = float(extended) if extended is not None else write * (2.0 / 1.25)  # the estimator's own ratio
+    return round(write / float(tariff[1]), 1)
 
 
 def _read(data_dir: pathlib.Path, take: Any) -> Any:
@@ -92,21 +102,24 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
 
     def entry(model: str) -> Dict[str, Any]:
         return models.setdefault(model or "unattributed", {
-            "calls": 0, "cost": 0.0, "open_rows": 0, "unpriced_rows": 0, "shared_cost": 0.0,
+            "calls": 0, "cost": 0.0, "priced_rows": 0, "open_rows": 0, "unpriced_rows": 0, "shared_cost": 0.0,
+            "uncounted_calls": 0, "uncounted_input_tokens": 0,
             "tokens": dict.fromkeys(_CLASSES, 0), "by_class": dict.fromkeys(_CLASSES, 0.0), "_written": {}})
 
     for start in range(first, end, _CHUNK_ROWS):
         stop = min(end, start + _CHUNK_ROWS)
-        # Two short reads; the ledger's writers go between them, and the tariffs are read outside both.
-        groups = _read(data_dir, lambda txn: txn.period_models(start, stop, since_iso))
-        priced = sorted({row["model"] for row in groups if tariff(row["model"], row["provider"])})
-        calls = _read(data_dir, lambda txn: txn.period_priced_calls(start, stop, since_iso, priced))
+        # One short read of the chunk (its models and its calls agree); the tariffs are read after it, outside it.
+        groups, calls = _read(data_dir, lambda txn: (txn.period_models(start, stop, since_iso),
+                                                     txn.period_settled_calls(start, stop, since_iso)))
         for row in groups:
             model = entry(row["model"])
             model["calls"] += int(row["calls"] or 0)
             model["cost"] += float(row["usd"] or 0.0)
             model["open_rows"] += int(row["open_rows"] or 0)
             model["unpriced_rows"] += int(row["unpriced_rows"] or 0)
+            model["priced_rows"] += int(row["priced_rows"] or 0)
+            model["uncounted_calls"] += int(row["uncounted_calls"] or 0)
+            model["uncounted_input_tokens"] += int(row["uncounted_input_tokens"] or 0)
             for name, count in _tokens_by_class(row).items():
                 model["tokens"][name] += count
         for row in calls:
@@ -127,7 +140,7 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
                 fact = json.loads(row["prefix"]) if row.get("prefix") else None
             except (TypeError, ValueError):
                 fact = None
-            name, detail = prefix_class(fact, row["prompt_cache_ttl"])
+            name, detail = prefix_class(fact, row["prompt_cache_ttl"], _epoch(row.get("ts_dispatched")))
             cause = causes.setdefault((name, detail), {"class": name, "detail": detail, "calls": 0, "write_tokens": 0,
                                                        "write_cost": 0.0, "unshared_calls": 0})
             cause["calls"] += 1
@@ -143,11 +156,13 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
         lifetime, ratio = next(((ttl, value) for ttl, value in ratios if value), ("", None))
         model.update(write_price_in_reads=ratio, write_price_lifetime=lifetime)
         shared = model.pop("shared_cost")
-        rows.append({"model": name, **model, "cost": round(model["cost"], 6),
+        if not model["priced_rows"]:
+            model["cost"] = None  # no call of the model has a recorded price: unknown, never $0
+        rows.append({"model": name, **model, "cost": None if model["cost"] is None else round(model["cost"], 6),
                      # What no tariff or token count could share out stays one disclosed amount, never spread.
-                     "unshared_cost": round(max(0.0, model["cost"] - shared), 6),
+                     "unshared_cost": round(max(0.0, (model["cost"] or 0.0) - shared), 6),
                      "by_class": {key: round(value, 6) for key, value in model["by_class"].items()} if shared > 0 else None})
-    rows.sort(key=lambda row: (-row["cost"], -sum(row["tokens"].values()), row["model"]))  # unpriced models by their tokens
+    rows.sort(key=lambda row: (-(row["cost"] or 0.0), -sum(row["tokens"].values()), row["model"]))  # unpriced by their tokens
     writes = sorted(causes.values(), key=lambda cause: (-cause["write_cost"], -cause["write_tokens"], cause["class"], cause["detail"]))
     for cause in writes:
         cause["write_cost"] = round(cause["write_cost"], 6)

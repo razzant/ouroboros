@@ -12,11 +12,14 @@ const VIEW = {
             tokens: { cache_write: 538_000_000, cache_read: 5_500_000_000, output: 26_400_000, uncached_input: 29_800_000 },
             by_class: { cache_write: 4306.97, cache_read: 1101.77, output: 527.36, uncached_input: 119.03 }, write_price_in_reads: 40,
             write_price_lifetime: '1h' },
-        { model: 'claudexor::codex=gpt-6-astra', calls: 56724, cost: 0, open_rows: 0, unpriced_rows: 0, unshared_cost: 0,
+        { model: 'claudexor::codex=gpt-6-astra', calls: 56724, cost: null, open_rows: 0, unpriced_rows: 56724, unshared_cost: 0,
             tokens: { cache_write: 0, cache_read: 34_500_000_000, output: 210_000_000, uncached_input: 2_900_000_000 },
             by_class: null, write_price_in_reads: null },
         { model: 'vendor/unlisted', calls: 3, cost: 0.4, open_rows: 0, unpriced_rows: 0, unshared_cost: 0.4,
-            tokens: { cache_write: 50, cache_read: 100, output: 7, uncached_input: 350 }, by_class: null, write_price_in_reads: null },
+            tokens: { cache_write: 50, cache_read: 100, output: 7, uncached_input: 350 }, by_class: null, write_price_in_reads: null,
+            uncounted_calls: 1, uncounted_input_tokens: 2_400 },
+        { model: 'vendor/cheap', calls: 2, cost: 0.008, open_rows: 0, unpriced_rows: 0, unshared_cost: 0.004,
+            tokens: { cache_write: 0, cache_read: 0, output: 10, uncached_input: 90 }, by_class: { cache_write: 0, cache_read: 0, output: 0.002, uncached_input: 0.002 } },
         { model: 'vendor/never-called', calls: 0, cost: 0, open_rows: 0, unpriced_rows: 0, unshared_cost: 0, tokens: {}, by_class: null },
     ],
     cache_writes: [
@@ -30,8 +33,9 @@ const VIEW = {
 test('a period shows each model\'s recorded cost by class, and tokens alone where no cost can be shared', () => {
     const shown = costPeriodPresentation(VIEW);
     assert.equal(shown.state, 'available');
-    assert.deepEqual(shown.models.map((model) => model.name), ['anthropic/claude-opus-5.5', 'claudexor::codex=gpt-6-astra', 'vendor/unlisted']);
-    const [opus, codex, unlisted] = shown.models;
+    assert.deepEqual(shown.models.map((model) => model.name),
+        ['anthropic/claude-opus-5.5', 'claudexor::codex=gpt-6-astra', 'vendor/unlisted', 'vendor/cheap']);
+    const [opus, codex, unlisted, cheap] = shown.models;
     assert.equal(opus.sum, '$6,055.13 · 10,741 calls');
     assert.equal(opus.split, true);
     assert.deepEqual(opus.parts.map((part) => part.text), [
@@ -39,14 +43,17 @@ test('a period shows each model\'s recorded cost by class, and tokens alone wher
     assert.ok(Math.abs(opus.parts.reduce((sum, part) => sum + part.share, 0) - 1) < 1e-9);  // the bar is the whole shared cost
     assert.deepEqual(opus.notes, ['14 calls are still open.', '165 ended without a price.', 'One token written for 1 hour costs 40 read tokens here.']);
     // A subscription model has no cost to share: its tokens by class are the fact shown, and its bar is by tokens and says so.
+    assert.equal(codex.sum, 'no recorded cost · 56,724 calls');  // unknown, never $0.00
     assert.deepEqual([codex.split, codex.bar], [false, true]);
     assert.deepEqual(codex.parts.map((part) => part.text), ['0 tokens · 0%', '34.5B tokens · 92%', '210M tokens · 1%', '2.9B tokens · 8%']);
-    assert.deepEqual(codex.notes, ['The bar is by tokens: there is no recorded cost to split.']);
+    assert.deepEqual(codex.notes, ['56,724 ended without a price.', 'The bar is by tokens: there is no recorded cost to split.']);
     assert.ok(Math.abs(codex.parts.reduce((sum, part) => sum + part.share, 0) - 1) < 1e-9);
     // A priced call with no price list at hand: the amount stands, the split is said to be absent, never invented.
     assert.deepEqual([unlisted.split, unlisted.bar], [false, true]);
     assert.deepEqual(unlisted.notes, ['Not split by class: these calls have no price list, token counts or named cache lifetime at hand.',
-        'The bar is by tokens: there is no recorded cost to split.']);
+        '1 call reported no cache counts: 2k input tokens are in no class.', 'The bar is by tokens: there is no recorded cost to split.']);
+    // Every positive amount left out is said, however small: the parts and it add up to the sum shown.
+    assert.deepEqual(cheap.notes, ['$0.0040 is not split (no price list, token counts or named cache lifetime for those calls).']);
     assert.match(shown.note, /share of the recorded cost, not the provider’s invoice lines/);
     assert.match(shown.note, /as recorded on 2026-11-12/);
     assert.match(shown.note, /delegated subscription sessions are not listed here/);

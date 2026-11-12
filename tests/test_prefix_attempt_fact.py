@@ -49,7 +49,7 @@ def test_the_first_request_and_a_pure_extension_of_it():
     slot = SimpleNamespace()
     start = [system(), {"role": "user", "content": "task"}]
     assert send(slot, start, OPUS, now=100.0) == {"departs": "first"}
-    assert send(slot, start + turn(1), OPUS, now=130.5) == {"departs": "append", "since_s": 30.5}
+    assert send(slot, start + turn(1), OPUS, now=130.5) == {"departs": "append", "base_at": 100.0}
 
 
 def test_a_return_to_a_model_is_compared_with_that_models_last_request():
@@ -61,7 +61,7 @@ def test_a_return_to_a_model_is_compared_with_that_models_last_request():
     send(slot, on_codex + turn(2), CODEX, now=20.0)
     # Back on the first model, three rounds later: its own last request is the baseline, and only rows were added.
     back = prefix.attempt_prefix_fact(slot, on_codex + turn(2) + turn(3), [*TOOLS], OPUS, now=50.0)
-    assert back == {"departs": "append", "from_route": CODEX, "since_s": 50.0}
+    assert back == {"departs": "append", "from_route": CODEX, "base_at": 0.0}
     # The single baseline alone would have compared with the Codex request and said nothing of the route.
     assert prefix.departure(slot, on_codex + turn(2) + turn(3), TOOLS) is None
 
@@ -118,7 +118,7 @@ def test_only_an_answered_request_becomes_the_routes_record():
     # A candidate that was never answered (a failed send) leaves the record of the last answered request.
     prefix.attempt_prefix_fact(slot, [system(memory="other"), start[1]], TOOLS, OPUS, now=5.0)
     again = prefix.attempt_prefix_fact(slot, start + turn(1), TOOLS, OPUS, now=9.0)
-    assert again == {"departs": "append", "since_s": 9.0}
+    assert again == {"departs": "append", "base_at": 0.0}
     # An observation that named no route (a helper's send) changes no record either.
     setattr(slot, prefix.PENDING_ROUTE_ATTR, None)
     prefix.observe_send(slot, [system(memory="helper view")], round_idx=3, tools=TOOLS)
@@ -135,7 +135,7 @@ def test_a_slot_restored_from_before_the_record_says_so_and_a_checkpoint_carries
     send(slot, start, OPUS, now=0.0)
     saved = json.loads(json.dumps({key: getattr(slot, key) for key in prefix.OBSERVER_STATE_ATTRS if hasattr(slot, key)}))
     restored = SimpleNamespace(**saved)
-    assert prefix.attempt_prefix_fact(restored, start + turn(1), TOOLS, OPUS, now=4.0) == {"departs": "append", "since_s": 4.0}
+    assert prefix.attempt_prefix_fact(restored, start + turn(1), TOOLS, OPUS, now=4.0) == {"departs": "append", "base_at": 0.0}
     assert prefix.attempt_prefix_fact(restored, [system(rules="new rules"), start[1]], TOOLS, OPUS, now=4.0)["index"] == 0
 
 
@@ -149,7 +149,7 @@ def test_a_task_keeps_a_bounded_number_of_routes():
     # The route whose record was let go keeps its name: its next request has no base and says so, never "first" or "entered".
     assert routes["model-0"] == {"dropped": True}
     dropped = prefix.attempt_prefix_fact(slot, start, TOOLS, "model-0", now=9.0)
-    assert dropped["departs"] == "unrecorded" and "since_s" not in dropped and prefix.prefix_class(dropped, "1h") == ("not_recorded", "")
+    assert dropped["departs"] == "unrecorded" and "base_at" not in dropped and prefix.prefix_class(dropped, "1h") == ("not_recorded", "")
     assert prefix.attempt_prefix_fact(slot, start, TOOLS, "model-new", now=9.0)["departs"] == "route"
 
 
@@ -209,7 +209,7 @@ def test_real_sends_leave_the_fact_on_their_ledger_rows(main_call):
     send(3)
     facts = [(row.get("physical_context") or {}).get("prefix") for row in dispatched_attempts(ctx.drive_root)]
     assert [fact["departs"] for fact in facts] == ["first", "append", "system"]
-    assert (facts[2]["index"], facts[2]["of"]) == (0, 1) and "since_s" in facts[1] and "from_route" not in facts[2]
+    assert (facts[2]["index"], facts[2]["of"]) == (0, 1) and "base_at" in facts[1] and "from_route" not in facts[2]
 
 
 def test_one_reader_names_the_class_in_the_providers_own_order():
@@ -221,12 +221,13 @@ def test_one_reader_names_the_class_in_the_providers_own_order():
         ("tools_changed", "continuation_restored")  # an earlier departure already accounts for the row
     assert name({"departs": "system", "index": 1, "of": 3, "block": "my story and identity"}) == ("system_changed", "my story and identity")
     assert name({"departs": "messages", "index": 4, "of": 9, "origins": ["compaction", "handover"]}) == ("history_rewritten", "compaction, handover")
-    # A pure extension: the pause is arithmetic over two recorded facts and a named lifetime, never a stored cause.
-    assert name({"departs": "append", "since_s": 3601.0}, "1h") == ("paused", "")
-    assert name({"departs": "append", "since_s": 3601.0}, "default") == name({"departs": "append", "since_s": 3601.0}) == ("append", "")
-    assert name({"departs": "append", "since_s": 301.0, "from_route": CODEX}, "5m") == ("paused", "")
-    assert name({"departs": "append", "since_s": 12.0, "from_route": CODEX}, "1h") == ("returned_to_model", CODEX)
-    assert name({"departs": "append", "since_s": 12.0}, "1h") == ("append", "")
+    # A pure extension: the pause is arithmetic over recorded facts (the base's answer, the row's own dispatch) and a
+    # named lifetime, never a stored cause; without the dispatch time or a named lifetime it is not derived.
+    assert name({"departs": "append", "base_at": 0.0}, "1h", 3601.0) == ("paused", "")
+    assert name({"departs": "append", "base_at": 0.0}, "default", 3601.0) == name({"departs": "append", "base_at": 0.0}, "1h") == ("append", "")
+    assert name({"departs": "append", "base_at": 0.0, "from_route": CODEX}, "5m", 301.0) == ("paused", "")
+    assert name({"departs": "append", "base_at": 0.0, "from_route": CODEX}, "1h", 12.0) == ("returned_to_model", CODEX)
+    assert name({"departs": "append", "base_at": 0.0}, "1h", 12.0) == ("append", "")
 
 
 def test_another_sends_answer_never_records_a_candidate_that_was_not_answered():
@@ -238,7 +239,7 @@ def test_another_sends_answer_never_records_a_candidate_that_was_not_answered():
     prefix.observe_send(slot, helper, round_idx=2, tools=TOOLS)  # a helper's answer is observed on the same slot
     held = getattr(slot, prefix.ROUTE_SENDS_ATTR)[OPUS]
     assert (held["at"], len(held["messages"])) == (0.0, 1)  # still the request that was answered
-    assert prefix.attempt_prefix_fact(slot, start + turn(1), TOOLS, OPUS, now=9.0) == {"departs": "append", "since_s": 9.0}
+    assert prefix.attempt_prefix_fact(slot, start + turn(1), TOOLS, OPUS, now=9.0) == {"departs": "append", "base_at": 0.0}
 
 
 def test_the_forced_final_takes_its_fact_from_the_input_it_measured():
@@ -271,3 +272,29 @@ def test_an_unmeasured_candidate_ends_the_wait_of_the_measured_one():
     prefix.observe_send(slot, start + turn(1), round_idx=2, tools=TOOLS)  # the very same rows, answered by that other route
     held = getattr(slot, prefix.ROUTE_SENDS_ATTR)[OPUS]
     assert (held["at"], len(held["messages"])) == (0.0, 1)
+
+
+def _answered(usage, call, route=OPUS, at="2026-11-12T12:00:00+00:00"):
+    """What the loop records when a response arrives (``loop_llm_call._remember_llm_call``), usable or not."""
+    model, local = (route[:-len(" (local)")], True) if route.endswith(" (local)") else (route, False)
+    usage["_last_llm_call_meta"] = {"llm_call_id": call, "model": model, "use_local": local, "ts": at}
+
+
+def test_an_answer_the_loop_did_not_accept_still_moves_its_routes_base():
+    """An empty or output-limited reply was written and charged: the next measurement sees its route answered."""
+    slot, usage = SimpleNamespace(), {}
+    ctx = SimpleNamespace(tools=SimpleNamespace(_ctx=slot), accumulated_usage=usage, tool_schemas=TOOLS,
+                          messages=[system(), {"role": "user", "content": "task"}], active_model=OPUS, active_use_local=False)
+    prefix.remember_attempt_prefix(ctx)
+    assert usage[prefix.ATTEMPT_PREFIX_KEY] == {"departs": "first"}
+    _answered(usage, "llm_1")  # an empty answer: the loop never observes it
+    ctx.messages = ctx.messages + turn(1)
+    prefix.remember_attempt_prefix(ctx)
+    fact = usage[prefix.ATTEMPT_PREFIX_KEY]
+    assert fact["departs"] == "append" and fact["base_at"] == pytest.approx(1794484800.0)  # dated by the answer
+    # An answer of another route ends the wait without moving this route's base.
+    prefix.remember_attempt_prefix(ctx)
+    _answered(usage, "llm_2", route=CODEX)
+    prefix.forget_attempt_prefix(ctx)
+    assert len(getattr(slot, prefix.ROUTE_SENDS_ATTR)[OPUS]["messages"]) == 1  # still the first request's record
+    assert getattr(slot, prefix.PENDING_ROUTE_ATTR) is None

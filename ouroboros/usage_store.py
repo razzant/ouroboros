@@ -73,7 +73,7 @@ _TASK_PAGE_SQL = ("SELECT attempt_id, state, settle_reason, model, provider, ts_
 _TASK_CURSOR_SQL = "SELECT seq_first FROM attempts WHERE attempt_id=? AND task_id=? AND category=?"
 # A period's model calls by position (``Txn.period_bounds``) and reservation time: the ledger's own calls, never
 # sessions, unmetered dispatches or imported history (rows that carry no reservation time).
-_PERIOD_WHERE = "rowid>=? AND rowid<? AND COALESCE(kind, 'attempt')='attempt' AND ts_reserved>=?"
+_PERIOD_WHERE = "rowid>=? AND rowid<? AND COALESCE(kind, 'attempt')='attempt' AND julianday(ts_reserved)>=julianday(?)"
 
 # One root's money rows of a recent window by range, never the root's whole life (the consciousness
 # allowance, ``consciousness_allowance``); a store an older body created gains it at the lifespan boot.
@@ -466,49 +466,53 @@ class Txn:
         reservation, an imported one in the order of its last record), so every row from the period's first call
         on was last written inside the period, give or take the wait of a writer that stamped before it took
         the store's lock. A bisection of point reads on that time therefore never lands past the first call; a
-        row revised long after its own time can only draw it earlier. Membership is the caller's filter on the
-        reservation time, so position decides the cost of a read and never what it counts. The ledger's rows
-        are kilobytes each: a period is read from here on, never by walking the ledger."""
+        row revised long after its own time, or one without a parseable time, can only draw it earlier. Membership
+        is the caller's filter on the reservation instant, so position decides the cost of a read and never what it
+        counts. The ledger's rows are kilobytes each: a period is read from here on, never by walking the ledger."""
         end = int(self.conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM attempts").fetchone()[0]) + 1
         floor, low, high = float(since_epoch) - USAGE_LOCK_TIMEOUT_SEC, 1, end
         while low < high:
             middle = (low + high) // 2
-            probe = self.conn.execute("SELECT rowid, ts_last_epoch FROM attempts WHERE rowid>=? AND ts_last_epoch IS NOT NULL "
-                                      "ORDER BY rowid LIMIT 1", (middle,)).fetchone()
-            if probe is None or float(probe["ts_last_epoch"]) >= floor:
+            probe = self.conn.execute("SELECT rowid, ts_last_epoch FROM attempts WHERE rowid>=? ORDER BY rowid LIMIT 1",
+                                      (middle,)).fetchone()
+            if probe is None or probe["ts_last_epoch"] is None or float(probe["ts_last_epoch"]) >= floor:
                 high = middle
             else:
                 low = int(probe["rowid"]) + 1
         return low, end
 
     def period_models(self, first: int, end: int, since_iso: str) -> List[Dict[str, Any]]:
-        """Per model and route: the model calls of rowids ``[first, end)`` reserved since ``since_iso``, how many
-        were sent, are still open or settled without a price, their settled cost and reported tokens. One
-        bounded range read over typed columns."""
+        """Per model and route: the model calls of rowids ``[first, end)`` reserved since ``since_iso``: how many
+        were sent, are still open, settled with or without a price, their settled cost and reported tokens. Input is
+        classed (read, written, uncached) only for calls that reported both cache counts; the others are counted
+        apart, never as uncached. One bounded range read over typed columns."""
         return [dict(record) for record in self.conn.execute(
             "SELECT COALESCE(model, '') AS model, COALESCE(provider, '') AS provider, "
             "SUM(state IN ('dispatched','settled','unresolved')) AS calls, "
             "SUM(CASE WHEN state='settled' AND cost_usd IS NOT NULL THEN CAST(cost_usd AS REAL) ELSE 0 END) AS usd, "
-            "SUM(state='settled' AND cost_usd IS NULL) AS unpriced_rows, "
-            "SUM(state IN ('reserved','dispatched','unresolved')) AS open_rows, "
-            "SUM(COALESCE(prompt_tokens, 0)) AS prompt_tokens, SUM(COALESCE(completion_tokens, 0)) AS completion_tokens, "
-            "SUM(COALESCE(cached_tokens, 0)) AS cached_tokens, SUM(COALESCE(cache_write_tokens, 0)) AS cache_write_tokens "
+            "SUM(state='settled' AND cost_usd IS NULL) AS unpriced_rows, SUM(state='settled' AND cost_usd IS NOT NULL) AS priced_rows, "
+            "SUM(state IN ('reserved','dispatched','unresolved')) AS open_rows, SUM(COALESCE(completion_tokens, 0)) AS completion_tokens, "
+            "SUM(COALESCE(cached_tokens, 0)) AS cached_tokens, SUM(COALESCE(cache_write_tokens, 0)) AS cache_write_tokens, "
+            "SUM(CASE WHEN cached_tokens IS NOT NULL AND cache_write_tokens IS NOT NULL "
+            "THEN MAX(0, COALESCE(prompt_tokens, 0) - cached_tokens - cache_write_tokens) ELSE 0 END) AS uncached_tokens, "
+            "SUM(prompt_tokens IS NOT NULL AND (cached_tokens IS NULL OR cache_write_tokens IS NULL)) AS uncounted_calls, "
+            "SUM(CASE WHEN cached_tokens IS NULL OR cache_write_tokens IS NULL THEN COALESCE(prompt_tokens, 0) ELSE 0 END) "
+            "AS uncounted_input_tokens "
             f"FROM attempts WHERE {_PERIOD_WHERE} GROUP BY 1, 2", (int(first), int(end), str(since_iso)))]
 
-    def period_priced_calls(self, first: int, end: int, since_iso: str, models: Sequence[str]) -> List[Dict[str, Any]]:
-        """The same range's settled calls one by one, for sharing each call's cost out by its own tokens: those
-        of ``models`` (the ones a tariff is known for) and every call that wrote cache, with what it did to its
-        route's cached start (``physical_context.prefix``, absent on rows written before that record) and the
-        provider's split of its writes by lifetime. The only rows of a period whose ``extra`` is opened."""
+    def period_settled_calls(self, first: int, end: int, since_iso: str) -> List[Dict[str, Any]]:
+        """The same range's settled calls one by one, for sharing each call's cost out by its own tokens: every
+        call with a recorded cost or a cache write, its dispatch time, and for a write what it did to its route's
+        cached start (``physical_context.prefix``, absent on rows written before that record) and the provider's
+        split of its writes by lifetime: the only rows of a period whose ``extra`` is opened."""
         return [dict(record) for record in self.conn.execute(
             "SELECT COALESCE(model, '') AS model, COALESCE(provider, '') AS provider, "
             "COALESCE(prompt_cache_ttl, '') AS prompt_cache_ttl, prompt_tokens, completion_tokens, cached_tokens, "
-            "cache_write_tokens, CAST(cost_usd AS REAL) AS usd, "
+            "cache_write_tokens, CAST(cost_usd AS REAL) AS usd, ts_dispatched, "
             "CASE WHEN cache_write_tokens>0 THEN json_extract(extra, '$.physical_context.prefix') END AS prefix, "
             "CASE WHEN cache_write_tokens>0 THEN json_extract(extra, '$.cache_write_tokens_by_ttl') END AS write_split "
-            f"FROM attempts WHERE {_PERIOD_WHERE} AND state='settled' "
-            "AND (cache_write_tokens>0 OR (cost_usd IS NOT NULL AND model IN (SELECT value FROM json_each(?))))",
-            (int(first), int(end), str(since_iso), _json(sorted(map(str, models)))))]
+            f"FROM attempts WHERE {_PERIOD_WHERE} AND state='settled' AND (cache_write_tokens>0 OR cost_usd IS NOT NULL)",
+            (int(first), int(end), str(since_iso)))]
 
     def bucket(self, scope: str, key: str = "") -> Bucket:
         address = (scope, str(key))

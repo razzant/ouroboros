@@ -1313,8 +1313,9 @@ class CostBreakdownResponse(TypedDict, total=False):
     accounting: Required[Dict[str, Any]]
     unattributed: Dict[str, Any]
     # ``?period=24h|7d|30d`` only (``gateway/cost_period.cost_period``): ``{available, period, since, until,
-    # tariff_observed_at, models: [{model, calls, cost, open_rows, unpriced_rows, unshared_cost, tokens, by_class,
-    # write_price_in_reads, write_price_lifetime}], cache_writes: [{class, detail, calls, write_tokens, write_cost,
+    # tariff_observed_at, models: [{model, calls, cost (null: no recorded price), priced_rows, open_rows, unpriced_rows,
+    # unshared_cost, uncounted_calls, uncounted_input_tokens, tokens, by_class, write_price_in_reads,
+    # write_price_lifetime}], cache_writes: [{class, detail, calls, write_tokens, write_cost,
     # unshared_calls}]}``, or ``{available: false, period, error_code}`` (``unknown_period`` adds ``periods``).
     period: Dict[str, Any]
 

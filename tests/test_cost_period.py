@@ -8,6 +8,7 @@ and filtered by time, so the order of rows decides speed and never membership.
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import json
 import time
 
@@ -94,7 +95,8 @@ def test_a_model_the_catalog_does_not_price_keeps_its_tokens_and_gets_no_split(r
     assert unlisted["by_class"] is None and unlisted["unshared_cost"] == 0.4 and unlisted["cost"] == 0.4
     assert unlisted["tokens"] == {"cache_write": 50, "cache_read": 100, "output": 7, "uncached_input": 350}
     assert (unlisted["write_price_in_reads"], unlisted["write_price_lifetime"]) == (None, "")
-    assert (by_model[OPUS]["calls"], by_model[OPUS]["cost"], by_model[OPUS]["open_rows"]) == (1, 0.0, 1)
+    # A model none of whose calls has a recorded price has an unknown cost, never $0.
+    assert (by_model[OPUS]["calls"], by_model[OPUS]["cost"], by_model[OPUS]["open_rows"]) == (1, None, 1)
 
 
 def test_a_period_holds_the_calls_started_in_it_whatever_the_order_of_rows(root):
@@ -129,9 +131,10 @@ def test_cache_writes_are_grouped_by_what_each_followed(root):
     _call(root, prompt=100, write=90, cost=0.9, prefix={"departs": "first"})
     _call(root, prompt=100, write=80, cost=0.8, prefix={"departs": "system", "index": 1, "of": 3, "block": "my story and identity"})
     _call(root, prompt=100, write=70, cost=0.7, prefix={"departs": "messages", "index": 4, "of": 9, "origins": ["compaction"]})
-    _call(root, prompt=100, write=60, cost=0.6, prefix={"departs": "append", "since_s": 4000.0})
-    _call(root, prompt=100, write=50, cost=0.5, prefix={"departs": "append", "since_s": 4000.0}, ttl="5m")
-    _call(root, prompt=100, write=40, cost=0.4, prefix={"departs": "append", "since_s": 12.0, "from_route": "codex"})
+    # A pause is measured from the base's answer (``base_at``) to the row's own dispatch, against the row's lifetime.
+    _call(root, prompt=100, write=60, cost=0.6, prefix={"departs": "append", "base_at": time.time() - 4000})
+    _call(root, prompt=100, write=50, cost=0.5, prefix={"departs": "append", "base_at": time.time() - 400}, ttl="5m")
+    _call(root, prompt=100, write=40, cost=0.4, prefix={"departs": "append", "base_at": time.time() - 12, "from_route": "codex"})
     _call(root, prompt=100, write=30, cost=0.3)  # a row written before the record existed
     _call(root, prompt=100, read=100, cost=0.1, prefix={"departs": "append"})  # wrote nothing: not a cache write
     writes = {(cause["class"], cause["detail"]): cause for cause in cost_period.cost_period(root, "24h")["cache_writes"]}
@@ -179,6 +182,14 @@ def test_class_weights_are_the_addends_the_estimate_itself_sums(root):
     # Unknown stays unknown: no tariff, or a call that reported no token counts, has no weights.
     assert pricing.cost_class_weights(None, usage) is None
     assert pricing.cost_class_weights(tariff, {**usage, "prompt_tokens": None}) is None
+    assert pricing.cost_class_weights(tariff, {**usage, "cached_tokens": None}) is None  # absent counts are not zero
+    assert pricing.cost_class_weights(tariff, {**usage, "cache_write_tokens": None}) is None
+    # The provider's split counts only when it accounts for every write; then it wins over an unnamed lifetime.
+    unnamed = {**usage, "prompt_cache_ttl": "default"}
+    assert pricing.cost_class_weights(tariff, {**unnamed, "cache_write_tokens_by_ttl": {"5m": 60_000, "1h": 40_000}})["cache_write"] \
+        == pytest.approx(60_000 * 5 / 1e6 + 40_000 * 8 / 1e6)
+    for partial in ({}, {"5m": 20_000}, {"5m": 60_000, "1h": "40000"}, {"2h": 100_000}):
+        assert pricing.cost_class_weights(tariff, {**unnamed, "cache_write_tokens_by_ttl": partial}) is None
     assert pricing.cost_class_weights((4.0, None, 5.0, 20.0), usage) is None  # reads happened, their price is unknown
     assert pricing.cost_class_weights(tariff, {**usage, "prompt_cache_ttl": "default"}) is None  # a write at an unnamed lifetime
     assert pricing.cost_class_weights(tariff, {**usage, "prompt_cache_ttl": "", "cache_write_tokens": 0}) is not None
@@ -284,3 +295,37 @@ def test_a_busy_ledger_is_asked_again_and_a_ledger_that_stays_busy_is_said_to_be
     refusals["left"] = 10 ** 6
     with pytest.raises(UsageLockUnavailable):
         cost_period.cost_period(root, "24h")
+
+
+def test_calls_without_cache_counts_are_counted_apart_and_never_split(root):
+    _call(root, prompt=1_000, read=400, write=100, output=10, cost=0.5)
+    attempt = _call(root, prompt=100, cost=None, settle=False)
+    ua.settle_attempt(attempt, {"prompt_tokens": 100, "completion_tokens": 10}, cost_usd=1.0, cost_final=True)  # no cache counts
+    model, = cost_period.cost_period(root, "24h")["models"]
+    assert model["tokens"] == {"cache_write": 100, "cache_read": 400, "output": 20, "uncached_input": 500}  # its 100 are in no class
+    assert (model["uncounted_calls"], model["uncounted_input_tokens"]) == (1, 100)
+    assert model["cost"] == pytest.approx(1.5) and model["unshared_cost"] == pytest.approx(1.0)  # its dollar stays unshared
+    assert sum(model["by_class"].values()) == pytest.approx(0.5, abs=1e-6)
+
+
+def test_the_bounds_search_reads_points_and_a_stamp_spelling_does_not_move_membership(root):
+    """Rows without a parseable time never make the search walk the ledger (each probe is one row), and membership
+    compares instants: a ``Z`` stamp half a second before the period's start stays out."""
+    first = _call(root, prompt=10, write=1, cost=0.1)
+    with usage_store.hold(root) as txn:
+        txn.conn.execute("UPDATE attempts SET ts_last_epoch=NULL")  # an imported tail without parseable times
+    with usage_store.read(root) as txn:
+        statements = []
+        txn.conn.set_trace_callback(statements.append)
+        bounds = txn.period_bounds(time.time() - 60)
+        txn.conn.set_trace_callback(None)
+    assert bounds[0] <= 1 and all("ts_last_epoch IS NOT NULL" not in sql for sql in statements)
+    start = time.time()
+    stamp = _dt.datetime.fromtimestamp(start - 0.5, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    with usage_store.hold(root) as txn:
+        txn.conn.execute("UPDATE attempts SET ts_reserved=?, ts_last_epoch=? WHERE attempt_id=?", (stamp, start, first.attempt_id))
+    assert cost_period.cost_period(root, "24h", now=start + cost_period.PERIODS["24h"])["models"] == []
+    later = _dt.datetime.fromtimestamp(start + 0.5, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    with usage_store.hold(root) as txn:
+        txn.conn.execute("UPDATE attempts SET ts_reserved=? WHERE attempt_id=?", (later, first.attempt_id))
+    assert [row["calls"] for row in cost_period.cost_period(root, "24h", now=start + cost_period.PERIODS["24h"])["models"]] == [1]

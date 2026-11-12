@@ -46,7 +46,9 @@ export function costPeriodPresentation(view) {
         const shared = split ? split.reduce((sum, part) => sum + part.usd, 0) : 0;
         const notes = [];  // one line under the parts: what the amounts leave out, then the price ratio
         if (!split && Number(row.cost) > 0) notes.push('Not split by class: these calls have no price list, token counts or named cache lifetime at hand.');
-        else if (Number(row.unshared_cost) >= 0.005) notes.push(`${formatUsd(row.unshared_cost)} is not split (no price list, token counts or named cache lifetime for those calls).`);
+        else if (Number(row.unshared_cost) > 0) notes.push(`${formatUsd(row.unshared_cost)} is not split (no price list, token counts or named cache lifetime for those calls).`);
+        if (row.uncounted_calls) notes.push(`${number(row.uncounted_calls)} ${row.uncounted_calls === 1 ? 'call' : 'calls'} reported no cache counts: `
+            + `${compactTokens(row.uncounted_input_tokens)} input tokens are in no class.`);
         if (row.open_rows) notes.push(`${number(row.open_rows)} ${row.open_rows === 1 ? 'call is' : 'calls are'} still open.`);
         if (row.unpriced_rows) notes.push(`${number(row.unpriced_rows)} ended without a price.`);
         if (row.write_price_in_reads) {
@@ -60,7 +62,8 @@ export function costPeriodPresentation(view) {
         if (!byMoney && counted > 0) notes.push('The bar is by tokens: there is no recorded cost to split.');
         return {
             name: row.model,
-            sum: `${formatUsd(row.cost)} · ${number(row.calls)} ${row.calls === 1 ? 'call' : 'calls'}`,
+            // No call with a recorded price: the amount is unknown (a subscription, a route without a price list), never $0.
+            sum: `${row.cost === null || row.cost === undefined ? 'no recorded cost' : formatUsd(row.cost)} · ${number(row.calls)} ${row.calls === 1 ? 'call' : 'calls'}`,
             parts: CLASS_WORDS.map(([key, label], index) => {
                 const share = byMoney ? split[index].usd / shared : counted > 0 ? counts[index] / counted : 0;
                 const tokens = `${compactTokens(counts[index])} tokens`;

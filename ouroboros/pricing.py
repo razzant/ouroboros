@@ -254,16 +254,39 @@ def cost_class_weights(pricing: Optional[tuple], usage: Dict[str, Any]) -> Optio
     ``usage`` carries the usage-row fields (``prompt_tokens``, ``completion_tokens``, ``cached_tokens``,
     ``cache_write_tokens``, ``prompt_cache_ttl``, the reported ``cache_write_tokens_by_ttl``). These are the
     addends ``_cost_from_pricing`` sums; only their ratios are meant, the recorded cost stays the amount."""
-    if not pricing or usage.get("prompt_tokens") is None or usage.get("completion_tokens") is None:
-        return None
-    if (int(usage.get("cache_write_tokens") or 0) > 0 and str(usage.get("prompt_cache_ttl") or "") not in ("5m", "1h")
-            and not isinstance(usage.get("cache_write_tokens_by_ttl"), dict)):
+    counts = [usage.get(name) for name in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens")]
+    if not pricing or any(count is None for count in counts):
+        return None  # a count the row does not have is unknown, never zero
+    prompt, completion, read, writes = (max(0, int(count)) for count in counts)
+    lifetimes = _write_lifetimes(usage, writes)
+    if lifetimes is None:
         return None  # written at a lifetime the row does not name: never assumed to be the cheaper one
-    addends = _cost_addends(pricing, max(0, int(usage["prompt_tokens"])), max(0, int(usage["completion_tokens"])), usage)
+    addends = _cost_addends(pricing, prompt, completion, {"cached_tokens": read, "cache_write_tokens": writes})
     if addends is None:
         return None
-    uncached, read, write_default, write_extended, output = addends
-    return {"cache_write": write_default + write_extended, "cache_read": read, "output": output, "uncached_input": uncached}
+    rates = pricing
+    for min_prompt_tokens, tier_pricing in getattr(pricing, "tiers", ()):
+        if prompt >= int(min_prompt_tokens):
+            rates = tier_pricing
+    write_price = float(rates[2] or 0.0)
+    extended = getattr(pricing, "cache_write_1h", None) if rates is pricing else None
+    extended = float(extended) if extended is not None else write_price * (2.0 / 1.25)  # the estimator's own ratio
+    uncached, cache_read, _written, _extended, output = addends
+    write = (lifetimes[0] * write_price + lifetimes[1] * extended) / 1_000_000
+    return {"cache_write": write, "cache_read": cache_read, "output": output, "uncached_input": uncached}
+
+
+def _write_lifetimes(usage: Dict[str, Any], writes: int) -> Optional[Tuple[int, int]]:
+    """``(5-minute, 1-hour)`` written tokens: the provider's own split when it accounts for every write, else the
+    one lifetime the row names; None when neither says (``default`` or an absent lifetime, a partial split)."""
+    if writes == 0:
+        return 0, 0
+    split = usage.get("cache_write_tokens_by_ttl")
+    if (isinstance(split, dict) and split and set(split) <= {"5m", "1h"}
+            and all(type(count) is int and count >= 0 for count in split.values()) and sum(split.values()) == writes):
+        return split.get("5m", 0), split.get("1h", 0)
+    named = str(usage.get("prompt_cache_ttl") or "")
+    return (writes, 0) if named == "5m" else (0, writes) if named == "1h" else None
 
 
 def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:

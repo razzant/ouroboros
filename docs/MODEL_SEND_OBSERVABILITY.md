@@ -278,34 +278,46 @@ and an `append` beside a large write is not a contradiction this record resolves
 - `origins`: every seam that rewrote the view since the last answered request, in
   order (compaction, a restored continuation, a route or tool change, …).
 - `from_route`: the route of the last answered request when it was another one.
-- `since_s`: seconds from the start of this route's last answered request to this
-  candidate's start (a cache lifetime runs from a request's start).
+- `base_at`: when this route's last answered request was answered (epoch seconds).
+  Its start was earlier, so the time from `base_at` to an attempt's own dispatch is at
+  most the time between the two starts (a cache lifetime runs from a request's start).
 
-A candidate that is never answered moves no base: the answer that is recorded must
-start with the candidate that waited for it (a send adds its own later rows, as its
-clock line), and a route that is sent unmeasured ends the wait. Sends outside Main's
-loop (helpers, reviews) carry no fact; the forced final takes its fact from the
-input it measured. The routes' records ride the continuation
+A candidate becomes its route's base when an answer of that route arrives: the
+accepted answer (it must start with the candidate that waited for it; a send adds its
+own later rows, as its clock line), or, at the next measurement, any answer the loop
+saw for it and did not accept (an empty or output-limited reply was still written and
+charged). A candidate never answered moves no base; an answer of another route, or a
+route sent unmeasured, ends its wait. A retry inside one call carries its call's fact.
+Sends outside Main's loop (helpers, reviews) carry no fact; the forced final takes its
+fact from the input it measured. The routes' records ride the continuation
 checkpoint with the observer's other state (`OBSERVER_STATE_ATTRS`).
 
 One reader names the class (`transcript_prefix.prefix_class`), in the provider's
 own order: `first_request`, `entered_model`, `tools_changed` (a reworded tool
 description or parameter rewrites every running task's start once), `system_changed`
 (which block), `history_rewritten` (origins); then, for pure extensions, `paused`
-(`since_s` exceeds the lifetime the row's `prompt_cache_ttl` names: arithmetic over
-two recorded facts, said as time, never as "expired", and never derived for
-`default` or an absent lifetime), `returned_to_model`, `append`; a row without a
-fact is `not_recorded`. Nothing decides by the fact or the class.
+(from `base_at` to the row's own `ts_dispatched` is longer than the lifetime the
+row's `prompt_cache_ttl` names, so the previous start was longer ago still:
+arithmetic over recorded facts, said as time, never as "expired", and never derived
+for `default`, an absent lifetime or an undispatched row), `returned_to_model`,
+`append`; a row without a fact is `not_recorded`. Nothing decides by the fact or the
+class.
 
 The Costs page's period view (`gateway/cost_period.py`,
 `GET /api/cost-breakdown?period=24h|7d|30d`) reads the calls reserved in a period
-(found by position: `usage_store.Txn.period_bounds`, in bounded slices) and shares
+(membership by the reservation instant; the slices are found by position,
+`usage_store.Txn.period_bounds`, in point reads; each slice is one short read, and the
+tariffs are looked up outside it) and shares
 each call's RECORDED cost among cache writes, cache reads, output and uncached
 input by what the route's tariff charges for that call's own tokens. Only price
-ratios enter; the parts and the cost that could not be shared (no tariff, no token
-counts, a write at a lifetime the row does not name) add up to the recorded cost.
-`write_price_in_reads` is how many read tokens one written token costs at
-`write_price_lifetime`, the lifetime most of the model's tokens were written at.
+ratios enter; the parts and the cost that could not be shared (no tariff, a token
+count the row does not have, a write whose lifetime neither the row nor the
+provider's split names) add up to the recorded cost. Input is classed only for calls
+that reported both cache counts; the others are counted apart (`uncounted_calls`,
+`uncounted_input_tokens`), never as uncached. A model none of whose calls has a
+recorded price has `cost: null`. `write_price_in_reads` is how many read tokens one
+written token costs at `write_price_lifetime` (the lifetime most of the model's
+tokens were written at) at the model's base price.
 Delegated subscription sessions and unmetered dispatches carry no reservation time
 and are not in a period.
 The tariff is read without a fetch: what the process holds, else the install's
