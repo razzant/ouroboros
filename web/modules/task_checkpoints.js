@@ -1,3 +1,4 @@
+import { causeOf } from './context_observation.js';
 import { statusMarkHtml } from './status_mark.js';
 
 // Producer census: loop_model_call/round_limits/nudges/budget, task_pacing,
@@ -6,7 +7,7 @@ export const CHECKPOINT_LABELS = {
     context_fit_low_retry: 'Books shown as chapter navigation during context-size recovery',
     context_fit_refused: 'Context-size check found no room for results',
     context_fit_route_rebound: 'Context fit rebound the route',
-    context_fit_physical_mode: 'Context starts in a smaller mode (window too small)',
+    context_fit_physical_mode: 'Context starts in a smaller mode',
     context_view: 'Context inspected',
     context_reclaim_emergency: 'Context shrunk during context-size recovery (no model)',
     context_memory_coarsened: 'Memory shown coarser during context-size recovery',
@@ -162,6 +163,11 @@ export function taskCheckpointLabel(evt = {}) {
     }
     if (kind === 'context_reclaim_emergency' && evt.cause === 'output_exhaustion') {
         return 'Source-address recovery after empty length-limited replies (no model)';
+    }
+    if (kind === 'context_fit_physical_mode') {  // the start's recorded reason, in the Context capsule's words
+        const why = causeOf({ preferred_at_send: evt.preferred_mode, applied: evt.effective_mode, cause: evt.cause },
+            evt.preferred_mode);
+        return why ? `${CHECKPOINT_LABELS[kind]}. ${why}` : CHECKPOINT_LABELS[kind];
     }
     const folded = Number(evt.reclaimed_tokens);
     if (kind === 'prompt_prefix_break' && evt.reasoning_retired) {
