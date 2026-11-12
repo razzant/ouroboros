@@ -392,6 +392,32 @@ test('a retry reuses the SAME request_id (stable idempotency key)', async () => 
     } finally { fx.restore(); }
 });
 
+test('an answer whose delivery is unknown is amber on a Project question\'s cards and not on Main\'s own', () => {
+    const delivery = { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' };
+    const answered = { ...WS_MSG, state: 'answered', answered_index: 0, question_delivery: delivery };
+    // Main's own question: the pill does not count it, its head is not amber.
+    const main = fixture({ isMain: true });
+    try {
+        assert.deepEqual(markOf(main.decision.buildQuizCard(answered)), ['dot', 'ok', false]);
+    } finally { main.restore(); }
+    // The same answer of a Project's question, in its own room: the pill counts it, the head is amber.
+    const room = fixture({ projectId: 'p1', chatId: 23 });
+    try {
+        assert.deepEqual(markOf(room.decision.buildQuizCard({ ...answered, project_id: 'p1' })), ['dot', 'owner', false]);
+    } finally { room.restore(); }
+    // And on its Main copy, which offers Remove from pending.
+    const column = new NodeStub();
+    const mirror = fixture({ isMain: true, frameNode: frameBubble, insertMessageNode: (node) => { column.append(node); return true; } });
+    try {
+        mirror.decision.appendQuestionPointer({ role: 'system', system_type: 'project_question_pointer', task_id: 't-1',
+            quiz_id: 'qz-1', project_id: 'p1', project_chat_id: 23, project_name: 'Storage', ts: '2026-09-18T22:00:00+00:00',
+            quiz_state: 'answered', question: 'Merge now?', options: ['Yes', 'No'], answered_index: 0, question_delivery: delivery });
+        const card = column.querySelector('.chat-quiz-card');
+        assert.equal(card.querySelector('.chat-quiz-dismiss')?.textContent, 'Remove from pending');
+        assert.deepEqual(markOf(card), ['dot', 'owner', false]);
+    } finally { mirror.restore(); }
+});
+
 test('applyQuizStateFrame settles an existing card and ignores unknown ids', async () => {
     const fx = fixture({ fetchImpl: async () => ({ ok: true, status: 200 }) });
     try {

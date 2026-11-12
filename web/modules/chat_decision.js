@@ -36,8 +36,9 @@ function paintStatusText(card, row, paused) {
     return true;
 }
 
-// What one observation of a question carries: its identity, lifecycle, recorded answer and wait facts.
-const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'state', 'answered_index', 'comment', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
+// What one observation of a question carries: its identity (its own Project included: '' for Main's own and a
+// private Presence question, so the head follows the pill's rule), lifecycle, recorded answer and wait facts.
+const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'project_id', 'state', 'answered_index', 'comment', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
     'secret_outcome', 'secret_save', ...WAIT_FIELDS];
 const lifecycleOf = (row) => Object.fromEntries(LIFECYCLE_FIELDS.filter((field) => Object.hasOwn(row, field))
     .map((field) => [field, row[field]]));
@@ -715,7 +716,9 @@ export function createChatDecision({
         const complete = Boolean(quiz.question) && quiz.optionsKnown;
         if (!quiz.quizId || !quiz.taskId || !(complete || mirror)) return null;
         const key = questionKey(quiz.taskId, quiz.quizId);
-        const frame = { task_id: quiz.taskId, quiz_id: quiz.quizId, state: quiz.state,
+        // The question's Project as this card knows it (its row's, its Main copy's, else this Project room's); a
+        // canonical read of the question replaces it.
+        const frame = { task_id: quiz.taskId, quiz_id: quiz.quizId, project_id: quiz.projectId, state: quiz.state,
             ...quiz.waitRow, ...quiz.answerFields, ...(quiz.closedReason ? { closed_reason: quiz.closedReason } : {}) };
         const current = mirror?.needsValidation && !['answered', 'closed', 'superseded'].includes(quiz.state)
             ? { ...frame, state: 'unknown' } : observe(frame);
