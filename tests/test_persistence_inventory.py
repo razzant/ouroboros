@@ -989,7 +989,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``archive/subagent_worktrees_<sha256>.json`` (``subagent_worktrees.import_legacy_registry``; the records row).
 # 467 -> 466: retiring ``generate_evolution_stats`` removes its local export,
 # ``task_results/artifacts/*/evolution-*.json``, and that export's sentinel below.
-EXPECTED_SCAN_PATHS = 466
+# 466 -> 468: the measurement fold a held store refused is a mark any process sees,
+# ``state/subagent_metrics.owed``, and the job's captured ``state/subagent_metrics.taken``
+# (``ouroboros/subagent_metrics.py``); their own row.
+EXPECTED_SCAN_PATHS = 468
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
