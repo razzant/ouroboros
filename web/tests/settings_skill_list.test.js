@@ -20,12 +20,13 @@ async function mountList(t, answer) {
     const { env } = world(t);
     env.routes.set('/api/extensions', async () => answer());
     const opened = [];
+    const state = { activePage: 'settings' };
     const container = new Stub('div');
     const page = settingsPageFor('skill');
     assert.equal(typeof page.title === 'function' ? page.title('skill') : page.title, 'Skill settings');
-    const handle = await page.mount(container, { path: 'skill', ctx: { openSettings: (path) => opened.push(path) } });
+    const handle = await page.mount(container, { path: 'skill', ctx: { openSettings: (path) => opened.push(path), state } });
     await settle();
-    return { env, container, opened, handle, doors: () => container.querySelectorAll('[data-setting-door]') };
+    return { env, container, opened, handle, state, doors: () => container.querySelectorAll('[data-setting-door]') };
 }
 const ok = (body) => ({ ok: true, status: 200, json: async () => body });
 
@@ -54,9 +55,9 @@ test('one door per skill that registered a form, named by its title, opening tha
     assert.equal(reads(), before + 1);
 });
 
-test('a skill changed by anyone redraws the list: the server says so or this page did it; let go, nothing is read', async (t) => {
+test('a skill changed by anyone redraws the list on screen: the server says so or this page did it; hidden or let go, nothing is read', async (t) => {
     const installed = structuredClone(INSTALLED);
-    const { env, handle, doors } = await mountList(t, () => ok(installed));
+    const { env, handle, state, doors } = await mountList(t, () => ok(installed));
     env.routes.set('/api/ui/contributions', async () => ok({}));
     const heard = new Map();
     t.after(getContributions().attach({ ws: { on(type, fn) { heard.set(type, fn); return () => heard.delete(type); } }, target: env.window }));
@@ -75,6 +76,12 @@ test('a skill changed by anyone redraws the list: the server says so or this pag
     env.window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', { detail: { action: 'review', name: 'telegram' } }));
     await settle();
     assert.equal(reads(), before + 1);
+    // Another page is on screen: the list reads nothing (the shell's "shown" reads it on the way back, above).
+    state.activePage = 'chat';
+    heard.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'telegram', action: 'updated' });
+    await settle();
+    assert.equal(reads(), before + 1, 'a hidden Settings reads nothing');
+    state.activePage = 'settings';
     handle.unmount();
     heard.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'telegram', action: 'enabled' });
     await settle();

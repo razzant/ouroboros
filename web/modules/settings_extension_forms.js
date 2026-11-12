@@ -222,6 +222,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
 
 /* ---- The pages ----------------------------------------------------------------------------------------------- */
 
+const settingsOnScreen = (ctx) => ctx?.state?.activePage === 'settings' && !globalThis.document?.hidden;
 const FORMS = new Map();  // skill id → { skill, name, sections }: what the last read of the installed skills says
 let formsHost = null;     // the one `#extension-settings-sections`, moved into the skill page that is open
 
@@ -285,8 +286,9 @@ function mountSkillList(container, { path, ctx }) {
     const onShown = (event) => { if (event.detail?.path === path) void draw(); };
     window.addEventListener('ouro:settings-page-shown', onShown);
     // Every way a skill changes ends in the one lifecycle signal (contributions.js): this page's own action, a job
-    // that finished, another window, Ouroboros itself.
-    const offLifecycle = getContributions().onLifecycle(draw);
+    // that finished, another window, Ouroboros itself. A Settings that is not on screen reads nothing: the shell says
+    // "shown" on the way back and the page reads then.
+    const offLifecycle = getContributions().onLifecycle(() => { if (settingsOnScreen(ctx)) void draw(); });
     return draw().then(() => ({
         unmount() {
             alive = false;
@@ -325,7 +327,7 @@ function mountSkillForm(container, { path, ctx }) {
     host.addEventListener('input', onTyped);
     window.addEventListener('ouro:settings-updated', onSaved);
     window.addEventListener('ouro:settings-page-shown', onShown);
-    const offLifecycle = getContributions().onLifecycle(fill);  // the same one signal as the list above
+    const offLifecycle = getContributions().onLifecycle(() => { if (settingsOnScreen(ctx)) void fill(); });  // as the list above
     return Promise.resolve(fill()).then(() => ({
         unmount() {
             alive = false;
