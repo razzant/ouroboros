@@ -134,7 +134,7 @@ def test_the_line_counts_clean_passes_from_published_facts_and_the_list_reads_an
         facts, shown = snapshot.waiting["late_reviews"], line(snapshot)
     assert (facts["count"], facts["in_rooms"], facts["clean_pass"], facts["unrecorded"]) == (3, 3, 1, 1)
     assert "late reviews 3 in 3 rooms, oldest " in shown
-    assert (", 1 PASS with no findings, 1 with no outcome kept on the mark (the list reads their records); "
+    assert (", 1 PASS with no findings, 1 with no outcome kept on the mark (the list reads the record where one exists); "
             "memory_read(room_id='late_reviews'") in shown
     assert ", 1 PASS with no findings; memory_read(room_id='late_reviews'" in memory_waiting.text({
         **snapshot.waiting, "late_reviews": {**facts, "unrecorded": 0}}), "every mark keeps its outcome: one fact"

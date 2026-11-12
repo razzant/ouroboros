@@ -197,7 +197,7 @@ def primary_action(ctx: Any, action: str) -> str:
     ctx.route_choice = route_choice.explicit("wait_card") if chosen else route_choice.opening_choice(ctx)
     return (f"primary route {ctx.active_model_override}{' (local)' if ctx.active_use_local_override else ''}"
             f" (role {route['role']}; if it refuses: "
-            f"{'wait for it' if action == 'wait' else 'configured routes again'})")
+            f"{'wait for it; once its content filter stops a request, nothing is there to wait for, so this run ends as interrupted, without configured routes' if action == 'wait' else 'configured routes again'})")
 
 
 def read_current(ctx: Any) -> dict:

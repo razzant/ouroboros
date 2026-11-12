@@ -482,7 +482,8 @@ above the row like the hint and never move the composer**: Main, the recents, th
 that can lead a work (those Settings offers the Main role, never agent sessions). With one source, its models stand
 under its own name without a source step; when Main has a row above, its model is omitted from this section.
 A recent may also appear under its source. A row is one model through one source, however many accounts list it, never an account: the source, whether
-it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one:
+it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one and
+neither Main's processing tier nor the default one, which every lead pays, is Fast or Economy:
 `OpenRouter · $4 in / $20 out`), its window when known (an unknown window is omitted), `Unavailable` when no
 account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
 and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps
@@ -2730,7 +2731,8 @@ replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
 confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
-published price per 1M tokens where it states one (`$4 in / $20 out`), which never sorts or filters the list;
+published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
+sorts or filters the list;
 nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned

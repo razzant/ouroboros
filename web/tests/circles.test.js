@@ -733,3 +733,28 @@ test('a model typed while Save is out stays a draft on the revision that Save ma
     await settled(); finish(); await next;
     assert.deepEqual(calls, [[{ model: GLM }, 4], [{ model: 'openai::gpt-6' }, 5]]);
 });
+
+test('a circle editor names a model\'s catalog price while its places pay it, and says it again on a tier or language change', async (t) => {
+    const { modelCatalog } = await import('../modules/model_catalog_store.js');
+    const { applyPayload, setMissTransport } = await import('../modules/i18n.js');
+    setMissTransport(() => Promise.resolve(null));
+    const priced = { items: [{ ...MODELS.items[0], price: { input: 1, output: 3 } }] };
+    modelCatalog.adoptSettings({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' });
+    const view = page(t, { response: WITH_MODELS, readModels: async () => priced });
+    await settled();
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    await settled();
+    const said = async () => { await view.controller.refresh(); return view.body.querySelectorAll('.ui-model-option-meta').map((node) => node.textContent); };
+    assert.deepEqual(await said(), [], "a circle's places run as leads on the default tier, here Fast");
+    modelCatalog.adoptSettings({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' });
+    assert.deepEqual(await said(), ['$1 in / $3 out'], 'a tier Settings saves reaches the open page');
+    // The words alone: without a document i18n.js leaves the fixture's page unwalked.
+    const language = (payload) => { const kept = globalThis.document; globalThis.document = undefined; try { applyPayload(payload); } finally { globalThis.document = kept; } };
+    language({ language: 'ru', english: false, revision: 51, entries: { '{input} in / {output} out': { text: '{input} вход / {output} выход' } } });
+    try {
+        view.env.window.dispatchEvent(new CustomEvent('ouro:language-changed'));
+        assert.deepEqual(await said(), ['$1 вход / $3 выход']);
+    } finally {
+        language({ language: '', english: true, revision: 52, entries: {} });
+    }
+});
