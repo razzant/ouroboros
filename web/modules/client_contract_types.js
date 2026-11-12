@@ -611,6 +611,7 @@
  * @property {ChatHistoryAnchor=} anchor  // an `around` read only
  * @property {string=} error
  * @property {string=} reason_code
+ * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one
  */
 
 // --- Journey bodies of routes whose handlers check fields by hand (ProjectEntry: ./api_types.js) ---

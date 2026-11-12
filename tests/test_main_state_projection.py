@@ -669,20 +669,25 @@ def test_a_direct_project_roots_own_warm_pause_stays_quiet_in_main(tmp_path, mon
 
 def test_project_chat_ids_is_unknown_never_empty_while_no_row_of_the_registry_can_be_read(gateway):
     """``[]`` means "no Projects" (a fresh install); a registry no row of which can be read is ``null``; an invalid
-    row beside readable ones leaves the rooms they name."""
-    assert _state(gateway)["project_chat_ids"] == [], "a fresh install without a registry has no Projects"
+    row beside readable ones leaves the rooms they name. The feed's count says the same in the same body: unknown
+    while the rooms are, never "none listed" (a reader keeps the rows it shows)."""
+    def rooms_and_count():
+        body = _state(gateway)
+        return body["project_chat_ids"], body["project_listable_count"]
+
+    assert rooms_and_count() == ([], 0), "a fresh install without a registry has no Projects"
     project = create_project(gateway.root, "known", name="Known")
-    assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]
+    assert rooms_and_count() == ([project["chat_id"]], 1)
     registry = gateway.root / "state" / "projects.json"
     intact = registry.read_bytes()
     registry.write_bytes(intact[: len(intact) // 2])
-    assert _state(gateway)["project_chat_ids"] is None
+    assert rooms_and_count() == (None, None)
     data = json.loads(intact)
     registry.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
-    assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]
+    assert rooms_and_count() == ([project["chat_id"]], 1)
     registry.unlink()  # lost beside its commit witness: unknown too
-    assert _state(gateway)["project_chat_ids"] is None
+    assert rooms_and_count() == (None, None)
     registry.write_text(json.dumps({**data, "projects": [{"chat_id": 7}]}), encoding="utf-8")  # only an invalid row
-    assert _state(gateway)["project_chat_ids"] is None
+    assert rooms_and_count() == (None, None)
     registry.write_bytes(intact)
-    assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]
+    assert rooms_and_count() == ([project["chat_id"]], 1)

@@ -1589,6 +1589,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
             reason = (exc.reason if isinstance(exc, HistoryCursorError) else
                       "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
             return Response(content=json.dumps({"messages": [], "error": reason, "reason_code": reason,
+                                                **({"detail": str(exc)} if type(exc) is StoreError else {}),
                                                 "next_cursor": cursor, "has_more": True,
                                                 "window": {"complete": False, "truncated_by": [reason]}}),
                             status_code=exc.status if isinstance(exc, HistoryCursorError) else 503,

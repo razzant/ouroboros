@@ -38,9 +38,11 @@ import { carryOpenQuestions } from './question_presentation.js';
  * the next read asks for the whole map. A body with no revision field (an older server) applies.
  */
 // A feed the server could not read (`project_listable_count: null`, its `projects` then empty) is unknown, never
-// empty: the page keeps the rows it showed, so a room that is the owner's turn keeps its row, until a read names them.
+// empty: the page keeps the rows it showed and the message revision they were read at, so a room that is the owner's
+// turn keeps its row, until a read names them.
 const heldFeed = (prior, data) => (data?.project_listable_count === null && Array.isArray(data.projects)
-    && Array.isArray(prior?.projects) ? { ...data, projects: prior.projects } : data);
+    && Array.isArray(prior?.projects) ? { ...data, projects: prior.projects,
+        project_messages_revision: prior.project_messages_revision ?? null } : data);
 
 export function createStateSnapshotSequencer(onApply, now = () => Date.now(), onUnavailable = () => {}) {
     let requestedGeneration = 0;
@@ -106,7 +108,9 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
                 appliedGeneration = generation;
                 latest = data = carryOpenQuestions(asked, heldFeed(asked, withBindings(data)));
                 if (data?.rooms && Array.isArray(data.works)) {
-                    asked = { rooms: data.rooms, projects: Array.isArray(data.projects) ? data.projects : asked?.projects };
+                    const fed = Array.isArray(data.projects);
+                    asked = { rooms: data.rooms, projects: fed ? data.projects : asked?.projects,
+                        project_messages_revision: fed ? data.project_messages_revision : asked?.project_messages_revision };
                 }
                 onApply(data, request.requestedAt, generation);
                 return true;
