@@ -133,6 +133,10 @@ function rowState(row) {
 }
 const repaintRow = (id) => BOUND.get(id)?.forEach((paint) => paint());
 
+// The composer's list and the circle and place Model fields learn the tiers and keys from the newest document
+// (model_catalog_store.js): a read, or a row's landed write.
+const announce = (data) => globalThis.document?.dispatchEvent?.(new CustomEvent('settings-document:applied', { detail: data }));
+
 /** One fresh read of the settings document; the helper keeps the newest for values, effects, tokens and the setup
  *  contract. A row whose write was not confirmed says it saved once a read shows the value it sent. */
 export async function readSettings() {
@@ -140,6 +144,7 @@ export async function readSettings() {
     const data = await fetchJson('/api/settings', { cache: 'no-store' });
     if (epoch !== settingsEpoch && lastSettings) return data;
     lastSettings = data;
+    announce(data);
     ROW_STATES.forEach((state) => {
         if (state.busy || state.outcome?.state !== 'unknown' || !sameValue(currentValue(state.row, data), state.sent)) return;
         Object.assign(state, { outcome: { ...state.outcome, state: 'saved', message: '', details: '' }, reread: false, typed: null, seen: false });
@@ -438,6 +443,7 @@ function patchSettings(row, value, outcome) {
     });
     const tokens = lastSettings._meta?.tokens;
     if (tokens && outcome.token) Object.assign(tokens, typeof outcome.token === 'string' ? { [row.keys[0]]: outcome.token } : outcome.token);
+    announce(lastSettings);
 }
 
 async function writeOnce(row, state, value, options) {

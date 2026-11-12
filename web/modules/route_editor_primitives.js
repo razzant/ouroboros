@@ -21,6 +21,8 @@ export const EFFORT_CHOICES = ['none', 'minimal', 'low', 'medium', 'high', 'xhig
 export const PROCESSING_PREFERENCE_KEY = 'OUROBOROS_PROCESSING_PREFERENCE';
 export const MODEL_PROCESSING_PREFERENCES_KEY = 'OUROBOROS_MODEL_PROCESSING_PREFERENCES';
 export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];
+/** Fast and Economy send another processing tier, which its own endpoint prices: a catalog's row is not that call's price. */
+export const tierPriced = (preference) => preference === 'fast' || preference === 'economy';
 
 export function processingLabel(value) {
     return { standard: 'Standard', fast: 'Fast', economy: 'Economy', mixed: 'Mixed', unknown: 'Unknown' }[value] || 'Route default';
