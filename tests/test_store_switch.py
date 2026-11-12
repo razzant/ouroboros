@@ -111,9 +111,9 @@ def test_the_intent_is_write_once_and_typed(tmp_path):
 def test_needs_and_the_engine_pin_come_from_the_target_tree(target_repo):
     repo, old, new = target_repo
     assert store_switch.switch_needs(repo, old) == {"facts": True, "money": True, "handles": True, "dialogue": True,
-                                                    "threads": True}
+                                                    "threads": True, "wake_transitions": True}
     assert store_switch.switch_needs(repo, new) == {"facts": False, "money": False, "handles": True, "dialogue": False,
-                                                    "threads": False}
+                                                    "threads": False, "wake_transitions": True}
     (repo / "ouroboros" / "dialogue_store.py").write_text("# a dialogue store that reads no reference\n", encoding="utf-8")
     git(repo, "commit", "-q", "-am", "older dialogue store")
     assert store_switch.switch_needs(repo, git(repo, "rev-parse", "HEAD"))["threads"] is True
@@ -123,6 +123,38 @@ def test_needs_and_the_engine_pin_come_from_the_target_tree(target_repo):
     git(repo, "rm", "-q", "ouroboros/claudexor_runtime_pin.json")
     git(repo, "commit", "-q", "-m", "no pin")
     assert store_switch.next_engine_pin(repo, git(repo, "rev-parse", "HEAD")) is None
+
+
+def test_a_door_writes_the_wake_transitions_back_only_for_a_target_without_their_reader(target_repo, tmp_path,
+                                                                                      monkeypatch):
+    """A door that resets now to a tree without the reader of the wake transition chain first writes the accepted
+    chain back in the form that tree reads; the export's failure is logged and the reset still runs. A tree with the
+    reader gets no export."""
+    from ouroboros import consciousness_transitions
+
+    repo, _old, new = target_repo
+    root, calls, resets = tmp_path / "data", [], []
+
+    def export(drive):
+        calls.append(drive)
+        raise OSError("chain unreadable")
+
+    def reset():
+        resets.append(True)
+        return True, "reset done"
+
+    monkeypatch.setattr(consciousness_transitions, "export_for_older_body", export)
+    assert store_switch.switch_or_reset(root, repo, target_sha=new, target_ref="v-new", reason="test",
+                                        door="ui_rollback", reset=reset) == (True, "reset done", False)
+    assert calls == [root] and resets == [True]
+    (repo / "ouroboros" / "consciousness_transitions.py").write_text("# the chain reader\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "chain reader")
+    reader = git(repo, "rev-parse", "HEAD")
+    assert store_switch.switch_needs(repo, reader)["wake_transitions"] is False
+    assert store_switch.switch_or_reset(root, repo, target_sha=reader, target_ref="v-reader", reason="test",
+                                        door="ui_rollback", reset=reset) == (True, "reset done", False)
+    assert calls == [root] and resets == [True, True]
 
 
 def test_every_door_calls_its_own_owner_bound_to_the_intent(target_repo, monkeypatch):
@@ -189,11 +221,17 @@ def test_the_seam_reports_an_owner_that_returns_without_moving_head(switch_root,
 
 # ---- the seam -----------------------------------------------------------------------------
 
-def test_the_seam_exports_consumes_the_intent_retires_the_store_and_only_then_switches(switch_root, target_repo):
+def test_the_seam_exports_consumes_the_intent_retires_the_store_and_only_then_switches(switch_root, target_repo,
+                                                                                      monkeypatch):
+    from ouroboros import consciousness_transitions
+
     root, (repo, old, _new) = switch_root, target_repo
     expected = snapshot(root)
     intent(root, old)
     seen = {}
+    # The wake transitions' export is best effort: its failure is its step's record, never the switch's.
+    monkeypatch.setattr(consciousness_transitions, "export_for_older_body",
+                        lambda _root: (_ for _ in ()).throw(OSError("chain unreadable")))
 
     def owner(recorded):
         seen.update(state(root), receipt=receipt(root))
@@ -209,11 +247,13 @@ def test_the_seam_exports_consumes_the_intent_retires_the_store_and_only_then_sw
     assert seen["receipt"]["steps"]["handles"] == {"status": "no_packs", "handles": 0, "bytes": 0, "packs": 0}
     assert seen["receipt"]["steps"]["dialogue"] == {}, "the export step ran; this fixture root holds no dialogue store"
     assert seen["receipt"]["steps"]["threads"] == {}, "so did the expansion of rows held by reference"
+    assert seen["receipt"]["steps"]["wake_transitions"] == {"status": "failed", "error": "OSError: chain unreadable"}
     assert len(seen["retired_facts"]) == 1 and len(seen["retired_money"]) == 1
     assert snapshot(root) == expected  # the files the old body reads are the ones the store imported
     assert receipt(root)["switched"]["ok"] is True
     phases = [row["phase"] for row in rows(root / "logs" / "supervisor.jsonl", "storage_switch")]
-    assert phases == ["preflight", "exporting", "money", "handles", "threads", "dialogue", "switching", "switched"]
+    assert phases == ["preflight", "exporting", "money", "handles", "threads", "dialogue", "wake_transitions",
+                      "switching", "switched"]
     assert json.loads((root / store_switch.PROGRESS_REL).read_text(encoding="utf-8"))["phase"] == "switched"
     assert store_switch.resume_pending_switch(root, repo_dir=repo) == {"status": "nothing_pending"}
     # the child drive's store and its own child's were retired with the canonical one

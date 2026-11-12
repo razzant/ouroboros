@@ -13,7 +13,8 @@ mechanics, nothing the mind sees depends on it. Every read verifies each file ag
 caller's unreadable source, never a guess by time.
 
 A boundary of the previous form names the state in its wake source's header (``transitions.source_ref``); the next
-wake reads it there and writes a base.
+wake reads it there and writes a base. ``export_for_older_body`` writes that form back before a switch to a body
+without this module (``store_switch``).
 """
 
 from __future__ import annotations
@@ -167,3 +168,40 @@ def bind_link(drive_root: Any, chain: Optional[TransitionChain], state: Dict[str
     if path.read_bytes() != data:
         raise ValueError("transition link readback mismatch")
     return {"version": CHAIN_VERSION, "link": name}
+
+
+def export_for_older_body(drive_root: Any) -> Dict[str, Any]:
+    """Before a switch to a body without this module: the accepted chain's state written as the wake source a
+    previous-form boundary names (one header line, under the accepted wake), then the boundary pointed at it in place
+    of its chain, so the older body reads the same state. A boundary of the previous form, or none, has nothing to
+    export. Any failure raises with the boundary unchanged; the caller decides what that costs the switch."""
+    from types import SimpleNamespace
+
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.chat_chain import retain_memory_source
+    from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from supervisor import state as runtime_state
+
+    root, accepted = pathlib.Path(drive_root), runtime_state.load_state().get(OBSERVATION_STATE_KEY)
+    if not isinstance(accepted, dict) or "transition_chain" not in accepted:
+        return {"status": "nothing_to_export"}
+    chain = read_chain(root, accepted["transition_chain"])
+    kept = {key: value for key, value in accepted.items() if key != "transition_chain"}
+    boundary = {key: kept[key] for key in (*CHAT_BOUNDARY_KEYS, "memory") if key in kept}
+    header = {"kind": "wake_observation", "captured_at": kept.get("captured_at"), "window": {}, "gaps": [],
+              "composition": {}, "trigger": "", "boundary": {**boundary, "transitions": chain.state}}
+    data = (json.dumps(header, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    task_id = str(kept["task_id"])
+    source = retain_memory_source(SimpleNamespace(drive_root=root, task_id=task_id), "wake_observation", data,
+                                  extension="jsonl")
+    if read_actor_source_bytes(root, task_id, source) != data:
+        raise ValueError("exported wake source readback mismatch")
+    older = {**kept, "transitions": {"version": TRANSITIONS_VERSION, "source_ref": source}}
+
+    def point(state: Dict[str, Any]) -> None:
+        if state.get(OBSERVATION_STATE_KEY) != accepted:
+            raise ValueError("the accepted wake boundary changed during the export")
+        state[OBSERVATION_STATE_KEY] = older
+
+    runtime_state.update_state(point)
+    return {"status": "exported", "link": chain.link, "tasks": len(chain.state["inventory"]), "source": source["path"]}

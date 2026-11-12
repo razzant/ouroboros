@@ -1122,3 +1122,36 @@ def test_reading_the_accepted_chain_removes_every_other_file_and_an_unreadable_c
     base = ct.bind_link(tmp_path, None, again.boundary["transitions"])  # a newer base, as after a previous-form boundary
     _wake(tmp_path, {**accepted, "transition_chain": base}, T0 + 1200)
     assert {path.name for path in directory.iterdir()} == {f"{base['link']}.json"}
+
+
+def test_the_export_for_an_older_body_writes_the_previous_form_it_reads_with_the_same_state(tmp_path, monkeypatch):
+    """Before a switch to a body without the chain reader, the accepted chain is written back as the wake source a
+    previous-form boundary names: the reader of that form (the code the older body runs) gets the state the chain
+    assembles, and the boundary names no chain. A previous-form boundary, or none, has nothing to export."""
+    from ouroboros import consciousness_transitions as ct
+    from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from supervisor import state as runtime_state
+
+    store = {}
+    monkeypatch.setattr(runtime_state, "load_state", lambda: dict(store))
+    monkeypatch.setattr(runtime_state, "update_state", lambda mutator, **_kw: mutator(store) or dict(store))
+    assert ct.export_for_older_body(tmp_path) == {"status": "nothing_to_export"}
+    for index in range(60):  # a base above one block, so the next window is a change
+        _write(tmp_path, f"old{index:02d}", status="completed", ts=_iso(T0 - 86400), updated_at=_iso(T0 - 86400))
+    _write(tmp_path, "kid", status="running", ts=_iso(T0 - 600), updated_at=_iso(T0 - 600))
+    accepted, _task = _bind(tmp_path, _wake(tmp_path, None, T0), "wake-a")
+    _write(tmp_path, "kid", status="completed", updated_at=_iso(T0 + 100))
+    accepted, _task = _bind(tmp_path, _wake(tmp_path, accepted, T0 + 600), "wake-b")
+    chain = ct.read_chain(tmp_path, accepted["transition_chain"])
+    assert len(chain.names) == 2  # a base and one change
+    store[OBSERVATION_STATE_KEY] = accepted
+    assert ct.export_for_older_body(tmp_path)["status"] == "exported"
+    older = store[OBSERVATION_STATE_KEY]
+    assert "transition_chain" not in older and older["transitions"]["version"] == 2
+    assert older == {**{key: value for key, value in accepted.items() if key != "transition_chain"},
+                     "transitions": {"version": 2, "source_ref": older["transitions"]["source_ref"]}}
+    assert ct.read_source_transitions(tmp_path, older) == chain.state
+    assert ct.export_for_older_body(tmp_path) == {"status": "nothing_to_export"}
+    _write(tmp_path, "late", status="completed", ts=_iso(T0 - 86400), updated_at=_iso(T0 - 86400))
+    through_source, through_chain = _wake(tmp_path, older, T0 + 1200), _wake(tmp_path, accepted, T0 + 1200)
+    assert through_source.full_text() == through_chain.full_text() and "- task late Done" in _lines(through_source)[0]
