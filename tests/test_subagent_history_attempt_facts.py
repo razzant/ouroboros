@@ -353,7 +353,7 @@ def test_no_first_call_sample_without_the_rows_own_paid_first_answer(root, monke
     if case == "subscription_engine":  # its attempt is in the ledger under the row's own name, with cash: only the route keeps it out
         target, provider = TARGET, "claudexor"
     write_journal(root, _settled(0, cost=0.05, model=TARGET if case == "subscription_engine" else "openai/gpt-fixture",
-                                 task_id="another-task" if case == "no_attempt" else "history-actor"))
+                                 provider=provider, task_id="another-task" if case == "no_attempt" else "history-actor"))
     ledger_rows(root)
     if case == "fallback_answered_first":
         assert _call(root, usage, model="openrouter::openai/gpt-other", provider="openrouter")
