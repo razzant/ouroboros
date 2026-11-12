@@ -185,7 +185,6 @@ TOOL_POLICY: Dict[str, str] = {
     "cherry_pick_pr_commits": POLICY_CHECK,
     "stage_adaptations": POLICY_CHECK,
     "stage_pr_merge": POLICY_CHECK,
-    "generate_evolution_stats": POLICY_CHECK,
     "submit_skill_to_hub": POLICY_CHECK,
     "github_write": POLICY_CHECK,
     "pr_merge": POLICY_CHECK,
