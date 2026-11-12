@@ -388,3 +388,43 @@ def test_a_closed_bounded_wait_reaches_the_replayed_card(tmp_path):
     [ask] = [message for page in pages(tmp_path) for message in page["messages"] if message.get("msg_type") == "quiz"]
     assert ask["quiz"]["state"] == "open" and ask["quiz"]["wait_ended_at"]
     assert "wait_for_answer" not in ask["quiz"]
+
+
+def test_main_refuses_its_recent_read_while_the_project_registry_cannot_be_read(tmp_path, monkeypatch):
+    """Main is "every room that is not a Project": decided from an empty set (an unreadable
+    registry) it would take the owner's rows typed in Project rooms (#3067's mechanism). It
+    answers the typed unavailable refusal instead, and reads as before once the registry reads."""
+    from ouroboros import projects_registry
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    rooms = [create_project(tmp_path, slug, name=slug) for slug in ("alpha", "beta")]
+    bind_task_to_project(tmp_path, "bound", rooms[0]["id"], origin={"absent": "system"})
+    write(tmp_path / "logs" / "chat.jsonl", [
+        row(0, text="main owner"),
+        *(row(1, text=f"room owner {room['chat_id']}", chat_id=room["chat_id"]) for room in rooms),
+        row(2, direction="out", text="bound reply", task_id="bound", chat_id=rooms[0]["chat_id"]),
+    ])
+    room_rows = {f"room owner {room['chat_id']}" for room in rooms} | {"bound reply"}
+    texts = lambda payload: {message.get("text") for message in payload["messages"]}  # noqa: E731
+    status, healthy = request(tmp_path)
+    assert status == 200 and "main owner" in texts(healthy) and not texts(healthy) & room_rows
+
+    strict_read, lenient = projects_registry.reserved_project_chat_ids, set
+    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", lambda root, *, strict=False: (
+        (_ for _ in ()).throw(OSError("registry unreadable")) if strict else lenient()))
+    status, refused = request(tmp_path)
+    assert not texts(refused) & room_rows, "a Project room's row reached Main's window"
+    assert status == 503 and refused["reason_code"] == "history_source_unavailable"
+    assert refused["has_more"] is True and refused["window"]["complete"] is False
+
+    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", strict_read)
+    restored = list(pages(tmp_path))
+    assert "main owner" in {text for page in restored for text in texts(page)}
+    assert not {text for page in restored for text in texts(page)} & room_rows
+
+
+def test_main_reads_on_a_fresh_install_without_a_project_registry(tmp_path):
+    write(tmp_path / "logs" / "chat.jsonl", [row(0, text="main owner")])
+    assert not (tmp_path / "state" / "projects.json").exists()
+    status, payload = request(tmp_path)
+    assert status == 200 and [message["text"] for message in payload["messages"]] == ["main owner"]
