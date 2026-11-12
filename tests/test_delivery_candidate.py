@@ -114,11 +114,13 @@ def test_mutating_tool_acknowledgements_cannot_erase_full_candidate(tmp_path, mo
     original = "Complete original answer with all implementation and verification details."
     write = {"content": None, "tool_calls": [{"id": "write-1", "type": "function", "function": {
         "name": "write_file", "arguments": json.dumps({"path": "effect.txt", "content": "durable tool effect"})}}]}
+    selection = _finish_response(original, by_hash=True)
+    # The first selection after the unexamined write gets the one pre-delivery notice; the next is delivered.
     result, _usage, trace, calls = _run_loop(tmp_path, monkeypatch,
-        [original, write, "Review completed.", "Everything is done now.", _finish_response(original, by_hash=True)],
+        [original, write, "Review completed.", "Everything is done now.", selection, selection],
         review_holds=[True, False])
     assert (tmp_path / "effect.txt").read_text(encoding="utf-8") == "durable tool effect"
-    assert result == original and len(calls) == 5
+    assert result == original and len(calls) == 6
     assert trace["delivery_candidate"]["degraded"] is False
     assert trace["delivery_candidate"]["evidence_current"] is True
     assert trace["delivery_candidate"]["acceptance_binding"]["authoritative"] is False

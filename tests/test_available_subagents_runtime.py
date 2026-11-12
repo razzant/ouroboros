@@ -819,7 +819,7 @@ def test_actor_first_bootstrap_adopts_existing_handoff_without_new_start(monkeyp
 
 def test_atomic_start_attempt_does_not_trigger_legacy_no_delegate_nudges(tmp_path):
     from ouroboros.delegate_evidence import record_start_blocked
-    from ouroboros.loop import _forced_delegation_note, _nanny_finalization_message
+    from ouroboros.loop import _forced_delegation_note, _pre_delivery_notice
     from ouroboros.tools.registry import ToolContext
 
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child1")
@@ -830,7 +830,8 @@ def test_atomic_start_attempt_does_not_trigger_legacy_no_delegate_nudges(tmp_pat
         _ctx=ctx,
         available_tools=lambda: ["delegate_start", "delegate_wait", "delegate_cancel"],
     )
-    assert _nanny_finalization_message(tools, tmp_path, "child1") == ""
+    # A refused start is no open run: the finish door has nothing to say about it.
+    assert _pre_delivery_notice(tools, tmp_path, "child1", {"tool_calls": []}, []) == ""
     assert _forced_delegation_note(ctx, {"tool_calls": []}) == ""
 
 

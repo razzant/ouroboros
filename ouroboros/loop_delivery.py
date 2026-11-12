@@ -90,11 +90,9 @@ class DeliveryCandidate:
 # Host continuations retain the answer and require an explicit next selection.
 # These states retain the concrete action/handover reason, not another protocol.
 _SKILL_ACTION_HOLD_CONTROL = "skill_action_or_revision_required"
-_CHILD_ABSORPTION_HOLD_CONTROL = "child_absorption_or_revision_required"
 _AUTHORING_HANDOVER_HOLD_CONTROL = "authoring_handover_recovery_required"
 _DELIVERY_HOLD_CONTROLS = frozenset({
     _SKILL_ACTION_HOLD_CONTROL,
-    _CHILD_ABSORPTION_HOLD_CONTROL,
     _AUTHORING_HANDOVER_HOLD_CONTROL,
 })
 # After these host-shown rounds (an owner follow-up, a routeless final's note) the answer is fresh, owing no selection.
@@ -122,7 +120,7 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
     if drive_root is None or not task_id:
         return ""
     try:
-        from ouroboros.task_status import FINAL_STATUSES, format_subagent_absorption_message
+        from ouroboros.task_status import format_subagent_absorption_message
 
         metadata = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
         status_drive_root = pathlib.Path(
@@ -145,23 +143,16 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
         ]
         from ouroboros.tools.join_ledger import _child_result_sha256
 
-        signature = "|".join(
+        pairs = frozenset(
             f"{child.get('task_id') or child.get('id')}:{_child_result_sha256(child)}"
             for child in children
         )
-        previous = getattr(tools._ctx, "_subagent_handoff_signature", "")
-        nonterminal_children = [
-            child for child in children
-            if str(child.get("status") or "").strip().lower() not in FINAL_STATUSES
-        ]
-        # P5: the reminder is suppressed ONLY by structured signals — a
-        # child discarded/cancelled (filtered above) or absorbed (unchanged
-        # signature), NEVER by parsing final PROSE; fires once per CHANGE, and
-        # finalizing with unhandled children appends a loud orphan note (P1).
-        _ = nonterminal_children  # (kept for readability; trigger is change-based)
-        if children and signature and signature != previous:
-            tools._ctx._subagent_handoff_signature = signature
-            tools._ctx._child_absorption_reminded = False
+        shown = frozenset(getattr(tools._ctx, "_subagent_handoff_shown", None) or ())  # a list across a continuation
+        # P5: shown again ONLY on a structured change — a child result (id:sha) this parent was not handed
+        # yet; a decision recorded for some children drops them from the set and re-attaches nothing. Never
+        # by parsing final PROSE; finalizing with unhandled children appends a loud orphan note (P1).
+        if pairs - shown:
+            tools._ctx._subagent_handoff_shown = sorted(shown | pairs)
             _absorb_budget = 160_000 if str(get_context_mode()).lower() == "max" else 60_000
             return format_subagent_absorption_message(
                 children, parent_task_id=task_id, budget_chars=_absorb_budget,
@@ -1251,14 +1242,18 @@ def _no_tool_final_answer(
             ):
                 return held("plan_gate")
             handoff_msg = _loop()._compute_subagent_handoff(tools, limit_ctx.drive_root, limit_ctx.task_id, content)
-            if handoff_msg:
+            if handoff_msg:  # the pre-delivery notice rides the same door: one door, one return
+                notice = _loop()._claim_pre_delivery_notice(tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace)
+                handoff_msg = f"{handoff_msg}\n\n{notice}" if notice else handoff_msg
                 if content and content.strip():
                     messages.append({"role": "assistant", "content": content})
                 _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{handoff_msg}")
-                emit_progress("Subagent handoff status refreshed before final response.")
-                llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
+                note = "Subagent handoff status refreshed before final response." + (
+                    " Pre-delivery facts shown with it." if notice else "")
+                emit_progress(note)
+                llm_trace["reasoning_notes"].append(note)
                 _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-                return held("subagent_handoff")
+                return held("subagent_handoff", "pre_delivery_notice" if notice else "")
             from ouroboros.owner_hurry import latched
             # The mind reads its review before it decides (owner 11.10); the rows themselves are the news.
             review_rows, review_present = ([], False) if resume_candidate or latched(tools._ctx) else (
@@ -1271,17 +1266,6 @@ def _no_tool_final_answer(
                 _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
                 tools._ctx._completion_pair_appended = bool(explicit_candidate)
                 return held("review_update")
-            absorption_result = _loop()._maybe_enforce_child_absorption_gate(
-                tools, limit_ctx, content, messages, emit_progress, llm_trace,
-            )
-            if absorption_result == "continue":
-                # Preserve the child action reason until disposition or explicit stop.
-                _hold_delivery_for_skill_action(
-                    tools, llm_trace, control=_CHILD_ABSORPTION_HOLD_CONTROL,
-                )
-                return held("child_absorption")
-            if absorption_result is not None:
-                return absorption_result
             skill_finalization_was_injected = bool(
                 getattr(tools._ctx, "_skill_finalization_injected", False)
             )
