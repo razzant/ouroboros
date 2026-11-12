@@ -68,15 +68,21 @@ def test_a_standing_revision_omits_the_map_and_a_bind_sends_it_whole(read_state)
     assert moved["task_bindings_revision"] not in ("", revision)
 
 
-def test_a_renamed_project_or_another_process_moves_the_revision(read_state, monkeypatch):
+def test_the_revision_moves_exactly_when_a_readers_map_would_differ(read_state, monkeypatch):
     root, read = read_state
     revision = read()["task_bindings_revision"]
-    registry.update_project(root, "alpha", name="Alpha renamed")
+    # A Project touched by its own work rewrites the registry and no reader's map: the held map still stands.
+    registry.touch_project(root, "alpha")
+    touched = read(revision)
+    assert touched["task_bindings"] is None and touched["task_bindings_unchanged"] is True
+
+    registry.update_project(root, "alpha", name="Alpha renamed")  # the map names the Project: it differs now
     renamed = read(revision)
     assert renamed["task_bindings"]["t1"]["project_name"] == "Alpha renamed"
+    assert renamed["task_bindings_revision"] not in ("", revision)
 
-    monkeypatch.setattr(registry, "_PROCESS_STAMP", "restarted")  # the next serving process: its own code
-    assert read(renamed["task_bindings_revision"])["task_bindings_unchanged"] is False
+    monkeypatch.setattr(registry, "_PROCESS_STAMP", "restarted")  # the next serving process sends the same bytes
+    assert read(renamed["task_bindings_revision"])["task_bindings_unchanged"] is True
 
 
 def test_a_failed_read_is_never_unchanged(read_state):
@@ -90,10 +96,13 @@ def test_a_failed_read_is_never_unchanged(read_state):
     assert read("")["task_bindings_unchanged"] is False
 
 
-def test_a_store_changed_within_a_clock_tick_has_no_revision(read_state, monkeypatch):
+def test_a_store_changed_within_a_clock_tick_names_the_map_it_sent(read_state, monkeypatch):
     root, read = read_state
+    revision = read()["task_bindings_revision"]
     monkeypatch.setattr(utils, "_RACY_NS", 2_000_000_000)
     registry.bind_task_to_project(root, "t2", "alpha", origin={"absent": "system"})
 
-    fresh = read()
-    assert fresh["task_bindings_revision"] == "" and set(fresh["task_bindings"]) == {"t1", "t2"}
+    # No file stamp proves these bytes yet; the map's own digest does, so the reader holds it from this answer on.
+    fresh = read(revision)
+    assert set(fresh["task_bindings"]) == {"t1", "t2"} and fresh["task_bindings_revision"] not in ("", revision)
+    assert read(fresh["task_bindings_revision"])["task_bindings_unchanged"] is True

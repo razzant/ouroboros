@@ -39,6 +39,14 @@ A visible toolbar stays as an opaque band over a full-screen page, so it hides o
 ends the exit with the toolbar hidden again, one set during the exit too, so it is shown again once
 the window is out; the style mask never changes in full screen.
 
+The window's full-screen phase is AppKit's four notifications, observed from ``before_show`` with or without the
+document script. A warm source handoff replaces this process only from the main thread, in the turn that found every
+window out of full screen (``transfer_when_windowed``): one in full screen is asked once to leave, and the handoff
+follows its DidExit (isolated macOS 26.4 probes saw an exec in full screen leave its Space briefly windowless, one
+after DidExit not). No window, or one no ``before_show`` has registered (not yet shown, or the setup window), refuses at
+once, before anything is queued; one hidden in full screen, or no confirmation within ``FULL_SCREEN_EXIT_SEC``, also
+keeps the running shell: nothing is torn down.
+
 The window's appearance follows the document's painted ``data-theme-choice`` (``data-theme`` for a
 page without one): Light and Dark force Aqua or DarkAqua on this window only, System and an unthemed
 page inherit. The window's appearance is also its page's ``prefers-color-scheme``, so forcing the
@@ -67,7 +75,8 @@ import json
 import logging
 import math
 import sys
-from typing import Any, Optional
+import threading
+from typing import Any, Callable, Optional
 
 from ouroboros.launcher_appearance import NativeAppearance, host_palette, palette_of_background
 
@@ -90,6 +99,11 @@ _SEPARATOR_NONE = 1  # NSTitlebarSeparatorStyleNone
 _TABBING_DISALLOWED = 2
 _LEFT_MOUSE_DOWN, _LEFT_MOUSE_UP, _LEFT_MOUSE_DRAGGED = 1, 2, 6
 _BUTTONS = (0, 1, 2)  # close, miniaturize, zoom
+_FULL_SCREEN = 1 << 14  # NSWindowStyleMaskFullScreen
+# AppKit's full-screen notifications, each with the phase it begins (no DidFail notification exists).
+_PHASES = (("NSWindowWillEnterFullScreenNotification", "entering"), ("NSWindowDidEnterFullScreenNotification", "full"),
+           ("NSWindowWillExitFullScreenNotification", "exiting"), ("NSWindowDidExitFullScreenNotification", "windowed"))
+FULL_SCREEN_EXIT_SEC = 10.0  # the exit animation takes about a second; this bound only delays a refusal
 # System Settings → Desktop & Dock → "Double-click a window's title bar to", in the global defaults domain.
 # Undocumented by Apple; Chromium's native_widget_mac_nswindow.mm uses these words and guarded
 # _zoomFill: (source inspected 2026-10-17). Selector presence cannot guarantee future semantics.
@@ -170,6 +184,8 @@ DOCUMENT_SCRIPT = r"""(() => {
 """ % {"handler": HANDLER, "integrated": INTEGRATED}
 
 _classes: dict = {}  # Objective-C class names are process-wide: the handler class is defined once
+_tracked: list = []  # WindowChrome observing its window's full-screen phase: from before_show until closed
+_transfer: Any = None  # the warm source handoff waiting for the windows, if any
 
 
 def _handler_class():
@@ -276,10 +292,16 @@ class WindowChrome:
         self._wanted = False
         self._integrated = False
         self._refused = False
-        self._fullscreen = False
+        self._phase: Optional[str] = None  # AppKit's full-screen phase (_PHASES); None: not observed
+        self._leaving: Any = None  # the handoff that asked this full-screen stint to end
         self._appearance: Optional[str] = None  # None: inherited
         self._sent: tuple = ()
         self._closed = False
+
+    @property
+    def _fullscreen(self) -> bool:
+        """From WillEnter until DidExit: the title bar's switches wait and nothing is reserved."""
+        return self._phase not in (None, "windowed")
 
     def attach(self, window: Any) -> None:
         """Register on ``window`` before ``webview.start``: its room colour everywhere, the rest on macOS only."""
@@ -296,6 +318,7 @@ class WindowChrome:
         native = getattr(self._window, "native", None)
         if native is None:
             return
+        self._observe_full_screen(native)  # a source handoff needs the phase even without the document script
         try:
             import WebKit
 
@@ -318,7 +341,6 @@ class WindowChrome:
             self._fill = None
         if self._fill is None:
             log.warning("pywebview's title bar fill is not the traffic lights' container; the title bar stays ordinary.")
-        self._observe_full_screen()
         # Nothing is on screen to collide with yet: pywebview adds the web view to the window only once the first
         # document has finished loading, after it declared, so the bar never flashes at launch and an undeclaring
         # first document is ordinary again before it is seen.
@@ -475,32 +497,56 @@ class WindowChrome:
         top = round(max(0.0, top) / zoom, 2)
         return {"top": top, "start": round(start / zoom, 2) if top else 0}
 
-    def _observe_full_screen(self) -> None:
-        import AppKit
+    def _observe_full_screen(self, native: Any) -> None:
+        """The phase is known only once all four notifications are observed; a new window is not in full screen."""
+        try:
+            import AppKit
 
-        center = AppKit.NSNotificationCenter.defaultCenter()
-        for name, handler in (("NSWindowWillEnterFullScreenNotification", self._entering_full_screen),
-                              ("NSWindowWillExitFullScreenNotification", self._leaving_full_screen),
-                              ("NSWindowDidExitFullScreenNotification", self._left_full_screen)):
-            # No queue: the block runs where AppKit posts, the main thread, before the transition.
-            self._observers.append(center.addObserverForName_object_queue_usingBlock_(
-                name, self._native, None, lambda _note, handler=handler: handler()))
+            center = AppKit.NSNotificationCenter.defaultCenter()
+            for name, phase in _PHASES:
+                # No queue: the block runs where AppKit posts, the main thread, around the transition.
+                self._observers.append(center.addObserverForName_object_queue_usingBlock_(
+                    name, native, None, lambda _note, phase=phase: self._full_screen(phase)))
+        except Exception:
+            log.warning("Full-screen notifications unavailable; a source handoff keeps this shell.", exc_info=True)
+            return
+        self._phase = "windowed"
+        _tracked.append(self)
 
-    def _entering_full_screen(self) -> None:
-        self._fullscreen = True
-        self._show_toolbar(False)
-        self._publish()
+    def _full_screen(self, phase: str) -> None:
+        """An observed notification (main thread): the window's phase, its title bar, then a waiting handoff."""
+        self._phase = phase
+        if phase == "entering":
+            self._show_toolbar(False)
+            self._publish()
+        elif phase == "exiting":
+            self._show_toolbar(True)
+        elif phase == "windowed":
+            self._switch()  # a document that arrived in full screen gets its title bar now
+            # AppKit ends the exit with the toolbar hidden, after WillExit showed it, and a toolbar set here starts
+            # hidden too: shown now, before the band is measured, or the page reserves only the bare title bar.
+            self._show_toolbar(True)
+            self._publish()
+        if phase in ("full", "windowed"):
+            self._leaving = None  # a stint began or ended: a handoff still waiting asks this one anew
+        _resume()
 
-    def _leaving_full_screen(self) -> None:
-        self._show_toolbar(True)
-
-    def _left_full_screen(self) -> None:
-        self._fullscreen = False
-        self._switch()  # a document that arrived in full screen gets its title bar now
-        # AppKit ends the exit with the toolbar hidden, after WillExit showed it, and a toolbar set here starts
-        # hidden too: shown now, before the band is measured, or the page reserves only the bare title bar.
-        self._show_toolbar(True)
-        self._publish()
+    def windowed(self, request: Any) -> Optional[bool]:
+        """Main thread, for a source handoff: True when AppKit's last word and the live style mask both say this window
+        is out of full screen; None while it moves, after asking once per ``request`` and stint (only from DidEnter: a
+        transition under way is never toggled); False when unknown or hidden in full screen, where only showing it
+        could end the stint."""
+        native = getattr(self._window, "native", None)
+        if self._phase is None or self._closed or native is None:
+            return False
+        if self._phase == "windowed":
+            return not native.styleMask() & _FULL_SCREEN  # the mask disagreeing is unknown, not windowed
+        if not native.isVisible():
+            return False
+        if self._phase == "full" and self._leaving is not request:
+            self._leaving = request
+            native.toggleFullScreen_(None)
+        return None
 
     def _show_toolbar(self, visible: bool) -> None:
         toolbar = self._native.toolbar() if self._integrated else None
@@ -558,6 +604,8 @@ class WindowChrome:
     def _close(self) -> None:
         """pywebview ``closed``: no further writes, and the notification center lets go of this window."""
         self._closed = True
+        if self in _tracked:
+            _tracked.remove(self)
         observers, self._observers = self._observers, []
         if not observers:
             return
@@ -569,3 +617,96 @@ class WindowChrome:
                 center.removeObserver_(token)
         except Exception:
             log.debug("Full-screen observers not released.", exc_info=True)
+
+
+class _Transfer:
+    """One warm source handoff: pending until the main thread claims it to run ``final``, refuses it, or its worker's
+    deadline abandons it. The lock guards only that one transition, never animation, I/O or ``final``."""
+
+    def __init__(self, final: Callable[[], None]) -> None:
+        self.final, self.state, self.error = final, "pending", None
+        self.lock, self.done = threading.Lock(), threading.Event()
+
+    def settle(self, state: str) -> bool:
+        with self.lock:
+            if self.state != "pending":
+                return False
+            self.state = state
+        if state != "claimed":
+            self.done.set()
+        return True
+
+
+def transfer_when_windowed(final: Callable[[], None]) -> bool:
+    """A warm macOS source handoff, from its worker thread: ``final`` (teardown and exec) runs on the main thread in
+    the very turn that found every window of this process out of full screen, so no window input comes between.
+
+    False: refused, ``final`` never ran (at once, before anything is queued, while no window exists or one is not
+    observed: not yet shown, or the setup window; one hidden in full screen; no main-thread turn or AppKit
+    confirmation within ``FULL_SCREEN_EXIT_SEC``). True: ``final`` returned; its exception is raised here on the
+    worker, where the caller's recovery may wait. The deadline abandons only an attempt the main thread has not
+    claimed; a later turn of an abandoned one does nothing."""
+    global _transfer
+    observers = _observers()
+    if not observers or None in observers:  # an exit 42 before the setup or main window exists or is observed
+        log.warning("No window is observed yet, so none can be confirmed out of full screen; this shell keeps running.")
+        return False
+    transfer = _transfer = _Transfer(final)
+    try:
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(_step, transfer)
+    except Exception:
+        transfer.settle("refused")
+        log.warning("The main thread cannot take the source handoff; this shell keeps running.", exc_info=True)
+        return False
+    if not transfer.done.wait(FULL_SCREEN_EXIT_SEC) and transfer.settle("abandoned"):
+        log.warning("No main-thread turn found the windows out of full screen within %.0fs; this shell keeps running.",
+                    FULL_SCREEN_EXIT_SEC)
+        return False
+    transfer.done.wait()  # refused at once, or claimed: ``final`` ends in exec or reports back
+    if transfer.error is not None:
+        raise transfer.error
+    return transfer.state == "claimed"
+
+
+def _observers() -> list:
+    """Each pywebview window's observing WindowChrome, None where no ``before_show`` registered one; empty without a
+    window. Python state only, no native read: the main thread's turn judges again, and natively."""
+    tracked = list(_tracked)  # pywebview runs ``closed`` handlers on their own thread
+    return [next((chrome for chrome in tracked if chrome._window is window), None)
+            for window in list(getattr(sys.modules.get("webview"), "windows", None) or ())]
+
+
+def _resume() -> None:
+    """A full-screen phase changed (main thread): a waiting handoff looks again in the next turn."""
+    transfer = _transfer
+    if transfer is not None and transfer.state == "pending":
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(_step, transfer)
+
+
+def _step(transfer: _Transfer) -> None:
+    """One main-thread turn of a handoff: refuse, wait for a notification, or claim and run ``final``; never block."""
+    if transfer.state != "pending":
+        return
+    try:
+        chromes = _observers()
+        # An unobserved window, or none left at all, refuses before any other is asked to leave full screen.
+        states = [False] if None in chromes or not chromes else [chrome.windowed(transfer) for chrome in chromes]
+    except Exception:
+        log.warning("A window's full-screen state is unreadable.", exc_info=True)
+        states = [False]
+    if False in states:
+        if transfer.settle("refused"):
+            log.warning("A window cannot be confirmed out of full screen; this shell keeps running.")
+        return
+    if None in states or not transfer.settle("claimed"):
+        return  # a notification of the moving window looks again
+    try:
+        transfer.final()
+    except BaseException as error:  # reported to the worker: the main thread never runs recovery that may wait
+        transfer.error = error
+    finally:
+        transfer.done.set()

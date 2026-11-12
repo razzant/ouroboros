@@ -822,7 +822,7 @@ class StateResponse(WorkStateFields):
     main_visible_revision: NotRequired[Optional[int]]
     # Task->project bindings ({task_id: {project_id, chat_id, project_name}}): a bound card hides the stray
     # "turn into project" button (v6.33.0 P2) and opens its project (v6.33.0 F4). Null only when
-    # ``?bindings_since`` named the current opaque ``task_bindings_revision`` ("" after a failed read).
+    # ``?bindings_since`` named the current opaque ``task_bindings_revision`` (the map's digest; "" after a failed read).
     task_bindings: Optional[dict]
     task_bindings_revision: str
     task_bindings_unchanged: bool
