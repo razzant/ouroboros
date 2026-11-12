@@ -38,6 +38,7 @@ import re
 import signal
 import sys
 import threading
+import urllib.parse
 import urllib.request
 
 from ouroboros.config import PANIC_EXIT_CODE, read_version
@@ -60,6 +61,7 @@ PERSISTENT_WEBVIEW_STORAGE = True
 _SHELL_VERSION = read_version()  # the loaded code; a later in-place Update is not a new shell
 STATUS_POLL_SEC = 15.0
 _active = None  # the started indicator, for the exit and Panic paths (a Windows icon outlives its process)
+_bindings_seen = ""  # the task-bindings revision of the last state answer (``status_line`` echoes it)
 
 
 def indicator_class():
@@ -85,11 +87,15 @@ def status_line(port: int) -> str:
     """The indicator's state line from the server's own ``/api/state`` work projection: a work is working,
     pausing, paused or waiting as the server classified it, an incomplete projection is said as unknown, and
     what waits for the owner is counted (gateway/work_status.py)."""
+    global _bindings_seen
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/api/state", timeout=5) as response:
+        # The line reads no task bindings: it names the revision the server last sent, so that map stays home.
+        seen = f"?bindings_since={urllib.parse.quote(_bindings_seen)}" if _bindings_seen else ""
+        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/api/state{seen}", timeout=5) as response:
             state = json.loads(response.read().decode("utf-8"))
         works = [work for work in state["works"] if isinstance(work, dict)]
         summary = state["work_summary"]
+        _bindings_seen = str(state.get("task_bindings_revision") or "")
     except Exception:
         return "Ouroboros: not responding"
     if state.get("supervisor_error"):

@@ -372,9 +372,11 @@ _PROCESS_STAMP = uuid.uuid4().hex[:8]  # this process's code shapes the map it a
 
 
 def bindings_revision(drive_root: Any) -> str:
-    """An opaque stamp of what ``all_task_project_bindings`` answers in this process: the file
-    identities of the bindings and of the registry naming their projects. ``""`` when no stamp can
-    prove the bytes unchanged: unreadable, or changed within a clock tick (``utils._RACY_NS``)."""
+    """An opaque stamp of the files ``all_task_project_bindings`` reads in this process: the identities of the
+    bindings and of the registry naming their projects. ``""`` when no stamp can prove the bytes unchanged:
+    unreadable, or changed within a clock tick (``utils._RACY_NS``). It keys the state publication (a touched
+    registry is a new production); the revision a reader holds the map by is the map's own digest
+    (``gateway.state_publication.map_revision``)."""
     started, stamps = time.time_ns(), [_PROCESS_STAMP]
     for path in (_bindings_path(drive_root), _registry_path(drive_root)):
         try:
