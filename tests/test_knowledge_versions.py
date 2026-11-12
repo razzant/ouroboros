@@ -440,3 +440,23 @@ def test_a_row_marked_digested_lists_its_text_as_not_stored_whatever_else_it_car
     assert rows[1].startswith(f"- {sha(texts[1])} · ") and "text not stored" not in rows[1], rows[1]
     with pytest.raises(versions.VersionUnavailable, match=r"holds no text \(digest-era\)"):
         versions.find_version(target, digested["new_sha256"])
+
+
+def test_a_version_whose_forward_path_is_damaged_reads_through_the_live_note(tmp_path):
+    """The version lookup hands the reader the note's current text: with B's change row damaged, B comes back from the
+    live note through the change of the row after it; with the note gone it is a typed miss that names the line."""
+    target = address(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    b = store.write_knowledge_note(target, "# Река\n\nOne, two.\n", expected_revision=a.revision).current
+    store.write_knowledge_note(target, "# Река\n\nOne, two, three.\n", expected_revision=b.revision)
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    raw = journal.read_bytes()
+    b_at = raw.index(b"\n") + 1
+    end = raw.index(b"\n", b_at)
+    rows = [json.loads(line) for line in raw.splitlines()]
+    assert len(rows) == 3 and all("change" in row and "new_content" not in row for row in rows[1:])
+    journal.write_bytes(raw[:b_at] + b"#" * (end - b_at) + raw[end:])
+    assert versions.find_version(target, b.revision) == (b.text, {})  # from the next row's old side, rebuilt
+    target.path.unlink()
+    with pytest.raises(versions.VersionUnavailable, match=f"the line at byte offset {b_at} is not a JSON row"):
+        versions.find_version(target, b.revision)

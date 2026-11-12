@@ -417,6 +417,12 @@ def test_a_history_row_that_stores_a_change_reads_its_versions_whole_and_its_lin
     with pytest.raises(MemoryReadError) as gap:
         document(tmp_path, {**entry, "field": ["new_content"]})
     assert gap.value.code == "not_found" and f"the line at byte offset {named_at} is not a JSON row" in gap.value.message
+    # With the note on disk holding the row's version, the reader takes it as the segment's newer end: both texts read.
+    note = tmp_path / "memory" / "knowledge" / "река.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_bytes(third.encode("utf-8"))
+    assert document(tmp_path, {**entry, "field": ["new_content"]})["text"] == third
+    assert document(tmp_path, {**entry, "field": ["old_content"]})["text"] == second
 
 
 def test_the_history_listing_names_where_a_change_rows_two_texts_read_whole(tmp_path):
