@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { initSettings } from '../modules/settings.js';
 import { isDoorId } from '../modules/settings_home.js';
@@ -14,7 +15,7 @@ import { registerSettingsPage, settingsPageFor, settingsPagePrefixes } from '../
 import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from '../modules/settings_rows.js';
 import { settle, world } from './helpers/settings_dom.js';
 
-const ROOT = new URL('../../', import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const DOORS = new Set([...HOME_ROWS.map((row) => row.to).filter(isDoorId), 'main:context']);
 const HOME_PAGES = HOME_ROWS.map((row) => row.to).filter((to) => !isDoorId(to));
 
