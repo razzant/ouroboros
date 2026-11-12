@@ -295,6 +295,26 @@ test('what a managed deployment locks is said in its row and what Cyber Pro does
     assert.deepEqual(row(plain, 'OUROBOROS_REVIEW_ENFORCEMENT').control, rowById('OUROBOROS_REVIEW_ENFORCEMENT').control);
 });
 
+test('Permissions and checks: under an organization\'s Supervisor the spare-model line is hidden; the ordinary page shows it', async (t) => {
+    const page = await open(t, 'permissions');
+    const spares = () => page.container.querySelector('[data-safety-spares]');
+    assert.equal(spares().hidden, false);
+    assert.match(spares().textContent, /^No safety check went to a spare model in the last 24 h\. /);
+    // Its checker lists a route of its own without a credential before any ask, and its own answer is then a walk's.
+    const ordinary = page.server.document;
+    page.server.document = () => {
+        const document = ordinary();
+        document._meta.policy_state.deployment = { access_max: 'pro', min_coverage: 'full', checker: { model: 'anthropic@safety::checker' } };
+        return document;
+    };
+    await page.shown();
+    assert.equal(page.meta('permissions:supervisor'), 'checker · Set by your organization');
+    assert.equal(spares().hidden, true, 'no count of the checker\'s own answers as a spare\'s');
+    page.server.document = ordinary;
+    await page.shown();
+    assert.equal(spares().hidden, false);
+});
+
 test('Your rules: its own Save, the server\'s refusal on the page with the text kept, and what a saved text applies to', async (t) => {
     const page = await open(t, 'rules');
     const field = page.container.querySelector('#settings-rules');

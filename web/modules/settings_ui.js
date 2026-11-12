@@ -158,6 +158,8 @@ const mountPermissions = rowsPage('permissions', {
         const exits = container.querySelector('[data-safety-exits]');
         exits.textContent = facts.exits;
         exits.hidden = !facts.exits;
+        // An organization's checker records a walk whenever a route of its own lacks a credential, its own answer included.
+        container.querySelector('[data-safety-spares]').hidden = facts.fixed;
         container.querySelector('[data-safety-organization-rules]').hidden = !facts.organizationRules;
     },
     shown: (container) => { void refreshSafetySkipCounter(container); },
