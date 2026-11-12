@@ -133,6 +133,8 @@ export function agentsOnlyAccess(connected = [], sources = []) {
     return connected.length > 0 && serving.size > 0 && !connected.some((harness) => serving.has(harness));
 }
 
+const READ_WORDS = { not_read: 'is not available yet', partial: 'is incomplete', stale: 'is out of date' };
+
 /**
  * What the Accounts step's access row and its API section badge say for the current reads: facts in, words out.
  * `continueBlocked` is the Continue button's own state, so the note never offers a step the button refuses.
@@ -142,7 +144,7 @@ export function accessRowState({ connected = [], sources = [], read = 'ok', chec
     const agentsOnly = !configured && agentsOnlyAccess(connected, sources);
     const note = [checking ? 'Checking model sources…' : '',
         !checking && read !== 'ok' && connected.length
-            ? `Model discovery is ${read === 'not_read' ? 'not available yet' : read}. ${readErrors} Your choices are kept.` : '',
+            ? `The model list ${READ_WORDS[read] || 'could not be read'}. ${readErrors} Your choices are kept.` : '',
         previewError ? `Automatic assignments could not be prepared: ${previewError} `
             + (continueBlocked ? 'Retry.' : 'Retry, or Continue to choose models yourself.') : ''];
     return {

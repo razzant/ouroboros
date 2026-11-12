@@ -79,11 +79,12 @@ count), for example `TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`,
 `OUROBOROS_REVIEW_ENFORCEMENT`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
 `OUROBOROS_RUNTIME_MODE` (read at a start). The exceptions are the choices only the
 owner's controls author, Safety coverage and the Context mode among them: Settings
-shows their saved or factory value whatever the environment says. Safety coverage is
-not consistent there today: while none is saved, the Safety Supervisor still reads a
-forwarded `OUROBOROS_SAFETY_MODE` (#3202), so choose the coverage in Settings to have
-one answer. A deployment policy file (below) can cap the Access level and raise the
-minimum coverage.
+shows their saved or factory value whatever the environment says. Neither is
+consistent there today: while none is saved, the Safety Supervisor still reads a
+forwarded `OUROBOROS_SAFETY_MODE`, and a task still starts in a forwarded
+`OUROBOROS_CONTEXT_MODE` (#3202), so choose both in Settings to have one answer. A
+deployment policy file (below) can cap the Access level and raise the minimum
+coverage.
 
 ## Unknown model role at startup
 

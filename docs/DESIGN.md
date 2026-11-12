@@ -2858,7 +2858,7 @@ stops clear of them.
 - A short or narrow window drops ornament (the slogan, the rail's sub-labels), never
   the words a choice or a field is made by and never the size of type. The footer's
   aside leaves only a narrow window, where the pinned footer would take the step's
-  lines. A line that changes no choice is deleted, not hidden; a taller step scrolls
+  lines; a warning it carries (a save whose answer was lost) stays. A line that changes no choice is deleted, not hidden; a taller step scrolls
   under the pinned footer.
 - Field labels are sentence case at meta ink: a step shows a dozen at once to
   get one value typed, not to present a grid of headings.

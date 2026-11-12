@@ -215,8 +215,12 @@ test('the access row never offers what Continue refuses, and calls the API secti
     assert.equal(row({ connected: ['claude'] }).retryHidden, true);
     assert.equal(row({ connected: ['claude'], previewError: 'Down.' }).retryHidden, false);
     assert.equal(row({ connected: ['codex'] }).retryHidden, false, 'a healthy read can still be read again');
-    assert.match(row({ connected: ['codex'], sources: [], read: 'failed', readErrors: 'Offline.' }).note,
-        /Offline\. Your choices are kept\.$/);
+    // The read state in a person's words, never its internal name ("failed", "transport").
+    for (const [read, words] of [['failed', 'could not be read'], ['transport', 'could not be read'],
+        ['partial', 'is incomplete'], ['stale', 'is out of date'], ['not_read', 'is not available yet']]) {
+        assert.equal(row({ connected: ['codex'], sources: [], read, readErrors: 'Offline.' }).note,
+            `The model list ${words}. Offline. Your choices are kept.`, read);
+    }
     assert.equal(row({ connected: ['codex'], checking: true }).note, 'Checking model sources…');
 });
 
