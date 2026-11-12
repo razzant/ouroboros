@@ -1,8 +1,9 @@
 // The work's review-gate field (ouroboros/review_overrides.py): how many times a review of this work returned FAIL or
 // no verdict, how often its author explicitly went on over one and how many commits landed over one, each part only
 // when recorded (an absent part is unknown, never zero). One compact phrase on the card's meta line and one Details
-// item, both replaced in place by the task detail or the live `review_advisory_override` event: never a row per
-// decision, and never a claim that a change was merged or runs.
+// item, both replaced in place by the task detail or the live `review_advisory_override` event (which carries the
+// outcome count; the author's continuation and the landing show at the next read): never a row per decision, and
+// never a claim that a change was merged or runs.
 
 const QUOTED = 80;  // review_overrides.QUOTED: the head of an author's reason the compact line quotes
 
