@@ -3,6 +3,15 @@
 import pathlib
 import tempfile
 
+import pytest
+
+from tests._work_life import CX, OPUS, OPUS_NAMED, Life, Place, breaches, run_life
+from tests.test_llm_claudexor import setup as gateway_fixture
+from tests.test_model_wait import live_wait as wait_fixture
+from tests.test_subscription_main_wait import main_call as main_fixture
+
+setup, live_wait, main_call = gateway_fixture, wait_fixture, main_fixture  # the fixtures a work's life runs on
+
 
 def _make_env_and_memory(tmpdir: pathlib.Path):
     from ouroboros.agent import Env
@@ -546,3 +555,130 @@ def test_supervising_wake_horizon_fires_only_past_the_applied_ttl(tmp_path):
     assert "cache_horizon_note" not in _wake("", 10_000)[1]
     replay = json.loads(run_wait(_ctx, "run-h").text)  # replayed before any sleep is armed or the run read
     assert replay.pop("replay_of")["fresh_observation"] is False and replay == past  # marked, else as recorded
+
+
+# --- a work's cache life --------------------------------------------------------------------------------------------
+#
+# The law (DEVELOPMENT 06): in Main's loop a work's start (tool array, system row) is written only where the answering
+# place holds no copy of it, or at a restore from saved state; whoever writes it leaves the work the room its route can
+# give; a start its route still holds changes only by physics or the mind's own act. Each life below runs one work end
+# to end on the production producers (tests/_work_life.py) and names, per answered request, the product's own class of
+# what it did to its route's start and the place that answered it. Beside the sequence every life holds the clauses of
+# three mechanisms, each in both its directions: P4, a start write that is not the work's first leaves one eighth of
+# the stated window free after the reply reserve (a rebind or restore that must narrow narrows to that line, a model
+# string never answered is sized with it; the place measures it within half an eighth, the host sizes by its own
+# estimate), while an account rotation of one string keeps its start and takes none and a return finds its start held;
+# P3, nothing is refused before sending while the input leaves 8,192 of the stated window (nano's own reserve), unless
+# the product recorded a refusal of the total kind for the route, and a place's refusal or cut reply teaches the host
+# once; P5, the install's own queue refuses nothing and moves nothing, tells the work's feed that its send waits in
+# line and states the time on the mind's next facts line, while a real failure still walks the chain; and a start
+# change always names the seam that made it (raised here, outside the observer's own handlers).
+
+_A, _B = Place("a", CX, "account-a"), Place("b", CX, "account-b")  # one Codex model, two engine accounts, 300k each
+_OP = Place("opus", OPUS, density=1.4, marked=True)  # the same request counts about 1.4 times larger than on Codex
+_NAMED = Place("named", OPUS_NAMED, density=1.4, marked=True)  # a second direct key of the same model: its own cache
+_P50, _P90, _WIDE = 38_000, 130_000, 60_000  # characters of one read: about 9,500, 32,600 and 15,000 tokens
+_ON_A = r"first_request@a( append@a)+"
+_WALLS = r"( system_changed@a( append@a)*)"
+
+
+def _a(**changes):
+    return Place(**{"name": "a", "model": CX, "account": "account-a", **changes})
+
+
+# name: (the life, the answered sequence as "class@place" tokens, the detail a class must name, refusals it may meet)
+WORK_LIVES = {
+    "ordinary": (Life(places=(_A, _B), fallbacks=("b",), reads=(8_000,) * 3), _ON_A, {}, 0),
+    "a_start_at_unknown_density": (Life(places=(_a(window=340_000, density=1.15),), reads=(8_000,) * 3), _ON_A, {}, 0),
+    "growth_to_the_wall": (Life(places=(_A,), reads=(_P90,) * 5), _ON_A + _WALLS + "?", {}, 0),
+    # An API route names its number; Claudexor passes no provider sentence on, so its refusals carry none.
+    "a_total_that_refuses_with_its_number": (
+        Life(places=(Place("opus", OPUS, density=1.4, marked=True, kind="total"),), primary="opus", reads=(_WIDE,) * 5),
+        r"first_request@opus( append@opus)*( system_changed@opus( append@opus)*)+", {}, 1),
+    # The product records it as an input cap at its own size (context_window.record_refusal): it must still learn once.
+    "a_total_that_refuses_without_a_number": (Life(places=(_a(kind="total_unnumbered"),), reads=(_P90,) * 5),
+                                              _ON_A + _WALLS + "+", {}, 1),
+    # P3's named gap: a route that cuts the reply never refuses; one cut reply may teach it, more may not.
+    "a_total_that_cuts_the_reply": (Life(places=(_a(kind="cut"),), reads=(_P90,) * 5), _ON_A + _WALLS + "*", {}, 0),
+    "an_input_refusal_at_the_stated_number": (
+        Life(places=(Place("opus", OPUS, density=1.4, dense=4.2, marked=True),), primary="opus",
+             reads=(200_000,) + (_P50,) * 4, dense=(0,)),
+        r"first_request@opus( append@opus)*( system_changed@opus( append@opus)*)+", {}, 1),
+    "an_account_rotation_of_one_model": (Life(places=(_A, _B), reads=(8_000,) * 4, rotate=3, pinned=False),
+                                         _ON_A + r"( append@b)+", {}, 0),
+    "a_move_to_a_model_string_never_answered": (
+        Life(places=(_A, Place("opus", OPUS, window=400_000, density=1.4, marked=True)), light="opus",
+             reads=(_P50,) * 4, acts=((4, ("switch", OPUS)),)),
+        _ON_A + r" entered_model@opus( append@opus)*", {"entered_model": CX}, 0),
+    "a_move_to_another_direct_key_of_the_same_model": (
+        Life(places=(_OP, _NAMED), primary="opus", light="named", reads=(_WIDE,) * 4,
+             acts=((3, ("switch", OPUS_NAMED)),)),
+        r"first_request@opus( append@opus)+ entered_model@named( append@named)*", {"entered_model": OPUS}, 0),
+    "a_return": (Life(places=(_A, Place("opus", OPUS, window=600_000, density=1.4, marked=True)), light="opus",
+                      reads=(8_000,) * 3, acts=((2, ("switch", OPUS)), (4, ("return",)))),
+                 _ON_A + r" entered_model@opus( append@opus)+ returned_to_model@a( append@a)*",
+                 {"entered_model": CX, "returned_to_model": OPUS}, 0),
+    "a_real_outage": (Life(places=(_A, Place("b", CX, "account-b", window=240_000)), fallbacks=("b",),
+                           reads=(8_000,) * 4, acts=((2, ("lost",)),)),
+                      r"first_request@a system_changed@b( append@b)*", {}, 0),
+    "a_full_queue_with_a_fallback": (Life(places=(_OP, _A), primary="opus", fallbacks=("a",), reads=(8_000,) * 3,
+                                          queue=(3, 0.6)), r"first_request@opus( append@opus)+", {}, 0),
+    "a_full_queue_without_a_fallback": (Life(places=(_OP,), primary="opus", reads=(8_000,) * 3, queue=(3, 0.6)),
+                                        r"first_request@opus( append@opus)+", {}, 0),
+    "a_restart": (Life(places=(_A,), reads=(_WIDE,) * 4, door=2), _ON_A + r" system_changed@a( append@a)*", {}, 0),
+    "an_update": (Life(places=(_A,), reads=(_WIDE,) * 4, door=2, update=True), _ON_A + r" tools_changed@a( append@a)*",
+                  {}, 0),
+    "a_restore_that_fits_with_room": (Life(places=(_a(window=400_000),), reads=(8_000,) * 2, door=2),
+                                      _ON_A + r" system_changed@a( append@a)*", {}, 0),
+    "the_mind_folds": (Life(places=(_A,), reads=(_WIDE,) * 3, acts=((3, ("fold",)),)),
+                       _ON_A + r" history_rewritten@a( append@a)*", {"history_rewritten": "compaction"}, 0),
+    "a_200k_window_with_a_small_memory": (Life(places=(_a(window=200_000),), reads=(30_000,) * 4, memory=0.25),
+                                          _ON_A + _WALLS + "?", {}, 0),
+    "a_second_work_on_the_same_key": (Life(places=(_OP,), primary="opus", reads=(8_000,), second=True),
+                                      r"first_request@opus( append@opus)+", {}, 0),
+}
+
+
+class LifeBreach(AssertionError):
+    """A life broke the law where a ``WORK_LIFE_GAPS`` row excuses it. Any other failure is a real one."""
+
+
+# Known breaches (strict: the row goes when its cause is gone), the pattern of tests/_turn_law.py: the one clause a
+# gap excuses ("" for the row's own closing check) and why. Any other breach of the row is a real failure.
+WORK_LIFE_GAPS = {
+    "a_second_work_on_the_same_key": ("", (
+        "A new work's first request on a key that just served another work reads only the tool array and the common "
+        "governance block A' of it (the live median of 12.11: 157,902 tokens, 18 %; here 103,507 of 194,865): the next "
+        "marked block already differs per work. Remover: razzant/ouroboros#3231 (a marker after B's head and the "
+        "per-work wordings of its items 3-4), a small pull request after this one; the row pins the two elements "
+        "read.")),
+    "a_total_that_cuts_the_reply": ("P3 cut reply", (
+        "A route that enforces its total by cutting the reply refuses nothing, so the favourable reading has no "
+        "refusal to learn from and keeps sending requests inside the reply reservation (replies stay at least the "
+        "reply floor of 8,192). No such route is known: of 184,622 settled requests with a stated window on the "
+        "maintainer's install (28.10-13.11) no reply ended at its window. Remover: razzant/ouroboros#3314 (an "
+        "output-limit finish at the stated total counts as the total's own refusal).")),
+}
+
+
+def _work_life_gap(name):
+    gap = WORK_LIFE_GAPS.get(name)
+    return (pytest.mark.xfail(strict=True, raises=LifeBreach, reason=gap[1]),) if gap else ()
+
+
+@pytest.mark.parametrize("name", [pytest.param(name, marks=_work_life_gap(name)) for name in WORK_LIVES])
+def test_a_works_life_writes_its_start_only_at_its_entries(name, main_call, monkeypatch, tmp_path):
+    """The life table: each work's start is written at its entries and nowhere else, with the room its route gives;
+    the clauses and their mechanisms are listed above the table; a breach names every clause it broke."""
+    life, sequence, details, refusals = WORK_LIVES[name]
+    record = run_life(life, main_call, monkeypatch, tmp_path)
+    found = breaches(record, {place.name: place for place in life.places}, sequence=sequence, details=details,
+                     refusals=refusals, queued=bool(life.queue))
+    excused = WORK_LIFE_GAPS.get(name, ("", ""))[0]
+    if excused and record["text"] and found and all(line.startswith(excused) for line in found):
+        raise LifeBreach(f"{name}:\n" + "\n".join(found))
+    assert record["text"] and not found, f"{name}:\n" + "\n".join(found)
+    if life.second and record["second"]["common"] <= 2:  # the tool array and A'
+        second = record["second"]
+        raise LifeBreach(f"{name}: the second work read {second['read']} of {second['tokens']} tokens "
+                         f"({second['common']} of {second['elements']} elements) from the first work's start")
