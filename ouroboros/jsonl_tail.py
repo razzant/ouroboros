@@ -43,7 +43,7 @@ from ouroboros.utils import JsonlChainUnreadable, iter_jsonl_objects, jsonl_chai
 # One bounded tail per path per process, memoized on the file's identity: a context build reads the
 # same 256 KB of ``logs/supervisor.jsonl`` for its health block and its body fact, so one read serves
 # both; an append (a new size and mtime) or a rotation (a new inode) reads again. The memory bound is
-# one entry per path (the two runtime logs the context tails).
+# one entry per path (the two runtime logs and the two self-file journals the context tails).
 _TAIL_LOCK = threading.Lock()
 _TAILS: Dict[str, Tuple[tuple, Tuple[Dict[str, Any], ...]]] = {}
 

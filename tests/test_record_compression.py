@@ -1,5 +1,6 @@
 """Finished records are compressed in place: the one floor (``artifact_storage.compression_outcome``) and the
-maintenance child's paced ``record_compression`` job over terminal evidence and finished reviewer seat homes.
+maintenance child's paced ``record_compression`` job over terminal evidence, finished reviewer seat homes and
+the rotated logs' segments an earlier server generation's walk recorded closed.
 
 Real APFS proofs run on macOS and skip elsewhere; the job's choices (which files, when, where it resumes)
 are proven on every platform through a recording outcome.
@@ -572,15 +573,17 @@ def test_evidence_waits_until_its_task_is_proven_over(data, recorded, monkeypatc
 def test_totals_are_kept_per_plane_and_shown_under_their_own_place(data, recorded):
     from ouroboros import storage_removers
 
+    _segment(data, "events_20261101T000000.jsonl")
+    _walk(data)  # records the segment closed; nothing else to compress yet
     _evidence(data, "done", live_files=False)
     _seat(data, "done", "op-1")
-    _run(data)
+    _walk(data)  # the next server generation: the new evidence, the new seat home and the recorded segment
     totals = maintenance_jobs.job(data, job.JOB)["totals"]
-    assert {plane: total["compressed"] for plane, total in totals.items()} == {"evidence": 3, "seats": 2}
+    assert {plane: total["compressed"] for plane, total in totals.items()} == {"evidence": 3, "seats": 2, "logs": 1}
     found = storage_removers.place_removers(data, engine=False)
     shown = {place: next(fact for fact in found[place] if fact["id"] == job.JOB)["compressed"]
-             for place in ("task_results", "app_state")}
-    assert shown == {"task_results": 3, "app_state": 2}, "never one job-wide total under two places"
+             for place in ("task_results", "app_state", "archives")}
+    assert shown == {"task_results": 3, "app_state": 2, "archives": 1}, "never one job-wide total under two places"
 
 
 def test_a_supported_run_clears_another_platforms_unsupported(data, recorded, monkeypatch):
@@ -677,6 +680,22 @@ def test_unsupported_platforms_record_it_once_and_walk_nothing(data, monkeypatch
     assert job.JOB not in maintenance.due(data) and _run(data) is None
 
 
+def test_an_unsupported_run_drops_another_platforms_log_holds(data, recorded, monkeypatch):
+    """Data moved from a host that held log segments to one that compresses nothing: the held segments wait for
+    no start there, so the Archives line says the verdict, never the earlier hold."""
+    from ouroboros import storage_removers
+
+    _segment(data, "events_20261101T000000.jsonl")
+    _walk(data)
+    assert _held(data) == [("closed_set_unrecorded", 1)], "the supported host's first walk holds the segment"
+    monkeypatch.setattr(artifact_storage, "compression_supported", lambda: False)
+    assert _run(data) == {"state": "done", "items": 0}
+    row = _row(data)
+    assert row["unsupported"] == sys.platform and "holds" not in row
+    [fact] = [fact for fact in storage_removers.place_removers(data, engine=False)["archives"] if fact["id"] == job.JOB]
+    assert fact["state"] == "unsupported" and "holds" not in fact
+
+
 @darwin
 def test_real_compression_of_terminal_evidence_and_a_finished_seat_home(data, monkeypatch):
     monkeypatch.setattr(job, "_queue_live", lambda root: (lambda task_id: False))
@@ -692,8 +711,8 @@ def test_real_compression_of_terminal_evidence_and_a_finished_seat_home(data, mo
     compressed = {path for path in identities if os.lstat(path).st_flags & stat.UF_COMPRESSED}
     assert compressed == {done["evidence"], done["generation"], done["test"], seat["evidence"], seat["test"]}
     row = maintenance_jobs.job(data, job.JOB)
-    assert {plane: total["compressed"] for plane, total in row["totals"].items()} == {"evidence": 3, "seats": 2}
-    assert all(total["saved_bytes"] > 0 for total in row["totals"].values()) and row["last"]["skipped"] == {}
+    assert {plane: total["compressed"] for plane, total in row["totals"].items()} == {"evidence": 3, "seats": 2, "logs": 0}
+    assert all(row["totals"][plane]["saved_bytes"] > 0 for plane in ("evidence", "seats")) and row["last"]["skipped"] == {}
     assert _run(data) is None
 
 
@@ -913,3 +932,266 @@ def test_in_scope_names_by_place_exactly_what_a_pass_offers_whatever_its_task_st
         alias = data.parent / "alias"
         alias.symlink_to(data, target_is_directory=True)
         assert job.in_scope(data, alias / done["test"].relative_to(data)), "the place is the resolved one"
+
+
+# ---- the log plane: the rotated logs' closed segments, offered once an earlier generation's walk recorded them ---
+
+_CONFIRMED = {"errors": [], "unresolved": [], "prior_workers_ended": True}  # the report of a recovery whose PID check passed
+
+
+def _segment(data, name, raw: bytes = TEXT * 4096) -> pathlib.Path:
+    return _write(data / "archive" / name, raw)
+
+
+def _start(data, report=_CONFIRMED) -> str:
+    """A server start: its ``startup_recovery`` record with REPORT's verdict. Returns the new generation."""
+    from ouroboros import maintenance_retirement
+
+    maintenance_retirement.record_startup(data, gaps=False, report=report)
+    return job._generation(job._startup(data))
+
+
+def _walk(data, report=_CONFIRMED) -> str:
+    """One server generation: its start, then the job's whole run under it."""
+    generation = _start(data, report)
+    assert _run(data)["state"] == "done"
+    return generation
+
+
+def _row(data):
+    return maintenance_jobs.job(data, job.JOB) or {}
+
+
+def _held(data):
+    return [(hold["class"], hold["count"]) for hold in _row(data).get("holds") or ()]
+
+
+def test_the_log_plane_offers_only_what_an_earlier_generations_walk_recorded_closed(data, recorded):
+    """A reader may hold this generation's once-live file by inode, so a walk offers only the segments a walk
+    under an earlier generation listed closed, and ends by recording what it lists for the generations after it.
+    The live log, a subfolder of ``archive/`` and a name the rotator never writes are never listed."""
+    closed = [_segment(data, name) for name in (
+        "events_20261101T000000.jsonl", "events_20261101T000000_1.jsonl", "tools_20261101T120000.jsonl",
+        "task_reflections_20261102T000000.jsonl")]
+    never = [_write(data / "logs" / "events.jsonl"), _segment(data, "usage_ledger/segment_ep1.jsonl"),
+             _segment(data, "rescue/events_20261101T000000.jsonl"), _segment(data, "consciousness_observations.jsonl"),
+             _segment(data, "events_20261101T000000.jsonl.xz"), _segment(data, "events_notes.jsonl")]
+    first = _walk(data)
+    assert not recorded and _held(data) == [("closed_set_unrecorded", len(closed))], "no earlier walk recorded them"
+    assert _row(data)["witness"] == {"generation": first, "chains": {
+        "events": ["events_20261101T000000_1.jsonl", 2], "tools": ["tools_20261101T120000.jsonl", 1],
+        "task_reflections": ["task_reflections_20261102T000000.jsonl", 1]}}, "a walk that ends records what it listed"
+    during = [_segment(data, "events_20261112T000000.jsonl"), _segment(data, "supervisor_20261112T000000.jsonl")]
+    assert _run(data) is None, "at rest for the rest of the generation"
+    second = _walk(data)
+    assert {path for path, _owned in recorded} == set(closed), "what the first walk listed; the rest waits a start more"
+    assert all(owned is None for _path, owned in recorded), "a closed segment has no owner to ask"
+    row = _row(data)
+    assert row["totals"]["logs"]["compressed"] == len(closed) and "holds" not in row
+    assert row["waiting"] == {"evidence": [], "seats": []}, "a log segment waits for no task"
+    assert row["witness"]["generation"] == second and row["witness"]["chains"]["events"] == [during[0].name, 3]
+    recorded.clear()
+    _walk(data)
+    offered = {path for path, _owned in recorded}
+    assert offered == {*closed, *during} and not offered & set(never)
+
+
+def test_no_witness_or_the_serving_generations_own_offers_nothing_and_holds(data, recorded):
+    """Only an earlier generation's record proves a segment was closed before the serving one began: without a
+    start there is no walk, a first walk has nothing to stand on, and a witness recorded under the serving
+    generation itself is no proof. The next start offers what the walk recorded."""
+    closed = [_segment(data, "events_20261101T000000.jsonl"), _segment(data, "tools_20261101T000000.jsonl")]
+    assert _run(data)["state"] == "done" and not recorded and "witness" not in _row(data), "no server start: no walk"
+    serving = _walk(data)
+    assert not recorded and _held(data) == [("closed_set_unrecorded", 2)]
+    assert _row(data)["witness"]["generation"] == serving
+    maintenance_jobs.record(data, job.JOB, generation="another")  # the walk is owed again under the same generation
+    assert _run(data)["state"] == "done" and not recorded, "the serving generation's own witness is no earlier one's"
+    assert _held(data) == [("closed_set_unrecorded", 2)] and _row(data)["generation"] == serving
+    _walk(data)
+    assert {path for path, _owned in recorded} == set(closed) and "holds" not in _row(data)
+
+
+def test_an_unreadable_archive_ends_the_log_walk_and_keeps_the_other_planes(data, recorded, monkeypatch):
+    """A folder the walk cannot list is counted, never taken for empty, and never the reason the evidence and seat
+    planes lose what the same run did: their positions are recorded and the plane rests until the next start."""
+    _evidence(data, "done", live_files=False)
+    _segment(data, "events_20261101T000000.jsonl")
+    _start(data)
+    real, refused = os.scandir, data / "archive"
+
+    def scandir(path="."):
+        if pathlib.Path(path) == refused:
+            raise PermissionError(13, "listing refused")
+        return real(path)
+
+    with monkeypatch.context() as unreadable:
+        unreadable.setattr(os, "scandir", scandir)
+        assert _run(data)["state"] == "done"
+    row = _row(data)
+    assert row["totals"]["evidence"]["compressed"] == 3 and row["last"]["skipped"].get("unreadable") == 1
+    assert "witness" not in row and _run(data) is None, "no record, and no new look under this generation"
+    _walk(data)
+    assert "witness" in _row(data), "the next start lists the folder again"
+
+
+def test_a_start_during_the_walk_names_its_record_after_that_start(data, recorded, monkeypatch):
+    """A server start while the walk runs may have a reader that holds, by inode, a segment the walk then lists
+    closed (live when that start's reader began, rotated after): the record names the generation current at its
+    write, so that start's generation offers none of it, and the next start's walk does."""
+    _start(data)
+    seats, started = job._Run.seats, {}
+
+    def a_start_before_the_logs(run):
+        owed = seats(run)
+        started["generation"] = _start(data)
+        started["segment"] = _segment(data, "events_20261112T000000.jsonl")  # that start's live log, rotated
+        return owed
+
+    with monkeypatch.context() as race:
+        race.setattr(job._Run, "seats", a_start_before_the_logs)
+        assert _run(data)["state"] == "done"
+    row = _row(data)
+    assert row["witness"]["generation"] == row["generation"] == started["generation"]
+    assert _run(data) is None and not recorded, "the start the walk ended under offers nothing it listed"
+    _walk(data)
+    assert [path for path, _owned in recorded] == [started["segment"]], "the next start's walk offers it"
+
+
+def test_a_name_no_newer_than_the_witness_that_appears_later_holds_its_chain(data, recorded):
+    """The right to a segment is the names a walk recorded, not a time: one sorting at or before the witness that
+    appears afterwards (the clock stepped back) may be the serving generation's, so its whole chain waits, as a
+    typed hold beside Archives alone and with no released count."""
+    from ouroboros import storage_removers
+
+    events = [_segment(data, "events_20261101T000000.jsonl"), _segment(data, "events_20261103T000000.jsonl")]
+    tools = _segment(data, "tools_20261101T000000.jsonl")
+    _walk(data)
+    late = _segment(data, "events_20261102T000000.jsonl")
+    _walk(data)
+    assert {path for path, _owned in recorded} == {tools}, "a chain whose count stands is offered"
+    row = _row(data)
+    assert _held(data) == [("closed_set_changed", 3)]
+    assert row["holds"][0]["example"] == events[0].name and row["holds"][0]["since"]
+    found = storage_removers.place_removers(data, engine=False)
+    facts = {place: next(fact for fact in found[place] if fact["id"] == job.JOB)
+             for place in ("task_results", "app_state", "archives")}
+    assert facts["archives"]["holds"] == row["holds"] and facts["archives"]["held"] == 3
+    assert facts["archives"]["compressed"] == 1 and "released" not in facts["archives"], "no count kept: none said"
+    assert not any("holds" in facts[place] for place in ("task_results", "app_state")), "the log plane's hold"
+    assert _run(data) is None, "a held chain is no reason to run again under this generation"
+    recorded.clear()
+    _walk(data)
+    assert {path for path, _owned in recorded} == {*events, late, tools}, "the walk that held it recorded it anew"
+    assert "holds" not in _row(data), "nothing held: the field is gone"
+
+
+@pytest.mark.parametrize("report", [{"errors": ["prior_worker_ownership_unconfirmed"]},
+                                    {"errors": ["startup_ownership_unconfirmed: OSError"]}, None,
+                                    {"errors": ["store_not_published"]}, {"errors": [], "unresolved": []}])
+def test_unconfirmed_prior_workers_hold_the_plane_until_a_start_confirms_them(data, recorded, report):
+    """A worker of the last generation that may still run can hold a log by inode: under a start that could
+    not confirm they ended (or has no report) the plane compresses nothing and says so; a confirmed start offers."""
+    closed = [_segment(data, "events_20261101T000000.jsonl"), _segment(data, "tools_20261101T000000.jsonl")]
+    _walk(data)
+    _walk(data, report)
+    assert not recorded and _held(data) == [("prior_workers_unconfirmed", 2)]
+    assert _run(data) is None, "the hold is a fact of this generation, not a reason to look again"
+    _walk(data)
+    assert {path for path, _owned in recorded} == set(closed) and "holds" not in _row(data)
+
+
+def test_the_log_plane_is_due_once_a_server_generation_and_nothing_else_wakes_it(data, recorded):
+    from ouroboros.task_results import write_task_result
+    from ouroboros.utils import append_jsonl
+
+    def due():
+        return job.due(data, _row(data), {}, False)
+
+    first = _segment(data, "events_20261101T000000.jsonl")
+    _walk(data)
+    _walk(data)
+    assert [path for path, _owned in recorded] == [first]
+    assert not due(), "the same generation after a walk that ended"
+    rotated = _segment(data, "events_20261112T000000.jsonl")  # a rotation under this generation
+    append_jsonl(data / "logs" / "events.jsonl", {"type": "unrelated"})
+    maintenance_jobs.record(data, "temp_sweep", state="done")  # another job's write moves the store
+    assert not due(), "neither a rotation nor an unrelated write wakes the job"
+    recorded.clear()
+    write_task_result(data, "other", "completed")  # the evidence plane's own wake
+    assert _run(data)["state"] == "done" and not recorded, "a run for another plane does not walk the logs again"
+    _start(data)
+    assert due(), "a new server generation"
+    assert _run(data)["state"] == "done" and {path for path, _owned in recorded} == {first}
+    assert not due()
+    recorded.clear()
+    _walk(data)
+    assert {path for path, _owned in recorded} == {first, rotated}, "closed after a record: one start more"
+
+
+def test_the_log_plane_keeps_the_jobs_budget_and_cursor_and_reaps_its_own_sibling(data, recorded, monkeypatch):
+    closed = [_segment(data, name) for name in (
+        "events_20261101T000000.jsonl", "events_20261101T000001.jsonl", "tools_20261101T000000.jsonl")]
+    earlier = _walk(data)
+    own = _write(artifact_storage.compression_sibling(closed[0]))  # a killed run's leftover: temp_sweep never walks here
+    foreign = _segment(data, ".events_20261101T000000.jsonl.tmp.4242.17.0a1b2c3d")  # another writer's temporary
+    serving = _start(data)
+    monkeypatch.setattr(job, "FILES_PER_RUN", 1)
+    states = []
+    while (outcome := _run(data)) is not None:
+        states.append(outcome["state"])
+        row = _row(data)
+        assert (row["cursor"] or {"plane": "logs"})["plane"] == "logs" and (row["cursor"] is None) == (outcome["state"] == "done")
+        ended = serving if outcome["state"] == "done" else earlier
+        assert (row["generation"], row["witness"]["generation"]) == (ended, ended), "both move when the walk ends"
+    assert states == ["pending", "pending", "done"]
+    assert [path for path, _owned in recorded] == sorted(closed), "each segment once, in name order"
+    assert not own.exists() and foreign.exists(), "only this job's own interrupted sibling is reaped"
+
+
+@darwin
+def test_real_compression_of_a_closed_segment_keeps_what_the_chain_readers_read(data):
+    """A closed segment compressed in place is a new inode under the same name, bytes, size and mtime: the chain's
+    length and offsets, a snapshot captured before the compression and a fresh one all read the same bytes; the
+    segment closed after the record, the live log and a subfolder's file keep their inode. A hold counts only
+    what is still uncompressed."""
+    from ouroboros.jsonl_tail import JsonlChainSnapshot
+    from ouroboros.utils import jsonl_archive_segments
+
+    def rows(tag):
+        return b"".join(json.dumps({"type": tag, "n": index, "text": "record " * 40}).encode("utf-8") + b"\n"
+                        for index in range(400))
+
+    live = _write(data / "logs" / "events.jsonl", rows("live"))
+    closed = [_segment(data, "events_20261101T000000.jsonl", rows("first")),
+              _segment(data, "events_20261102T000000.jsonl", rows("second"))]
+    nested = _segment(data, "usage_ledger/segment_ep1.jsonl")
+    _walk(data)
+    assert _held(data) == [("closed_set_unrecorded", 2)] and not any(
+        os.lstat(path).st_flags & stat.UF_COMPRESSED for path in closed), "recorded, not yet offered"
+    during = _segment(data, "events_20261112T000000.jsonl", rows("third"))
+    seen = {path: (os.lstat(path).st_ino, os.lstat(path).st_mtime_ns, _identity(path))
+            for path in (*closed, during, live, nested)}
+    before = JsonlChainSnapshot(live)
+    whole, ends, names = before._read(0, before.upper), list(before.ends), jsonl_archive_segments(live)
+    assert names == [*closed, during] and before.upper == sum(len(path.read_bytes()) for path in (*closed, during, live))
+
+    _start(data)
+    assert _run(data) == {"state": "done", "items": 2}
+    for path, (inode, mtime, identity) in seen.items():
+        now = os.lstat(path)
+        assert (_identity(path), now.st_mtime_ns) == (identity, mtime), path
+        assert bool(now.st_flags & stat.UF_COMPRESSED) == (path in closed), path
+        assert (now.st_ino != inode) == (path in closed), "only what was compressed is another inode"
+    row = _row(data)
+    assert row["totals"]["logs"]["compressed"] == 2 and row["totals"]["logs"]["saved_bytes"] > 0 and "holds" not in row
+
+    after = JsonlChainSnapshot(live)
+    assert (after.upper, list(after.ends), jsonl_archive_segments(live)) == (before.upper, ends, names)
+    assert after._read(0, after.upper) == whole == before._read(0, before.upper), "the earlier snapshot still reads"
+    inside, across = 1000, ends[0] - 500  # an address inside the first segment, one crossing into the second
+    for start, length in ((inside, 5000), (across, 2000)):
+        assert after._read(start, start + length) == whole[start:start + length] == before._read(start, start + length)
+    assert _run(data) is None
+    _walk(data, None)  # a start that cannot confirm the last workers: all three are in the record, one is still plain
+    assert _held(data) == [("prior_workers_unconfirmed", 1)]
