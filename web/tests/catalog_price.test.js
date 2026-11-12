@@ -361,3 +361,9 @@ test('while Main or the default tier is on Fast or Economy the composer list nam
     // The list serves Main and its rooms alike: a room's new work, a lead, would pay the default tier's price.
     assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }), '');
 });
+
+test('a role on a model stored with its local label says it runs locally, never Price unknown', async () => {
+    const { editor, host } = await mainRole({ OUROBOROS_MODEL_VISION: 'qwen2.5-vl (local)' });
+    assert.equal(host.querySelector('[data-model-role-group="vision"] [data-model-role-status]').textContent, 'Uses the local runtime.');
+    editor.destroy();
+});
