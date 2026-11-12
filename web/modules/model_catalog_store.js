@@ -6,7 +6,7 @@
 // Models refreshing its own catalog feeds this one without another request. The circle editor's Model field takes
 // its suggestions from the same read (circles.js).
 import { apiClient, apiFetch } from './api_client.js';
-import { apiConnections } from './route_editor_primitives.js';
+import { apiConnections, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_PREFERENCE_KEY, tierPriced } from './route_editor_primitives.js';
 import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog } from './settings_catalog.js';
 import { buildModelIndex, normalizeRoute } from './chat_model_routes.js';
 
@@ -37,7 +37,7 @@ async function fetchCatalog() {
 export function createModelCatalogStore({ readCatalog = fetchCatalog, readPreferences = () => apiClient.uiPreferences(),
     readSettings = () => apiClient.settings(), now = () => Date.now() } = {}) {
     const state = { catalog: null, readAt: 0, failed: false, reading: null, recents: [], recentsReading: null,
-        connections: null, connectionsReading: null, index: null };
+        connections: null, connectionsReading: null, index: null, mainTierPriced: false };
     const listeners = new Set();
     const notify = () => { state.index = null; listeners.forEach((listener) => listener()); };
 
@@ -86,6 +86,10 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         state.connectionsReading ||= Promise.resolve().then(readSettings)
             .then((settings) => {
                 state.connections = apiConnections(settings, settings?._meta?.setup_contract?.providerProfiles || {});
+                // Main on Fast or Economy is priced by its tier's endpoint: the list then names no catalog price.
+                let roles = settings?.[MODEL_PROCESSING_PREFERENCES_KEY];
+                try { roles = typeof roles === 'string' ? JSON.parse(roles) : roles; } catch { roles = null; }
+                state.mainTierPriced = tierPriced(String(roles?.main || settings?.[PROCESSING_PREFERENCE_KEY] || ''));
             })
             .catch(() => {})
             .finally(() => { state.connectionsReading = null; notify(); });
@@ -99,7 +103,7 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         /** The catalog as last read (the merged `/api/model-catalog` answer), or null before any read. */
         catalog: () => state.catalog,
         /** The index of the catalog as last read (chat_model_routes.js), built once per change. */
-        index() { return state.index ||= buildModelIndex({ catalog: state.catalog || {}, connections: state.connections }); },
+        index() { return state.index ||= buildModelIndex({ catalog: state.catalog || {}, connections: state.connections, tierPriced: state.mainTierPriced }); },
         recents: () => state.recents,
         /** `reading`: a read is in flight; `read`: one has answered; `failed`: the last one did not. */
         status: () => ({ reading: Boolean(state.reading), read: Boolean(state.catalog), failed: state.failed }),

@@ -163,7 +163,7 @@ def openrouter_catalog_price(model: Any) -> Optional[Dict[str, Any]]:
         return None
     others = [float(value) for key, value in pricing.items() if key not in ("prompt", "completion", "overrides")
               and isinstance(value, (int, float, str)) and not isinstance(value, bool) and _number(value)]
-    if row[0] == row[3] == 0 and not tiers and any(value > 0 for value in others):
+    if not any(figures) and any(value > 0 for value in others):
         return None  # free by tokens, yet another part of the call is charged: "free" would be false
     return {"input": row[0], "output": row[3], **({"tiers": [
         {"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]} for minimum, tier in tiers]} if tiers else {})}

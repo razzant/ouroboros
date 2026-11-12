@@ -1354,6 +1354,11 @@ test('a price is what one review measured or plainly unknown, and a seat is spok
         '≈$1.23 per review (median of 7 measured, $0.50–$3.10)');
     assert.equal(reviewCostText(apiRow({ delivery: 'packet' }), { usd_per_review: 0.0042, basis: 'observed_reviews', reviews: 1,
         low: 0.0042, high: 0.0042 }), '≈$0.0042 per review (1 measured)');
+    // A charge below the printed precision is never a proven zero (the words review_price.py prints).
+    assert.equal(reviewCostText(api, { usd_per_review: 0.00003, basis: 'observed_reviews', reviews: 1, low: 0.00003, high: 0.00003 }),
+        '<$0.0001 per review (1 measured)');
+    assert.equal(reviewCostText(api, { usd_per_review: 0.02, basis: 'observed_reviews', reviews: 3, low: 0.00003, high: 0.05 }),
+        '≈$0.02 per review (median of 3 measured, <$0.0001–$0.05)');
 });
 
 test('a minted row names its origin, and a copy keeps the mark but never the origin', () => {

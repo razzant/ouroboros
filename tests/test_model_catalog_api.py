@@ -506,6 +506,7 @@ def test_an_openrouter_row_carries_the_price_its_catalog_states(pricing, expecte
     {"prompt": "0.00000015", "completion": "0.0000006", "internal_reasoning": "0.0000035"},
     # Free by tokens, yet the call is charged for something else: "free" would be false.
     {"prompt": "0", "completion": "0", "image": "0.04"}, {"prompt": "0", "completion": "0", "web_search": "0.004"},
+    {"prompt": "0", "completion": "0", "image": "0.04", "overrides": [{"min_prompt_tokens": 1000, "prompt": "0", "completion": "0"}]},
     # A tier that also names an hour window is not a plain input-length tier.
     {"prompt": "0.000002", "completion": "0.00001", "overrides": [
         {"min_prompt_tokens": 1000, "utc_start": 1500, "utc_end": 100, "prompt": "0.000004"}]},

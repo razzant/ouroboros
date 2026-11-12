@@ -255,3 +255,21 @@ test('in the composer list the price follows the language of each paint, not of 
         applyPayload({ language: '', english: true, revision: 42, entries: {} });
     }
 });
+
+test('while Main is on Fast or Economy the composer list names no catalog price; on Standard it does', async () => {
+    assert.equal(describeRoute(buildModelIndex({ catalog: { items: [OPUS] }, tierPriced: true }), { model: OPUS.value }).price, '');
+    const { createModelCatalogStore } = await import('../modules/model_catalog_store.js');
+    const shown = async (settings) => {
+        const store = createModelCatalogStore({ readCatalog: async () => ({ items: [OPUS] }), readPreferences: async () => ({}),
+            readSettings: async () => settings });
+        await store.read();
+        await store.readConnections();
+        return describeRoute(store.index(), { model: OPUS.value }).price;
+    };
+    assert.equal(await shown({}), '$4 in / $20 out');
+    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' }), '$4 in / $20 out');
+    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' }), '');
+    assert.equal(await shown({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), '');
+    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }),
+        '$4 in / $20 out', "Main's own choice outranks the global one");
+});

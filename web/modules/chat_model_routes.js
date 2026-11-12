@@ -92,7 +92,7 @@ export function compareNewerFirst(a, b) {
  * `connections` (`apiConnections()` of a settings read, when one was made) names an API source that cannot send.
  * @param {{catalog?: object, connections?: ?Array}} input
  */
-export function buildModelIndex({ catalog = {}, connections = null } = {}) {
+export function buildModelIndex({ catalog = {}, connections = null, tierPriced = false } = {}) {
     const sources = new Map();
     const rows = new Map();
     const descriptors = Array.isArray(catalog.model_sources) ? catalog.model_sources : [];
@@ -143,7 +143,7 @@ export function buildModelIndex({ catalog = {}, connections = null } = {}) {
             : row.states.size === 1 && row.states.has('unavailable') ? false : null;
         // The catalog's price, while every item of the row states that same one (only OpenRouter's rows state any);
         // kept as the figures, so its words follow the language of each paint.
-        row.price = row.prices.size === 1 ? [...row.prices.values()][0] : null;
+        row.price = !tierPriced && row.prices.size === 1 ? [...row.prices.values()][0] : null;
         delete row.states;
         delete row.prices;
     }
