@@ -451,7 +451,7 @@ def _run_shell(
             )
         audit_error = ""
         try:
-            # A script's argv names only its temporary file: run_script hands its body to this audit.
+            # A script's argv names its temporary file, not what it writes: run_script hands its body here.
             undeclared_user_outputs = _mentioned_user_file_outputs_without_declaration(
                 ctx, kwargs.get("_audit_cmd") or cmd, outputs, scratch_abs=scratch_abs,
                 command_start_ts=_command_start_epoch, cwd=work_dir,
@@ -628,7 +628,7 @@ def _run_script(
             ctx, argv, cwd=cwd, outputs=outputs, scratch=scratch,
             _resolved_binding=binding, timeout_sec=timeout_sec, timeout=timeout,
             env_from_settings=kwargs.get("env_from_settings"), _tool="run_script",
-            _audit_cmd=[interp, "-c", body],
+            _audit_cmd=[interp, "-c", body, *argv[2:]],  # the body, then the arguments the argv audit read before
         )
     except (OSError, ValueError) as exc:
         if shell_entered:
