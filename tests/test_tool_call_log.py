@@ -155,6 +155,28 @@ def test_early_exits_after_the_start_still_settle(tmp_path):
     calls = logical_calls(_rows(logs / "tools.jsonl"))
     assert [call["state"] for call in calls] == ["settled", "settled"]
     assert calls[1]["settled"]["status"] == "host_error" and calls[1]["settled"]["is_error"] is True
+    assert "control_reason" not in calls[1]["settled"]  # no control ended it: the host's own failure
+    assert calls[0]["settled"]["tool_result_code"] == "TOOL_ARG_ERROR"  # the handler-less refusal is typed too
+
+
+@pytest.mark.parametrize("control", ["owner_pause", "cancelled"])
+def test_a_control_that_ends_the_call_settles_as_interrupted_with_its_reason(tmp_path, control):
+    """Pause, Cancel or a deadline is no host failure (audit 08-11.11 item 6): the one settlement is
+    ``interrupted`` and names the control. No handler result exists, so the row invents no code."""
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    def ended_by_control(_name, _args):
+        raise ModelWaitInterrupted(control) if control == "owner_pause" else PhysicalDispatchInterrupted(control)
+
+    registry = _Registry(tmp_path, ended_by_control)
+    with pytest.raises((ModelWaitInterrupted, PhysicalDispatchInterrupted)):
+        _call(registry, tmp_path)
+    [call] = logical_calls(_rows(tmp_path / "child" / "logs" / "tools.jsonl"))
+    row = call["settled"]
+    assert call["state"] == "settled" and (row["status"], row["control_reason"]) == ("interrupted", control)
+    assert row["is_error"] is True and "tool_result_code" not in row
+    assert row["result_preview"].endswith(f"interrupted: {control}")
 
 
 def test_host_error_producer_reaches_memory_as_failure(tmp_path, monkeypatch):
@@ -311,9 +333,10 @@ def test_the_recent_tools_header_counts_calls_not_rows(tmp_path):
     assert tools.count("✓ read_file path=") == 10
 
 
+@pytest.mark.parametrize("stub", ["host_error", "interrupted"])
 @pytest.mark.parametrize("real_first", [True, False])
-def test_a_duplicate_host_error_settlement_never_hides_the_real_one(real_first):
-    real, host = _log_row("tool_call", "i", status="ok"), _log_row("tool_call", "i", status="host_error")
+def test_a_duplicate_host_error_settlement_never_hides_the_real_one(real_first, stub):
+    real, host = _log_row("tool_call", "i", status="ok"), _log_row("tool_call", "i", status=stub)
     [call] = logical_calls([_log_row("tool_call_started", "i"), *([real, host] if real_first else [host, real])])
     assert call["state"] == "settled" and call["settled"] is real
 
