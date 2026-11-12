@@ -345,7 +345,13 @@ def test_emergency_conversation_line_names_omitted_notes_only_when_present():
             emergency = next((line for line in text.splitlines() if line.startswith("Emergency:")), "")
             assert bool(emergency) is bool(notes)
             assert ("2 notes by count" in emergency) is bool(notes)
-            assert "0 notes" not in emergency
+            assert "0 notes" not in emergency and "0 untold" not in emergency  # rev_grok REV1 R4: a zero names nothing
+    group = syn.conversation(1)
+    group["rooms"][0]["tasks"] = [{"task": f"w{n}", "line": f"[t; host; task w{n}] Done", "pos": n, "gist": {
+        "summary": f"Work {n} finished.", "address": f"row:2001@2026-09-0{n + 1}T00:00:00+00:00#{n:012x}",
+        "ts": f"2026-09-0{n + 1}T00:00:00+00:00"}} for n in range(2)]
+    text = conv.render_group(group, set(), set(), 3)
+    assert "Emergency: 2 works, only the last gist shown." in text and "untold" not in text
 
 
 @pytest.mark.parametrize("swap", [False, True], ids=["P-A", "P-B"])

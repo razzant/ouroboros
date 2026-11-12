@@ -250,10 +250,10 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
         if as_line >= 2:
             untold = data["untold"]
             notes = sum(len(room["notes"]) for room in group["rooms"])
-            if untold or notes or as_line == 3 and len(gists) > 1:
-                lines.append(f"Emergency: {untold} untold rows" + (f"; {notes} notes by count" if notes else "")
-                             + (f"; {len(gists)} works, " + ("only the last gist shown." if as_line == 3 else "every gist shown.")
-                                if gists else "."))
+            if untold or notes or as_line == 3 and len(gists) > 1:  # each named omission is real; a zero names none
+                parts = [f"{n} {what}" for n, what in ((untold, "untold rows"), (notes, "notes by count")) if n]
+                parts += [f"{len(gists)} works, " + ("only the last gist shown" if as_line == 3 else "every gist shown")] if gists else []
+                lines.append("Emergency: " + "; ".join(parts) + ".")
         for room in group["rooms"]:
             lines += [_note_pointer(note) for note in room["notes"]] if as_line == 1 else []
             if (unread := data["rooms"][room["room_id"]]["unread"]) and not room.get("overheard"):
