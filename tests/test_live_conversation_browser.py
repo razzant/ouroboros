@@ -586,6 +586,22 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     page.wait_for_function('__settingsSignals.length === 1')
     assert subscription_ui['call_saves'][-1]['instructions'] == 'Speak briefly in this synthetic call.'
     assert not any('device' in key or key == 'echoCancellation' for key in subscription_ui['call_saves'][-1])
+    # A device option changed, then Back, then another skill's form drawn (its signal), then Calls again: the form is
+    # drawn anew and the skill binds it again, so its device controls and its autosave still work.
+    form.locator('[data-call-processing="echoCancellation"]').check()
+    page.locator('#page-settings [data-settings-page="skill/live_conversation"] [data-settings-back]').click()
+    expect(page.locator('#page-settings [data-settings-page="skill/live_conversation"]')).to_have_count(0)
+    page.evaluate("window.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted'))")
+    open_calls_settings(page)
+    expect(form.locator('[data-call-device="mic"]')).to_have_count(1)
+    expect(form.locator('[data-call-device="mic"]')).to_have_value('test-mic')
+    saves = len(subscription_ui['call_saves'])
+    form.locator('[name="provider"]').select_option(grok['id'])
+    for _ in range(100):
+        if len(subscription_ui['call_saves']) > saves and subscription_ui['call_saves'][-1].get('provider') == grok['id']:
+            break
+        page.wait_for_timeout(50)
+    assert subscription_ui['call_saves'][-1]['provider'] == grok['id'], 'the form saves itself again'
     navigate(page, 'chat')
     assert page.locator("[data-call-entry='talk']").count() == 0
     assert not subscription_ui['errors']

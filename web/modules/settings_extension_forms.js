@@ -3,9 +3,9 @@
  * `skill` lists the skills that registered a settings form, one door each; search lands on it by the names this
  * list had ("Extension Settings", under Advanced). `skill/<id>` is the form a skill registered (its reviewed,
  * host-rendered settings sections), opened from that list, the skill's card, a place's Connect, Voice and calls,
- * and search. Each opened form has its own host element, `#extension-settings-sections` (one in the page at a time: a
- * form put aside with unsaved words, settings.js, is out of it). Only that skill's routes are read, and
- * `ouro:extension-settings-mounted` tells
+ * and search. Each opened form has its own host element, `#extension-settings-sections`, let go with its page: the
+ * shell never puts a skill's form aside (settings.js), because a skill's page module binds each drawing anew and
+ * only the forms in the page. Only that skill's routes are read, and `ouro:extension-settings-mounted` tells
  * a skill's own page module that its form stands (the bundled Calls skill enhances its form on it). The host draws
  * every field, reads the stored values from the route it posts to and owns the Save outcome.
  *
@@ -330,7 +330,6 @@ function mountSkillForm(container, { path, ctx }) {
     window.addEventListener('ouro:settings-page-shown', onShown);
     const offLifecycle = getContributions().onLifecycle(() => { if (onScreen(ctx, path)) void fill(); });  // as the list above
     return Promise.resolve(fill()).then(() => ({
-        unsaved: () => Boolean(host.dataset.typed),  // the shell puts such a form aside instead of letting it go
         unmount() {
             alive = false;
             host.removeEventListener('input', onTyped);

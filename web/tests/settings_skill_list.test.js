@@ -113,7 +113,7 @@ test('a skill form the owner types into is not redrawn by a read that was on its
     await settle();
     const host = container.firstElementChild;
     const shown = () => host.querySelector('[name="chat_id"]')?.getAttribute('value');
-    assert.deepEqual([shown(), handle.unsaved()], ['first', false]);
+    assert.equal(shown(), 'first');
     const changedElsewhere = () => heard.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'other', action: 'updated' });
 
     // Untouched, the form follows the server: another window or Ouroboros changed a skill, the form is read again.
@@ -135,7 +135,9 @@ test('a skill form the owner types into is not redrawn by a read that was on its
     await settle();
     assert.equal(host.querySelector('[name="chat_id"]'), field, 'the field the owner types in stays the same node');
     assert.equal(shown(), 'second', 'the answer that arrived late was not drawn');
-    assert.equal(handle.unsaved(), true, 'the shell puts such a form aside when it is left');
+    // Left, the form is let go (no `unsaved()`): its skill's page module binds each drawing, and a form taken out of
+    // the page would lose that binding (tests/test_live_conversation_browser.py, Calls).
+    assert.equal(handle.unsaved, undefined);
     handle.unmount();
 });
 
