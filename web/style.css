@@ -1465,7 +1465,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
    surface; focus is the field's ring, drawn as shadows), then the count, ↑ newer, ↓ older and × as quiet icon
    controls; while there are matches their list follows, each a quiet option (author and time in meta ink, the snippet
    in primary ink, the query's words in the crimson word), the one landed on wearing the chooser's chosen wash. A
-   landing places its row below the sheet (chat_reply.js counts it). */
+   landing places its row below the sheet (chat_reply.js counts it, and while it is open the feed's top clears it). */
 .chat-find {
     position: absolute;
     top: calc(var(--chat-header-bar, 56px) + var(--space-1));
@@ -1613,7 +1613,7 @@ html[data-layout="stack"] .chat-find {
 .chat-find-more:hover { text-decoration: underline; }
 .chat-find-more:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
 /* The query's words in the landed message (the CSS Custom Highlight API: no node is written). */
-::highlight(ouro-chat-find) { background-color: var(--accent-25); color: inherit; }
+::highlight(ouro-chat-find) { background-color: var(--tone-crimson-word); color: var(--bg-primary); }
 
 /* The bars' controls (DESIGN.md design bible): neutral capsules on glass, standing on the rest shadow; Panic is the
    danger tone (--panic-fill: on dark the capsule's own veil, since the red tone there is already a neutral veil and
@@ -1883,7 +1883,8 @@ html[data-layout="stack"] .chat-find {
     overflow-y: auto;
     overflow-x: hidden;
     padding: 20px;
-    padding-top: var(--chat-header-reserve, 56px);
+    /* The room's bar and note, and while its search is open what the sheet covers below them (chat_reply.js). */
+    padding-top: calc(var(--chat-header-reserve, 56px) + var(--chat-find-reserve, 0px));
     padding-bottom: 0;
     display: flex;
     flex-direction: column;
@@ -8444,7 +8445,7 @@ html[data-layout="stack"] .chat-send-inline {
 
 /* Main's transcript clears the taller phone header and the absolute composer. */
 html[data-layout="stack"] #chat-messages {
-    padding-top: var(--chat-header-reserve, 80px);
+    padding-top: calc(var(--chat-header-reserve, 80px) + var(--chat-find-reserve, 0px));
     padding-bottom: 0;
     overflow-x: hidden;
 }
@@ -8535,7 +8536,7 @@ body.keyboard-open .chat-instance-panel .chat-messages {
     position: relative;
     height: auto;
     max-height: none;
-    padding-top: 0;
+    padding-top: var(--chat-find-reserve, 0px);
     padding-bottom: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -9248,7 +9249,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     padding-bottom: 0;
 }
 .project-panel .chat-instance-panel .chat-messages {
-    padding-top: var(--chat-feed-reserve, var(--chat-header-reserve, 56px));
+    padding-top: calc(var(--chat-feed-reserve, var(--chat-header-reserve, 56px)) + var(--chat-find-reserve, 0px));
     /* Reserve the real scrollbar lane from the first layout: WebKit's auto-overflow transition can leave rows
        wider than the content box until a resize, covering the focus corners. Overlay scrollbars take no space. */
     overflow-y: scroll;
@@ -9286,7 +9287,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 }
 body.keyboard-open .project-panel .chat-panel-statusbar { padding-top: 8px; }
 body.keyboard-open .project-panel .chat-instance-panel .chat-messages {
-    padding-top: 0;
+    padding-top: var(--chat-find-reserve, 0px);
 }
 
 /* The Project composer already includes its safe-area inset in the measured

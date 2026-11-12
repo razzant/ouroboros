@@ -434,17 +434,20 @@ class HistorySource:
         (``_RECENT_WINDOW_ROWS`` rows or ``_RECENT_WINDOW_BYTES``), the import frontier or the read ceiling."""
         return self._page(self.upper, want, counts, _READ_CEILING_ROWS, window=True)
 
-    def older(self, before, want, counts, ceiling=None):
+    def older(self, before, want, counts, ceiling=None, *, byte_ceiling=None):
         """Consume one backward page of ``want`` counted rows below ``before``; the read ceiling
-        ends it early. At the import frontier nothing older is readable yet: the page is empty and
-        stays at the frontier (the request's caller answers "still importing")."""
+        ends it early, as ``byte_ceiling`` does once the stored rows read reach that many bytes (a soft
+        bound: the row crossing it is read whole, never split; ``chat_search``'s page). At the import
+        frontier nothing older is readable yet: the page is empty and stays at the frontier (the
+        request's caller answers "still importing")."""
         if want <= 0:
             return [], before, set()
         if 0 < self.floor >= before:
             return [], self.floor, set()
-        return self._page(before, want, counts, _READ_CEILING_ROWS if ceiling is None else ceiling)
+        return self._page(before, want, counts, _READ_CEILING_ROWS if ceiling is None else ceiling,
+                          byte_ceiling=byte_ceiling)
 
-    def _page(self, before, want, counts, ceiling, window=False):
+    def _page(self, before, want, counts, ceiling, window=False, *, byte_ceiling=None):
         top, selected, counted, read, seen = before, [], 0, 0, 0
         while True:
             rows = self._candidates(self.floor, before)
@@ -455,7 +458,7 @@ class HistorySource:
                 read += 1
                 seen += entry["_history_end"] - before  # the stored row's exact length
                 windowed = not window or read >= _RECENT_WINDOW_ROWS or seen >= _RECENT_WINDOW_BYTES
-                if (counted >= want and windowed) or read >= ceiling:
+                if (counted >= want and windowed) or read >= ceiling or (byte_ceiling is not None and seen >= byte_ceiling):
                     return list(reversed(selected)), before, self.gaps(before, top)
             if len(rows) < _PROBE_ROWS:  # the room's rows above the frontier are exhausted
                 return list(reversed(selected)), self.floor, self.gaps(self.floor, top)

@@ -602,23 +602,61 @@
  */
 
 /**
- * One run of a search match's snippet; `match` marks an occurrence of the query.
- * @typedef {Object} ChatSearchSnippetPart
- * @property {string} text
- * @property {boolean} match
+ * An owner attachment as its bubble draws it (history's ChatAttachmentView, no address): its file card or player
+ * shows `name`, an available image only its picture; the composer's file-name tail the bubble hides is built from
+ * the names.
+ * @typedef {Object} ChatSearchAttachment
+ * @property {string} name
+ * @property {'image'|'video'|'audio'|'file'} kind
+ * @property {boolean} available
  */
 
 /**
- * A saved message whose words contain the query: `history_id` and `row_address` are its identity in
- * `GET /api/chat/history` (`around=<row_address>` reads the page around it).
- * @typedef {Object} ChatSearchMatch
+ * A link button of a delivered links row: its label is shown, its address only decides whether it is.
+ * @typedef {Object} ChatSearchLink
+ * @property {string} label
+ * @property {string} url
+ */
+
+/**
+ * A question row's question, as asked.
+ * @typedef {Object} ChatSearchQuestion
+ * @property {string} question
+ */
+
+/**
+ * A saved message as the fields the room's renderer draws its words from (chat_search_words.js `candidateBox`): the
+ * text history gives it (`system_type`, `markdown`, `narration`, `source` and the owner's `attachments` names choose
+ * how), a photo, video or file's `caption` and a file's `filename`, a links row's `title` and `actions`, a question's
+ * `quiz.question`, a Project lifecycle row's answer and ending. Whether its words contain the query is the client's
+ * reading.
+ * `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
+ * @typedef {Object} ChatSearchCandidate
  * @property {string} history_id
  * @property {string} row_address
  * @property {'user'|'assistant'|'system'} role
  * @property {string} ts
- * @property {ChatSearchSnippetPart[]} snippet
+ * @property {string} text
+ * @property {string=} system_type
+ * @property {boolean=} markdown
+ * @property {boolean=} narration
+ * @property {string=} source
  * @property {string=} sender_label
  * @property {string=} task_id
+ * @property {ChatSearchAttachment[]=} attachments
+ * @property {boolean=} text_placeholder
+ * @property {'photo'|'video'|'document'|'links'|'quiz'=} msg_type
+ * @property {string=} caption
+ * @property {string=} filename
+ * @property {string=} title
+ * @property {ChatSearchLink[]=} actions
+ * @property {ChatSearchQuestion=} quiz
+ * @property {string=} completion_answer
+ * @property {string=} project_id
+ * @property {string=} project_name
+ * @property {string=} task_name
+ * @property {string=} completion_reason
+ * @property {Object=} completion_notice
  */
 
 /**
@@ -633,12 +671,12 @@
  */
 
 /**
- * `GET /api/chat/search`: matches newest first from one bounded read; a page may hold none and still
- * continue (`next_cursor`). The whole room was searched only when a chain reached `beginning` with no
- * `gaps`. An error answer keeps this shape with no matches and the cursor that was sent.
+ * `GET /api/chat/search`: one bounded read of the room's saved messages as candidates, newest first; a page may hold
+ * none and still continue (`next_cursor`). The whole room was searched only when a chain reached `beginning` with no
+ * `gaps`. An error answer keeps this shape with no candidates and the cursor that was sent.
  * @typedef {Object} ChatSearchResponse
  * @property {string} query
- * @property {ChatSearchMatch[]} matches
+ * @property {ChatSearchCandidate[]} candidates
  * @property {boolean} has_more
  * @property {?string} next_cursor
  * @property {ChatSearchSpan} searched

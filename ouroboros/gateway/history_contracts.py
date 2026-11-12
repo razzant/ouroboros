@@ -2,7 +2,7 @@
 
 ``GET /api/chat/history`` projects the dialogue store's stored chat and progress rows
 (``state/dialog.sqlite``) plus a few synthesized ones (``gateway/history.py``); ``GET /api/chat/search``
-finds a room's saved messages by their words (``gateway/chat_search.py``). The JSDoc twin is
+reads a room's saved messages for a word search (``gateway/chat_search.py``). The JSDoc twin is
 ``web/modules/client_contract_types.js``.
 """
 
@@ -282,26 +282,63 @@ class ChatHistoryResponse(TypedDict, total=False):
     reason_code: str
 
 
-class ChatSearchSnippetPart(TypedDict):
-    """One run of a match's snippet, the message's words with white space collapsed; ``match`` marks
-    an occurrence of the query. An ellipsis run says the words were cut there."""
+class ChatSearchAttachment(TypedDict):
+    """An owner attachment as its bubble draws it (history's ``ChatAttachmentView``, no address): its file card or
+    player shows ``name``, an available image only its picture; the composer's file-name tail the bubble hides is
+    built from the names."""
 
-    text: str
-    match: bool
+    name: str
+    kind: Literal["image", "video", "audio", "file"]
+    available: bool
 
 
-class ChatSearchMatch(TypedDict, total=False):
-    """One saved message of the room whose words contain the query. ``history_id`` and ``row_address``
-    are that row's identity in ``GET /api/chat/history``, whose ``around=<row_address>`` reads the page
-    around it; ``role`` is its author as history names it."""
+class ChatSearchLink(TypedDict):
+    """A link button of a delivered links row: its label is shown, its address only decides whether it is."""
+
+    label: str
+    url: str
+
+
+class ChatSearchQuestion(TypedDict):
+    """A question row's question, as asked."""
+
+    question: str
+
+
+class ChatSearchCandidate(TypedDict, total=False):
+    """One saved message of the room as the fields the room's renderer draws its words from: the text history
+    gives it (``system_type``, ``markdown``, ``narration``, ``source`` and the owner's ``attachments`` names choose
+    how), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
+    question's ``quiz``, a Project lifecycle row's answer and ending (``completion_answer``, ``project_id``,
+    ``project_name``, ``task_name``, ``completion_notice``). Whether its words contain the query is the client's
+    reading of those words. ``history_id`` and ``row_address`` are the row's identity in ``GET /api/chat/history``, whose
+    ``around=<row_address>`` reads the page around it; ``role`` is its author as history names it."""
 
     history_id: Required[str]
     row_address: Required[str]
     role: Required[Literal["user", "assistant", "system"]]
     ts: Required[str]
-    snippet: Required[List[ChatSearchSnippetPart]]
+    text: Required[str]
+    system_type: str
+    markdown: bool
+    narration: bool
+    source: str
     sender_label: str
     task_id: str
+    attachments: List[ChatSearchAttachment]
+    text_placeholder: bool  # the host's words for an owner who sent only attachments: not shown
+    msg_type: Literal["photo", "video", "document", "links", "quiz"]
+    caption: str
+    filename: str
+    title: str
+    actions: List[ChatSearchLink]
+    quiz: ChatSearchQuestion
+    completion_answer: str
+    project_id: str
+    project_name: str
+    task_name: str
+    completion_reason: str
+    completion_notice: Dict[str, Any]
 
 
 class ChatSearchSpan(TypedDict):
@@ -320,16 +357,16 @@ class ChatSearchSpan(TypedDict):
 
 
 class ChatSearchResponse(TypedDict, total=False):
-    """``GET /api/chat/search?chat_id=&q=``: the room's saved messages containing the query, newest
-    first, from one bounded read. ``query`` is the query as searched (white space collapsed).
-    ``has_more`` and ``next_cursor`` continue older; a page may hold no match and still continue.
-    The search covered the whole room only when a chain of pages reached ``beginning`` with no
-    ``gaps``. An error answer (400 search_query_invalid or search_cursor_invalid, 409
-    search_view_changed, 503 history_source_unavailable or migrating) keeps this shape with no
-    matches and the cursor that was sent as ``next_cursor``."""
+    """``GET /api/chat/search?chat_id=&q=``: one bounded read of the room's saved messages, newest first, as
+    candidates whose shown words the client reads for the query. ``query`` is the query as searched (NFC, white
+    space collapsed). ``has_more`` and ``next_cursor`` continue older; a page may hold no candidate and still
+    continue. The search covered the whole room only when a chain of pages reached ``beginning`` with no
+    ``gaps``. An error answer (400 search_query_invalid or search_cursor_invalid, 409 search_view_changed, 503
+    history_source_unavailable or migrating) keeps this shape with no candidates and the cursor that was sent as
+    ``next_cursor``."""
 
     query: Required[str]
-    matches: Required[List[ChatSearchMatch]]
+    candidates: Required[List[ChatSearchCandidate]]
     has_more: Required[bool]
     next_cursor: Required[Optional[str]]
     searched: Required[ChatSearchSpan]
@@ -341,5 +378,6 @@ __all__ = [
     "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
     "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
-    "ChatSearchSnippetPart", "ChatSearchMatch", "ChatSearchSpan", "ChatSearchResponse",
+    "ChatSearchAttachment", "ChatSearchLink", "ChatSearchQuestion", "ChatSearchCandidate", "ChatSearchSpan",
+    "ChatSearchResponse",
 ]

@@ -382,8 +382,8 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200,400,409,503:ChatHistoryResponse", query="chat_id cursor around n_human n_progress limit",
         note="an error page echoes the cursor sent, so the same request can be repeated"),
     "GET /api/chat/search": Shape(
-        "200,400,409,503:ChatSearchResponse", query="chat_id q cursor limit",
-        note="read-only; one bounded read of the room's saved messages, newest first; the cursor continues older"),
+        "200,400,409,503:ChatSearchResponse", query="chat_id q cursor",
+        note="read-only; one bounded read of the room's saved messages as candidates, newest first; the cursor continues older"),
     "POST /api/chat/upload": Shape("200:UploadResponse 400:ErrorResponse", "multipart", note="form field file"),
     "DELETE /api/chat/upload": Shape("200:ChatUploadDeleteResponse 400,404,409:ErrorResponse", "ChatUploadDeleteRequest",
                                      note="pending uploads only; a repeat answers 404"),

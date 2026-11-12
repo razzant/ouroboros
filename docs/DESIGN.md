@@ -2066,21 +2066,23 @@ Room closure, Escape, Back and Panic close the sheet (`message_share.js`).
 
 ### Search in a chat
 
-Ctrl+F or Cmd+F searches the saved messages of the room in front: Main, or the Project over it; elsewhere, and in a
-dialog or menu, the key stays the page's. A finger opens it from "+" → Search this chat. One sheet floats under the
-room's bar at its trailing edge (the bar's width on a phone) in the menus' material: the field with its count, ↑ newer,
-↓ older and ×, then the matches newest first, each its author, time and a snippet with the words in the crimson word.
-Its corner is the composer field's: the sheet radius, half its height while it holds the field alone, so an empty or
-emptied search is one capsule with the field concentric inside, and matches or a note (searching, a failure, how far it
-read) make it a card with the same corner, never an oval; nothing under the field takes room until it has words.
-Words match literally in any case, white space counting as one space, in the messages the room shows; never
-attachments, files, narration or other rooms (Main's copy of a Project's question is the Project's, found there).
-Enter or ↓ lands on the next match, older, Shift+Enter or ↑ the previous, a press on its row that match: the exact
-row through a quote's landing (its page read, the row below the sheet, the words marked), the keyboard staying in the
-field; on a phone the list folds over the landed row until the field is touched. The host reads the room in bounded pages: a search with no match yet reads on to its first match or the
-room's beginning; `N found` only for the whole room, `N+` while older messages remain (`Search older messages`); history
-not yet readable or with unreadable lines is said, never "no match". Esc or × closes it and returns the focus, the
-draft untouched; a room leaving the screen closes its search.
+Cmd+F on a Mac (Ctrl+F stays the field's), Ctrl+F elsewhere, searches the saved messages of the room in front: Main, or
+the Project over it; elsewhere, and in a dialog or menu, the key stays the page's. A finger opens it from "+" → Search
+this chat. One sheet floats under the room's bar at its trailing edge (the bar's width on a phone) in the menus'
+material: the field with its count, ↑ newer, ↓ older and ×, then the matches newest first, each its author, time and a
+snippet with the words in the crimson word. Its corner is the composer field's sheet radius: half its height around the
+field alone, a capsule; matches or a note (searching, a failure, how far it read) make a card with the same corner,
+never an oval. Words match as shown: through bold and links, never a link's hidden address or a diagram's or chart's
+contents; code literal; a formula by its characters; a file by its name and caption, a photo or video by its caption;
+System words in the chosen language; any case, accents kept, white space as one space; never attachments, file contents,
+narration or other rooms (Main's copy of a Project's question is the Project's). Enter or ↓ lands on the next match,
+older, Shift+Enter or ↑ the previous, a press its match: the exact row through a quote's landing, its first matched
+words between the sheet and the composer, each room marking only its own, the keyboard staying in the field. Hidden
+words are explained; a folded answer points to its Project. A phone folds the list over the landed row until the field
+is touched. The host reads the room in bounded pages: a search with no match yet reads on to its first match or the
+room's beginning; `N found` only for the whole room, `N+` while older messages remain (`Search older messages`);
+unreadable or still importing history is said, never "no match". Esc or × closes it and returns the focus, the draft
+untouched; a room leaving the screen closes its search.
 
 ### Skills in the page
 

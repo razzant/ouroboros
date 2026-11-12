@@ -149,17 +149,19 @@ class ChronologicalSource(HistorySource):
     def recent(self, want, counts):
         return self._page(self.top, None, want, counts, _READ_CEILING_ROWS, window=True)
 
-    def older(self, before, want, counts, ceiling=None):
-        """Rows below the cursor's cut (``None``: the frozen present, where a deferral left the newest row)."""
+    def older(self, before, want, counts, ceiling=None, *, byte_ceiling=None):
+        """Rows below the cursor's cut (``None``: the frozen present, where a deferral left the newest row);
+        ``byte_ceiling`` as ``HistorySource.older``."""
         if not 0 <= before <= self.top:
             raise HistoryCursorError("history_cursor_invalid", 400)
         below = self.keys.get("before")
         if want <= 0 or not before:
             self.top_key = self.lower_key = below
             return [], before, set()
-        return self._page(before, below, want, counts, _READ_CEILING_ROWS if ceiling is None else ceiling)
+        return self._page(before, below, want, counts, _READ_CEILING_ROWS if ceiling is None else ceiling,
+                          byte_ceiling=byte_ceiling)
 
-    def _page(self, top, below, want, counts, ceiling, window=False):
+    def _page(self, top, below, want, counts, ceiling, window=False, *, byte_ceiling=None):
         """Rows below the public key ``below``, newest first, each a step below the one after it from ``top``."""
         selected, counted, read, seen, coordinate = [], 0, 0, 0, top
         self.top_key, self.lower_key = below, below  # an empty page replays nothing
@@ -174,7 +176,8 @@ class ChronologicalSource(HistorySource):
                 read += 1
                 seen += row.length
                 windowed = not window or read >= _RECENT_WINDOW_ROWS or seen >= _RECENT_WINDOW_BYTES
-                if (counted >= want and windowed) or read >= ceiling:
+                if (counted >= want and windowed) or read >= ceiling or (
+                        byte_ceiling is not None and seen >= byte_ceiling):
                     self.lower_key = entry["_chrono_key"]
                     if len(batch) < _PROBE_ROWS and entry is labelled[-1]:  # nothing older: the beginning
                         return list(reversed(selected)), 0, self.gaps(0, top)

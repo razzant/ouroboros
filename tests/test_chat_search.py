@@ -1,20 +1,24 @@
-"""``GET /api/chat/search``: a room's saved messages found by their words, over the production store and room rule.
+"""``GET /api/chat/search``: a room's saved messages read for a word search, over the production store and room rule.
 
-The search reads what the room's history shows (``gateway.chat_search``): literal case-folded words of saved messages,
-newest first, in bounded reads whose cursor binds the room, its view, the query and the frozen end. A page without a
-match keeps its continuation; the import frontier and unreadable lines are said, never "no match"; a room holding
-imported earlier messages is searched in its reading order. Every answer is checked against ``ChatSearchResponse``.
+The search reads what the room's history shows (``gateway.chat_search``) and answers its saved messages as candidates,
+the fields their shown words are drawn from, newest first, in bounded reads (rows and a soft byte target, a row never
+split) whose cursor binds the room, its view, the query and the frozen end. Whether a message's shown words hold the
+query is the client's (web/tests/chat_search.test.js; the real renderer in tests/test_history_reply_browser.py): the
+host leaves out only an owner's literal ASCII words without an ASCII query. A page without a candidate keeps its
+continuation; the import frontier and unreadable lines are said, never "no match"; a room holding imported earlier
+messages is searched in its reading order. Every answer is checked against ``ChatSearchResponse``.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from types import SimpleNamespace
 
 
 from ouroboros import dialogue_store as ds
 from ouroboros.gateway import chat_search
-from ouroboros.gateway.chat_search import make_chat_search_endpoint, snippet
+from ouroboros.gateway.chat_search import make_chat_search_endpoint
 from ouroboros.gateway.history_contracts import ChatSearchResponse
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.gateway.schema import validate_ingress
@@ -52,12 +56,14 @@ def _say(root, index, text, *, chat_id=1, direction="in", stream="chat", **extra
     return row
 
 
-def _words(match):
-    return "".join(part["text"] for part in match["snippet"])
+def _words(candidate):
+    """The words a candidate's row is drawn from: a question's question, a caption, a Project answer, else its text."""
+    return (candidate.get("quiz", {}).get("question") or candidate.get("caption") or candidate.get("completion_answer")
+            or candidate["text"])
 
 
 def _texts(page):
-    return [_words(match) for match in page["matches"]]
+    return [_words(candidate) for candidate in page["candidates"]]
 
 
 def _all(root, chat_id=1, **params):
@@ -72,24 +78,41 @@ def _all(root, chat_id=1, **params):
             return pages
 
 
-def test_words_are_literal_case_folded_and_their_white_space_is_one_space(tmp_path):
+def test_only_an_owners_literal_ascii_words_without_an_ascii_query_are_left_out(tmp_path):
+    """The host never decides whether shown words hold the query: Markdown, a System sentence (shown in the install's
+    language), non-ASCII words and every row for a non-ASCII query are candidates. An owner's ASCII words are drawn
+    literally, so one without the ASCII query (white space as one space, letters lower case) cannot show it."""
     _say(tmp_path, 1, "Die Straße endet hier")
-    _say(tmp_path, 2, "STRASSE gesperrt", direction="out")
+    _say(tmp_path, 2, "STRASSE gesperrt")
     _say(tmp_path, 3, "pattern a.b*c literally")
-    _say(tmp_path, 4, "regex would take aXbbc")
-    _say(tmp_path, 5, "line one\n\n   line two")
-    _say(tmp_path, 6, "Новогодняя ЁЛКА")
-    _say(tmp_path, 7, "ёлка во дворе")
-    assert _texts(_found(tmp_path, q="strasse")) == ["STRASSE gesperrt", "Die Straße endet hier"]
-    assert _texts(_found(tmp_path, q="A.B*C")) == ["pattern a.b*c literally"], "never a pattern"
-    assert _texts(_found(tmp_path, q="  one   line\ttwo ")) == ["line one line two"]
-    assert _found(tmp_path, q="two line")["matches"] == []
-    page = _found(tmp_path, q="ёлка")
-    assert _texts(page) == ["ёлка во дворе", "Новогодняя ЁЛКА"]
-    assert [[part for part in match["snippet"] if part["match"]] for match in page["matches"]] == [
-        [{"text": "ёлка", "match": True}], [{"text": "ЁЛКА", "match": True}]]
-    assert page["query"] == "ёлка" and page["searched"] == {
+    _say(tmp_path, 4, "line one\n\n   line TWO")
+    _say(tmp_path, 5, "**bold** words from Ouroboros", direction="out")
+    _say(tmp_path, 6, "A host notice", direction="system", type="restart_notice")
+    _say(tmp_path, 7, "pattern a.b*c, said with ** marks", format="markdown")
+    assert _texts(_found(tmp_path, q="strasse")) == [
+        "A host notice", "**bold** words from Ouroboros", "STRASSE gesperrt", "Die Straße endet hier"]
+    assert _texts(_found(tmp_path, q="A.B*C")) == ["pattern a.b*c, said with ** marks", "A host notice",
+                                                    "**bold** words from Ouroboros", "pattern a.b*c literally",
+                                                    "Die Straße endet hier"], "non-ASCII words are always the client's"
+    assert "line one\n\n   line TWO" in _texts(_found(tmp_path, q="  one   line\ttwo "))
+    assert "line one\n\n   line TWO" not in _texts(_found(tmp_path, q="two line"))
+    page = _found(tmp_path, q="Straße")
+    assert len(page["candidates"]) == 7, "a non-ASCII query is the client's to read in every row"
+    assert page["query"] == "Straße" and page["searched"] == {
         "rows": 7, "reached_ts": _ts(1), "beginning": True, "importing": False, "gaps": []}
+    assert _found(tmp_path, q="Cafe\u0301   noir")["query"] == "Café noir", "the query as searched is NFC, one space"
+
+
+def test_a_candidate_carries_the_fields_its_words_are_drawn_from_never_its_media_or_facts(tmp_path):
+    _say(tmp_path, 1, "See **this**", direction="out", format="markdown", sender_label="Ouroboros", task_id="t-1",
+         client_message_id="secret-id", cost={"usd": 1})
+    _say(tmp_path, 2, "🧠 Memory: kept", direction="system", type="legacy_memory_notice", narration=True)
+    candidates = _found(tmp_path, q="see")["candidates"]
+    assert candidates[1] == {"history_id": candidates[1]["history_id"], "row_address": candidates[1]["row_address"],
+                             "role": "assistant", "ts": _ts(1), "text": "See **this**", "markdown": True,
+                             "sender_label": "Ouroboros", "task_id": "t-1"}
+    assert candidates[0]["role"] == "system" and candidates[0]["system_type"] == "legacy_memory_notice"
+    assert candidates[0]["narration"] is True
 
 
 def test_a_match_is_the_rows_identity_in_history_and_lands_there(tmp_path):
@@ -98,7 +121,7 @@ def test_a_match_is_the_rows_identity_in_history_and_lands_there(tmp_path):
     target = _say(tmp_path, 300, "the far older needle", direction="out")
     for index in range(301, 700):
         _say(tmp_path, index, f"n{index}")
-    match, = _found(tmp_path, q="NEEDLE")["matches"]
+    match, = _found(tmp_path, q="NEEDLE")["candidates"]
     assert match["role"] == "assistant" and match["ts"] == target["ts"]
     status, around = _history(tmp_path, around=match["row_address"], n_human=8, n_progress=4)
     assert status == 200 and around["anchor"]["state"] == "found", around
@@ -114,7 +137,7 @@ def test_only_the_saved_messages_the_room_shows_are_searched(tmp_path):
     _say(tmp_path, 2, "needle from Ouroboros", direction="out")
     _say(tmp_path, 3, "needle as a host notice", direction="system", type="restart_notice")
     _say(tmp_path, 4, "plain words", note="needle only in metadata", attachments=[{"name": "needle.txt"}])
-    _say(tmp_path, 5, "needle", text_placeholder=True)
+    _say(tmp_path, 5, "needle", text_placeholder=True)  # the host's words for an owner who sent none, and no file
     _say(tmp_path, 6, "needle in a routing grounding", direction="out", type="routing_options")
     _say(tmp_path, 7, "needle answer evidence", direction="out", type="quiz_answer", quiz={"quiz_id": "q"})
     _say(tmp_path, 8, "needle terminal summary", direction="out", type="task_summary", task_id="old")
@@ -125,9 +148,18 @@ def test_only_the_saved_messages_the_room_shows_are_searched(tmp_path):
     _say(tmp_path, 13, "needle narration", stream="progress", task_id="t", content="needle narration")
     _say(tmp_path, 14, "needle in the Project", chat_id=project["chat_id"])
     _say(tmp_path, 15, "needle written under Main by the bound work", direction="out", task_id="bound-work")
+    _say(tmp_path, 16, "(file attached)", text_placeholder=True, attachments=[{"name": "needle-map.pdf"}])
     main = _found(tmp_path, q="needle")
-    assert _texts(main) == ["needle as a host notice", "needle from Ouroboros", "needle from the owner"]
-    assert [match["role"] for match in main["matches"]] == ["system", "assistant", "user"]
+    # An owner row's file cards show their names, so a row with attachments is a candidate whatever its words (the
+    # client reads the cards' names, never the metadata note); a placeholder's words are marked as not shown.
+    assert _texts(main) == ["(file attached)", "plain words", "needle as a host notice", "needle from Ouroboros",
+                            "needle from the owner"]
+    assert [match["role"] for match in main["candidates"]] == ["user", "user", "system", "assistant", "user"]
+    placeholder, plain = main["candidates"][0], main["candidates"][1]
+    assert placeholder["text_placeholder"] is True and placeholder["attachments"] == [
+        {"name": "needle-map.pdf", "kind": "file", "available": False}]
+    assert plain["attachments"] == [{"name": "needle.txt", "kind": "file", "available": False}]
+    assert "text_placeholder" not in plain
     room = _found(tmp_path, chat_id=project["chat_id"], q="needle")
     assert _texts(room) == ["needle written under Main by the bound work", "needle in the Project"]
 
@@ -172,7 +204,8 @@ def test_a_search_reads_its_room_and_the_room_rules_lineage_never_a_task_result_
     monkeypatch.setattr(project_dialogue, "latest_chat_annotations", lambda *args, **kwargs: (
         reads.append("annotations"), annotations(*args, **kwargs))[1])
     assert _texts(_found(tmp_path, q="kingfisher")) == ["kingfisher from a running root", "kingfisher from the owner"]
-    pages = _all(tmp_path, q="kingfisher", limit=1)  # each continued page as well, never once per search
+    monkeypatch.setattr(chat_search, "_SCAN_ROWS", 1)
+    pages = _all(tmp_path, q="kingfisher")  # each continued page as well, never once per search
     assert len(pages) >= 2 and [text for page in pages for text in _texts(page)] == [
         "kingfisher from a running root", "kingfisher from the owner"]
     assert reads == []
@@ -194,7 +227,7 @@ def test_main_finds_no_copy_of_a_projects_question_which_its_project_finds(tmp_p
         question = f"Which heron path, {quiz_id}?"
         record_asked(tmp_path, "asker", quiz_id=quiz_id, question=question, options=["a", "b"], wait_for_answer=True)
         _say(tmp_path, index, question, chat_id=project["chat_id"], direction="out", type="quiz", task_id="asker",
-             quiz={"quiz_id": quiz_id, "options": ["a", "b"], "wait_for_answer": True})
+             quiz={"quiz_id": quiz_id, "question": question, "options": ["a", "b"], "wait_for_answer": True})
     assert record_answered(tmp_path, "asker", quiz_id="answered", option_index=0, request_id="answer")["ok"]
     assert record_closed(tmp_path, "asker", quiz_id="closed", reason="not needed now", actor="owner",
                          request_id="close")["ok"]
@@ -244,16 +277,53 @@ def test_pages_continue_below_their_cut_and_a_page_without_a_match_keeps_its_con
     for index in range(300):
         _say(tmp_path, index, "needle early" if index == 10 else "needle late" if index == 250 else f"m{index}")
     pages = _all(tmp_path, q="needle")
-    assert [len(page["matches"]) for page in pages] == [1, 0, 0, 0, 0, 1]
-    assert [_texts(page) for page in pages if page["matches"]] == [["needle late"], ["needle early"]]
+    assert [len(page["candidates"]) for page in pages] == [1, 0, 0, 0, 0, 1]
+    assert [_texts(page) for page in pages if page["candidates"]] == [["needle late"], ["needle early"]]
     assert [page["searched"]["rows"] for page in pages] == [50] * 6, "each read is bounded; together they read all"
     reached = [page["searched"]["reached_ts"] for page in pages]
     assert reached == sorted(reached, reverse=True) and reached[-1] == _ts(0)
     assert [page["searched"]["beginning"] for page in pages] == [False] * 5 + [True]
-    # A page's limit of matches ends it early as well; the next page goes on right below its last match.
-    first, second = _found(tmp_path, q="m", limit=3), None
-    second = _found(tmp_path, q="m", limit=3, cursor=first["next_cursor"])
-    assert _texts(first) + _texts(second) == [f"m{index}" for index in range(299, 293, -1)]
+
+
+def _sized(root, count, *, chat_id=1):
+    """``count`` messages of Ouroboros (every one a candidate), two in every seven long ones; their texts, oldest first."""
+    texts = [("long " * 300 if index % 7 in (3, 4) else "short") + f" #{index}" for index in range(count)]
+    for index, text in enumerate(texts):
+        _say(root, index, text, chat_id=chat_id, direction="out")
+    return texts
+
+
+def test_a_page_ends_at_its_byte_target_on_a_whole_row_and_its_continuation_skips_none(tmp_path, monkeypatch):
+    """The stored bytes a page reads are bounded too: the row that crosses the soft target is read whole (one longer
+    than the target alone is a page), and the next page starts right below it, so the chain reads every row once."""
+    texts = _sized(tmp_path, 40)
+    monkeypatch.setattr(chat_search, "_SCAN_BYTES", 1200)
+    pages = _all(tmp_path, q="#")
+    assert [text for page in pages for text in _texts(page)] == texts[::-1], "every row once, newest first, none split"
+    assert len(pages) > 5 and [page["searched"]["beginning"] for page in pages][-1]
+    for page in pages:
+        texts_read = _texts(page)
+        assert all(text.startswith("short") for text in texts_read[:-1]), \
+            "a long row (longer than the target alone) is read whole and ends its page"
+    assert any(len(page["candidates"]) == 1 and _texts(page)[0].startswith("long") for page in pages), \
+        "one longer than the target alone is a page of its own"
+    monkeypatch.setattr(chat_search, "_SCAN_BYTES", 10 ** 9)
+    assert _texts(_found(tmp_path, q="#")) == texts[::-1], "a target above the room is one page"
+
+
+def test_a_room_in_reading_order_continues_on_its_byte_target_without_skipping(tmp_path, monkeypatch):
+    room = 7002
+    texts = _sized(tmp_path, 30, chat_id=room)
+    for order in range(12):  # imported later, read earlier than every live row
+        text = ("long " * 300 if order % 5 == 1 else "short") + f" imported #{order}"
+        _say(tmp_path, 100 + order, text, chat_id=room, direction="out", type="place_arrival", place_id="pl-1",
+             historical_import={"id": f"imp-{order}"},
+             source_order={"time": f"2026-10-12T00:00:{order:02d}Z", "order": order})
+        texts.insert(order, text)
+    monkeypatch.setattr(chat_search, "_SCAN_BYTES", 1500)
+    pages = _all(tmp_path, chat_id=room, q="#")
+    assert [text for page in pages for text in _texts(page)] == texts[::-1]
+    assert len(pages) > 4 and pages[-1]["searched"]["beginning"]
 
 
 def test_a_request_reads_a_bounded_slice_of_the_room_never_its_history(tmp_path, monkeypatch):
@@ -268,27 +338,29 @@ def test_a_request_reads_a_bounded_slice_of_the_room_never_its_history(tmp_path,
         return rows
     monkeypatch.setattr(ds, "probe_rows", counted)
     page = _found(tmp_path, q="absent words")
-    assert page["matches"] == [] and page["has_more"] and page["searched"]["rows"] == 50
+    assert page["candidates"] == [] and page["has_more"] and page["searched"]["rows"] == 50
     assert sum(decoded) <= 200, decoded  # one probe page of the room's newest rows
 
 
-def test_the_cursor_binds_its_room_query_view_and_frozen_end(tmp_path):
+def test_the_cursor_binds_its_room_query_view_and_frozen_end(tmp_path, monkeypatch):
     for index in range(30):
         _say(tmp_path, index, f"needle {index}")
-    first = _found(tmp_path, q="needle", limit=5)
+    monkeypatch.setattr(chat_search, "_SCAN_ROWS", 5)
+    first = _found(tmp_path, q="needle")
     _say(tmp_path, 30, "needle that arrived after the search began")
-    second = _found(tmp_path, q="needle", limit=5, cursor=first["next_cursor"])
+    second = _found(tmp_path, q="needle", cursor=first["next_cursor"])
     assert _texts(second) == [f"needle {index}" for index in range(24, 19, -1)], "the set is frozen at the first read"
-    assert _texts(_found(tmp_path, q="needle", limit=1)) == ["needle that arrived after the search began"]
+    assert _texts(_found(tmp_path, q="needle"))[0] == "needle that arrived after the search began"
     for params, status, reason in (
             ({"q": "other words"}, 400, "search_cursor_invalid"),
+            ({"q": "NEEDLE"}, 400, "search_cursor_invalid"),
             ({"q": "needle", "chat_id": 7}, 409, "search_view_changed"),
             ({"q": "needle", "cursor": first["next_cursor"][:-4] + "AAAA"}, 400, "search_cursor_invalid"),
             ({"q": "   "}, 400, "search_query_invalid"),
             ({"q": "x" * 201}, 400, "search_query_invalid")):
         sent = {"cursor": first["next_cursor"], **params}
         code, body = _search(tmp_path, **sent)
-        assert (code, body["reason_code"], body["matches"], body["next_cursor"]) == (status, reason, [], sent["cursor"])
+        assert (code, body["reason_code"], body["candidates"], body["next_cursor"]) == (status, reason, [], sent["cursor"])
     project = create_project(tmp_path, "later-room", name="Later")
     bind_task_to_project(tmp_path, "later-work", project["id"], origin={"absent": "system"})
     code, body = _search(tmp_path, q="needle", cursor=first["next_cursor"])
@@ -322,7 +394,7 @@ def test_lines_the_import_could_not_store_are_named_gaps(tmp_path):
     assert page["searched"]["gaps"] == ["malformed_jsonl"] and page["searched"]["beginning"]
 
 
-def test_a_room_of_imported_earlier_messages_is_searched_in_its_reading_order(tmp_path):
+def test_a_room_of_imported_earlier_messages_is_searched_in_its_reading_order(tmp_path, monkeypatch):
     room = 7001
     _say(tmp_path, 100, "alpha said live", chat_id=room, sender_label="Ann")
     # Imported later, read earlier: their provider times precede the live row they were stored after.
@@ -330,47 +402,39 @@ def test_a_room_of_imported_earlier_messages_is_searched_in_its_reading_order(tm
         _say(tmp_path, 200 + order, f"alpha imported {order}", chat_id=room, type="place_arrival",
              place_id="pl-1", historical_import={"id": f"imp-{order}"}, sender_label="Bo",
              source_order={"time": _ts(minute), "order": order})
-    pages = _all(tmp_path, chat_id=room, q="alpha", limit=1)
+    monkeypatch.setattr(chat_search, "_SCAN_ROWS", 1)
+    pages = _all(tmp_path, chat_id=room, q="alpha")
     assert [_texts(page) for page in pages] == [["alpha said live"], ["alpha imported 1"], ["alpha imported 0"]]
-    assert pages[0]["matches"][0]["sender_label"] == "Ann" and pages[-1]["searched"]["beginning"]
+    assert pages[0]["candidates"][0]["sender_label"] == "Ann" and pages[-1]["searched"]["beginning"]
     assert [page["searched"]["reached_ts"] for page in pages] == [_ts(100), _ts(20), _ts(10)]
+    # Its cut is a reading key as history's own cursors hold one (``history_paging._row_key``); any other is refused.
+    cursor = pages[0]["next_cursor"]
+    state = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+    for cut in ([state["cut"][0], state["cut"][1], -1], ["x" * 65, None, 0], [state["cut"][0], True, 0]):
+        forged = chat_search.encode_cursor({**state, "cut": cut})
+        code, body = _search(tmp_path, chat_id=room, q="alpha", cursor=forged)
+        assert (code, body["reason_code"]) == (400, "search_cursor_invalid"), cut
 
 
-def test_snippets_window_on_words_and_map_folded_matches_back_to_their_text():
-    long = "word " * 40 + "the Kingfisher flashed " + "tail " * 60
-    parts = snippet(long, "kingfisher")
-    assert parts[0] == {"text": "…", "match": False} and parts[-1] == {"text": "…", "match": False}
-    assert [part["text"] for part in parts if part["match"]] == ["Kingfisher"]
-    words = "".join(part["text"] for part in parts[1:-1])
-    assert words.startswith("word ") and len(words) <= 161 and not words.endswith(" ")
-    assert [part for part in snippet("Die Straße endet", "strasse") if part["match"]] == [{"text": "Straße", "match": True}]
-    assert snippet("two hits: hit and HIT", "hit") == [
-        {"text": "two ", "match": False}, {"text": "hit", "match": True}, {"text": "s: ", "match": False},
-        {"text": "hit", "match": True}, {"text": " and ", "match": False}, {"text": "HIT", "match": True}]
-
-
-def test_visible_project_answers_use_their_presented_text_and_author(tmp_path):
+def test_project_lifecycle_rows_carry_their_answer_and_ending_for_the_client_to_draw(tmp_path):
+    """A lifecycle row is drawn as its authored answer, else its System text (project_answer.js): the candidate carries
+    both, the text read as history reads a lifecycle row, and the typed ending its System row is painted from."""
     room = create_project(tmp_path, "mirror-room", name="Mirror room")
     for index, kind in enumerate(("project_started", "project_handoff", "project_completion_summary")):
-        _say(tmp_path, index, "hidden lifecycle boilerplate", direction="system", type=kind,
-             project_id=room["id"], completion_answer=f"Kingfisher answer {index}")
-    matches = _found(tmp_path, q="kingfisher")["matches"]
-    assert len(matches) == 3
-    assert all(match["role"] == "assistant" for match in matches)
-    assert _texts(_found(tmp_path, q="kingfisher")) == [f"Kingfisher answer {i}" for i in (2, 1, 0)]
-    assert not _found(tmp_path, q="hidden lifecycle boilerplate")["matches"], "hidden host text is not the message"
+        _say(tmp_path, index, "**hidden** lifecycle boilerplate", direction="system", type=kind,
+             project_id=room["id"], completion_answer=f"Kingfisher **answer** {index}")
+    notice = {"phase": "failed", "cause": "The heron work stopped.", "undescribed": []}
     _say(tmp_path, 10, "visible fallback notice", direction="system", type="project_completion_summary",
-         project_id=room["id"], completion_answer="")
-    fallback, = _found(tmp_path, q="visible fallback")["matches"]
-    assert fallback["role"] == "system"
+         project_id=room["id"], project_name="Mirror room", task_name="Heron count", completion_answer="",
+         completion_notice=notice)
     _say(tmp_path, 11, "ordinary visible words", direction="out", type="message", completion_answer="hidden payload")
-    assert not _found(tmp_path, q="hidden payload")["matches"], "unrelated fields are not rendered answers"
-
-
-def test_casefold_expansion_never_duplicates_original_snippet_characters():
-    for words, query in (("Die Straße endet hier", "s"), ("ßß", "s"), ("İstanbul", "i")):
-        parts = snippet(words, query)
-        assert "".join(part["text"] for part in parts) == words
+    ordinary, fallback, *answers = _found(tmp_path, q="kingfisher")["candidates"]
+    assert [candidate["completion_answer"] for candidate in answers] == [f"Kingfisher **answer** {i}" for i in (2, 1, 0)]
+    assert {candidate["text"] for candidate in answers} == {"hidden lifecycle boilerplate"}, "history's plain reading"
+    assert all(candidate["role"] == "system" and candidate["project_id"] == room["id"] for candidate in answers)
+    assert (fallback["completion_notice"], fallback["task_name"], fallback["project_name"]) == (
+        notice, "Heron count", "Mirror room")
+    assert "completion_answer" not in ordinary, "a field another row happens to carry is not a lifecycle answer"
 
 
 def test_main_work_portals_are_not_messages_but_legacy_notices_stay_searchable(tmp_path):
@@ -382,32 +446,50 @@ def test_main_work_portals_are_not_messages_but_legacy_notices_stay_searchable(t
              project_id=room["id"])
     _say(tmp_path, 10, "hidden lifecycle text", direction="system", type="project_completion_summary",
          task_id="finished-work", project_id=room["id"], completion_answer="visible falcon answer")
-    assert not _found(tmp_path, q="portal-only")['matches'], "Main renders these rows as work portals, not bubbles"
     assert _texts(_found(tmp_path, q="falcon")) == [
-        "visible falcon answer", "standalone legacy falcon", "standalone legacy falcon"]
+        "visible falcon answer", "standalone legacy falcon", "standalone legacy falcon"], \
+        "Main renders a started or handed-over work's rows as its portal, not a message"
 
 
-def test_search_uses_web_caption_words_without_hiding_authored_or_other_transport_text(tmp_path):
-    tail = "[Attached file: bird.txt]"
-    attachment = [{"name": "bird.txt", "unavailable": "missing"}]
-    _say(tmp_path, 1, "Here is the document.\n\n" + tail, source="web", attachments=attachment)
-    _say(tmp_path, 2, tail, source="telegram", attachments=attachment)
-    _say(tmp_path, 3, "Authored literal: " + tail, source="web", attachments=attachment)
-    _say(tmp_path, 4, "Wrong name.\n\n" + tail, source="web", attachments=[{"name": "other.txt"}])
-    _say(tmp_path, 5, tail, source="web", attachments=attachment)
-    _say(tmp_path, 6, tail, source="web")
-    assert _texts(_found(tmp_path, q="document")) == ["Here is the document."]
-    assert _texts(_found(tmp_path, q="Attached file")) == [
-        tail, "Wrong name. " + tail, "Authored literal: " + tail, tail]
-    assert not _found(tmp_path, q="bird.txt] Here")['matches']
-
-
-def test_generated_attachment_tail_uses_the_same_bounded_names_and_overflow_as_the_composer(tmp_path):
+def test_owner_attachments_reach_the_client_as_names_and_the_ascii_filter_reads_the_whole_stored_text(tmp_path):
+    """The bubble hides the web composer's file-name tail from the owner's words (chat_attachments.js): its candidate
+    carries the names (with what decides whether its card shows one) and the source that rule reads. The host's ASCII
+    filter never leaves out a row with attachments, whose cards' names are words too; on a row without any it reads the
+    whole stored text."""
     names = [f"bird-{index}.txt" for index in range(27)]
     tail = "\n".join([f"[Attached file: {name}]" for name in names[:25]] + ["[2 more attached files]"])
     _say(tmp_path, 1, "Visible caption.\n\n" + tail, source="web", attachments=[{"name": name} for name in names])
-    assert _texts(_found(tmp_path, q="caption")) == ["Visible caption."]
-    assert not _found(tmp_path, q="attached files")['matches']
+    _say(tmp_path, 2, "[Attached file: x.txt]", source="telegram", attachments=[{"name": "x.txt", "unavailable": "missing"}])
+    _say(tmp_path, 3, "Owner words without the query and no file.")
+    telegram, web = _found(tmp_path, q="caption")["candidates"]
+    assert telegram["source"] == "telegram" and telegram["attachments"] == [{"name": "x.txt", "kind": "file",
+                                                                            "available": False}]
+    assert web["source"] == "web" and web["attachments"] == [{"name": name, "kind": "file", "available": False}
+                                                             for name in names]
+    assert set(web) <= {"history_id", "row_address", "role", "ts", "text", "source", "attachments"}, "never a file's URL"
+    assert len(_found(tmp_path, q="attached file")["candidates"]) == 2, "a row without the words or a file is left out"
+
+
+def test_media_files_links_and_questions_carry_what_their_bubble_draws_from_never_media(tmp_path):
+    media = {"download_url": "/api/tasks/t/artifacts/heron.png", "mime": "image/png"}
+    _say(tmp_path, 1, "Photo attachment", direction="out", type="photo", caption="A heron on the weir", **media)
+    _say(tmp_path, 2, "Photo attachment", direction="out", type="photo")  # no address: its bubble shows these words
+    _say(tmp_path, 3, "📎 heron.pdf", direction="out", type="document", caption="", filename="heron.pdf",
+         download_url="/api/files/download?path=heron.pdf")
+    _say(tmp_path, 4, "links", direction="out", type="links", title="Heron sites",
+         actions=[{"label": "Weir", "url": "https://example.org/weir", "extra": "x"}])
+    _say(tmp_path, 5, "question text", direction="out", type="quiz", task_id="asker",
+         quiz={"quiz_id": "q", "question": "Which **heron**?", "options": ["a"], "stake": "s"})
+    _say(tmp_path, 6, "card", direction="out", type="card", card={"card_id": "c", "kind": "k", "title": "Heron card"})
+    quiz, links, document, plain, photo = _found(tmp_path, q="heron")["candidates"]
+    assert (photo["msg_type"], photo["caption"]) == ("photo", "A heron on the weir") and "download_url" not in photo
+    assert "msg_type" not in plain and plain["text"] == "Photo attachment"
+    assert (document["msg_type"], document["caption"], document["filename"]) == ("document", "", "heron.pdf"), \
+        "its card shows the name (the file itself is never read)"
+    assert "download_url" not in document and "mime" not in document
+    assert (links["msg_type"], links["title"], links["actions"]) == (
+        "links", "Heron sites", [{"label": "Weir", "url": "https://example.org/weir"}])
+    assert (quiz["msg_type"], quiz["quiz"]) == ("quiz", {"question": "Which **heron**?"})
 
 
 def test_the_search_runs_off_the_event_loop(tmp_path, monkeypatch):
@@ -421,7 +503,7 @@ def test_the_search_runs_off_the_event_loop(tmp_path, monkeypatch):
         return search(*args, **kwargs)
     monkeypatch.setattr(chat_search, "search_room", recorded)
     assert _texts(_found(tmp_path, q="needle")) == ["needle"]
-    assert on_loop == [False], "the room's reads, matching and encoding run in a worker thread"
+    assert on_loop == [False], "the room's reads, selection and encoding run in a worker thread"
 
 
 def test_an_unreadable_store_keeps_the_answers_shape(tmp_path, monkeypatch):
@@ -431,11 +513,11 @@ def test_an_unreadable_store_keeps_the_answers_shape(tmp_path, monkeypatch):
     for error, reason in ((StoreMigrating("importing"), "migrating"), (StoreError("unreadable"), "history_source_unavailable")):
         monkeypatch.setattr(chat_search, "search_room", lambda *args, error=error, **kwargs: (_ for _ in ()).throw(error))
         code, body = _search(tmp_path, q="needle")
-        assert (code, body["reason_code"], body["matches"], body["searched"]["importing"]) == (
+        assert (code, body["reason_code"], body["candidates"], body["searched"]["importing"]) == (
             503, reason, [], reason == "migrating")
 
 
-def test_unreadable_room_authority_is_unavailable_never_no_match(tmp_path):
+def test_unreadable_room_authority_is_unavailable_never_no_match(tmp_path, monkeypatch):
     """Which saved messages a room shows is its rule's: the Project registry and the bindings that move a work's words
     into its Project. Unreadable, a search cannot say what the room holds: 503 ``history_source_unavailable`` (the
     surface's "could not be searched"), never a read that reached the beginning with no match. A continuation keeps
@@ -447,18 +529,19 @@ def test_unreadable_room_authority_is_unavailable_never_no_match(tmp_path):
     for index in range(12):
         _say(tmp_path, index, f"heron {index}", direction="out", task_id="bound-work")
     room = project["chat_id"]
-    first = _found(tmp_path, chat_id=room, q="heron", limit=5)
+    monkeypatch.setattr(chat_search, "_SCAN_ROWS", 5)
+    first = _found(tmp_path, chat_id=room, q="heron")
     assert _texts(first) == [f"heron {index}" for index in range(11, 6, -1)] and first["has_more"]
     for path in (_bindings_path(tmp_path), _registry_path(tmp_path)):
         healthy = path.read_bytes()
         path.write_text("{not json", encoding="utf-8")
         for chat_id, cursor in ((room, None), (room, first["next_cursor"]), (1, None)):
             code, body = _search(tmp_path, chat_id=chat_id, q="heron", **({"cursor": cursor} if cursor else {}))
-            assert (code, body.get("reason_code"), body["matches"], body["searched"]["beginning"]) == (
+            assert (code, body.get("reason_code"), body["candidates"], body["searched"]["beginning"]) == (
                 503, "history_source_unavailable", [], False), (path.name, chat_id, body)
             assert (body["has_more"], body["next_cursor"]) == (bool(cursor), cursor), "the same request can be repeated"
         path.write_bytes(healthy)
-    second = _found(tmp_path, chat_id=room, q="heron", limit=5, cursor=first["next_cursor"])
+    second = _found(tmp_path, chat_id=room, q="heron", cursor=first["next_cursor"])
     assert _texts(second) == [f"heron {index}" for index in range(6, 1, -1)], "the continuation goes on where it was"
 
 
@@ -481,7 +564,7 @@ def test_a_row_whose_room_the_rule_cannot_read_is_unavailable_never_left_out(tmp
         patch.setattr(projects_registry, "_TASK_LINEAGE", {})
         patch.setattr(projects_registry, "open_store", unreadable)
         code, body = _search(tmp_path, chat_id=room, q="osprey")
-    assert (code, body.get("reason_code"), body["matches"], body["searched"]["beginning"]) == (
+    assert (code, body.get("reason_code"), body["candidates"], body["searched"]["beginning"]) == (
         503, "history_source_unavailable", [], False), body
     assert _texts(_found(tmp_path, chat_id=room, q="osprey")) == ["osprey from the bound work's follow-up"]
 
@@ -505,6 +588,6 @@ def test_a_bound_works_descendant_the_lens_cannot_name_is_unavailable_never_left
     with monkeypatch.context() as patch:
         patch.setattr(task_store, "task_facts", unreadable)
         code, body = _search(tmp_path, chat_id=room, q="plover")
-    assert (code, body.get("reason_code"), body["matches"], body["searched"]["beginning"]) == (
+    assert (code, body.get("reason_code"), body["candidates"], body["searched"]["beginning"]) == (
         503, "history_source_unavailable", [], False), body
     assert _texts(_found(tmp_path, chat_id=room, q="plover")) == ["plover from the bound work's follow-up"]
