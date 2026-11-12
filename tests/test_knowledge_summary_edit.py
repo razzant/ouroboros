@@ -10,6 +10,7 @@ Every test writes only a synthetic data root.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import threading
@@ -18,6 +19,7 @@ import pytest
 
 from ouroboros import context
 from ouroboros import knowledge as store
+from ouroboros import knowledge_versions as versions
 from ouroboros.memory import Memory
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
@@ -357,7 +359,9 @@ def test_an_overwrite_takes_its_summary_after_its_own_merge(tmp_path):
 
 def test_a_bare_append_is_answered_with_the_outline_and_says_earlier_text_stood(tmp_path):
     ctx, address, _original = _setup(tmp_path)
-    receipt = _receipt(tools._knowledge_write(ctx, "people/ada", "\n## Later\nNew fact.\n", mode="append", scope="global"))
+    reply = tools._knowledge_write(ctx, "people/ada", "\n## Later\nNew fact.\n", mode="append", scope="global")
+    assert reply.count("\n") == 1  # the meta holds this outline: nothing follows the JSON line
+    receipt = _receipt(reply)
     assert receipt["knowledge_note"] == "Earlier text was not revised by this write."
     assert receipt["knowledge_outline"].startswith("Outline of 'people/ada' (global)")
     assert "# Ada — line 8" in receipt["knowledge_outline"] and "## Later — line" in receipt["knowledge_outline"]
@@ -368,3 +372,20 @@ def test_a_bare_append_is_answered_with_the_outline_and_says_earlier_text_stood(
     revised = _receipt(tools._knowledge_write(ctx, "people/ada", "More.", mode="append", scope="global", summary=NEW,
                                               expected_revision=current.revision))
     assert "knowledge_outline" not in revised and "knowledge_note" not in revised
+
+
+def test_a_bare_append_whose_outline_the_receipt_cannot_hold_carries_it_after_the_json_line(tmp_path):
+    raw = "---\ntype: note\n---\n# Журнал\n\n" + "".join(f"## Запись номер {i:03d}\n\nТекст.\n\n" for i in range(120))
+    ctx, address, _original = _setup(tmp_path, "journal/long", raw)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ctx)
+    reply = tools._knowledge_write(ctx, "journal/long", "\n## Позже\n\nНовое.\n", mode="append", scope="global")
+    line, _, carried = reply.split("\n", 1)[1].partition("\n\n")
+    receipt = json.loads(line)
+    assert receipt["knowledge_outline"]["omitted"] is True  # the meta cannot hold it ...
+    assert carried == versions.render_outline(store.read_knowledge_note(address))  # ... so it follows, whole
+    assert receipt["knowledge_outline"]["sha256"] == hashlib.sha256(carried.encode("utf-8")).hexdigest()
+    assert "## Позже — line" in carried and receipt["knowledge_note"] == "Earlier text was not revised by this write."
+    assert receipt["knowledge_delta"]["added_headings"] == ["## Позже"]  # the outline gave way first, as the largest
+    pointer = receipt["knowledge_outline"]["read"]
+    assert registry.execute(pointer["tool"], pointer["arguments"]).endswith(carried)  # the meta's pointer reads it too

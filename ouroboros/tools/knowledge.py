@@ -340,11 +340,14 @@ def _knowledge_write(
             if not expected_revision:  # a bare append: earlier text stood unseen
                 meta["knowledge_outline"] = knowledge_versions.render_outline(result.current)
                 meta["knowledge_note"] = "Earlier text was not revised by this write."
+        outline = meta.get("knowledge_outline")
         _bound_delta_meta(meta)
-        return _publish_tool_result(ctx, ToolResult(
-            status="ok", code="OK",
-            text=f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True),
-            meta=meta))
+        text = f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True)
+        if isinstance(outline, str) and not isinstance(meta["knowledge_outline"], str):
+            # The bare appender's only look at the note: an outline the meta cannot hold follows
+            # the JSON line whole; the meta keeps its pointer (size, sha256, the read).
+            text += "\n\n" + outline
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text, meta=meta))
     text = f"⚠️ TOOL_ERROR: Knowledge write not completed: {result.reason}."
     changes = None
     if result.reason == "revision_conflict" and result.held is not None and result.current is not None:
