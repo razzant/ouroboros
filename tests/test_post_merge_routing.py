@@ -412,6 +412,12 @@ def test_a_size_red_is_handed_over_with_the_base_it_was_measured_against():
                               head=HEAD, run_url="u")
     assert "`book-growth` label approved still counts against that base" in book
     assert "book-growth" not in github.issues[100]["body"] and "only by passing against that base" in github.issues[100]["body"]
+    # the closing sentence promises "found gone" only for a test outside the size check
+    plain, mixed = (routing.issue_body({"kind": "unattributed", "base": "a" * 40, "ids": ids}, head=HEAD, run_url="u")
+                    for ids in (["tests/t.py::test_a"], ["tests/t.py::test_a", SIZED]))
+    assert "it passes, or finds it gone, and closes" in plain
+    assert "it passes, and closes" in github.issues[100]["body"] and "it passes, and closes" in book
+    assert "it passes, or finds one outside the size check gone, and closes" in mixed
 
 
 def test_a_label_the_other_leg_created_meanwhile_is_no_warning():

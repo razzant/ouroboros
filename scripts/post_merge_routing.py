@@ -149,8 +149,11 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
     else:
         opening = f"These tests fail on `ouroboros` on {system}, but the post-merge check could not find the merge that broke them."
     rows = "\n".join(f"- {_named(nodeid)}" for nodeid in block["ids"])
+    sized = sum(nodeid.startswith(SIZE_PREFIX) for nodeid in block["ids"])  # a size test is never found gone: `_size_hint`
+    gone = ("" if sized == len(block["ids"]) else ", or finds one outside the size check gone" if sized
+            else ", or finds it gone")
     return (f"{opening}\n\n{rows}\n\n{seen} at `{head}`: {run_url}\n\n{_FORWARD}{_size_hint(block)} The "
-            f"post-merge check takes a test off this list when a check on {system} runs it and it passes, or finds it gone, "
+            f"post-merge check takes a test off this list when a check on {system} runs it and it passes{gone}, "
             f"and closes this issue when none is left.\n\n{machine_block(block)}\n")
 
 
