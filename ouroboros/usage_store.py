@@ -484,8 +484,8 @@ class Txn:
     def period_models(self, first: int, end: int, since_iso: str) -> List[Dict[str, Any]]:
         """Per model and route: the model calls of rowids ``[first, end)`` reserved since ``since_iso``: how many
         were sent, are still open, settled with or without a price, their settled cost and reported tokens. Input is
-        classed (read, written, uncached) only for calls that reported both cache counts; the others are counted
-        apart, never as uncached. One bounded range read over typed columns."""
+        classed (read, written, uncached) only for calls that reported both cache counts; the rest of the others'
+        input (beyond a count they did report) is counted apart, never as uncached. One bounded range read."""
         return [dict(record) for record in self.conn.execute(
             "SELECT COALESCE(model, '') AS model, COALESCE(provider, '') AS provider, "
             "SUM(state IN ('dispatched','settled','unresolved')) AS calls, "
@@ -496,8 +496,8 @@ class Txn:
             "SUM(CASE WHEN cached_tokens IS NOT NULL AND cache_write_tokens IS NOT NULL "
             "THEN MAX(0, COALESCE(prompt_tokens, 0) - cached_tokens - cache_write_tokens) ELSE 0 END) AS uncached_tokens, "
             "SUM(prompt_tokens IS NOT NULL AND (cached_tokens IS NULL OR cache_write_tokens IS NULL)) AS uncounted_calls, "
-            "SUM(CASE WHEN cached_tokens IS NULL OR cache_write_tokens IS NULL THEN COALESCE(prompt_tokens, 0) ELSE 0 END) "
-            "AS uncounted_input_tokens "
+            "SUM(CASE WHEN cached_tokens IS NULL OR cache_write_tokens IS NULL THEN MAX(0, COALESCE(prompt_tokens, 0) "
+            "- COALESCE(cached_tokens, 0) - COALESCE(cache_write_tokens, 0)) ELSE 0 END) AS uncounted_input_tokens "
             f"FROM attempts WHERE {_PERIOD_WHERE} GROUP BY 1, 2", (int(first), int(end), str(since_iso)))]
 
     def period_settled_calls(self, first: int, end: int, since_iso: str) -> List[Dict[str, Any]]:

@@ -54,9 +54,23 @@ def _shares(row: Dict[str, Any], tariff: Optional[tuple]) -> Optional[Dict[str, 
     return {name: weight / total for name, weight in weights.items()} if total > 0 else None
 
 
+def _row_lifetimes(row: Dict[str, Any], written: int) -> Optional[tuple]:
+    """``(5-minute, 1-hour)`` tokens one call wrote: the provider's full split, else its named lifetime."""
+    from ouroboros.pricing import write_lifetimes
+
+    usage = {"prompt_cache_ttl": row.get("prompt_cache_ttl")}
+    try:
+        split = json.loads(row["write_split"]) if row.get("write_split") else None
+    except (TypeError, ValueError):
+        split = None
+    if isinstance(split, dict):
+        usage["cache_write_tokens_by_ttl"] = split
+    return write_lifetimes(usage, written)
+
+
 def _write_price_in_reads(tariff: Optional[tuple], ttl: str) -> Optional[float]:
-    """How many read tokens one written token costs at this lifetime at the model's BASE price (40 on a 1-hour Opus
-    write): a prompt-length tier is a property of one call, not of a model. None for an unnamed lifetime."""
+    """How many read tokens one written token costs at this lifetime at the model's BASE price, both from the same
+    catalogue: a prompt-length tier is a property of one call, not of a model. None for an unnamed lifetime."""
     if not tariff or len(tariff) != 4 or not tariff[1] or tariff[2] is None or ttl not in ("5m", "1h"):
         return None
     write = float(tariff[2])
@@ -133,9 +147,10 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
             written = int(row.get("cache_write_tokens") or 0)
             if written <= 0:
                 continue
-            if route_tariff is not None:  # written tokens by lifetime, for the price ratio of the lifetime most were written at
-                held = model["_written"].setdefault(row["prompt_cache_ttl"], [0, route_tariff])
-                held[0] += written
+            lifetimes = _row_lifetimes(row, written) if route_tariff is not None else None
+            for ttl, count in zip(("5m", "1h"), lifetimes or ()):  # by the lifetimes the call was written at
+                if count:
+                    model["_written"].setdefault(ttl, [0, route_tariff])[0] += count
             try:
                 fact = json.loads(row["prefix"]) if row.get("prefix") else None
             except (TypeError, ValueError):

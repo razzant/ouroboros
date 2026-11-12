@@ -306,6 +306,11 @@ def test_calls_without_cache_counts_are_counted_apart_and_never_split(root):
     assert (model["uncounted_calls"], model["uncounted_input_tokens"]) == (1, 100)
     assert model["cost"] == pytest.approx(1.5) and model["unshared_cost"] == pytest.approx(1.0)  # its dollar stays unshared
     assert sum(model["by_class"].values()) == pytest.approx(0.5, abs=1e-6)
+    # One count reported, one absent: what it did report is classed, only the rest of its input is apart.
+    partial = _call(root, prompt=100, cost=None, settle=False)
+    ua.settle_attempt(partial, {"prompt_tokens": 100, "completion_tokens": 0, "cached_tokens": 60}, cost_usd=0.2, cost_final=True)
+    model, = cost_period.cost_period(root, "24h")["models"]
+    assert model["tokens"]["cache_read"] == 460 and (model["uncounted_calls"], model["uncounted_input_tokens"]) == (2, 140)
 
 
 def test_the_bounds_search_reads_points_and_a_stamp_spelling_does_not_move_membership(root):
@@ -329,3 +334,11 @@ def test_the_bounds_search_reads_points_and_a_stamp_spelling_does_not_move_membe
     with usage_store.hold(root) as txn:
         txn.conn.execute("UPDATE attempts SET ts_reserved=? WHERE attempt_id=?", (later, first.attempt_id))
     assert [row["calls"] for row in cost_period.cost_period(root, "24h", now=start + cost_period.PERIODS["24h"])["models"]] == [1]
+
+
+def test_the_price_ratio_follows_the_lifetimes_the_provider_says_the_writes_were_made_at(root):
+    attempt = _call(root, prompt=1_000, cost=None, settle=False, ttl="1h")
+    ua.settle_attempt(attempt, {"prompt_tokens": 1_000, "completion_tokens": 5, "cached_tokens": 0, "cache_write_tokens": 900,
+                                "cache_write_tokens_by_ttl": {"5m": 900}, "prompt_cache_ttl": "1h"}, cost_usd=0.01, cost_final=True)
+    model, = cost_period.cost_period(root, "24h")["models"]
+    assert (model["write_price_in_reads"], model["write_price_lifetime"]) == (25.0, "5m")  # requested 1h, written at 5m

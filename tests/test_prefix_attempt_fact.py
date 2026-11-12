@@ -274,27 +274,130 @@ def test_an_unmeasured_candidate_ends_the_wait_of_the_measured_one():
     assert (held["at"], len(held["messages"])) == (0.0, 1)
 
 
-def _answered(usage, call, route=OPUS, at="2026-11-12T12:00:00+00:00"):
-    """What the loop records when a response arrives (``loop_llm_call._remember_llm_call``), usable or not."""
+def _answered(usage, route=OPUS, read=True):
+    """What ``loop_llm_call`` notes where a response arrives: an answer that read its input, or a body error."""
     model, local = (route[:-len(" (local)")], True) if route.endswith(" (local)") else (route, False)
-    usage["_last_llm_call_meta"] = {"llm_call_id": call, "model": model, "use_local": local, "ts": at}
+    reply = {"prompt_tokens": 1_000} if read else {"prompt_tokens": 0, "provider_error": {"code": "context_length_exceeded"}}
+    prefix.note_prefix_answer(usage, reply, model, local)
 
 
-def test_an_answer_the_loop_did_not_accept_still_moves_its_routes_base():
+def _main_ctx(slot, usage, messages):
+    return SimpleNamespace(tools=SimpleNamespace(_ctx=slot), accumulated_usage=usage, tool_schemas=TOOLS,
+                           messages=messages, active_model=OPUS, active_use_local=False)
+
+
+def test_an_answer_the_loop_did_not_accept_still_moves_its_routes_base(monkeypatch):
     """An empty or output-limited reply was written and charged: the next measurement sees its route answered."""
+    import time
+
+    monkeypatch.setattr(time, "time", lambda: 5_000.0)
     slot, usage = SimpleNamespace(), {}
-    ctx = SimpleNamespace(tools=SimpleNamespace(_ctx=slot), accumulated_usage=usage, tool_schemas=TOOLS,
-                          messages=[system(), {"role": "user", "content": "task"}], active_model=OPUS, active_use_local=False)
+    ctx = _main_ctx(slot, usage, [system(), {"role": "user", "content": "task"}])
     prefix.remember_attempt_prefix(ctx)
     assert usage[prefix.ATTEMPT_PREFIX_KEY] == {"departs": "first"}
-    _answered(usage, "llm_1")  # an empty answer: the loop never observes it
+    _answered(usage)  # an empty answer: the loop never observes it
     ctx.messages = ctx.messages + turn(1)
     prefix.remember_attempt_prefix(ctx)
-    fact = usage[prefix.ATTEMPT_PREFIX_KEY]
-    assert fact["departs"] == "append" and fact["base_at"] == pytest.approx(1794484800.0)  # dated by the answer
+    assert usage[prefix.ATTEMPT_PREFIX_KEY] == {"departs": "append", "base_at": 5_000.0}  # dated by the answer
     # An answer of another route ends the wait without moving this route's base.
-    prefix.remember_attempt_prefix(ctx)
-    _answered(usage, "llm_2", route=CODEX)
+    _answered(usage, route=CODEX)
     prefix.forget_attempt_prefix(ctx)
     assert len(getattr(slot, prefix.ROUTE_SENDS_ATTR)[OPUS]["messages"]) == 1  # still the first request's record
     assert getattr(slot, prefix.PENDING_ROUTE_ATTR) is None
+
+
+def test_a_body_error_read_nothing_and_moves_no_base():
+    slot, usage = SimpleNamespace(), {}
+    ctx = _main_ctx(slot, usage, [system(), {"role": "user", "content": "task"}])
+    prefix.remember_attempt_prefix(ctx)
+    _answered(usage, read=False)  # a structured error in an HTTP 200 body
+    prefix.note_prefix_answer(usage, {"completion_tokens": 3}, OPUS, False)  # no input reported: no evidence either
+    assert prefix.ANSWER_KEY not in usage
+    ctx.messages = ctx.messages + turn(1)
+    prefix.remember_attempt_prefix(ctx)
+    assert usage[prefix.ATTEMPT_PREFIX_KEY] == {"departs": "first"}  # nothing was answered yet
+
+
+def test_a_retry_after_its_own_answer_extends_that_request(monkeypatch):
+    import time
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+    slot, usage = SimpleNamespace(), {}
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    ctx = _main_ctx(slot, usage, start + turn(1))
+    prefix.remember_attempt_prefix(ctx)
+    bound = prefix.with_attempt_prefix(_physical(), usage)
+    assert bound.prefix["departs"] == "append" and bound.prefix["base_at"] == 0.0
+    # The first attempt is answered (empty) at 399; the retry starts at 401 and extends that answered request.
+    clock["now"] = 399.0
+    _answered(usage)
+    retry = prefix.refresh_attempt_prefix(bound, usage, OPUS, False)
+    assert retry.prefix == {"departs": "append", "base_at": 399.0}
+    assert prefix.refresh_attempt_prefix(retry, usage, OPUS, False) is retry  # no new answer: nothing to refresh
+    # A failed send left no answer, and another route's answer is not this candidate's.
+    assert prefix.refresh_attempt_prefix(bound, {**usage, prefix.ANSWER_SEEN_KEY: 1}, OPUS, False) is bound
+    _answered(usage, route=CODEX)
+    assert prefix.refresh_attempt_prefix(retry, usage, OPUS, False) is retry
+    assert prefix.refresh_attempt_prefix(_physical(), usage, OPUS, False).prefix is None  # no fact, nothing made up
+
+
+def test_a_checkpoint_carries_the_waiting_candidate_and_its_answer():
+    slot, usage = SimpleNamespace(), {}
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    ctx = _main_ctx(slot, usage, start + turn(1))
+    prefix.remember_attempt_prefix(ctx)
+    _answered(usage)  # an output-limited reply; the task parks before another measurement
+    saved = json.loads(json.dumps({key: getattr(slot, key) for key in prefix.OBSERVER_STATE_ATTRS if hasattr(slot, key)}))
+    restored, restored_usage = SimpleNamespace(**saved), json.loads(json.dumps(usage))
+    ctx = _main_ctx(restored, restored_usage, start + turn(1) + turn(2))
+    prefix.remember_attempt_prefix(ctx)
+    fact = restored_usage[prefix.ATTEMPT_PREFIX_KEY]
+    assert fact["departs"] == "append" and fact["base_at"] == usage[prefix.ANSWER_KEY]["at"]  # the answered reply, not the older one
+
+
+def test_a_deferred_promotion_keeps_the_seams_named_after_the_measurement():
+    slot, usage = SimpleNamespace(), {}
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    prefix.sanction_rewrite(slot, "compaction")  # carried by the next candidate
+    ctx = _main_ctx(slot, usage, [system(), {"role": "user", "content": "task"}, {"role": "user", "content": "[fold]"}])
+    prefix.remember_attempt_prefix(ctx)
+    _answered(usage)  # unaccepted
+    prefix.sanction_rewrite(slot, "route_rebind", scope="system")  # after the answer, before the next measurement
+    ctx.messages = [system(context="rebound"), *ctx.messages[1:]]
+    prefix.remember_attempt_prefix(ctx)
+    assert usage[prefix.ATTEMPT_PREFIX_KEY]["origins"] == ["route_rebind"]  # the fold was carried; the rebind was not
+
+
+def test_the_accepted_answer_dates_its_routes_base(monkeypatch):
+    import time
+
+    monkeypatch.setattr(time, "time", lambda: 700.0)
+    slot, usage = SimpleNamespace(), {}
+    start = [system(), {"role": "user", "content": "task"}]
+    prefix.attempt_prefix_fact(slot, start, TOOLS, OPUS, now=650.0, usage=usage)  # measured at 650, answered at 700
+    _answered(usage)
+    prefix.observe_send(slot, start, round_idx=1, tools=TOOLS, usage=usage)
+    assert getattr(slot, prefix.ROUTE_SENDS_ATTR)[OPUS]["at"] == 700.0
+    prefix.attempt_prefix_fact(slot, start + turn(1), TOOLS, OPUS, now=800.0, usage=usage)
+    prefix.observe_send(slot, start + turn(1), round_idx=2, tools=TOOLS, usage=usage)  # no answer noted since: its measurement
+    assert getattr(slot, prefix.ROUTE_SENDS_ATTR)[OPUS]["at"] == 800.0
+
+
+def test_an_unmeasured_route_ends_the_wait_at_its_real_call_site():
+    """``loop_model_call._measure_round_main_fit`` with no plan for the acting model forgets the waiting candidate."""
+    from ouroboros import loop_model_call
+
+    slot = SimpleNamespace()
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    usage = {}
+    prefix.attempt_prefix_fact(slot, start + turn(1), TOOLS, OPUS, now=1.0, usage=usage)
+    usage[prefix.ATTEMPT_PREFIX_KEY] = {"departs": "append"}
+    ctx = SimpleNamespace(tools=SimpleNamespace(_ctx=slot), accumulated_usage=usage, messages=start + turn(1),
+                          context_fit_plan=SimpleNamespace(model=OPUS), active_model=CODEX, active_use_local=False)
+    assert loop_model_call._measure_round_main_fit(ctx, automatic_pass_used=False) is None
+    assert getattr(slot, prefix.PENDING_ROUTE_ATTR) is None and prefix.ATTEMPT_PREFIX_KEY not in usage

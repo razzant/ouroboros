@@ -55,6 +55,10 @@ LAST_ROUTE_ATTR = "_transcript_prefix_last_route"
 PENDING_ROUTE_ATTR = "_transcript_prefix_pending"
 #: ``accumulated_usage`` key of the candidate's prefix fact, for the dispatch that binds its physical context.
 ATTEMPT_PREFIX_KEY = "_attempt_prefix"
+#: ``accumulated_usage`` keys: the last answer that read its input (``note_prefix_answer``: count, route, time), and
+#: the count the bound fact was taken at. They ride a continuation with the rest of the usage.
+ANSWER_KEY = "_prefix_answer"
+ANSWER_SEEN_KEY = "_prefix_answer_seen"
 #: Every seam that rewrote the view since the last answered request, in order (the stamps keep one per scope).
 ORIGINS_ATTR = "_transcript_prefix_origins"
 _ROUTES_KEPT = 4  # full records a checkpoint carries; an older route keeps its name and reads ``unrecorded``
@@ -62,7 +66,7 @@ _ROUTES_KEPT = 4  # full records a checkpoint carries; an older route keeps its 
 #: The observer's per-slot state a continuation checkpoint carries (``owner_wait``): the last
 #: sent digests, an unconsumed origin stamp, the rewrite count, a change already counted and the routes' records.
 OBSERVER_STATE_ATTRS = (DIGEST_ATTR, TOOLS_DIGEST_ATTR, SANCTION_ATTR, REWRITE_EPOCH_ATTR, "_reasoning_retirement_break",
-                        SCOPED_SANCTION_ATTR, ROUTE_SENDS_ATTR, LAST_ROUTE_ATTR, ORIGINS_ATTR)
+                        SCOPED_SANCTION_ATTR, ROUTE_SENDS_ATTR, LAST_ROUTE_ATTR, ORIGINS_ATTR, PENDING_ROUTE_ATTR)
 
 
 def sanction_rewrite(slot: Any, by: str = "compaction", scope: str = "messages") -> None:
@@ -363,24 +367,37 @@ def _route_record(messages: Sequence[Mapping[str, Any]], tools_identity: str, di
             "messages": [_short(digest) for digest in later]}
 
 
-def _last_answer(usage: Any) -> tuple:
-    """``(call id, route, epoch)`` of the last model call the loop saw answered (``_last_llm_call_meta``, written when a
-    response arrives, an empty or unusable one included); ``("", "", None)`` without one."""
-    meta = usage.get("_last_llm_call_meta") if isinstance(usage, Mapping) else None
-    if not isinstance(meta, Mapping):
-        return "", "", None
-    route = str(meta.get("model") or "") + (" (local)" if meta.get("use_local") else "")
+def note_prefix_answer(usage: Any, response_usage: Any, model: Any, use_local: Any) -> None:
+    """Where a Main response arrives (``loop_llm_call``): an answer whose usage says the provider read its input (input
+    tokens reported, no provider error) is what moves its route's base, an empty or output-limited reply included;
+    a body error read nothing and moves nothing. Kept in ``usage`` as ``(count, route, time)``."""
+    if not isinstance(usage, dict) or not isinstance(response_usage, Mapping) or response_usage.get("provider_error"):
+        return
     try:
-        from datetime import datetime
+        if int(response_usage.get("prompt_tokens") or 0) <= 0:
+            return
+    except (TypeError, ValueError):
+        return
+    import time
 
-        at: Optional[float] = datetime.fromisoformat(str(meta.get("ts") or "")).timestamp()
-    except ValueError:
-        at = None
-    return str(meta.get("llm_call_id") or ""), route, at
+    count = _answer(usage)[0]
+    usage[ANSWER_KEY] = {"n": count + 1, "route": str(model or "") + (" (local)" if use_local else ""),
+                         "at": round(time.time(), 1)}
 
 
-def _promote(slot: Any, route: str, record: Mapping[str, Any], at: Any) -> None:
-    """``record`` becomes ``route``'s base; four full bases are kept, an older route keeps its name alone."""
+def _answer(usage: Any) -> tuple:
+    """``(count, route, epoch)`` of the last answer that read its input (``note_prefix_answer``); ``(0, "", None)``."""
+    held = usage.get(ANSWER_KEY) if isinstance(usage, Mapping) else None
+    if not isinstance(held, Mapping):
+        return 0, "", None
+    at = held.get("at")
+    return int(held.get("n") or 0), str(held.get("route") or ""), (float(at) if isinstance(at, (int, float)) else None)
+
+
+def _promote(slot: Any, route: str, record: Mapping[str, Any], at: Any, carried: Optional[int] = None) -> None:
+    """``record`` becomes ``route``'s base; four full bases are kept, an older route keeps its name alone. The seams
+    the answered request carried are consumed: all of them, or the first ``carried`` (a deferred promotion keeps the
+    seams named after the candidate's measurement for the next request)."""
     kept = getattr(slot, ROUTE_SENDS_ATTR, None)
     routes = {key: value for key, value in (kept if isinstance(kept, Mapping) else {}).items() if key != route}
     routes[route] = {"tools": record.get("tools"), "blocks": list(record.get("blocks") or ()),
@@ -389,20 +406,21 @@ def _promote(slot: Any, route: str, record: Mapping[str, Any], at: Any) -> None:
         routes[stale] = {"dropped": True}  # its name stays: a later request on it has no base, and says so
     setattr(slot, ROUTE_SENDS_ATTR, routes)
     setattr(slot, LAST_ROUTE_ATTR, route)
-    setattr(slot, ORIGINS_ATTR, [])  # the answered request carried every seam named so far
+    seams = getattr(slot, ORIGINS_ATTR, None)
+    setattr(slot, ORIGINS_ATTR, list(seams[carried:]) if carried is not None and isinstance(seams, list) else [])
 
 
 def _settle_pending(slot: Any, usage: Any) -> None:
-    """A measured candidate whose route answered since its measurement (``_last_answer``) becomes the route's base,
-    though the loop did not accept the answer (an empty or output-limited reply was still written and charged);
-    one answered by another route was not answered, and its wait ends."""
+    """A measured candidate whose route answered since its measurement (``_answer``) becomes the route's base, though
+    the loop did not accept the answer (an empty or output-limited reply was still written and charged); one answered
+    by another route was not answered, and its wait ends. A checkpoint carries both, so a restored task settles too."""
     pending = getattr(slot, PENDING_ROUTE_ATTR, None)
-    call, route, at = _last_answer(usage)
-    if not isinstance(pending, Mapping) or not call or call == pending.get("call"):
+    count, route, at = _answer(usage)
+    if not isinstance(pending, Mapping) or count <= int(pending.get("seen") or 0):
         return
     setattr(slot, PENDING_ROUTE_ATTR, None)
     if route == pending.get("route"):
-        _promote(slot, route, pending, at if at is not None else pending.get("at"))
+        _promote(slot, route, pending, at if at is not None else pending.get("at"), int(pending.get("seams") or 0))
 
 
 def _remember_route_send(slot: Any, messages: Sequence[Mapping[str, Any]], digests: List[str], tools_identity: str,
@@ -417,9 +435,9 @@ def _remember_route_send(slot: Any, messages: Sequence[Mapping[str, Any]], diges
             or pending.get("blocks") != record["blocks"] or record["messages"][:len(waited)] != waited):
         setattr(slot, ORIGINS_ATTR, [])  # a helper's answer on this slot: the candidate that waited was not answered
         return
-    call, _route, at = _last_answer(usage)
+    count, _route, at = _answer(usage)
     _promote(slot, str(pending["route"]), record,
-             at if call and call != pending.get("call") and at is not None else pending.get("at"))
+             at if count > int(pending.get("seen") or 0) and at is not None else pending.get("at"))
 
 
 def attempt_prefix_fact(slot: Any, messages: Sequence[Mapping[str, Any]], tools: Any, route: str,
@@ -480,8 +498,9 @@ def attempt_prefix_fact(slot: Any, messages: Sequence[Mapping[str, Any]], tools:
     if isinstance(base, Mapping) and isinstance(base.get("at"), (int, float)):
         fact["base_at"] = round(float(base["at"]), 1)
     # The answered request starts with this candidate (the send may add its own later rows, as its clock line);
-    # ``call`` tells a later answer from the one already seen when the candidate was measured.
-    setattr(slot, PENDING_ROUTE_ATTR, {"route": route, "at": now, "call": _last_answer(usage)[0], **record})
+    # ``seen`` tells a later answer from those before its measurement, ``seams`` how many seams it carries.
+    setattr(slot, PENDING_ROUTE_ATTR, {"route": route, "at": now, "seen": _answer(usage)[0],
+                                       "seams": len(seams) if isinstance(seams, list) else 0, **record})
     return fact
 
 
@@ -541,7 +560,10 @@ def forget_attempt_prefix(ctx: Any) -> None:
         usage.pop(ATTEMPT_PREFIX_KEY, None)
     slot = getattr(getattr(ctx, "tools", None), "_ctx", None)
     if slot is not None:
-        _settle_pending(slot, usage)  # an answer to the measured candidate still counts before its wait ends
+        try:
+            _settle_pending(slot, usage)  # an answer to the measured candidate still counts before its wait ends
+        except Exception:  # a record of the send, never a condition of it
+            log.debug("attempt prefix settlement unavailable", exc_info=True)
         setattr(slot, PENDING_ROUTE_ATTR, None)
 
 
@@ -555,7 +577,26 @@ def with_attempt_prefix(physical: Any, usage: Any, ctx: Any = None, messages: An
         return physical
     from dataclasses import replace
 
+    usage[ANSWER_SEEN_KEY] = _answer(usage)[0]  # the answers this fact already accounts for
     return replace(physical, prefix=dict(fact))
+
+
+def refresh_attempt_prefix(physical: Any, usage: Any, model: Any, use_local: Any) -> Any:
+    """Before each physical attempt of one call (``loop_llm_call``): when this route answered the same candidate since
+    its fact was bound (a reply the loop retries), the retry extends that answered request, dated by its answer."""
+    try:
+        count, route, at = _answer(usage)
+        current = str(model or "") + (" (local)" if use_local else "")
+        if (getattr(physical, "prefix", None) is None or not isinstance(usage, dict) or at is None or route != current
+                or count <= int(usage.get(ANSWER_SEEN_KEY) or 0)):
+            return physical
+        from dataclasses import replace
+
+        usage[ANSWER_SEEN_KEY] = count
+        return replace(physical, prefix={"departs": "append", "base_at": at})
+    except Exception:  # a record of the send, never a condition of it
+        log.debug("attempt prefix refresh unavailable", exc_info=True)
+        return physical
 
 
 def retire_unbound_reasoning(slot: Any, messages: List[Dict[str, Any]], tools: Any) -> Optional[Dict[str, Any]]:

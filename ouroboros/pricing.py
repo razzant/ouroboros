@@ -258,7 +258,7 @@ def cost_class_weights(pricing: Optional[tuple], usage: Dict[str, Any]) -> Optio
     if not pricing or any(count is None for count in counts):
         return None  # a count the row does not have is unknown, never zero
     prompt, completion, read, writes = (max(0, int(count)) for count in counts)
-    lifetimes = _write_lifetimes(usage, writes)
+    lifetimes = write_lifetimes(usage, writes)
     if lifetimes is None:
         return None  # written at a lifetime the row does not name: never assumed to be the cheaper one
     addends = _cost_addends(pricing, prompt, completion, {"cached_tokens": read, "cache_write_tokens": writes})
@@ -276,7 +276,7 @@ def cost_class_weights(pricing: Optional[tuple], usage: Dict[str, Any]) -> Optio
     return {"cache_write": write, "cache_read": cache_read, "output": output, "uncached_input": uncached}
 
 
-def _write_lifetimes(usage: Dict[str, Any], writes: int) -> Optional[Tuple[int, int]]:
+def write_lifetimes(usage: Dict[str, Any], writes: int) -> Optional[Tuple[int, int]]:
     """``(5-minute, 1-hour)`` written tokens: the provider's own split when it accounts for every write, else the
     one lifetime the row names; None when neither says (``default`` or an absent lifetime, a partial split)."""
     if writes == 0:

@@ -41,17 +41,18 @@ test('a period shows each model\'s recorded cost by class, and tokens alone wher
     assert.deepEqual(opus.parts.map((part) => part.text), [
         '$4,306.97 · 71% · 538M tokens', '$1,101.77 · 18% · 5.5B tokens', '$527.36 · 9% · 26.4M tokens', '$119.03 · 2% · 29.8M tokens']);
     assert.ok(Math.abs(opus.parts.reduce((sum, part) => sum + part.share, 0) - 1) < 1e-9);  // the bar is the whole shared cost
-    assert.deepEqual(opus.notes, ['14 calls are still open.', '165 ended without a price.', 'One token written for 1 hour costs 40 read tokens here.']);
+    assert.deepEqual(opus.notes, ['14 calls are still open.', '165 ended without a price.',
+        'One token written for 1 hour costs 40 read tokens at this model’s base price.']);
     // A subscription model has no cost to share: its tokens by class are the fact shown, and its bar is by tokens and says so.
     assert.equal(codex.sum, 'no recorded cost · 56,724 calls');  // unknown, never $0.00
     assert.deepEqual([codex.split, codex.bar], [false, true]);
     assert.deepEqual(codex.parts.map((part) => part.text), ['0 tokens · 0%', '34.5B tokens · 92%', '210M tokens · 1%', '2.9B tokens · 8%']);
-    assert.deepEqual(codex.notes, ['56,724 ended without a price.', 'The bar is by tokens: there is no recorded cost to split.']);
+    assert.deepEqual(codex.notes, ['56,724 ended without a price.', 'The bar is by tokens: there is no recorded cost.']);
     assert.ok(Math.abs(codex.parts.reduce((sum, part) => sum + part.share, 0) - 1) < 1e-9);
     // A priced call with no price list at hand: the amount stands, the split is said to be absent, never invented.
     assert.deepEqual([unlisted.split, unlisted.bar], [false, true]);
     assert.deepEqual(unlisted.notes, ['Not split by class: these calls have no price list, token counts or named cache lifetime at hand.',
-        '1 call reported no cache counts: 2k input tokens are in no class.', 'The bar is by tokens: there is no recorded cost to split.']);
+        '1 call reported no complete cache counts: 2k input tokens are in no class.', 'The bar is by tokens: the recorded cost could not be split.']);
     // Every positive amount left out is said, however small: the parts and it add up to the sum shown.
     assert.deepEqual(cheap.notes, ['$0.0040 is not split (no price list, token counts or named cache lifetime for those calls).']);
     assert.match(shown.note, /share of the recorded cost, not the provider’s invoice lines/);
@@ -87,4 +88,17 @@ test('token counts keep a glance\'s precision, and the periods are the three the
     assert.deepEqual([812, 630_400, 12_400_000, 345_000_000, 1_200_000_000, 0, undefined].map(compactTokens),
         ['812', '630k', '12.4M', '345M', '1.2B', '0', '0']);
     assert.deepEqual(COST_PERIODS.map(([key]) => key), ['24h', '7d', '30d']);
+});
+
+test('a later period choice abandons the read it replaces', async () => {
+    const { mountCostPeriod } = await import('../modules/cost_period.js');
+    const signals = [];
+    const host = { innerHTML: '', querySelector: () => ({ textContent: '', innerHTML: '' }), querySelectorAll: () => [],
+        addEventListener: () => {} };
+    const card = mountCostPeriod(host, { load: (period, signal) => { signals.push(signal); return new Promise(() => {}); } });
+    card.reload();
+    card.reload();
+    assert.equal(signals.length, 2);
+    assert.equal(signals[0].aborted, true);
+    assert.equal(signals[1].aborted, false);
 });

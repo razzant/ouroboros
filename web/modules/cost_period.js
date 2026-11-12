@@ -13,7 +13,7 @@ const CLASS_WORDS = [['cache_write', 'Cache writes'], ['cache_read', 'Cache read
 const WRITE_WORDS = Object.freeze({
     first_request: 'First request of a task',
     entered_model: 'A running task switched to this model',
-    tools_changed: 'Tool descriptions changed',
+    tools_changed: 'The tool list changed',
     system_changed: 'A part of the request start changed',
     history_rewritten: 'Earlier history was rewritten',
     paused: 'Paused longer than the cache lifetime',
@@ -47,19 +47,22 @@ export function costPeriodPresentation(view) {
         const notes = [];  // one line under the parts: what the amounts leave out, then the price ratio
         if (!split && Number(row.cost) > 0) notes.push('Not split by class: these calls have no price list, token counts or named cache lifetime at hand.');
         else if (Number(row.unshared_cost) > 0) notes.push(`${formatUsd(row.unshared_cost)} is not split (no price list, token counts or named cache lifetime for those calls).`);
-        if (row.uncounted_calls) notes.push(`${number(row.uncounted_calls)} ${row.uncounted_calls === 1 ? 'call' : 'calls'} reported no cache counts: `
+        if (row.uncounted_calls) notes.push(`${number(row.uncounted_calls)} ${row.uncounted_calls === 1 ? 'call' : 'calls'} reported no complete cache counts: `
             + `${compactTokens(row.uncounted_input_tokens)} input tokens are in no class.`);
         if (row.open_rows) notes.push(`${number(row.open_rows)} ${row.open_rows === 1 ? 'call is' : 'calls are'} still open.`);
         if (row.unpriced_rows) notes.push(`${number(row.unpriced_rows)} ended without a price.`);
         if (row.write_price_in_reads) {
             const lifetime = { '5m': ' for 5 minutes', '1h': ' for 1 hour' }[row.write_price_lifetime] || '';
-            notes.push(`One token written${lifetime} costs ${number(row.write_price_in_reads)} read tokens here.`);
+            notes.push(`One token written${lifetime} costs ${number(row.write_price_in_reads)} read tokens at this model\u2019s base price.`);
         }
         // Where no cost can be shared (a subscription model, a call without a price list) the bar is by tokens, and says so.
         const counts = CLASS_WORDS.map(([key]) => Math.max(0, Number(row.tokens?.[key]) || 0));
         const counted = counts.reduce((sum, count) => sum + count, 0);
         const byMoney = Boolean(split && shared > 0);
-        if (!byMoney && counted > 0) notes.push('The bar is by tokens: there is no recorded cost to split.');
+        if (!byMoney && counted > 0) {
+            notes.push(row.cost === null || row.cost === undefined ? 'The bar is by tokens: there is no recorded cost.'
+                : 'The bar is by tokens: the recorded cost could not be split.');
+        }
         return {
             name: row.model,
             // No call with a recorded price: the amount is unknown (a subscription, a route without a price list), never $0.
@@ -107,8 +110,8 @@ const writesHtml = (writes) => (writes.length ? `<h4 class="costs-period-subtitl
         <table class="cost-table costs-period-writes"><thead><tr><th>Before the write</th><th class="cost-cell-right">Calls</th><th class="cost-cell-right">Written</th><th class="cost-cell-right">Share of cost</th></tr></thead>
         <tbody>${writes.map((row) => `<tr><td>${escapeHtmlAttr(row.label)}</td><td class="cost-cell-right">${row.calls}</td><td class="cost-cell-right">${row.tokens}</td><td class="cost-cell-right">${row.cost}</td></tr>`).join('')}</tbody></table>` : '');
 
-async function fetchPeriod(period) {
-    const response = await apiFetch(`/api/cost-breakdown?period=${encodeURIComponent(period)}`);
+async function fetchPeriod(period, signal) {
+    const response = await apiFetch(`/api/cost-breakdown?period=${encodeURIComponent(period)}`, { signal });
     return (await response.json()).period;
 }
 
@@ -131,6 +134,7 @@ export function mountCostPeriod(host, { load = fetchPeriod, period = '24h' } = {
     const noteEl = host.querySelector('.costs-period-note');
     let chosen = period;
     let read = 0;
+    let pending = null;  // the read a later choice abandons gives its connection back at once
     async function reload() {
         const mine = ++read;
         host.querySelectorAll('[data-cost-period]').forEach((button) => {
@@ -139,8 +143,11 @@ export function mountCostPeriod(host, { load = fetchPeriod, period = '24h' } = {
             button.setAttribute('aria-pressed', String(active));
         });
         status.textContent = 'Counting…';
+        pending?.abort();
+        const control = typeof AbortController === 'function' ? new AbortController() : null;
+        pending = control;
         let view = null;
-        try { view = await load(chosen); } catch { view = null; }
+        try { view = await load(chosen, control?.signal); } catch { view = null; }
         if (mine !== read) return;  // a later choice owns the card
         const shown = costPeriodPresentation(view);
         status.textContent = '';

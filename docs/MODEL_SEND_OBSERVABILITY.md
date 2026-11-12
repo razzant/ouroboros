@@ -282,12 +282,17 @@ and an `append` beside a large write is not a contradiction this record resolves
   Its start was earlier, so the time from `base_at` to an attempt's own dispatch is at
   most the time between the two starts (a cache lifetime runs from a request's start).
 
-A candidate becomes its route's base when an answer of that route arrives: the
-accepted answer (it must start with the candidate that waited for it; a send adds its
-own later rows, as its clock line), or, at the next measurement, any answer the loop
-saw for it and did not accept (an empty or output-limited reply was still written and
-charged). A candidate never answered moves no base; an answer of another route, or a
-route sent unmeasured, ends its wait. A retry inside one call carries its call's fact.
+A candidate becomes its route's base when an answer of that route that read its
+input arrives (`note_prefix_answer`, where the response arrives: input tokens
+reported, no provider error; a body error read nothing): the accepted answer (it must
+start with the candidate that waited for it; a send adds its own later rows, as its
+clock line), or, at the next measurement, an answer the loop did not accept (an empty
+or output-limited reply was still written and charged); the waiting candidate and the
+answer ride a continuation checkpoint. A candidate never answered moves no base; an
+answer of another route, or a route sent unmeasured, ends its wait. A retry inside one
+call after its own answer extends that answered request (`refresh_attempt_prefix`);
+a retry after a failed send keeps its call's fact. Seams named after the measurement
+stay for the next request.
 Sends outside Main's loop (helpers, reviews) carry no fact; the forced final takes its
 fact from the input it measured. The routes' records ride the continuation
 checkpoint with the observer's other state (`OBSERVER_STATE_ATTRS`).
@@ -317,7 +322,8 @@ that reported both cache counts; the others are counted apart (`uncounted_calls`
 `uncounted_input_tokens`), never as uncached. A model none of whose calls has a
 recorded price has `cost: null`. `write_price_in_reads` is how many read tokens one
 written token costs at `write_price_lifetime` (the lifetime most of the model's
-tokens were written at) at the model's base price.
+tokens were written at, by the provider's split when it accounts for every write)
+at the model's base price.
 Delegated subscription sessions and unmetered dispatches carry no reservation time
 and are not in a period.
 The tariff is read without a fetch: what the process holds, else the install's
