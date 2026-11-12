@@ -759,7 +759,7 @@ def test_the_notice_offers_a_result_review_only_where_this_actor_can_ask_for_one
     if mode == "auto_without_review_tool":
         tools.available_tools = lambda: ["write_file", "verify_and_record", "finish_task"]
     notice = _pre_delivery_notice(tools, tmp_path, "t", trace, [])
-    assert notice.startswith("Before delivery: nothing has examined this result since it last changed.")
+    assert notice.startswith("Before delivery: no recorded check (verify_and_record) or result review has examined")
     assert ('review_change with subject="result"' in notice) is (mode == "auto")
     assert ("off on this install" in notice) is (mode == "off")
     assert "verify_and_record runs the check" in notice and "or deliver it as it is" in notice

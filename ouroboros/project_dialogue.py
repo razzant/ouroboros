@@ -800,7 +800,7 @@ TASK_CAUSE_PHRASES = {
     "terminal_plan_review_open": "The plan review was still open when this answer was delivered",
     "child_results_deferred": "Some sub-task results were deferred instead of being folded into this answer",
     "tool_failure": "A tool this task used failed and nothing recovered it",
-    "receipt_absent": "Nothing checked this result after its last change: no check ran and no result review was asked for after it; this does not establish whether other checks ran.",
+    "receipt_absent": "No recorded check or result review examined this result after its last change; this does not establish whether other checks ran.",
     "verification_red_unreconciled": "A check of this result failed and no later run of the same check passed.",
     "children_undecided": "Some finished sub-task results carry no recorded decision on how this answer used them.",
     "expected_output_ungrounded": "A retired check recorded no tool calls or structured answer; it does not assess the written result.",

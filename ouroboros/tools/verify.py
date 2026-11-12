@@ -723,7 +723,7 @@ def _verify_and_record(
     # v6.54.4 criterion provenance (FLAG-ONLY, status never changes): where did
     # this success criterion come from — stated by the task, or synthesized by
     # the agent? agent_defined receipts surface to the acceptance reviewer and
-    # feed a one-shot advisory nudge (mirrors the masked-verification pattern).
+    # in the record (the call's own result says it when the check runs).
     # Default agent_defined: an UNDECLARED provenance must not read as task-stated.
     _source = str(criterion_source or "").strip().lower()
     receipt["criterion_source"] = _source if _source in ("task_stated", "agent_defined") else "agent_defined"
@@ -888,7 +888,7 @@ def _verify_and_record(
                 receipt["artifacts_missing_after"] = _missing_after
         # Exit-masking sensor (v6.52.2, FLAG-ONLY — status unchanged): record when the check's own
         # shell pipeline can launder the real exit code (e.g. `... | tail`, `|| true`). Surfaced to
-        # the advisory reviewer + a one-shot nudge so a PASS over a masked check is reconsidered.
+        # the advisory reviewer and in this call's own result, so a PASS over a masked check is reconsidered.
         _masked, _mask_reasons = _check_has_exit_masking(argv)
         if _masked:
             receipt["check_exit_masking"] = True

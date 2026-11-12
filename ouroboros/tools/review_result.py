@@ -590,7 +590,7 @@ def _findings_text(record: Dict[str, Any], *, blocking: bool, required: bool = T
                       "revise the result" + ("" if required else " and ask for its review"))
                   + ("" if required and not raised else " with review_change(subject=\"result\")")
                   + " or stop the task explicitly.") if blocking else
-                 "You decide: deliver it, or revise it; nothing is delivered until you answer again."
+                 "You decide: deliver it, or revise it (a revised result is not reviewed again unless you ask); nothing is delivered until you answer again."
                  if aggregate == "PASS" and not revised else
                  "You decide: revise the result, deliver it as it is" + ("" if aggregate == "PASS" else " with your reasons")
                  + " (finish_task rationale), or ask for another review with review_change(subject=\"result\"), which "

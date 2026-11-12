@@ -329,7 +329,8 @@ def _recorded_fact(drive_root: Any, task_id: str, receipt_rows: List[Dict[str, A
     if red is not None:
         check, code = str(red.get("check") or "").strip(), red.get("returncode")
         matcher = "; exit 0 but the expected text was not found" if code == 0 and red.get("matched") is False else ""
-        parts.append(f"latest check RED{f' on `{check[:200]}`' if check else ''}"
+        check = check[:200] + ("…" if len(check) > 200 else "")
+        parts.append(f"latest check RED{f' on `{check}`' if check else ''}"
                      f"{f' (exit {code}{matcher})' if code is not None else ''} with no later pass of the same check")
     return "; ".join(parts) or "no verification receipt"
 
@@ -412,7 +413,8 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
                    "verdict comes back before delivery)"] if can_review else [])
         deliver = "deliver it as it is and say in the answer what was not checked, which the record then shows"
         lines += [
-            "Before delivery: nothing has examined this result since it last changed.",
+            "Before delivery: no recorded check (verify_and_record) or result review has examined this result since it "
+            "last changed.",
             f"Changed: {_changed_fact(llm_trace)}.",
             f"Recorded about it: {_recorded_fact(drive_root, task_id, receipt_rows)}.",
             f"This answer is read by: {_reader_fact(tools._ctx)}.",
@@ -443,7 +445,7 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
         return ""
     if not lines[0].startswith("Before delivery"):
         lines.insert(0, "Before delivery:")
-    return "\n".join([*lines, "This notice comes once; your next answer is delivered as you choose."])
+    return "\n".join([*lines, "Your next answer is delivered as you choose."])
 
 
 def _claim_pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],

@@ -23,11 +23,9 @@ from ouroboros import _outcome_receipts
 # The receipt projections below parameterize the reconciliation core and live
 # with it; these historical names stay resolvable through this module.
 from ouroboros._outcome_receipts import (  # explicit re-exports, one statement
-    latest_agent_defined_verification as latest_agent_defined_verification,
     latest_unreconciled_failed_receipt as latest_unreconciled_failed_receipt,
     latest_unreconciled_failed_verification as latest_unreconciled_failed_verification,
     latest_unreconciled_masked_pass as latest_unreconciled_masked_pass,
-    latest_unreconciled_masked_verification as latest_unreconciled_masked_verification,
 )
 # Tool-call trace vocabulary + execution-axis classifier (leaf module). Re-exported
 # here so `from ouroboros.outcomes import _classify_tool_errors/_POLICY_DENIAL_STATUSES/...`
