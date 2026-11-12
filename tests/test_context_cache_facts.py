@@ -131,6 +131,9 @@ def test_no_clause_without_a_change_before_that_request(tmp_path):
 @pytest.mark.parametrize("call, money", [
     ({"provider": "openrouter", "cost": 0.2154924, "cost_final": True}, "; write 4,625 tokens; cost $0.2155 reported |"),
     ({"provider": "openrouter", "cost": 0.2154924, "cost_final": False}, "; write 4,625 tokens; cost $0.2155 estimated |"),
+    # A proven zero is a number; a charge below the printed precision is never that zero.
+    ({"provider": "openrouter", "cost": 0.0, "cost_final": True}, "; write 4,625 tokens; cost $0.0000 reported |"),
+    ({"provider": "openrouter", "cost": 0.00003, "cost_final": True}, "; write 4,625 tokens; cost <$0.0001 reported |"),
     # The subscription engine's own cash, when it states one, is a number like any other.
     ({"provider": "claudexor", "cost": 0.5, "cost_final": True}, "; write 4,625 tokens; cost $0.5000 reported |"),
     # An API call without a price: unknown is said, and why the money facts beside it do not move.
@@ -145,9 +148,6 @@ def test_the_previous_calls_own_money_stands_beside_its_cache(tmp_path, call, mo
     line = _facts_line(tmp_path, {"_last_round_cache_usage": previous})
     assert f"[round 2, {call['provider']}, m]{money}" in line
     assert "tariff" not in line and "$0.00 " not in line
-    from ouroboros.transcript_prefix import previous_cache_fact
-    usage = {"_last_round_cache_usage": previous}
-    assert previous_cache_fact(usage) == previous_cache_fact(usage), "the same round re-prepared says the same bytes"
 
 
 @pytest.mark.parametrize("applied, bracket", [

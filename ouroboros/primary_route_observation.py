@@ -40,10 +40,13 @@ def accepted_call(usage: dict, round_idx) -> dict:
 
 
 def call_cost_words(call: dict) -> str:
-    """One accepted call's own cost as its producer stated it; empty when it stated none."""
+    """One accepted call's own cost as its producer stated it; empty when it stated none.
+    A positive amount below the printed precision says so: a charge never reads as a proven zero."""
     cost = call.get("cost")
-    known = isinstance(cost, (int, float)) and not isinstance(cost, bool)
-    return f"cost ${float(cost):.4f} {'reported' if call.get('cost_final') is True else 'estimated'}" if known else ""
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+        return ""
+    amount = "<$0.0001" if 0 < cost < 0.00005 else f"${float(cost):.4f}"
+    return f"cost {amount} {'reported' if call.get('cost_final') is True else 'estimated'}"
 
 
 def _call_money(call: dict) -> str:
