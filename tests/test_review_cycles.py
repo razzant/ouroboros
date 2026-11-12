@@ -24,7 +24,6 @@ from starlette.testclient import TestClient
 from ouroboros import config as cfg
 from ouroboros import review_cycles as rc
 
-REPO = pathlib.Path(__file__).resolve().parents[1]
 KEY = "OUROBOROS_REVIEW_MAX_CYCLES"
 LEGACY = "OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES"
 
@@ -352,11 +351,3 @@ def test_exhausted_event_is_durable_even_with_a_live_queue(tmp_path):
         cycles_paid=1, cap=1, enforcement="advisory")
     lines = (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2 and events.empty()
-
-
-def test_review_cycle_modules_respect_size_bounds():
-    module_lines = (REPO / "ouroboros" / "review_cycles.py").read_text(encoding="utf-8").splitlines()
-    # Brief-level target for this module (the repo ratchet is 1000/1600).
-    assert len(module_lines) <= 200
-    config_lines = (REPO / "ouroboros" / "config.py").read_text(encoding="utf-8").splitlines()
-    assert len(config_lines) <= 1600

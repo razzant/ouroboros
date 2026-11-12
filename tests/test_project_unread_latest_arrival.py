@@ -363,9 +363,9 @@ def test_the_bounded_search_passes_a_project_question_on_to_mains_own_reply(room
     assert recent["latest_message"] == {"history_id": room.row_id("main reply"), "out_of_order": True}
 
 
-def test_a_room_read_while_the_project_registry_is_unreadable_names_no_arrival_and_main_reads_on(room):
+def test_a_room_read_while_the_project_registry_is_unreadable_names_no_arrival_and_main_refuses(room):
     """Unclassified, the room is read through Main's lens: its arrival is unknown, never absent
-    (which the bottom would decide). Main is known without the registry and reads as before."""
+    (which the bottom would decide). Main, "every room that is not a Project", refuses (#3067)."""
     room.deliver("root answer", 5)
     registry = room.root / "state" / "projects.json"
     intact = registry.read_bytes()
@@ -373,7 +373,7 @@ def test_a_room_read_while_the_project_registry_is_unreadable_names_no_arrival_a
     try:
         assert room.read()["window"]["latest_message"] is None
         main = asyncio.run(history.make_chat_history_endpoint(room.root)(SimpleNamespace(query_params={})))
-        assert main.status_code == 200 and "latest_message" not in json.loads(main.body)["window"]
+        assert main.status_code == 503 and json.loads(main.body)["reason_code"] == "history_source_unavailable"
     finally:
         registry.write_bytes(intact)
     assert room.read()["window"]["latest_message"] == {"history_id": room.row_id("root answer"), "out_of_order": False}
