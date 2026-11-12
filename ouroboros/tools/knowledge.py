@@ -169,30 +169,41 @@ def _omitted(text: str) -> dict:
     return {"omitted": True, "chars": len(text), "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
 
 
+_DELTA_LISTS = ("removed_headings", "added_headings", "removed_sections")
+
+
 def _bound_delta_meta(meta: dict) -> None:
     """Keep the tool receipt inside its existing metadata limit; history holds the full delta.
 
-    Over the limit, each list gives way to its count, an omission flag and its sha256, in this
-    order: ``removed_headings``, ``removed_sections``; then the outline, then the replaced
-    version's reason give way to their size, sha256 and the read that shows them.
+    Over the limit, the largest of what can give way goes first, until the receipt fits: a delta
+    list (``_DELTA_LISTS``; an empty one has nothing to give) becomes its count, an omission flag
+    and its sha256; the bare append's outline and the replaced version's reason become their size,
+    sha256 and the read that shows them. A transport bound on the receipt, never a judgment of
+    what matters: a small list is not dropped while a larger one overflows.
     """
-    for field in ("removed_headings", "removed_sections"):
-        delta = meta.get("knowledge_delta") or {}
-        values = delta.get(field)
-        if not isinstance(values, list) or _meta_bytes(meta) <= _MAX_META_BYTES:
-            continue
-        meta["knowledge_delta"] = {**delta, field: [], f"{field}_count": len(values), f"{field}_omitted": True,
-                                   f"{field}_sha256": hashlib.sha256(
-                                       json.dumps(values, ensure_ascii=False).encode("utf-8")).hexdigest()}
-    source = meta.get("knowledge_source") or {}
-    reader = {"tool": "knowledge_read", "arguments": {**(source.get("read") or {}).get("arguments", {})}}
-    if isinstance(meta.get("knowledge_outline"), str) and _meta_bytes(meta) > _MAX_META_BYTES:
-        meta["knowledge_outline"] = {**_omitted(meta["knowledge_outline"]),
-                                     "read": {**reader, "arguments": {**reader["arguments"], "view": "outline"}}}
-    previous = meta.get("knowledge_previous")
-    if isinstance(previous, dict) and isinstance(previous.get("reason"), str) and _meta_bytes(meta) > _MAX_META_BYTES:
-        meta["knowledge_previous"] = {**previous, "reason": {**_omitted(previous["reason"]),
-                                      "read": {**reader, "arguments": {**reader["arguments"], "view": "history"}}}}
+    arguments = ((meta.get("knowledge_source") or {}).get("read") or {}).get("arguments", {})
+
+    def read(view: str) -> dict:
+        return {"tool": "knowledge_read", "arguments": {**arguments, "view": view}}
+
+    while _meta_bytes(meta) > _MAX_META_BYTES:
+        delta, previous = meta.get("knowledge_delta") or {}, meta.get("knowledge_previous")
+        options = [(field, delta[field]) for field in _DELTA_LISTS if isinstance(delta.get(field), list) and delta[field]]
+        if isinstance(meta.get("knowledge_outline"), str):
+            options.append(("outline", meta["knowledge_outline"]))
+        if isinstance(previous, dict) and isinstance(previous.get("reason"), str):
+            options.append(("reason", previous["reason"]))
+        if not options:
+            return
+        field, value = max(options, key=lambda option: len(json.dumps(option[1], ensure_ascii=True)))
+        if field == "outline":
+            meta["knowledge_outline"] = {**_omitted(value), "read": read("outline")}
+        elif field == "reason":
+            meta["knowledge_previous"] = {**previous, "reason": {**_omitted(value), "read": read("history")}}
+        else:
+            meta["knowledge_delta"] = {**delta, field: [], f"{field}_count": len(value), f"{field}_omitted": True,
+                                       f"{field}_sha256": hashlib.sha256(
+                                           json.dumps(value, ensure_ascii=False).encode("utf-8")).hexdigest()}
 
 
 def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -> str:

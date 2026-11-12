@@ -712,7 +712,7 @@ def write_knowledge_note(
     replacement does. History retains the authored ``summary`` only when supplied;
     the delta carries ``old_chars``/``new_chars``/``change_chars``, the characters
     ``removed_chars``/``added_chars`` from the exact change of the two texts
-    (``text_change``), ``removed_headings``, ``removed_sections`` and
+    (``text_change``), ``removed_headings``/``added_headings``, ``removed_sections`` and
     ``body_changed``/``summary_changed`` (heading and changed facts are ``None``
     when a side has no parsed source). It keeps the version it publishes whole;
     the version it replaces stays inline unless this note's newest row within the
@@ -807,7 +807,8 @@ def write_knowledge_note(
                                         {"old_chars": len(current.text), "new_chars": len(current.text),
                                          "old_body_chars": body_chars(current), "new_body_chars": body_chars(current),
                                          "change_chars": 0, "removed_chars": 0, "added_chars": 0, "removed_headings": [],
-                                         "removed_sections": [], "body_changed": False, "summary_changed": False})
+                                         "added_headings": [], "removed_sections": [], "body_changed": False,
+                                         "summary_changed": False})
         # A body edit keeps the preamble bytes; a revised summary (edit or append)
         # may re-render them only if every other field keeps its value (``type``
         # defaults, in the merge's key order), compared by exact YAML spelling.
@@ -825,8 +826,9 @@ def write_knowledge_note(
         after = (Counter((heading.level, heading.title) for heading in updated.source.headings)
                  if updated.source else Counter())
         known = (current is None or current.source) and updated.source
-        removed_headings = (sorted("#" * level + " " + title for (level, title) in (before - after).elements())
-                            if known else None)
+        removed_headings, added_headings = (
+            sorted("#" * level + " " + title for (level, title) in (left - right).elements()) if known else None
+            for left, right in ((before, after), (after, before)))
         # Body bytes and the resident (index) summary, each compared as published;
         # an unparseable side leaves both unknown, like its heading delta.
         old_body, old_summary = ((current.raw[current.source.body_span.start_byte:], current.summary)
@@ -835,7 +837,7 @@ def write_knowledge_note(
         delta = {"old_chars": len(old_text), "new_chars": len(updated.text),
                  "old_body_chars": body_chars(current), "new_body_chars": body_chars(updated),
                  "change_chars": len(updated.text) - len(old_text), "removed_chars": removed_chars,
-                 "added_chars": added_chars, "removed_headings": removed_headings,
+                 "added_chars": added_chars, "removed_headings": removed_headings, "added_headings": added_headings,
                  "removed_sections": knowledge_versions.removed_sections(current, updated),
                  "body_changed": old_body != raw[updated.source.body_span.start_byte:] if known else None,
                  "summary_changed": old_summary != updated.summary if known else None}

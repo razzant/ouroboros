@@ -149,7 +149,8 @@ def test_exact_edit_preserves_other_knowledge_and_reports_its_delta(tmp_path):
     assert change["delta"] == {"old_chars": len(original.text), "new_chars": len(updated.text),
                                 "old_body_chars": store.body_chars(original), "new_body_chars": store.body_chars(updated),
                                 "change_chars": len(updated.text) - len(original.text), "removed_headings": [],
-                                "removed_chars": 3, "added_chars": 3, "removed_sections": [],  # "Old" → "New"
+                                "added_headings": [], "removed_chars": 3, "added_chars": 3,  # "Old" → "New"
+                                "removed_sections": [],
                                 "body_changed": True, "summary_changed": False}
     assert json.loads(reply.split("\n", 1)[1])["knowledge_delta"] == change["delta"]
 
@@ -221,7 +222,11 @@ def test_large_removed_heading_delta_keeps_tool_receipt_and_full_history(tmp_pat
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
     target = address(tmp_path, "large-headings")
     body = "".join(f"# Раздел {i:03d}\n" for i in range(240))
-    original = store.write_knowledge_note(target, body).current
+    created = json.loads(tools._knowledge_write(ctx, "large-headings", body, scope="global").split("\n", 1)[1])
+    assert created["knowledge_delta"]["added_headings_count"] == 240 and created["knowledge_delta"]["added_headings_omitted"]
+    assert "removed_headings_omitted" not in created["knowledge_delta"]  # an empty list has nothing to give way
+    assert len(history(target)[-1]["delta"]["added_headings"]) == 240
+    original = store.read_knowledge_note(target)
     reply = tools._knowledge_write(ctx, "large-headings", "# Short\n", mode="edit",
                                    old_str=body, scope="global", expected_revision=original.revision)
     assert reply.startswith("✅")
@@ -231,6 +236,8 @@ def test_large_removed_heading_delta_keeps_tool_receipt_and_full_history(tmp_pat
     reported = json.loads(reply.split("\n", 1)[1])["knowledge_delta"]
     assert reported["removed_headings_count"] == 240
     assert reported["removed_headings_omitted"] is True
+    assert reported["removed_sections_count"] == 240 and reported["removed_sections_omitted"] is True
+    assert reported["added_headings"] == ["# Short"]  # the largest lists give way first; a short one stays whole
     assert reported["old_chars"] == len(original.text)
 
 
@@ -254,16 +261,20 @@ def test_edit_delta_counts_real_markdown_headings_including_duplicates(tmp_path)
     first = store.write_knowledge_note(target, "", mode="edit",
                                        old_str="# Repeat\n\nOnly the first section.\n\n",
                                        expected_revision=original.revision)
-    assert first.ok and first.delta["removed_headings"] == ["# Repeat"]
+    assert first.ok and first.delta["removed_headings"] == ["# Repeat"] and first.delta["added_headings"] == []
     second = store.write_knowledge_note(target, "", mode="edit", old_str="Setext\n------\n\n",
                                         expected_revision=first.current.revision)
     assert second.ok and second.delta["removed_headings"] == ["## Setext"]
     fenced = store.write_knowledge_note(target, "ordinary text", mode="edit", old_str="# Not a heading",
                                         expected_revision=second.current.revision)
-    assert fenced.ok and fenced.delta["removed_headings"] == []
+    assert fenced.ok and fenced.delta["removed_headings"] == [] and fenced.delta["added_headings"] == []
     noop = store.write_knowledge_note(target, "ordinary text", mode="edit", old_str="ordinary text",
                                       expected_revision=fenced.current.revision)
     assert noop.ok and noop.reason == "unchanged" and noop.delta["change_chars"] == 0
+    assert noop.delta["added_headings"] == []
+    again = store.write_knowledge_note(target, "# Repeat\n\nBack.\n\n## Новый\n", mode="append")
+    assert again.delta["added_headings"] == ["# Repeat", "## Новый"] and again.delta["removed_headings"] == []
+    assert history(target)[-1]["delta"]["added_headings"] == ["# Repeat", "## Новый"]  # recorded at write time
 
 
 def test_edit_is_an_opt_in_tool_mode_the_backlog_shares(tmp_path):
@@ -405,7 +416,7 @@ def test_overwrite_malformed_legacy_source_discloses_unknown_heading_delta(tmp_p
     assert old.parse_error and old.source is None
     changed = store.write_knowledge_note(target, "---\ntype: note\n---\n# New heading\n",
                                          expected_revision=old.revision)
-    assert changed.ok and changed.delta["removed_headings"] is None
+    assert changed.ok and changed.delta["removed_headings"] is None and changed.delta["added_headings"] is None
     assert history(target)[-1]["delta"]["removed_headings"] is None
 
 

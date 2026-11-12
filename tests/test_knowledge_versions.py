@@ -7,6 +7,7 @@ import re
 
 from ouroboros import knowledge as store
 from ouroboros import knowledge_versions as versions
+from ouroboros import markdown_source
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext
 
@@ -72,6 +73,24 @@ def test_history_lists_versions_newest_first_marks_the_current_one_and_names_gap
     assert f"expected_revision={third.revision!r}" in listing
     page = tools._knowledge_read(ctx, TOPIC, view="history", start_char=10, end_char=60)
     assert body(page) == body(listing)[10:60] and '"complete_chars": ' in page
+
+
+def test_history_prints_the_headings_each_row_recorded_and_parses_no_earlier_version(tmp_path, monkeypatch):
+    target = address(tmp_path)
+    first = store.write_knowledge_note(target, "# Река\n\nОдин.\n").current
+    second = store.write_knowledge_note(target, "# Река\n\nОдин.\n\n## Мост\n\nНовый.\n", expected_revision=first.revision)
+    assert second.delta["added_headings"] == ["## Мост"] and second.delta["removed_headings"] == []
+    third = store.write_knowledge_note(target, "Два.", "edit", second.current.revision, old_str="Один.")
+    assert third.delta["added_headings"] == []
+
+    def parsed_again(*_args, **_kwargs):
+        raise AssertionError("the listing parsed a version again instead of printing its row")
+
+    monkeypatch.setattr(store, "parse_markdown_source", parsed_again)
+    monkeypatch.setattr(markdown_source, "parse_markdown_source", parsed_again)
+    rows = [line for line in versions.render_history(third.current).splitlines() if line.startswith("- ")]
+    assert "headings added" not in rows[0] and "headings added: ## Мост" in rows[1]
+    assert "headings added: # Река" in rows[2]  # the creating row recorded every heading it brought
 
 
 def test_a_digest_era_row_says_its_text_is_not_stored(tmp_path):

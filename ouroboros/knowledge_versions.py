@@ -323,6 +323,9 @@ def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
             f"{item.get('heading')} ({item.get('chars')} chars)" for item in sections if isinstance(item, Mapping)))
     elif isinstance(headings, list) and headings:
         parts.append("headings removed: " + "; ".join(str(item) for item in headings))
+    added = delta.get("added_headings")  # recorded at write time: no earlier version is parsed again here
+    if isinstance(added, list) and added:
+        parts.append("headings added: " + "; ".join(str(item) for item in added))
     if row.get("reverted_from"):
         parts.append(f"reverted_from {row['reverted_from']}")
     if not row["text_stored"]:
