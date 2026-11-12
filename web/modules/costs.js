@@ -6,6 +6,7 @@ import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
 import { allowanceHold, allowanceText } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
+import { mountCostPeriod } from './cost_period.js';
 
 const COST_BUDGET_INPUTS = {
     TOTAL_BUDGET: 's-budget',
@@ -297,9 +298,11 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
                 <p class="ui-result" id="budget-save-status" role="status" aria-live="polite"></p>
             </div>
         </section>
+        <div id="costs-period"></div>
         <div class="costs-tables">${TABLES.map(tableCardHtml).join('')}</div>
     `;
     mount.appendChild(page);
+    const periodCard = mountCostPeriod(page.querySelector('#costs-period'));  // its own read: the period governs that card alone
     const budgetCard = page.querySelector('.costs-budget');
     const statusEl = page.querySelector('#budget-save-status');
     // An edit of either field starts a new subject: the last save's words go (DESIGN "Status and chips").
@@ -454,7 +457,7 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
         } catch {}
     }
 
-    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); });
+    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); periodCard.reload(); });
     // The allowance's doors: a held wake's card in Main, and the Consciousness tab.
     budgetCard.addEventListener('click', (event) => {
         if (openTaskReference(event)) return;
@@ -521,7 +524,9 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
     }
 
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
-        if (event.detail?.tab === 'costs' && state.activePage === 'dashboard') refreshCostsPanel();
+        if (event.detail?.tab !== 'costs' || state.activePage !== 'dashboard') return;
+        refreshCostsPanel();
+        periodCard.reload();  // read when the tab is looked at, never at app start or on a settings save
     });
     window.addEventListener('ouro:settings-updated', (event) => {
         if (event.detail?.source === 'costs') return;
