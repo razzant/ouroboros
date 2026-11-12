@@ -1206,10 +1206,12 @@ def test_status_snapshot_names_the_model_its_next_wake_thinks_with(clock, monkey
     assert route() == {"value": "anthropic/claude-opus-5-5", "layer": "consciousness", "local": False}
     monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "")
     assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": False}
-    # An empty slot whose own local flag differs from Main's decides the route: Main's model, run locally.
+    # An empty slot's own box, checked under a cloud Main, decides the route: Main's model, run locally.
     monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "true")
     assert route() == {"value": "openai/gpt-6-astra", "layer": "consciousness", "local": True}
     monkeypatch.setenv("USE_LOCAL_MAIN", "true")  # equal flags: Main's own route, local
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": True}
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "false")  # an unchecked box follows a local Main (owner, #3272)
     assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": True}
     monkeypatch.setattr(route_choice, "following_route", lambda *_a, **_k: (_ for _ in ()).throw(OSError("unreadable")))
     assert route() is None

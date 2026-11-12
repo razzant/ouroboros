@@ -97,8 +97,8 @@ def _iso(ts: float) -> str:
 def model_route() -> Optional[Dict[str, Any]]:
     """The model the next wake thinks with, read from the settings as they are now (no network, no store), with
     the route's local flag: ``layer`` ``consciousness`` when its own slot decides the route (a model of its own, or
-    Main's under the slot's own local flag: ``route_choice.model_role_slot_override``), else ``main``, the route
-    a wake follows (``following_route``). ``None`` when it cannot be read."""
+    Main's run locally when its box is checked under a cloud Main: ``route_choice.model_role_slot_override``), else
+    ``main``, the route a wake follows (``following_route``). ``None`` when it cannot be read."""
     from ouroboros.route_choice import following_route, model_role_slot_override
 
     try:
