@@ -19,7 +19,10 @@ def short_gist_frame(message: dict) -> dict:
 
 
 def short_schedule_gists(payload: dict) -> dict:
-    """The next scheduled run reads the full cached outcome; only its UI row is shortened."""
+    """The next scheduled run reads the full cached outcome; only its UI row is shortened. An answer that lists no
+    rows (an unavailable reader's) passes as it is."""
+    if "tasks" not in payload:
+        return payload
     rows = []
     for row in payload.get("tasks", ()):
         for key in ("outcome", "last_outcome"):

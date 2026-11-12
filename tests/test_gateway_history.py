@@ -43,6 +43,16 @@ def test_completion_gist_is_short_on_cards_room_rows_and_live_frames(tmp_path, s
     assert load_task_result(tmp_path, task_id)["wake_summary"] == terminal["wake_summary"] == summary
 
 
+def test_schedule_gists_shorten_listed_rows_and_leave_other_answers_as_they_are():
+    from ouroboros.gateway.completion_gist import short_schedule_gists
+    assert short_schedule_gists({"available": False}) == {"available": False}  # an unavailable reader's answer
+    rows = {"available": True, "tasks": [{"id": "s1", "last_outcome": {"line": "Done. 42 rows in /tmp/r.csv."}},
+                                         {"id": "s2", "last_outcome": {"line": "Host notice. Detail.", "notice": True}}]}
+    shown = short_schedule_gists(rows)
+    assert shown["tasks"][0]["last_outcome"]["line"] == "Done." and shown["tasks"][1] == rows["tasks"][1]
+    assert rows["tasks"][0]["last_outcome"]["line"] == "Done. 42 rows in /tmp/r.csv."  # the cached outcome stays whole
+
+
 def test_chat_history_preserves_subagent_lane_group_metadata(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()
