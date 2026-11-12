@@ -122,9 +122,12 @@ class WorkTail(TypedDict):
 
 
 class WorkTurn(TypedDict):
-    """What waits for the owner: an unanswered question or an action only the owner takes."""
+    """What waits for the owner: ``question`` (a task waits for the answer), ``open_question`` (a current question
+    Main's pill counts while its work goes on, after it ended, or one held by no work at all) or ``action`` (only the
+    owner takes it). ``code`` ``delivery_unknown`` marks an ``open_question`` that was answered but whose delivery a
+    restart left unknown. In a room's ``turn`` an item a work holds names its ``work_id``; one no work holds has none."""
 
-    kind: str
+    kind: str  # question | open_question | action
     task_id: str
     quiz_id: NotRequired[str]
     wait_id: NotRequired[str]
@@ -186,7 +189,9 @@ class Work(WorkLeadFields):
 
 
 class RoomStatus(TypedDict):
-    """One room's status from its works: the most active work speaks; ``amber`` while something waits for the owner."""
+    """One room's status from its works: the most active work speaks; ``amber`` while something waits for the owner.
+    ``turn`` holds its works' items (with ``work_id``) and the room's own current questions no work holds (without):
+    a room at rest can be the owner's turn."""
 
     activity: str
     transition: str
@@ -200,7 +205,7 @@ class RoomStatus(TypedDict):
 
 class WorkSummary(TypedDict):
     counts: Dict[str, int]
-    turn: int
+    turn: int  # what waits for the owner: each work with a turn, and each standalone question no counted work carries
     confirmed: bool
 
 
