@@ -262,7 +262,7 @@ test('Permissions and checks: three questions and what it is trusted with, doors
     assert.doesNotMatch(settingsPageSource(), / title="/, 'what a row needs to say is in its meta or its result line');
 });
 
-const settingsPageSource = () => fs.readFileSync(new URL('../modules/settings_ui.js', import.meta.url), 'utf8').split('/* ---- What is left of the old tabs')[0]
+const settingsPageSource = () => fs.readFileSync(new URL('../modules/settings_ui.js', import.meta.url), 'utf8')
     + fs.readFileSync(new URL('../modules/settings_safety.js', import.meta.url), 'utf8');
 
 test('what a managed deployment locks is said in its row and what Cyber Pro does to Blocking in the row it changes', () => {

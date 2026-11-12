@@ -4,7 +4,7 @@
  * so it saves itself and says what happened; a row whose control belongs to another module (the theme, the interface
  * size, the notifier, the host's two switches, the language) is drawn here on the same frame and keeps that module's
  * hooks. A page reads the settings when it is shown (`ouro:settings-page-shown` for its path) and after one of its
- * rows saved. Below the pages stand the sections of the old tabs that the editor lanes still take. */
+ * rows saved. */
 import { apiClient, apiFetch } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { getContributions } from './contributions.js';
