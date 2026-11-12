@@ -162,7 +162,6 @@ export function onboardingSettingsDraft({
         ...Object.fromEntries(budgetFields.filter((field) => state[field.stateKey] !== '').map(
             (field) => [field.settingKey, Number(state[field.stateKey] || 0)],
         )),
-        OUROBOROS_REVIEW_ENFORCEMENT: clean(state.reviewEnforcement) || 'advisory',
         OUROBOROS_SKILLS_REPO_PATH: clean(state.skillsRepoPath),
         LOCAL_MODEL_SOURCE: clean(state.localSource),
         LOCAL_MODEL_FILENAME: clean(state.localFilename),

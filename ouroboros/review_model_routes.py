@@ -1,9 +1,9 @@
-"""Reviewer quorum, enforcement and typed model targets.
+"""Reviewer quorum and typed model targets.
 
 The review pool is the marked catalog rows read by
 ``reviewer_slot_config.review_pool_slots``. Factory provider panels are minted
 once by ``subscription_install_presets.factory_review_rows``. This module
-owns the shared quorum and enforcement readers, the per-model typed target,
+owns the shared quorum reader, the per-model typed target,
 and the direct-provider helpers re-exported by config.
 """
 
@@ -16,8 +16,6 @@ from ouroboros.provider_models import (
     resolve_model_target,
     review_model_uses_local,
 )
-from ouroboros.settings_defaults import SETTINGS_DEFAULTS
-from ouroboros.settings_integrity import runtime_setting
 
 
 def _exclusive_direct_remote_provider_env() -> str:
@@ -49,10 +47,3 @@ def resolved_review_model_target(model: str, *, effort: str = "") -> ResolvedMod
     if target.provider_route != "local" and review_model_uses_local(target.model_id):
         target = dataclasses.replace(target, provider_route="local")
     return target
-
-
-def get_review_enforcement() -> str:
-    """Return the configured pre-commit review enforcement mode."""
-    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"])
-    raw = (runtime_setting("OUROBOROS_REVIEW_ENFORCEMENT", default_val) or default_val).strip().lower()
-    return raw if raw in {"advisory", "blocking"} else default_val

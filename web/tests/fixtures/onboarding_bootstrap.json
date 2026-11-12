@@ -348,22 +348,6 @@
         "providerCopy": "Z.ai is present, so the next step prefills Z.ai's own GLM model ids."
       }
     },
-    "reviewModes": [
-      {
-        "className": "advisory",
-        "copy": "Reviewers read plans, results and changes; their findings stay visible and Ouroboros decides what to do with them.",
-        "label": "Advisory",
-        "tone": "Flexible",
-        "value": "advisory"
-      },
-      {
-        "className": "blocking",
-        "copy": "Outside Cyber Pro Access, unresolved critical review findings block commits. Cyber Pro keeps the findings as evidence for Ouroboros's decision.",
-        "label": "Blocking",
-        "tone": "Strict",
-        "value": "blocking"
-      }
-    ],
     "runtimeModes": [
       {
         "className": "light",
@@ -381,14 +365,14 @@
       },
       {
         "className": "pro",
-        "copy": "May change its protected core. Reviews work as you set them.",
+        "copy": "May change its protected core. Reads a review before each change.",
         "label": "Pro",
         "tone": "Power",
         "value": "pro"
       },
       {
         "className": "cyber-pro",
-        "copy": "Full say over itself and this computer. Reviews advise, it decides.",
+        "copy": "Full say over itself and this computer. Asks for reviews when it judges.",
         "label": "Cyber Pro",
         "tone": "Maximum power",
         "value": "cyber_pro"
@@ -410,11 +394,11 @@
         "title": "Choose models"
       },
       {
-        "copy": "Choose how reviews affect work and how much access Ouroboros gets.",
+        "copy": "Choose how much access Ouroboros gets.",
         "footer": "",
         "id": "review_mode",
-        "railCopy": "Strictness + reach",
-        "title": "Choose review and access"
+        "railCopy": "Reach",
+        "title": "Choose access"
       },
       {
         "copy": "Review subscription quotas and optional API spending limits.",
@@ -490,7 +474,6 @@
     "perTaskCostUsd": 50.0,
     "processingPreference": "",
     "providerProfile": "openrouter",
-    "reviewEnforcement": "advisory",
     "runtimeMode": "advanced",
     "safetyModel": "",
     "skillsRepoPath": "",
