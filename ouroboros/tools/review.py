@@ -11,6 +11,7 @@ from ouroboros.utils import (
     estimate_tokens,  # noqa: F401 — patchable seam: fit_triad_prompt resolves it through THIS namespace
     truncate_review_artifact,  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 )
+from ouroboros import config as _cfg  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 from ouroboros.review_overrides import record_override
 from ouroboros.owner_words import owner_words_text
 from ouroboros.review_substrate import SLOT_ID_PREFIX, TYPED_FAILURE_FACT_KEYS, slot_id_for_row  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
