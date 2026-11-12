@@ -379,11 +379,6 @@ def _retry_backoff_sec(attempt: int, is_transient: bool) -> float:
     return min(2.0 ** attempt * 4, _TRANSIENT_BACKOFF_CAP_SEC if is_transient else 30.0)
 
 
-def _deadline_allows(seconds: float, deadline_ts: Optional[float]) -> bool:
-    """The task deadline (epoch seconds) can absorb ``seconds`` and still leave another attempt."""
-    return not deadline_ts or float(deadline_ts) - time.time() >= float(seconds) + _DEADLINE_RETRY_FLOOR_SEC
-
-
 def _sleep_within_deadline(
     seconds: float, deadline_ts: Optional[float], *, wake_check: Optional[Callable[[], bool]] = None,
 ) -> bool:
@@ -392,7 +387,7 @@ def _sleep_within_deadline(
     time budget cannot absorb the backoff, signalling the caller to stop.
     An optional wake also returns False after interrupting sleep: the paid
     transport repeat's typed control, an ordinary repeat's unread owner words."""
-    if not _deadline_allows(seconds, deadline_ts):
+    if deadline_ts and float(deadline_ts) - time.time() < float(seconds) + _DEADLINE_RETRY_FLOOR_SEC:
         return False
     if wake_check is not None:
         from ouroboros.loop_transport import interruptible_wait_sleep
@@ -1073,10 +1068,9 @@ def _stop_after_llm_error(ctx: _LlmErrorContext) -> bool:
         # round start drains them and rebuilds, same route and logical round (#2996 joins Main follow-ups to this turn).
         # A timeout repeat resends its own bytes.
         owner_words = None if timed_out else ctx.owner_input_check
-        fits = _deadline_allows(backoff, ctx.deadline_ts)
-        if fits and _sleep_within_deadline(backoff, None, wake_check=owner_words):
+        if _sleep_within_deadline(backoff, ctx.deadline_ts, **({"wake_check": owner_words} if owner_words else {})):
             return False
-        if fits:  # only those words wake this sleep
+        if owner_words is not None and owner_words():  # woken for them, or out of time: the round start reads them first
             append_jsonl(ctx.drive_logs / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "llm_not_dispatched", "task_id": ctx.task_id, "round": ctx.round_idx,
                 "model": ctx.model, "reason_code": OWNER_WORDS_WAITING, "error_kind": error_kind})
