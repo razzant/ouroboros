@@ -581,8 +581,14 @@ several positively live leaves, without resending the lost cognitive request.
 
 Recovery schema 2 holds all run and pending-invocation bindings. Adoption reports
 adopted, deferred or refused per holder, restoring a settled wake alongside live
-and pending work. Saved cognition defers pending replay; other recovery replays
-only the invocation's saved binding. Root-direct recovery uses the same path.
+and pending work. Saved cognition defers pending replay; other recovery first reads, never
+creating, the saved binding's accepted work (`delegate_accepted.py`; live and paused owners too;
+admitted apart from replay, a process Stop halting both) and binds it once: no STARTED is published
+outside the actor decision lock, and a run only its process holds records money only on that row.
+Only a plain miss, never a typed refusal, may replay that binding, its store rule unchanged.
+Recovered custody carries the original request time and cap separately from STARTED publication:
+review continuation and copy retention use that window, so late collection grants no fresh time.
+Root-direct recovery uses the same path.
 Orphan protection and registration retention name exact handles, not every run of a
 reserved task. Stop reaches all owned runs and late pending starts; no new POST.
 Windows transfer needs observed parent exit 42 and measured parent/successor identity.

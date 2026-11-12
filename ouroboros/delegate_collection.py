@@ -105,6 +105,9 @@ def record_terminal_money(root, entry, detail: dict, *, failures=None) -> dict:
     """The old exact session accounting, without project retirement or output ACK."""
     if entry.settled:
         return {"settled": True, "ledger_recorded": entry.ledger_recorded, "retried": False}
+    from ouroboros.delegate_accepted import deferred_money
+    if deferred := deferred_money(root, entry):  # an invocation's money lands once, on its one STARTED row
+        return {"settled": False, "ledger_recorded": False, "retried": False, **deferred}
     from ouroboros.delegate_output import engine_locator
     from ouroboros.gateways.claudexor import final_attempt_facts, run_failure_cause
     from ouroboros.usage_accounting import record_subscription_session

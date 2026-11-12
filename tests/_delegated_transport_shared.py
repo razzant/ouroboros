@@ -435,3 +435,20 @@ class _StreamingStub:
         }
 
     def close(self): pass
+
+
+def _delegate_registry(tmp_path, monkeypatch, task_id="t-family"):
+    """A real registry, with the family's five entries registered as production does."""
+    from ouroboros.tools.registry import ToolRegistry
+    import ouroboros.safety as safety
+
+    monkeypatch.setattr(safety, "check_safety", lambda *_a, **_k: (True, ""))
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = task_id
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(tmp_path, task_id, "running", root_task_id=task_id, task_attempt=1)
+    registry._ctx.task_metadata = {"root_task_id": task_id, "parent_task_id": task_id}
+    assert {"delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer",
+            "delegate_message"} <= set(registry._entries)
+    return registry
