@@ -613,7 +613,7 @@ def _owner_turn(srv: Any, ctx: Any, chat_id: int, message_id: str) -> int:
             target()
         carrier(self, body, *args, **kwargs)
 
-    InlineCarrier.__init__ = after_handling  # a carrier this handling starts runs its body after it
+    InlineCarrier.__init__ = after_handling  # any carrier built while the handling runs starts its body after it
     try:
         return srv._handle_bridge_update_batch(ctx.bridge, [update], 0, ctx, [0])
     finally:
