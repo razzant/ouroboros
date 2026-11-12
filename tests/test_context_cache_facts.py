@@ -128,6 +128,41 @@ def test_no_clause_without_a_change_before_that_request(tmp_path):
         assert "write 0 tokens |" in line and "before that request" not in line
 
 
+@pytest.mark.parametrize("call, money", [
+    ({"provider": "openrouter", "cost": 0.2154924, "cost_final": True}, "; write 4,625 tokens; cost $0.2155 reported |"),
+    ({"provider": "openrouter", "cost": 0.2154924, "cost_final": False}, "; write 4,625 tokens; cost $0.2155 estimated |"),
+    # The subscription engine's own cash, when it states one, is a number like any other.
+    ({"provider": "claudexor", "cost": 0.5, "cost_final": True}, "; write 4,625 tokens; cost $0.5000 reported |"),
+    # An API call without a price: unknown is said, and why the money facts beside it do not move.
+    ({"provider": "openai"}, "; write 4,625 tokens; cost unknown (not in known spend) |"),
+    # The subscription engine and the local lane state no cash: nothing is said, never "unknown" or a zero.
+    ({"provider": "claudexor", "billing": "unknown"}, "; write 4,625 tokens |"),
+    ({"provider": "local", "cost": 0.0, "cost_final": True}, "; write 4,625 tokens |"),
+])
+def test_the_previous_calls_own_money_stands_beside_its_cache(tmp_path, call, money):
+    previous = {"round": 2, "model": "m", "prompt_tokens": 567_946, "cached_tokens": 562_502,
+                "cache_write_tokens": 4_625, **call}
+    line = _facts_line(tmp_path, {"_last_round_cache_usage": previous})
+    assert f"[round 2, {call['provider']}, m]{money}" in line
+    assert "tariff" not in line and "$0.00 " not in line
+    from ouroboros.transcript_prefix import previous_cache_fact
+    usage = {"_last_round_cache_usage": previous}
+    assert previous_cache_fact(usage) == previous_cache_fact(usage), "the same round re-prepared says the same bytes"
+
+
+@pytest.mark.parametrize("applied, bracket", [
+    ("1h", "[round 2, anthropic, m, cache TTL 1h]"), ("5m", "[round 2, anthropic, m, cache TTL 5m]"),
+    # A bare marker names no tier and an unmarked send none at all: the bracket stays as it was.
+    ("default", "[round 2, anthropic, m]"), ("", "[round 2, anthropic, m]"),
+])
+def test_only_a_stamped_cache_ttl_is_named(tmp_path, applied, bracket):
+    previous = {"round": 2, "provider": "anthropic", "model": "m", "prompt_tokens": 1000, "cached_tokens": 900,
+                "cache_write_tokens": 100, "cost": 0.01, "cost_final": True}
+    line = _facts_line(tmp_path, {"_last_round_cache_usage": previous, "_last_prompt_cache_ttl": applied})
+    assert bracket in line and ("cache TTL" in line) == (applied in ("1h", "5m"))
+    assert "expire" not in line and "cold" not in line  # the fact, no forecast
+
+
 @pytest.mark.parametrize(("input_sources", "kind", "target"), [
     ("shared", "api_model", "openai/gpt-fixture"),
     ("declared", "agent_session", "codex=gpt-fixture"),

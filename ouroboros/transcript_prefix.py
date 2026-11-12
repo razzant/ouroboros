@@ -379,9 +379,26 @@ def history_change_text(facts: Any, round_idx: Any) -> str:
     return f"; before that request sent message {fact.get('index')} changed ({history_change_origin(fact)})"
 
 
+def _previous_call_money(previous: Mapping[str, Any]) -> str:
+    """That call's own money as its producer stated it. An API call without a price says so: it adds nothing to
+    known spend (``usage_accounting.paid_admission``); the subscription engine and the local lane say nothing."""
+    from ouroboros.primary_route_observation import call_cost_words
+    from ouroboros.usage_accounting import paid_admission
+
+    provider = previous.get("provider")
+    if provider == "local":
+        return ""
+    words = call_cost_words(dict(previous))
+    if not words and paid_admission(provider, None):
+        words = "cost unknown (not in known spend)"
+    return "; " + words if words else ""
+
+
 def previous_cache_fact(usage: Mapping[str, Any]) -> str:
-    """The previous request's cache share as its provider reported it, and a change of sent history before it."""
+    """The previous request's cache share as its provider reported it, the cache TTL its send stamped, its own
+    money, and a change of sent history before it."""
     from ouroboros.event_usage import event_token_counts
+    from ouroboros.llm_attempt import cache_ttl_seconds
 
     previous = usage.get("_last_round_cache_usage") or {}
     counts = event_token_counts(previous)  # the provider's own report outranks a synthesized billing zero
@@ -393,9 +410,12 @@ def previous_cache_fact(usage: Mapping[str, Any]) -> str:
         account, moved = previous.get("served_account"), previous.get("previous_served_account")
         served = (f", served by account {account}" + (f" (moved from {moved})" if moved and moved != account else "")
                   if account else "")
-        cache += f" [round {previous['round']}, {previous.get('provider') or 'provider unknown'}, {previous.get('model') or 'model unknown'}{served}]"
+        # Only an explicitly stamped tier names a horizon; a bare marker's is the provider's business.
+        ttl = str(usage.get("_last_prompt_cache_ttl") or "").strip()
+        stamped = f", cache TTL {ttl}" if cache_ttl_seconds(ttl) is not None else ""
+        cache += f" [round {previous['round']}, {previous.get('provider') or 'provider unknown'}, {previous.get('model') or 'model unknown'}{served}{stamped}]"
         cache += f"; write {int(written):,} tokens" if written is not None else "; write unknown"
-        cache += history_change_text(usage.get("_recent_prefix_breaks"), previous["round"])
+        cache += _previous_call_money(previous) + history_change_text(usage.get("_recent_prefix_breaks"), previous["round"])
     return cache
 
 
