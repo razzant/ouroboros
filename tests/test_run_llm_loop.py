@@ -717,3 +717,28 @@ def test_run_llm_loop_does_not_include_current_subagent_in_own_handoff(tmp_path,
     assert calls["count"] == 1
     assert not any("Subagent handoff status refreshed" in item for item in progress)
     assert not any("Subagent handoff status refreshed" in item for item in trace["reasoning_notes"])
+
+
+def test_subagent_handoff_reattaches_only_a_child_result_not_yet_handed(tmp_path):
+    """The handoff is shown again only for an (id, result sha) pair the parent was not handed yet: recording a
+    decision for one child re-attaches nothing, while a changed result of another child is news (audit 11.11,
+    item 18: no return for bookkeeping)."""
+    from ouroboros.loop import _compute_subagent_handoff
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.tools.registry import ToolRegistry
+    from tests._delivery_candidate_shared import write_confirmed_disposition_fixture
+
+    for child, text in (("child1", "first result"), ("child2", "second result")):
+        write_task_result(tmp_path, child, STATUS_COMPLETED, parent_task_id="parent1", root_task_id="parent1",
+                          delegation_role="subagent", role="reviewer", result=text)
+    tools = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    first = _compute_subagent_handoff(tools, tmp_path, "parent1", "done")
+    assert "child1" in first and "child2" in first
+
+    write_confirmed_disposition_fixture(tmp_path, child_id="child1", disposition="integrated", rationale="read")
+    assert _compute_subagent_handoff(tools, tmp_path, "parent1", "done") == "", "a recorded decision is no news"
+
+    write_task_result(tmp_path, "child2", STATUS_COMPLETED, parent_task_id="parent1", root_task_id="parent1",
+                      delegation_role="subagent", role="reviewer", result="second result, revised")
+    again = _compute_subagent_handoff(tools, tmp_path, "parent1", "done")
+    assert "child2" in again and "second result, revised" in again

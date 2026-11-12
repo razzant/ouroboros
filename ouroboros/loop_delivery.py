@@ -122,7 +122,7 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
     if drive_root is None or not task_id:
         return ""
     try:
-        from ouroboros.task_status import FINAL_STATUSES, format_subagent_absorption_message
+        from ouroboros.task_status import format_subagent_absorption_message
 
         metadata = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
         status_drive_root = pathlib.Path(
@@ -145,22 +145,16 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
         ]
         from ouroboros.tools.join_ledger import _child_result_sha256
 
-        signature = "|".join(
+        pairs = frozenset(
             f"{child.get('task_id') or child.get('id')}:{_child_result_sha256(child)}"
             for child in children
         )
-        previous = getattr(tools._ctx, "_subagent_handoff_signature", "")
-        nonterminal_children = [
-            child for child in children
-            if str(child.get("status") or "").strip().lower() not in FINAL_STATUSES
-        ]
-        # P5: the reminder is suppressed ONLY by structured signals — a
-        # child discarded/cancelled (filtered above) or absorbed (unchanged
-        # signature), NEVER by parsing final PROSE; fires once per CHANGE, and
-        # finalizing with unhandled children appends a loud orphan note (P1).
-        _ = nonterminal_children  # (kept for readability; trigger is change-based)
-        if children and signature and signature != previous:
-            tools._ctx._subagent_handoff_signature = signature
+        shown = getattr(tools._ctx, "_subagent_handoff_shown", frozenset())
+        # P5: shown again ONLY on a structured change — a child result (id:sha) this parent was not handed
+        # yet; a decision recorded for some children drops them from the set and re-attaches nothing. Never
+        # by parsing final PROSE; finalizing with unhandled children appends a loud orphan note (P1).
+        if pairs - shown:
+            tools._ctx._subagent_handoff_shown = shown | pairs
             tools._ctx._child_absorption_reminded = False
             _absorb_budget = 160_000 if str(get_context_mode()).lower() == "max" else 60_000
             return format_subagent_absorption_message(
