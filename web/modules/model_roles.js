@@ -232,7 +232,11 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
             : catalog.items.filter((item) => parseModelSource(item.value || item.id).source === row.source);
     }
-    const tieredProcessing = (row) => tierPriced(row.processing_preference || processingPreference);
+    // A fallback with no tier of its own keeps its caller's (model_slots.task_processing_preference): Main's or a lead's.
+    const mainTier = () => (rows.find((entry) => entry.slot.slot === 'main')?.processing_preference
+        ?? modelRoleMap(settings[MODEL_PROCESSING_PREFERENCES_KEY]).main) || processingPreference;
+    const tieredProcessing = (row) => tierPriced(row.processing_preference || processingPreference)
+        || (row.slot.slot === 'fallback' && !row.processing_preference && tierPriced(mainTier()));
     function currentItem(row) {
         const model = row.source === 'inherit' ? inheritedRow(row)?.model : row.model;
         // An account pins a subscription's rows; an API source's rows name none, so a stale pin never hides them.

@@ -243,6 +243,20 @@ test('a role on Fast or Economy shows no catalog price: its tier is priced by it
     }
 });
 
+test('a fallback with no tier of its own names a price only while Main and the default both pay Standard', async () => {
+    const line = async (settings) => {
+        const { editor, host } = await mainRole({ OUROBOROS_MODEL_FALLBACKS: OPUS.value, ...settings });
+        const text = host.querySelector('[data-model-role-group="fallback"] [data-model-role-status]').textContent;
+        editor.destroy();
+        return text;
+    };
+    assert.equal(await line({}), '$4 in / $20 out per 1M tokens');
+    assert.equal(await line({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}' }), '', "Main's calls through it pay Fast");
+    assert.equal(await line({ OUROBOROS_PROCESSING_PREFERENCE: 'economy' }), '', 'a lead on the default pays Economy');
+    assert.equal(await line({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast","fallback":["standard"]}' }),
+        '$4 in / $20 out per 1M tokens', 'its own tier is the one paid');
+});
+
 test('in the composer list the price follows the language of each paint, not of the catalog read', () => {
     const index = buildModelIndex({ catalog: { items: [OPUS] } });
     assert.equal(describeRoute(index, { model: OPUS.value }).price, '$4 in / $20 out');
