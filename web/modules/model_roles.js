@@ -563,7 +563,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     }
 
     return {
-        load(value, contract = {}) {
+        // `keep`: a role's page holding typed fields keeps that role as typed; the rest follows the read (keys, Main, processing).
+        load(value, contract = {}, { keep = false } = {}) {
+            const kept = keep && only && loaded ? soleRow() : null;
             validationAttempted = false;
             settings = { ...value }; offeredSlots = contract.modelSlots || offeredSlots;
             slots = offeredSlots.filter((slot) => !slot.managed);
@@ -582,6 +584,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             // A role's page past the saved fallbacks holds a new one, unsaved until its Save.
             const fallback = only?.slot === 'fallback' && slots.find((slot) => slot.slot === 'fallback');
             if (fallback && !soleRow()) rows.push(Object.assign(rowState(fallback, '', rows.length), { account: '', context: 0, processing_preference: '' }));
+            const at = kept ? rows.indexOf(soleRow()) : -1;
+            if (at >= 0) rows[at] = Object.assign(kept, { slot: rows[at].slot });
             loaded = true; render();
         },
         mount() {
@@ -884,12 +888,17 @@ function mountRole(container, { path, ctx }, slot, index) {
     const editor = createModelRolesEditor({ hostId, mainNote: true, only: { slot, index, actions: SAVE_ROW },
         onChange: () => { dirty = true; container.querySelector('[data-editor-discard]')?.removeAttribute('hidden'); setResult(container.querySelector('[data-editor-result]'), {}); } });
     const say = (words) => setResult(container.querySelector('[data-editor-result]'), words);
+    // A typed form keeps its fields while the page around them follows the read (a key added in Accounts, a new Main);
+    // the fallback list a Save checks stays the one the typing began from. Nothing is drawn while the owner is in it.
+    const typing = () => dirty && container.contains(globalThis.document?.activeElement);
     const read = async () => {
-        if (dirty) return;  // a typed form keeps its text
+        if (typing()) return;
         let settings;
         try { settings = await ctx.readSettings(); } catch { return; }
-        readFallbacks = fallbackEntries(settings).map((entry) => entry.value).join(',');
-        editor.load(settings, { ...settings._meta?.setup_contract, modelSlots: slotsOf(settings).map((each) => ({ ...each, inputId: each.settingsInputId })) });
+        if (typing()) return;
+        if (!dirty) readFallbacks = fallbackEntries(settings).map((entry) => entry.value).join(',');
+        editor.load(settings, { ...settings._meta?.setup_contract, modelSlots: slotsOf(settings).map((each) => ({ ...each, inputId: each.settingsInputId })) }, { keep: dirty });
+        if (dirty) container.querySelector('[data-editor-discard]')?.removeAttribute('hidden');  // drawn again, still unsaved
     };
     const save = async (button) => {
         editor.noteSaveAttempt();
@@ -959,7 +968,7 @@ function mountWebSearch(container, { path, ctx }) {
         } catch { if (mine === previews) preview.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     };
     const read = async () => {
-        if (dirty) return;
+        if (dirty) { void showPreview(); return; }  // a typed choice stays; the routes it would take are read again
         let settings;
         try { settings = await ctx.readSettings(); } catch { return; }
         source.value = settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto';

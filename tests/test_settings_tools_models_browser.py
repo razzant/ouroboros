@@ -373,17 +373,23 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
 
 def test_a_role_left_with_unsaved_words_comes_back_as_it_was_left_and_a_saved_one_is_read_again(subscription_ui):
     """Back from an editor with unsaved words puts its page aside: its path opens it again as it was left, and Save
-    then writes those words. With nothing unsaved the page is let go and shows what is stored the next time."""
-    page, server = _page(subscription_ui, 1087, 740)
+    then writes those words. Around the typed role the page follows the read: a key saved in Accounts meanwhile is
+    offered. With nothing unsaved the page is let go and shows what is stored the next time."""
+    from playwright.sync_api import expect
+
+    page, server = _page(subscription_ui, 1087, 740, ANTHROPIC_API_KEY="")
     open_settings(page, "models/role/vision")
     editor = _settled(page, "models/role/vision")
     editor.locator("[data-editor-save]").wait_for(state="visible")
+    assert editor.locator('[data-model-role-source] option[value="api:anthropic"]').count() == 0, "no Anthropic key yet"
     editor.locator("[data-model-role-source]").select_option("api:openai")
     _type_model(editor, "gpt-vision")
     go_back(page)
     assert not server.posts, "leaving wrote nothing"
+    server.values["ANTHROPIC_API_KEY"] = "***set***"  # saved in Accounts and keys while the role waited aside
     open_settings(page, "models/role/vision")
     editor = _settled(page, "models/role/vision")
+    expect(editor.locator('[data-model-role-source] option[value="api:anthropic"]')).to_have_count(1)
     assert editor.locator("[data-model-role-source]").input_value() == "api:openai"
     assert editor.locator("[data-model-role-model]").input_value() == "gpt-vision"
     assert editor.locator("[data-editor-discard]").is_visible()
