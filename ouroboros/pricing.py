@@ -10,6 +10,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 import logging
@@ -66,18 +67,48 @@ def _fetch_live_rows(provider: str, model: str = "") -> Dict[str, Tuple[Optional
     return {}
 
 
+def _direct_price_catalog(provider: str, *, at: Optional[datetime] = None,
+                          allow_live_fetch: bool = True) -> Dict[str, Tuple[Optional[float], ...]]:
+    """Schedules for providers whose tariffs arrive as dated documents, not catalogs.
+
+    The prices, their source document and version, the peak/off-peak clock and the
+    rouble-to-dollar rate all belong to :mod:`ouroboros.price_evidence`; this adapts
+    them to the four-slot shape every money caller already understands. A model with
+    no live evidence is absent from the mapping, which the caller turns into an unknown
+    cost — never a zero.
+    """
+    from ouroboros import price_evidence
+
+    schedules: Dict[str, Tuple[Optional[float], ...]] = {}
+    for identity, unit in price_evidence.catalog(
+            provider, at=at, allow_live_fetch=allow_live_fetch).items():
+        schedules[identity] = PricingSchedule(
+            (unit.input_per_million, unit.cached_input_per_million,
+             unit.cache_write_per_million, unit.output_per_million),
+            source=unit.evidence(),
+        )
+    return schedules
+
+
 def get_pricing(
     *, provider: str = "openrouter", allow_live_fetch: bool = True, model: str = "",
+    at: Optional[datetime] = None,
 ) -> Dict[str, Tuple[Optional[float], ...]]:
     """Return pricing from the exact provider route's live catalog.
 
-    Direct/OpenAI-compatible/GigaChat routes have no automatic catalog here and
-    therefore return an empty mapping. A cold/expired fetch is bounded to five
-    seconds; failures expose unknown pricing rather than a fabricated fallback.
-    An exact OpenRouter model selects its endpoint-tagged tariff catalog lazily,
-    sharing this cache's TTL and in-flight owner. It never fetches all endpoints.
+    OpenRouter and Cloud.ru answer from their own catalogs. DeepSeek and GigaChat,
+    which publish no machine-readable tariff, answer from the dated document evidence
+    in :mod:`ouroboros.price_evidence`, priced to the instant ``at`` (default: now) —
+    DeepSeek's own rates halve off-peak, and a whole weekend is off-peak. Every other
+    route (direct OpenAI, Anthropic, openai-compatible, Claudexor) has no automatic
+    catalog here and returns an empty mapping. A cold/expired fetch is bounded to five
+    seconds; failures expose unknown pricing rather than a fabricated fallback. An
+    exact OpenRouter model selects its endpoint-tagged tariff catalog lazily, sharing
+    this cache's TTL and in-flight owner. It never fetches all endpoints.
     """
     provider = str(provider or "").strip().lower()
+    if provider in {"deepseek", "gigachat"}:
+        return _direct_price_catalog(provider, at=at, allow_live_fetch=allow_live_fetch)
     if provider not in {"openrouter", "cloudru"} or (model and provider != "openrouter"):
         return {}
     exact = str(model or "").strip()  # the slug the endpoints API names; the cache keys its identity
@@ -115,7 +146,8 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
                            cache_usage: Optional[Dict[str, Any]] = None,
                            allow_live_fetch: bool = True,
                            provider: Optional[str] = None,
-                           processing_mode: str = "") -> Optional[float]:
+                           processing_mode: str = "",
+                           at: Optional[datetime] = None) -> Optional[float]:
     """Estimate cost from exact provider/model data, preserving unknown as None.
 
     ``cache_usage`` and everything after it are KEYWORD-ONLY: the 4th slot used
@@ -143,17 +175,26 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
     not an exact endpoint quote; missing eligible tariffs keep the amount unknown.
     Empty mode retains the legacy model-catalog estimate. Provider-reported cost
     remains the settlement authority.
+
+    ``at`` fixes the instant whose tariff applies — DeepSeek halves its rate off-peak
+    and all weekend. Settlement defaults to now, so a call straddling a boundary is
+    priced by the end it reached.
     """
     raw_model = str(model or "").strip()
     normalized = normalize_model_identity(raw_model)
     route = str(provider or provider_for_model(raw_model) or "openrouter").strip().lower()
     if route == "local":
         return 0.0
-    if processing_mode:
+    # A processing preference is an OpenRouter endpoint-pool axis, never a tariff axis:
+    # DeepSeek's peak/off-peak clock is its own, so a submitted preference must not
+    # blank a price this body genuinely knows. Other non-OpenRouter routes keep the
+    # historical refusal through the empty catalog they are left with.
+    if processing_mode and route == "openrouter":
         mode = {"standard": "default", "fast": "priority"}.get(processing_mode, processing_mode)
-        if route != "openrouter" or mode not in {"default", "priority", "flex"}:
+        if mode not in {"default", "priority", "flex"}:
             return None
-        endpoints = get_pricing(provider=route, model=raw_model, allow_live_fetch=allow_live_fetch)
+        endpoints = get_pricing(provider=route, model=raw_model, allow_live_fetch=allow_live_fetch,
+                                at=at)
         # A bound over all published tier-eligible routes, not a quote from an
         # endpoint we did not select. Retain unhealthy rows: health can change
         # during dispatch without invalidating the tariff we must reserve for.
@@ -165,7 +206,7 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
         costs = [_cost_from_pricing(row, prompt_tokens, completion_tokens, cache_usage, exact_cache_tiers=True)
                  for row in endpoints.values() if row.source.get("service_tier") in eligible]
         return max(costs) if costs and all(cost is not None for cost in costs) else None
-    model_pricing = get_pricing(provider=route, allow_live_fetch=allow_live_fetch)
+    model_pricing = get_pricing(provider=route, allow_live_fetch=allow_live_fetch, at=at)
     pricing = model_pricing.get(normalized)
     if not pricing:
         return None

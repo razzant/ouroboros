@@ -178,7 +178,9 @@ def test_cloudru_catalog_uses_exact_model_and_explicit_fx(monkeypatch):
     assert rows["cloudru/vendor/new-model"] == (1.0, None, None, 5.0)
 
 
-@pytest.mark.parametrize("provider", ["openai", "gigachat", "anthropic"])
+# GigaChat left this list with ouroboros/price_evidence.py: its prices arrive as a dated
+# Cloud.ru document (roubles, VAT-exclusive), not as a machine-readable catalog.
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
 def test_routes_without_automatic_catalog_return_empty(provider):
     assert get_pricing(provider=provider) == {}
 
