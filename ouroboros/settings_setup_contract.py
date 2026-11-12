@@ -262,8 +262,9 @@ BUDGET_SETTING_KEYS = tuple(_BUDGET_FIELDS_BY_KEY)
 
 # Local presets (12.11.2026): the current Qwen generation, trained to 262,144 tokens with full attention in one
 # layer of four, so a long window costs little memory. A fresh install's first turn needs about 34K tokens of input
-# beside the reply's room (measured on Qwen3.8-27B), so each opens at 65,536: the 9B fits a 16 GB machine, the
-# others want 32 GB. Their GGUF files need a llama-cpp-python runtime from mid-2026 or later.
+# beside the reply's room (measured on Qwen3.8-27B), so each opens at 65,536. Measured memory: Qwen3.8-27B held
+# 19.45 GB resident at 65,536 (macOS footprint showed 37 GB right after a first turn); the 9B and the 35B-A3B are not
+# measured. Their GGUF files need a llama-cpp-python runtime from mid-2026 or later (0.3.36 loads the 27B).
 _LOCAL_PRESETS: Dict[str, Dict[str, Any]] = {
     "qwen35-9b": {"label": "Qwen3.5-9B Q4_K_M (5.7 GB)", "source": "unsloth/Qwen3.5-9B-GGUF", "filename": "Qwen3.5-9B-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
     "qwen38-27b": {"label": "Qwen3.8-27B Q4_K_M (16.6 GB)", "source": "unsloth/Qwen3.8-27B-GGUF", "filename": "Qwen3.8-27B-UD-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
