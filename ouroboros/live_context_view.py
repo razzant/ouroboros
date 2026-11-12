@@ -14,9 +14,10 @@ def record_session_view(host, evidence, manifest_ref):
     from ouroboros.tools.compact_context import record_context_view
 
     record_context_view(host.ctx, host.messages, host.schemas, fit_measurement=evidence['fit']['measurement'])
+    # The send seal's manifest reference carries the delivered lead fact; any other reference names none.
     host.ctx._last_context_observation.update(
         work_room=copy.deepcopy(evidence['work_room']), physical_source_ref=manifest_ref,
-        chronicle_lead_rule=(manifest_ref or {}).get('chronicle_lead_rule'))
+        chronicle_lead_rule=manifest_ref.get('chronicle_lead_rule') if isinstance(manifest_ref, dict) else None)
     if evidence['work_room'].get('reason') == 'start_room_shortfall' and host.ctx.emit_progress_fn:
         # The progress notice reaches the owner even when the physical candidate
         # cannot accommodate another in-model notice without losing held content.

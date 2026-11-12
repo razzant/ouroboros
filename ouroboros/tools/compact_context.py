@@ -43,8 +43,8 @@ def record_context_view(ctx, messages, tool_schemas, *, physical_capture=_CANONI
     if physical_capture is _CANONICAL_OBSERVATION:
         return  # Existing non-Main actors retain their own observation boundary.
     observation = ctx._last_context_observation
-    observation["chronicle_lead_rule"] = (
-        (physical_capture.candidate_manifest_ref or {}).get("chronicle_lead_rule") if physical_capture else None)
+    ref = getattr(physical_capture, "candidate_manifest_ref", None)
+    observation["chronicle_lead_rule"] = ref.get("chronicle_lead_rule") if isinstance(ref, dict) else None
     observation.update(exposed_units=[], physical_source_status="unavailable")
     if physical_capture is None or not physical_capture.candidate_manifest_ref:
         return
