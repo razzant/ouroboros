@@ -84,7 +84,9 @@ def test_apply_discloses_before_post_and_applied_card_restores_locally(engine, w
                     dialog = page.get_by_role("dialog")
                     dialog.wait_for()
                     text = dialog.inner_text()
-                    for fact in ["4.5.0 → 4.6.0", "end all its active runs", "work: unknown",
+                    for fact in ["Running tasks stop and continue by themselves after the restart",
+                                 "Tasks already paused or held stay so until they are resumed",
+                                 "4.5.0 → 4.6.0", "end all its active runs", "work: unknown",
                                  "forward-only", "3.10.19", "3.50.4", "3.10.22", "3.53.1"]:
                         assert fact in text
                     before = len([path for path, _body in calls if path == "/api/update/apply"])
