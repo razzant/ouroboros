@@ -262,10 +262,14 @@ _BUDGET_FIELDS = [
 _BUDGET_FIELDS_BY_KEY = {field["settingKey"]: field for field in _BUDGET_FIELDS}
 BUDGET_SETTING_KEYS = tuple(_BUDGET_FIELDS_BY_KEY)
 
+# Local presets (12.11.2026): the current Qwen generation, trained to 262,144 tokens with full attention in one
+# layer of four, so a long window costs little memory. A fresh install's first turn needs about 34K tokens of input
+# beside the reply's room (measured on Qwen3.8-27B), so each opens at 65,536: the 9B fits a 16 GB machine, the
+# others want 32 GB. Their GGUF files need a llama-cpp-python runtime from mid-2026 or later.
 _LOCAL_PRESETS: Dict[str, Dict[str, Any]] = {
-    "qwen25-7b": {"label": "Qwen2.5-7B Instruct Q3_K_M", "source": "Qwen/Qwen2.5-7B-Instruct-GGUF", "filename": "qwen2.5-7b-instruct-q3_k_m.gguf", "contextLength": 16384, "chatFormat": ""},
-    "qwen3-14b": {"label": "Qwen3-14B Instruct Q4_K_M", "source": "Qwen/Qwen3-14B-GGUF", "filename": "Qwen3-14B-Q4_K_M.gguf", "contextLength": 16384, "chatFormat": ""},
-    "qwen3-32b": {"label": "Qwen3-32B Instruct Q4_K_M", "source": "Qwen/Qwen3-32B-GGUF", "filename": "Qwen3-32B-Q4_K_M.gguf", "contextLength": 32768, "chatFormat": ""},
+    "qwen35-9b": {"label": "Qwen3.5-9B Q4_K_M", "source": "unsloth/Qwen3.5-9B-GGUF", "filename": "Qwen3.5-9B-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
+    "qwen38-27b": {"label": "Qwen3.8-27B Q4_K_M", "source": "unsloth/Qwen3.8-27B-GGUF", "filename": "Qwen3.8-27B-UD-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
+    "qwen36-35b-a3b": {"label": "Qwen3.6-35B-A3B Q4_K_M (fast)", "source": "unsloth/Qwen3.6-35B-A3B-GGUF", "filename": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
 }
 
 # Agent SUBSCRIPTION intent (install-time presets, D-3/D-4). These two

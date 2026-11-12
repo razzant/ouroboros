@@ -448,3 +448,23 @@ def test_the_local_lane_answers_without_its_reasoning_and_calls_tools_the_new_wa
     assert answer["content"] == "Hello. I am Ouroboros." and answer["reasoning_content"] == "I am greeting my human."
     assert json.loads(call["tool_calls"][0]["function"]["arguments"]) == {"path": "README.md", "limit": 3}
     assert call["content"] == "Read it."
+
+
+def test_the_wizard_presets_and_the_factory_window_start_a_fresh_install():
+    """The presets name the current Qwen generation and open the factory window, which a fresh install's first turn
+    fits in (about 34K tokens of input beside the reply, measured on Qwen3.8-27B on 12 November 2026); a window of
+    16,384 refused that turn on every preset."""
+    from ouroboros.local_model import RUNTIME_PROBE, local_model_settings
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+    from ouroboros.settings_setup_contract import _LOCAL_PRESETS
+
+    window = SETTINGS_DEFAULTS["LOCAL_MODEL_CONTEXT_LENGTH"]
+    assert window == 65536
+    assert {preset["contextLength"] for preset in _LOCAL_PRESETS.values()} == {window}
+    assert all(preset["source"].startswith("unsloth/Qwen3.") and preset["filename"].endswith(".gguf")
+               for preset in _LOCAL_PRESETS.values())
+    assert local_model_settings({})["LOCAL_MODEL_CONTEXT_LENGTH"] == window
+    assert local_model_settings({"LOCAL_MODEL_CONTEXT_LENGTH": 0})["LOCAL_MODEL_CONTEXT_LENGTH"] == window
+    assert local_model_settings({"LOCAL_MODEL_CONTEXT_LENGTH": 8192})["LOCAL_MODEL_CONTEXT_LENGTH"] == 8192
+    # The runtime counts as installed only when the server it is started as can import.
+    assert "llama_cpp.server.app" in RUNTIME_PROBE

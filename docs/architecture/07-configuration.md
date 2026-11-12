@@ -188,7 +188,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC | 90 | Liveness watchdog; alerts and recommends `/restart`, never frees a wedged turn's lock |
 | LOCAL_MODEL_SOURCE | "" | Local-model source (HF repo or path) |
 | LOCAL_MODEL_FILENAME | "" | Local-model GGUF filename (split first shard expanded) |
-| LOCAL_MODEL_CONTEXT_LENGTH | 16384 | Local-model context window |
+| LOCAL_MODEL_CONTEXT_LENGTH | 65536 | Local-model context window |
 | LOCAL_MODEL_N_GPU_LAYERS | 0 | GPU offload layers |
 | USE_LOCAL_MAIN | false | Route Main locally |
 | USE_LOCAL_HEAVY | false | Migration input only; excluded from active routing |
