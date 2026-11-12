@@ -682,9 +682,11 @@ def _loose_line(entry: Entry, cls: Mapping[str, Any], texts: Mapping[str, Dict[s
     return f"{head} {meta.get('type') or meta.get('direction') or 'row'}, {meta.get('text_chars', 0)} chars, read by address"
 
 
-def _lanes(root: pathlib.Path, entries: List[Entry], lineage: Mapping[str, Any], summaries: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]],
-                                                                                            List[Dict[str, Any]]]:
-    """Lane 1 verbatim (people and my words to them) and lane 2 as one line per root task."""
+def _lanes(root: pathlib.Path, entries: List[Entry], lineage: Mapping[str, Any],
+           summaries: Optional[Mapping[str, Any]] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Lane 1 verbatim (people and my words to them) and lane 2 as one line per root task; ``summaries``: the
+    capture's gists by work (``memory_view_work.gists``), none when a caller gives none."""
+    summaries = summaries or {}
     classed = [(entry, row_class(entry[1], pos=entry[2], **lineage)) for entry in entries]
     groups: Dict[str, List[Tuple[Entry, Dict[str, Any]]]] = {}
     order: List[Tuple[int, str, Any]] = []
