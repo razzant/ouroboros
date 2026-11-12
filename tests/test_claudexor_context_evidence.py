@@ -270,11 +270,15 @@ def test_a_resumed_turn_reads_the_conversations_fresh_record_and_asks_only_its_o
 
 
 def test_the_rebind_after_tool_reconciliation_reuses_the_first_answer(tmp_path, monkeypatch, catalog):
-    """A restore rebinds twice when its tools changed; the second rebind binds the first one's answer, so it reads that
-    record instead of asking again."""
+    """A restore rebinds twice when its tools changed. The first binds the conversation's account (account-a, no record
+    here, so the route's own question is asked, and the engine answers account-b); the second binds that first answer,
+    so it reads account-b's record instead of asking again."""
     from types import SimpleNamespace
     from ouroboros import continuation_tools, loop, owner_wait
 
+    catalog["value"] = _catalog("account-b", "identity-b")
+    conversation = {"source": "test-source", "model": "exact-model", "credentialProfileId": "account-a",
+                    "accountFingerprint": "identity-a"}
     calls = []
 
     def rebind(plan, _tools, _messages, **route):
@@ -287,9 +291,9 @@ def test_the_rebind_after_tool_reconciliation_reuses_the_first_answer(tmp_path, 
     monkeypatch.setattr(owner_wait, "sanction_rewrite", lambda *_a, **_kw: None)
     ctx = SimpleNamespace(context_fit_plan=None, active_model=MODEL, active_use_local=False, task_metadata={},
                           model_wait_context=None, active_context_mode="max")
-    owner_wait.rebind_restored_route(SimpleNamespace(_ctx=ctx), {"tool_schemas": []}, [{"role": "user", "content": "go"}])
-    assert calls[0] == {} and calls[1]["accountFingerprint"] == "identity-a"  # no answer yet: the route's own question
-    assert len(catalog["calls"]) == 1  # once, not twice
+    owner_wait.rebind_restored_route(SimpleNamespace(_ctx=ctx), {"tool_schemas": []}, _answered(conversation))
+    assert calls[0] == conversation and calls[1]["accountFingerprint"] == "identity-b"
+    assert catalog["calls"] == [("test-source", None, "exact-model")]  # once (Auto, no hidden pin), not twice
 
 
 def test_a_pinned_route_with_a_silent_engine_keeps_its_window_only_with_the_same_fingerprint(tmp_path, monkeypatch,
