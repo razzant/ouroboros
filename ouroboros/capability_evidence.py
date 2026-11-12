@@ -333,7 +333,8 @@ def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) 
 
     It re-reads the CURRENT file inside the transaction, so no writer in any process saves a
     stale snapshot over another's record; the network read runs OUTSIDE it. An entry the store
-    already holds as it is is not written again. Returns whether the entry is stored and never
+    already holds as it is is not written again, nor over a statement observed later than it
+    (``_later_statement``). Returns whether the entry is stored and never
     raises: a write that fails or finds the store busy leaves the previous file as it was,
     including an older record of this key. The measured window counts a write (``evidence_writes``)."""
     from ouroboros.context_timing import counted
@@ -345,6 +346,8 @@ def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) 
             data = _load(drive_root)
             if data.get(kind, {}).get(fp) == value:
                 return True
+            if _later_statement(data.get(kind, {}).get(fp), value):
+                return False
             _drop_expired_probes(data)
             data.setdefault(kind, {})[fp] = value
             counted("evidence_writes", key=(kind, fp))
@@ -389,11 +392,21 @@ def _drop_expired_probes(data: Dict[str, Any]) -> None:
             probes.pop(fp, None)
 
 
+def _later_statement(held: Any, value: Dict[str, Any]) -> bool:
+    """``held`` states an observation dated after ``value``'s: an answer read earlier never replaces it (two reads
+    finishing out of order). A failed attempt states nothing; an unreadable date or one from the future decides nothing."""
+    if not isinstance(held, dict) or held.get("status") == STATUS_FAILED:
+        return False
+    dates = [parse_deadline_ts(str(row.get("ts") or row.get("observed_at") or "")) for row in (held, value)]
+    return None not in dates and dates[1] < dates[0] <= utc_now()
+
+
 def _age_seconds(ts: str) -> float:
+    """Seconds since ``ts``; infinite for an unreadable date and for one later than now: a date from the future
+    proves no freshness (every TTL reads it as expired, and the write seam's expiry drops such a probe)."""
     parsed = parse_deadline_ts(ts)
-    if parsed is None:
-        return float("inf")
-    return max(0.0, (utc_now() - parsed).total_seconds())
+    age = (utc_now() - parsed).total_seconds() if parsed is not None else -1.0
+    return age if age >= 0 else float("inf")
 
 
 # --- Measured tokenizer density -------------------------------------------------

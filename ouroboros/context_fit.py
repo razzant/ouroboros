@@ -111,6 +111,7 @@ class ContextFitPlan:
     window_record: Optional[WindowRecord] = None
     window_witness_bound: bool = True
     route_base_url: str = ""
+    account_pin: str = ""  # the profile the role pins ("": Auto, where an answer naming no route names no account)
     start_tool_schemas_json: Optional[str] = None  # what the start fit priced (``null``: none); None: not captured
     # The start fit's own mode and why it is below the owner's (``memory_floor.start_cause``): every reprojection
     # and route rebind keeps it, while ``initial_mode`` follows the current selection. ("", ""): not a built start;
@@ -574,6 +575,8 @@ def _context_route(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
             credential_profile_id=account,
             model_route=task.get("model_route"),
         )
+        route["account_pin"] = str(model_account_options(route["model"], role=role, settings=settings,
+                                                         credential_profile_id=account)["credential_profile_id"])
     route["window_observation_fp"] = route_observation_scope(route, settings)
     return route, settings
 
@@ -1037,7 +1040,7 @@ def build_context_fit_plan(
         model_role=str(route.get("model_role") or "main"),
         model_route=evidence_model_route(evidence, route["model"]) if route["provider"] == "claudexor" else {},
         evidence_source=window_record.source, window_record=window_record, window_witness_bound=bound,
-        route_base_url=str(route.get("base_url") or ""),
+        route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
         core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
         start=(initial_mode, "" if initial_mode == preferred else start_cause(contents[initial_mode][1])),
     )

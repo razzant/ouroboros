@@ -575,7 +575,7 @@ def _rebind_context_fit_plan(
         model_route=evidence_model_route(evidence, str(route.get("model") or model)) if route.get("provider") == "claudexor" else {},
         evidence_source=str(getattr(evidence, "source", "") or ""),
         **route_window_kwargs(evidence), window_record=window, window_tokens=window_tokens,  # with its own frame
-        window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""),
+        window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
     ).reproject_for_route(  # the shown view kept while it fits this route's window, else narrowed
         window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried,
         output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages)

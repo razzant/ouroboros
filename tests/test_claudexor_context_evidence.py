@@ -237,6 +237,34 @@ def test_catalog_observation_time_is_not_refreshed_by_local_cache(tmp_path, cata
     assert not ce.is_known(evidence, require_fresh=True)
 
 
+def test_an_older_answer_never_replaces_a_later_statement_and_a_future_date_is_not_fresh(tmp_path, catalog):
+    """H8 (W2, 12.11.2026): two reads of one account that finish out of order keep the later statement in the
+    store; a statement dated after now proves no freshness (every TTL reads it as expired) and decides no race."""
+    import datetime
+
+    now = ce.utc_now()
+
+    def read(hours, window):
+        catalog["value"].update(observedAt=(now + datetime.timedelta(hours=hours)).isoformat(),
+                                models=[{**catalog["value"]["models"][0], "maxContextWindow": window}])
+        return _probe(tmp_path)
+
+    def stored():  # one account, one key
+        return ce._read(tmp_path)["probes"][later.route_fp]
+
+    later = read(-1, 500_000)
+    assert read(-2, 872_000).window_tokens == 872_000  # the late answer is its own read's evidence ...
+    assert (stored()["window_tokens"], stored()["ts"]) == (500_000, later.ts)  # ... but never replaces the later one
+    assert read(0, 872_000).window_tokens == stored()["window_tokens"] == 872_000  # a later statement does
+    exact = {"source_id": "test-source", "credential_profile_id": "account-a", "account_fingerprint": "identity-a"}
+    assert ce.is_known(_probe(tmp_path, options=exact, allow_fetch=False), require_fresh=True)
+    future = read(1, 990_000)
+    assert future.stale and not ce.is_known(future, require_fresh=True)  # observed "in an hour": not fresh now
+    assert ce._age_seconds(future.ts) == float("inf") and ce._age_seconds(later.ts) < 2 * 3600
+    assert not ce.is_known(_probe(tmp_path, options=exact, allow_fetch=False), require_fresh=True)
+    assert read(-0.5, 872_000).window_tokens == stored()["window_tokens"] == 872_000  # a future row wins no race
+
+
 def test_observed_route_must_match_model_and_current_role_pin():
     observed = _binding(ce.CapabilityEvidence(
         872_000, "confirmed", "provider_metadata", "fp", source_id="test-source",
