@@ -40,8 +40,11 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     min-width: 0;
     overflow-wrap: anywhere;
 }
-/* Wide: the home is a rail beside the page. Its card says only who and how many; the count opens the list. */
+/* Wide: the home is a rail beside the page. Its card says only who and how many; the count opens the list. Until a
+   row is pressed the home stands alone, in the middle of the window and as wide as at a desk (no page is opened for
+   it: a page reads when it is shown), so the window has no empty half. */
 @container settingspage (min-width: 56rem) {
+    .settings-shell[data-settings-view="home"] .settings-home-column { margin-inline: auto; }
     .settings-shell[data-settings-view="page"] { grid-template-columns: 348px minmax(0, 1fr); }
     .settings-shell[data-settings-view="page"] > .settings-home { display: block; padding-inline-end: var(--space-3); }
     .settings-shell[data-settings-view="page"] .settings-page { padding-inline-start: var(--space-4); }
