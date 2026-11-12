@@ -52,12 +52,18 @@ def test_ordinary_notes_remain_on_demand_and_overview_creation_prices_zero(tmp_p
     assert 'Body 0 → ' in created and 'estimate 0.00 → ' in created
 
 
-def test_the_resident_overview_heading_carries_its_revision_and_moves_only_with_its_text(tmp_path):
+def test_the_resident_overview_carries_its_revision_after_its_body(tmp_path):
+    """The revision covers the whole note, its summary too, so it follows the body: a summary-only edit of the
+    overview moves only the section's last line, never a byte in front of the overview body (the cached prefix)."""
     env = SimpleNamespace(drive_root=tmp_path, drive_path=lambda p: tmp_path / p)
     address = store.resolve_knowledge_address(tmp_path, 'overview', 'global')
-    first = store.write_knowledge_note(address, '# Overview\n\nWhat I understand.\n').current
+    body = '# Overview\n\nWhat I understand.\n'
+    first = store.write_knowledge_note(address, '---\nsummary: Before.\n---\n' + body).current
     section = build_knowledge_sections(env)[0]
-    assert f"Source: knowledge_read(topic='overview', scope='global'); revision {first.revision}." in section
+    assert section.endswith(f"{body}\nRevision of this overview: {first.revision}.\n")
     assert build_knowledge_sections(env)[0] == section  # nothing else moves it
-    second = store.write_knowledge_note(address, '# Overview\n\nRevised.\n', expected_revision=first.revision).current
-    assert f"revision {second.revision}." in build_knowledge_sections(env)[0] and first.revision not in build_knowledge_sections(env)[0]
+    second = store.write_knowledge_note(address, '', 'edit', first.revision, summary='After.').current
+    moved = build_knowledge_sections(env)[0]
+    through_body = section.index(body) + len(body)
+    assert moved[:through_body] == section[:through_body]  # every byte up to the body's end is unchanged
+    assert moved.endswith(f"Revision of this overview: {second.revision}.\n") and first.revision not in moved

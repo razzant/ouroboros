@@ -55,12 +55,13 @@ def build_knowledge_sections(
             reader = f"knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global')"
             from ouroboros.knowledge import overview_residency
 
-            # Its revision rides with it (it moves only when this text does), so a write needs no read for its token.
-            heading = (f"## Shared understanding\n\n{overview_residency(overview)}\n"
-                       f"Source: {reader}; revision {overview.revision}.\n\n")
+            heading = f"## Shared understanding\n\n{overview_residency(overview)}\nSource: {reader}.\n\n"
+            # Its revision rides after the body, so a write needs no read for its token. The revision covers
+            # the whole note, its summary too: a summary-only edit moves this last line and no byte before it.
+            revision = ("" if overview_text.endswith("\n") else "\n") + f"\nRevision of this overview: {overview.revision}.\n"
             # The whole authored orientation rides whole in every request: the window never
             # shortens the overview (TIER0_ALWAYS_FULL); its headings are no substitute for it.
-            sections.append(HostSection("shared_understanding", heading + overview_text, reader=reader))
+            sections.append(HostSection("shared_understanding", heading + overview_text + revision, reader=reader))
         else:
             sections.append(_SHARED_UNDERSTANDING_GAP)  # present but empty is still unauthored
     except FileNotFoundError:
