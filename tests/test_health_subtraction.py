@@ -73,8 +73,11 @@ def test_counts_and_obligations_with_an_action_stay(tmp_path):
     ])
     (tmp_path / "repo" / "pyproject.toml").write_text('version = "9.9.9"', encoding="utf-8")
     text = context_health.build_health_invariants(env)
-    assert "WARNING: PROVIDER/ROUTING ERRORS — 1 recent failures (provider/model x1)" in text
-    assert "WARNING: LOCAL CONTEXT OVERFLOW — 1 recent overflow event(s)" in text
+    # A count names where it was read; the host adds no advice about what to do with it (audit 11.11, item 1).
+    source = f"source: logs/events.jsonl, last {context_health._RECENT_LOG_BYTES // 1000} KB."
+    assert f"WARNING: PROVIDER/ROUTING ERRORS — 1 recent failures (provider/model x1); {source}" in text
+    assert f"WARNING: LOCAL CONTEXT OVERFLOW — 1 recent overflow event(s) (provider/model x1); {source}" in text
+    assert "may need" not in text
     assert "CRITICAL: VERSION DESYNC" in text and "OK:" not in text
 
 
