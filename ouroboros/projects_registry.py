@@ -373,13 +373,14 @@ _PROCESS_STAMP = uuid.uuid4().hex[:8]  # this process's code shapes the map it a
 
 def bindings_revision(drive_root: Any) -> str:
     """An opaque stamp of the files ``all_task_project_bindings`` reads in this process: the identities of the
-    bindings, of the registry naming their projects and of its commit witness (which tells a lost registry from
-    one never written, so it decides ``project_chat_ids``). ``""`` when no stamp can prove the bytes unchanged:
+    bindings and of the registry naming their projects, and whether the registry's commit witness exists (it tells
+    a lost registry from one never written, so it decides ``project_chat_ids``; reconcile touches it each tick, so
+    its times are no part of the stamp). ``""`` when no stamp can prove the bytes unchanged:
     unreadable, or changed within a clock tick (``utils._RACY_NS``). It keys the state publication (a touched
     registry is a new production); the revision a reader holds the map by is the map's own digest
     (``gateway.state_publication.map_revision``)."""
     started, stamps = time.time_ns(), [_PROCESS_STAMP]
-    for path in (_bindings_path(drive_root), _registry_path(drive_root), _registry_witness_path(drive_root)):
+    for path in (_bindings_path(drive_root), _registry_path(drive_root)):
         try:
             info = path.stat()
         except FileNotFoundError:
@@ -390,6 +391,7 @@ def bindings_revision(drive_root: Any) -> str:
         if max(info.st_mtime_ns, info.st_ctime_ns) >= started - utils._RACY_NS:
             return ""
         stamps.append(utils.file_identity(info))
+    stamps.append(_registry_witness_path(drive_root).exists())
     return hashlib.sha256(repr(stamps).encode("utf-8")).hexdigest()[:16]
 
 

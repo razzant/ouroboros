@@ -125,6 +125,8 @@ def test_the_registry_witness_alone_moves_the_publication_stamp(read_state):
     (root / "state" / "projects.json").unlink()
     lost = registry.bindings_revision(root)
     assert lost and registry.bindings_revision(root) == lost and read()["project_chat_ids"] is None
+    (root / "state" / "projects.json.committed").touch()  # as reconcile does each tick: whether it exists decides
+    assert registry.bindings_revision(root) == lost, "a touched witness is no new production"
     (root / "state" / "projects.json.committed").unlink()
     assert registry.bindings_revision(root) not in ("", lost), "the witness's removal is a new production"
     assert read()["project_chat_ids"] == []
