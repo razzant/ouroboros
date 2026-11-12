@@ -177,6 +177,11 @@ test('in the composer list a priced model says its price where "paid by key" sto
 });
 
 
+test('one rule decides where a processing tier prices the call instead of the catalog', async () => {
+    const { tierPriced } = await import('../modules/route_editor_primitives.js');
+    assert.deepEqual(['', 'standard', 'fast', 'economy', undefined].map(tierPriced), [false, false, true, true, false]);
+});
+
 test('the Agents chooser of an OpenRouter row shows the price too; a direct key reads as before', () => {
     const items = [OPUS, { provider_id: 'openai', id: 'gpt-6', value: 'openai::gpt-6', name: 'gpt-6' }];
     const priced = routeModelInputHtml('aria-label="Model"', { kind: 'api_model', target_id: OPUS.value }, items, 'agent-models');
@@ -191,4 +196,168 @@ test('in the composer list two catalog rows of one model that disagree on its pr
     assert.equal(describeRoute(index, { model: OPUS.value }).price, '');
     const agreeing = buildModelIndex({ catalog: { items: [OPUS, { ...OPUS, credential_profile_id: 'second' }] } });
     assert.equal(describeRoute(agreeing, { model: OPUS.value }).price, '$4 in / $20 out');
+});
+
+
+// The Settings role editor over one OpenRouter Main, as a page builds it; `settings` adds processing preferences.
+async function mainRole(settings = {}) {
+    const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
+    const { doc } = domDouble();
+    const host = doc.createElement('div');
+    host.id = 'roles';
+    doc.body.append(host);
+    Object.defineProperty(host, 'innerHTML', { set(html) { host.replaceChildren(); appendHtml(host, html); }, get: () => '' });
+    const store = { snapshot: {}, accountsKnown: false, subscribe: () => () => {}, refresh: async () => {}, read: async () => {} };
+    const editor = createModelRolesEditor({ hostId: 'roles', doc, showContext: false, store,
+        catalogFetch: async () => ({ items: [], model_sources: [] }) });
+    editor.load({ OPENROUTER_API_KEY: 'k', OUROBOROS_MODEL: OPUS.value, ...settings }, contract);
+    editor.adoptCatalog({ model_sources: [], items: [OPUS] });
+    await new Promise((resolve) => setImmediate(resolve));
+    const status = host.querySelector('[data-model-role-group="main"] [data-model-role-status]');
+    const input = host.querySelector('[data-model-role-group="main"] [data-model-role-model]');
+    input.emit('click');  // opens the chooser without changing the role: it paints its suggestions
+    const suggestions = doc.getElementById(input.getAttribute('aria-controls')).innerHTML;
+    return { editor, status, suggestions, input, host };
+}
+
+test('a role on Fast or Economy shows no catalog price: its tier is priced by its own endpoint', async () => {
+    for (const settings of [{}, { OUROBOROS_PROCESSING_PREFERENCE: 'standard' }]) {
+        const { editor, status, suggestions, input } = await mainRole(settings);
+        assert.equal(status.textContent, '$4 in / $20 out per 1M tokens', JSON.stringify(settings));
+        assert.equal(status.dataset.i18nFmt, 'model price', 'composed words: the overlay leaves them alone');
+        assert.match(suggestions, /ui-model-option-meta/);
+        input.value = '';
+        input.emit('input');  // the role loses its model: the line is a sentence again, which the overlay reads
+        assert.equal(status.textContent, 'Choose a model to continue.');
+        assert.equal(status.dataset.i18nFmt, undefined);
+        editor.destroy();
+    }
+    for (const settings of [{ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}' }, { OUROBOROS_PROCESSING_PREFERENCE: 'economy' },
+        { OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"light":"standard"}' }]) {
+        const { editor, status, suggestions } = await mainRole(settings);
+        assert.equal(status.textContent, '', JSON.stringify(settings));
+        assert.equal(status.dataset.i18nFmt, undefined, 'no composed price: the overlay reads the line again');
+        assert.match(suggestions, /data-model-value="anthropic\/claude-opus-5\.5"/, 'the model is still offered');
+        assert.doesNotMatch(suggestions, /ui-model-option-meta/);
+        editor.destroy();
+    }
+});
+
+test('a fallback with no tier of its own names a price only while Main and the default both pay Standard', async () => {
+    const line = async (settings) => {
+        const { editor, host } = await mainRole({ OUROBOROS_MODEL_FALLBACKS: OPUS.value, ...settings });
+        const text = host.querySelector('[data-model-role-group="fallback"] [data-model-role-status]').textContent;
+        editor.destroy();
+        return text;
+    };
+    assert.equal(await line({}), '$4 in / $20 out per 1M tokens');
+    assert.equal(await line({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}' }), '', "Main's calls through it pay Fast");
+    assert.equal(await line({ OUROBOROS_PROCESSING_PREFERENCE: 'economy' }), '', 'a lead on the default pays Economy');
+    assert.equal(await line({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast","fallback":["standard"]}' }),
+        '$4 in / $20 out per 1M tokens', 'its own tier is the one paid');
+});
+
+test('in the composer list the price follows the language of each paint, not of the catalog read', () => {
+    const index = buildModelIndex({ catalog: { items: [OPUS] } });
+    assert.equal(describeRoute(index, { model: OPUS.value }).price, '$4 in / $20 out');
+    applyPayload({ language: 'ru', english: false, revision: 41, entries: { '{input} in / {output} out': { text: '{input} вход / {output} выход' } } });
+    try {
+        assert.equal(describeRoute(index, { model: OPUS.value }).price, '$4 вход / $20 выход', 'the same index, painted after a language change');
+    } finally {
+        applyPayload({ language: '', english: true, revision: 42, entries: {} });
+    }
+});
+
+test('a circle or a place names the price beside a model only while its lead pays the catalog one', async () => {
+    const { modelSuggestions } = await import('../modules/place_sheet.js');
+    const { createModelCatalogStore } = await import('../modules/model_catalog_store.js');
+    const direct = { provider_id: 'openai', id: 'gpt-6', value: 'openai::gpt-6', name: 'gpt-6' };
+    const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}),
+        readSettings: async () => ({}) });
+    const said = () => modelSuggestions({ items: [OPUS, direct, { id: 'local', use_local: true }] }, { tierPriced: store.tierPriced('lead') });
+    assert.equal(said()[0].meta, undefined, 'before the settings document is read the tier is unknown');
+    // A lead pays the default tier: Main's own tier changes nothing here.
+    for (const settings of [{}, { OUROBOROS_PROCESSING_PREFERENCE: 'standard', OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}' }]) {
+        store.adoptSettings(settings);
+        const [priced, plain] = said();
+        assert.equal(priced.meta, '$4 in / $20 out', JSON.stringify(settings));
+        assert.equal(plain.meta, undefined, 'a model without a catalog price reads as before');
+        assert.match(modelChooserHtml('aria-label="Model"', '', 'room-models', [priced, plain]), /ui-model-option-meta" data-i18n-skip>\$4 in \/ \$20 out</);
+    }
+    for (const settings of [{ OUROBOROS_PROCESSING_PREFERENCE: 'fast' },
+        { OUROBOROS_PROCESSING_PREFERENCE: 'economy', OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"standard"}' }]) {
+        store.adoptSettings(settings);
+        const [offered] = said();
+        assert.equal(offered.meta, undefined, JSON.stringify(settings));
+        assert.equal(offered.value, OPUS.value, 'the model is still offered');
+    }
+});
+
+test('the capsule strip and the Change Main sheet say the price where "paid by key" stood', async () => {
+    const { routeFacts } = await import('../modules/model_list.js');
+    const index = buildModelIndex({ catalog: { items: [OPUS, { provider_id: 'openrouter', id: 'z-ai/glm-5.3', value: 'z-ai/glm-5.3' }] } });
+    const said = describeRoute(index, { model: OPUS.value });
+    assert.equal(routeFacts(said), 'OpenRouter · $4 in / $20 out');
+    assert.equal(said.facts, 'OpenRouter · $4 in / $20 out');
+    assert.equal(routeFacts(describeRoute(index, { model: 'z-ai/glm-5.3' })), 'OpenRouter · paid by key');
+});
+
+test('a stale account pin left from a subscription never hides an OpenRouter role price', async () => {
+    const { editor, status } = await mainRole({ OUROBOROS_MODEL_ACCOUNTS: '{"main":"old-codex-account"}' });
+    assert.equal(status.textContent, '$4 in / $20 out per 1M tokens');
+    editor.destroy();
+});
+
+test('a language change says the price under a role again, in the new language', async () => {
+    const previous = globalThis.window;
+    globalThis.window = new EventTarget();
+    try {
+        const { editor, host } = await mainRole();
+        editor.mount();  // paints the editor anew
+        await new Promise((resolve) => setImmediate(resolve));
+        const line = () => host.querySelector('[data-model-role-group="main"] [data-model-role-status]').textContent;
+        assert.equal(line(), '$4 in / $20 out per 1M tokens');
+        applyPayload({ language: 'ru', english: false, revision: 51, entries: {
+            '{input} in / {output} out per 1M tokens': { text: '{input} вход / {output} выход за 1 млн токенов' } } });
+        globalThis.window.dispatchEvent(new Event('ouro:language-changed'));
+        assert.equal(line(), '$4 вход / $20 выход за 1 млн токенов');
+        editor.destroy();
+        applyPayload({ language: '', english: true, revision: 53, entries: {} });
+        globalThis.window.dispatchEvent(new Event('ouro:language-changed'));
+        assert.equal(line(), '$4 вход / $20 выход за 1 млн токенов', 'a destroyed editor no longer listens');
+    } finally {
+        applyPayload({ language: '', english: true, revision: 52, entries: {} });
+        globalThis.window = previous;
+    }
+});
+
+test('the Agents editor paints again for another language: its prices are composed words', async () => {
+    const { availableSubagentsRenderSignature } = await import('../modules/subagents_settings.js');
+    const state = { loaded: true, setting: { items: [] } };
+    const english = availableSubagentsRenderSignature(state, 0);
+    applyPayload({ language: 'ru', english: false, revision: 61, entries: {} });
+    try {
+        assert.notEqual(availableSubagentsRenderSignature(state, 0), english);
+    } finally {
+        applyPayload({ language: '', english: true, revision: 62, entries: {} });
+    }
+    assert.equal(availableSubagentsRenderSignature(state, 0), english);
+});
+
+test('while Main or the default tier is on Fast or Economy the composer list names no catalog price; on Standard it does', async () => {
+    assert.equal(describeRoute(buildModelIndex({ catalog: { items: [OPUS] }, tierPriced: true }), { model: OPUS.value }).price, '');
+    const { createModelCatalogStore } = await import('../modules/model_catalog_store.js');
+    const shown = async (settings) => {
+        const store = createModelCatalogStore({ readCatalog: async () => ({ items: [OPUS] }), readPreferences: async () => ({}),
+            readSettings: async () => settings });
+        await store.read();
+        await store.readConnections();
+        return describeRoute(store.index(), { model: OPUS.value }).price;
+    };
+    assert.equal(await shown({}), '$4 in / $20 out');
+    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' }), '$4 in / $20 out');
+    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' }), '');
+    assert.equal(await shown({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), '');
+    // The list serves Main and its rooms alike: a room's new work, a lead, would pay the default tier's price.
+    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }), '');
 });

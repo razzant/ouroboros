@@ -14,7 +14,7 @@ import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_sta
 import { parseModelSource, composeModelSource, apiConnections, configuredApiProviders, indexProfilesByHarness,
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
-    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords } from './route_editor_primitives.js';
+    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords, tierPriced } from './route_editor_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { catalogPrograms } from './model_program.js';
@@ -232,10 +232,16 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
             : catalog.items.filter((item) => parseModelSource(item.value || item.id).source === row.source);
     }
+    // A fallback with no tier of its own keeps its caller's (model_slots.task_processing_preference): Main's or a lead's.
+    const mainTier = () => (rows.find((entry) => entry.slot.slot === 'main')?.processing_preference
+        ?? modelRoleMap(settings[MODEL_PROCESSING_PREFERENCES_KEY]).main) || processingPreference;
+    const tieredProcessing = (row) => tierPriced(row.processing_preference || processingPreference)
+        || (row.slot.slot === 'fallback' && !row.processing_preference && tierPriced(mainTier()));
     function currentItem(row) {
         const model = row.source === 'inherit' ? inheritedRow(row)?.model : row.model;
+        // An account pins a subscription's rows; an API source's rows name none, so a stale pin never hides them.
         const matches = itemsFor(row).filter((item) => (parseModelSource(item.value || item.id).model === model
-            || item.id === model) && (!row.account || item.credential_profile_id === row.account));
+            || item.id === model) && (!row.account || !sourceId(row) || item.credential_profile_id === row.account));
         return matches.length === 1 ? matches[0] : undefined;
     }
 
@@ -364,7 +370,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const accountOptions = accountHtml.slice(accountHtml.indexOf('>') + 1, accountHtml.lastIndexOf('</select>'));
             if (account.innerHTML !== accountOptions) account.innerHTML = accountOptions;
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
-                ...item, value: parseModelSource(item.value || item.id).model,
+                ...item, value: parseModelSource(item.value || item.id).model, ...(tieredProcessing(row) ? { price: null } : {}),
             }))), row.local ? [] : catalogPrograms(catalogs.get(catalogKey(row)), {source: sourceId(row), profile: row.account, sources: catalog.model_sources}));
             if (showContext) node.querySelector('[data-model-context-note]').textContent = modelContextNote(row.windowPreview);
             if (showContext) node.querySelector('[data-processing-summary]').textContent = processingIntentLabel(row.processing_preference, processingPreference);
@@ -380,7 +386,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const choosing = !row.local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
             status.classList.toggle('ui-status', choosing);
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
-            const price = row.local || keyNote(row) || note || !row.model || sourceId(row) ? '' : priceWords(currentItem(row)?.price, { unit: true });
+            const price = row.local || keyNote(row) || note || !row.model || sourceId(row) || tieredProcessing(row) ? ''
+                : priceWords(currentItem(row)?.price, { unit: true });
             status.textContent = row.local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
@@ -590,6 +597,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         },
         mount() {
             getDoc()?.addEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
+            // The prices are composed words the overlay leaves alone: a language change says them again.
+            globalThis.window?.addEventListener?.('ouro:language-changed', updateCatalogViews);
             if (!disposeStatus) disposeStatus = bindStatusSurface(store, { elementId: hostId, doc: getDoc,
                 listener: updateCatalogViews });
             render();
@@ -617,6 +626,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         },
         destroy() {
             getDoc()?.removeEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
+            globalThis.window?.removeEventListener?.('ouro:language-changed', updateCatalogViews);
             destroyed = true; disposeStatus?.(); disposeStatus = null;
             disposeChoosers();
             for (const request of requests.values()) request.controller.abort();
