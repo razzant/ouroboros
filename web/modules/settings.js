@@ -5,7 +5,7 @@ export { accountCatalogRefreshKey } from './settings_catalog.js';
 import { getNotifier } from './notifications.js';
 import { mountDesktopShell } from './desktop_shell.js';
 import { bindEffortSegments, syncEffortSegments, readCustomSecretDraft, collectCustomSecretDraft, paintSettingsFieldErrors, setButtonBusy, settingsWriteFailure,
-    webSearchPreviewWords } from './settings_controls.js';
+    syncSearchModelWords, webSearchPreviewWords } from './settings_controls.js';
 import { applyLocalModelPolicy, bindLocalModelControls } from './settings_local_model.js';
 import { bindAutostartControl } from './settings_autostart.js';
 import { applyMcpSettings, collectMcpSettings, initMcpSettings, mcpDraftSnapshot, validateMcpSettings } from './mcp_settings.js';
@@ -1205,6 +1205,7 @@ export function initSettings({ state, setBeforePageLeave, ws, openDashboardTab =
         const sequence = ++searchPreviewSequence;
         const target = byId('s-websearch-preview');
         if (!target?.isConnected) return;
+        syncSearchModelWords(byId('s-websearch-source'), byId('s-websearch-model'), byId('s-websearch-model-help'));
         try {
             const data = await apiClient.webSearchPreview(searchSelectionEdited ? collectSearchSelection() : {});
             if (sequence !== searchPreviewSequence || !target.isConnected) return;

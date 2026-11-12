@@ -308,6 +308,139 @@ def test_a_saved_search_choice_keeps_its_meaning_from_the_real_page_to_dispatch(
     assert not ui['errors'].unexpected(), ui['errors'].report()
 
 
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_an_explicit_deepseek_source_from_the_real_page_to_its_named_connection(saved_ui, monkeypatch, tmp_path, theme):
+    """Owner decision (11 Nov 2026): DeepSeek search is only an explicit Source. Auto's preview never names it; choosing
+    it gives the Model field DeepSeek's own words, a deepseek@name:: value shows its connection, Save and Reload keep
+    both, and a task's web_search then sends the query once on that connection's key, never the built-in one."""
+    import httpx
+    from playwright.sync_api import expect
+
+    from ouroboros import net_transport
+
+    ui = saved_ui
+    page, preview, field = _open_models(ui, {
+        'OUROBOROS_WEBSEARCH_BACKEND': 'auto', 'DEEPSEEK_API_KEY': 'deepseek-fixture',
+        'OUROBOROS_CONNECTIONS': [{'kind': 'deepseek', 'name': 'work', 'api_key': 'work-fixture'}]}, theme=theme)
+    source, words = page.locator('#s-websearch-source'), page.locator('#s-websearch-model-help')
+    expect(preview).to_contain_text('Uses OpenAI, then OpenRouter, then Anthropic, then DuckDuckGo.')
+    expect(preview).not_to_contain_text('DeepSeek')  # a DeepSeek key alone adds nothing to Auto
+    own_words, own_placeholder = words.inner_text(), field.get_attribute('placeholder')
+    source.select_option('deepseek')
+    expect(words).to_contain_text('DeepSeek search takes no model')
+    expect(field).to_have_attribute('placeholder', 'Built-in DeepSeek key')
+    expect(preview).to_contain_text('Uses DeepSeek.')
+    expect(preview).to_contain_text('DeepSeek · built-in key.')
+    field.fill('deepseek@gone::')  # a connection that does not exist is named, never read as the built-in key's gap
+    field.blur()
+    expect(preview).to_contain_text('Not available now: DeepSeek connection gone (not configured).')
+    field.fill('deepseek@work')  # a head typo is refused, never the built-in key
+    field.blur()
+    expect(preview).to_contain_text('Write a DeepSeek connection exactly as deepseek:: or deepseek@name::')
+    field.fill('deepseek@work::')
+    field.blur()
+    expect(preview).to_contain_text('DeepSeek · connection work.')  # in Details: the key the search will use
+    preview.locator('summary').click()
+    field.scroll_into_view_if_needed()
+    routes.roles.capture(page, f'search-deepseek-named-draft-{theme}')
+    page.set_viewport_size({'width': 390, 'height': 844})
+    field.scroll_into_view_if_needed()
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')  # the longer help still fits a phone
+    routes.roles.capture(page, f'search-deepseek-named-draft-{theme}-narrow')
+    page.set_viewport_size({'width': 1360, 'height': 900})
+    _save_and_reload(page)
+    on_disk = _on_disk()
+    assert (on_disk.get('OUROBOROS_WEBSEARCH_BACKEND'), on_disk.get('OUROBOROS_WEBSEARCH_MODEL')) == ('deepseek', 'deepseek@work::')
+    expect(source).to_have_value('deepseek')
+    expect(field).to_have_value('deepseek@work::')
+    expect(words).to_contain_text('DeepSeek search takes no model')
+    expect(preview).to_contain_text('DeepSeek · connection work.')
+    field.fill('gpt-5.5')  # another source's model stays the owner's text and is said not to apply
+    field.blur()
+    expect(preview).to_contain_text('Uses DeepSeek. DeepSeek takes no model, so the saved model gpt-5.5 is not applied.')
+    field.scroll_into_view_if_needed()
+    routes.roles.capture(page, f'search-deepseek-unapplied-{theme}')
+    source.select_option('auto')  # the field's own words come back with every other Source
+    expect(words).to_have_text(own_words)
+    expect(field).to_have_attribute('placeholder', own_placeholder)
+
+    sent = []
+
+    def respond(request):
+        sent.append((str(request.url), request.headers['authorization'], json.loads(request.content)))
+        return httpx.Response(200, json={'results': [{'title': 'Found', 'url': 'https://example.invalid/', 'summary': 'It.'}]})
+
+    monkeypatch.setattr(net_transport, 'env_proxies_configured', lambda: False)
+    monkeypatch.setattr(net_transport, 'remote_httpx_transport', lambda *a, **k: httpx.MockTransport(respond))
+    result, found, _stood_in = _dispatch(monkeypatch, tmp_path, {})(query='  site:example.invalid found  ')
+    assert sent == [('https://api.deepseek.com/v1/tools/search', 'Bearer work-fixture', {'query': '  site:example.invalid found  '})]
+    assert 'error' not in found and found['backend'] == 'deepseek_search_tool' and found['route']['legs'][0]['connection'] == 'work'
+    assert not ui['errors'].unexpected(), ui['errors'].report()
+
+
+# A translated install (the house idiom: the gateway's /api/ui/i18n answer, stubbed). The Model help is one composite
+# the overlay translates whole; DeepSeek's has its own entry.
+_HELP_EN = ('Built-in <1>web_search</1> only. Skills, MCP and browser tools remain independent choices. '
+            'Empty follows the model Ouroboros recommends for each source.')
+_HELP_RU = ('Только встроенный <1>web_search</1>. Навыки, MCP и браузерные инструменты выбираются отдельно. '
+            'Пустое поле: модель, которую Ouroboros рекомендует для каждого источника.')
+_DEEPSEEK_HELP_EN = ('Built-in <1>web_search</1> only. Skills, MCP and browser tools remain independent choices. DeepSeek '
+                     'search takes no model: leave it empty for the built-in key, or enter <2>deepseek@name::</2> for a '
+                     'named connection.')
+_DEEPSEEK_HELP_RU = ('Только встроенный <1>web_search</1>. Навыки, MCP и браузерные инструменты выбираются отдельно. Поиску '
+                     'DeepSeek модель не нужна: оставьте поле пустым для встроенного ключа или введите <2>deepseek@name::</2> '
+                     'для именованного подключения.')
+_TRANSLATED = {'language': 'ru', 'english': False, 'revision': 1, 'entries': {
+    english: {'text': text, 'provenance': 'imported'} for english, text in (
+        (_HELP_EN, _HELP_RU), (_DEEPSEEK_HELP_EN, _DEEPSEEK_HELP_RU),
+        ('Recommended for each source', 'Рекомендуемая для каждого источника'),
+        ('Built-in DeepSeek key', 'Встроенный ключ DeepSeek'))}}
+_COUNT_HELP_WRITES = """() => {
+    const help = document.querySelector('#s-websearch-model-help');
+    window.__helpWrites = 0;
+    new MutationObserver((records) => { window.__helpWrites += records.length; })
+        .observe(help, { childList: true, subtree: true, characterData: true });
+}"""
+
+
+def test_a_translated_search_model_help_changes_with_the_source_and_survives_typing(saved_ui):
+    """The Model field's help and placeholder are the page's own English sentence, so a translated install shows their
+    translation; typing never rewrites them, and switching to DeepSeek and back shows each Source's translation."""
+    from playwright.sync_api import expect
+
+    ui = saved_ui
+    ui['page'].route('**/api/ui/i18n', lambda route: route.fulfill(json=_TRANSLATED))
+    ui['page'].route('**/api/ui/i18n/missing', lambda route: route.fulfill(json={'ok': True}))
+    page, preview, field = _open_models(ui, {'OUROBOROS_WEBSEARCH_BACKEND': 'auto'})
+    source, help_ = page.locator('#s-websearch-source'), page.locator('#s-websearch-model-help')
+    plain = lambda text: text.replace('<1>', '').replace('</1>', '').replace('<2>', '').replace('</2>', '')  # noqa: E731
+    expect(help_).to_have_text(plain(_HELP_RU))
+    expect(help_.locator('code')).to_have_text(['web_search'])
+    expect(field).to_have_attribute('placeholder', 'Рекомендуемая для каждого источника')
+    page.evaluate(_COUNT_HELP_WRITES)
+    field.press_sequentially('gpt-5.5')
+    expect(preview).to_contain_text('OpenAI · gpt-5.5')  # every keystroke has refreshed the preview
+    assert page.evaluate('window.__helpWrites') == 0
+    expect(help_).to_have_text(plain(_HELP_RU))
+    field.fill('')
+    source.select_option('deepseek')
+    expect(help_).to_have_text(plain(_DEEPSEEK_HELP_RU))
+    expect(help_.locator('code')).to_have_text(['web_search', 'deepseek@name::'])
+    expect(field).to_have_attribute('placeholder', 'Встроенный ключ DeepSeek')
+    expect(preview).to_contain_text('Not available now: DeepSeek built-in key (not configured).')  # no DeepSeek key here
+    page.evaluate(_COUNT_HELP_WRITES)
+    field.press_sequentially('deepseek@work::')
+    expect(preview).to_contain_text('Not available now: DeepSeek connection work (not configured).')
+    assert page.evaluate('window.__helpWrites') == 0
+    help_.scroll_into_view_if_needed()
+    routes.roles.capture(page, 'search-deepseek-translated-help')
+    field.fill('')
+    source.select_option('auto')
+    expect(help_).to_have_text(plain(_HELP_RU))
+    expect(field).to_have_attribute('placeholder', 'Рекомендуемая для каждого источника')
+    assert not ui['errors'].unexpected(), ui['errors'].report()
+
+
 def types_module(name):
     import types
 

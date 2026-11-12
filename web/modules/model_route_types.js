@@ -4,10 +4,12 @@
 /**
  * One built-in search transport the resolver may try, in order.
  * @typedef {Object} WebSearchLeg
- * @property {string} source `openai`, `openrouter`, `anthropic` or `ddgs`.
+ * @property {string} source `openai`, `openrouter`, `anthropic`, `ddgs` or `deepseek`.
  * @property {string} backend
- * @property {string} model The wire model; empty for ddgs.
+ * @property {string} model The wire model; empty for ddgs and deepseek.
  * @property {'selection'|'provider_default'} model_source `provider_default`: the source's recommended model.
+ * @property {string=} connection The named connection whose key this leg uses; absent: the built-in one.
+ * @property {number=} query_max_chars The longest query this transport accepts (deepseek).
  * @property {('no_credentials'|'package_missing'|'legacy_openai_base_url')=} unavailable_reason Only on an
  *   `unavailable` leg: the locally known cause, never a provider probe.
  */
@@ -24,7 +26,7 @@
  * @property {string} note
  * @property {string=} error The selection has no built-in transport.
  * @property {string=} ignored_legacy_model A saved bare model the Anthropic source does not apply.
- * @property {string=} unapplied_model Under Auto, a saved model no built-in transport serves.
+ * @property {string=} unapplied_model A saved model Auto's transports or the DeepSeek source do not apply.
  */
 
 /**

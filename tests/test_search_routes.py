@@ -232,6 +232,8 @@ def _refusing_legs(monkeypatch):
     ('auto', 'claudexor::codex=future', []),
     ('auto', 'openai::vendor/future', []),
     ('ddgs', 'future', []),  # ddgs takes no model, so a named one is refused rather than dropped
+    ('deepseek', 'future', []),  # nor does DeepSeek search,
+    ('deepseek', 'deepseek@work::', []),  # and a call never names its connection: the saved Model does
 ])
 def test_a_model_the_call_names_is_mandatory(monkeypatch, source, named, expected):
     _every_source_ready(monkeypatch, source)
@@ -344,6 +346,12 @@ def test_settings_preview_endpoint_serves_the_unavailable_causes(monkeypatch):
     assert {leg['source']: (leg['model'], leg['model_source']) for leg in data['legs'] + data['unavailable']} == {
         source: (SEARCH_MODELS[source], 'provider_default') for source in ('openai', 'openrouter', 'anthropic')
     } | {'ddgs': ('', 'provider_default')}
+    # A DeepSeek draft: its connection and its own query limit on its leg, the cause it cannot serve now.
+    draft = client.get('/api/settings', params={'websearch_preview': '1', 'backend': 'deepseek',
+                                                'model': 'deepseek@work::'}).json()
+    assert draft['legs'] == [] and draft['unavailable'] == [{
+        'source': 'deepseek', 'backend': 'deepseek_search_tool', 'model': '', 'model_source': 'provider_default',
+        'connection': 'work', 'query_max_chars': 128, 'unavailable_reason': 'no_credentials'}]
 
 
 def _progress_ctx():
@@ -779,3 +787,146 @@ def test_a_ddgs_search_plans_no_credential_of_its_own():
                 "OUROBOROS_WEBSEARCH_MODEL": "anthropic::saved-search"}
     plan = provider_credential_plan(settings)
     assert "ANTHROPIC_API_KEY" not in plan["planned_keys"] and "anthropic" not in plan["providers"]
+
+
+# DeepSeek search is chosen only explicitly (owner decision, 11 Nov 2026): Auto never tries it, whatever DeepSeek
+# credentials exist, and under its own Source the saved Model can only name its connection (deepseek[@name]::).
+
+_DEEPSEEK_WORK = {'kind': 'deepseek', 'name': 'work', 'api_key': 'work-key'}
+# Every current saved or per-call shape: (model the resolver reads, whether a call named it).
+_ROUTED_SHAPES = [(None, False), ('', False), ('gpt-5.2', False), ('vendor/future', False),
+                  ('anthropic/claude-opus-4-6', False), ('openai@work::gpt-5.5', False), ('claudexor::codex=future', False),
+                  ('deepseek::', False), ('deepseek@work::', False), ('deepseek@work', False), ('DeepSeek@work::', False),
+                  ('future', True), ('anthropic::future', True),
+                  ('openai@work::future', True), ('deepseek::', True), ('deepseek@work::', True)]
+
+
+@pytest.mark.parametrize('model,per_call', _ROUTED_SHAPES)
+def test_auto_reads_the_same_with_or_without_any_deepseek_credential(monkeypatch, model, per_call):
+    from ouroboros.provider_models import CONNECTIONS_KEY
+
+    _discoverable(monkeypatch, anthropic=True, ddgs=True)
+    saved = {'OUROBOROS_WEBSEARCH_BACKEND': 'auto', 'OUROBOROS_WEBSEARCH_MODEL': 'gpt-5.2', 'OPENROUTER_API_KEY': 's',
+             'ANTHROPIC_API_KEY': 's', CONNECTIONS_KEY: [_OPENAI_WORK]}
+    variants = (saved, {**saved, 'DEEPSEEK_API_KEY': 's'}, {**saved, CONNECTIONS_KEY: [_OPENAI_WORK, _DEEPSEEK_WORK]})
+    without, with_key, with_named = (resolve_web_search_route(settings=settings, model=model, per_call=per_call)
+                                     for settings in variants)
+    assert with_key == without == with_named
+    assert [leg for leg in without['legs'] + without['unavailable'] if leg['source'] == 'deepseek'] == []
+
+
+def test_auto_offers_and_withholds_web_search_the_same_way_whatever_deepseek_can_serve(tmp_path, monkeypatch):
+    from ouroboros.provider_models import CONNECTIONS_KEY
+
+    seen = []
+    for index, deepseek in enumerate(({}, {'DEEPSEEK_API_KEY': 'synthetic'}, {CONNECTIONS_KEY: json.dumps([_DEEPSEEK_WORK])})):
+        _search_settings(monkeypatch, 'auto')
+        monkeypatch.delenv(CONNECTIONS_KEY, raising=False)
+        monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+        for key, value in deepseek.items():
+            monkeypatch.setenv(key, value)
+        _discoverable(monkeypatch, anthropic=True, ddgs=False)
+        (tmp_path / str(index)).mkdir()
+        hidden, rows, _lines = _withheld(_task_registry(tmp_path / str(index)))
+        seen.append((hidden, [(row['reason'], row['details']['web_search']) for row in rows]))
+    assert seen[0][0] and seen[1] == seen[0] == seen[2]  # a DeepSeek key alone never makes Auto offer the tool
+
+
+@pytest.mark.parametrize('saved,connection,unapplied', [
+    ('', '', None), ('deepseek::', '', None), ('deepseek@default::', '', None), ('deepseek@work::', 'work', None),
+    ('gpt-5.5', '', 'gpt-5.5'), ('openai@work::gpt-5.5', '', 'openai@work::gpt-5.5'),
+    ('deepseek-chat', '', 'deepseek-chat'), ('deepseek/deepseek-chat', '', 'deepseek/deepseek-chat'),  # no head: kept, unapplied
+])
+def test_the_deepseek_source_sends_no_model_and_takes_its_connection_only_from_a_saved_head(saved, connection, unapplied):
+    from ouroboros.provider_models import CONNECTIONS_KEY
+
+    route = resolve_web_search_route(settings={'OUROBOROS_WEBSEARCH_BACKEND': 'deepseek', 'OUROBOROS_WEBSEARCH_MODEL': saved,
+                                               'DEEPSEEK_API_KEY': 'built-in', CONNECTIONS_KEY: [_OPENAI_WORK, _DEEPSEEK_WORK]})
+    assert 'error' not in route and route['unavailable'] == [] and route['model'] == saved
+    assert route['legs'] == [{'source': 'deepseek', 'backend': 'deepseek_search_tool', 'model': '',
+                              'model_source': 'provider_default', **({'connection': connection} if connection else {}),
+                              'query_max_chars': 128}]
+    assert route.get('unapplied_model') == unapplied and ('not applied' in route['note']) == bool(unapplied)
+
+
+_HEAD_DIAGNOSES = ('names only its connection', 'is not valid', 'exactly as deepseek:: or deepseek@name::')
+
+
+@pytest.mark.parametrize('saved,diagnosis', [
+    ('deepseek::deepseek-chat', 'names only its connection'), ('deepseek@work::x', 'names only its connection'),
+    ('deepseek@Work::', "name 'Work' is not valid"), ('deepseek@::', "name '' is not valid"),
+    # Typos of a connection head: no ::, one colon, another case, a lane suffix.
+    ('deepseek@work', 'exactly as'), ('deepseek@work:', 'exactly as'), ('DeepSeek@work::', 'exactly as'),
+    ('deepseek@work:: (local)', 'exactly as'),
+])
+def test_a_deepseek_head_naming_a_model_or_a_malformed_connection_is_refused_before_any_send(monkeypatch, saved, diagnosis):
+    monkeypatch.setenv('OUROBOROS_WEBSEARCH_BACKEND', 'deepseek')
+    monkeypatch.setenv('OUROBOROS_WEBSEARCH_MODEL', saved)
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'built-in')
+    monkeypatch.setattr(search, '_web_search_deepseek', lambda *_a, **_k: pytest.fail('never the built-in key instead'))
+    route = resolve_web_search_route()
+    assert diagnosis in route['error'] and route['legs'] == route['unavailable'] == []
+    assert len([said for said in _HEAD_DIAGNOSES if said in route['error']]) == 1  # one cause, named as itself
+    result = json.loads(search._web_search(SimpleNamespace(pending_events=[], task_metadata={}), 'q'))
+    assert result['error'] == route['error'] and result['legs_tried'] == []
+
+
+@pytest.mark.parametrize('rows', [[], [{**_DEEPSEEK_WORK, 'enabled': False}], [{**_OPENAI_WORK}],
+                                  [{'kind': 'deepseek', 'name': 'work'}]],
+                         ids=['missing', 'disabled', 'another_kind', 'keyless'])
+def test_a_deepseek_connection_that_cannot_serve_refuses_and_never_uses_the_built_in_key(tmp_path, monkeypatch, rows):
+    from ouroboros import net_transport
+    from ouroboros.provider_models import CONNECTIONS_KEY
+
+    monkeypatch.setenv('OUROBOROS_WEBSEARCH_BACKEND', 'deepseek')
+    monkeypatch.setenv('OUROBOROS_WEBSEARCH_MODEL', 'deepseek@work::')
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'built-in-key')
+    monkeypatch.setenv(CONNECTIONS_KEY, json.dumps(rows))
+    monkeypatch.setattr(net_transport, 'web_search_openai_client', lambda **kwargs: pytest.fail('no client is built'))
+    route = resolve_web_search_route()
+    assert route['legs'] == [] and [(leg['connection'], leg['unavailable_reason']) for leg in route['unavailable']] == [
+        ('work', 'no_credentials')]
+    result = json.loads(search._web_search(SimpleNamespace(pending_events=[], task_metadata={}, drive_root=tmp_path), 'q'))
+    assert result['error'] == 'DeepSeek connection work is not configured'
+    assert [(leg['source'], leg['outcome']) for leg in result['legs_tried']] == [('deepseek', 'failed')]
+
+
+@pytest.mark.parametrize('saved,keys,withheld', [
+    ('', {}, ('missing_credential', 'web_search_backend: deepseek no_credentials')),
+    ('', {'DEEPSEEK_API_KEY': 'synthetic'}, None),
+    # A blank Model is the built-in key only: a named row alone serves no call.
+    ('', {'OUROBOROS_CONNECTIONS': [_DEEPSEEK_WORK]}, ('missing_credential', 'web_search_backend: deepseek no_credentials')),
+    ('deepseek@work::', {'OUROBOROS_CONNECTIONS': [_DEEPSEEK_WORK]}, None),
+    # No call can name another connection or a model for this Source, so the built-in key never makes it offered.
+    ('deepseek@work::', {'DEEPSEEK_API_KEY': 'synthetic'}, ('missing_credential', 'web_search_backend: deepseek@work no_credentials')),
+    ('deepseek::deepseek-chat', {'DEEPSEEK_API_KEY': 'synthetic'}, ('unsupported_selection', 'names only its connection')),
+    ('deepseek@work', {'DEEPSEEK_API_KEY': 'synthetic'}, ('unsupported_selection', 'exactly as deepseek::')),
+])
+def test_the_registry_offers_an_explicit_deepseek_source_only_when_its_own_connection_serves(
+        tmp_path, monkeypatch, saved, keys, withheld):
+    for key in ('DEEPSEEK_API_KEY', 'OUROBOROS_CONNECTIONS'):
+        monkeypatch.delenv(key, raising=False)
+    _search_settings(monkeypatch, 'deepseek', **{key: json.dumps(value) if isinstance(value, list) else value
+                                                 for key, value in keys.items()})
+    monkeypatch.setenv('OUROBOROS_WEBSEARCH_MODEL', saved)
+    hidden, rows, _lines = _withheld(_task_registry(tmp_path))
+    assert hidden is bool(withheld) and [row['reason'] for row in rows] == ([withheld[0]] if withheld else [])
+    assert not withheld or withheld[1] in rows[0]['details']['web_search']  # the cause it names
+
+
+@pytest.mark.parametrize('backend,saved,planned', [
+    ('auto', '', set()),  # Auto plans no DeepSeek credential, whatever the document holds
+    ('deepseek', '', {'DEEPSEEK_API_KEY'}),
+    ('deepseek', 'deepseek@work::', {'DEEPSEEK_API_KEY', 'OUROBOROS_CONNECTIONS'}),  # the named row travels whole
+    ('deepseek', 'openai@work::gpt-5.5', {'DEEPSEEK_API_KEY'}),  # an unapplied route plans nothing of its own
+])
+def test_the_search_slot_plans_deepseek_credentials_only_for_its_explicit_source(backend, saved, planned):
+    from devtools.benchmarks.common.server_runner import build_isolated_settings
+    from ouroboros.provider_models import provider_credential_plan
+
+    live = {'OUROBOROS_MODEL': 'openrouter/model', 'OUROBOROS_WEBSEARCH_BACKEND': backend, 'OUROBOROS_WEBSEARCH_MODEL': saved,
+            'OPENROUTER_API_KEY': 'or', 'DEEPSEEK_API_KEY': 'ds', 'OUROBOROS_CONNECTIONS': [_OPENAI_WORK, _DEEPSEEK_WORK]}
+    assert set(provider_credential_plan(live)['planned_keys']) & {'DEEPSEEK_API_KEY', 'OUROBOROS_CONNECTIONS'} == planned
+    out = build_isolated_settings(live)  # the isolated benchmark run searches as the saved document does
+    assert ('DEEPSEEK_API_KEY' in out) == bool(planned)
+    assert resolve_web_search_route(settings=out)['legs'] == resolve_web_search_route(settings=live)['legs']

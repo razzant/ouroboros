@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { syncPolicyState } from '../modules/settings_policy.js';
-import { collectCustomSecretDraft, paintSettingsFieldErrors, settingsWriteFailure, webSearchPreviewWords } from '../modules/settings_controls.js';
+import { collectCustomSecretDraft, paintSettingsFieldErrors, settingsWriteFailure, syncSearchModelWords,
+    webSearchPreviewWords } from '../modules/settings_controls.js';
 
 const draft = (overrides = {}) => ({
     key: '', value: '', appliedValue: '', originalKey: '', clear: false, removed: false,
@@ -111,6 +112,50 @@ test('the web search preview names the sources once in order; models, gaps and c
         /^Uses DuckDuckGo\. No built-in search serves the saved model x-1/);
     assert.deepEqual(webSearchPreviewWords({ legs: [] }, name), { main: 'No search source is ready.', details: 'Uses saved account credentials.' });
     assert.deepEqual(webSearchPreviewWords({ error: 'Search routes are not ready' }), { main: 'Search routes are not ready', details: '' });
+});
+
+test('a DeepSeek preview names the key it uses; every other source keeps its own words', () => {
+    const name = (id) => ({ deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Anthropic' })[id] || id;
+    const leg = { source: 'deepseek', backend: 'deepseek_search_tool', model: '', model_source: 'provider_default' };
+    assert.deepEqual(webSearchPreviewWords({ source: 'deepseek', legs: [{ ...leg, connection: 'work' }] }, name),
+        { main: 'Uses DeepSeek.', details: 'DeepSeek · connection work. Uses saved account credentials.' });
+    assert.deepEqual(webSearchPreviewWords({ source: 'deepseek', legs: [leg] }, name),
+        { main: 'Uses DeepSeek.', details: 'DeepSeek · built-in key. Uses saved account credentials.' });
+    // A saved model this Source ignores changes what the owner does next, so it stays in the main line.
+    assert.equal(webSearchPreviewWords({ source: 'deepseek', legs: [leg], unapplied_model: 'gpt-5.5' }, name).main,
+        'Uses DeepSeek. DeepSeek takes no model, so the saved model gpt-5.5 is not applied.');
+    // A named connection that is missing, disabled or of another kind is named as itself, never as the built-in key.
+    const gap = (extra) => webSearchPreviewWords({ source: 'deepseek', legs: [],
+        unavailable: [{ ...leg, ...extra, unavailable_reason: 'no_credentials' }] }, name);
+    assert.deepEqual(gap({ connection: 'work' }), { main: 'No search source is ready.',
+        details: 'Not available now: DeepSeek connection work (not configured). Uses saved account credentials.' });
+    assert.equal(gap({}).details, 'Not available now: DeepSeek built-in key (not configured). Uses saved account credentials.');
+    // Auto and the sources with a model say what they said before DeepSeek: no connection beside a model.
+    assert.deepEqual(webSearchPreviewWords({ source: 'auto', unapplied_model: 'x-1',
+        legs: [{ source: 'openai', model: 'gpt-5.5', model_source: 'selection', connection: 'work' }],
+        unavailable: [{ source: 'anthropic', unavailable_reason: 'no_credentials' }] }, name), {
+        main: 'Uses OpenAI. No built-in search serves the saved model x-1; Auto uses the recommended models.',
+        details: 'OpenAI · gpt-5.5. Not available now: Anthropic (no API key). Uses saved account credentials.' });
+});
+
+test('the search Model help and placeholder change with the Source only, so typing never rewrites a translation', () => {
+    const writes = [];
+    const help = { set innerHTML(value) { writes.push(value); } };
+    const field = { set placeholder(value) { writes.push(`placeholder: ${value}`); } };
+    const select = { dataset: { modelHelp: 'Page help', modelPlaceholder: 'Recommended for each source' },
+        selectedOptions: [{ dataset: {} }] };
+    syncSearchModelWords(select, field, help);  // the page rendered the select's own words: nothing to write
+    syncSearchModelWords(select, field, help);  // a keystroke
+    assert.deepEqual(writes, []);
+    select.selectedOptions = [{ dataset: { modelHelp: 'DeepSeek help', modelPlaceholder: 'Built-in DeepSeek key' } }];
+    syncSearchModelWords(select, field, help);
+    syncSearchModelWords(select, field, help);  // typing under DeepSeek writes nothing more
+    select.selectedOptions = [{ dataset: {} }];
+    syncSearchModelWords(select, field, help);  // back to a source with a model: the page's own English again
+    assert.deepEqual(writes, ['DeepSeek help', 'placeholder: Built-in DeepSeek key', 'Page help',
+        'placeholder: Recommended for each source']);
+    syncSearchModelWords(null, field, help);  // a page without the section changes nothing
+    assert.equal(writes.length, 4);
 });
 
 test('a policy line says one value once and spells the facts out only where they differ', () => {

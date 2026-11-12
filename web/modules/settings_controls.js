@@ -139,22 +139,45 @@ const SEARCH_GAPS = { no_credentials: 'no API key', package_missing: 'package no
 
 /** The web search preview in owner words: the sources in the order they are tried (each named by `name`, the
  *  Source select's own word for its id) and a saved model a source ignores stay in the main line; the models, the
- *  sources not available now and the credential note are Details. */
+ *  sources not available now and the credential note are Details. DeepSeek takes no model, so its leg names the key
+ *  it uses instead: a named connection, or the built-in key. */
 export function webSearchPreviewWords(data, name = (id) => id) {
     if (data?.error) return { main: String(data.error), details: '' };
     const legs = data?.legs || [];
+    const deepseekKey = (leg) => (leg.connection ? `connection ${leg.connection}` : 'built-in key');
+    const unapplied = data?.source === 'deepseek'
+        ? ` ${name('deepseek')} takes no model, so the saved model ${data.unapplied_model} is not applied.`
+        : ` No built-in search serves the saved model ${data?.unapplied_model}; Auto uses the recommended models.`;
     const ignored = data?.ignored_legacy_model ? ` Anthropic does not apply the saved model ${data.ignored_legacy_model}; edit Source or Model to change it.`
-        : data?.unapplied_model ? ` No built-in search serves the saved model ${data.unapplied_model}; Auto uses the recommended models.` : '';
+        : data?.unapplied_model ? unapplied : '';
     // provider_default names the source's recommended model (search_routes.SEARCH_MODELS), not the owner's.
-    const models = legs.filter((leg) => leg.model)
-        .map((leg) => `${name(leg.source)} · ${leg.model}${leg.model_source === 'provider_default' ? ' (recommended)' : ''}`);
+    const models = legs.filter((leg) => leg.model || leg.source === 'deepseek')
+        .map((leg) => (leg.source === 'deepseek' ? `${name(leg.source)} · ${deepseekKey(leg)}`
+            : `${name(leg.source)} · ${leg.model}${leg.model_source === 'provider_default' ? ' (recommended)' : ''}`));
     const unavailable = (data?.unavailable || [])
-        .map((leg) => `${name(leg.source)} (${SEARCH_GAPS[leg.unavailable_reason] || 'not ready'})`);
+        .map((leg) => (leg.source === 'deepseek' && leg.unavailable_reason === 'no_credentials'
+            ? `${name(leg.source)} ${deepseekKey(leg)} (not configured)`
+            : `${name(leg.source)} (${SEARCH_GAPS[leg.unavailable_reason] || 'not ready'})`));
     return {
         main: `${legs.length ? `Uses ${legs.map((leg) => name(leg.source)).join(', then ')}.` : 'No search source is ready.'}${ignored}`,
         details: [models.length ? `${models.join('; ')}.` : '', unavailable.length ? `Not available now: ${unavailable.join(', ')}.` : '',
             'Uses saved account credentials.'].filter(Boolean).join(' '),
     };
+}
+
+const searchModelHelpShown = new WeakMap();  // help element → the English it was last given here
+
+/** The web search Model field's help and placeholder: the chosen option's own (DeepSeek, which takes no model, carries
+ *  `data-model-help` and `data-model-placeholder`), else the Source select's, which the page renders first. Written
+ *  from that static English only when it changes (a Source switch), never read back from a page the interface
+ *  language may have translated, so typing never rewrites a standing translation; no route grammar is read here. */
+export function syncSearchModelWords(source, field, help) {
+    if (!source || !field || !help) return;
+    const own = { ...source.dataset, ...source.selectedOptions?.[0]?.dataset };
+    if (own.modelHelp === (searchModelHelpShown.get(help) ?? source.dataset.modelHelp)) return;
+    searchModelHelpShown.set(help, own.modelHelp);
+    help.innerHTML = own.modelHelp ?? '';
+    field.placeholder = own.modelPlaceholder ?? '';
 }
 
 /* The one Settings section recipe (DESIGN.md principle 7; the 06.11 convergence): a title, one authored lead in

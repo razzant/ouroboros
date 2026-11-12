@@ -196,7 +196,8 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "",
     "OUROBOROS_WEBSEARCH_MODEL": "",
     # web_search backend pin: auto (default OpenAI-first cascade) | ddgs (pure
-    # retrieval, no second LLM — for fixed-model runs) | openai | openrouter | anthropic.
+    # retrieval, no second LLM — for fixed-model runs) | openai | openrouter | anthropic
+    # | deepseek (DeepSeek's Search API; explicit only, never in auto).
     "OUROBOROS_WEBSEARCH_BACKEND": "auto",
     # Main-loop OpenRouter server web-search tool. Off by default: provider-
     # specific capability, not a core provider-independence requirement.

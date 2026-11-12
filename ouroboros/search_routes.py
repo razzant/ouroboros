@@ -6,12 +6,15 @@ remain independent choices. Resolution reads settings; it performs no provider I
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 
+from ouroboros.gateways.search_api import QUERY_MAX_CHARS
 from ouroboros.provider_models import legacy_openai_base
 
-# The model Ouroboros recommends for each built-in source, the one home of that choice: curated, never
-# a ranking of model names or catalogs. A blank saved Model follows it; a saved model stays as saved.
+# The model Ouroboros recommends for each source Auto tries, in Auto's order: the one home of that choice and of
+# Auto's sources, curated, never a ranking of model names or catalogs. A blank saved Model follows it; a saved
+# model stays as saved.
 # Checked 2026-11-01; re-check the source's own guide before changing its row:
 # OpenAI recommends gpt-5.5 with Responses web_search (developers.openai.com/api/docs/guides/tools-web-search);
 # OpenRouter lists openrouter:web_search on the openai/gpt-5.5 endpoints
@@ -20,7 +23,15 @@ from ouroboros.provider_models import legacy_openai_base
 # web_search_20250305 tool (llm_anthropic.py) serves every model. If stale: a retired id fails its own
 # leg loudly (Auto then tries the next source); a superseded one keeps answering until a release moves it.
 SEARCH_MODELS = {"openai": "gpt-5.5", "openrouter": "openai/gpt-5.5", "anthropic": "claude-sonnet-5-5", "ddgs": ""}
-SEARCH_BACKENDS = {"openai": "openai_responses", "openrouter": "openrouter_server_tool", "anthropic": "anthropic_server_tool", "ddgs": "ddgs"}
+# Every source a Source setting may name, with its transport. DeepSeek's own Search API is only an explicit choice
+# (owner decision, 11 Nov 2026): Auto never tries it, and its saved Model can only name its connection.
+SEARCH_BACKENDS = {"openai": "openai_responses", "openrouter": "openrouter_server_tool", "anthropic": "anthropic_server_tool",
+                   "ddgs": "ddgs", "deepseek": "deepseek_search_tool"}
+MODELLESS_SOURCES = ("ddgs", "deepseek")  # they send no model, so no call can name one for them
+_LEG_FACTS = {"deepseek": {"query_max_chars": QUERY_MAX_CHARS}}  # a transport's own limit, said on its leg
+# A saved DeepSeek Model that starts like its connection head but is not one (deepseek@work, deepseek@work:,
+# DeepSeek@work::, deepseek@work:: (local)) is refused: never the built-in key for a connection it misnames.
+_DEEPSEEK_HEAD_LIKE = re.compile(r"deepseek\s*[@:]", re.IGNORECASE)
 
 
 def resolve_web_search_route(*, backend=None, model=None, settings=None, per_call=False) -> dict:
@@ -29,7 +40,8 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
     ``model`` stands in for the saved selection (a Settings draft keeps the saved meaning). With
     ``per_call`` a nonblank ``model`` is the one a ``web_search`` call named, and it is mandatory:
     only legs that send that model are candidates, so a model no built-in transport serves is an
-    error, never Auto's other models or ddgs."""
+    error, never Auto's other models or ddgs. The Anthropic Source keeps a saved bare id's legacy
+    reading: not applied (``ignored_legacy_model``), its recommended model sent instead."""
     from ouroboros.config import runtime_setting
 
     setting = settings.get if settings is not None else runtime_setting
@@ -42,7 +54,7 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
               "note": "Applies only to built-in web_search; skills, MCP and browser tools remain independent choices."
                       + (" This call named its model: only these legs send it (a routed model or named connection has one),"
                          " and no other model or ddgs substitutes." if strict else "")}
-    if source not in {"auto", *SEARCH_MODELS}:
+    if source not in {"auto", *SEARCH_BACKENDS}:
         return {**result, "error": "Unknown web search source"}
     from ouroboros.provider_models import parse_model_route
 
@@ -56,10 +68,26 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
                    if sep and (prefix not in {"openai", "anthropic", "openrouter"} or not native or not parsed.valid) else
                    "Direct search sources require a native model id"
                    if sep and prefix in {"openai", "anthropic"} and "/" in native else "")
+    if source in MODELLESS_SOURCES and strict:  # a named model is never silently dropped
+        return {**result, "error": f"The {source} source takes no model; omit model to search with {source}"}
     if source == "ddgs":
-        if strict:  # a named model is never silently dropped
-            return {**result, "error": "The ddgs source takes no model; omit model to search with ddgs"}
         candidates = [("ddgs", "")]  # ddgs takes no model: a saved model of any route is irrelevant here
+    elif source == "deepseek":
+        head = sep and prefix == "deepseek"  # deepseek[@name]:: names the connection, never a model
+        # Never the built-in key in place of a connection the owner tried to name.
+        if head and not parsed.valid:
+            return {**result, "error": f"DeepSeek connection name {parsed.connection!r} is not valid: a name is 1-32 "
+                                       "lowercase letters, digits, '-' or '_', starting with a letter or digit"}
+        if head and native.strip():
+            return {**result, "error": "A DeepSeek search Model names only its connection: deepseek:: or "
+                                       "deepseek@name::, with nothing after ::"}
+        if not head and _DEEPSEEK_HEAD_LIKE.match(selected):
+            return {**result, "error": "Write a DeepSeek connection exactly as deepseek:: or deepseek@name:: "
+                                       "(lowercase, ending in ::)"}
+        if selected and not head:
+            result["unapplied_model"] = selected
+            result["note"] += " DeepSeek search takes no model, so the saved model is not applied."
+        candidates = [("deepseek", "")]
     elif unsupported and (strict or source != "auto"):
         return {**result, "error": unsupported}  # a strict source or a named model never substitutes another
     elif source == "auto":
@@ -114,13 +142,13 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
             reason = "legacy_openai_base_url"  # Legacy compatible credentials are not official Responses access.
         elif name in _SDK_PACKAGES and not _package_discoverable(_SDK_PACKAGES[name]):
             reason = "package_missing"  # discoverable is not proof of a working import; dispatch still reports that
-        explicit_model = (bool(selected) and name != "ddgs" and not result.get("ignored_legacy_model")
+        explicit_model = (bool(selected) and name not in MODELLESS_SOURCES and not result.get("ignored_legacy_model")
                           and not result.get("unapplied_model"))
         if source == "auto" and name == "anthropic" and prefix != "anthropic" and not legacy_anthropic:
             explicit_model = False
         leg = {"source": name, "backend": SEARCH_BACKENDS[name], "model": wire_model,
                "model_source": "selection" if explicit_model else "provider_default",
-               **({"connection": leg_connection} if leg_connection else {})}
+               **({"connection": leg_connection} if leg_connection else {}), **_LEG_FACTS.get(name, {})}
         result["unavailable" if reason else "legs"].append({**leg, "unavailable_reason": reason} if reason else leg)
     return result
 
