@@ -63,8 +63,9 @@ export function vouchedBy(data) {
 }
 
 const listed = value => (Array.isArray(value) ? value : []);
-const sameQuestion = (one, other) => String(one?.task_id) === String(other?.task_id)
-    && (!one?.quiz_id || !other?.quiz_id || String(one.quiz_id) === String(other.quiz_id));
+// One question's exact address: a bare wait without a quiz never stands for an addressed question (as on the server).
+const sameAddress = (one, other) => String(one?.task_id) === String(other?.task_id)
+    && String(one?.quiz_id || '') === String(other?.quiz_id || '');
 
 /**
  * One state body with the `open_question` items an earlier body (`prior`) had in its rooms and this one dropped
@@ -83,12 +84,16 @@ export function carryOpenQuestions(prior, data) {
     const rooms = { ...data.rooms };
     let works = data.works;
     for (const [chat, before] of Object.entries(prior?.rooms || {})) {
-        for (const item of listed(before?.turn)) {
-            if (item?.kind !== 'open_question' || !item.task_id || vouched(item.task_id, item.quiz_id)) continue;
+        for (const known of listed(before?.turn)) {
+            // A known question keeps its address whatever its item was: a wait this body no longer confirms is carried
+            // as the open question it still is, never as a wait nobody holds; a bare wait has no proved address.
+            const exact = known?.kind === 'question' && known.quiz_id;
+            if (!(known?.kind === 'open_question' || exact) || !known.task_id || vouched(known.task_id, known.quiz_id)) continue;
+            const item = { ...known, kind: 'open_question' };
             const room = rooms[chat] && typeof rooms[chat] === 'object' ? rooms[chat]
                 : { activity: complete ? 'idle' : 'unknown', transition: 'none', call: '', turn: [], amber: false,
                     mark: complete ? 'none' : 'ring', confirmed: complete, works: [] };
-            if (listed(room.turn).some(entry => ['question', 'open_question'].includes(entry?.kind) && sameQuestion(entry, item))) continue;
+            if (listed(room.turn).some(entry => ['question', 'open_question'].includes(entry?.kind) && sameAddress(entry, item))) continue;
             const { work_id: workId, ...own } = item;
             const holder = workId && listed(room.works).includes(workId) ? workId : '';
             if (holder) works = works.map(work => (work?.work_id === holder && String(work.room ?? 0) === chat

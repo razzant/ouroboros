@@ -132,3 +132,27 @@ test('a read that does not vouch against an open question keeps it in its room; 
     const gone = carryOpenQuestions({ rooms: { 42: { ...working, turn: [held], amber: true } } }, gap);
     assert.deepEqual(gone.rooms['42'].turn, [item]);
 });
+
+test('a partial read keeps a known question whatever its item was; a bare wait is not carried; a vouching read removes it', () => {
+    const idle = (turn) => ({ activity: 'idle', transition: 'none', call: '', turn, amber: turn.length > 0, mark: 'none',
+        confirmed: true, works: [] });
+    const gap = { supervisor_ready: true, works: [], works_complete: true, rooms: {},
+        current_questions_gaps: [{ task_id: 't' }] };
+    const open = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    // The work stood on its exact question and was stopped unanswered: the next body lists no work and cannot read
+    // the question. It stays the room's turn, as the open question it still is, never as a wait nobody holds.
+    for (const known of [open, { kind: 'question', task_id: 't', quiz_id: 'q', work_id: 'w' }]) {
+        const carried = carryOpenQuestions({ rooms: { 42: idle([known]) } }, gap);
+        assert.deepEqual(carried.rooms['42'].turn, [open], known.kind);
+        assert.equal(carried.rooms['42'].amber, true, known.kind);
+        // A read that vouches against it removes it.
+        const complete = { ...gap, current_questions_complete: true };
+        assert.equal(carryOpenQuestions({ rooms: { 42: idle([known]) } }, complete), complete, known.kind);
+    }
+    // A wait that never named its quiz has no proved address: it is not carried.
+    assert.equal(carryOpenQuestions({ rooms: { 42: idle([{ kind: 'question', task_id: 't' }]) } }, gap), gap);
+    // A bare wait the body still lists never stands for the exact question it does not name.
+    const bare = { ...gap, rooms: { 42: idle([{ kind: 'question', task_id: 't' }]) } };
+    assert.deepEqual(carryOpenQuestions({ rooms: { 42: idle([open]) } }, bare).rooms['42'].turn,
+        [{ kind: 'question', task_id: 't' }, open]);
+});
