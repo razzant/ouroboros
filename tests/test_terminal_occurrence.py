@@ -30,6 +30,37 @@ def test_executor_observes_once_enrichment_and_recovery_do_not_restamp(tmp_path,
     assert load_task_result(tmp_path, 'legacy')['terminal_time']['occurred_at'] is None
 
 
+def test_a_supervisor_cancel_is_an_observed_end_named_by_its_observer(tmp_path, monkeypatch):
+    """The supervisor cancelling work it holds performs that transition itself, so it observes the end
+    (audit 08-11.11 item 6); the fact names its observer. In the other direction nothing else gains a
+    clock: a cancel written without the flag (recovery) stays unknown, the flag stamps no other status,
+    no field can claim the source, and a terminal the executor observed first is never restamped."""
+    def started(task_id):
+        monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T1)
+        write_task_result(tmp_path, task_id, 'running', task_attempt=1, started_at=T1)
+        monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T2)
+
+    started('held')
+    cancelled = write_task_result(tmp_path, 'held', 'cancelled', _cancel_observed=True, result='Task cancelled.')
+    assert terminal_time_fact(cancelled) == {'v': 1, 'occurred_at': T2, 'source': 'supervisor_cancel',
+                                             'attempt': task_attempt_witness(cancelled)}
+    monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T3)
+    write_task_result(tmp_path, 'held', 'cancelled', _cancel_observed=True, cost_final=True)  # enrichment
+    assert load_task_result(tmp_path, 'held')['terminal_time'] == cancelled['terminal_time']
+
+    started('recovered')
+    recovered = write_task_result(tmp_path, 'recovered', 'cancelled', result='was neither queued nor running',
+                                  terminal_time={**cancelled['terminal_time'], 'occurred_at': T2})
+    assert terminal_time_fact(recovered)['source'] == 'unknown'
+    started('failed')
+    assert terminal_time_fact(write_task_result(tmp_path, 'failed', 'failed', _cancel_observed=True))['source'] == 'unknown'
+    started('done')
+    done = write_task_result(tmp_path, 'done', 'completed', _terminal_observed=True, result='ok')
+    write_task_result(tmp_path, 'done', 'cancelled', _cancel_observed=True)  # natural completion wins a late cancel
+    assert load_task_result(tmp_path, 'done')['terminal_time'] == done['terminal_time']
+    assert done['terminal_time']['source'] == 'executor_terminal'
+
+
 def test_replica_transfers_only_matching_source_attempt_without_receiver_clock(tmp_path, monkeypatch):
     from ouroboros.post_task_checkpoint import project_replica_task_result_fields
 

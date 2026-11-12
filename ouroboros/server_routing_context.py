@@ -232,8 +232,8 @@ def _chat_running_tasks(ctx: Any, chat_id: int) -> list:
 
 
 STOP_REASON_LABEL = "the stopping author's own account, not an owner instruction"
-_REFERENCE_KEYS = ("task_id", "status", "title", "authority_source", "outcome", "cause", "ended_at",
-                   "continuation_offer", "stop_reason", "read_error")
+_REFERENCE_KEYS = ("task_id", "status", "title", "authority_source", "outcome", "cause", "cancelled_by", "earlier_stop",
+                   "ended_at", "continuation_offer", "stop_reason", "read_error")
 
 
 def _ended_work_facts(row: Dict[str, Any], task_id: str) -> Dict[str, Any]:
@@ -253,6 +253,13 @@ def _ended_work_facts(row: Dict[str, Any], task_id: str) -> Dict[str, Any]:
         facts: Dict[str, Any] = {
             "outcome": "Interrupted" if row.get("status") == "interrupted" else OUTCOME_PHASE_HEADLINE[outcome_phase(ended, {})],
             "cause": recorded_cause(row), "ended_at": terminal_time_fact(row).get("occurred_at")}
+        origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
+        if row.get("status") == "cancelled" and origin:
+            # A cancel ended this work. Its row keeps the reason code of the stop that preceded the cancel
+            # (a pause, a spent budget): that is the earlier stop, never the cause of the end.
+            earlier = facts["cause"] if facts["cause"] not in ("", "cancelled") else None
+            facts.update(cause="cancelled", **({"cancelled_by": str(origin["source"])} if origin.get("source") else {}),
+                         **({"earlier_stop": earlier} if earlier else {}))
         offer = offer_view(row, task_id)
         if offer is not None:
             facts["continuation_offer"] = offer

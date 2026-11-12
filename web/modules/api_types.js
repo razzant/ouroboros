@@ -761,7 +761,7 @@
  * @property {boolean=} outcome_final  // true only after the canonical task outcome settles; false marks a pre-finalization narrative
  * @property {{status: string, phase: string, ts: string, provenance: string, model_execution?: Object}=} historical_terminal
  * @property {Object=} model_execution
- * @property {{v: 1, occurred_at: ?string, source: "executor_terminal"|"unknown", attempt: Object}=} terminal_time  // a task_summary row's host end fact; `ts` stays its publication time
+ * @property {{v: 1, occurred_at: ?string, source: "executor_terminal"|"supervisor_cancel"|"unknown", attempt: Object}=} terminal_time  // a task_summary row's host end fact; `ts` stays its publication time
  */
 
 /**
