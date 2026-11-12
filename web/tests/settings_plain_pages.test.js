@@ -527,3 +527,17 @@ test('the home opens every one of these pages by the path its row names', () => 
     }
     assert.equal(settingsPageFor('computer/advanced').prefix, 'computer/advanced', 'the longest prefix serves a page under This computer');
 });
+
+test('a switch a page draws by hand is stamped as a switch, so a narrow row keeps it at its end', async (t) => {
+    // settings.css keeps a door, a switch, a stored key and a short number at a narrow row's end; a custom row's
+    // control goes under its words. A page that draws its own switch says so in the row's description (`as`).
+    const notifications = await open(t, 'notifications');
+    for (const id of ['notify:enabled', 'notify:needs_answer', 'notify:task_done', 'notify:important', 'notify:main_reply', 'notify:sound', 'notify:show_text']) {
+        assert.equal(notifications.row(id).dataset.kind, 'switch', id);
+    }
+    assert.equal(notifications.row('notify:test').dataset.kind, 'custom', 'a button of a page stays a custom row');
+    const computer = await open(t, 'computer');
+    for (const id of ['computer:autostart', 'OUROBOROS_DESKTOP_KEEP_RUNNING']) assert.equal(computer.row(id).dataset.kind, 'switch', id);
+    const css = fs.readFileSync(new URL('../settings.css', import.meta.url), 'utf8');
+    assert.match(css, /@container \(max-width: 28rem\) \{\s*\.settings-row:is\(\[data-kind="door"\], \[data-kind="switch"\]/);
+});

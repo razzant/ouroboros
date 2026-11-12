@@ -190,6 +190,8 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     page.evaluate(TEST_PAGE)
     level, _kept = _open_from_home(page, "rules")
     setup_browser.capture(page, "settings-beside-1440x900")
+    # Beside the home too the opened page takes the focus on its Back: a keyboard reaches the page at once.
+    assert _focused(page, '[data-settings-page="rules"] [data-settings-back]')
     assert page.locator(HOME).is_visible(), "wide: the home stays beside the page"
     assert page.locator(f'{HOME} [data-settings-open="rules"]').get_attribute("aria-current") == "page"
     assert page.evaluate(SETTINGS_LAYERS) == [], "beside the home a level is no layer"

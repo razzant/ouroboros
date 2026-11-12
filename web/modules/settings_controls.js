@@ -648,7 +648,7 @@ export function settingsRow(row, ctx = {}) {
     const id = rowDomId(row);
     const name = escapeHtmlAttr(row.name);
     const meta = `<span id="${id}-meta" data-setting-meta>${escapeHtmlAttr(row.meta || '')}</span>`;
-    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(control.kind || 'custom')}"${control.noLimit ? ' data-no-limit' : ''}`;
+    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(control.as || control.kind || 'custom')}"${control.noLimit ? ' data-no-limit' : ''}`;
     if (control.kind === 'door') {  // the whole row is the press: phrasing content only
         return `<button type="button" ${attrs} data-setting-door><span class="ui-row-title">${name}</span>`
             + `<span class="ui-row-meta">${meta}</span><span class="ui-row-actions">${controlHtml(row, control, ctx)}</span></button>`;

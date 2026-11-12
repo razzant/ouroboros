@@ -206,7 +206,7 @@ export function initSettings(ctx = {}) {
         syncLayers();
         if (!quiet) {
             if (row && level) revealRow(level, row);
-            else if (opened && (!besideBefore || !visible(document.activeElement))) {
+            else if (opened) {  // beside the home too: a keyboard reaches the page at once, and Back returns to the row
                 opened.el.querySelector('[data-settings-back]')?.focus({ preventScroll: true });
             } else if (returned) {
                 const to = visible(returned.opener) ? returned.opener

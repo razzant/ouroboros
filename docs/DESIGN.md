@@ -2862,10 +2862,9 @@ stops clear of them.
 means and what a change did, and a paragraph waits behind `More`. The home is Ouroboros's card, search and six
 groups of rows; a wide window keeps it beside the open page, whose first row is Back. A row opens its page or is a
 door: what lives elsewhere (a Dashboard tab beside its live state, Main's composer) shows its value here and leads
-there, and a tab opened from here leads back. A list of entries (agents, tool servers, keys, fallbacks) is heads:
+there, and a tab or page opened from here leads back. A list of entries (agents, tool servers, keys, fallbacks) is heads:
 a press opens the entry's page, Add an unsaved one. The card speaks in Ouroboros's voice: what it has read that
-waits for the owner here, each with its one action, and a neutral Check for what it has not read; it never says
-that nothing waits.
+waits for the owner here, each with its one action, and a neutral Check for what it has not read.
 
 **No page-wide Save, no page draft.** A switch (an entry's too), a strip and a choice act when pressed; a typed
 value is written when its field is left, and its line says `Saved`, the value it replaced and `Undo` (a
