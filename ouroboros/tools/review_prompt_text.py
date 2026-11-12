@@ -29,7 +29,7 @@ Before marking any finding CRITICAL you MUST:
    items that all require the same fix.
 5. If a previous CRITICAL finding was concretely fixed and only a broader
    future-risk variant remains, mark that broader concern **advisory**.
-   Do NOT keep a FAIL open by reformulating a fixed concrete issue into
+   Do NOT hold an obligation open by reformulating a fixed concrete issue into
    a more abstract version.
 6. Pre-existing gaps that exist entirely outside the touched area are advisory
    unless this diff directly depends on them or introduces a regression.
