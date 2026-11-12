@@ -418,6 +418,32 @@ test('an answer whose delivery is unknown is amber on a Project question\'s card
     } finally { mirror.restore(); }
 });
 
+test('a private Presence question is Main\'s wherever it is drawn: its unknown delivery is not amber in its work\'s Project', async () => {
+    const delivery = { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' };
+    const answered = { ...WS_MSG, state: 'answered', answered_index: 0, question_delivery: delivery };
+    // From history: the row names its work's Project only as a reference; its contact says it is Main's.
+    const history = fixture({ projectId: 'p1', chatId: 23 });
+    try {
+        const card = history.decision.buildQuizCard({ ...answered, project_id: 'p1', presence_contact: { kind: 'telegram' } });
+        assert.deepEqual(markOf(card), ['dot', 'ok', false]);
+    } finally { history.restore(); }
+    // Read canonically first (Main's own room, shown in the Project too): building the room's card keeps that fact.
+    const block = { ...WS_MSG, state: 'answered', answered_index: 0, asked_at: WS_MSG.ts,
+        delivery: { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' } };
+    const read = fixture({ projectId: 'p1', chatId: 23, fetchDetail: async () => ({ task_id: 't-1', owner_quiz: { 'qz-1': block },
+        question_rooms: { 'qz-1': { state: 'known', chat_id: 1, project_id: '', also_project_ids: ['p1'] } } }) });
+    try {
+        const question = await read.decision.readQuestion('t-1', 'qz-1', 'p1');
+        assert.equal(question?.project_id, '');
+        assert.deepEqual(markOf(read.decision.buildQuizCard({ ...answered, project_id: 'p1' })), ['dot', 'ok', false]);
+    } finally { read.restore(); }
+    // An ordinary question of that Project drawn in its room stays amber, as the pill counts it.
+    const own = fixture({ projectId: 'p1', chatId: 23 });
+    try {
+        assert.deepEqual(markOf(own.decision.buildQuizCard(answered)), ['dot', 'owner', false]);
+    } finally { own.restore(); }
+});
+
 test('applyQuizStateFrame settles an existing card and ignores unknown ids', async () => {
     const fx = fixture({ fetchImpl: async () => ({ ok: true, status: 200 }) });
     try {
