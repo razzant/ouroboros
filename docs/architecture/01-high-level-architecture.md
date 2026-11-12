@@ -212,9 +212,8 @@ ouroboros/ — agent core and shared runtime (§6)
   safety_config.py — independent coverage per kind (your work, consciousness), the resolved checker and the one-time settings migration
   safety_records.py, safety_evidence.py — Safety verdict parsing/accounting; the bundle's evidence diet and who wrote each row
   ouroboros/gateway/safety_settings.py — owner Safety level, rules and checker endpoints
-  consciousness.py, consciousness_wake.py, consciousness_transitions.py — the background alarm admitting an ordinary Main turn through the supervisor tick; the wake input and `wake_task_metadata` envelope (§6 Background consciousness)
+  consciousness.py, consciousness_wake.py, consciousness_transitions.py, consciousness_view.py — the background alarm admitting an ordinary Main turn on the supervisor tick; the wake input, accepted transition chain and `wake_task_metadata` envelope; read-only facts: places, counted roots, bounded recent wakes (§6 Background consciousness)
   consciousness_authority.py, consciousness_allowance.py — dispatch-bound autonomy ceilings and the rolling 24-hour allowance (§6 Background consciousness and Evolution)
-  consciousness_view.py — read-only consciousness facts: places, counted roots and bounded recent wakes (§6 Background consciousness)
   chat_chain.py, chat_references.py, chronicle_store.py, chronicle_quotes.py — addressed dialogue reads: content identities, legacy `(gen, line)` hints, Reply facts, `retain_memory_source`; append-only chronicle: pages/parts, version-bound accounts, separate common-view selections, disposable index (§6)
   mark_anchors.py — a mark tied to a tool (optional call text) or a path trails that call's result once per task; later changes of its room's and global marks reach a running task's next round as a host row (§6)
   chronicle_import.py, memory_nomination_receipts.py, memory_inventory.py — one model-free import of prior dialogue memory as `legacy` records; nominations imported once as marks; what is open or folded (§6)
