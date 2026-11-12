@@ -796,8 +796,8 @@ def test_a_performed_preflight_of_the_same_tree_never_answers_the_commit_panel(c
     fact = candidate._commit_preflight
     assert fact["status"] == "performed" and fact["record_id"] and fact["reviewer"] == "api-scout"
     preflight = rl.load_record(rl.ledger_root(candidate), fact["record_id"])
-    gate = rl.load_record(rl.ledger_root(candidate), result["review_record_id"])
+    gate = rl.load_record(rl.ledger_root(candidate), result["review_reference"]["review_record_id"])
     assert (preflight["surface"], gate["surface"]) == ("preflight", "commit_gate")
     assert [seat["seat_id"] for seat in preflight["rows"]] == ["api-scout"]
     assert preflight["fingerprints"]["reuse_key"] != gate["fingerprints"]["reuse_key"]
-    assert gate["preflight"] == fact and result["status"] == "passed"
+    assert gate["preflight"] == fact and result["status"] == "reviewed"  # the panel's PASS returns before Git

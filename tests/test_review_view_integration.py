@@ -291,8 +291,8 @@ def test_first_commit_gate_wave_reaches_the_next_request_after_the_authors_fold(
     monkeypatch.setattr(review_substrate, "run_review_request", _failing_dispatch() if dispatch == "fail" else crash)
     outcome = _run_non_committing_review_cycle(ctx, "fix: drop the redundant helper branch",
                                                skip_advisory_review=True, goal="Ship the bounded file design")
-    assert outcome["status"] != "passed", outcome
-    record = review_ledger.load_record(drive, outcome["review_record_id"])
+    assert outcome["status"] == "reviewed", outcome  # the outcome returns to its author for the decision
+    record = review_ledger.load_record(drive, outcome["review_reference"]["review_record_id"])
     assert record["verdict"]["aggregate"] == ("FAIL" if dispatch == "fail" else "NOT_PERFORMED"), record["verdict"]
     messages = [{"role": "system", "content": "Runtime."}, {"role": "user", "content": "Ship the bounded file design."}]
     assert not _index(messages)  # no resident index precedes this first wave
