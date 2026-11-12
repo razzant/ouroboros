@@ -589,8 +589,8 @@ def test_real_loop_round_two_wait_keeps_tool_and_live_leaf(root, short_acquisiti
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx.task_id = "t-wait"
     # The finish door's one notice about the still-open leaf has its own home (test_nanny_finalization_nudge.py):
-    # latched as shown, so the two scripted rounds stay the accounting wait's.
-    registry._ctx._pre_delivery_noticed = True
+    # silenced here, so the two scripted rounds stay the accounting wait's.
+    monkeypatch.setattr("ouroboros.loop_nudges._claim_pre_delivery_notice", lambda *_a, **_k: "")
     leaf = custody.RunCustody(run_id="accounting-live-leaf", task_id="t-wait", route_id="stub", model="stub")
     assert custody.record_started(root, leaf)
     releases, tools, sends = [], [], []

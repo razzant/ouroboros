@@ -40,15 +40,8 @@ def _read_hold_events(tmp_path):
     return [row for row in rows if row.get("type") == "delegate_hold"]
 
 
-def _quiet_door(registry):
-    """These contracts hold on the leaf; the finish door's one notice about a run still open in custody (its
-    home: tests/test_nanny_finalization_nudge.py) is latched as already shown, so the scripted rounds stay theirs."""
-    registry._ctx._pre_delivery_noticed = True
-    return registry
-
-
 def _configured_registry(tmp_path, task_id="t-hold"):
-    registry = _quiet_door(ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path))
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_id = task_id
     registry._ctx.exact_model_route = True
     registry._ctx._configured_subagent_route_kind = "agent_session"
@@ -66,7 +59,9 @@ def _start_leaf(tmp_path, task_id="t-hold", run_id="run-leaf"):
 @pytest.fixture(autouse=True)
 def _quiet_probe(monkeypatch):
     """Default leaf probe: read-only poll sees a live engine state; releases are
-    recorded, not executed."""
+    recorded, not executed. These contracts hold on the leaf: the finish door's one notice about a run still
+    open in custody (its home: tests/test_nanny_finalization_nudge.py) is silenced, so the scripted rounds stay theirs."""
+    monkeypatch.setattr("ouroboros.loop_nudges._claim_pre_delivery_notice", lambda *_a, **_k: "")
     import ouroboros.claudexor_daemon as daemon_mod
     import ouroboros.delegate_progress as progress_mod
 
@@ -258,7 +253,7 @@ def test_generic_task_does_not_hold_but_configured_multiple_runs_do(tmp_path, mo
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
 
     # Generic tasks use the network owner, never the single-leaf nanny hold.
-    registry = _quiet_door(ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path))
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_id = "t-generic"
     _start_leaf(tmp_path, task_id="t-generic", run_id="run-g")
     result, usage, _t = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
