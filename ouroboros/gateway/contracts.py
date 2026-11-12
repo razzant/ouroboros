@@ -1193,7 +1193,7 @@ class TaskDetailResponse(TypedDict, total=False):
     # Every adoption this task authorized, as boot settled them: {adoption_id, outcome, commit_sha, previous_sha, branch,
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
-    review_overrides: Dict[str, Any]  # a root's decisions Blocking would have stopped: {count, latest} (review_overrides.py)
+    review_overrides: Dict[str, Any]  # a root's review trace: {count?, latest?, continued?, landed?} (review_overrides.py)
     error: str
 
 

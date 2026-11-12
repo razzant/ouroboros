@@ -140,7 +140,19 @@ def _compat_cost_groups(
 def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
     from starlette.responses import JSONResponse
 
-    def _cost_breakdown_response() -> JSONResponse:
+    def _period_view(period: str) -> Dict[str, Any]:
+        """The optional period view (``cost_period``); its own failure never takes the page's totals with it."""
+        from ouroboros.gateway.cost_period import PERIODS, cost_period
+
+        if period not in PERIODS:
+            return {"available": False, "period": period, "error_code": "unknown_period", "periods": list(PERIODS)}
+        try:
+            return cost_period(data_dir, period)
+        except Exception:
+            log.exception("Cost period view unavailable")
+            return {"available": False, "period": period, "error_code": "ledger_unavailable"}
+
+    def _cost_breakdown_response(period: str = "") -> JSONResponse:
         try:
             from ouroboros.pricing import infer_model_category
             from ouroboros.usage_accounting import usage_breakdown
@@ -197,6 +209,7 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
                 ),
                 "accounting": accounting,
                 "unattributed": unattributed,
+                **({"period": _period_view(period)} if period else {}),
             })
         except Exception:
             log.exception("Physical-attempt accounting unavailable")
@@ -210,11 +223,12 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
                 },
             }, status_code=503)
 
-    async def api_cost_breakdown(_request: Request) -> JSONResponse:
-        """Return ledger-derived cost and physical-attempt breakdowns."""
+    async def api_cost_breakdown(request: Request) -> JSONResponse:
+        """Return ledger-derived cost and physical-attempt breakdowns; ``?period=24h|7d|30d`` adds that period's view."""
         # Off the event loop (as ``gateway/state.py`` does): a ledger read, stale
         # path or a cold first replay, must never hold every HTTP client behind it.
-        return await asyncio.to_thread(_cost_breakdown_response)
+        params = getattr(request, "query_params", None) or {}
+        return await asyncio.to_thread(_cost_breakdown_response, str(params.get("period") or ""))
 
     return api_cost_breakdown
 

@@ -1071,6 +1071,16 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
     assert outcome_words(advised("failed")) == "PASS, no findings, 1 adviser answer missing"
     assert not clean_pass(advised("failed")) and not clean_pass(advised("custody_lost"))
     assert clean_pass(advised("responded")) and clean_pass(advised("failed", additional=False))
+    # An adviser asked both questions counts each unreadable answer: a readable change answer beside a coupling
+    # matrix it left unanswered or broken (its critical rows kept only as discarded diagnostics) is no clean PASS.
+    def asked_of(change, coupling):
+        return outcome_facts({**_settled("PASS"), "rows": [{"seat_id": "s1", "status": "responded"}, {
+            "seat_id": "adv", "status": "responded", "additional": True, "parts": ["change", "coupling"],
+            "answers": {"change": {"status": change}, "coupling": {"status": coupling}}}]})
+    half = asked_of("responded", "unanswered")
+    assert outcome_words(half) == "PASS, no findings, 1 adviser answer missing" and not clean_pass(half)
+    assert outcome_words(asked_of("unanswered", "unanswered")) == "PASS, no findings, 2 adviser answers missing"
+    assert clean_pass(asked_of("responded", "responded"))
     assert outcome_facts(None) is None and not clean_pass(None), "no record says nothing, never a verdict"
     earlier = {name: value for name, value in clean.items() if name != "unheard"}  # kept before advisers were counted
     assert not clean_pass(earlier), "an unknown number of unheard advisers is not zero"
@@ -1186,3 +1196,39 @@ def test_a_late_commit_review_tells_what_is_recorded_of_the_change_it_read(tmp_p
     assert "commit review of task beta1; PASS, no findings; what landed could not be read; memory_read(" in again
     assert again.splitlines()[0].endswith("; 1 PASS commit reviews with no commit under that review and no merged receipt "
                                           "of their task")
+
+
+def test_a_queued_receipt_names_its_later_readback_and_an_unknown_tree_relation_is_said(tmp_path):
+    """A queued merge whose pull request reads otherwise since says so in the owner module's words
+    (``merge_receipts.queued_earlier_note``); a landing whose tree relation is not known to be the same says it is
+    unknown; a receipt told as merged is counted as merged by the list's head as by its words."""
+    from ouroboros.late_review_marks import landing_words, mark_landing, outcome_facts
+    from ouroboros.memory_waiting import listing
+    from ouroboros.merge_receipts import queued_earlier_note
+    from ouroboros.review_ledger import ledger_dir, record_path
+
+    shared.world(tmp_path)
+    ledger_dir(tmp_path, create=True)
+    record_id = "rl-20261017T000000-" + "a" * 12
+    record_path(tmp_path, record_id).write_text(json.dumps(_settled("PASS")), encoding="utf-8")
+    receipt = {"number": 9, "outcome": {"status": "queued"}, "observed_after": {"state": "CLOSED", "auto_merge": False},
+               "effect": {"ok": True}}
+    seed_result(tmp_path, "queue1", {"status": "completed", "chat_id": 1, "merge_receipts": [receipt]})
+    published = {**_record(tmp_path, "queue1", 1, "late words"), "surface": "commit_gate",
+                 "outcome": outcome_facts(_settled("PASS")), "subject": {"record_id": record_id}}
+    assert publish_late_review(tmp_path, published).status == "saved"
+    mark = next(m for m in _late_marks(tmp_path) if m["review"]["task_id"] == "queue1")
+    note = queued_earlier_note(receipt)
+    assert note.startswith("earlier; PR now CLOSED")
+    assert mark_landing(mark, tmp_path) == {"pr": "PR #9", "status": "queued", "note": note}
+    assert landing_words(mark_landing(mark, tmp_path)) == f"a receipt of its task records PR #9 as queued ({note})"
+    still_open = {**receipt, "observed_after": {"state": "OPEN", "auto_merge": True}}
+    assert queued_earlier_note(still_open) == "", "a queue the readback still shows needs no note"
+    assert landing_words({"pr": "PR #9", "status": "queued"}) == "a receipt of its task records PR #9 as queued"
+    for tree in (None, "", "weird", "unknown"):
+        assert landing_words({"commit": "ab" * 20, "tree": tree}) == (
+            "committed as abababababab under this review; its relation to the reviewed tree is unknown"), tree
+    assert landing_words({"commit": "ab" * 20, "tree": "same"}) == "committed as abababababab under this review"
+    heads = [listing("late_reviews", [mark], {}, landing=lambda _m, became=became: became)[0]
+             for became in ({"pr": "PR #9"}, {"pr": "PR #9", "status": "merged"}, {"pr": "PR #9", "status": "queued"})]
+    assert heads[0] == heads[1] != heads[2], heads

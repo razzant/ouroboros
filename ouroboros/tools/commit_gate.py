@@ -1428,7 +1428,6 @@ def _review_ledger_facts(ctx: ToolContext, commit_message: str, *, goal: str, sc
     except Exception:
         mode = ""
     tests_passed = getattr(ctx, "_preflight_tests_passed", None)
-    pre_fingerprint = pre_fingerprint or {}
     panel = commit_panel_facts(ctx)
     return {
         **_review_body_facts(ctx),
@@ -1515,6 +1514,7 @@ def settle_commit_review_ledger(ctx: ToolContext, commit_message: str, *, goal: 
     continuation buys no record: it notes the author's decision on the record it answered.
     Ledger failure never changes the gate's decision; it is logged and the id stays ""."""
     from ouroboros import review_ledger as ledger
+    from ouroboros.review_overrides import note_author_continuation
     from ouroboros.tools import git as git_mod
 
     ctx._current_review_record_id = ""
@@ -1525,6 +1525,7 @@ def settle_commit_review_ledger(ctx: ToolContext, commit_message: str, *, goal: 
             if prior and ledger.load_record(root, prior) is not None:
                 ledger.note_author_decision(root, prior, dict(getattr(ctx, "_author_commit_record", None) or {}))
                 ctx._current_review_record_id = prior
+            note_author_continuation(ctx, getattr(ctx, "_author_commit_record", None))  # over a FAIL or no verdict
             return ctx._current_review_record_id
         structured = dict(getattr(ctx, "_last_review_structured", {}) or {})
         refusal = None

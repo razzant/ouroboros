@@ -29,6 +29,11 @@ export function openCircles(detail = {}) {
     globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-circles', { detail }));
 }
 
+/** Ask the app for one Dashboard tab (`{tab}`): the page that holds what a line here only points at. */
+export function openDashboard(detail = {}) {
+    globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-dashboard', { detail }));
+}
+
 const OWNER_VOICE = new Set(['owner', 'migration']);
 const shortDate = (value) => {
     const time = Date.parse(String(value || ''));
@@ -140,7 +145,8 @@ function wakesHtml(place, ui) {
     return `<p class="place-sheet-note">${fmt('A checked kind calls it here at once, when {service} reports it.', { service })}</p>
         <ul class="place-wake-list">${items}</ul>
         ${vocabulary.includes('from_bot') ? `<p class="place-sheet-note">${tr('places.wake.bots', 'Bot messages need this check; once checked, they can wake it without another checked kind.')}</p>` : ''}
-        ${place.onlyHears ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}</p>`
+        ${place.onlyHears ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}
+            <button type="button" class="consciousness-inline-link ui-hit-area" data-place-act="open-consciousness">${tr('places.consciousness.door', 'Consciousness ›')}</button></p>`
         : place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}
         ${place.state === 'paused' ? `<p class="place-sheet-note">${tr('places.wake.paused', 'While this place is Paused, nothing here wakes it.')}</p>` : ''}
         <p class="place-sheet-note">${tr('places.wake.honesty', 'Everything else here it sees at its next own wake and decides what to read.')}</p>`;
@@ -638,6 +644,8 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         if (act === 'add-mine') { ui.adding = true; paint(); body.querySelector('[data-place-draft="actorId"]')?.focus(); return; }
         if (act === 'cancel-add') { ui.adding = false; paint(); return; }
         if (act === 'open-connector') { sheet.close(); openSkillsFor({ skill: current.connector }); return; }
+        // Its Start stands with the daily limit it spends under: the door goes there, it starts nothing itself.
+        if (act === 'open-consciousness') { sheet.close(); openDashboard({ tab: 'consciousness' }); return; }
         if (act === 'edit-circle') { const id = current.circle?.id || ''; sheet.close(); openCircles({ circle: id, edit: Boolean(id) }); return; }
         if (act === 'open-latest') { const latest = recentRooms(ui.roomIndex?.rooms)[0]; if (latest) openRoom(latest); return; }
         if (act === 'all-rooms') { ui.allRooms = true; paint(); return; }

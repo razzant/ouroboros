@@ -140,7 +140,7 @@ def test_accepted_restart_ends_current_batch_without_processing_later_command(mo
 
 def test_the_owners_restart_reply_names_commits_landed_over_a_review(tmp_path, monkeypatch):
     """The agent restart notice's line (``server_process.restart_gate_line``): commits since this body started that Git
-    recorded over a review Blocking would have stopped, deployment unconfirmed. Without one the reply is unchanged."""
+    recorded over a review FAIL or no verdict, deployment unconfirmed. Without one the reply is unchanged."""
     import json
     import subprocess
 
@@ -167,9 +167,8 @@ def test_the_owners_restart_reply_names_commits_landed_over_a_review(tmp_path, m
     ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
     server._process_bridge_updates(Bridge([{"chat": {"id": 1}, "from": {"id": 1}, "text": "/restart", "source": "web"}]),
                                    0, ctx)
-    assert ctx.sent == [(1, "♻️ Restarting.\nCommitted over a review Blocking would have stopped (the review gate did "
-                            f"not prohibit continuation): {landed[:12]} (critical findings); deployment unconfirmed, as "
-                            "no record yet binds a running process to them.")]
+    assert ctx.sent == [(1, f"♻️ Restarting.\nCommitted over a FAIL or no verdict: {landed[:12]} (review FAIL: "
+                            "critical findings); deployment unconfirmed, as no record yet binds a running process to them.")]
 
 
 def _real_bridge(*texts, chat_id=1, user_id=1, source="web"):

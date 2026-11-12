@@ -878,8 +878,8 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         *([tree_note] if tree_note else []),
         result_line,
         *([stop_note] if stop_note else []),
-        "Decide whether and how to continue; if the right next step is unclear (for example the work "
-        "may no longer be wanted), ask the owner in this conversation instead of guessing.",
+        "Decide whether and how to continue; if whether the work is still wanted is unclear, ask the "
+        "owner in this conversation.",
         "Use manage_schedules(action='list') to inspect related or unknown future follow-ups. "
         "Continue does not release their holds. Resolve unknown relationships explicitly; restore "
         "only an observed hold_id. Original money and hard deadlines still apply to related work.",

@@ -44,6 +44,81 @@ const deliveryOwed = row => ['answered', 'closed'].includes(row.quiz_state || ro
 export const questionDeliveryPending = row => deliveryOwed(row) && row.question_delivery?.dismissed !== true;
 export const unknownDeliveryRemovable = row => questionDeliveryPending(row)
     && (row.quiz_state || row.state) === 'answered' && row.question_delivery?.reason_code === 'late_answer_delivery_unknown';
+// Whether a current question still waits on the owner: unanswered (its task may wait, go on or have ended), or a
+// Project's answer a restart left undelivered, which only the owner can remove. Main's pill counts by this rule; the
+// server's rooms follow its twin (ouroboros/gateway/main_decisions.py question_waits; the parity fixture pins both).
+export const questionWaits = row => ANSWERABLE_QUIZ_STATES.includes(row.quiz_state)
+    || (Boolean(row.project_id) && unknownDeliveryRemovable(row));
+
+// What a census read vouches for: complete, everything; incomplete, every question its gaps do
+// not name (a gap names a task, or a task and its quiz). A gap naming no task (index, registry or
+// bindings unavailable), an unexplained incompleteness or a failed read vouches for nothing.
+// Main's pill and the rooms' turn keep a question by this one scope (main_waiting.js, carryOpenQuestions).
+export function vouchedBy(data) {
+    if (data?.current_questions_complete === true) return () => true;
+    const gaps = Array.isArray(data?.current_questions_gaps) ? data.current_questions_gaps : [];
+    if (!gaps.length || gaps.some(gap => !gap?.task_id)) return () => false;
+    return (taskId, quizId) => !gaps.some(gap => String(gap.task_id) === String(taskId)
+        && (!gap.quiz_id || String(gap.quiz_id) === String(quizId)));
+}
+
+const listed = value => (Array.isArray(value) ? value : []);
+// One question's exact address: a bare wait without a quiz never stands for an addressed question (as on the server).
+const sameAddress = (one, other) => String(one?.task_id) === String(other?.task_id)
+    && String(one?.quiz_id || '') === String(other?.quiz_id || '');
+
+/**
+ * One state body with the `open_question` items an earlier body (`prior`) had in its rooms and this one dropped
+ * without vouching against them (`vouchedBy`): the server recomputes each room's turn from the questions it could
+ * read, so a read with a gap would turn a room's amber off for one read while Main's pill keeps the question. A kept
+ * item stays in its room (with its work when that work is listed there, else as the room's own) and the room stays
+ * the owner's turn; a read never invents an item and a read that vouches against one, a complete one included,
+ * removes it. A room kept so keeps its feed row too: the row `prior.projects` held for it stays after this body's
+ * `projects` when they no longer hold it (the server kept it only while it could read the question), unless the
+ * body's `project_chat_ids` no longer name the room. A deleted Project's tombstone stays named there, so its row can
+ * come back for as long as reads cannot vouch against its question. A body without the
+ * work projection is returned as it is.
+ */
+export function carryOpenQuestions(prior, data) {
+    if (!data || typeof data !== 'object' || !Array.isArray(data.works) || !data.rooms || typeof data.rooms !== 'object') {
+        return data;
+    }
+    const vouched = vouchedBy(data);
+    const complete = data.works_complete === true && data.supervisor_ready === true;
+    const rooms = { ...data.rooms };
+    const kept = new Set();
+    let works = data.works;
+    for (const [chat, before] of Object.entries(prior?.rooms || {})) {
+        for (const known of listed(before?.turn)) {
+            // A known question keeps its address whatever its item was: a wait this body no longer confirms is carried
+            // as the open question it still is, never as a wait nobody holds; a bare wait has no proved address.
+            const exact = known?.kind === 'question' && known.quiz_id;
+            if (!(known?.kind === 'open_question' || exact) || !known.task_id || vouched(known.task_id, known.quiz_id)) continue;
+            const item = { ...known, kind: 'open_question' };
+            const room = rooms[chat] && typeof rooms[chat] === 'object' ? rooms[chat]
+                : { activity: complete ? 'idle' : 'unknown', transition: 'none', call: '', turn: [], amber: false,
+                    mark: complete ? 'none' : 'ring', confirmed: complete, works: [] };
+            if (listed(room.turn).some(entry => ['question', 'open_question'].includes(entry?.kind) && sameAddress(entry, item))) continue;
+            const { work_id: workId, ...own } = item;
+            const holder = workId && listed(room.works).includes(workId) ? workId : '';
+            if (holder) works = works.map(work => (work?.work_id === holder && String(work.room ?? 0) === chat
+                ? { ...work, turn: [...listed(work.turn), own] } : work));
+            rooms[chat] = { ...room, turn: [...listed(room.turn), holder ? item : own], amber: true };
+            kept.add(String(chat));
+        }
+    }
+    let projects = data.projects;
+    if (Array.isArray(projects) && kept.size) {
+        const named = Array.isArray(data.project_chat_ids) ? new Set(data.project_chat_ids.map(String)) : null;
+        const shown = new Set(projects.map(row => String(row?.chat_id)));
+        const rows = listed(prior?.projects).filter(row => kept.has(String(row?.chat_id))
+            && !shown.has(String(row?.chat_id)) && (!named || named.has(String(row?.chat_id))));
+        if (rows.length) projects = [...projects, ...rows];
+    }
+    return works === data.works && projects === data.projects
+        && Object.keys(rooms).every(chat => rooms[chat] === data.rooms[chat])
+        ? data : { ...data, rooms, works, ...(projects === data.projects ? {} : { projects }) };
+}
 
 // The lifecycle code of one row: a settled state names itself; an open one says whether the task waits.
 function lifecycleKey(row) {
@@ -84,15 +159,17 @@ export function questionPresentation(row = {}, { paused = false } = {}) {
     return { status: tr(`question.status.${key}`, STATUS[key]) };
 }
 
-// The dot beside that word (DESIGN "Quiz card"): the owner's amber only while the task positively waits for the
-// answer, ok once it is answered, the head's own disabled ink for a replaced or closed question, and neutral for
-// every other lifecycle (unanswered, the task continued or finished, status unavailable).
-const MARK_HUES = { waiting: 'owner', answered: 'ok', superseded: 'ink', closed: 'ink' };
+// The dot beside that word (DESIGN "Quiz card"): the owner's amber exactly while Main's pill counts the question
+// (`questionWaits`: unanswered, whether its task waits, went on or ended, or an answer whose delivery is unknown), ok
+// once it is answered, the head's own disabled ink for a replaced or closed question, and neutral for any other
+// lifecycle (status unavailable). The words beside it stay the lifecycle's own.
+const MARK_HUES = { answered: 'ok', superseded: 'ink', closed: 'ink' };
 
 /** The question head's mark as a status-mark view ({ shape, hue }, web/modules/status_mark.js). */
 export function questionMark(row = {}) {
-    // An answer whose late delivery became unknown waits for the owner to stop counting it (Remove from pending).
-    if (unknownDeliveryRemovable(row)) return { shape: 'dot', hue: 'owner' };
+    // A card carries its state as `quiz_state` or as `state`: the pill's rule reads the one field. Amber exactly while
+    // the pill counts it: a Project's answer whose delivery is unknown (Remove from pending) is, Main's own is not.
+    if (questionWaits({ ...row, quiz_state: row.quiz_state || row.state })) return { shape: 'dot', hue: 'owner' };
     return { shape: 'dot', hue: MARK_HUES[lifecycleKey(row)] || 'neutral' };
 }
 
