@@ -1116,6 +1116,34 @@ def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, 
                                   f"{newest.replace('T', ' ')[:16]} (catalog unavailable)"))
 
 
+def _pinned_record(drive_root: Any, route: Dict[str, Any], fingerprint: str = "") -> Optional[CapabilityEvidence]:
+    """A pinned route whose catalog read failed: the fresh statement of the same profile AND the same account
+    fingerprint, as that account's own record (its own date; nothing stored). The fingerprint is the route's
+    identity when it carries one, else the newest one observed behind that profile: a profile name alone proves no
+    account, so a statement of another fingerprint, a stale one, or Auto leave the window unknown."""
+    options = route.get("options") or {}
+    profile = options.get("credential_profile_id")
+    if route.get("provider") != "claudexor" or not profile:
+        return None
+    rows = [(fp, row) for fp, row in (_read(drive_root).get("probes") or {}).items() if isinstance(row, dict)
+            and row.get("provider") == "claudexor" and row.get("model") == route.get("model")
+            and row.get("source_id") == options.get("source_id") and row.get("credential_profile_id") == profile
+            and row.get("account_fingerprint") and _age_seconds(str(row.get("ts") or "")) <= _CONFIRMED_TTL_SEC]
+
+    def age(pair):
+        return _age_seconds(str(pair[1].get("ts") or ""))
+
+    fingerprint = fingerprint or options.get("account_fingerprint") or (min(rows, key=age)[1]["account_fingerprint"]
+                                                                         if rows else "")
+    stated = [pair for pair in rows if pair[1]["account_fingerprint"] == fingerprint
+              and pair[1].get("status") == STATUS_CONFIRMED and int(pair[1].get("window_tokens") or 0) > 0]
+    if not stated:
+        return None
+    fp, row = min(stated, key=age)
+    return _cached_evidence(row, fp, str(route.get("model") or ""), "claudexor",
+                            detail="recorded capacity of the pinned account (catalog unavailable)")
+
+
 def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
 
@@ -1123,10 +1151,11 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
     ten-minute record, or a live failure that kept an exact prior record stale) is named by it, so neither is
     repeated. After a failed read a fetching probe of an unpinned
     Auto route plans by the pool's smallest fresh statement (``_pool_bound``); a reader that may not fetch keeps it unknown.
+    A pin keeps the fresh record of its profile and account fingerprint instead (``_pinned_record``).
 
     ``ask``: the route's own question (Auto, or the pin) when ``options`` name the exact account a send will prefer
     (its identity). That account's fresh record answers without a question; otherwise ``ask`` is asked, so a
-    preference never becomes a pin, and the pool bound follows that question.
+    preference never becomes a pin, and the pool bound or the pin's record follow that question.
     """
     from dataclasses import asdict, replace
     from ouroboros.response_limits import probe_response_limit
@@ -1140,8 +1169,8 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
     if is_known(evidence, require_fresh=True):
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
                                       source=evidence.source, observed_at=evidence.ts)
-    if read_failed and route.get("allow_fetch", True):  # after the server's word: the pool's bound is none
-        evidence = _pool_bound(drive_root, evidence, route) or evidence
+    if read_failed and route.get("allow_fetch", True):  # after the server's word: the pool's bound or the pin's record
+        evidence = _pool_bound(drive_root, evidence, route) or _pinned_record(drive_root, route, identity) or evidence
     ack = _read(drive_root).get("owner_acks", {}).get(evidence.route_fp)
     options = {**(route.get("options") or {}), **{key: getattr(evidence, key) for key in (
         "source_id", "credential_profile_id", "account_fingerprint") if getattr(evidence, key)}}

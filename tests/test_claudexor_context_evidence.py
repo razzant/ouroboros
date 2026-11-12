@@ -208,7 +208,8 @@ def test_a_failed_auto_catalog_read_plans_by_the_pools_smallest_fresh_statement(
     assert _probe(tmp_path).to_json() == bound.to_json() and reads == [1]  # its ten-minute record reads nothing
     assert _probe(tmp_path, allow_fetch=False).status == ce.STATUS_FAILED  # a reader that may not fetch: unknown
     pinned = _probe(tmp_path, options={"source_id": "test-source", "credential_profile_id": "account-a"})
-    assert pinned.status == ce.STATUS_FAILED and pinned.window_tokens == 0  # a pin without its fingerprint is no Auto
+    # A pin is no Auto: never the pool's bound, only its own account's fresh record (H6, the fingerprint test below).
+    assert (pinned.window_tokens, pinned.account_fingerprint, pinned.source) == (872_000, "identity-a", "provider_metadata")
     other = ce.probe(tmp_path, provider="claudexor", model=MODEL + "-other")
     assert other.window_tokens == 0 and other.status == ce.STATUS_FAILED  # another model's accounts state nothing here
     data = ce._read(tmp_path)
@@ -289,6 +290,30 @@ def test_the_rebind_after_tool_reconciliation_reuses_the_first_answer(tmp_path, 
     owner_wait.rebind_restored_route(SimpleNamespace(_ctx=ctx), {"tool_schemas": []}, [{"role": "user", "content": "go"}])
     assert calls[0] == {} and calls[1]["accountFingerprint"] == "identity-a"  # no answer yet: the route's own question
     assert len(catalog["calls"]) == 1  # once, not twice
+
+
+def test_a_pinned_route_with_a_silent_engine_keeps_its_window_only_with_the_same_fingerprint(tmp_path, monkeypatch,
+                                                                                             catalog):
+    """H6 (W2, 12.11.2026): a pinned route whose catalog read failed plans by the fresh record of the same profile AND
+    the same account fingerprint (its own date, nothing stored), never by another account behind that profile name."""
+    from ouroboros.llm import LLMClient
+
+    pinned = {"source_id": "test-source", "credential_profile_id": "account-a"}
+    seeded = _probe(tmp_path, options=pinned)
+    answered = dict(catalog["value"])
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+        lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+    kept = _probe(tmp_path, options=pinned)
+    assert (kept.window_tokens, kept.account_fingerprint, kept.ts, kept.stale) == (872_000, "identity-a", seeded.ts, False)
+    assert ce._read(tmp_path)["probes"][ce.route_fingerprint(provider="claudexor", model=MODEL, options=pinned)][
+        "status"] == ce.STATUS_FAILED  # the failure is what the store keeps for the pin
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(  # the profile now logs into another account
+        lambda *_a, **_kw: {**answered, "accountFingerprint": "identity-b", "models": [], "observedAt": ce.utc_now_iso()}))
+    _probe(tmp_path, options={**pinned, "account_fingerprint": "identity-b"})  # observed: identity-b, no window stated
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+        lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+    other = _probe(tmp_path, options=pinned)
+    assert other.window_tokens == 0 and not ce.is_known(other)  # account-a's window is not this profile's any more
 
 
 def test_exact_observed_binding_reuses_only_its_cache(tmp_path, catalog):
