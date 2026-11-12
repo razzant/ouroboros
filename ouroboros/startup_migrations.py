@@ -212,6 +212,12 @@ def _prepare_startup_state(root, *, rebuild, repo_dir=None, initialize_journal=F
     from ouroboros.store_import import ensure_current_store
 
     root = Path(root)
+    copies = None
+    try:  # first, so no other job's failure skips it; on a failure here the registry stays for the next boot
+        from ouroboros.subagent_worktrees import import_legacy_registry
+        copies = import_legacy_registry(root)
+    except Exception:
+        log.warning("Legacy private-copy registry not imported; the next start repeats it", exc_info=True)
     try:
         watermarks(root)
     except ValueError:
@@ -225,12 +231,6 @@ def _prepare_startup_state(root, *, rebuild, repo_dir=None, initialize_journal=F
                               capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         head = ""  # unknown current body is recorded; never substitute the previous body's SHA
-    copies = None
-    try:  # before the store, so its failure never skips this; on a failure here the registry stays for the next boot
-        from ouroboros.subagent_worktrees import import_legacy_registry
-        copies = import_legacy_registry(root)
-    except Exception:
-        log.warning("Legacy private-copy registry not imported; the next start repeats it", exc_info=True)
     report = ensure_current_store(root, rederive=rebuild, body_sha=head, initialize_journal=initialize_journal)
     if copies:
         report["private_copies"] = copies

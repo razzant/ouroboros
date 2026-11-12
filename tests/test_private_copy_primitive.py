@@ -373,7 +373,23 @@ def test_startup_imports_the_registry_a_7_8_0_body_wrote_before_any_worker(tmp_p
     assert sw.find_execution_snapshot("oldsnap0001", data)["task_id"] == "old-writer-task"
     assert "private_copies" not in prepare_startup_state(data), "a second start finds nothing to import"
 
-    legacy.write_bytes(raw)  # an older body wrote it again, and this start cannot write its receipt
+    legacy.write_bytes(raw)  # an older body wrote it again, and this start's store import fails
+    with monkeypatch.context() as patch:
+        patch.setattr("ouroboros.store_import.ensure_current_store", lambda *_a, **_k: 1 / 0)
+        assert prepare_startup_state(data, strict=False)["status"] == "unavailable"
+    assert not legacy.exists(), "the copies' import waits for no other startup job"
+
+    legacy.write_bytes(raw)  # ... again, while another process holds the import's lock
+    lock = data / "state" / "private_copies" / ".legacy-import.lock"
+    held, began = sw.acquire_exclusive_file_lock(lock, timeout_sec=0.0, owner_aware_stale=True), time.monotonic()
+    try:
+        assert "private_copies" not in prepare_startup_state(data) and legacy.read_bytes() == raw
+    finally:
+        sw.release_exclusive_file_lock(lock, held)
+    assert time.monotonic() - began < 60, "a start never waits out a busy import lock"
+    assert prepare_startup_state(data)["private_copies"]["moved"] == 0, "the next start finishes it"
+
+    legacy.write_bytes(raw)  # ... and once more, and this start cannot write its receipt
     monkeypatch.setattr(sw, "atomic_write_json", lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")))
     assert "private_copies" not in prepare_startup_state(data), "a failed import never fails the start"
     assert legacy.read_bytes() == raw, "and the file waits at its place for the next one"

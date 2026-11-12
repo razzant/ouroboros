@@ -248,7 +248,7 @@ def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str,
     if not legacy.is_file():
         return None
     lock = _records_dir(data_dir) / ".legacy-import.lock"
-    fd = acquire_exclusive_file_lock(lock, timeout_sec=_LOCK_TIMEOUT_SEC, stale_sec=_LOCK_STALE_SEC,
+    fd = acquire_exclusive_file_lock(lock, timeout_sec=0.0, stale_sec=_LOCK_STALE_SEC,  # a start never waits here
                                      metadata=f"pid={os.getpid()} op=legacy_import", owner_aware_stale=True)
     if fd is None:
         return None
