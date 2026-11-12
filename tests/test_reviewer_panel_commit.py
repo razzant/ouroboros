@@ -22,7 +22,6 @@ def test_advisory_commit_seats_exactly_the_named_reviewers(staged_body, tmp_path
 
 def test_reasonless_advisory_commit_refuses_before_staging(staged_body, tmp_path, monkeypatch):
     repo = Path(staged_body["repo"])
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setattr(substrate, "run_review_request", lambda *a, **k: pytest.fail("no wave may be paid"))
     ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "gate-drive")
     e2e.shared.git(repo, "reset", "-q", "HEAD")

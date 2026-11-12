@@ -219,6 +219,7 @@ def _gate_with_critic(staged_body, tmp_path, monkeypatch, *, mode: str, expected
 
     set_review_pool(monkeypatch, shared.golden_pool(pool_seat("scout", "openai/gpt-5.6-sol", effort="high", marked=False)))
     monkeypatch.setattr(git_mod, "get_runtime_mode", lambda: mode)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)  # the review authority reads the same Access
     briefs: list[dict] = []
     monkeypatch.setattr(substrate, "run_review_request", _golden_with_critic(briefs, "scout"))
     ctx = ToolContext(repo_dir=Path(staged_body["repo"]), drive_root=tmp_path / "gate-drive")
@@ -245,24 +246,12 @@ def test_in_cyber_pro_commit_reviewed_composes_its_panel_from_the_pool_and_recor
     assert record["verdict"]["aggregate"] == "PASS" and record["mode"] == "cyber_pro"
 
 
-def test_blocking_widens_the_commit_panel_and_records_the_request(staged_body, tmp_path, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    record, sent = _gate_with_critic(staged_body, tmp_path, monkeypatch, mode="pro", reviewers=["t1", "scout"])
-    assert sent == ["s1", "scout", "t1", "t2"]
-    panel = record["panel"]
-    assert (panel["composition"], panel["chosen_by"], panel["reason_missing"], panel["reviewers_subset_ignored"]) == (
-        "full_pool", "ouroboros", False, True)
-    assert panel["widened_from"] == ["t1", "scout"]
-    assert (sorted(panel["assigned"]), panel["additional"], panel["seats"]) == (["s1", "t1", "t2"], ["scout"], 3)
-    assert record["verdict"]["aggregate"] == "PASS"
-
-
 @pytest.mark.parametrize("mode", ["cyber_pro", "pro"])
 def test_the_commit_panel_hears_any_enabled_catalog_row_as_an_added_critic(staged_body, tmp_path, monkeypatch, mode):
     """``commit_reviewed`` composes through the one composer: an unmarked api row and an
-    unmarked agent-session row (its own effort kept) are added critics beside the counted
-    pool seats, in Cyber Pro and below; a switched-off row is refused before anything is
-    staged, reviewed or recorded."""
+    unmarked agent-session row (its own effort kept) are added critics beside the named
+    counted seat, in Cyber Pro and below (a reasoned narrowing is never widened); a
+    switched-off row is refused before anything is staged, reviewed or recorded."""
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.tools import commit_gate
     from ouroboros.tools.review_change import ReviewChangeArgumentError
@@ -278,11 +267,10 @@ def test_the_commit_panel_hears_any_enabled_catalog_row_as_an_added_critic(stage
     panel = commit_gate.compose_commit_panel(ctx, ["s1", "scout", "session-critic"], REASON)
     seats = {seat.slot.slot_id: seat for seat in panel.seats}
     assert panel.facts["additional"] == ["scout", "session-critic"]
-    assert sorted(name for name, seat in seats.items() if not seat.additional) == (
-        ["s1"] if mode == "cyber_pro" else ["s1", "t1", "t2"])
+    assert sorted(name for name, seat in seats.items() if not seat.additional) == ["s1"]
     critic = seats["session-critic"].slot
     assert (critic.route, critic.session_target, critic.effort) == (ReviewRouteKind.AGENT_SESSION, "codex=gpt-5.6-sol", "xhigh")
-    assert panel.facts["composition"] == ("composed" if mode == "cyber_pro" else "full_pool")
+    assert panel.facts["composition"] == "composed" and "widened_from" not in panel.facts
 
     for names in (["s1", "retired"], ["retired"]):
         with pytest.raises(ReviewChangeArgumentError, match="switched off"):
@@ -909,7 +897,6 @@ def test_a_bound_body_candidate_is_the_subject_and_the_serving_body_is_the_gover
     shared.git(candidate, "add", "ouroboros/config.py")
 
     set_review_pool(monkeypatch, shared.golden_pool())
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     monkeypatch.setattr(git_mod, "_run_review_preflight_tests", shared.passing_test_runner)
@@ -1001,7 +988,6 @@ def test_the_commit_gate_judges_a_bound_candidate_by_the_serving_handbook_and_re
     shared.git(candidate, "add", "-A")
 
     set_review_pool(monkeypatch, shared.golden_pool())
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     monkeypatch.setattr(git_mod, "_run_review_preflight_tests", shared.passing_test_runner)
