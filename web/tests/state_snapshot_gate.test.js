@@ -222,15 +222,28 @@ test('a held bindings map fills an unchanged body for its own revision only', ()
     assert.equal(sequencer.begin().path, '/api/state', 'and the next read asks for the whole map');
 });
 
-test('an old server, a failed bindings read or a retire hold nothing', () => {
-    const sequencer = createStateSnapshotSequencer(() => {});
+test('an old server or a failed bindings read holds nothing; a retire keeps the map for the server to vouch', () => {
+    const applied = [];
+    const sequencer = createStateSnapshotSequencer((data) => applied.push(data));
     sequencer.apply(sequencer.begin(), { task_bindings: bound });
     assert.equal(sequencer.begin().path, '/api/state');
     sequencer.apply(sequencer.begin(), { task_bindings: {}, task_bindings_revision: '', task_bindings_unchanged: false });
     assert.equal(sequencer.begin().path, '/api/state');
     sequencer.apply(sequencer.begin(), { task_bindings: bound, task_bindings_revision: 'r1' });
+    // A socket change or a confirmed mutation retires older bodies, never the map: its revision is its own digest,
+    // so the next read asks by it and the server says whether it still stands.
     sequencer.retire();
-    assert.equal(sequencer.begin().path, '/api/state', 'a socket change or a confirmed mutation reads the map whole');
+    assert.equal(sequencer.latest(), null, 'no body survives a retire');
+    const after = sequencer.begin();
+    assert.equal(after.path, '/api/state?bindings_since=r1');
+    sequencer.apply(after, { task_bindings: null, task_bindings_revision: 'r1', task_bindings_unchanged: true });
+    assert.deepEqual(applied.at(-1).task_bindings, bound, 'an unchanged answer is filled from the kept map');
+    // A mutation that did change the map: the server sends it whole under its new revision.
+    sequencer.retire();
+    const moved = { ...bound, t2: { project_id: 'alpha', chat_id: 5, project_name: 'Alpha' } };
+    sequencer.apply(sequencer.begin(), { task_bindings: moved, task_bindings_revision: 'r2', task_bindings_unchanged: false });
+    assert.deepEqual(applied.at(-1).task_bindings, moved);
+    assert.equal(sequencer.begin().path, '/api/state?bindings_since=r2');
 });
 
 test('an older answer can neither fill nor replace the held map', () => {
