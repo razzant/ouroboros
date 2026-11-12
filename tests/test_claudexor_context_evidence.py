@@ -551,6 +551,19 @@ def test_the_early_questions_work_stays_its_own_until_the_fit_takes_its_answer(m
     assert "catalog_calls_again" not in work
 
 
+@pytest.mark.parametrize("provider", ["claudexor", "openrouter"])
+def test_only_a_claudexor_route_is_asked_beside_the_build(monkeypatch, provider):
+    """Fix round 1 (Fable 5): the early question exists for the engine's catalog; another route starts no thread and
+    its fit asks its own question at the usual point, as before."""
+    from ouroboros import context_fit as cf
+
+    asked = []
+    monkeypatch.setattr(cf, "_context_route", lambda _task: ({"provider": provider, "model": "m"}, {}))
+    question = cf.RouteQuestion({}, lambda _task, *, allow_fetch: asked.append("early") or ({"model": "m"}, object()))
+    assert question.asked.wait(5)
+    assert (asked, question.key is None) == ((["early"], False) if provider == "claudexor" else ([], True))
+
+
 def test_a_changed_route_voids_the_early_answer_and_asks_its_own_question(tmp_path, monkeypatch, catalog):
     """One handle per route: the build whose route changed (here the role's pin) after the question started asks its
     own question; the early answer is never applied to it, and the account that just failed is never spent by it."""
