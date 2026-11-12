@@ -267,7 +267,7 @@ def test_the_rosters_switch_names_what_it_stops(role_ui):
 
 
 @pytest.mark.parametrize("long_labels", [False, True])
-@pytest.mark.parametrize("consumer,width,tracks", [("settings", 360, 1), ("settings", 720, 2), ("wizard", 700, 3)])
+@pytest.mark.parametrize("consumer,width,tracks", [("settings", 360, 1), ("settings", 720, 1), ("wizard", 700, 3)])
 def test_narrow_consumers_lay_the_form_out_by_their_own_width(role_ui, long_labels, consumer, width, tracks, record_property):
     ui = role_ui
     rows = _roster(ui)
@@ -300,22 +300,23 @@ def test_narrow_consumers_lay_the_form_out_by_their_own_width(role_ui, long_labe
                     .forEach(n => { n.textContent = ' Als Gutachter verwenden '; });
             }""")
     card.evaluate("e => e.scrollIntoView({block: 'start'})")
-    shape = card.evaluate("""card => {
+    shape = card.evaluate("""(card, consumer) => {
         const route = card.querySelector('.available-subagent-route');
         const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
         const style = getComputedStyle(card);
         const width = card.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
         const bounds = route.getBoundingClientRect();
-        return {width, expected: width <= 22 * rem ? 1 : width <= 34 * rem ? 2 : 3,
+        const expected = consumer === 'settings' ? (width <= 34 * rem ? 1 : 3)
+            : width <= 22 * rem ? 1 : width <= 34 * rem ? 2 : 3;
+        return {width, expected,
             tracks: getComputedStyle(route).gridTemplateColumns.split(' ').length,
             overflow: [...route.querySelectorAll('select, label')].some(e =>
                 e.getBoundingClientRect().right > bounds.right + 1),
             pageOverflow: document.documentElement.scrollWidth > innerWidth};
-    }""")
+    }""", consumer)
     record_property("card_columns", json.dumps(shape))
-    # The form's columns follow its own container (the agent's page in Settings, the card in setup): a 360px
-    # phone leaves Settings one, 720px, the first docked width (#1998), two beside its sidebar, while the wizard's
-    # wider card holds three.
+    # The form reads its own container: Settings keeps the full Auto wording on one field per line below 34rem,
+    # including a 720px window beside its sidebar. The setup card keeps its own one/two/three-column grid.
     assert shape["expected"] == tracks, shape
     assert shape["tracks"] == shape["expected"], shape
     assert not shape["overflow"] and not shape["pageOverflow"], shape
