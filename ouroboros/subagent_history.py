@@ -13,7 +13,6 @@ from ouroboros.utils import utc_now_iso, write_text_atomic
 log = logging.getLogger(__name__)
 LAST_DELEGATION_FILENAME = "subagent_last_delegation.json"
 FIRST_CALLS_KEY = "first_call_costs"  # beside the receipts in the projection: row id -> its first-call price samples
-FIRST_CALLS_KEPT = 20  # a row's kept samples: the bound of a measurement (``review_price.RECENT_REVIEWS``)
 
 
 def _timestamp_key(value: Any) -> tuple[int, datetime]:
@@ -56,8 +55,8 @@ def _first_call_cost(drive_root, task_id: str, first: Mapping[str, Any], target:
         with usage_store.read(drive_root, allow_stale=True) as txn:
             row = next((row for row in txn.conn.execute(
                 "SELECT model, cost_usd FROM attempts INDEXED BY attempts_task WHERE task_id=? AND provider=? "
-                "AND source='agent.task' AND state='settled' AND COALESCE(prompt_tokens, 0) > 0 "
-                "ORDER BY seq_first", (task_id, str(first.get("provider") or "")))
+                "AND source='agent.task' AND COALESCE(prompt_tokens, 0) > 0 ORDER BY seq_first",
+                (task_id, str(first.get("provider") or "")))
                 if normalize_model_identity(str(row["model"] or "")) in own), None)
     except Exception:
         log.debug("first-call cost unavailable from the usage ledger", exc_info=True)
@@ -65,20 +64,24 @@ def _first_call_cost(drive_root, task_id: str, first: Mapping[str, Any], target:
     return None if row is None else {"usd": None if row["cost_usd"] is None else float(row["cost_usd"])}
 
 
-def _kept_first_calls(old: Any, rows: Mapping[str, Any], actor: str, sample: Optional[dict]) -> dict:
-    """Every kept row's first-call samples, ``sample`` offered to ``actor``'s. A row keeps the samples of its
-    recorded price class, one per task (the first recorded), the newest ``FIRST_CALLS_KEPT`` by the date of
-    their execution: a late or repeated observation neither erases nor outranks newer measurements, and a
-    row that left the projection takes its samples."""
+def _kept_first_calls(old: Any, rows: Mapping[str, Any], actor: str, sample: Optional[dict], of: list[str]) -> dict:
+    """Every kept row's first-call samples, ``sample`` (of price class ``of``) offered to ``actor``'s. A row
+    keeps the samples of its recorded price class, one per task (the first recorded), the newest
+    ``RECENT_REVIEWS`` by the date of their execution, the bound a review seat's price is measured over. A late
+    or repeated observation neither erases nor outranks newer measurements; a row that left the projection
+    takes its samples."""
+    from ouroboros.review_price import RECENT_REVIEWS
+
     old, kept = old if isinstance(old, dict) else {}, {}
     for key, row in rows.items():
-        of, tasks, ring = _price_class(row.get("identity") if isinstance(row, dict) else None), set(), []
-        for item in [*(old.get(key) if isinstance(old.get(key), list) else ()), *([sample] if sample and key == actor else ())]:
-            if isinstance(item, dict) and item.get("of") == of and item.get("task_id") not in tasks:
-                tasks.add(item.get("task_id"))
-                ring.append(item)
-        if ring:
-            kept[key] = sorted(ring, key=lambda item: _timestamp_key(item.get("ts")))[-FIRST_CALLS_KEPT:]
+        own = _price_class(row.get("identity") if isinstance(row, dict) else None)
+        ring, first = old.get(key) if isinstance(old.get(key), dict) else {}, {}
+        for item in [*(ring.get("calls") if ring.get("of") == own and isinstance(ring.get("calls"), list) else ()),
+                     *([sample] if sample and key == actor and of == own else ())]:
+            if isinstance(item, dict):
+                first.setdefault(item.get("task_id"), item)
+        if first:
+            kept[key] = {"of": own, "calls": sorted(first.values(), key=lambda item: _timestamp_key(item.get("ts")))[-RECENT_REVIEWS:]}
     return kept
 
 
@@ -88,14 +91,18 @@ def first_call_facts(drive_root=None) -> dict[str, dict[str, str]]:
     import statistics
 
     from ouroboros.review_price import ReviewPrice, review_price_text
+    from ouroboros.subagent_metrics import number
 
     kept, facts = _projection(drive_root).get(FIRST_CALLS_KEY), {}
-    for actor, samples in (kept.items() if isinstance(kept, dict) else ()):
-        own = [item for item in samples if isinstance(item, dict)] if isinstance(samples, list) else []
-        usd = [float(item["usd"]) for item in own if isinstance(item.get("usd"), (int, float)) and not isinstance(item.get("usd"), bool)]
-        if own:
+    for actor, ring in (kept.items() if isinstance(kept, dict) else ()):
+        try:
+            calls = [item for item in ring["calls"] if isinstance(item, dict)]
+            usd = [float(item["usd"]) for item in calls if number(item.get("usd"))]
             price = ReviewPrice(usd=statistics.median(usd), reviews=len(usd), low=min(usd), high=max(usd)) if usd else None
-            facts[actor] = {"first_call": review_price_text(price, "first call")}
+            if calls:
+                facts[actor] = {"first_call": review_price_text(price, "first call")}
+        except Exception:  # a damaged ring is no price for its row; the receipts and the other rows still show
+            log.debug("first-call samples unreadable for %s", actor, exc_info=True)
     return facts
 
 
@@ -215,7 +222,7 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
                                reverse=True)[:MAX_CONFIGURED_SUBAGENTS])
             latest = row if not old or (occurred_at and _timestamp_key(row["ts"]) >= _timestamp_key(old.get("ts"))) else old
             costs = _kept_first_calls(stored.get(FIRST_CALLS_KEY), rows, selected_subagent_id, first_call and {
-                "task_id": task_id, "ts": row["ts"], "of": _price_class(identity), **first_call})
+                "task_id": task_id, "ts": row["ts"], **first_call}, _price_class(identity))
             write_text_atomic(path, json.dumps({**latest, "latest_by_subagent": rows, **({FIRST_CALLS_KEY: costs} if costs else {})},
                                                ensure_ascii=False, indent=1))
         finally:
