@@ -8,7 +8,7 @@ import { parseModelSource, composeModelSource, apiConnections, configuredApiProv
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER } from './route_editor_primitives.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
-    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords } from './route_editor_primitives.js';
+    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords, tierPriced } from './route_editor_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { catalogPrograms } from './model_program.js';
@@ -224,10 +224,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
             : catalog.items.filter((item) => parseModelSource(item.value || item.id).source === row.source);
     }
-    // Fast and Economy send another processing tier, which its own endpoint prices: the catalog's row is not its price.
-    function tieredProcessing(row) {
-        return ['fast', 'economy'].includes(row.processing_preference || processingPreference);
-    }
+    const tieredProcessing = (row) => tierPriced(row.processing_preference || processingPreference);
     function currentItem(row) {
         const model = row.source === 'inherit' ? inheritedRow(row)?.model : row.model;
         const matches = itemsFor(row).filter((item) => (parseModelSource(item.value || item.id).model === model

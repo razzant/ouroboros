@@ -177,6 +177,14 @@ test('in the composer list a priced model says its price where "paid by key" sto
 });
 
 
+test('the Agents chooser hides the catalog price for a helper on Fast or Economy, by the same rule as a role', async () => {
+    const { tierPriced } = await import('../modules/route_editor_primitives.js');
+    assert.deepEqual(['', 'standard', 'fast', 'economy', undefined].map(tierPriced), [false, false, true, true, false]);
+    const source = readFileSync(new URL('../modules/subagents_settings.js', import.meta.url), 'utf8');
+    assert.match(source, /tierPriced\(row\.processing_preference \|\| state\.processingPreference\)\s*\? state\.apiModels\.map\(\(item\) => \(\{ \.\.\.item, price: null \}\)\)/);
+    assert.match(source, /if \(field === 'processing_preference'\) paint\(\);/);
+});
+
 test('the Agents chooser of an OpenRouter row shows the price too; a direct key reads as before', () => {
     const items = [OPUS, { provider_id: 'openai', id: 'gpt-6', value: 'openai::gpt-6', name: 'gpt-6' }];
     const priced = routeModelInputHtml('aria-label="Model"', { kind: 'api_model', target_id: OPUS.value }, items, 'agent-models');

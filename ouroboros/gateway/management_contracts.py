@@ -898,7 +898,7 @@ class ModelCatalogItem(TypedDict, total=False):
     problem: Any
     processing: Any
     use_local: bool
-    price: ModelPrice  # OpenRouter rows only, when the catalog states both token prices and no per-request fee
+    price: ModelPrice  # OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
 
 
 class ModelCatalogResponse(TypedDict, total=False):

@@ -2748,7 +2748,8 @@ replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
 confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
-published price per 1M tokens where it states one (`$4 in / $20 out`), which never sorts or filters the list;
+published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
+sorts or filters the list;
 nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
