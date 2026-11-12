@@ -49,8 +49,8 @@ def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
 def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
     """What the running code's recent builds did past one pass, from their ``context_memory_view`` receipts: work repeated
     on the same input (a ``<verb>_again`` above zero). A fact for the mind, and only when it is there: in a healthy state
-    nothing is added. The rows a capture read stay in the receipts and are no line: the stored tail is read whole on
-    every capture, so that fact stood in every context."""
+    nothing is added. The rows a capture read stay in the receipts and are no line: the tail is read whole on every
+    capture, stored or live, so that fact stood in the contexts whatever the host did."""
     from ouroboros.transcript_prefix import _running_code
 
     code = _running_code()

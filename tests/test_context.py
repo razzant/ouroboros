@@ -545,8 +545,9 @@ class TestHostWorkBeyondOnePass:
         assert _host_checks(env) == []
 
     def test_the_rows_a_capture_read_are_no_line(self, tmp_path):
-        """The stored tail is read whole on every capture, so rows read past those open and new are in every receipt: a
-        line about them stood in every context. The real capture path shows the receipt, and the block stays empty."""
+        """The tail is read whole on every capture, stored or live, so rows read past those open are in its receipt: a
+        line about them stood in the contexts whatever the host did. The real capture path (here the live one, before
+        a stored prefix stands) shows the receipt, and no host-work line is added."""
         from ouroboros import chat_chain, memory_inventory
         from ouroboros.chronicle_store import ChronicleStore
         from ouroboros.context_timing import measured_sections, section_spans
