@@ -507,8 +507,8 @@ function enqueue(row, job) {
  */
 export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', unset = [], only = null, ask = openConfirmDialog } = {}) {
     if (!lastSettings) await ensureRead();  // effects, tokens and a contract field's bounds
-    const confirm = CONFIRMS[row.confirm];
-    if (confirm && !confirmed && !(await confirm(row, value, currentValue(row), ask))) {
+    const question = CONFIRMS[row.confirm];
+    if (question && !confirmed && !(await question(row, value, currentValue(row), ask))) {
         repaintRow(row.id);
         return unchanged(row);
     }
