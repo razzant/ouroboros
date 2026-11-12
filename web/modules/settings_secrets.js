@@ -243,10 +243,13 @@ export function bindSecretRows(container, { rowOf, ask } = {}) {
         const remove = event.target.closest('[data-secret-remove]');
         const row = remove && rowOf?.(node.dataset.settingRow);
         if (!row || !(await CONFIRMS.removeEntry(row, null, null, ask))) return;
+        const doc = node.ownerDocument, focused = node.contains(node.ownerDocument.activeElement);
         setButtonBusy(remove, true);
         // An empty value clears the key. It goes through the row's own queue, so its result line says what happened.
-        await commitSetting(row, '', { confirmed: true, ask });
+        const outcome = await commitSetting(row, '', { confirmed: true, ask });
         setButtonBusy(remove, false);
+        // Disabling Remove can blur it before the saved-key readback removes its row.
+        if (focused && doc.activeElement === doc.body && node.isConnected) (landed(outcome) ? parts(node).opener : remove).focus?.({ preventScroll: true });
     };
     container.addEventListener('click', onClick);
     return {

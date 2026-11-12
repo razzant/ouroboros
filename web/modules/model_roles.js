@@ -844,7 +844,9 @@ function mountModels(container, { path, ctx }) {
             const name = `fallback ${index + 1}, ${head.querySelector('.ui-row-title')?.textContent || ''}`;
             if (!(await CONFIRMS.removeEntry({ name }, null, null, ctx.ask))) return;
             await writeFallbacks(hit('[data-fallback-remove]'), (list) => list.filter((_, i) => i !== index), 'Removed');
-            (container.querySelector(`[data-entry-id="fallback/${index + 1}"] [data-entry-open]`) || container.querySelector('[data-fallback-add]'))?.focus?.();
+            (container.querySelector(`[data-entry-id="fallback/${index + 1}"] [data-entry-open]`)
+                || [...container.querySelectorAll('[data-entry-id^="fallback/"] [data-entry-open]')].at(-1)
+                || container.querySelector('[data-fallback-add]'))?.focus?.();
         } else if (head && !hit('[data-setting-door]')) ctx.openSettings(`models/role/${head.dataset.entryId}`);
     };
     container.addEventListener('click', onClick);

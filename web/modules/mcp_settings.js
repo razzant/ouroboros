@@ -653,7 +653,7 @@ function bindCardEvents(card, rowServer) {
     card.querySelector('[data-editor-discard]')?.addEventListener('click', () => { dirty.delete(rowServer); cardMessages.delete(rowServer); void reload(); });
     card.querySelector('[data-editor-remove]')?.addEventListener('click', async (event) => {
         if (!isLive(rowServer)) { draftServer = null; editorView?.ctx?.openSettings?.('tools'); return; }  // an unsaved server: its form is let go
-        const name = serverName(rowServer);
+        const name = serverName(rowServer), index = mcpServers.indexOf(rowServer);
         if (!(await CONFIRMS.removeEntry({ name }, null, null, editorView?.ctx?.ask))) return;
         setButtonBusy(event.target, true);
         const outcome = await entryWrite(rowServer, () => null);
@@ -661,6 +661,8 @@ function bindCardEvents(card, rowServer) {
         if (!landed(outcome) && outcome.state !== 'changed_elsewhere') { sayOutcome(rowServer, outcome); return; }
         dirty.delete(rowServer);
         await leaveTo(editorView?.ctx, landed(outcome) ? `Removed ${name}.` : outcomeWords(outcome).text);
+        const next = mcpServers[Math.min(index, mcpServers.length - 1)];
+        listView?.el.querySelector(next ? `[data-entry-id="${pageId(next)}"] [data-entry-open]` : '[data-tools-add]')?.focus?.();
     });
     card.querySelector('[data-mcp-test]')?.addEventListener('click', async () => {
         const server = rowServer;

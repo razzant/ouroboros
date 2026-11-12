@@ -234,6 +234,8 @@ function mountList(container, { ctx = {} }) {
         if (!settings) return;
         const next = otherKeyRows(settings, skills);
         const keep = new Set(next.map((row) => row.id));
+        const before = [...otherRows.values()];
+        const focused = before.findIndex(({ node }) => node.contains(container.ownerDocument.activeElement));
         for (const [id, mounted] of otherRows) {
             if (keep.has(id)) continue;
             mounted.handle.dispose();
@@ -259,6 +261,13 @@ function mountList(container, { ctx = {} }) {
             }
             mounted.secrets.paint(settings);
         });
+        if (focused >= 0 && !keep.has(before[focused].row.id)) {
+            const neighbour = [...before.slice(focused + 1), ...before.slice(0, focused).reverse()]
+                .find(({ row }) => keep.has(row.id));
+            const control = neighbour?.node.querySelector('[data-secret-open]:not([hidden]), [data-setting-control]')
+                || find(`[data-open-path="${CUSTOM_KEY_PATH}"]`);
+            revealNewRow(neighbour?.node, control);
+        }
     }
     const paint = () => { paintProviders(); paintKeys(); paintOther(); };
 
