@@ -678,7 +678,8 @@ def test_wait_decision_preserves_existing_settings_timeout_receipt(live_wait, mo
 
 
 class _AppliedPlan:
-    """A plan the call applied before it yielded (an authored view, a low retry, a card's rebind)."""
+    """An identity token for a plan the call applied before it yielded (an authored view, a low retry, a card's
+    rebind). Every attribute reads as None, so these tests never reach a real rebind: the harness has no context core."""
 
     def __getattr__(self, _name):
         return None
@@ -709,9 +710,11 @@ def test_a_yielded_round_redials_from_what_its_call_applied(tmp_path, monkeypatc
     call_round, inject, seen, applied = loop._call_round_model, loop._inject_round_checkpoints, [], _AppliedPlan()
 
     def call(model_call):
-        seen.append((model_call.active_model, model_call.context_fit_plan, model_call.active_context_mode))
+        seen.append((model_call.active_model, model_call.active_use_local, model_call.context_fit_plan,
+                     model_call.active_context_mode))
         if where == "in_call" and len(seen) == 1:  # what _reprepare_waiting_main, a view and _reproject_actual_overflow_low set
-            model_call.active_model, model_call.context_fit_plan, model_call.active_context_mode = "card/model", applied, "low"
+            model_call.active_model, model_call.active_use_local = "card/model", True
+            model_call.context_fit_plan, model_call.active_context_mode = applied, "low"
             model_call.tools._ctx.route_choice = explicit("wait_card")
             raise model_wait.ModelWaitInterrupted(reason)
         if where == "in_call":  # the applied plan is a stand-in: this redial's answer is scripted
@@ -730,10 +733,10 @@ def test_a_yielded_round_redials_from_what_its_call_applied(tmp_path, monkeypatc
         **_loop_kwargs(tmp_path, ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path), [], llm=_Answering()))
     assert result == "done"
     if where == "in_call":
-        assert seen[0] == ("test-model", None, "max") and len(seen) == 2
-        assert seen[1][0] == "card/model" and seen[1][1] is applied and seen[1][2] == "low"
+        assert seen[0] == ("test-model", False, None, "max") and len(seen) == 2
+        assert seen[1][:2] == ("card/model", True) and seen[1][2] is applied and seen[1][3] == "low"
     else:
-        assert seen == [("test-model", None, "max")]  # one call, from the loop's own state, after the early yield
+        assert seen == [("test-model", False, None, "max")]  # one call, from the loop's own state, after the early yield
 
 
 @pytest.mark.parametrize("reason", ["owner_words_waiting", "owner_model"])
