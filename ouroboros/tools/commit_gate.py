@@ -81,8 +81,7 @@ BLOCK_CLASS_INFRA = "infra"
 # Triad block reasons that ARE reviewer verdicts; everything else recorded at
 # phase=blocking_review is an infrastructure fact about the gate. Post-review
 # failure phases (post_commit_tests, commit_binding, tag_binding) need no set
-# of their own: the streak walker's generic terminal break already ends an
-# identical-diff streak on them, and their paid dispatch stays counted.
+# of their own: their paid dispatch stays counted.
 _TRIAD_VERDICT_BLOCK_REASONS = frozenset({"critical_findings"})
 # Failed-status phases that are pre/around-review infrastructure facts.
 _INFRA_FAILURE_PHASES = frozenset({"infra", "expired"})
@@ -137,9 +136,8 @@ def attempt_block_class(item: Any) -> str:
     if str(getattr(item, "phase", "") or "") == "revalidation":
         # Post-review revalidation blocks (fingerprint drift, fingerprint
         # unavailable, review_subject_binding_mismatch) are facts about the
-        # GATE, never reviewer verdicts: they must not anchor identical-diff
-        # refusal quotes nor build a refusal streak, while their dispatched
-        # wave (paid=True on the merged row) still counts toward the ceiling.
+        # GATE, never reviewer verdicts, while their dispatched wave
+        # (paid=True on the merged row) still counts toward the ceiling.
         return BLOCK_CLASS_INFRA
     if str(getattr(item, "phase", "") or "") != "blocking_review":
         return ""  # preflight/advisory-gate rows are neither verdict nor infra
@@ -167,12 +165,8 @@ def resolve_root_task_id(ctx: ToolContext) -> str:
 
     DELIBERATE TRADEOFF (adversarial wave, machine-3): ``origin_root_task_id``
     — the follow-up chain marker — is NOT honored here, so a scheduled
-    follow-up task is a FRESH root with its own ceiling. This makes the
-    refusal's "leave the remaining work to a follow-up task with its own
-    budget" exit real; the cost is that a follow-up can buy new paid cycles
-    for the same goal. The cross-task identical-fingerprint refusal remains
-    the anti-laundering backstop: byte-identical bytes stay refused whichever
-    task resubmits them."""
+    follow-up task is a FRESH root with its own ceiling; the cost is that a
+    follow-up can buy new paid cycles for the same goal."""
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     return str(

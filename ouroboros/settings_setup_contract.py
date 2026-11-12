@@ -145,7 +145,7 @@ _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
     ("review_mode", "Choose access", "Reach", "Choose how much access Ouroboros gets.", ""),
     ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
-    ("summary", "Review before launch", "Final check", "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
+    ("summary", "Review before launch", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
 

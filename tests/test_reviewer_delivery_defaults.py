@@ -438,18 +438,21 @@ BLOCKING_GONE = (
     "message and the update description name it.")
 
 
-@pytest.mark.parametrize("where, value, owed", [
-    ("document", "blocking", True), ("document", " Blocking ", True), ("environment", "blocking", True),
-    ("document", "advisory", False), ("environment", "advisory", False), ("document", "strictest", False),
-    ("absent", None, False), ("no_document", None, False),
+@pytest.mark.parametrize("where, value, environment, owed", [
+    ("document", "blocking", None, True), ("document", " Blocking ", None, True), ("absent", None, "blocking", True),
+    ("document", "", "blocking", True), ("document", "advisory", None, False), ("absent", None, "advisory", False),
+    ("document", "advisory", "blocking", False), ("document", "strictest", None, False), ("absent", None, None, False),
+    ("no_document", None, None, False),
 ])
-def test_an_install_that_had_blocking_hears_once_that_it_is_gone(notice_world, monkeypatch, where, value, owed):
-    """STEP4 7(iv) item 4: an install whose settings document or process environment said ``blocking`` hears one
-    sentence once, marked, never again at the next boot; another value, absence or no document hears nothing."""
+def test_an_install_that_had_blocking_hears_once_that_it_is_gone(notice_world, monkeypatch, where, value, environment,
+                                                                 owed):
+    """STEP4 7(iv) item 4: an install that ran with ``blocking`` hears one sentence once, marked, never again at the
+    next boot: its settings document said so, or it saved nothing there and its process environment did. A saved
+    choice outranked the environment, so an install that saved another value, or had none, hears nothing."""
     document = None if where == "no_document" else {"OUROBOROS_REVIEW_ENFORCEMENT": value} if where == "document" else {}
     monkeypatch.setattr(notice_world.notices, "_raw_settings_document", lambda: document)
-    if where == "environment":
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", value)
+    if environment is not None:
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", environment)
     notice_world.notices.startup_upgrade_notices({})
     notice_world.notices.startup_upgrade_notices({})
     texts = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "review_enforcement_notice"]

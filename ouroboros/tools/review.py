@@ -497,8 +497,8 @@ def _capture_triad_staged_diff(
         ctx._last_review_block_reason = "infra_failure"
         _handle_review_block_or_warning(
             ctx,
-            "⚠️ REVIEW_BLOCKED: Cannot capture the staged diff — commit cannot "
-            f"proceed.\nError: {exc}\n"
+            "⚠️ REVIEW_BLOCKED: Cannot capture the staged diff — nothing was reviewed.\n"
+            f"Error: {exc}\n"
             "Ensure git is available and the repository is in a valid state.",
             "Staged diff capture failed; triad review skipped rather than run against a placeholder. ",
         )
@@ -609,7 +609,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         log.error("Checklist loading failed (fail-closed): %s", e)
         ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
-            "⚠️ REVIEW_BLOCKED: Cannot load review checklist — commit cannot proceed.\n"
+            "⚠️ REVIEW_BLOCKED: Cannot load review checklist — nothing was reviewed.\n"
             f"Error: {e}\n"
             "Ensure docs/CHECKLISTS.md exists and contains the expected section headers."
         )
@@ -793,7 +793,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         ctx._last_review_block_reason = "infra_failure"
         _handle_review_block_or_warning(
             ctx,
-            "⚠️ REVIEW_BLOCKED: Failed to build the review brief — commit blocked.\n"
+            "⚠️ REVIEW_BLOCKED: Failed to build the review brief — nothing was reviewed.\n"
             f"Seat {failed_slot}: {exc}\n"
             "Ensure git is available and the repository is in a valid state.",
             "Review brief assembly failed; an explicit author decision is required. ",
@@ -876,8 +876,7 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
         log.error("Unified review infrastructure failure: %s", e)
         ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
-            "⚠️ REVIEW_BLOCKED: Review infrastructure failed — commit cannot proceed "
-            "without a successful review.\n"
+            "⚠️ REVIEW_BLOCKED: Review infrastructure failed — no review verdict.\n"
             f"Error: {e}\n"
             "Check OPENROUTER_API_KEY, network connectivity, and retry."
         )
@@ -888,8 +887,7 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
         log.error("Review returned error: %s", result["error"])
         ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
-            "⚠️ REVIEW_BLOCKED: Review service returned an error — commit cannot proceed "
-            "without a successful review.\n"
+            "⚠️ REVIEW_BLOCKED: Review service returned an error — no review verdict.\n"
             f"Error: {result['error']}\n"
             "Check OPENROUTER_API_KEY, network connectivity, and retry."
         )
@@ -901,8 +899,7 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
         ctx._last_review_block_reason = "infra_failure"
         if getattr(ctx, "_triad_withheld_seat_records", None):
             ctx._last_triad_raw_results = list(ctx._triad_withheld_seat_records)
-        blocked_msg = ("⚠️ REVIEW_BLOCKED: Review returned no results from any "
-                       "model — commit cannot proceed without a successful review.")
+        blocked_msg = "⚠️ REVIEW_BLOCKED: Review returned no results from any model — no review verdict."
         _handle_review_block_or_warning(ctx, blocked_msg,
                                         "No model results were received; an explicit author decision is required. ")
         return None

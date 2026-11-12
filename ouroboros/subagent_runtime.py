@@ -202,15 +202,15 @@ _REVIEW_RULES = {
 
 _REVIEW_SURFACES = {
     "commit_gate": {"advisory": "choose ticked reviewers; narrowing requires a reason; omitted means the whole pool; outcome returns before Git for an author disposition",
-                    "cyber_pro": "compose or skip, recording the departure; never holds"},
+                    "cyber_pro": "compose or skip, recording the departure"},
     "review_change": "own code follows commit composition; other repositories compose freely in every mode, record a missing reason and never bind",
     "skill_review": {"advisory": "choose ticked reviewers, with a reason when narrowed; omitted and owner-started mean whole pool; review-each blockers keep the skill off until clean review or owner Skip",
                      "cyber_pro": "panel, self-check or no review; the skill may run"},
     "plan_review": "opening is optional; a first own-code ask outside Cyber Pro requires a ticked reviewer and a reason when narrowed, Cyber Pro is free; later asks name rows; objections are disclosed, none holds",
-    "advisers": "enabled unticked rows may be named in every mode: heard, not counted, never holding",
+    "advisers": "enabled unticked rows may be named in every mode: heard, not counted",
     "result": ("review_change(subject=result): on a Required root, name ticked reviewers, with a reason when narrowed, "
                "and if nobody reviewed before delivery the host seats the whole pool (chosen by the host); Auto composes "
-               "freely; Cyber Pro composes freely and never holds; Off is refused; a child's own result review "
+               "freely; Cyber Pro composes freely; Off is refused; a child's own result review "
                "composes freely; advisers are heard, not counted; omitted reviewers mean the whole pool"),
     "preflight": "one enabled catalog row you name: commit_reviewed(preflight_reviewer=…); none → recorded as not performed",
     "system_review": "/review: one enabled catalog row, default Main",

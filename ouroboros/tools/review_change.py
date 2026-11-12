@@ -1330,7 +1330,7 @@ _DESCRIPTION = (
     "On a Required root, name ticked reviewers, with a reason when narrowed (else a $0 refusal); delivering "
     "unreviewed, the host seats the whole pool. A result revised after a review reached you is reviewed again "
     "only if you ask, delivery being your own acceptance. "
-    "Auto composes the named rows. Cyber Pro composes freely and never holds. A child's "
+    "Auto composes the named rows. Cyber Pro composes freely. A child's "
     "own result review composes freely. Under Auto ask when another mind's check could change what you deliver or "
     "your human asks for one. Task review Off refuses it; it counts its own paid cycles. The same subject, "
     "surface, panel and ask return the settled verdict free (reused=true), even after a guide changed; after a "

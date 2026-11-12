@@ -235,6 +235,24 @@ def test_review_result_message_prefers_non_pass_findings_and_marks_omissions(mon
     assert "full findings in Skills page" in message
 
 
+@pytest.mark.parametrize("strict", [False, True], ids=["any_source", "source_that_reviews_each_skill"])
+def test_the_review_payload_and_its_line_say_what_the_gate_says_of_blockers(strict):
+    """Blockers keep a skill off only when its source reviews each skill (until the owner skips the review): the
+    review payload and its result line read that same policy instead of calling the skill executable (REV8 F4)."""
+    from ouroboros.skill_review_runner import _outcome_payload
+
+    outcome = SkillReviewOutcome(skill_name="alpha", status="blockers",
+                                 findings=[{"item": "bug_hunting", "verdict": "FAIL", "reason": "unsafe path"}])
+    outcome.strict_review = strict
+    payload = _outcome_payload(outcome, deps_status="not_required", deps_error="", extension_action=None,
+                               extension_reason=None)
+    assert payload["executable_review"] is not strict, payload["review_gate"]
+    assert payload["review_gate"]["blocking_reason"] == (
+        "blocker_findings_need_owner" if strict else "blockers_allowed_by_advisory_enforcement")
+    assert _review_result_message(outcome).startswith(
+        "Review blocked: blocker findings (blockers)" if strict else "Review executable with findings (blockers)")
+
+
 def test_review_result_message_allows_warnings_status(monkeypatch):
     outcome = SkillReviewOutcome(
         skill_name="alpha",

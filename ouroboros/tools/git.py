@@ -417,8 +417,7 @@ def _subject_binding_mismatch_outcome(
         duration_sec=time.time() - commit_start,
         phase="revalidation",
         # Infra by construction (A1 composition): a binding mismatch is a gate
-        # fact, not a reviewer verdict — it must never build a refusal streak
-        # nor anchor an identical-diff refusal quote.
+        # fact, not a reviewer verdict.
         block_class=BLOCK_CLASS_INFRA,
         pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
         fingerprint_status="invalid",

@@ -134,13 +134,14 @@ def command_timeout_notice(document: Optional[Mapping[str, Any]], settings: Mapp
 def review_enforcement_notice(document: Optional[Mapping[str, Any]], environ: Mapping[str, str]) -> str:
     """The owner-facing sentence that Blocking left the product, owed once to an install that had it.
 
-    Read from the raw document, before the read seam drops the retired key, or from the process
-    environment (an exported variable of a Docker unit, a Colab cell or a benchmark adapter): only
-    ``blocking``, whatever its case or spaces, owes it; another value, absence or no document is silent.
+    Read the value the install ran with, before the read seam drops the retired key: the raw document's
+    non-empty value (a saved choice outranked the environment), else the process environment (an exported
+    variable of a Docker unit, a Colab cell or a benchmark adapter). Only ``blocking``, whatever its case or
+    spaces, owes it; another value, absence or no document is silent.
     """
-    values = [document.get(_REVIEW_ENFORCEMENT_KEY) if isinstance(document, Mapping) else None,
-              environ.get(_REVIEW_ENFORCEMENT_KEY)]
-    if not any(str(value).strip().lower() == "blocking" for value in values if value is not None):
+    saved = document.get(_REVIEW_ENFORCEMENT_KEY) if isinstance(document, Mapping) else None
+    value = saved if str(saved if saved is not None else "").strip() else environ.get(_REVIEW_ENFORCEMENT_KEY)
+    if str(value if value is not None else "").strip().lower() != "blocking":
         return ""
     return ("⚙️ This install had reviews set to Blocking. That setting is gone with this update: a reviewer's serious "
             "finding, or a review that gave no answer, no longer stops Ouroboros. Outside Cyber Pro it still asks for a "

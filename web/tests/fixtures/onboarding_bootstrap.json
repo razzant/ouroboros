@@ -408,7 +408,7 @@
         "title": "Review limits"
       },
       {
-        "copy": "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.",
+        "copy": "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.",
         "footer": "The same onboarding values remain editable later in Settings.",
         "id": "summary",
         "railCopy": "Final check",
