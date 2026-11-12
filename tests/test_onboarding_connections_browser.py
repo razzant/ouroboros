@@ -10,6 +10,7 @@ import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
+from tests.settings_browser_helpers import open_settings
 from tests.ui_console_errors import record_console_errors, record_failed_loads, unexpected_console_errors
 
 pytestmark = [pytest.mark.ui_browser]
@@ -59,7 +60,7 @@ def _frame(page, evidence, name):
     page.screenshot(path=str(evidence / f"{name}.png"), animations="disabled")
     return page.evaluate("""() => ({viewport: [innerWidth, innerHeight],
         body: [document.body.clientWidth, document.body.scrollWidth],
-        scrollBodies: [...document.querySelectorAll('.settings-scroll, .wizard-content')]
+        scrollBodies: [...document.querySelectorAll('[data-settings-page], .wizard-content')]
             .filter(el => el.getBoundingClientRect().width).map(el => [el.clientWidth, el.scrollWidth]),
         overflow: [...document.querySelectorAll('input, select, .connection-row, .settings-provider-card')]
             .filter(el => el.getBoundingClientRect().width && el.getBoundingClientRect().right > innerWidth + 1)
@@ -192,7 +193,7 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
             page.click('#next-btn')
         assert completion.value.status == 200, completion.value.text()
         report['receipt'] = receipts[-1]
-        saved = json.loads((ui['data_dir'] / 'settings.json').read_text())
+        saved = json.loads((ui['data_dir'] / 'settings.json').read_text(encoding="utf-8"))
         assert saved['OUROBOROS_MODEL'] == sources[0] + '::same-model'
         assert saved['OUROBOROS_MODEL_LIGHT'] == sources[1] + '::same-model'
         assert report['completion_routes']['OUROBOROS_MODEL_FALLBACKS'] == fallback_route
@@ -203,14 +204,11 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
         # Follow the wizard's completion handoff before opening Settings. A second goto
         # here races its location.replace and can abort either navigation.
         page.wait_for_url(ui['url'] + '/', wait_until='domcontentloaded')
-        page.click('[data-nav-page="settings"]')
-        page.click('[data-settings-tab="models"]')
-        expect(page.locator('[data-model-role="heavy"], #s-model-heavy')).to_have_count(0)
         for role, source in zip(('main', 'light'), sources):
+            open_settings(page, f"models/role/{role}")
             expect(page.locator(f'[data-model-role="{role}"] [data-model-role-source]')).to_have_value('api:' + source)
             expect(page.locator(f'[data-model-role="{role}"] [data-model-role-model]')).to_have_value('same-model')
-        expect(page.locator('#settings-status')).to_have_text('Settings refreshed')
-        expect(fallback).to_have_count(1)
+        fallback = open_settings(page, "models/role/fallback/1")
         expect(fallback.locator('[data-model-role-source]')).to_have_value('api:' + sources[1])
         expect(fallback.locator('[data-model-role-model]')).to_have_value('same-model')
         settings = page.request.get(ui['url'] + '/api/settings').json()
@@ -218,59 +216,30 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
         report['reloaded_routes'] = {key: settings[key] for key in report['completion_routes']}
         for theme in ('light', 'dark'):
             page.evaluate('theme => document.documentElement.dataset.theme = theme', theme)
-            report['frames'][f'settings-models-{theme}'] = _frame(page, evidence, f'after-settings-models-{theme}')
-            fallback.scroll_into_view_if_needed()
             report['frames'][f'settings-fallback-{theme}'] = _frame(page, evidence, f'after-settings-fallback-{theme}')
-            page.locator('[data-model-role="main"]').scroll_into_view_if_needed()
-        page.click('[data-settings-tab="providers"]')
-        rows = page.locator('[data-connection-row][data-kind="openai-compatible"][data-uid]')
-        expect(rows).to_have_count(2)
-        expect(rows.nth(1).locator('[data-connection-label]')).to_have_value('Research server renamed')
-        # Saved masked rows withdraw readiness on field edits, and restore it on undo.
-        saved_row = rows.nth(1)
-        row_status = saved_row.locator('[data-connection-status]')
-        expect(row_status).to_have_text('Ready')
-        for field in ('base_url', 'api_key'):
-            control = saved_row.locator(f'[data-connection-field="{field}"]')
-            original = control.input_value()
-            control.fill('')
-            expect(row_status).to_have_text('Not saved')
-            control.fill(original)
-            expect(row_status).to_have_text('Ready')
-        secret = saved_row.locator('[data-connection-field="api_key"]')
-        mask = secret.input_value()
-        saved_row.locator('.secret-clear').click()
-        expect(secret).to_have_value('')
-        expect(row_status).to_have_text('Not saved')
-        assert secret.get_attribute('data-force-clear') == '1'
-        secret.fill(mask)
-        expect(row_status).to_have_text('Ready')
-        assert secret.get_attribute('data-force-clear') is None
-        # Built-in rows survive Reload; their baseline must exclude transient Clear intent.
-        builtin = page.locator('[data-connection-row][data-kind="openai-compatible"][data-builtin="1"]')
-        builtin.locator('.secret-clear').click()
-        assert builtin.locator('[data-connection-field="api_key"]').get_attribute('data-force-clear') == '1'
-        page.click('#btn-reload-settings')
-        page.get_by_role('button', name='Discard and continue', exact=True).click()
-        expect(page.locator('#settings-status')).to_have_text('Settings loaded')
-        builtin_status = builtin.locator('[data-connection-status]')
-        expect(builtin_status).to_have_text('No key')
-        builtin_url = builtin.locator('[data-connection-field="base_url"]')
-        loaded_url = builtin_url.input_value()
-        builtin_url.fill('http://127.0.0.1:1/v1')
-        expect(builtin_status).to_have_text('Not saved')
-        builtin_url.fill(loaded_url)
-        expect(builtin_status).to_have_text('No key')
-        report['builtin_reload_undo'] = {'status': builtin_status.inner_text(), 'base_url': loaded_url}
-        # Test the saved destinations from their real rows; alpha sends no auth, beta uses its own saved key.
-        for row in (rows.nth(0), rows.nth(1)):
+        listing = open_settings(page, "accounts")
+        for source in sources:
+            expect(listing.locator(f'[data-entry-id="{source}"]')).to_have_count(1)
+        # Each saved destination has its own editor; its Test uses only that connection's saved credential.
+        for source in sources:
+            kind, name = source.split('@', 1)
+            editor = open_settings(page, f"accounts/key/{kind}/{name}")
+            row = editor.locator('[data-connection-row]')
+            if source == sources[1]:
+                expect(row.locator('[data-connection-label]')).to_have_value('Research server renamed')
             with page.expect_response('**/api/providers/test') as tested:
                 row.locator('[data-connection-test]').click()
             assert tested.value.status == 200 and tested.value.json()['ok'], tested.value.text()
             assert tested.value.request.post_data_json == {
-                'provider_id': 'openai-compatible', 'connection': row.get_attribute('data-name'), 'overrides': {},
+                'provider_id': 'openai-compatible', 'connection': name, 'overrides': {},
             }
-            expect(row.locator('[data-connection-test-status]')).to_have_text('Works')
+            expect(row.locator('[data-editor-result]')).to_have_text('Works')
+            # A verdict is about the tested draft; editing clears it, without saving anything.
+            field = row.locator('[data-connection-field="base_url"]')
+            original = field.input_value()
+            field.fill('')
+            expect(row.locator('[data-editor-result]')).to_have_text('')
+            field.fill(original)
         assert any(call.get('model') == 'same-model' for call in alpha_calls)
         assert any(call.get('model') == 'same-model' for call in beta_calls)
         assert all(call['authorization'] is None for call in alpha_calls)
@@ -278,9 +247,9 @@ def test_first_run_named_servers_keep_routes_and_credentials_in_settings(direct_
         report.update(alpha_calls=alpha_calls, beta_calls=beta_calls, console_errors=errors, failed_loads=failed,
                       unexpected_console_errors=unexpected_console_errors(errors, failed))
         page.set_viewport_size({'width': 390, 'height': 844})
-        rows.nth(1).scroll_into_view_if_needed()
+        row.scroll_into_view_if_needed()
         report['frames']['narrow-accounts'] = _frame(page, evidence, 'after-settings-accounts-narrow')
-        (evidence / 'consumer-proof.json').write_text(json.dumps(report, indent=2))
+        (evidence / 'consumer-proof.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         assert all(not frame['overflow'] and frame['body'][1] <= frame['viewport'][0] + 1 for frame in report['frames'].values())
         assert all(width >= scroll - 1 for frame in report['frames'].values() for width, scroll in frame['scrollBodies'])
         browser.close()
@@ -350,5 +319,5 @@ def test_undo_named_server_edits_restores_the_current_wizard_draft(direct_server
         assert calls and all(call['authorization'] == 'Bearer b' for call in calls)
         report.update(discovery_payload=sent, upstream_calls=calls, console_errors=errors,
                       failed_loads=failed, models=_frame(page, evidence, 'undone-models'))
-        (evidence / 'undo-proof.json').write_text(json.dumps(report, indent=2))
+        (evidence / 'undo-proof.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         browser.close()

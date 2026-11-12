@@ -331,7 +331,7 @@ def test_settings_preview_endpoint_serves_the_unavailable_causes(monkeypatch):
 
     _discoverable(monkeypatch, anthropic=False, ddgs=True)
     saved = {'OUROBOROS_WEBSEARCH_BACKEND': 'auto', 'OPENROUTER_API_KEY': 'sk-or-secret-7f3', 'ANTHROPIC_API_KEY': 'sk-ant-secret-7f3'}
-    monkeypatch.setattr(settings_mod, 'load_settings', lambda: dict(saved))
+    monkeypatch.setattr(settings_mod, 'settings_read_view', lambda: (dict(saved), {}))
     monkeypatch.setattr(settings_mod, 'apply_runtime_provider_defaults', lambda s: (dict(s), False, []))
     client = TestClient(Starlette(routes=[Route('/api/settings', endpoint=settings_mod.api_settings_get)]))
     data = client.get('/api/settings', params={'websearch_preview': '1'}).json()

@@ -77,7 +77,9 @@ test('one maintenance host per family, independent of the account count', () => 
         };
         const html = harnessFamilyMarkup(group, {});
         assert.equal((html.match(/data-family-maintenance=/g) || []).length, 1);
-        assert.equal((html.match(/class="harness-account-row/g) || []).length, count);
+        assert.equal((html.match(/class="ui-row harness-account-row/g) || []).length, count);
+        // The program's row stands above the accounts, in a card of its own.
+        assert.ok(html.indexOf('data-family-maintenance=') < html.indexOf('agent-family-rows'));
     }
     assert.doesNotMatch(harnessFamilyMarkup({ harness: 'api-agent', label: 'API agent', rows: [], maintenanceOnly: true }, {}), /data-family-add/);
 });

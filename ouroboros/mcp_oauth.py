@@ -56,7 +56,7 @@ class MCPAuthRequired(RuntimeError):
         super().__init__(
             f"MCP_AUTH_REQUIRED: server {server_id!r} needs the owner's sign-in ({reason}"
             f"{': ' + detail if detail else ''}). Nothing ran there. The owner can press Sign in on its card in "
-            f"Settings → MCP, or remote_mcp_sign_in(server={server_id!r}, action='begin') (enable_tools loads it) issues "
+            f"Settings → Tools, or remote_mcp_sign_in(server={server_id!r}, action='begin') (enable_tools loads it) issues "
             "a sign-in link to give them.")
 
 
@@ -499,7 +499,7 @@ async def _client_for(cfg: Any, doc: Dict[str, Any], metadata: Any, issuer: str,
         raise MCPAuthRequired(cfg.id, "no_self_registration",
                               f"the provider registers no apps itself: register one there for the return address "
                               f"{redirect}, then enter its client ID (and secret) under Sign in on this server's card "
-                              "in Settings → MCP")
+                              "in Settings → Tools")
     endpoint = _checked(str(metadata.registration_endpoint))
     body = OAuthClientMetadata(client_name="Ouroboros", redirect_uris=[redirect], token_endpoint_auth_method="none",
                                grant_types=["authorization_code", "refresh_token"], response_types=["code"]).model_dump(

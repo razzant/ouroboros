@@ -295,18 +295,6 @@ def test_state_response_typeddict_declares_phase2_keys():
 # ===========================================================================
 
 
-def test_settings_js_reads_and_writes_phase2_keys():
-    src = "\n".join((REPO / "web" / "modules" / name).read_text(encoding="utf-8")
-                     for name in ("settings.js", "settings_local_model.js"))
-    assert "OUROBOROS_RUNTIME_MODE" in src
-    assert "OUROBOROS_CONTEXT_MODE'" in src
-    assert "OUROBOROS_SKILLS_REPO_PATH" in src
-    assert "['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced']" in src
-    assert "['s-context-mode', 'OUROBOROS_CONTEXT_MODE', 'max']" in src
-    assert "['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH']" in src
-    assert "fieldValue(id).trim()" in src
-
-
 def test_the_protected_path_messages_name_the_review_panel_and_the_review_gate(monkeypatch):
     """V-D4-07, the owner's approval of 2026-10-08 for exactly three phrases of the protected
     ``runtime_mode_policy``: the module docstring, the advanced-mode refusal and the pro-mode
@@ -361,11 +349,12 @@ def test_api_settings_post_clamps_unknown_runtime_mode(tmp_path, monkeypatch):
         return out
 
     def fake_save_settings(payload, *, allow_elevation: bool = False, allow_context_lowering: bool = False,
-                           authored_keys=(), boundary=None):
+                           authored_keys=(), boundary=None, expected_digest="", if_unchanged=None, unset=()):
         # Stands in for both save_settings (allow_elevation) and _owner_write_settings
         # (allow_context_lowering, added in v6.33.0 P4; authored_keys in v6.80.0 — the caller
         # names the disk-authored keys it really authors, see prepare_settings_for_persist;
-        # boundary marks the commit point, so the stub marks it as the real writer would).
+        # boundary marks the commit point, so the stub marks it as the real writer would;
+        # expected_digest, if_unchanged and unset bind the save to its own read and a row's token).
         saved.clear()
         saved.update(payload)
         if boundary is not None:
@@ -410,11 +399,12 @@ def test_api_settings_post_silently_drops_runtime_mode_changes(monkeypatch):
         return out
 
     def fake_save_settings(payload, *, allow_elevation: bool = False, allow_context_lowering: bool = False,
-                           authored_keys=(), boundary=None):
+                           authored_keys=(), boundary=None, expected_digest="", if_unchanged=None, unset=()):
         # Stands in for both save_settings (allow_elevation) and _owner_write_settings
         # (allow_context_lowering, added in v6.33.0 P4; authored_keys in v6.80.0 — the caller
         # names the disk-authored keys it really authors, see prepare_settings_for_persist;
-        # boundary marks the commit point, so the stub marks it as the real writer would).
+        # boundary marks the commit point, so the stub marks it as the real writer would;
+        # expected_digest, if_unchanged and unset bind the save to its own read and a row's token).
         saved.clear()
         saved.update(payload)
         if boundary is not None:

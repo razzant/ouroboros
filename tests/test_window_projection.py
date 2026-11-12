@@ -24,7 +24,7 @@ def test_settings_reads_stored_window_and_matches_main(tmp_path, monkeypatch, re
     route = dict(provider="openai-compatible", model="openai-compatible::fixture", base_url="https://fixture.invalid/v1")
     settings = dict(OUROBOROS_MODEL=route["model"], OPENAI_COMPATIBLE_BASE_URL=route["base_url"],
                     OPENAI_COMPATIBLE_API_KEY="fixture", OUROBOROS_MODEL_CONTEXT_WINDOWS={"main": typed})
-    monkeypatch.setattr(gateway, "load_settings", lambda: settings)
+    monkeypatch.setattr(gateway, "settings_read_view", lambda: (settings, {}))
     monkeypatch.setattr(gateway, "_owner_audit", lambda *a: None)
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: pytest.fail("Settings fetched metadata"))

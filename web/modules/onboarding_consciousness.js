@@ -49,7 +49,7 @@ export function limitPhrases(facts) {
 export function offerRowHtml(facts, ticked = false) {
     if (!facts.offered) return '';
     const limits = `<span class="consciousness-offer-sub">${limitPhrases(facts).map(escapeHtml).join(' ')}</span>`;
-    const where = '<span class="consciousness-offer-sub">Change the allowance in Dashboard › Costs and the rest in Settings › Behavior › Consciousness. Stop or start it any time in Dashboard › Consciousness.</span>';
+    const where = '<span class="consciousness-offer-sub">Change the allowance in Dashboard › Costs. Its other settings, and Stop and Start, are in Dashboard › Consciousness.</span>';
     const value = facts.enabled === true
         ? '<span class="consciousness-offer-value">On already</span>'
         : `<label class="consciousness-offer-choice"><input type="checkbox" class="ui-checkbox" data-consciousness-start${ticked ? ' checked' : ''}>
