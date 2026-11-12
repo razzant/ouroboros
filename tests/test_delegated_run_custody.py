@@ -92,6 +92,8 @@ def test_the_invocation_id_is_reused_on_retry_and_fresh_per_intended_start(
             return httpx.Response(200, json={"snapshots": []})
         if path == "/v2/projects":
             return httpx.Response(200, json={"projects": [{"id": "prj-existing", "root": str(tmp_path)}]})
+        if path == "/v2/operations":  # an engine before the accepted-start lookup (#3138)
+            return httpx.Response(200, json={"operations": []})
         keys.append(request.headers.get("Idempotency-Key"))
         bodies.append(json.loads(request.read()))
         action = script.pop(0)
@@ -225,6 +227,8 @@ def test_a_retry_testifies_about_the_stored_invocation_not_the_current_config(
         if request.method == "DELETE" and path.startswith("/v2/projects/"):
             removals.append(path.rsplit("/", 1)[-1])
             return httpx.Response(200, json={})
+        if path == "/v2/operations":  # an engine before the accepted-start lookup (#3138)
+            return httpx.Response(200, json={"operations": []})
         assert path == "/v2/runs", path
         keys.append(request.headers.get("Idempotency-Key"))
         bodies.append(json.loads(request.read()))

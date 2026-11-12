@@ -93,7 +93,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true, catchingUp: catchUp.active,\n            ready: hostStart.ready(),"
+    "value": "return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true,\n            serverAnswers: ws.serverAnswersWhileDown?.() === true, catchingUp: catchUp.active,\n            ready: hostStart.ready(),"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",

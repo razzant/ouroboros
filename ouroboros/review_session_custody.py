@@ -316,13 +316,43 @@ def join_recorded_review_continuation(gateway: Any, root: Any, entry: Any, detai
         **{key: getattr(entry, key) for key in ("task_id", "route_id", "model", "profile_id", "project_id",
             "project_owned", "project_persistent", "root_task_id", "parent_task_id", "category", "source",
             "review_skill", "review_wave_id", "review_slot_id", "authority_source", "execution_root", "target_root")})
-    if not custody.record_started(root, successor, shape={
+    successor, landed = custody.bind_started(root, successor, shape={  # converges with any reader of this key
             "access": entry.access, "mode": entry.mode, "isolation": entry.isolation,
             "delegated": entry.delegated, "max_seconds": entry.max_seconds,
-            "surface": invocation.surface, "slot_id": invocation.slot_id}):
+            "surface": invocation.surface, "slot_id": invocation.slot_id})[:2]
+    if not landed:
         raise ReviewRouteUnavailable("Review successor start remains pending in custody",
                                      code="review_continuation_checkpoint_unwritable")
     return successor
+
+
+def rejoin_recorded_review(invocation: Any, data_root: Any, gateway: Any, record: Dict[str, Any],
+                           run_id: str, started: Any) -> tuple[str, Any, Optional[float]]:
+    """A recovered seat's first step on its recorded engine: ``(run_id, started custody, generation end)``.
+
+    A pending start (its key: the seat's own token, ``retry_state["pending_invocation_id"]``) is first
+    read for the work the engine already accepted (#3138, ``delegate_accepted.recover``); found, it is
+    bound once and joined like a started one. The panel owns this read (the sweep leaves review starts
+    to it), after ``review_recovery_facts`` proved the seat owns the record. It precedes the checking-copy restoration
+    and the generation window (``prepare_continuation_send``, ``continuation_generation_end``), which
+    bound only a new POST: accepted work is collected after its window closed or its released checkout
+    went. A read that forbids any replay refuses typed with the start kept; any other miss leaves the
+    send exactly as before, an explicit continuation's first send included."""
+    if not run_id and record.get("state") == "pending":
+        from ouroboros.delegate_accepted import NO_REPLAY, recover
+
+        token = str((getattr(invocation, "retry_state", None) or {}).get("pending_invocation_id") or "")
+        held, read = recover(data_root, gateway, {**record, "invocation_id": token})
+        if held is not None:
+            run_id, started = held.run_id, held
+        elif read["reason"] in NO_REPLAY:
+            from ouroboros.review_execution import ReviewRouteUnavailable
+
+            raise ReviewRouteUnavailable(f"the engine answered for this review's recorded start ({read['lookup']}) but no "
+                                         "run could be bound to it now; nothing was re-sent and its outcome stays unknown",
+                                         code=read["reason"])
+    prepare_continuation_send(invocation, data_root, record, run_id)  # every continuation POST, replays too
+    return run_id, started, continuation_generation_end(invocation, record, run_id)
 
 
 def continuation_send(invocation: Any) -> bool:
