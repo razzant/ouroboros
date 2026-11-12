@@ -1221,16 +1221,40 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
             value.control_episode_seen = True
 
 
+def _conversation_account(ctx: Any, messages: list, role: str, account: Any) -> dict:
+    """The exact account a resumed turn's next send names (``llm_substitution.send_account``): the last answer of this
+    model in the restored messages, else the account its plan was built on; ``{}`` on another transport or none."""
+    from ouroboros.provider_models import parse_claudexor_model, provider_for_model
+
+    model = str(getattr(ctx, "active_model", "") or "")
+    try:
+        if getattr(ctx, "active_use_local", False) or provider_for_model(model) != "claudexor":
+            return {}
+        source, native = parse_claudexor_model(model)
+    except ValueError:
+        return {}
+    from ouroboros.llm_claudexor import cache_key_for_model
+    from ouroboros.llm_substitution import send_account
+
+    return send_account({"source": source, "resolved_model": native}, messages, {
+        "model_role": role, "model_account_override": account, "cache_affinity": cache_key_for_model(model)},
+        plan=getattr(ctx, "context_fit_plan", None))[1]
+
+
 def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     """Rebind the restored route's context-fit plan; returns ``(plan, mode)``.
 
     The actor's captured owner choice survives restart, separately from the physically
-    achieved mode. Legacy sources without that choice keep the previous fallback."""
+    achieved mode. Legacy sources without that choice keep the previous fallback.
+    The plan binds the conversation's account (``_conversation_account``): its fresh record answers without a question
+    to the engine; without one the route's own question is asked once, and the rebind after tool reconciliation reuses
+    that answer. Dates are read anew; an account the conversation names without a usable record is asked about."""
     from ouroboros.loop import _rebind_context_fit_plan, get_context_mode
     from ouroboros.memory_floor import MODES
     from ouroboros.model_slots import task_model_binding
     from ouroboros.continuation_tools import reconcile_restored_tools
     from ouroboros.context_fit import restored_start
+    from ouroboros.context_timing import timed
 
     ctx = tools._ctx
     ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
@@ -1244,12 +1268,14 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     route = dict(model=ctx.active_model,
         use_local=ctx.active_use_local, preferred_mode=owner,
         tool_schemas=state["tool_schemas"],
-        model_role=role, model_route={}, credential_profile_id=account,
+        model_role=role, model_route=_conversation_account(ctx, messages, role, account), credential_profile_id=account,
+        route_is_preference=True,
     )
     plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, **route,
         start_mode=ran if owner in MODES and ran in MODES[MODES.index(owner):] else None)
-    if reconcile_restored_tools(tools, state, messages, mode):
-        plan, mode = _rebind_context_fit_plan(plan, tools, messages, **route, start_mode=mode)
+    if timed("restore.tools", reconcile_restored_tools, tools, state, messages, mode):
+        plan, mode = _rebind_context_fit_plan(plan, tools, messages, start_mode=mode,  # the first answer, never a second question
+                                              **{**route, "model_route": getattr(plan, "model_route", {})})
         sanction_rewrite(ctx, "continuation_restored", scope="tools")
     # This process captured its context again: the restored system row names that, not a route change.
     sanction_rewrite(ctx, "continuation_restored", scope="system")

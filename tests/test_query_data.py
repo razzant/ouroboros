@@ -963,3 +963,15 @@ def test_a_failed_sql_statement_names_the_readable_schema_and_a_served_one_does_
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
     assert query_data_sql.schema_hint("money") == "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
+
+
+def test_a_malformed_knowledge_history_line_is_a_named_gap_and_later_rows_still_return(ctx):
+    rows = [{"ts": "2026-11-01T00:00:00Z", "topic": "before", "mode": "edit"},
+            {"ts": "2026-11-02T00:00:00Z", "topic": "after", "mode": "overwrite"}]
+    head = json.dumps(rows[0]).encode() + b"\n"
+    write(ctx, "memory/knowledge_history.jsonl", head + b'{"topic": "torn\n' + json.dumps(rows[1]).encode() + b"\n")
+    result = call(ctx, op="jsonl", kind="knowledge_history", tail=10)
+    assert result["status"] == "ok" and [r["topic"] for r in result["data"]] == ["before", "after"]
+    assert result["source"]["gaps"] == {"malformed_lines": 1, "first_malformed_offset": len(head)}
+    write(ctx, "memory/knowledge_history.jsonl", b"".join(json.dumps(r).encode() + b"\n" for r in rows))
+    assert "gaps" not in call(ctx, op="jsonl", kind="knowledge_history", tail=10)["source"]

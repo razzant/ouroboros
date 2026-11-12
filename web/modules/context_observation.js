@@ -125,8 +125,9 @@ const said = (mode) => translateString(CONTEXT_LABELS[mode] || '');
 const listed = (modes) => (modes.length > 1
     ? fmt('{first} and {second}', { first: modes.slice(0, -1).map(said).join(', '), second: said(modes.at(-1)) }) : said(modes[0]));
 
-// Why the request ran below the mode its work held at send (`cause`), else that the owner's choice changed since.
-function causeOf(fact, preferred) {
+// Why the request ran below the mode its work held at send (`cause`), else that the owner's choice changed since. The
+// task card's start row says its recorded reason in these same words (`task_checkpoints.js`).
+export function causeOf(fact, preferred) {
     const asked = said(fact.preferred_at_send);
     const ran = said(fact.applied);
     switch (asked && fact.cause) {

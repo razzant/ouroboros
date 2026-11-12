@@ -375,22 +375,31 @@ def _older_segments(path, live, where, need, budget, admit):
     return [row for chunk in reversed(chunks) for row in chunk], consumed, clipped, facts
 
 
-def _knowledge_history(path, where, tail):
+def _knowledge_history(path, where, tail, gaps=None):
     """The newest ``tail`` matching knowledge writes, each without its two note bodies.
 
     Facts a row lacks stay absent (old rows carry no publication stamp); the current
     text is ``knowledge_read``. A window past the read budget is said as truncated.
+    A line that is not JSON is skipped and counted in ``gaps`` with the byte offset of
+    the first; the rows after it are still read.
     """
-    rows, partial = deque(maxlen=tail or None), False
+    rows, partial, offset = deque(maxlen=tail or None), False, 0
     with path.open("rb") as stream:
         if path.stat().st_size > _HISTORY_SCAN_BYTES:
-            stream.seek(-_HISTORY_SCAN_BYTES, 2)
-            stream.readline()  # discard the possibly partial leading record
+            offset = stream.seek(-_HISTORY_SCAN_BYTES, 2)
+            offset += len(stream.readline())  # discard the possibly partial leading record
             partial = True
         for line in stream:
+            at, offset = offset, offset + len(line)
             if not line.strip():
                 continue
-            value = json.loads(line)
+            try:
+                value = json.loads(line)
+            except (ValueError, RecursionError):
+                if gaps is not None:
+                    gaps["malformed_lines"] = gaps.get("malformed_lines", 0) + 1
+                    gaps.setdefault("first_malformed_offset", at)
+                continue
             if isinstance(value, dict):
                 for field in _HISTORY_BODY_FIELDS:
                     value.pop(field, None)
@@ -417,10 +426,10 @@ def _retained_run(canonical, identity, child):
 
 
 def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, canonical=None, *,
-            admit=None, rotation=None, selected=False):
+            admit=None, rotation=None, selected=False, gaps=None):
     """One identity's ``(raw, value, rebuilt, clipped, consumed, owned)``. A log's ``rotation`` dict
     receives its archive facts (``admit`` opens each segment); ``selected`` leaves a shared queue
-    snapshot uncanonicalized for its selection."""
+    snapshot uncanonicalized for its selection; ``gaps`` receives knowledge history's skipped lines."""
     if kind == "task_result":
         if not _path(ctx, root, store.STORE_REL).is_file():
             raise FileNotFoundError("task store is unavailable in the selected data root")
@@ -454,7 +463,7 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
     path = _path(ctx, root, relative)
     subject = f"{kind} {identity}".strip()
     if kind == "knowledge_history":
-        raw, value, partial, consumed = _knowledge_history(path, where, tail)
+        raw, value, partial, consumed = _knowledge_history(path, where, tail, gaps)
         return raw, value, True, partial, consumed, False
     if op == "jsonl":
         raw, value, partial, consumed, live = _jsonl(path, where, tail, cap, subject)
@@ -646,11 +655,12 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             local = caller if plane == owner else root  # a file off this drive needs the actor's read admission
             values, remaining, retained = {}, sql.MAX_BYTES, 0
             rotation = {} if kind.endswith("_log") else None
+            gaps = {} if kind == "knowledge_history" else None
             for identity in identities:
                 raw, value, rebuilt, clipped, consumed, owned = _record(
                     ctx, root, kind, identity, _name(child_task_id or ctx.task_id) if kind == "run" else "",
                     state_file, op, filter, tail, remaining, canonical, rotation=rotation, selected=bool(select),
-                    admit=lambda physical: _plane_path(ctx, plane, root, physical, local))
+                    admit=lambda physical: _plane_path(ctx, plane, root, physical, local), gaps=gaps)
                 retained += owned
                 if consumed > remaining:  # history rows and a rebuilt task document are measured only here
                     history = kind == "knowledge_history"  # a selected queue snapshot is measured after select
@@ -674,6 +684,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             source.update(kind=kind, ids=identities, state_file=state_file if kind == "skill_state" else None)
             if rotation:  # the log's rotated archive: segments read, oldest first, those left unopened, gaps
                 source["rotation"] = rotation
+            if gaps:  # knowledge history lines that are not JSON: how many, and where the first one starts
+                source["gaps"] = gaps
         if not result or result["status"] == "ok":
             if select:
                 if op in {"sql", "blob"}:

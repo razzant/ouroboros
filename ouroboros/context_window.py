@@ -221,8 +221,8 @@ def observed_plan(plan, usage):
     from ouroboros.provider_models import parse_claudexor_model
 
     observed = usage.get("_model_route") or {}
-    if not observed:
-        return plan if getattr(plan, "window_witness_bound", False) else None
+    if not observed:  # an answer naming no route: its account is the pin's, and on Auto no account's to write
+        return plan if getattr(plan, "window_witness_bound", False) and getattr(plan, "account_pin", "") else None
     source, model = parse_claudexor_model(plan.model)
     if observed.get("source") != source or observed.get("model") != model or not all(
             observed.get(key) for key in ("credentialProfileId", "accountFingerprint")):
