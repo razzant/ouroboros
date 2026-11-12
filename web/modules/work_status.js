@@ -235,13 +235,16 @@ export function roomSpeaker(room, works = [], word = activityWord(room)) {
     return list(room?.works).map((id) => byId.get(id)).find((work) => work && activityWord(work) === word) || null;
 }
 
-/** What waits for the owner in a room ('question' | 'action'), '' when nothing does or its own word says so. */
+/** What waits for the owner in a room ('question' | 'unanswered' | 'action'), '' when nothing does or its own word
+ *  says so: a question a task waits on, else one still unanswered while its work goes on or after it ended. */
 export const roomAmber = (room) => (!room?.amber || (room.activity === 'waiting' && asked(room)) ? ''
-    : questioned(room) ? 'question' : 'action');
+    : asked(room) ? 'question' : questioned(room) ? 'unanswered' : 'action');
 
-/** The amber mark said in words, for the room's accessible name: the colour is never the only way it is told. */
+/** The amber mark said in words, for the room's accessible name: the colour is never the only way it is told. An
+ *  unanswered question nobody waits on is never said as a wait. */
 export const amberNote = (kind) => (kind === 'question' ? tr('work.amber.question', 'A question waits for your answer')
-    : kind === 'action' ? tr('work.amber.action', 'Something here waits for you') : '');
+    : kind === 'unanswered' ? tr('work.amber.unanswered', 'An unanswered question is here')
+        : kind === 'action' ? tr('work.amber.action', 'Something here waits for you') : '');
 
 /**
  * The room's status in its bar: the server's room in short words, with the client's own facts on top. Tone is the
