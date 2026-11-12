@@ -185,6 +185,8 @@
     --surface-object-opaque: #1c1c1f;
     --surface-capsule: rgba(255, 255, 255, 0.09);
     --surface-capsule-hover: rgba(255, 255, 255, 0.135);
+    /* The switch's thumb: an opaque body, white in both themes and in every voice (a veil would take the track's hue). */
+    --switch-thumb: #ffffff;
     --chip-float: linear-gradient(var(--surface-capsule), var(--surface-capsule)), rgba(var(--shell-rgb), 0.98);
     --chip-float-hover: linear-gradient(var(--surface-capsule-hover), var(--surface-capsule-hover)), rgba(var(--shell-rgb), 0.98);
     /* The opaque neutral sheet (DESIGN principle 2): the capsule's step over the room's own ink, fully opaque,
@@ -1191,7 +1193,7 @@ textarea.ui-control { resize: vertical; }
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    background: var(--surface-capsule);
+    background: var(--switch-thumb);
     box-shadow: var(--elev-rest);
     transition: transform 140ms ease;
 }
