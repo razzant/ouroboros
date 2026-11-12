@@ -1,8 +1,8 @@
 """Commit-review status projection over the durable review-state records.
 
-Boundary: this leaf reads ``review_state`` records (commit attempts, obligations,
-commit-readiness debts; the retired advisory lane's archive only by its address) and renders the semantic read-model plus the
-human-facing ``review_status`` payload and one-line message. It knows nothing
+Boundary: this leaf reads ``review_state`` records (commit attempts and the stale marker; the
+retired advisory lane's and obligation layer's archives only by their address) and renders the semantic
+read-model plus the human-facing ``review_status`` payload and one-line message. It knows nothing
 about other evidence and must never import ``ouroboros.review_evidence`` — the
 dependency runs the other way, which keeps the module a leaf. It also owns the read-only join of a split-drive task's
 canonically held ``review_change`` attempts that ``review_evidence`` shares.
@@ -69,8 +69,6 @@ def build_review_projection(
         marker = state.stale_marker(repo_filter or "", str(look.get("ts") or "")) if look["marked"] else {}
         stale_ts = marker["ts"] if marker else ("now (worktree moved)" if look["tree_moved"] else None)
         stale_reason = marker["reason"] if marker else (_TREE_MOVED_REASON if look["tree_moved"] else None)
-    open_obligations = state.get_open_obligations(repo_key=repo_filter)
-    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_filter)
     try:
         from ouroboros.utils import read_json_dict
 
@@ -94,12 +92,10 @@ def build_review_projection(
         # Attribution of the marker only; stale_from_edit/freshness above never read it.
         **state.stale_marker_provenance(reader_task_id, marker=marker),
         "preflight": look,
-        "open_obligations": open_obligations,
-        "open_debts": open_debts,
-        "retry_anchor": "commit_readiness_debt" if open_debts else None,
         "advisory_overrides": advisory_overrides,
         "canonical_attempts_unreadable": canonical_unreadable,
         "advisory_run_archive": _advisory_run_archive(state, drive_root_path),
+        "obligation_archive": _obligation_archive(state, drive_root_path),
     }
 
 
@@ -122,6 +118,30 @@ def _advisory_run_archive(state: Any, drive_root: pathlib.Path) -> Dict[str, Any
         return {}
     return {"path": str(drive_root.resolve(strict=False) / _STATE_RELPATH), "advisory_runs": len(state.advisory_runs),
             "advisory_debts": len(state.archived_advisory_debts), "note": _ARCHIVE_NOTE}
+
+
+_OBLIGATION_ARCHIVE_NOTE = (
+    "Rows the retired obligation layer stored, kept as recorded: history only, never current work. This "
+    "checkout's open ones show in the Review Continuity section until a commit lands in it; the findings they "
+    "came from stay in their review records. Read them with read_file(path=<path>, start_char/max_chars) or, on "
+    "your own drive, query_data(op='json', kind='advisory_review', select='open_obligations')."
+)
+
+
+def _obligation_archive(state: Any, drive_root: pathlib.Path) -> Dict[str, Any]:
+    """Where this store keeps what the retired obligation layer stored, counted as stored (the retired advisory
+    lane's debts stay in ``advisory_run_archive``); ``{}`` when it keeps none."""
+    from ouroboros.review_state import _STATE_RELPATH
+    from ouroboros.review_state_records import _is_archived_advisory_debt
+
+    rows = getattr(state, "retired_review_rows", None) or {}
+    obligations, debts = rows.get("open_obligations"), rows.get("commit_readiness_debts")
+    obligations = obligations if isinstance(obligations, list) else []
+    debts = [row for row in debts if not _is_archived_advisory_debt(row)] if isinstance(debts, list) else []
+    if not obligations and not debts:
+        return {}
+    return {"path": str(drive_root.resolve(strict=False) / _STATE_RELPATH), "open_obligations": len(obligations),
+            "commit_readiness_debts": len(debts), "note": _OBLIGATION_ARCHIVE_NOTE}
 
 
 def with_canonical_change_attempts(attempts: List[Any], canonical_root: Any, drive_root: Any,
@@ -195,8 +215,6 @@ def _preflight_look(state: Any, drive_root: pathlib.Path, repo_dir: pathlib.Path
 
 def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, include_raw: bool = False) -> Dict[str, Any]:
     selected_attempt = projection.get("selected_attempt")
-    open_obligations = list(projection.get("open_obligations") or [])
-    open_debts = list(projection.get("open_debts") or [])
     payload: Dict[str, Any] = {
         "latest_advisory_status": projection["effective_status"],
         "stale_from_edit": projection["stale_from_edit"],
@@ -207,11 +225,6 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
         "filters": projection["filters"],
         "attempts": [_review_status_attempt_to_dict(item) for item in reversed(projection.get("attempts") or [])],
         "selected_commit_attempt": _review_status_attempt_payload(selected_attempt),
-        "open_obligations": [_review_status_obligation_to_dict(item) for item in open_obligations],
-        "open_obligations_count": len(open_obligations),
-        "commit_readiness_debts": [_review_status_debt_to_dict(item) for item in open_debts],
-        "commit_readiness_debts_count": len(open_debts),
-        "retry_anchor": projection["retry_anchor"],
         "status_summary": _review_status_message(projection),
         "next_step": next_step,
     }
@@ -233,8 +246,9 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
                 "commit_reviewed, this review_reference and no author_disposition; the review_reference that call returns, with an explicit author_disposition/rationale, commits the current bytes of the paths it reviewed (or the paths you name) without a new panel. Independent checks still apply.")
     if projection.get("canonical_attempts_unreadable"):
         payload["canonical_attempts_unreadable"] = projection["canonical_attempts_unreadable"]
-    if projection.get("advisory_run_archive"):
-        payload["advisory_run_archive"] = projection["advisory_run_archive"]
+    for archive in ("advisory_run_archive", "obligation_archive"):
+        if projection.get(archive):
+            payload[archive] = projection[archive]
     payload["message"] = payload["status_summary"]
     # Persistent advisory-enforcement visibility (BIBLE P3 loud-advisory bound):
     # how many blocking-grade signals advisory enforcement waved through.
@@ -271,7 +285,6 @@ def _review_status_attempt_payload(ca: Any) -> Dict[str, Any] | None:
         "late_result_pending": bool(ca.late_result_pending),
         "critical_findings": len(ca.critical_findings or []),
         "advisory_findings": len(ca.advisory_findings or []),
-        "obligation_ids": list(ca.obligation_ids or []),
         "readiness_warnings": list(ca.readiness_warnings or []),
         "pre_review_fingerprint": ca.pre_review_fingerprint[:12] or None,
         "post_review_fingerprint": ca.post_review_fingerprint[:12] or None,
@@ -314,31 +327,6 @@ def _review_status_actor_summary(attempt: Any) -> Dict[str, Any]:
             actor(scope_raw)
             if scope_raw.get("status") else None
         ),
-    }
-
-
-def _review_status_obligation_to_dict(item: Any) -> Dict[str, Any]:
-    return {
-        **{key: getattr(item, key, "") for key in ("obligation_id", "fingerprint", "item", "severity", "status")},
-        "reason": truncate_review_artifact(item.reason, limit=200),
-        "source_ts": item.source_attempt_ts,
-        "source_commit": item.source_attempt_msg,
-    }
-
-
-def _review_status_debt_to_dict(item: Any) -> Dict[str, Any]:
-    return {
-        "debt_id": item.debt_id,
-        "category": item.category,
-        "title": item.title,
-        "summary": truncate_review_artifact(item.summary, limit=220),
-        "status": item.status,
-        "severity": item.severity,
-        "source": item.source,
-        "repo_key": item.repo_key or None,
-        "source_obligation_ids": list(item.source_obligation_ids or []),
-        "evidence": list(item.evidence or []),
-        "updated_at": item.updated_at,
     }
 
 
@@ -400,8 +388,6 @@ def _review_status_message(projection: Dict[str, Any]) -> str:
             from ouroboros.review_records import review_failure_summary
             current += "\n" + "\n".join(review_failure_summary(row) for row in (ca.triad_raw_results or [])
                                          if row.get("status") != "responded")
-    if projection.get("open_debts"):
-        current = f"{current}  |  Commit-readiness debt: {len(projection['open_debts'])}"
     if projection.get("canonical_attempts_unreadable"):
         current = (f"{current}  |  This task's canonically held review_change attempts are not listed: "
                    f"{projection['canonical_attempts_unreadable']}")

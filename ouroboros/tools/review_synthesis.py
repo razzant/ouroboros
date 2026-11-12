@@ -378,9 +378,6 @@ A missing entry means the question was not reviewed.
   FAIL — the concrete FAIL is authoritative.
 - Severity: critical requires a concrete current artifact and a required change to
   this diff; otherwise advisory. {body_note}
-- If an open obligation in the coupling history below already names an
-  `obligation_id` for a root cause, reuse that exact id; never invent a new id for
-  the same root cause.
 
 {coupling_checklist}
 

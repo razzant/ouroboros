@@ -397,31 +397,21 @@ def test_a_change_brief_word_only_some_rounds_render_counts_in_every_round(forei
 
 
 @pytest.mark.parametrize("surface", ["change"])
-@pytest.mark.parametrize("case", ["obligations", "paged"])
-def test_a_counted_frame_around_host_records_reaches_its_seats(foreign, monkeypatch, surface, case):
-    """Open obligations and a paged brief are host records; the frame they are handed in is the contract. With
-    an obligation held (every seat) or a session seat's first send paged (its pointer), an edit of that frame is
-    a new wave whose seats read the new words, and the same request then replays free."""
-    from ouroboros.review_state_model import AdvisoryReviewState
-    from ouroboros.review_state_records import ObligationItem
-
+def test_a_counted_frame_around_host_records_reaches_its_seats(foreign, monkeypatch, surface):
+    """A paged brief is a host record; the frame it is handed in is the contract. With a session seat's first send
+    paged (its pointer), an edit of that frame is a new wave whose seat reads the new words, and the same request
+    then replays free."""
     ctx, sends, briefs = foreign
-    if case == "paged":
-        monkeypatch.setattr(review_brief_coupling, "SESSION_INLINE_DIFF_CEILING_CHARS", 1)
+    monkeypatch.setattr(review_brief_coupling, "SESSION_INLINE_DIFF_CEILING_CHARS", 1)
     first = run_review_change(ctx, **SURFACES[surface])
     paid = len(sends)
     assert first["aggregate"] == "PASS" and paid, first
-    if case == "obligations":
-        held = [ObligationItem(obligation_id="obl-1", item="code_quality", severity="critical", reason="still open",
-                               source_attempt_ts="", source_attempt_msg="")]
-        monkeypatch.setattr(AdvisoryReviewState, "get_open_obligations", lambda self, repo_key=None: held)
-    words = _revise(monkeypatch, *(("build_obligations_block", "text") if case == "obligations"
-                                   else ("paged_review_text", "coupling")))
+    words = _revise(monkeypatch, "paged_review_text", "coupling")
     _restart(ctx)
     briefs.clear()
     second = run_review_change(ctx, **SURFACES[surface])
     assert (second["aggregate"], second["reused"], len(sends)) == ("PASS", False, 2 * paid), second
-    assert all(words in briefs[seat] for seat in (("t1", "t2", "s1") if case == "obligations" else ("t2",)))
+    assert words in briefs["t2"]
     assert run_review_change(ctx, **SURFACES[surface])["record_id"] == second["record_id"] and len(sends) == 2 * paid
 
 

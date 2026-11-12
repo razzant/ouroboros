@@ -2,8 +2,9 @@
 
 Decision 3A retired the advisory gate, so no advisory status, open obligation or
 commit-readiness debt holds a commit; the rows a former install recorded stay in the
-state file, which ``review_status`` names (``advisory_run_archive``), while no surface
-projects their content or a ``repo_commit_ready`` verdict from them.
+state file, which ``review_status`` names (``advisory_run_archive``,
+``obligation_archive``), while no surface projects a ``repo_commit_ready`` verdict from
+them; earlier open obligations show only as history until a commit lands.
 """
 
 import json
@@ -67,4 +68,8 @@ def test_a_failed_legacy_row_and_owed_work_are_history_never_readiness(candidate
     assert "repo_commit_ready" not in context and "Advisory readiness" not in context
     # Owed work shows as history until a commit lands; a debt is projected nowhere.
     assert ("earlier_open_obligations=1" in context) is owed and "crd-0001" not in context
-    assert bool(status["open_obligations"]) is owed
+    for retired in ("open_obligations", "open_obligations_count", "commit_readiness_debts", "retry_anchor"):
+        assert retired not in status and retired not in evidence, retired
+    assert ("obligation_archive" in status) is owed
+    if owed:
+        assert (status["obligation_archive"]["open_obligations"], status["obligation_archive"]["commit_readiness_debts"]) == (1, 1)

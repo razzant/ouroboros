@@ -398,15 +398,6 @@ def test_tool_timeout_settings_wins_when_higher():
     assert result == 900, f"Expected 900 (settings), got {result}"
 
 
-def test_review_evidence_no_obligation_cap():
-    """collect_review_evidence default max_obligations must be None (no cap)."""
-    import inspect
-    from ouroboros.review_evidence import collect_review_evidence
-    sig = inspect.signature(collect_review_evidence)
-    default = sig.parameters["max_obligations"].default
-    assert default is None, f"Expected None, got {default}"
-
-
 def test_run_script_timeout_360():
     """run_script ToolEntry must stay foreground-bounded like run_command."""
     from ouroboros.tools.shell import get_tools
@@ -433,13 +424,6 @@ def test_repository_index_collapses_junk_dirs():
     from ouroboros.tools.review_helpers import _FULL_REPO_SKIP_DIR_PREFIXES
     for prefix in ("assets/", "tests/", "devtools/"):
         assert prefix in _FULL_REPO_SKIP_DIR_PREFIXES, f"{prefix} not in skip list"
-
-
-def test_obligation_context_shows_all():
-    """build_review_context must not slice open_obligations."""
-    src = open("ouroboros/agent_task_pipeline.py", encoding="utf-8").read()
-    assert "open_obs[:4]" not in src, "open_obs[:4] cap should be removed"
-    assert "obligation_ids[:4]" not in src, "obligation_ids[:4] cap should be removed"
 
 
 def test_unevidenced_reviewer_keeps_the_full_window_assumption(tmp_path, monkeypatch):

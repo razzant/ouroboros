@@ -89,7 +89,7 @@ def test_multiple_local_accounts_render_every_text_in_order(harness, monkeypatch
 def test_commit_and_change_briefs_render_the_account_without_bookkeeping(staged_body, tmp_path, monkeypatch, surface):
     from pathlib import Path
     from ouroboros import capability_evidence, reviewer_window, review_substrate, review_ledger
-    from ouroboros.review_history import render_history_with_obligations
+    from ouroboros.review_history import render_review_history
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.registry import ToolContext
     from tests import _contributor_packet_shared as shared
@@ -109,7 +109,7 @@ def test_commit_and_change_briefs_render_the_account_without_bookkeeping(staged_
     assert receipt["status"] == "applied", receipt
     texts = _texts(view.load_review_history_view(receipt["selected_review_history_view"],
                                                  lambda ref: read_actor_source_bytes(drive, ctx.task_id, ref)))
-    rendered = render_history_with_obligations({}, drive_root=drive, repo_root=root, task_id=ctx.task_id)
+    rendered = render_review_history({}, drive_root=drive, repo_root=root, task_id=ctx.task_id)
     section = rendered.split("### Author's selected account of earlier review sources", 1)[1]
     assert json.loads(section.strip().split("\n", 1)[0])["texts"] == texts
     _assert_reviewer_text(rendered, texts)

@@ -1,12 +1,11 @@
-"""Tests for review pipeline fidelity: no [:N] caps on findings/obligations.
+"""Tests for review pipeline fidelity: no [:N] caps on findings.
 
-Verifies that removing slice caps in review_helpers.build_blocking_findings_json_section,
-review_state.format_status_section, and commit_gate warning messages means ALL items
-are included in output without silent truncation.
+Verifies that removing slice caps in review_state.format_status_section, the
+review_status payload and the persistence path means ALL items are included in
+output without silent truncation.
 
 Ref: v4.16.1 — review pipeline fidelity fix.
 """
-import json
 from typing import Any, Dict, List
 
 import pytest
@@ -15,22 +14,6 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers — build minimal dataclass stand-ins to avoid full state setup
 # ---------------------------------------------------------------------------
-
-def _make_obligation(obligation_id: str, item: str = "code_quality",
-                     reason: str = "some reason") -> Any:
-    from ouroboros.review_state import ObligationItem
-    ob = ObligationItem.__new__(ObligationItem)
-    ob.obligation_id = obligation_id
-    ob.item = item
-    ob.severity = "critical"
-    ob.reason = reason
-    ob.source_attempt_ts = "2026-04-08T00:00:00"
-    ob.source_attempt_msg = "fix something"
-    ob.status = "still_open"
-    ob.resolved_by = ""
-    ob.repo_key = ""
-    return ob
-
 
 def _make_commit_attempt(findings: List[Dict[str, Any]]) -> Any:
     from ouroboros.review_state import CommitAttemptRecord
@@ -65,83 +48,6 @@ def _make_commit_attempt(findings: List[Dict[str, Any]]) -> Any:
     ca.triad_raw_results = []
     ca.scope_raw_result = {}
     return ca
-
-
-# ---------------------------------------------------------------------------
-# Tests: build_blocking_findings_json_section — no [:6] on findings, no history_limit
-# ---------------------------------------------------------------------------
-
-class TestBuildBlockingFindingsJsonSection:
-    """All findings and ALL blocking attempts must appear in serialised output."""
-
-    def test_more_than_six_findings_per_attempt_all_included(self):
-        """Old cap was [:6] per attempt — 8 findings must all appear."""
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        findings = [{"item": f"finding_{i}", "severity": "critical", "reason": f"reason {i}"}
-                    for i in range(8)]  # 8 > old cap of 6
-        obs = [_make_obligation("ob1")]
-        attempt = _make_commit_attempt(findings)
-
-        output = build_blocking_findings_json_section(obs, [attempt])
-        assert output, "Expected non-empty output"
-
-        # Extract JSON block
-        start = output.find("```json")
-        end = output.rfind("```")
-        assert start != -1 and end > start
-        payload = json.loads(output[start + 7:end].strip())
-
-        attempt_data = payload["recent_blocking_attempts"]
-        assert len(attempt_data) == 1
-        assert len(attempt_data[0]["critical_findings"]) == 8, (
-            f"Expected 8 findings but got {len(attempt_data[0]['critical_findings'])}"
-        )
-        for i in range(8):
-            assert any(f"finding_{i}" in json.dumps(f)
-                       for f in attempt_data[0]["critical_findings"])
-
-    def test_more_than_four_blocking_attempts_all_included(self):
-        """Old history_limit was 4 — 7 attempts must all appear."""
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        obs = [_make_obligation("ob1")]
-        attempts = [_make_commit_attempt([{"item": f"item_{i}", "severity": "critical",
-                                           "reason": f"r{i}"}])
-                    for i in range(7)]  # 7 > old limit of 4
-
-        output = build_blocking_findings_json_section(obs, attempts)
-        payload = json.loads(output[output.find("```json") + 7:output.rfind("```")].strip())
-
-        assert len(payload["recent_blocking_attempts"]) == 7, (
-            f"Expected 7 attempts but got {len(payload['recent_blocking_attempts'])}"
-        )
-
-    def test_no_ellipsis_truncation_marker_in_output(self):
-        """'... and N more' must not appear — caps were removed."""
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        findings = [{"item": f"f{i}", "severity": "critical", "reason": f"r{i}"}
-                    for i in range(10)]
-        obs = [_make_obligation("ob1")]
-        attempt = _make_commit_attempt(findings)
-
-        output = build_blocking_findings_json_section(obs, [attempt])
-        assert "... and" not in output
-
-    def test_all_open_obligations_included(self):
-        """All open obligations must appear in JSON payload."""
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        obs = [_make_obligation(f"ob{i}", reason=f"obligation reason {i}")
-               for i in range(9)]  # 9 obligations
-        attempt = _make_commit_attempt([{"item": "code_quality", "severity": "critical",
-                                         "reason": "some issue"}])
-
-        output = build_blocking_findings_json_section(obs, [attempt])
-        payload = json.loads(output[output.find("```json") + 7:output.rfind("```")].strip())
-
-        assert len(payload["open_obligations"]) == 9
 
 
 # ---------------------------------------------------------------------------
@@ -224,93 +130,6 @@ class TestFormatStatusSection:
             assert f"repo_commit#{i+1}" in output or f"attempt msg {i}" in output, (
                 f"Attempt {i} missing from output"
             )
-
-
-# ---------------------------------------------------------------------------
-# Tests: the shared blocking-findings JSON helper keeps every obligation.
-# ---------------------------------------------------------------------------
-
-
-class TestCommitGateJsonHelperNotTruncated:
-    """build_blocking_findings_json_section must not cap findings or attempts."""
-
-    @pytest.mark.parametrize("count", [6, 8])  # 6 = old cap + 1; 8 = well above old [:5] cap
-    def test_n_obligations_all_in_json_payload(self, count):
-        """All obligations must appear in the JSON section — no [:N] cap.
-
-        Parametrized in v5.15.x — collapsed
-        test_six_obligations_boundary_case + test_eight_obligations_all_in_json_payload.
-        """
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        obs = [_make_obligation(f"ob{i}", reason=f"gate reason {i}")
-               for i in range(count)]
-        attempt = _make_commit_attempt([{"item": "code_quality", "severity": "critical",
-                                         "reason": "something"}])
-
-        output = build_blocking_findings_json_section(obs, [attempt])
-        payload = json.loads(output[output.find("```json") + 7:output.rfind("```")].strip())
-
-        assert len(payload["open_obligations"]) == count
-        ids = {ob["obligation_id"] for ob in payload["open_obligations"]}
-        for i in range(count):
-            assert f"ob{i}" in ids, f"Missing obligation ob{i}"
-        assert "... and" not in output
-
-    def test_long_reason_not_silently_truncated(self):
-        """reason > 500 chars must survive in full (_sanitize_text no longer truncates)."""
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        long_reason = "X" * 800  # well above old 500-char limit
-        obs = [_make_obligation("ob_long", reason=long_reason)]
-        attempt = _make_commit_attempt([{"item": "code_quality", "severity": "critical",
-                                         "reason": "R" * 700}])  # above old 500-char limit
-
-        output = build_blocking_findings_json_section(obs, [attempt])
-        payload = json.loads(output[output.find("```json") + 7:output.rfind("```")].strip())
-
-        # Obligation reason must be preserved in full
-        assert payload["open_obligations"][0]["reason"] == long_reason
-
-        # Finding reason must also be preserved
-        cf = payload["recent_blocking_attempts"][0]["critical_findings"][0]
-        assert cf["reason"] == "R" * 700
-
-    def test_long_source_attempt_msg_not_silently_truncated(self):
-        """source_attempt_msg > 200 chars must survive in full (old limit=200 removed)."""
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        long_msg = "M" * 350  # well above old 200-char limit
-        ob = _make_obligation("ob_msg")
-        ob.source_attempt_msg = long_msg
-
-        output = build_blocking_findings_json_section([ob], [])
-        payload = json.loads(output[output.find("```json") + 7:output.rfind("```")].strip())
-        assert payload["open_obligations"][0]["source_attempt_msg"] == long_msg
-
-    def test_blocking_history_without_obligations_not_dropped(self):
-        """Old early-return `if not open_obligations: return ""` silently dropped
-        recent_blocking_attempts when the obligation list was empty.
-        With the fix, passing empty obligations + non-empty history must still
-        return a non-empty JSON block containing the attempts.
-        """
-        from ouroboros.tools.review_helpers import build_blocking_findings_json_section
-
-        attempt = _make_commit_attempt([
-            {"item": "code_quality", "severity": "critical", "reason": "some bug"}
-        ])
-
-        output = build_blocking_findings_json_section([], [attempt])
-        assert output, "Expected non-empty output even when open_obligations is empty"
-
-        start = output.find("```json")
-        end = output.rfind("```")
-        assert start != -1 and end > start
-        payload = json.loads(output[start + 7:end].strip())
-
-        assert len(payload["recent_blocking_attempts"]) == 1
-        cf = payload["recent_blocking_attempts"][0]["critical_findings"]
-        assert len(cf) == 1 and cf[0]["reason"] == "some bug"
 
 
 class TestFormatStatusSectionNoFieldSlicing:
@@ -608,7 +427,6 @@ class TestReviewEvidenceOmissionBudget:
                 task_id="t1",
                 max_attempts=0,
                 max_continuations=0,
-                max_obligations=0,
             )
         if ev["omitted_corrupt"] > 0:
             assert ev["has_evidence"] is True, (

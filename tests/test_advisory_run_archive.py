@@ -205,7 +205,8 @@ def test_review_status_names_the_store_it_read_and_existing_readers_return_the_r
     assert "history only" in archive["note"].lower() and "readiness_warning:advisory:" in archive["note"]
     assert "advisory_stale" in archive["note"]
     assert "advisory_runs" not in status and "latest_advisory_hash" not in status
-    assert status["latest_advisory_status"] == "none" and status["commit_readiness_debts"] == []
+    assert status["latest_advisory_status"] == "none" and "commit_readiness_debts" not in status
+    assert "obligation_archive" not in status, "the advisory lane's debts are its own archive"
 
     rows = json.loads(_query_data(ctx, op="json", kind="advisory_review", select="advisory_runs"))
     # query_data answers canonical (sorted-key) JSON; every row and value is there.
@@ -245,14 +246,42 @@ def test_context_status_and_evidence_read_as_if_the_archive_were_absent(ctx):
     assert (archived_context, archived_ledger, archived_evidence) == (context, ledger, evidence)
     assert {key: value for key, value in archived_status.items() if key != "advisory_run_archive"} == status
     assert "advisory_run_archive" not in status
-    assert "ARCHIVE" not in _compact([archived_context, archived_ledger, archived_evidence,
-                                      archived_status["commit_readiness_debts"]])
+    assert "ARCHIVE" not in _compact([archived_context, archived_ledger, archived_evidence])
     for retired in ("recent_advisory_runs", "foreign_advisory_runs", "advisory_status", "snapshot_hash"):
         assert retired not in archived_evidence and retired not in archived_evidence["current_repo"], retired
-    # The modern owed work and the look's stale marker still reach every surface.
+    # The modern finding and the look's stale marker still reach every surface.
     assert "tests_affected: add a test" in context and "stale_marker=" in context and "invalidated_by=task task-a" in context
-    assert evidence["current_repo"]["stale_task_id"] == "task-a" and evidence["open_obligations"]
-    assert status["stale_from_edit"] is True and status["commit_readiness_debts_count"] == 1
+    assert evidence["current_repo"]["stale_task_id"] == "task-a"
+    assert status["stale_from_edit"] is True and status["selected_commit_attempt"]["critical_findings"] == 1
+
+
+def test_review_status_names_the_obligation_archive_and_projects_no_obligation_or_debt(ctx):
+    """Home (step 5): ``review_status`` projects no obligation, debt or retry anchor, and its next step names none.
+    When the state file holds what the retired obligation layer stored, ``obligation_archive`` names the store it
+    read and counts those rows as stored, the advisory lane's debts staying in ``advisory_run_archive``; with none
+    it is absent."""
+    from ouroboros.tools.preflight_review import _handle_review_status
+
+    drive = pathlib.Path(ctx.drive_root)
+    repo_key = make_repo_key(ctx.repo_dir)
+    retired = {"open_obligations", "open_obligations_count", "commit_readiness_debts", "commit_readiness_debts_count",
+               "retry_anchor"}
+    plain = json.loads(_handle_review_status(ctx))
+    assert "obligation_archive" not in plain and not retired & set(plain)
+
+    data = _inject_archive(drive, _archive_rows(repo_key), [*_archived_debts(repo_key), *_live_debts(repo_key)])
+    data.update(open_obligations=[{"obligation_id": "obl-0004", "item": "tests_affected", "status": "still_open",
+                                   "repo_key": repo_key, "reason": "OBLIGATION-SENTINEL"}], next_obligation_seq=5)
+    (drive / _STATE_RELPATH).write_text(_compact(data), encoding="utf-8")
+
+    status = json.loads(_handle_review_status(ctx))
+    archive = status["obligation_archive"]
+    assert archive["path"] == str((drive / _STATE_RELPATH).resolve())
+    assert (archive["open_obligations"], archive["commit_readiness_debts"]) == (1, 3)
+    assert "history only" in archive["note"] and "Review Continuity" in archive["note"]
+    assert status["advisory_run_archive"]["advisory_debts"] == 4, "the advisory archive keeps its own count"
+    assert not retired & set(status) and "obligation" not in status["next_step"].lower()
+    assert "OBLIGATION-SENTINEL" not in json.dumps(status) and "live crd-" not in json.dumps(status)
 
 
 def test_live_debts_keep_their_lifecycle_and_bound_beside_the_archive(tmp_path):
