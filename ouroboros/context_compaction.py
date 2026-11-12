@@ -876,9 +876,6 @@ def _authored_view(
                                replaced_notes=replaced_notes, **facts)
 
 
-# Emergency representation shares this materializer but never writes a summary.
-from ouroboros.context_source_view import emergency_address_view  # noqa: E402,F401
-
 
 def compact_tool_history_llm(
     messages: list,

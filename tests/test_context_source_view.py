@@ -5,6 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 import json
+import os
+import pathlib
+import subprocess
+import sys
 
 import pytest
 
@@ -22,6 +26,16 @@ main_loop = _main_loop
 
 BODY = "Exact producer bytes: Ж, e\u0301, emoji 🧠.\r\n" * 1000 + "CONSEQUENTIAL-TAIL\r\n"
 OWNER = "Keep the original contract until the replacement is verified."
+
+
+def test_the_view_imports_first_in_a_fresh_interpreter():
+    """Nothing the view imports reaches back into it while it loads (razzant/ouroboros#3008: a worker or
+    process that met it before ``context_compaction`` died on the import)."""
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    done = subprocess.run([sys.executable, "-c", "import ouroboros.context_source_view"], cwd=repo,
+                          env={**os.environ, "PYTHONPATH": str(repo), "PYTHONDONTWRITEBYTECODE": "1"},
+                          check=False, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr[-2000:]
 
 
 def _tool(call_id="reused", *, invocation=None, facts=None, text=BODY):
@@ -432,11 +446,11 @@ def test_main_emergency_measurement_uses_sealed_final_facts_without_mutating_liv
     # The applied pass keeps its round's record of the rows the first show did not count; a later
     # round's pass that changes nothing names nothing (C2 S3; Astra RV4).
     from types import SimpleNamespace
-    from ouroboros import context_compaction
+    from ouroboros import context_source_view
     from ouroboros.transcript_prefix import SIZE_PASS_ROWS_ATTR
     assert getattr(ctx.tools._ctx, SIZE_PASS_ROWS_ATTR)["round"] == ctx.round_idx
     ctx.round_idx += 1
-    monkeypatch.setattr(context_compaction, "emergency_address_view", lambda messages, *_a, **_k: (messages, SimpleNamespace(
+    monkeypatch.setattr(context_source_view, "emergency_address_view", lambda messages, *_a, **_k: (messages, SimpleNamespace(
         status="no_eligible", reclaimed_tokens=0, checkpoint_ref=None, selected_unit_ids=())))
     assert _run_emergency_address_pass(ctx, _fit(goal=1), rung="bodies").status == "no_eligible"
     assert getattr(ctx.tools._ctx, SIZE_PASS_ROWS_ATTR) is None
