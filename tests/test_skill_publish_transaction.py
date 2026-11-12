@@ -748,7 +748,7 @@ def test_github_failure_envelope_keeps_cause_and_last_completed_stage(monkeypatc
     def prepare(_ctx, attempt, **kwargs):
         attempt.mark("fork_ready", repository="alice/project", actor="alice")
         raise skill_publish.SkillPublishGitHubError(
-            "fork_sync_failed", "Update GITHUB_TOKEN in Settings → Secrets, then retry.",
+            "fork_sync_failed", "Update GITHUB_TOKEN in Settings → Accounts and keys, then retry.",
             detail=detail, http_status=http_status, operation="merge-upstream",
         )
 

@@ -12,10 +12,14 @@ import {
 } from '../modules/route_editor_primitives.js';
 import { modelSourceGroups, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
 import { adoptConnectionLabels, connectionLabel, routeConnectionId } from '../modules/connection_labels.js';
-import { PROVIDER_CARDS, PROVIDER_SECRET_KEYS, connectionRowHtml } from '../modules/settings_provider_cards.js';
-import { renderSettingsPage } from '../modules/settings_ui.js';
+import { PROVIDER_CARDS, PROVIDER_SECRET_KEYS, connectionRowHtml, providerSettingsCard } from '../modules/settings_provider_cards.js';
+import { otherKeyRows } from '../modules/settings_accounts.js';
+import { rowById } from '../modules/settings_rows.js';
+
+// Setup retains the shared provider cards, each with its keys and forms.
+const renderSettingsPage = () => PROVIDER_CARDS.map(providerSettingsCard).join('');
 import {
-    cacheHintsNote, connectionNameFor, connectionReferencesText, connectionRowFacts, connectionRows, connectionUsage,
+    cacheHintsNote, connectionNameFor, connectionRowFacts, connectionRows, connectionUsage,
 } from '../modules/settings_connections.js';
 import { renderLiveCardMeta } from '../modules/chat_activity.js';
 
@@ -171,9 +175,8 @@ test("a route names its key in the owner's words: the chip, and the task card's 
     }
 });
 
-test('Accounts renders one card per provider with its Default row, and an added row with its own fields', () => {
+test('setup renders one card per provider with its Default row, and an added row with its own fields', () => {
     const html = renderSettingsPage();
-    assert.match(html, /Each role names the key it uses; keys never rotate\. For a second key of the same model, add it as a fallback\./);
     assert.equal([...html.matchAll(/data-connection-add="([^"]+)"/g)].length, PROVIDER_CARDS.length);
     assert.equal([...html.matchAll(/data-connection-row data-kind="[^"]+" data-builtin="1"/g)].length, PROVIDER_CARDS.length);
     // The built-in key keeps its flat setting, with one input per key on the whole page.
@@ -181,13 +184,15 @@ test('Accounts renders one card per provider with its Default row, and an added 
         assert.equal(html.split(`data-secret-setting="${field.settingKey}"`).length - 1, 1, field.settingKey);
     }
     assert.match(html, /id="s-openrouter" name="OPENROUTER_API_KEY" data-secret-setting="OPENROUTER_API_KEY"/);
-    // Provider keys have one input each, in Accounts: the Secrets tab keeps the other secrets only.
-    const secrets = html.slice(html.indexOf('data-settings-panel="secrets"'), html.indexOf('data-settings-panel="models"'));
-    for (const key of PROVIDER_SECRET_KEYS) assert.doesNotMatch(secrets, new RegExp(`data-secret-setting="${key}"`), key);
-    assert.match(secrets, /data-secret-setting="GITHUB_TOKEN"/);
-    // The network password has one field, beside the bind host it guards (Accounts › Network Gate), not a second one here.
-    assert.doesNotMatch(secrets, /OUROBOROS_NETWORK_PASSWORD/);
-    assert.equal(html.split('data-secret-setting="OUROBOROS_NETWORK_PASSWORD"').length - 1, 1);
+    // A provider's key has one home, its own page: the other keys of Accounts and keys never list one, even when a
+    // skill asks for it or it was stored as a key of the owner's own.
+    const others = otherKeyRows({ _meta: { custom_secret_keys: ['OPENAI_API_KEY', 'TEAM_HOOK'] } },
+        [{ name: 'one', grants: { requested_keys: [...PROVIDER_SECRET_KEYS, 'GITHUB_TOKEN', 'SLACK_TOKEN'] } }]).map((row) => row.id);
+    for (const key of PROVIDER_SECRET_KEYS) assert.ok(!others.includes(key), key);
+    assert.deepEqual(others, ['GITHUB_TOKEN', 'GITHUB_REPO', 'SLACK_TOKEN', 'TEAM_HOOK']);
+    // The network password has one control, a row beside the choice it guards (This computer), not a field here.
+    assert.doesNotMatch(others.join(' ') + html, /OUROBOROS_NETWORK_PASSWORD/);
+    assert.deepEqual([rowById('OUROBOROS_NETWORK_PASSWORD').page, rowById('OUROBOROS_SERVER_HOST').page], ['computer', 'computer']);
 
     const compatible = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const row = connectionRowHtml(compatible, { uid: 'compatible-7', name: 'gigaagent', label: 'GigaAgent', enabled: false,
@@ -225,9 +230,9 @@ test('a row says what is true of its key now: status, use, and who provides it',
     // A built-in compatible row served by the legacy pair names that address and where it is edited.
     const legacyAddress = 'http://127.0.0.1:8080/v1';
     assert.deepEqual(connectionRowFacts({ configured: true, usedBy: ['Main'], legacyAddress }), { tone: 'ok', label: 'Ready',
-        meta: 'Legacy OpenAI Base URL http://127.0.0.1:8080/v1 with the OpenAI API key · change the address in Settings → Accounts · used by Main' });
+        meta: 'Legacy OpenAI Base URL http://127.0.0.1:8080/v1 with the OpenAI API key · change the address in Settings → Accounts and keys · used by Main' });
     assert.deepEqual(connectionRowFacts({ configured: false, usedBy: ['Main'], legacyAddress }), { tone: 'neutral', label: 'No key',
-        meta: 'Legacy OpenAI Base URL http://127.0.0.1:8080/v1 with the OpenAI API key · change the address in Settings → Accounts · used by Main' });
+        meta: 'Legacy OpenAI Base URL http://127.0.0.1:8080/v1 with the OpenAI API key · change the address in Settings → Accounts and keys · used by Main' });
     assert.equal(connectionRowFacts({ configured: true, source: 'environment', legacyAddress }).meta,
         'Provided by environment · not used by any role');
     assert.equal(connectionRowFacts({ enabled: false, legacyAddress }).label, 'Disabled');
@@ -240,8 +245,8 @@ test('a row says what is true of its key now: status, use, and who provides it',
         { route: { kind: 'api_model', target_id: 'anthropic/claude-opus-5.5' } },
     ] } }, contract.modelSlots);
     // Roles by name, Agents rows as one count: a long roster never turns the line into a list.
-    assert.deepEqual(usage.get('openrouter@claude-credits'), ['Main', '1 subagent']);
-    assert.deepEqual(usage.get('openrouter'), ['Fallback 1', '2 subagents']);
+    assert.deepEqual(usage.get('openrouter@claude-credits'), ['Main', '1 agent']);
+    assert.deepEqual(usage.get('openrouter'), ['Fallback 1', '2 agents']);
     assert.deepEqual(usage.get('openai-compatible@gigaagent'), ['Fallback 2']);
     assert.equal(usage.has('subscription:codex'), false, 'subscriptions are not API keys');
 
@@ -252,7 +257,7 @@ test('a row says what is true of its key now: status, use, and who provides it',
     assert.equal(cacheHintsNote({ cache_hints: { refused: false } }), '');
 });
 
-test('a new key takes a stored name from its label once; the setting and the save receipt read safely', () => {
+test('a new key takes a stored name from its label once; the setting reads safely', () => {
     assert.equal(connectionNameFor('Claude credits'), 'claude-credits');
     assert.equal(connectionNameFor('  Crédits — équipe 2 '), 'credits-equipe-2');
     assert.equal(connectionNameFor('Default'), 'default-2', '`default` is the built-in key');
@@ -264,25 +269,6 @@ test('a new key takes a stored name from its label once; the setting and the sav
     assert.deepEqual(connectionRows('[{"kind":"zai","name":"coding"}]'), [{ kind: 'zai', name: 'coding' }]);
     assert.deepEqual(connectionRows('not json'), []);
     assert.deepEqual(connectionRows([null, 'x', [], { kind: 'openai', name: 'b' }]), [{ kind: 'openai', name: 'b' }]);
-
-    const connections = apiConnections(SETTINGS);
-    assert.equal(connectionReferencesText([], connections), '');
-    assert.equal(connectionReferencesText([
-        { setting: 'OUROBOROS_MODEL', route: 'openrouter@claude-credits::anthropic/claude-opus-5.5', connection: 'claude-credits', reason: 'missing' },
-        { setting: 'OUROBOROS_MODEL_FALLBACKS', entry: '2', route: 'openrouter@claude-credits::x', connection: 'claude-credits', reason: 'disabled' },
-        { setting: 'OUROBOROS_SUBAGENTS', entry: 'reviewer-1', route: 'openrouter@claude-credits::y', connection: 'claude-credits', reason: 'missing' },
-    ], connections).includes('Main ('), true);
-    assert.match(connectionReferencesText([
-        { setting: 'OUROBOROS_MODEL_FALLBACKS', entry: '2', route: 'openrouter@claude-credits::x', connection: 'claude-credits' },
-    ], connections), /Fallback 2 \(/);
-    assert.match(connectionReferencesText([
-        { setting: 'OUROBOROS_SUBAGENTS', entry: 'reviewer-1', route: 'openrouter@claude-credits::y', connection: 'claude-credits' },
-    ], connections), /Agents · reviewer-1 \(/);
-    assert.doesNotMatch(connectionReferencesText([
-        { setting: 'OUROBOROS_MODEL', route: 'openrouter@claude-credits::z', connection: 'claude-credits' },
-    ], connections), /OUROBOROS_MODEL/);
-    assert.equal(connectionReferencesText([{ label: 'Main', connection: 'openrouter@claude-credits' }, 'Subagent 2'], connections),
-        'Still naming a removed or disabled key, so they cannot send: Main (OpenRouter · Claude credits), Subagent 2');
 });
 
 test('a wizard draft lists named endpoints without saved metadata, keeping identical model IDs distinct', () => {

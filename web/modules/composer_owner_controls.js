@@ -538,8 +538,8 @@ function createContextModeControl({ el, row, chatId, saveContextMode, showToast,
  * @param {(body: object) => Promise<object>} deps.saveEffortRange  `apiClient.ownerEffortRange`
  * @param {(body: object) => Promise<object>} [deps.saveSubagentsMode]  the room's subagents mode writer
  * @param {(body: object) => Promise<object>} [deps.saveChatModel]  the room's model writer (`apiClient.ownerChatModel`)
- * @param {(tab: string) => void} [deps.openSettings]  a Settings tab: Agents, where subagents are turned on; Accounts
- *   (`providers`), where a model source is added
+ * @param {(path: string) => void} [deps.openSettings]  a Settings page: Agents, where subagents are turned on; Accounts
+ *   and keys (`accounts`), where a model source is added
  * @param {(message: string, tone?: string) => void} deps.showToast
  * @param {(force?: boolean) => Promise<void>|void} deps.refreshState  a forced `/api/state` re-read
  * @param {() => void} [deps.onLayout]  a strip opened or closed on its own line
@@ -640,7 +640,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
     // The room's Model, first in the row. Its endpoint answers the room's own choice, so it scopes and checks itself.
     const modelEl = row && saveChatModel ? byId('model-mode') : null;
     const model = modelEl ? createModelControl({ el: modelEl, row, projectId, chatId, save: saveChatModel,
-        openSettings: () => openSettings('providers'), ...shared, ...modelDeps }) : null;
+        openSettings: () => openSettings('accounts'), ...shared, ...modelDeps }) : null;
     const controls = [model, subagents, context, effort].filter(Boolean);
     for (const control of controls) capsules.push(control.capsule);
     // One capsule is open at a time.

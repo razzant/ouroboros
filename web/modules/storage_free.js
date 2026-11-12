@@ -155,6 +155,10 @@ export const CAUSES = {
     nothing_unsaved: 'nothing in it is unsaved any more', nested_repository: 'a repository inside it cannot be saved as a patch',
     commits_unprotected: 'its commits are not held by a branch', generation_closed: 'stopped by a restart',
     removal_failed: 'its removal failed', younger_than_retention: 'it is still inside the retention days',
+    source_recovery_pending: 'startup recovery is not confirmed complete: old task folders and service logs are kept',
+    closed_set_unrecorded: 'closed log files waiting for the next app restart (no earlier run of the app saw them closed)',
+    prior_workers_unconfirmed: 'closed log files waiting for the next app restart (the previous run’s background processes are not confirmed stopped)',
+    closed_set_changed: 'closed log files waiting for the next app restart (their log’s archive changed since the last run saw it)',
 };
 /** A code's words from the one map, `''` when it has none. */
 const causeWords = (code) => CAUSES[code] || KEPT_REASONS[code] || '';
@@ -164,12 +168,18 @@ const reasonWords = (reason, cause = '') => cause ? fmt(causeWords(cause) || '{r
  *  1 you asked to keep it"; a class without words is shown by its name. */
 export function holdsPhrase(fact, now) {
     const holds = Array.isArray(fact.holds) ? fact.holds.filter((hold) => hold && hold.count > 0) : [];
+    // A hold whose count is unknown (`null`: what it keeps was never listed) is said by its reason alone, never a number.
+    const unknown = Array.isArray(fact.holds) ? fact.holds.filter((hold) => hold && hold.class && hold.count === null) : [];
     const held = holds.length ? holds.reduce((sum, hold) => sum + hold.count, 0) : (fact.held > 0 ? fact.held : 0);
-    if (!(held > 0)) return '';
-    const head = fact.held_since ? fmt('holding {n} since {when}', { n: number(held), when: whenLabel(fact.held_since, now) })
-        : fmt('holding {n}', { n: number(held) });
     const words = (hold) => (causeWords(hold.class) ? fmt(causeWords(hold.class)) : String(hold.class || '').replace(/_/g, ' '));
-    return holds.length ? `${head}: ${holds.map((hold) => `${number(hold.count)} ${words(hold)}`).join(', ')}` : head;
+    const parts = unknown.map((hold) => (hold.since ? fmt('held since {when}: {reason}', { when: whenLabel(hold.since, now), reason: words(hold) })
+        : fmt('held: {reason}', { reason: words(hold) })));
+    if (held > 0) {
+        const head = fact.held_since ? fmt('holding {n} since {when}', { n: number(held), when: whenLabel(fact.held_since, now) })
+            : fmt('holding {n}', { n: number(held) });
+        parts.unshift(holds.length ? `${head}: ${holds.map((hold) => `${number(hold.count)} ${words(hold)}`).join(', ')}` : head);
+    }
+    return parts.join(' · ');
 }
 
 /** What happened to the owner's own attempt, kept beside the server's current facts: `notice` outlives a plan the

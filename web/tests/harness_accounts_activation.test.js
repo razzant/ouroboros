@@ -46,12 +46,14 @@ function surface() {
         removeEventListener(type, fn) {
             listeners[type] = (listeners[type] || []).filter((item) => item !== fn);
         },
-        fire(type) { return Promise.all((listeners[type] || []).map((fn) => fn())); },
+        // The Settings shell's signal: which Settings page is shown now (`detail.path`; '' is the home).
+        fire(type, path = PAGE) { return Promise.all((listeners[type] || []).map((fn) => fn({ detail: { path } }))); },
     };
     return { elements, doc, win };
 }
+const PAGE = 'accounts/codex';
 
-test('Agents activation wakes only an already-provisioned idle daemon', async () => {
+test('showing the provider\'s page wakes only an already-provisioned idle daemon; no other page of Settings reads or wakes', async () => {
     const priorDoc = globalThis.document;
     const priorWin = globalThis.window;
     const { elements, doc, win } = surface();
@@ -72,10 +74,16 @@ test('Agents activation wakes only an already-provisioned idle daemon', async ()
         doc,
     });
     try {
-        await initHarnessAccounts({ store });
+        await initHarnessAccounts({ store, family: 'codex', path: PAGE });
+        // The home, the list of providers, another provider's page and another app page are not this page's showing:
+        // none of them reads the status or starts the daemon, though the idle daemon is one press from a wake.
         requests.length = 0;
-        await win.fire('ouro:settings-subtab-shown');
+        for (const other of ['', 'accounts', 'accounts/claude', 'accounts/key/openai', 'models']) await win.fire('ouro:settings-page-shown', other);
+        await win.fire('ouro:page-shown', PAGE);
+        assert.deepEqual(requests, []);
+        await win.fire('ouro:settings-page-shown');
         assert.ok(requests.includes('POST /api/claudexor/wake'));
+        assert.equal(requests.filter((request) => request === 'POST /api/claudexor/wake').length, 1);
 
         // A failed refresh keeps the last snapshot for display. It must not
         // make that retained `stale + ready` value look like fresh wake proof.
@@ -83,13 +91,13 @@ test('Agents activation wakes only an already-provisioned idle daemon', async ()
         await store.refresh();
         requests.length = 0;
         failNextRead = true;
-        await win.fire('ouro:settings-subtab-shown');
+        await win.fire('ouro:settings-page-shown');
         assert.deepEqual(requests, ['GET /api/claudexor/status']);
 
         body = payload('not_provisioned');
         await store.refresh();
         requests.length = 0;
-        await win.fire('ouro:settings-subtab-shown');
+        await win.fire('ouro:settings-page-shown');
         assert.ok(!requests.includes('POST /api/claudexor/wake'));
         assert.match(elements['agents-service-banner'].textContent, /No accounts connected yet/i);
 
@@ -101,7 +109,7 @@ test('Agents activation wakes only an already-provisioned idle daemon', async ()
             body = { ...payload('stale'), daemon };
             await store.refresh();
             requests.length = 0;
-            await win.fire('ouro:settings-subtab-shown');
+            await win.fire('ouro:settings-page-shown');
             assert.ok(!requests.includes('POST /api/claudexor/wake'));
         }
     } finally {
@@ -118,7 +126,7 @@ test('the service banner reports an automatic wake in progress', () => {
     });
 });
 
-test('mount reads status only; opening visible Accounts reads inventory once', async (t) => {
+test('mount reads status only; showing the provider\'s page reads the program inventory once', async (t) => {
     const before = {document: globalThis.document, window: globalThis.window};
     const {elements, doc, win} = surface();
     globalThis.document = doc; globalThis.window = win;
@@ -126,13 +134,13 @@ test('mount reads status only; opening visible Accounts reads inventory once', a
     t.mock.method(globalThis, 'fetch', async url => { inventories.push(String(url)); return response({harnesses: []}); });
     const store = createClaudexorStatusStore({fetchImpl: async () => response(RUNNING), doc});
     try {
-        await initHarnessAccounts({store});
+        await initHarnessAccounts({store, family: 'codex', path: PAGE});
         assert.deepEqual(inventories, []);
-        elements['harness-accounts-groups'].offsetParent = null;
-        await win.fire('ouro:settings-subtab-shown');
-        assert.deepEqual(inventories, []);
-        elements['harness-accounts-groups'].offsetParent = {};
-        await win.fire('ouro:settings-subtab-shown');
+        await win.fire('ouro:settings-page-shown', 'accounts');
+        await win.fire('ouro:settings-page-shown', '');
+        assert.deepEqual(inventories, [], 'the list of providers and the home read no program');
+        assert.ok(elements['harness-accounts-groups']);
+        await win.fire('ouro:settings-page-shown');
         assert.equal(inventories.length, 1);
         assert.match(inventories[0], /fresh=true/);
         assert.match(inventories[0], /checkLatest=true/);

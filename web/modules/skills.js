@@ -283,6 +283,8 @@ async function fetchSkills() {
 }
 
 export function initSkills(ctx = {}) {
+    // A Settings page opened from here leads back to Skills, where it was opened.
+    const skillsBack = { label: 'Skills', go: () => ctx.showPage?.('skills') };
     const page = document.createElement('div');
     page.innerHTML = skillsPageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
@@ -818,7 +820,12 @@ export function initSkills(ctx = {}) {
         }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
         if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
-        if (action === 'open_secrets') { if (typeof ctx.openSettingsTab === 'function') ctx.openSettingsTab('secrets'); return false; }
+        if (action === 'open_secrets') {
+            // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
+            void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim(), back: skillsBack });
+            return false;
+        }
+        if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`, { back: skillsBack }); return false; }
         if (action === 'read_findings') { openFindings(name); return false; }
         if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
         if (action === 'review' || action === 'rereview') {
@@ -1003,7 +1010,7 @@ export function initSkills(ctx = {}) {
         pageModuleFacts,
         showInstalled: (name) => { selectTab('installed'); searchInput.value = name; applyInstalledFilter(); },
         showMadeHere: () => { filter = 'made'; selectTab('installed'); },
-        openBehaviorSettings: () => { if (typeof ctx.openSettingsTab === 'function') ctx.openSettingsTab('behavior'); },
+        openSettings: (path, options = {}) => ctx.openSettings?.(path, { back: skillsBack, ...options }),
     };
     const browse = createSkillBrowse({ pane: document.getElementById('skills-pane-browse'), chrome: document.getElementById('skills-browse-chrome'), host });
     const sourcesView = createSkillSources({ pane: document.getElementById('skills-pane-sources'), host });

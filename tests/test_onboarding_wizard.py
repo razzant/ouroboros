@@ -529,10 +529,12 @@ def test_setup_contract_has_no_secret_values():
 
     assert contract["hostMode"] == "web"
     assert "providerFields" in contract
-    assert budget_fields["TOTAL_BUDGET"]["settingsInputId"] == "s-total-budget"
+    # The budgets have one editor in the app, the Costs rows, which find a field by its ``stateKey``: the contract
+    # names no Settings input for them (the second editor in Settings is gone).
+    assert all("settingsInputId" not in field for field in contract["budgetFields"])
+    assert [field["stateKey"] for field in contract["budgetFields"]] == ["totalBudget", "perTaskCostUsd"]
     assert budget_fields["TOTAL_BUDGET"]["min"] == "0.01"
     assert budget_fields["TOTAL_BUDGET"]["step"] == "any"
-    assert budget_fields["OUROBOROS_PER_TASK_COST_USD"]["settingsInputId"] == "s-settings-per-task-cost"
     assert "settingsInputId" in contract["providerFields"][0]
     assert "OPENROUTER_API_KEY" in text
     assert "sk-or-v1-super-secret" not in text
@@ -725,6 +727,7 @@ def test_api_settings_exposes_setup_contract_without_secrets(tmp_path):
         patch.object(srv, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(srv, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch.object(gw_settings, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
+        patch.object(gw_settings, "settings_read_view", return_value=({"OPENROUTER_API_KEY": secret}, {})),
         patch.object(gw_settings, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch("ouroboros.server_auth.get_configured_network_password", return_value=""),
     ]

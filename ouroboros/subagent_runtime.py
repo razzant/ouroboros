@@ -165,7 +165,7 @@ def model_visible_subagent_catalog(settings: Mapping[str, Any]) -> dict[str, Any
         projected["review_eligible"] = row.review_eligible
         if row.review_eligible and not session:
             projected["delivery"] = row.delivery or "native"
-        # The owner's words, verbatim and last: bounded intent, never a title.
+        # The row's guidance, verbatim and last; authorship is not recorded here.
         projected["recommended_use"] = row.recommended_use
         rows.append(projected)
     if not rows:

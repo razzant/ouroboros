@@ -113,7 +113,7 @@ def test_costs_names_the_known_spend_with_what_is_still_open_before_anything_els
             body: body.classList.contains('dashboard-body') && body.parentElement.classList.contains('dashboard-panel'),
             detailsInCard: card.contains(details) && !details.open,
             lead: top('#cost-known-limit'), metaTop: top('#cost-left'),
-            budget: top('#s-budget'), tables: top('#cost-by-model'),
+            budget: top('#setting-TOTAL_BUDGET'), tables: top('#cost-by-model'),
             sizes: [size('#cost-known-limit'), size('#cost-left')],
             leadBottom: el('#cost-left').getBoundingClientRect().bottom,
             viewport: innerHeight,

@@ -7,10 +7,10 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-# Where a page's section is mounted and where its header is rendered (Settings splits the two).
+# Where a page's section is mounted and where its header is rendered.
 MODULES = {"chat": ("chat.js", "chat.js"), "circles": ("circles.js", "circles.js"), "files": ("files.js", "files.js"),
            "skills": ("skills.js", "skills.js"), "widgets": ("widgets.js", "widgets.js"),
-           "dashboard": ("dashboard.js", "dashboard.js"), "settings": ("settings.js", "settings_ui.js")}
+           "dashboard": ("dashboard.js", "dashboard.js"), "settings": ("settings.js", "settings.js")}
 
 
 def _read(rel: str) -> str:

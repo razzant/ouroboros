@@ -13,6 +13,7 @@ import pytest
 
 from ouroboros.launcher_window_chrome import DOCUMENT_SCRIPT
 from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import open_settings
 from tests.test_design_system_gate_browser import (PROJECTS, open_nav, rest, save_evidence, seed_page, settle,
                                                    sidebar_metrics)
 from tests._work_projection_shared import work_fields
@@ -433,15 +434,6 @@ def test_the_status_word_is_whole_or_absent(shell_ui, tmp_path, room, width):
         assert word['shown'] is True, facts  # a bar with room keeps the word
 
 
-INLINE_LINK = """() => {
-    const a = document.querySelector('.settings-section-copy a[href="https://clawhub.ai"]');
-    const range = document.createRange();
-    range.selectNodeContents(a.parentElement);
-    const tops = [...range.getClientRects()].filter((q) => q.width && q.height).map((q) => q.top).sort((x, y) => x - y);
-    const lines = tops.reduce((acc, t) => (acc.length && t - acc[acc.length - 1] < 3 ? acc : [...acc, t]), []);
-    return {display: getComputedStyle(a).display, height: Math.round(a.getBoundingClientRect().height),
-            lines: lines.length, gaps: lines.slice(1).map((t, i) => Math.round((t - lines[i]) * 10) / 10)};
-}"""
 TARGET = """sel => {
     const e = document.querySelector(sel);
     if (!e) return null;
@@ -455,40 +447,26 @@ TARGET = """sel => {
 }"""
 
 
-def open_settings_panel_of(page, selector):
-    panel = page.evaluate("s => document.querySelector(s)?.closest('[data-settings-panel]')?.dataset.settingsPanel || ''",
-                          selector)
-    page.locator(f'[data-settings-tab="{panel}"]').first.click()
-    # A section's copy beyond its lead lives behind its Details disclosure: open it as the owner does.
-    summary = page.locator(selector).first.locator("xpath=ancestor::details[1]/summary")
-    if summary.count():
-        summary.click()
-    page.locator(selector).first.scroll_into_view_if_needed()
-    settle(page)
-    return panel
-
-
-def test_an_inline_link_in_settings_copy_reads_as_text_while_a_standalone_link_keeps_a_finger_target(shell_ui, tmp_path):
+# Settings copy carries no inline link any more (the ClawHub sentence that held one is a row's meta now); a standalone
+# link, such as About's, keeps a finger's target on a phone.
+def test_a_standalone_link_in_settings_keeps_a_finger_target(shell_ui, tmp_path):
     page = seed_page(shell_ui, 390, 844)
     facts = {'engine': shell_ui['engine']}
-    standalone = '.about-links a[href]'
+    standalone = '#page-settings .about-links a[href]'
     try:
         boot(page, shell_ui)
         facts['coarse'] = page.evaluate("matchMedia('(pointer: coarse)').matches")
         open_drawer(page)
         page.locator('[data-nav-page="settings"]').click()
         page.locator('#page-settings').wait_for(state='visible')
-        facts['inline_panel'] = open_settings_panel_of(page, '.settings-section-copy a[href="https://clawhub.ai"]')
-        facts['inline'] = page.evaluate(INLINE_LINK)
-        facts['standalone_panel'] = open_settings_panel_of(page, standalone)
+        open_settings(page, 'computer/about')
+        page.locator(standalone).first.scroll_into_view_if_needed()
+        settle(page)
         facts['standalone'] = page.evaluate(TARGET, standalone)
     finally:
-        evidence(tmp_path, f'shell-inline-link-{shell_ui["engine"]}', facts)
+        evidence(tmp_path, f'shell-standalone-link-{shell_ui["engine"]}', facts)
         page.close()
     assert facts['coarse'] is True, facts
-    inline = facts['inline']
-    assert inline['display'] == 'inline', facts
-    assert inline['lines'] >= 3 and max(inline['gaps']) - min(inline['gaps']) <= 2, facts
     target = facts['standalone']
     assert target and (target['hit'] or (target['width'] >= 43.9 and target['height'] >= 43.9)), facts
 
@@ -611,7 +589,7 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         facts['band'] = page.evaluate(TITLE_BAND, {'band': 52, 'allowed': allowed})
         band = facts['band']
         assert band['height'] == 52 and band['drags'] > 0 and not band['unexpected'], facts
-        if page_name == 'widgets':
+        if page_name in ('widgets', 'settings'):  # Settings has no tab strip: Back is the first row of a page
             assert band['controls'] == [] and band['firstTabTop'] is None, facts
         else:
             assert band['controls'], facts
@@ -629,7 +607,7 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         if page_name == 'files':
             page.locator('#files-new-file').click()
             page.locator('#page-files .files-editor').wait_for()
-        elif page_name != 'widgets':
+        elif page_name not in ('widgets', 'settings'):
             tab = page.locator(f'#page-{page_name} .app-page-lead .app-tab').nth(1)
             tab.click()
             assert tab.get_attribute('aria-selected') == 'true'
