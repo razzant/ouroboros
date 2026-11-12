@@ -25,7 +25,7 @@ from ouroboros.deadline_utils import (
 )
 from ouroboros.knowledge import observed_route_stamp
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
-from ouroboros.llm_claudexor import propagate_model_error, presence_refusal_unstarted
+from ouroboros.llm_claudexor import ClaudexorModelNotDispatched, propagate_model_error, presence_refusal_unstarted
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import (
     OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait, model_wait_reason, propagate_model_control,
@@ -39,7 +39,7 @@ from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.task_custody import canonical_owner_root
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
 from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, TOOL_CALL_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
-from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture, physical_attempt_capture_from_exception
+from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture, physical_attempt_capture_from_exception
 from ouroboros.physical_attempt_context import observe_dispatch
 from ouroboros.primary_route_observation import note_content_refusal
 from ouroboros.contracts.record_contract import RECORD_CONTRACT_VERSION
@@ -215,7 +215,6 @@ def timeout_repeat_blocked(usage: Dict[str, Any]) -> bool:
 
 
 def _claim_timeout_repeat(usage: Dict[str, Any], call_ids: Dict[str, Any], reservation: Any) -> None:
-    from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed
     record = usage[TIMEOUT_REPEAT_KEY]
     if record.get("state") != "granted":
         raise PhysicalAttemptPreconditionFailed("timeout repeat already dispatched")
@@ -917,8 +916,6 @@ def _record_llm_call_error(
 ) -> bool:
     """Classify an LLM-round exception, emit live/durable evidence and mark usage infra-failed.
     Return whether the caller must stop retrying the unchanged request."""
-    from ouroboros.llm_claudexor import ClaudexorModelNotDispatched
-
     safe_error = sanitize_tool_result_for_log(repr(error))
     classification = classify_llm_exception(error, safe_error)
     if ctx.task_type == "presence":  # stays True only while every attempt so far provably never started
