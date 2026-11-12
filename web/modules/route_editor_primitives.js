@@ -7,6 +7,7 @@ import { accountRows, accountName, accountModelUnsupported } from './claudexor_s
 import { formatRelativeAge } from './ui_helpers.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { fmt, tr } from './i18n.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
 
 export const ROUTE_KIND_API_MODEL = 'api_model';
@@ -300,19 +301,21 @@ function usd(value) {
 /**
  * A catalog's published price (`ModelCatalogItem.price`) in the owner's words, USD per 1M tokens: `$4 in / $20 out`;
  * where input length changes it, each figure's range (`$2–4 in / $10–15 out`); `free` when every figure is zero;
- * '' when the catalog states none. `unit` names the unit. Words only: a price never sorts, filters or admits a model.
+ * '' when the catalog states none, or a figure cannot be read or would print a charge as zero. `unit` names the unit.
+ * The words go through the translation seam. Words only: a price never sorts, filters or admits a model.
  */
 export function priceWords(price, { unit = false } = {}) {
-    const stated = (figure) => Number.isFinite(figure) && figure >= 0;
-    if (!stated(price?.input) || !stated(price?.output)) return '';
-    const tiers = Array.isArray(price.tiers) ? price.tiers : [];
-    const figures = (key) => [price[key], ...tiers.map((tier) => tier?.[key]).filter(stated)];
-    if ([...figures('input'), ...figures('output')].every((figure) => figure === 0)) return 'free';
+    const tiers = Array.isArray(price?.tiers) ? price.tiers : [];
+    const figures = [price?.input, price?.output, ...tiers.flatMap((tier) => [tier?.input, tier?.output])];
+    if (!figures.every((figure) => Number.isFinite(figure) && figure >= 0 && !(figure > 0 && usd(figure) === '$0'))) return '';
+    if (figures.every((figure) => figure === 0)) return tr('model.price.free', 'free');
     const span = (key) => {
-        const [low, high] = [usd(Math.min(...figures(key))), usd(Math.max(...figures(key)))];
+        const own = [price[key], ...tiers.map((tier) => tier[key])];
+        const [low, high] = [usd(Math.min(...own)), usd(Math.max(...own))];
         return low === high ? low : `${low}–${high.slice(1)}`;
     };
-    return `${span('input')} in / ${span('output')} out${unit ? ' per 1M tokens' : ''}`;
+    const params = { input: span('input'), output: span('output') };
+    return unit ? fmt('{input} in / {output} out per 1M tokens', params) : fmt('{input} in / {output} out', params);
 }
 
 /**

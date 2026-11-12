@@ -123,28 +123,34 @@ def openrouter_catalog_price(model: Any) -> Optional[Dict[str, Any]]:
 
     ``{"input", "output"}``, plus ``tiers`` (``[{"min_prompt_tokens", "input",
     "output"}]``) when the price changes with input length: the row accounting
-    reads (``openrouter_price_row``). None when the record states no complete
-    token price, adds a per-request fee, or holds an unreadable, negative or
-    non-finite figure: the picker then shows no price, never a partial one.
+    reads (``openrouter_price_row``). None, so a picker shows no price rather than
+    a partial or false one, when the record states no complete token price, adds a
+    per-request fee, varies its price by anything but input length (a time window),
+    holds an unreadable, negative or non-finite figure or a tier accounting skips,
+    or charges less than four decimals per 1M print (it would read as free).
     """
     pricing = model.get("pricing") if isinstance(model, dict) else None
     if not isinstance(pricing, dict):
         return None
+    overrides = pricing.get("overrides") or []
     try:
         # A per-request fee is part of every call's price, which per-token figures would not say.
         if pricing.get("request") is not None and float(pricing["request"]) != 0:
             return None
+        if not isinstance(overrides, list) or not all(
+                isinstance(tier, dict) and int(tier.get("min_prompt_tokens") or 0) > 0 for tier in overrides):
+            return None
+        figures = [float(value) for value in (pricing.get("prompt"), pricing.get("completion"), *(
+            tier[key] for tier in overrides for key in ("prompt", "completion") if tier.get(key) is not None))]
         row = openrouter_price_row(model)
     except (TypeError, ValueError, ArithmeticError):
         return None
-    if row is None:
+    tiers = getattr(row, "tiers", ())
+    if row is None or len(tiers) != len(overrides) or not all(
+            isfinite(figure) and figure >= 0 and not (figure > 0 and round(figure * 1_000_000, 4) == 0) for figure in figures):
         return None
-    tiers = [{"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]}
-             for minimum, tier in getattr(row, "tiers", ())]
-    figures = [row[0], row[3], *(tier[key] for tier in tiers for key in ("input", "output"))]
-    if not all(isfinite(figure) and figure >= 0 for figure in figures):
-        return None
-    return {"input": row[0], "output": row[3], **({"tiers": tiers} if tiers else {})}
+    return {"input": row[0], "output": row[3], **({"tiers": [
+        {"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]} for minimum, tier in tiers]} if tiers else {})}
 
 
 def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Optional[float], ...]]:

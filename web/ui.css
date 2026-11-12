@@ -1185,7 +1185,7 @@ textarea.ui-control { resize: vertical; }
 .ui-model-option { cursor: pointer; }
 /* A catalog price sits after its model's name at the row's end; where the line cannot hold both it goes under the
    name, which keeps its line. */
-.ui-model-option:has(> .ui-model-option-meta) {
+.ui-model-option-priced {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;

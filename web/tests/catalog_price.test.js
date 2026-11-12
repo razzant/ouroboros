@@ -10,9 +10,12 @@ import { buildModelIndex, describeRoute } from '../modules/chat_model_routes.js'
 import { bindModelChooser, matchingModelOptions, modelChooserHtml, modelOptions, updateModelChooserOptions } from '../modules/model_chooser.js';
 import { createModelList } from '../modules/model_list.js';
 import { createModelRolesEditor } from '../modules/model_roles.js';
-import { catalogModelOptions, priceWords } from '../modules/route_editor_primitives.js';
+import { applyPayload, CODE_PREFIX, setMissTransport } from '../modules/i18n.js';
+import { catalogModelOptions, priceWords, routeModelInputHtml } from '../modules/route_editor_primitives.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { appendHtml, domDouble } from './dom_double.js';
+
+setMissTransport(() => Promise.resolve(null));
 
 const OPUS = { provider_id: 'openrouter', id: 'anthropic/claude-opus-5.5', value: 'anthropic/claude-opus-5.5',
     name: 'Anthropic: Claude Opus 5.5', price: { input: 4, output: 20 } };
@@ -33,10 +36,31 @@ test('a catalog price reads as one short fact, and as nothing where the catalog 
     assert.equal(priceWords({ input: 0, output: 0 }, { unit: true }), 'free');
     assert.equal(priceWords({ input: 0, output: 0, tiers: [{ min_prompt_tokens: 1000, input: 1, output: 2 }] }), '$0–1 in / $0–2 out');
     for (const none of [undefined, null, {}, { input: 4 }, { output: 20 }, { input: '4', output: '20' }, { input: -1, output: 20 },
-        { input: Number.NaN, output: 1 }, { input: Number.POSITIVE_INFINITY, output: 1 }]) {
+        { input: Number.NaN, output: 1 }, { input: Number.POSITIVE_INFINITY, output: 1 },
+        // A tier that cannot be read leaves the whole price unsaid, never the base with part of a range.
+        { input: 2, output: 10, tiers: [{ min_prompt_tokens: 1, input: -1, output: 15 }] },
+        { input: 2, output: 10, tiers: [{ min_prompt_tokens: 1, output: 15 }] },
+        // A charge four decimals would print as zero is never shown as $0 or free.
+        { input: 0.00001, output: 1 }, { input: 0.00001, output: 0.00001 }]) {
         assert.equal(priceWords(none), '', JSON.stringify(none));
         assert.equal(priceWords(none, { unit: true }), '', JSON.stringify(none));
     }
+});
+
+test('the price words go through the translation seam: one template, never one entry per price', () => {
+    applyPayload({ language: 'ru', english: false, revision: 31, entries: {
+        '{input} in / {output} out': { text: '{input} вход / {output} выход' },
+        '{input} in / {output} out per 1M tokens': { text: '{input} вход / {output} выход за 1 млн токенов' },
+        [CODE_PREFIX + 'model.price.free']: { text: 'бесплатно' } } });
+    try {
+        assert.equal(priceWords({ input: 4, output: 20 }), '$4 вход / $20 выход');
+        assert.equal(priceWords({ input: 2, output: 10, tiers: [{ min_prompt_tokens: 1, input: 4, output: 15 }] }, { unit: true }),
+            '$2–4 вход / $10–15 выход за 1 млн токенов');
+        assert.equal(priceWords({ input: 0, output: 0 }), 'бесплатно');
+    } finally {
+        applyPayload({ language: '', english: true, revision: 32, entries: {} });
+    }
+    assert.equal(priceWords({ input: 4, output: 20 }), '$4 in / $20 out');
 });
 
 test('a suggestion carries the price apart from its label, which stays the name with one account and with eighteen', () => {
@@ -58,6 +82,8 @@ test('the Settings chooser shows the price beside the name, never in it: not in 
     const html = modelChooserHtml('aria-label="Main"', '', 'models', items);
     assert.match(html, priced('$4 in / $20 out'));
     assert.match(html, /aria-selected="false">Model 4o<\/div>/, 'an option without a price keeps its markup');
+    assert.match(html, /class="ui-model-option ui-model-option-priced" role="option" id="models-0"/, 'a priced option says so by class');
+    assert.match(html, /class="ui-model-option" role="option" id="models-1"/);
     assert.deepEqual(modelOptions(items), items);
     assert.deepEqual(matchingModelOptions(items, '4').map((item) => item.value), ['vendor/y']);
 
@@ -148,4 +174,21 @@ test('in the composer list a priced model says its price where "paid by key" sto
         'source:openrouter': '3 models · paid by key',
         'source:openai': '1 model · paid by key',
     });
+});
+
+
+test('the Agents chooser of an OpenRouter row shows the price too; a direct key reads as before', () => {
+    const items = [OPUS, { provider_id: 'openai', id: 'gpt-6', value: 'openai::gpt-6', name: 'gpt-6' }];
+    const priced = routeModelInputHtml('aria-label="Model"', { kind: 'api_model', target_id: OPUS.value }, items, 'agent-models');
+    assert.match(priced, /<span class="ui-model-option-meta" data-i18n-skip>\$4 in \/ \$20 out<\/span>/);
+    const direct = routeModelInputHtml('aria-label="Model"', { kind: 'api_model', target_id: 'openai::gpt-6' }, items, 'agent-models');
+    assert.doesNotMatch(direct, /ui-model-option-meta/);
+    assert.match(direct, /aria-selected="false">gpt-6<\/div>/);
+});
+
+test('in the composer list two catalog rows of one model that disagree on its price state none', () => {
+    const index = buildModelIndex({ catalog: { items: [OPUS, { ...OPUS, credential_profile_id: 'second', price: { input: 5, output: 25 } }] } });
+    assert.equal(describeRoute(index, { model: OPUS.value }).price, '');
+    const agreeing = buildModelIndex({ catalog: { items: [OPUS, { ...OPUS, credential_profile_id: 'second' }] } });
+    assert.equal(describeRoute(agreeing, { model: OPUS.value }).price, '$4 in / $20 out');
 });

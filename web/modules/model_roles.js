@@ -358,11 +358,14 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const choosing = !row.local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
             status.classList.toggle('ui-status', choosing);
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
+            const price = row.local || keyNote(row) || note || !row.model || sourceId(row) ? '' : priceWords(currentItem(row)?.price, { unit: true });
             status.textContent = row.local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
                         ? 'No models were listed for this source. Your selection is kept.'
-                        : 'Uses your subscription. No API key required.') : priceWords(currentItem(row)?.price, { unit: true }));
+                        : 'Uses your subscription. No API key required.') : price);
+            // The price is already composed through the translation seam: the overlay leaves it alone and reads the rest.
+            if (price) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];
             const message = node.querySelector('[data-model-role-error]');
             Object.assign(message, { textContent: errors.map((error) => error.message).join(' '), hidden: !errors.length });

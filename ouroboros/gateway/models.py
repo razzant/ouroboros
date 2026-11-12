@@ -485,7 +485,7 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
     settings = load_settings()
     items = list(subscription["items"])
     errors = list(subscription["errors"])
-    seen_values: set[str] = set()
+    kept_at: dict[str, int] = {}
     specs = _provider_specs(settings, record_image_input=True)
 
     timeout = httpx.Timeout(_CATALOG_HTTP_TIMEOUT_SEC)
@@ -514,10 +514,14 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
             continue
         for item in provider_items:
             value = str(item.get("value", "") or "")
-            if not value or value in seen_values:
+            if value in kept_at:
+                kept = items[kept_at[value]]
+                if "price" in kept and kept["price"] != item.get("price"):  # records disagree: no one price to show
+                    items[kept_at[value]] = {key: field for key, field in kept.items() if key != "price"}
                 continue
-            seen_values.add(value)
-            items.append(item)
+            if value:
+                kept_at[value] = len(items)
+                items.append(item)
 
     items.extend(filter(None, [_local_model_entry(settings)]))
     items.sort(key=lambda item: (item.get("provider", "").lower(), item.get("name", "").lower()))

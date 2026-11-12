@@ -23,7 +23,7 @@ export function matchingModelOptions(items, query) {
 
 function optionsHtml(items, listId) {
     return modelOptions(items).map(({ value, label, custom, meta }, index) =>
-        `<div class="ui-model-option" role="option" id="${escapeHtml(listId)}-${index}"
+        `<div class="ui-model-option${meta ? ' ui-model-option-priced' : ''}" role="option" id="${escapeHtml(listId)}-${index}"
             data-model-value="${escapeHtml(value)}"${custom ? ' data-model-custom-option' : ''} aria-selected="false">${meta
             ? `<span class="ui-model-option-name">${escapeHtml(label || value)}</span> <span class="ui-model-option-meta" data-i18n-skip>${escapeHtml(meta)}</span>`
             : escapeHtml(label || value)}</div>`).join('');
