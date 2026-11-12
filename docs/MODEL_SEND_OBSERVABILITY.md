@@ -284,7 +284,7 @@ and an `append` beside a large write is not a contradiction this record resolves
 
 A candidate becomes its route's base when an answer of that route that read its
 input arrives (`note_prefix_answer`, where the response arrives: input tokens
-reported, no provider error; a body error read nothing): the accepted answer (it must
+reported or output generated, no provider error; a body error read nothing): the accepted answer (it must
 start with the candidate that waited for it; a send adds its own later rows, as its
 clock line), or, at the next measurement, an answer the loop did not accept (an empty
 or output-limited reply was still written and charged); the waiting candidate and the

@@ -196,3 +196,25 @@ def test_a_record_from_before_prices_were_kept_is_observed_once_more_at_boot(cat
     _another_process(client)
     client.prefetch_openrouter_catalog()  # the record it wrote carries the prices
     assert len(gets) == 1
+
+
+def test_a_failed_extra_read_keeps_the_record_it_had_adopted(catalogue, monkeypatch):
+    """Offline or refused on the first boot after an upgrade: the adopted record stays the answer, never a failure."""
+    import requests
+
+    from ouroboros.utils import atomic_write_json
+
+    client, gets, record = catalogue
+    atomic_write_json(record, {"observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "models": {
+        "vendor/known": {"context_length": 200_000, "supported_parameters": ["max_tokens", "tools"]}}})
+
+    class Refused:
+        status_code = 503
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(requests, "get", lambda url, **_kwargs: gets.append(url) or Refused())
+    client.prefetch_openrouter_catalog()
+    assert len(gets) == 1 and not client.metadata_fetch_attempted_and_failed()
+    assert client._get_supported_parameters("vendor/known") == {"max_tokens", "tools"}

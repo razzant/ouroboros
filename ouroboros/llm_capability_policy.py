@@ -261,8 +261,11 @@ class _CapabilityPolicyMixin:
     def prefetch_openrouter_catalog(cls) -> None:
         """At boot, off every turn: observe the catalogue unless a process recorded a current one with its prices (a
         record from before prices were kept is observed once more, so Costs can split a period from the first look)."""
-        if not cls._adopt_recorded_catalog() or not _records_prices():
+        adopted = cls._adopt_recorded_catalog()
+        if not adopted or not _records_prices():
             cls._fetch_openrouter_capabilities()
+            if adopted and not cls._CAPABILITIES_FETCH_OK:
+                cls._adopt_recorded_catalog()  # a failed extra read keeps the record it had adopted
 
     @classmethod
     def metadata_fetch_attempted_and_failed(cls) -> bool:

@@ -60,7 +60,7 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
     may write its update letter through the local model, and the git fetch ahead of that call is
     the head start the model server gets (no readiness wait — a letter that still finds the model
     loading fails typed and is rewritten by the next check). The owned daemon is warmed, and an
-    OpenRouter install's model catalogue observed unless a process recorded a current one, for
+    OpenRouter install's model catalogue observed unless a process recorded a current one with prices, for
     provisioned homes only (``warm_daemon``): background work off the startup path, so a request
     reads the catalogue and never waits for it. A managed execution domain's dedicated containers
     are measured for Panic, also off the startup path (``execution_domain``). A sign-in entry naming

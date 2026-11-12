@@ -1,7 +1,8 @@
 // Dashboard › Costs, "By period": what the model calls started in a period cost, by token class, and what each
 // cache write followed (`GET /api/cost-breakdown?period=…`, ouroboros/gateway/cost_period.py). The parts are each
 // call's RECORDED cost shared out by the model's price list, never invoice lines; what could not be shared is named
-// beside them. Four fixed hues name the four classes (ui.css `--chart-series-*`): none of them is a verdict, and the
+// beside them. Four fixed hues name the four classes (ui.css `--chart-series-*`), a fainter neutral the input in no
+// class: none of them is a verdict, and the
 // card raises no signal. The page's totals and tables above stay all-time; the period governs this card alone.
 import { formatUsd, number } from './storage_format.js';
 import { apiFetch } from './api_client.js';
