@@ -3,7 +3,7 @@ from collections import Counter
 from types import MappingProxyType
 
 from ouroboros.chronicle_store import is_late_review_mark
-from ouroboros.late_review_marks import SURFACE_NAMES, clean_pass, mark_outcome, outcome_words
+from ouroboros.late_review_marks import SURFACE_NAMES, clean_pass, landing_words, mark_outcome, outcome_words
 
 
 WAITING_CLASSES = MappingProxyType({
@@ -76,31 +76,38 @@ def text(waiting):
                            *(f"{label} ~{chars} chars" for label, chars in facts.get("largest", ()))])
         held = facts.get("in_rooms")  # absent in a view captured before the count existed
         where = f" in {held} room{'' if held == 1 else 's'}" if held else ""
-        # Late reviews: how many say PASS with nothing to read, how many carry no outcome facts (the list reads
-        # those records). Absent in a view captured before these counts; two facts, never a suggestion.
-        told = (f", {facts['clean_pass']} PASS with no findings, {facts['unrecorded']} without a recorded outcome"
+        # Late reviews: how many say PASS with nothing to read and, while any remain, how many keep no outcome on
+        # the mark (the list reads those records). Absent in a view captured before these counts; facts, never a
+        # suggestion.
+        told = (f", {facts['clean_pass']} PASS with no findings"
+                + (f", {facts['unrecorded']} with no outcome kept on the mark (the list reads their records)"
+                   if facts.get("unrecorded") else "")
                 if facts.get("count") and "clean_pass" in facts else "")
         lines.append(f"{cls['subject']} {facts['count']}{where}, oldest {facts['oldest']}{told}"
                      + (f", most in {rooms}" if rooms else "") + f"; {cls['reader']}; act {cls['act']}")
     return "; waiting for me at the start: " + " | ".join(lines)
 
 
-def listing(kind, marks, notes, label=None, outcome=mark_outcome):
+def listing(kind, marks, notes, label=None, outcome=mark_outcome, landing=None):
     """Exact ids and dates for the existing memory_read's paged list modes; no source prose. Late reviews are grouped
     by the room of their work, the room with the oldest first (``label`` names a room), each with the review it is
     (``late_review_marks.SURFACE_NAMES``), its work, its date, its outcome in words and its exact reader: what a
     wake once held as one pointer per mark is read here by choice. ``outcome`` reads one mark's outcome; the
     reader passes one that also reads the review record of a mark older than its own outcome facts, so the head
-    can say how many of all listed are a PASS with no findings."""
+    can say how many of all listed are a PASS with no findings. ``landing`` (the reader's) says what is recorded
+    of the change a commit review read; with it the head counts the PASS commit reviews under which no commit
+    and no merge is recorded: approved work that may never have landed."""
     if kind == "late_reviews":
         rows = []
         for m in late_reviews(marks):
-            told = outcome(m)
+            told, became = outcome(m), landing(m) if landing else None
             rows.append({"id": m["id"], "room": str(m.get("room_id")), "date": str(m.get("ts") or "unknown"),
                          "task": str((m.get("review") or {}).get("task_id") or "unknown"),
                          "review": SURFACE_NAMES.get(str((m.get("author") or {}).get("surface") or ""),
                                                      str((m.get("author") or {}).get("surface") or "review")),
-                         "outcome": outcome_words(told), "clean": clean_pass(told)})
+                         "outcome": "; ".join(filter(None, (outcome_words(told), landing_words(became)))),
+                         "clean": clean_pass(told),
+                         "idle": became == {} and isinstance(told, dict) and told.get("verdict") == "PASS"})
         rows.sort(key=lambda row: (row["date"], row["id"]))
         rooms = {}
         for row in rows:
@@ -111,7 +118,9 @@ def listing(kind, marks, notes, label=None, outcome=mark_outcome):
             lines += [f"  - {row['date']}; {row['review']} of task {row['task']}; {row['outcome']}; "
                       f"memory_read(node_id='{row['id']}')" for row in items]
         return (f"{WAITING_CLASSES[kind]['subject']}: {len(rows)} in {len(rooms)} room{'' if len(rooms) == 1 else 's'}"
-                f"; {sum(row['clean'] for row in rows)} PASS with no findings", "\n".join(lines))
+                f"; {sum(row['clean'] for row in rows)} PASS with no findings"
+                + (f"; {sum(row['idle'] for row in rows)} commit review PASS with no commit or merge recorded"
+                   if landing else ""), "\n".join(lines))
     rows = [{"id": n["id"], "room": room, "date": str(n.get("date") or "unknown")} for room, n in mind_notes(notes)]
     rows.sort(key=lambda row: (row["date"], row["id"]))
     return (f"{WAITING_CLASSES[kind]['subject']}: {len(rows)}",

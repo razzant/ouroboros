@@ -225,6 +225,50 @@ def mark_outcome(mark: Mapping[str, Any], drive_root: Any = None) -> Optional[Di
         return None
 
 
+def mark_landing(mark: Mapping[str, Any], drive_root: Any) -> Optional[Dict[str, Any]]:
+    """What is recorded, as it reads now, of the change a late commit review read: the commit that landed under
+    this review (``{"commit": sha}``), else the pull request its task merged, named by its address
+    (``{"pr": url}``: a fact about the task, which may have merged it in another repository), else that neither
+    is recorded (``{}``). ``None`` for any other review and whenever the record or the task's result cannot be
+    read: an unread fact is never told as nothing landed. Read on request and never kept on the mark, because a
+    successor of the task may still land the work."""
+    review = mark.get("review") or {}
+    if review.get("surface") != "commit_gate":
+        return None
+    from ouroboros.merge_receipts import RECEIPTS_KEY  # the readers below are named lazily only
+    from ouroboros.review_doctrine import public_commit_landings
+    from ouroboros.review_ledger import load_record
+    from ouroboros.task_results import load_task_result
+
+    try:
+        record = load_record(drive_root, str((review.get("subject") or {}).get("record_id") or ""))
+        if record is None:
+            return None
+        commits = public_commit_landings(record)
+        if commits:
+            return {"commit": commits[-1]["commit_sha"]}
+        task = load_task_result(drive_root, str(review.get("task_id") or ""))
+    except Exception:  # the list the mind asked for keeps its other rows when one work's facts cannot be read
+        log.warning("Landing facts unavailable for late review mark %s", mark.get("id"), exc_info=True)
+        return None
+    if not isinstance(task, dict):
+        return None
+    merged = [receipt for receipt in task.get(RECEIPTS_KEY) or []
+              if isinstance(receipt, dict) and (receipt.get("outcome") or {}).get("status") == "merged"]
+    return {"pr": str((merged[-1].get("repo") or {}).get("url") or f"PR #{merged[-1].get('number')}")} if merged else {}
+
+
+def landing_words(landing: Any) -> str:
+    """One late commit review's landing for the list: what is recorded, never a guess about lost work."""
+    if not isinstance(landing, Mapping):
+        return ""
+    if landing.get("commit"):
+        return f"committed as {str(landing['commit'])[:12]} under this review"
+    if landing.get("pr"):
+        return f"its task merged {landing['pr']}"
+    return "no commit under this review, no merge by its task recorded"
+
+
 def publish_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateReviewMark:
     """Keep one settled late review in view in its owning room (module docstring); never raises, never wakes.
 

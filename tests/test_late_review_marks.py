@@ -1090,3 +1090,58 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
     assert publish_late_review(tmp_path, {**_record(tmp_path, "pres1", 1, "gap"), "outcome": None}).status == "saved"
     [gap] = [m for m in _late_marks(tmp_path) if m["review"]["task_id"] == "pres1"]
     assert "outcome" not in gap["review"]
+
+
+def test_a_late_commit_review_tells_what_is_recorded_of_the_change_it_read(tmp_path):
+    """The list says what became of a late commit review's change as it reads now: the commit under this review,
+    else the pull request its task merged, else that neither is recorded. The head counts the PASS commit
+    reviews with neither, and an unread fact is never told as nothing landed."""
+    from ouroboros.late_review_marks import landing_words, mark_landing, outcome_facts
+    from ouroboros.review_ledger import ledger_dir, record_path
+
+    shared.world(tmp_path)
+    ledger_dir(tmp_path, create=True)
+    sha = "ab" * 20
+
+    def late(task, *, surface="commit_gate", verdict="PASS", landings=(), receipts=None):
+        record_id = f"rl-20261017T000000-{'abcd'[len(_late_marks(tmp_path))] * 12}"
+        record_path(tmp_path, record_id).write_text(json.dumps({
+            **_settled(verdict), "commit_landings": [{"commit_sha": commit} for commit in landings]}), encoding="utf-8")
+        if receipts is not None:
+            seed_result(tmp_path, task, {"status": "completed", "chat_id": 1, "merge_receipts": receipts})
+        published = {**_record(tmp_path, task, 1, "late words"), "surface": surface,
+                     "outcome": outcome_facts(_settled(verdict)), "subject": {"record_id": record_id}}
+        assert publish_late_review(tmp_path, published).status == "saved"
+        return next(m for m in _late_marks(tmp_path) if m["review"]["task_id"] == task), record_id
+
+    committed, _ = late("main1", landings=[sha])
+    pull = "https://github.com/example/body/pull/3104"
+    merged, _ = late("bound", receipts=[{"number": 7, "outcome": {"status": "queued"}},
+                                        {"number": 3104, "repo": {"url": pull}, "outcome": {"status": "merged"}}])
+    idle, idle_record = late("beta1", receipts=[{"number": 8, "outcome": {"status": "queued"}}])
+    failed, _ = late("pres1", verdict="FAIL", receipts=[])
+    assert mark_landing(committed, tmp_path) == {"commit": sha}
+    assert landing_words({"commit": sha}) == "committed as abababababab under this review"
+    assert mark_landing(merged, tmp_path) == {"pr": pull} and landing_words({"pr": pull}) == f"its task merged {pull}"
+    assert mark_landing(idle, tmp_path) == {} == mark_landing(failed, tmp_path)
+    assert landing_words({}) == "no commit under this review, no merge by its task recorded"
+
+    listed = _memory_read(_ctx(tmp_path, "reader"), room_id="late_reviews")
+    assert listed.splitlines()[0].endswith("; 3 PASS with no findings; 1 commit review PASS with no commit or merge recorded")
+    for task, words in (("main1", "PASS, no findings; committed as abababababab under this review"),
+                        ("bound", f"PASS, no findings; its task merged {pull}"),
+                        ("beta1", "PASS, no findings; no commit under this review, no merge by its task recorded"),
+                        ("pres1", "FAIL, no findings; no commit under this review, no merge by its task recorded")):
+        assert f"commit review of task {task}; {words}; memory_read(node_id='late-review-" in listed, task
+
+    # What cannot be read, and every other kind of review, says nothing about landing: never "nothing landed".
+    other = {"review": {**idle["review"], "surface": "result"}}
+    unknown_task = {"review": {**idle["review"], "task_id": "no-such-task"}}
+    assert mark_landing(other, tmp_path) is None and mark_landing(unknown_task, tmp_path) is None
+    record_path(tmp_path, idle_record).write_text("{broken", encoding="utf-8")
+    assert mark_landing(idle, tmp_path) is None
+    record_path(tmp_path, idle_record).unlink()
+    assert mark_landing(idle, tmp_path) is None and landing_words(None) == ""
+    again = _memory_read(_ctx(tmp_path, "reader"), room_id="late_reviews")
+    assert "commit review of task beta1; PASS, no findings; memory_read(node_id='late-review-" in again
+    assert again.splitlines()[0].endswith("; 0 commit review PASS with no commit or merge recorded")
