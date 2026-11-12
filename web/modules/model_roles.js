@@ -224,6 +224,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
             : catalog.items.filter((item) => parseModelSource(item.value || item.id).source === row.source);
     }
+    // Fast and Economy send another processing tier, which its own endpoint prices: the catalog's row is not its price.
+    function tieredProcessing(row) {
+        return ['fast', 'economy'].includes(row.processing_preference || processingPreference);
+    }
     function currentItem(row) {
         const model = row.source === 'inherit' ? inheritedRow(row)?.model : row.model;
         const matches = itemsFor(row).filter((item) => (parseModelSource(item.value || item.id).model === model
@@ -342,7 +346,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const accountOptions = accountHtml.slice(accountHtml.indexOf('>') + 1, accountHtml.lastIndexOf('</select>'));
             if (account.innerHTML !== accountOptions) account.innerHTML = accountOptions;
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
-                ...item, value: parseModelSource(item.value || item.id).model,
+                ...item, value: parseModelSource(item.value || item.id).model, ...(tieredProcessing(row) ? { price: null } : {}),
             }))), row.local ? [] : catalogPrograms(catalogs.get(catalogKey(row)), {source: sourceId(row), profile: row.account, sources: catalog.model_sources}));
             if (showContext) node.querySelector('[data-model-context-note]').textContent = modelContextNote(row.windowPreview);
             if (showContext) node.querySelector('[data-processing-summary]').textContent = processingIntentLabel(row.processing_preference, processingPreference);
@@ -358,7 +362,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const choosing = !row.local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
             status.classList.toggle('ui-status', choosing);
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
-            const price = row.local || keyNote(row) || note || !row.model || sourceId(row) ? '' : priceWords(currentItem(row)?.price, { unit: true });
+            const price = row.local || keyNote(row) || note || !row.model || sourceId(row) || tieredProcessing(row) ? ''
+                : priceWords(currentItem(row)?.price, { unit: true });
             status.textContent = row.local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length

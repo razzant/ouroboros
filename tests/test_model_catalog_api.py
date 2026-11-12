@@ -502,6 +502,13 @@ def test_an_openrouter_row_carries_the_price_its_catalog_states(pricing, expecte
     # A charge four decimals per 1M would print as zero is never shown as free.
     {"prompt": "0.00000000001", "completion": "0.00000000001"},
     {"prompt": "0.00000000001", "completion": "0.000005"},
+    # Reasoning billed at its own rate: the output figure is not the output price.
+    {"prompt": "0.00000015", "completion": "0.0000006", "internal_reasoning": "0.0000035"},
+    # Free by tokens, yet the call is charged for something else: "free" would be false.
+    {"prompt": "0", "completion": "0", "image": "0.04"}, {"prompt": "0", "completion": "0", "web_search": "0.004"},
+    # A tier that also names an hour window is not a plain input-length tier.
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [
+        {"min_prompt_tokens": 1000, "utc_start": 1500, "utc_end": 100, "prompt": "0.000004"}]},
 ])
 def test_an_openrouter_row_without_a_complete_token_price_has_no_price_field(pricing):
     record = {"id": "vendor/model", "name": "Vendor: Model", **({} if pricing is None else {"pricing": pricing})}
@@ -589,3 +596,36 @@ def test_two_catalog_records_of_one_model_show_a_price_only_when_they_agree(monk
     payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
     [item] = [item for item in payload["items"] if item["value"] == "vendor/x"]
     assert item.get("price") == expected and item["name"] == "Vendor: X", "the model stays listed either way"
+
+
+@pytest.mark.parametrize("pricing, expected", [
+    # Most reasoning models bill reasoning as output: the pair is the whole token price.
+    ({"prompt": "0.000004", "completion": "0.00002", "internal_reasoning": "0.00002"}, {"input": 4.0, "output": 20.0}),
+    ({"prompt": "0", "completion": "0", "internal_reasoning": "0", "image": "0"}, {"input": 0.0, "output": 0.0}),
+])
+def test_a_price_whose_other_fees_change_nothing_is_still_shown(pricing, expected):
+    [item] = _openrouter_items([{"id": "vendor/model", "name": "Vendor: Model", "pricing": pricing}])
+    assert item["price"] == expected
+
+
+def test_a_model_listed_first_without_a_price_keeps_none_when_a_later_record_states_one(monkeypatch):
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"OPENROUTER_API_KEY": "or-key"})
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, **_kwargs):
+            return _Response({"data": [{"id": "vendor/x", "name": "Vendor: X"},
+                                       {"id": "vendor/x", "name": "Vendor: X", "pricing": {"prompt": "0.000004", "completion": "0.00002"}}]})
+
+    monkeypatch.setattr(model_catalog_api.httpx, "AsyncClient", Client)
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+    [item] = [item for item in payload["items"] if item["value"] == "vendor/x"]
+    assert "price" not in item
