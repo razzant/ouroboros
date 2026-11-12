@@ -460,7 +460,7 @@ def test_skill_exec_refuses_disabled_skill(tmp_path, monkeypatch):
     assert "disabled" in result
 
 
-def test_skill_exec_refuses_non_pass_review(tmp_path, monkeypatch):
+def test_skill_exec_refuses_a_review_without_a_verdict_and_runs_past_blockers(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     skill_dir = _build_skill(skills_root, "hello")
     ctx = _make_ctx(tmp_path)
@@ -469,20 +469,23 @@ def test_skill_exec_refuses_non_pass_review(tmp_path, monkeypatch):
     save_review_state(
         ctx.drive_root,
         "hello",
-        SkillReviewState(status="blockers", content_hash=content_hash),
+        SkillReviewState(status="pending", content_hash=content_hash),
     )
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     result = skill_exec_mod._handle_skill_exec(
         ctx, skill="hello", script="scripts/hello.py"
     )
     assert "SKILL_EXEC_BLOCKED" in result
-    assert "'blockers'" in result
+    assert "'pending'" in result
+    # Blocker findings are recorded and returned; outside Cyber Pro they veto nothing.
+    save_review_state(ctx.drive_root, "hello", SkillReviewState(status="blockers", content_hash=content_hash))
+    ran = json.loads(skill_exec_mod._handle_skill_exec(ctx, skill="hello", script="scripts/hello.py"))
+    assert ran["exit_code"] == 0
 
 
-@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
-def test_skill_exec_refuses_stale_review(tmp_path, monkeypatch, enforcement):
+def test_skill_exec_refuses_stale_review(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     skill_dir = _build_skill(skills_root, "hello")
     ctx = _make_ctx(tmp_path)
@@ -496,14 +499,13 @@ def test_skill_exec_refuses_stale_review(tmp_path, monkeypatch, enforcement):
     (skill_dir / "scripts" / "hello.py").write_text("print('edited')\n", encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     result = skill_exec_mod._handle_skill_exec(
         ctx, skill="hello", script="scripts/hello.py"
     )
     assert "SKILL_EXEC_BLOCKED" in result
     assert "edited since the last review" in result
     assert "current executable reviewer verdict" in result
-    assert ("qualified Advisory author acceptance" in result) is (enforcement == "advisory")
+    assert "qualified author acceptance" in result
 
 
 def test_skill_exec_refuses_extension_skill_in_phase3(tmp_path, monkeypatch):
@@ -916,7 +918,6 @@ def test_toggle_skill_allows_warnings_review(tmp_path, monkeypatch):
     skill_dir = _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     save_review_state(
         ctx.drive_root,
         "alpha",
@@ -930,32 +931,11 @@ def test_toggle_skill_allows_warnings_review(tmp_path, monkeypatch):
     assert enabled_resp["executable_review"] is True
 
 
-def test_toggle_skill_allows_warnings_under_blocking(tmp_path, monkeypatch):
+def test_skill_exec_allows_warnings(tmp_path, monkeypatch):
     skills_root = tmp_path / "skills"
     skill_dir = _build_skill(skills_root, "alpha")
     ctx = _make_ctx(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    save_review_state(
-        ctx.drive_root,
-        "alpha",
-        SkillReviewState(status="warnings", content_hash=compute_content_hash(skill_dir)),
-    )
-
-    resp = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
-
-    enabled_resp = json.loads(resp)
-    assert enabled_resp["enabled"] is True
-    assert enabled_resp["review_status"] == "warnings"
-    assert enabled_resp["executable_review"] is True
-
-
-def test_skill_exec_allows_warnings_under_blocking(tmp_path, monkeypatch):
-    skills_root = tmp_path / "skills"
-    skill_dir = _build_skill(skills_root, "alpha")
-    ctx = _make_ctx(tmp_path)
-    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     save_enabled(ctx.drive_root, "alpha", True)
     save_review_state(
         ctx.drive_root,
@@ -1637,9 +1617,9 @@ def test_toggle_skill_rejects_stale_pass_review(tmp_path, monkeypatch):
 
     resp = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
     assert "SKILL_TOGGLE_ERROR" in resp
-    # Default Advisory: the stale verdict no longer counts; the typed refusal's detail names both authorities.
+    # The stale verdict no longer counts; the typed refusal's detail names both authorities.
     assert '"error": "It turns on after a review passes."' in resp and ('"detail": "a current executable reviewer '
-            'verdict or a qualified Advisory author acceptance of these exact bytes"') in resp
+            'verdict or a qualified author acceptance of these exact bytes"') in resp
     assert '"blocking_reason": "review_stale"' in resp
 
 

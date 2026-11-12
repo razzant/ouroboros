@@ -138,7 +138,7 @@ Nobody tells an unmarked page to reload. A new choice reaches it when someone ne
 - **`contract`**, the setup vocabulary:
   - `providerFields`: credential and endpoint inputs; `settingKey` is the settings key to send.
   - `modelSlots`: model roles; `settingKey`. A `managed` slot is fixed by a deployment policy: show it, send nothing for it.
-  - `reviewModes` and `runtimeModes`: `value` is what the setting stores; under a deployment policy `runtimeModes` lists only the Access levels it allows.
+  - `runtimeModes`: `value` is what the setting stores; under a deployment policy it lists only the Access levels it allows. The review-enforcement fields (`reviewModes`, `initialState.reviewEnforcement`) are gone with the retired setting.
   - `localRoutingModes`.
   - `budgetFields`: with defaults and minimums.
   - `subscriptionFields`: declarations the setup call accepts, not settings.
@@ -172,7 +172,6 @@ To finish setup, send `POST /api/onboarding/complete`:
 
 | Initial-state field | Completion-body key |
 |---|---|
-| `reviewEnforcement` | `OUROBOROS_REVIEW_ENFORCEMENT` |
 | `runtimeMode` | `OUROBOROS_RUNTIME_MODE` |
 | `skillsRepoPath` | `OUROBOROS_SKILLS_REPO_PATH` |
 | `localSource` | `LOCAL_MODEL_SOURCE` |
@@ -550,7 +549,7 @@ Private Presence contacts carry `presence_contact` source facts separately from 
 - **`effects`:** when a saved key is consumed: `now`, `next_call`, `next_wake`, `next_task`, `restart` or `local_model` (the local model's own Stop, then Start).
 - **`tokens`:** one per key that is not a secret, covering its stored value and whether it is stored, for a conditional write.
 - **`setup_contract`:** the same vocabulary as setup.
-- **Other facts:** policy and agent roster.
+- **Other facts:** policy (`policy_state`: Access and Supervisor; its review axis is gone with the retired review enforcement) and agent roster.
 
 Secrets are masked: password types use the configured placeholder; others a short prefix plus `...`.
 

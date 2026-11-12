@@ -194,13 +194,12 @@ REVISED = "The status report is complete: all three checks passed, and the backu
 FORCED = "The round limit's best answer: the report is ready, its findings are unaddressed."
 
 
-def test_a_required_review_the_spent_allowance_refused_is_bound_as_recorded_and_never_holds_the_speech(
-        host, monkeypatch):
-    """Required and Blocking with one paid result cycle per root: the author's own review of its draft spent it,
-    so the host's review of the answer it then speaks is refused at $0 (``review_cycles_exhausted``). Nothing holds
-    that speech and nothing more is bought; the refusal is bound as at any delivery, so the terminal's review axis
-    keeps it rather than reading ``skipped``, the ledger keeps it as recorded, and a refusal, being no reviewer's
-    feedback, owes no mark."""
+def test_speech_revised_after_its_own_review_is_the_authors_and_buys_nothing_at_a_spent_allowance(host, monkeypatch):
+    """Required with one paid result cycle per root: the author's own review of its draft spent it and returned
+    whole, and the answer it then speaks is that review's revision, its author's to accept (``_revised``): no host
+    review is bought or refused at $0, nothing holds that speech, the terminal's review axis keeps the earlier PASS
+    as the accepted earlier revision's rather than reading ``skipped``, the ledger holds that one review, and
+    nothing is owed as a mark."""
     h = host
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
     h.addressed = ""  # nothing to leave the draft's review for: its own call returns that outcome whole
@@ -211,12 +210,10 @@ def test_a_required_review_the_spent_allowance_refused_is_bound_as_recorded_and_
     assert (spoken["status"], spoken["outcome"], spoken["text"]) == ("completed", "message", ANSWER)
     wait_for(lambda: poll(h, ref).status_code == 200, what="the terminal")
     axis = load_task_result(h.data, ref)["outcome_axes"]["review"]
-    assert (axis["status"], axis["source"], axis["aggregate_signals"], axis["blocked_reason"]) == (
-        "degraded", "result_review", ["DEGRADED"], "review_cycles_exhausted")
+    assert (axis["status"], axis["source"], axis["aggregate_signals"], axis["author_finish"]) == (
+        "pass", "result_review", ["PASS"], "previous_revision_accepted")
     rows = review_ledger.recent_records(h.data, ref, limit=50, surface="result")
-    refused = [row["record_id"] for row in rows if (row.get("verdict") or {}).get("aggregate") == "NOT_DISPATCHED"]
-    [record] = [review_ledger.load_record(h.data, record_id) for record_id in refused]
-    assert (record["state"], record["dispatch_refusal"]["kind"]) == ("settled", "review_cycles_exhausted")
+    assert [(row.get("verdict") or {}).get("aggregate") for row in rows] == ["PASS"], "no refusal, no second wave"
     assert replay_owed_late_reviews(h.data) == {"settled": 0, "waiting": 0, "retired": 0, "failed": 0}
     assert SECTION not in room_view(h, ref)
     assert_the_spoken_turn_stayed(h, ref, 2)

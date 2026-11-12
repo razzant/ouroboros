@@ -8,7 +8,7 @@ import pytest
 from ouroboros import config
 from ouroboros.tools import git
 from ouroboros.tools.parallel_review import aggregate_review_verdict
-from ouroboros.tools.review_helpers import review_enforcement_blocks
+from ouroboros.tools.review_helpers import cyber_review_authority
 from ouroboros.review_ledger import CouplingOutcome
 from tests.test_git_review_preflight_gate import candidate  # noqa: F401
 from tests.test_plan_task_tool import harness  # noqa: F401 — the planning organ's fixture
@@ -18,15 +18,41 @@ from tests.test_plan_task_tool import harness  # noqa: F401 — the planning org
 def access(request, monkeypatch):
     config.reset_runtime_mode_baseline_for_tests()
     config.initialize_runtime_mode_baseline(request.param)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
     yield request.param
     config.reset_runtime_mode_baseline_for_tests()
 
 
-def test_effective_authority_keeps_configured_enforcement(access):
-    assert config.get_review_enforcement() == "blocking"
-    assert review_enforcement_blocks() == (access == "pro")
-    assert not review_enforcement_blocks("advisory")
+def test_cyber_review_authority_is_true_only_in_cyber_pro(access):
+    """The one literal probe: only Cyber Pro is free of the duties to ask and to read first. A leftover Blocking
+    value of the retired setting moves nothing."""
+    assert cyber_review_authority() is (access == "cyber_pro")
+
+
+def test_an_unread_outcome_is_refused_outside_cyber_pro_and_stated_in_it(access, monkeypatch):
+    """The same probe at the decision seam (``review_collection.require_shown``): a record that holds an outcome the
+    decision's reference did not return refuses the continuation outside Cyber Pro; Cyber Pro continues with the gap
+    stated. A reference naming every outcome passes in both."""
+    from types import SimpleNamespace
+
+    from ouroboros import review_ledger, review_waiting
+    from ouroboros.tools import review_collection
+
+    record = {"record_id": "r1", "state": "settled", "verdict": {"aggregate": "FAIL"}}
+    monkeypatch.setattr(review_ledger, "ledger_root", lambda _ctx: "unused")
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, _record_id: record)
+    monkeypatch.setattr(review_waiting, "shown_outcomes", lambda _record, _rows=None: ["late outcome"])
+    ctx, source = SimpleNamespace(_review_advisory=[]), object()
+    reference = {"review_record_id": "r1", review_collection.SHOWN_OUTCOMES: ["earlier outcome"]}
+    if access == "cyber_pro":
+        assert review_collection.require_shown(ctx, reference, source) is source and ctx._author_commit_unread is True
+        assert any("did not read it" in item for item in ctx._review_advisory)
+    else:
+        with pytest.raises(review_collection.ContinuationUnread):
+            review_collection.require_shown(ctx, reference, source)
+    ctx = SimpleNamespace(_review_advisory=[])
+    reference[review_collection.SHOWN_OUTCOMES] = ["late outcome"]
+    assert review_collection.require_shown(ctx, reference, source) is source and ctx._author_commit_unread is False
 
 
 @pytest.mark.parametrize("status", [
@@ -48,7 +74,7 @@ def test_coupling_facts_survive_action_authority(candidate, access, status):  # 
     assert coupling_items[0]["verdict"] == "FAIL" and coupling_items[0]["tag"] == "coupling"
     if access == "cyber_pro":
         event = json.loads((candidate.drive_logs() / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
-        assert event["review_enforcement"] == "blocking"
+        assert "review_enforcement" not in event
         assert event["decision_authority"] == "cyber_pro"
 
 
@@ -76,8 +102,8 @@ def test_review_status_readiness_matches_the_actual_gate(candidate, access):  # 
 
 
 def test_failed_review_returns_before_git_and_cyber_continues_explicitly(candidate, access, monkeypatch):  # noqa: F811
-    """#1741: a Cyber outcome, even a failed review, reaches the author before Git; only the
-    author's explicit continuation commits the independently bound current bytes."""
+    """#1741: an outcome, even a failed review, reaches the author before Git in every Access; only
+    the author's explicit continuation commits the independently bound current bytes."""
     import json as _json
     from ouroboros.tools import commit_gate, git_review_cycle
 
@@ -96,10 +122,8 @@ def test_failed_review_returns_before_git_and_cyber_continues_explicitly(candida
     outcome = git_review_cycle._run_reviewed_stage_cycle(
         candidate, "candidate", 0, paths=["change.py"], require_release_tag=False,
     )
-    assert outcome["status"] == ("reviewed" if access == "cyber_pro" else "blocked")
+    assert outcome["status"] == "reviewed"
     assert result.status == "error" and result.blocked
-    if access != "cyber_pro":
-        return
     assert "Review outcome returned before commit" in outcome["message"]
     reference = _json.loads(outcome["message"].split("\n", 1)[1])["review_reference"]
     assert reference == outcome["review_reference"] and reference["surface"] == "commit"
@@ -182,9 +206,10 @@ def test_skill_gate_does_not_relabel_the_verdict(access, status, stale):
     from ouroboros.skill_review_status import skill_review_gate
 
     result = skill_review_gate(status, stale=stale, findings=[{"item": "skill_preflight", "verdict": "FAIL"}])
-    assert result["executable_review"] == (access == "cyber_pro")
+    # Outside Cyber Pro only blockers run (findings recorded); a pending or stale review does not.
+    assert result["executable_review"] == (access == "cyber_pro" or status == "blockers")
     assert result["status"] == status and result["stale"] == stale
-    assert result["review_enforcement"] == "blocking"
+    assert result["review_enforcement"] == "advisory"
     assert result["preflight_failed"] == (not stale)
 
 
@@ -201,14 +226,15 @@ def test_skill_author_can_finish_without_fabricating_first_feedback(tmp_path, ac
     monkeypatch.setattr(skill_exec, "run_skill_review_lifecycle_blocking", lambda *a, **k: pytest.fail("Unexpected panel"), raising=False)
     result = skill_exec._author_finish_existing_skill_review(ctx, binding, "demo",
         disposition="accepted", rationale="Run this local greeter with the available evidence.")
-    if access == "pro":
-        assert "requires advisory" in result["error"]
+    if access == "pro":  # outside Cyber Pro a finish needs feedback first
+        assert "author finish needs prior reviewer feedback" in result["error"]
+        assert not load_review_state(ctx.drive_root, "demo").author_disposition
         return
     assert "error" not in result, result
     saved = load_review_state(ctx.drive_root, "demo")
     assert saved.status == "pending" and not saved.raw_actor_records and not saved.raw_result
     assert saved.author_disposition["reviewer_signal"] == "pending"
-    assert saved.author_disposition["enforcement"] == "blocking"
+    assert saved.author_disposition["enforcement"] == "advisory"
     save_enabled(ctx.drive_root, "demo", True)
     actual = json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))
     assert actual["exit_code"] == 0 and "hello from skill" in actual["stdout"]
@@ -246,5 +272,5 @@ def test_skill_review_texts_state_the_gate_skill_exec_obeys(tmp_path, access, mo
 def test_real_plan_gate_ignores_legacy_force_plan_in_every_access_mode(harness, access):  # noqa: F811
     from ouroboros.owner_hurry import plan_gate_decision
 
-    result = plan_gate_decision(harness.make_ctx(force_plan=True), {}, enforcement="blocking")
+    result = plan_gate_decision(harness.make_ctx(force_plan=True), {})
     assert result["allow"] is True and result["status"] == "not_required"

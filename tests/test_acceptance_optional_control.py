@@ -3,8 +3,8 @@
 While a retained answer waits for Main's explicit completion (delivery control
 armed), prose and historical control objects never select bytes; ``finish_task``
 selects them, records the ``pending_review`` choice and acknowledges the owner
-source. The choice is offered only while a result review of the answer is still
-running and enforcement does not block (``review_result.pending_review_choice_offered``).
+source. The choice is offered while a result review of the answer is still running
+(``review_result.pending_review_choice_offered``), whatever the retired enforcement key says.
 The task-acceptance wait these tests once entered through is gone; a result
 review still running is the state that now offers the choice.
 """
@@ -48,7 +48,7 @@ def _held(tmp_path):
 def test_answer_choice_preserves_the_pending_review_wait_policy(tmp_path, monkeypatch, enforcement, mode, answer):
     from ouroboros.tools.review_result import pending_review_choice_offered
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)  # retired: read by nothing
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     registry, ctx, trace, candidate = _held(tmp_path)
     revised = ANSWER + " Budget: $12.\nThe complete timeline is two weeks."
@@ -67,13 +67,11 @@ def test_answer_choice_preserves_the_pending_review_wait_policy(tmp_path, monkey
     assert choice == ("finish" if answer == "finish" else "wait")
     # The host waits for the running review unless the choice is offered AND Main chose finish.
     waits = not (pending_review_choice_offered(registry._ctx) and choice == "finish")
-    assert waits is ((enforcement == "blocking" and mode != "cyber_pro") or answer != "finish")
+    assert waits is (answer != "finish")
     assert registry._ctx._result_review_pending == RUNNING_REVIEW
     assert candidate.control_episode_seen is True
     assert "Interim prose is activity, not a new completion selection" in str(ctx.messages)
-    assert ("Pending critics: choose pending_review=wait" in str(ctx.messages)) is (
-        enforcement == "advisory" or mode == "cyber_pro"
-    )
+    assert "Pending critics: choose pending_review=wait" in str(ctx.messages)
 
 
 @pytest.mark.parametrize("raw", [

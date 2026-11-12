@@ -236,7 +236,7 @@ export function reviewCopiesText(groups, poolSize) {
 }
 
 /** `subagent_runtime.PACKET_ONLY_POOL_WARNING`, the save warning of a pool no row of which reads the repository. */
-export const PACKET_ONLY_POOL_WARNING = 'Every reviewer is a Packet row, so none reads the repository and the coupling question (how the change fits the rest of the code) goes unanswered: with Blocking review, every commit to Ouroboros itself stops as “not performed”. Mark a reviewer that reads the work itself, or choose Advisory.';
+export const PACKET_ONLY_POOL_WARNING = 'Every reviewer is a Packet row, so none reads the repository and the coupling question (how the change fits the rest of the code) goes unanswered: every review of a commit to Ouroboros itself ends without a verdict. Mark a reviewer that reads the work itself.';
 
 /** A non-empty pool whose every row is Packet (`subagent_runtime.coupling_unanswerable`). */
 export function packetOnlyReviewPool(setting) {
@@ -1351,7 +1351,7 @@ export function createAvailableSubagentsEditor({
         adopt(settings) {
             const meta = settings?._meta?.available_subagents || {};
             state.processingPreference = String(settings?.[PROCESSING_PREFERENCE_KEY] || '');
-            state.tickCaption = reviewerTickCaption(settings?.OUROBOROS_REVIEW_ENFORCEMENT, settings?.OUROBOROS_RUNTIME_MODE);
+            state.tickCaption = reviewerTickCaption(settings?.OUROBOROS_RUNTIME_MODE);
             setSourceContext({ settings, providerProfiles: settings?._meta?.setup_contract?.providerProfiles });
             return load(availableSubagentsLoadValue(settings), {
                 source: String(meta.source || 'configured'), diagnostics: meta.diagnostics || meta.diagnostic || [], automatic: meta.automatic === true });
@@ -1382,15 +1382,14 @@ export function availableSubagentsEditorHost(hostId = 'available-subagents-edito
     return `<div id="${escapeHtml(hostId)}" class="available-subagents-editor"><div class="available-subagents-empty">Loading Available subagents…</div></div>`;
 }
 
-// What the Reviewer tick means under the SAVED strictness, one line each (IMPL_SPEC §5). Cyber Pro
-// Access outranks the enforcement it keeps but never enforces (review_helpers.review_enforcement_blocks).
+// What the Reviewer tick means under the SAVED Access, one line each (IMPL_SPEC §5): Cyber Pro composes freely
+// (review_helpers.cyber_review_authority).
 export const REVIEWER_TICK_CAPTIONS = Object.freeze({
-    blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
     advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 });
-export const reviewerTickCaption = (enforcement, access) => REVIEWER_TICK_CAPTIONS[String(access || '').trim().toLowerCase() === 'cyber_pro'
-    ? 'cyber_pro' : String(enforcement || '').trim().toLowerCase() === 'blocking' ? 'blocking' : 'advisory'];
+export const reviewerTickCaption = (access) => REVIEWER_TICK_CAPTIONS[String(access || '').trim().toLowerCase() === 'cyber_pro'
+    ? 'cyber_pro' : 'advisory'];
 
 export function availableSubagentsLoadValue(settings) {
     const raw = settings?.OUROBOROS_SUBAGENTS;

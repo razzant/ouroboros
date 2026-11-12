@@ -229,7 +229,7 @@ def _review_exception_projection(
         operation_state, failure_code = "settled", "review_run_cancelled"
     # Origin is a producer fact, not the rendered transport label (which can
     # contain error prose). Ledger/admission and authority refusals stay
-    # independent of the owner's advisory review enforcement.
+    # independent of the review's outcome.
     if isinstance(exc, UsageAccountingError) or failure_code in {
         "subscription_window_exhausted", "credential_pool_exhausted",
     }:

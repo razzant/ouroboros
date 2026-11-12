@@ -216,7 +216,7 @@ def test_frozen_system_index_of_a_managed_resolution_is_the_managed_artifact(tmp
     assert frozen.render_prompt_diff(unified=0) == capture_review_diff(ctx, repo, unified=0)
     # The triad capture seam: the system index is read through the live managed
     # call (same artifact, same S tree), not replayed from the frozen copy.
-    diff_text, seam_subject, block = _capture_triad_staged_diff(ctx, str(repo), True, frozen=frozen)
+    diff_text, seam_subject, block = _capture_triad_staged_diff(ctx, str(repo), frozen=frozen)
     assert block is None and diff_text == frozen.diff_text
     assert seam_subject is not None and seam_subject.staged_tree == frozen.tree_sha
 
@@ -279,9 +279,8 @@ def test_gate_subject_binding_mismatch_blocks_commit(tmp_path, monkeypatch):
         ctx, commit_message="binding ok", commit_start=0.0,
         skip_advisory_pre_review=True,
     )
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
-    # No mismatch block; nonblocking enforcement returns the outcome before Git (#1741).
-    assert outcome["status"] == ("passed" if review_enforcement_blocks() else "reviewed")
+    # No mismatch block; the outcome returns before Git (#1741).
+    assert outcome["status"] == "reviewed"
 
 
 def test_non_managed_capture_is_byte_identical(tmp_path, monkeypatch):
@@ -518,15 +517,13 @@ def test_brief_assembly_failure_blocks_the_whole_wave_before_dispatch(tmp_path, 
         review_mod, "_dispatch_unified_review",
         lambda *a, **k: pytest.fail("the wave dispatched despite the brief failure"),
     )
-    from ouroboros import config as cfg
+    review_err, coupling, reason, advisory = pr.run_parallel_review(ctx, "msg")
 
-    monkeypatch.setattr(cfg, "get_review_enforcement", lambda: "blocking")
-
-    review_err, coupling, reason, _advisory = pr.run_parallel_review(ctx, "msg")
-
-    assert review_err and "Failed to build the review brief" in review_err
-    assert "Seat slot_1: RuntimeError: the coupling checklist could not be loaded" in review_err \
-        or "Seat slot_1: the coupling checklist could not be loaded" in review_err
+    # The failure returns to the author as a recorded signal naming the seat: no verdict, no dispatch.
+    signal = "\n".join(advisory)
+    assert review_err is None and "Failed to build the review brief" in signal
+    assert "Seat slot_1: RuntimeError: the coupling checklist could not be loaded" in signal \
+        or "Seat slot_1: the coupling checklist could not be loaded" in signal
     assert reason == "infra_failure" and coupling is None
     assert ctx._last_triad_raw_results == []
 
@@ -724,14 +721,13 @@ def test_an_oversize_drop_never_promotes_an_added_critic_into_the_quorum(tmp_pat
     from tests.test_workflow_review_outcomes import _seat, _two_part
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     set_review_pool(monkeypatch, pool_roster(
         pool_seat("packet", "openai/gpt-5"),
         pool_seat("reading", "anthropic/claude-opus-4.1", delivery="native"),
         pool_seat("extra", "google/gemini-2.5-pro", delivery="native", marked=not additional),
     ))
-    panel = compose_panel(ReviewChangeRequest(root="system_repo", subject="index", reviewers=("extra",)),
-                          body=True, strictness="blocking")
+    panel = compose_panel(ReviewChangeRequest(root="system_repo", subject="index", reviewers=("packet", "reading", "extra")),
+                          body=True)
     with slots.composed_review_pool(panel.seats):
         plan = slots.commit_triad_delivery()
     assert plan["additional"] == [False, False, additional]
@@ -927,7 +923,7 @@ def test_withheld_seats_get_typed_records_on_wave_refusal(tmp_path, monkeypatch)
     plan = _row_plan(["api", "session"])
     plan.update(retrieves=[False, True], parts=[("change",), ("change", "coupling")],
                 routes=[ReviewRouteKind.API_CHAT, ReviewRouteKind.AGENT_SESSION])
-    prepared = {"prompt": "p", "blocking_review": False, "row_plan": plan,
+    prepared = {"prompt": "p", "row_plan": plan,
                 "models": list(plan["models"]), "routes": list(plan["routes"])}
     monkeypatch.setattr(
         review_mod, "_prepare_unified_review", lambda *a, **k: (prepared, None, False)

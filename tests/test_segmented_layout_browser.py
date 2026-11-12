@@ -21,7 +21,7 @@ pytest_plugins = ("tests.test_ui_smoke_playwright",)
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # Every group the renderer draws in Settings, with its number of choices.
 GROUPS = {
-    'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS': 3, 'OUROBOROS_REVIEW_ENFORCEMENT': 2,
+    'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS': 3,
     'OUROBOROS_TASK_REVIEW_MODE': 3, 'OUROBOROS_REVIEW_MAX_CYCLES': 5,
     'OUROBOROS_PROMPT_CACHE_TTL': 3, 'OUROBOROS_SAFETY_MODE': 3,
     'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE': 3, 'OUROBOROS_SERVER_HOST': 2,

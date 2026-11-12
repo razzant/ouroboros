@@ -19,6 +19,7 @@ from ouroboros import review_custody, review_ledger
 from ouroboros import usage_accounting as ua
 from ouroboros.tools.registry import ToolContext
 from tests import _contributor_packet_shared as shared
+from tests._review_change_fixtures import LANDING_DECISION, returned_reference
 from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 from tests.test_skill_exec import _build_skill
 
@@ -85,7 +86,6 @@ def _fresh_custody(monkeypatch):
 @pytest.fixture
 def skill(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(tmp_path))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", "")
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "3")
     _one_packet_seat(monkeypatch)
@@ -320,7 +320,6 @@ def test_a_concurrent_duplicate_relays_the_live_operation_and_never_pays_twice(t
 def project(tmp_path, monkeypatch):
     """A registered project (a recognized foreign root) with one staged change."""
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(tmp_path))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.delenv("OUROBOROS_REVIEW_MAX_CYCLES", raising=False)
     _one_packet_seat(monkeypatch)
     system = Path(shared.init_installed_body(tmp_path / "ouroboros")["repo"])
@@ -370,7 +369,6 @@ def staged_body(tmp_path, monkeypatch):
     shared.git(repo, "commit", "-q", "-m", "ignore caches")
     shared.git(repo, "cherry-pick", "--no-commit", fixture["head_sha"])
     _one_packet_seat(monkeypatch)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     monkeypatch.delenv("OUROBOROS_REVIEW_MAX_CYCLES", raising=False)
@@ -390,7 +388,7 @@ def test_the_commit_gate_review_repeat_after_an_empty_answer_is_a_new_paid_attem
     ctx = ToolContext(repo_dir=staged_body, drive_root=drive, task_id="task-gate")
     ask = dict(skip_advisory_review=True, goal="Return the proposal's constant", scope="ouroboros/helper.py")
     first = _run_non_committing_review_cycle(ctx, "fix: return the proposal's constant", **ask)
-    assert first["status"] == "blocked" and len(reviewer.sends) == 2, first
+    assert first["status"] == "reviewed" and len(reviewer.sends) == 2, first  # no verdict: returned to its author
     shared.git(staged_body, "add", "-A")  # the cycle hands its index back unstaged
     second = _run_non_committing_review_cycle(ctx, "fix: return the proposal's constant", **ask)
     assert reviewer.sends == ["", "", CLEAN], second
@@ -454,6 +452,18 @@ def _public_commit(staged_body, drive, monkeypatch, tests):
                            commit=lambda **kwargs: git._commit_reviewed(ctx, **ask, **kwargs))
 
 
+def _land(gate, returned, **kwargs):
+    """The author's explicit continuation on the outcome a commit call returned before Git: it reaches Git."""
+    return gate.commit(review_reference=returned_reference(returned), author_disposition=dict(LANDING_DECISION), **kwargs)
+
+
+def _failed_landing(gate, **kwargs):
+    """The first call's PASS returns before Git; the author's continuation reaches the failing Git write."""
+    landed = _land(gate, gate.commit(**kwargs), **kwargs)
+    assert "GIT_ERROR (commit)" in landed, landed
+    return landed
+
+
 def test_an_identical_commit_after_a_post_review_git_failure_collects_its_pass_at_zero(staged_body, tmp_path,
                                                                                          monkeypatch):
     """The public commit handler: the round's settled PASS is collected with its own roster (no second review,
@@ -461,16 +471,17 @@ def test_an_identical_commit_after_a_post_review_git_failure_collects_its_pass_a
     from ouroboros import review_ledger, review_state
 
     gate = _public_commit(staged_body, tmp_path / "public-drive", monkeypatch, ScriptedTests())
-    first = gate.commit()
-    assert "GIT_ERROR (commit)" in first, first
-    [paid] = review_state.load_state(gate.ctx.drive_root).attempts
+    _failed_landing(gate)
+    [paid] = [row for row in review_state.load_state(gate.ctx.drive_root).attempts if row.paid]
     assert review_ledger.load_record(gate.ctx.drive_root, paid.review_record_id)["verdict"]["aggregate"] == "PASS"
     second = gate.commit()
-    assert "GIT_ERROR (commit)" in second and "CUSTODY" not in second, second
+    assert second.startswith("Review outcome returned before commit. ") and "CUSTODY" not in second, second
+    assert returned_reference(second)["review_record_id"] == paid.review_record_id, "the retry names the verdict it collected"
+    retried = _land(gate, second)
+    assert "GIT_ERROR (commit)" in retried and "CUSTODY" not in retried, retried
     assert len(gate.sends) == 1 and len(gate.commits) == 2, "the settled PASS bought no second review"
     rows = review_state.load_state(gate.ctx.drive_root).attempts
-    assert [(row.attempt, row.paid, row.status) for row in rows] == [(1, True, "failed"), (2, False, "failed")]
-    assert rows[1].review_record_id == paid.review_record_id, "the retry names the verdict it collected"
+    assert sum(row.paid for row in rows) == 1 and {row.review_record_id for row in rows} == {paid.review_record_id}
 
 
 def test_a_collected_pass_still_owes_the_repeats_own_tests_before_git(staged_body, tmp_path, monkeypatch):
@@ -481,31 +492,31 @@ def test_a_collected_pass_still_owes_the_repeats_own_tests_before_git(staged_bod
 
     gate = _public_commit(staged_body, tmp_path / "public-drive", monkeypatch,
                           ScriptedTests("FAILED tests/test_helper.py::test_constant"))
-    first = gate.commit(skip_tests=True)
-    assert "GIT_ERROR (commit)" in first and gate.tests.selections == [] and len(gate.sends) == 1, first
+    _failed_landing(gate, skip_tests=True)
+    assert gate.tests.selections == [] and len(gate.sends) == 1
     second = gate.commit()
     assert "TESTS_PREFLIGHT_BLOCKED" in second and "test_constant" in second, second
     assert (len(gate.tests.selections), len(gate.commits), len(gate.sends)) == (1, 1, 1)
     assert gate.ctx._review_reconcile_only is False, "the refusal leaks no no-dispatch flag to another surface"
     shared.git(staged_body, "add", "-A")  # the refusal hands the index back unstaged
     gate.tests.failure = ""
-    third = gate.commit()
+    third = _land(gate, gate.commit())
     assert "GIT_ERROR (commit)" in third and "CUSTODY" not in third, third
-    assert (len(gate.tests.selections), len(gate.commits), len(gate.sends)) == (2, 2, 1)
+    assert (len(gate.tests.selections), len(gate.commits), len(gate.sends)) == (3, 2, 1)
     rows = load_state(gate.ctx.drive_root).attempts
-    assert [(row.attempt, row.paid, row.status) for row in rows] == [
-        (1, True, "failed"), (2, False, "blocked"), (3, False, "failed")]
-    assert rows[1].block_reason == "tests_preflight_blocked" and rows[2].review_record_id == rows[0].review_record_id
+    assert sum(row.paid for row in rows) == 1 and len({row.review_record_id for row in rows if row.status != "blocked"}) == 1
+    assert [row.block_reason for row in rows if row.status == "blocked"] == ["tests_preflight_blocked"]
 
 
 def test_a_collected_pass_runs_the_repeats_own_wider_test_selection(staged_body, tmp_path, monkeypatch):
     """The test request is not review identity: a repeat asking for the full battery collects the PASS at $0,
     and the tests preflight before its Git write runs the selection it asked for."""
     gate = _public_commit(staged_body, tmp_path / "public-drive", monkeypatch, ScriptedTests())
-    assert "GIT_ERROR (commit)" in gate.commit()
-    second = gate.commit(full_tests=True, test_reason="the helper's consumers are unresolved")
+    _failed_landing(gate)
+    wider = dict(full_tests=True, test_reason="the helper's consumers are unresolved")
+    second = _land(gate, gate.commit(**wider), **wider)
     assert "GIT_ERROR (commit)" in second and (len(gate.commits), len(gate.sends)) == (2, 1), second
-    assert [selection["full_tests"] for selection in gate.tests.selections] == [False, True]
+    assert [selection["full_tests"] for selection in gate.tests.selections][-1] is True
 
 
 def test_a_binding_refusal_before_collecting_a_pass_is_the_repeats_own_outcome(staged_body, tmp_path, monkeypatch):
@@ -514,12 +525,13 @@ def test_a_binding_refusal_before_collecting_a_pass_is_the_repeats_own_outcome(s
     from ouroboros.tools import git
 
     gate = _public_commit(staged_body, tmp_path / "public-drive", monkeypatch, ScriptedTests())
-    assert "GIT_ERROR (commit)" in gate.commit()
+    _failed_landing(gate)
+    before = load_state(gate.ctx.drive_root).attempts
     monkeypatch.setattr(git, "_review_binding_precondition_error", lambda *_a, **_k: "REVIEW_BINDING_INVALID: fixture")
     assert "REVIEW_BINDING_INVALID" in gate.commit()
     rows = load_state(gate.ctx.drive_root).attempts
-    assert [(row.attempt, row.paid, row.status) for row in rows] == [(1, True, "failed"), (2, False, "blocked")]
-    assert rows[1].block_reason == "review_binding_invalid" and gate.ctx._review_reconcile_only is False
+    assert rows[:len(before)] == before and [(row.paid, row.status) for row in rows[len(before):]] == [(False, "blocked")]
+    assert rows[-1].block_reason == "review_binding_invalid" and gate.ctx._review_reconcile_only is False
     assert (len(gate.commits), len(gate.sends)) == (1, 1)
 
 
@@ -531,15 +543,15 @@ def test_an_identical_review_only_cycle_after_a_pass_collects_it_at_zero(staged_
     _native_gate_seat(monkeypatch, sends)
     ctx = ToolContext(repo_dir=staged_body, drive_root=tmp_path / "gate-drive", task_id="task-gate")
     first = _run_non_committing_review_cycle(ctx, "fix: return the proposal's constant", **GATE_ASK)
-    assert first["status"] == "passed", first
+    assert first["status"] == "reviewed", first  # a single seat's PASS returns with its degradation (no diversity)
     shared.git(staged_body, "add", "-A")
     second = _run_non_committing_review_cycle(ctx, "fix: return the proposal's constant", **GATE_ASK)
-    assert second["status"] == "passed", second
+    assert second["status"] == first["status"], second
     assert len(sends) == 1 and [row.paid for row in load_state(ctx.drive_root).attempts] == [True, False]
 
 
-def test_an_identical_commit_after_a_failing_verdict_is_refused_free(staged_body, tmp_path, monkeypatch):
-    """A usable FAIL keeps its existing free identical-diff refusal: one review, nothing bought on the repeat."""
+def test_an_identical_commit_after_a_failing_verdict_buys_nothing(staged_body, tmp_path, monkeypatch):
+    """A usable FAIL returns to its author, and the identical repeat returns it again: one review, nothing bought."""
     import json
 
     from ouroboros.tools.git_review_cycle import _run_non_committing_review_cycle
@@ -551,10 +563,10 @@ def test_an_identical_commit_after_a_failing_verdict_is_refused_free(staged_body
         "change_clean": False, "coupling": shared._coupling_matrix("s1 checked the consumers")}))
     ctx = ToolContext(repo_dir=staged_body, drive_root=tmp_path / "gate-drive", task_id="task-gate")
     first = _run_non_committing_review_cycle(ctx, "fix: return the proposal's constant", **GATE_ASK)
-    assert first["status"] == "blocked" and first["block_reason"] == "critical_findings", first
+    assert first["status"] == "reviewed" and "returns the wrong constant" in first["message"], first
     shared.git(staged_body, "add", "-A")
     second = _run_non_committing_review_cycle(ctx, "fix: return the proposal's constant", **GATE_ASK)
-    assert second["block_reason"] == "identical_diff_refused" and len(sends) == 1, second
+    assert second["status"] == "reviewed" and len(sends) == 1, second
 
 
 def test_an_identical_commit_from_a_fresh_context_collects_the_counted_pass_while_an_adviser_runs(
@@ -567,16 +579,16 @@ def test_an_identical_commit_from_a_fresh_context_collects_the_counted_pass_whil
     from ouroboros.tools import git
 
     gate = _public_commit(staged_body, tmp_path / "public-drive", monkeypatch, ScriptedTests())
-    first = gate.commit()
-    assert "GIT_ERROR (commit)" in first, first
-    [paid] = review_state.load_state(gate.ctx.drive_root).attempts
+    _failed_landing(gate)
+    [paid] = [row for row in review_state.load_state(gate.ctx.drive_root).attempts if row.paid]
     adviser = {"slot_id": "adviser", "model_id": "test/adviser", "status": "error", "operation_id": "op-adviser",
                "operation_state": "in_flight", "late_result_pending": True, "pending_invocation_id": "inv-adviser",
                "review_plan": {"additional": True}}
 
     def adviser_still_running(state):
-        state.attempts[0].triad_raw_results.append(dict(adviser))
-        state.attempts[0].late_result_pending = True
+        original = next(row for row in state.attempts if row.paid)
+        original.triad_raw_results.append(dict(adviser))
+        original.late_result_pending = True
     review_state.update_state(gate.ctx.drive_root, adviser_still_running)
     review_ledger.revise_record(gate.ctx.drive_root, paid.review_record_id, lambda payload: {
         **payload, "state": "pending", "rows": [*payload["rows"], {
@@ -585,10 +597,13 @@ def test_an_identical_commit_from_a_fresh_context_collects_the_counted_pass_whil
     fresh = ToolContext(repo_dir=staged_body, drive_root=gate.ctx.drive_root, task_id=gate.ctx.task_id)
 
     second = git._commit_reviewed(fresh, **GATE_ASK, commit_message="fix: return the proposal's constant")
+    assert second.startswith("Review outcome returned before commit. "), second
+    landed = git._commit_reviewed(fresh, **GATE_ASK, commit_message="fix: return the proposal's constant",
+                                  review_reference=returned_reference(second), author_disposition=dict(LANDING_DECISION))
 
-    assert "GIT_ERROR (commit)" in second, second
+    assert "GIT_ERROR (commit)" in landed, landed
     assert len(gate.sends) == 1 and len(gate.commits) == 2, "the counted PASS bought no second wave"
-    original = review_state.load_state(gate.ctx.drive_root).attempts[0]
+    original = next(row for row in review_state.load_state(gate.ctx.drive_root).attempts if row.paid)
     kept = next(row for row in original.triad_raw_results if row["slot_id"] == "adviser")
     assert kept["operation_state"] == "in_flight" and kept["pending_invocation_id"] == "inv-adviser"
     assert sum(row.paid for row in review_state.load_state(gate.ctx.drive_root).attempts) == 1

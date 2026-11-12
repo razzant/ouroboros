@@ -411,3 +411,29 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     else:
         assert len(messages) == 3 and expects in messages[2]["content"]
         assert messages[2]["content"].startswith("[SYSTEM NOTICE]")
+
+
+@pytest.mark.parametrize("wake", ["hurry", "answer"])
+def test_after_an_owner_wait_the_first_round_carries_the_hurry_words_only_for_a_hurry(tmp_path, monkeypatch, wake):
+    """STEP4 4.5, at the owner-question wait: the Hurry that woke the wait reaches the next round's messages as one
+    typed row of the owner's act (``HURRY_WORDS``), never as an answer; an answer wake carries no such row."""
+    import ouroboros.loop as loop
+    from ouroboros import owner_hurry as oh
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+
+    ctx = native_context(tmp_path)
+    ctx.current_chat_id = 1
+    record_asked(tmp_path, ctx.task_id, quiz_id="q1", question="Which path?", options=["a", "b"],
+                 wait_for_answer=True, chat_id=1, assumption="a meanwhile")
+    _bridge(monkeypatch)
+    wake_with = _hurry if wake == "hurry" else _answer
+    monkeypatch.setattr("ouroboros.owner_wait.time.sleep", lambda _seconds: wake_with(tmp_path, ctx.task_id))
+    messages = []
+    wait_after_tools(ctx, messages, {}, {}, 1, [], set())
+    loop._drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id,
+                                  SimpleNamespace(put_nowait=lambda _event: None), set(), owner_ctx=ctx)
+    rows = [message for message in messages if message.get("content") == oh.HURRY_WORDS]
+    if wake == "hurry":
+        assert len(rows) == 1 and rows[0][HOST_CONTEXT_KIND_KEY] == OWNER_WORDS_KIND
+    else:
+        assert rows == [] and not oh.latched(ctx)

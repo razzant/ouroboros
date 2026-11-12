@@ -326,13 +326,12 @@ class ComposedPanel:
                             for slot, parts, extra in self.seats for part in parts))
 
 
-def review_strictness(enforcement: Optional[str] = None, mode: Optional[str] = None) -> str:
-    """Effective authority, independent of the runtime mode's other capabilities."""
-    from ouroboros.config import get_review_enforcement, get_runtime_mode
+def review_strictness(mode: Optional[str] = None) -> str:
+    """The panel rule in force: ``cyber_pro`` composes freely, ``advisory`` keeps the counted floor."""
+    from ouroboros.config import get_runtime_mode
     from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 
-    return ("cyber_pro" if mode_has_unrestricted_agency(mode if mode is not None else get_runtime_mode())
-            else enforcement if enforcement is not None else get_review_enforcement())
+    return "cyber_pro" if mode_has_unrestricted_agency(mode if mode is not None else get_runtime_mode()) else "advisory"
 
 
 def review_cost_facts(cost: Any, *, route: str = "", model: str = "") -> Dict[str, Any]:
@@ -345,9 +344,8 @@ def review_cost_facts(cost: Any, *, route: str = "", model: str = "") -> Dict[st
             "cost_kind": "subscription" if subscription else "measured" if known else "unknown"}
 
 
-# Surfaces whose counted floor is the owner's strictness: Blocking widens a named
-# subset to every ticked reviewer; Advisory refuses that narrowing without a reason.
-# ``result_required`` is the host fact "this is a Required root result wave"
+# Surfaces with a counted floor outside Cyber Pro: a named subset needs at least one
+# ticked reviewer and a reason when it narrows the pool. ``result_required`` is the host fact "this is a Required root result wave"
 # (``review_result.required_root_wave``), never a model argument. Auto, a child and
 # Cyber Pro stay on ``result`` / free composition. ``chosen_by`` is the caller's.
 _COUNTED_FLOOR_SURFACES = frozenset({"own_body", "skill", "plan_first", "result_required"})
@@ -358,10 +356,10 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
                          pool: Optional[Sequence[Any]] = None, reviewer_effort: str = "",
                          coupling_only: Sequence[str] = (), chosen_by: str = "ouroboros",
                          reason_field: str = "reason") -> ComposedPanel:
-    """Compose one frozen wave. Blocking widens only the counted-floor surfaces.
+    """Compose one frozen wave; the counted-floor surfaces keep the reason rule.
 
     Those are body, skill, a first body-plan ask, and a Required root result wave.
-    Advisory narrowing on the same surfaces requires a reason; an adviser neither
+    Narrowing on them outside Cyber Pro requires a reason; an adviser neither
     satisfies the counted minimum nor acquires authority from its delivery. Optional
     plan follow-ups, preflight, Auto/child result waves and Cyber Pro keep named-row
     composition. Omission selects the pool, including its disclosed Main fallback.
@@ -397,15 +395,14 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
     named = list({slot.slot_id: slot for slot in map(resolve, reviewers)}.values())
     requested = {slot.slot_id for slot in named}
     counted = requested & by_id.keys()
-    widens = strictness == "blocking" and surface in _COUNTED_FLOOR_SURFACES
     narrowed = surface != "preflight" and bool(named) and counted != by_id.keys()
     counted_hint = "name main (the empty pool's counted seat)" if main_alone else "name at least one reviewer from the review pool"
-    if strictness == "advisory" and narrowed and surface in _COUNTED_FLOOR_SURFACES:
+    if strictness != "cyber_pro" and narrowed and surface in _COUNTED_FLOOR_SURFACES:
         if not counted:
             raise PanelCompositionError(f"REVIEW_PANEL_EMPTY: {counted_hint}; advisers are heard, not counted. No review was dispatched ($0).")
         if not str(reason).strip():
-            raise PanelCompositionError(f"REVIEW_PANEL_REASON_REQUIRED: an Advisory panel with fewer than all ticked reviewers requires a reason. Supply {reason_field} or omit reviewers to ask the whole pool. No review was dispatched ($0).")
-    selected = ordered if not named or widens else [slot for slot in named if slot.slot_id in by_id]
+            raise PanelCompositionError(f"REVIEW_PANEL_REASON_REQUIRED: a panel with fewer than all ticked reviewers requires a reason. Supply {reason_field} or omit reviewers to ask the whole pool. No review was dispatched ($0).")
+    selected = ordered if not named else [slot for slot in named if slot.slot_id in by_id]
     seats = [PoolSeat(slot, tuple(seat_parts(slot))) for slot in selected]
     seats.extend(PoolSeat(slot, tuple(seat_parts(slot)), surface != "preflight")
                  for slot in named if slot.slot_id not in by_id)
@@ -427,9 +424,8 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
                   "route": str(getattr(slot.route, "value", slot.route))} for slot in configured if not main_alone],
         "pool_empty": main_alone, "main_self_review": main_alone,
         "chosen_by": chosen_by, "strictness": strictness, "reason": str(reason),
-        "composition": "full_pool" if not named or widens else "composed",
-        "widened_from": list(reviewers) if widens and narrowed else [],
-        "reviewers_subset_ignored": widens and narrowed, "reason_missing": narrowed and not str(reason).strip() and not widens,
+        "composition": "full_pool" if not named else "composed",
+        "reason_missing": narrowed and not str(reason).strip(),
         "reviewers_requested": list(reviewers), "coupling_only": list(coupling_only), "coupling_only_ignored": ignored,
         "additional": [seat.slot.slot_id for seat in seats if seat.additional], "not_reached": [],
         "assigned": [seat.slot.slot_id for seat in seats if not seat.additional],

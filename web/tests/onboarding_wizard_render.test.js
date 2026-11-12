@@ -160,7 +160,7 @@ test(`importing the onboarding wizard renders the '${step}' step without throwin
 });
 }
 
-test('the setup contract renders Cyber Pro beside the independent Blocking choice', async () => {
+test('the setup contract renders the four Access choices and no review-mode choice', async () => {
     const reviewIndex = BOOTSTRAP.stepOrder.indexOf('review_mode');
     const bootstrap = {
         ...BOOTSTRAP,
@@ -170,24 +170,23 @@ test('the setup contract renders Cyber Pro beside the independent Blocking choic
         const html = doc.getElementById('root').innerHTML;
         assert.match(html, /wizard-choice-grid four/);
         assert.match(html, /data-runtime-mode="cyber_pro"[\s\S]*Cyber Pro/);
-        assert.match(html, /data-review-mode="blocking"[\s\S]*Blocking/);
+        assert.doesNotMatch(html, /data-review-mode|Blocking|Advisory/);
     });
 });
 
-// IMPL_SPEC §5, verbatim: what a Reviewer tick means per strictness (Cyber Pro outranks enforcement).
+// IMPL_SPEC §5, verbatim: what a Reviewer tick means per Access.
 const TICK = {
-    blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
     advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 };
 
-test('the Review step says what a Reviewer tick means under the chosen mode, repainted in place', async () => {
+test('the Access step says what a Reviewer tick means under the chosen Access, repainted in place', async () => {
     const reviewIndex = BOOTSTRAP.stepOrder.indexOf('review_mode');
     const bootstrap = {
         ...BOOTSTRAP,
         stepOrder: [...BOOTSTRAP.stepOrder.slice(reviewIndex), ...BOOTSTRAP.stepOrder.slice(0, reviewIndex)],
         initialState: {
-            ...BOOTSTRAP.initialState, reviewEnforcement: 'advisory', runtimeMode: 'advanced',
+            ...BOOTSTRAP.initialState, runtimeMode: 'advanced',
             availableSubagents: { enabled: true, items: [{ subagent_id: 'reviewer_one', review_eligible: true,
                 recommended_use: 'Reviews changes.', route: { kind: 'api_model', target_id: 'openai/gpt-5.6-luna' } }] },
         },
@@ -198,25 +197,19 @@ test('the Review step says what a Reviewer tick means under the chosen mode, rep
         button.getAttribute = (key) => (key === attribute ? value : null);
         return button;
     });
-    const [advisory, blocking] = choices('data-review-mode', ['advisory', 'blocking']);
     const access = choices('data-runtime-mode', ['light', 'advanced', 'pro', 'cyber_pro']);
     const lead = 'Reviewers: 1 — the rows marked Reviewer under Models → Available subagents. ';
     const prepare = (doc) => {
         const root = doc.getElementById('root');
         const others = root.querySelectorAll;
         root.querySelector = (selector) => (selector === '[data-reviewers-note]' ? note : inertElement());
-        root.querySelectorAll = (selector) => ({ '[data-review-mode]': [advisory, blocking], '[data-runtime-mode]': access }[selector]
-            || others(selector));
+        root.querySelectorAll = (selector) => ({ '[data-runtime-mode]': access }[selector] || others(selector));
     };
     await withWizard(bootstrap, 'reviewers-note', async ({ doc }) => {
         const html = doc.getElementById('root').innerHTML;
         assert.ok(html.includes(`data-reviewers-note>${lead}${TICK.advisory}</div>`), html.match(/data-reviewers-note>[^<]*/)?.[0]);
         assert.doesNotMatch(html, /each of them reviews every change|composes the panel from them/);
-        blocking.fire('click');
-        assert.equal(note.textContent, lead + TICK.blocking);
-        access[3].fire('click');  // Cyber Pro Access: findings never block, whatever the enforcement kept
-        assert.equal(note.textContent, lead + TICK.cyber_pro);
-        advisory.fire('click');
+        access[3].fire('click');  // Cyber Pro Access: Ouroboros decides whom to ask
         assert.equal(note.textContent, lead + TICK.cyber_pro);
         access[1].fire('click');
         assert.equal(note.textContent, lead + TICK.advisory);
@@ -233,7 +226,6 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
         initialState: {
             ...BOOTSTRAP.initialState,
             openrouterKey: 'test-key-not-a-secret',
-            reviewEnforcement: 'blocking',
         },
     };
     const modelInputs = {
@@ -267,11 +259,11 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
             input.value = value;
             input.fire('input');
         }
-        doc.getElementById('next-btn').fire('click');   // Models → review mode.
+        doc.getElementById('next-btn').fire('click');   // Models → Access.
         const access = doc.getElementById('root').innerHTML;  // the access step in a person's words
         assert.match(access, /How far Ouroboros reaches into its own code and this computer\./);
         assert.match(access, /Folder of your own skills \(optional\)/);
-        doc.getElementById('next-btn').fire('click');   // Review mode → budget.
+        doc.getElementById('next-btn').fire('click');   // Access → budget.
         for (const [id, value] of [['total-budget', '15.5'], ['per-task-budget', '5.25']]) {
             const input = doc.getElementById(id);
             input.value = value;
@@ -294,12 +286,12 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
             OUROBOROS_MODEL_FALLBACKS: 'test/owner-fallback',
             TOTAL_BUDGET: 15.5,
             OUROBOROS_PER_TASK_COST_USD: 5.25,
-            OUROBOROS_REVIEW_ENFORCEMENT: 'blocking',
             OUROBOROS_RUNTIME_MODE: 'advanced',
             subscriptionsConnected: false,
             skipSubscriptionPresets: false,
         };
         for (const [key, value] of Object.entries(expected)) assert.equal(requests[0].body[key], value, key);
+        assert.equal('OUROBOROS_REVIEW_ENFORCEMENT' in requests[0].body, false, 'the retired setting is never written');
         assert.deepEqual(replaced, [], 'a pending save is not a completion');
         assert.equal(doc.getElementById('next-btn').disabled, true);
         returnReceipt({
@@ -771,7 +763,7 @@ test('a staged language the gateway refuses for good does not hold the finished 
     }
 });
 
-test('the summary warns, and still offers Start, when Blocking review has no reviewer that reads the work', async () => {
+test('the summary warns, and still offers Start, when no reviewer reads the work, in every Access', async () => {
     // Completion closes the wizard, so a save warning would never be read: the summary says it before the save.
     const reviewer = (id, target, delivery) => ({
         subagent_id: id, recommended_use: `use ${id}`, review_eligible: true,
@@ -791,16 +783,15 @@ test('the summary warns, and still offers Start, when Blocking review has no rev
     };
     const warning = /data-review-pool-warning>Every reviewer is a Packet row, so none reads the repository/;
 
-    const warned = await summaryHtml('pool=packet-blocking', { reviewEnforcement: 'blocking', availableSubagents: packetOnly });
-    assert.match(warned, warning);
-    assert.match(warned, /Start Ouroboros/, 'a warning, never a refusal');
     for (const [query, initial] of [
-        ['pool=packet-advisory', { reviewEnforcement: 'advisory', availableSubagents: packetOnly }],
-        ['pool=reader-blocking', { reviewEnforcement: 'blocking', availableSubagents: withReader }],
-        ['pool=packet-cyber-pro', { reviewEnforcement: 'blocking', runtimeMode: 'cyber_pro', availableSubagents: packetOnly }],
+        ['pool=packet', { availableSubagents: packetOnly }],
+        ['pool=packet-cyber-pro', { runtimeMode: 'cyber_pro', availableSubagents: packetOnly }],
     ]) {
-        assert.doesNotMatch(await summaryHtml(query, initial), /data-review-pool-warning/, query);
+        const warned = await summaryHtml(query, initial);
+        assert.match(warned, warning, query);
+        assert.match(warned, /Start Ouroboros/, 'a warning, never a refusal');
     }
+    assert.doesNotMatch(await summaryHtml('pool=reader', { availableSubagents: withReader }), /data-review-pool-warning/);
 });
 
 // Audit 05.11 item 13: with a subscription, Summary says what an exhausted quota does. A set Fallback continues the

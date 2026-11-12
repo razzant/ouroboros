@@ -92,7 +92,7 @@ def cyber_settings(isolated_settings, monkeypatch):
     initial = {
         "OUROBOROS_RUNTIME_MODE": "cyber_pro", "OUROBOROS_SAFETY_MODE": "full",
         "OUROBOROS_CONTEXT_MODE": "max", "OUROBOROS_CONTEXT_MODE_AUTO_LOW": "false",
-        "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
+        "OUROBOROS_TASK_REVIEW_MODE": "required",
         **{key: "original-install-fact" for key in cfg.ENDPOINT_AUTHORED_SETTINGS},
     }
     isolated_settings.write_text(json.dumps(initial), encoding="utf-8")
@@ -140,7 +140,7 @@ def test_cyber_generic_post_saves_controls_and_preserves_fact_provenance(cyber_s
     chosen = {
         "OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_SAFETY_MODE": "off",
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true", "OUROBOROS_MODEL": "openai/test-model",
-        "OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+        "OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_TASK_REVIEW_MODE": "auto",
         "SERVICE_API_KEY": "owner-test-key",
     }
     response = TestClient(app).post("/api/settings", json={
@@ -164,7 +164,7 @@ def test_cyber_generic_post_saves_controls_and_preserves_fact_provenance(cyber_s
     change, later_change = (event for event in events if event.get("action") == "settings_changed")
     assert change["changes"]["OUROBOROS_SAFETY_MODE"] == {"old": "full", "new": "off"}
     assert change["changes"]["OUROBOROS_CONTEXT_MODE"] == {"old": "max", "new": "low"}
-    assert change["changes"]["OUROBOROS_REVIEW_ENFORCEMENT"] == {"old": "blocking", "new": "advisory"}
+    assert change["changes"]["OUROBOROS_TASK_REVIEW_MODE"] == {"old": "required", "new": "auto"}
     assert change["changes"]["OUROBOROS_RUNTIME_MODE"] == {"old": "cyber_pro", "new": "pro"}
     assert change["changes"]["SERVICE_API_KEY"] == {"withheld": "secret"}
     assert "owner-test-key" not in json.dumps(change)
@@ -220,13 +220,13 @@ def test_cyber_context_save_retains_current_task_snapshot(cyber_settings, monkey
     snapshot = task_settings_snapshot(cfg.load_settings(), dict(os.environ))
     with task_settings_scope(snapshot):
         response = TestClient(app).post("/api/settings", json={
-            "OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+            "OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_TASK_REVIEW_MODE": "auto",
         })
         assert response.status_code == 200, response.text
         assert cfg.get_owner_context_mode() == "max"
-        assert cfg.get_review_enforcement() == "blocking"
+        assert cfg.get_task_review_mode() == "required"
     assert cfg.get_owner_context_mode() == "low"
-    assert cfg.get_review_enforcement() == "advisory"
+    assert cfg.get_task_review_mode() == "auto"
     assert snapshot.settings["OUROBOROS_CONTEXT_MODE"] == "max"
 
 

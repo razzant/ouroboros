@@ -64,12 +64,11 @@ def _attempt(n, phase, fingerprint):
     return SimpleNamespace(tool_name="commit_reviewed", attempt=n, phase=phase, pre_review_fingerprint=fingerprint)
 
 
-def _continuation_ctx(tmp_path, monkeypatch, attempts, *, enforcement="advisory"):
+def _continuation_ctx(tmp_path, monkeypatch, attempts):
     from ouroboros import config, review_state
 
     monkeypatch.setattr(review_state, "_load_state_unlocked", lambda *_a, **_kw: SimpleNamespace(
         filter_attempts=lambda **_kw: list(attempts)))
-    monkeypatch.setattr(config, "get_review_enforcement", lambda: enforcement)
     monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
     return SimpleNamespace(repo_dir=str(tmp_path), drive_root=str(tmp_path), task_id="t1", _commit_call_notes=[])
 
@@ -101,31 +100,23 @@ def test_a_decision_without_a_reference_asks_for_the_review_or_names_the_exact_r
 
 
 def test_the_continuation_texts_name_the_step_their_cause_leaves(tmp_path, monkeypatch):
-    """06.11: Blocking says its review decides and lands a passing commit; Advisory names collecting a running wave,
-    else the returned outcome; an unreadable state names the reference instead of buying a review."""
+    """06.11: a running wave names collecting it, else the returned outcome; an unreadable state names the
+    reference instead of buying a review. A leftover Blocking value of the retired setting changes no text."""
     from ouroboros import review_state
     from ouroboros.tools import review_collection as rc
 
-    blocking = _continuation_ctx(tmp_path, monkeypatch, [], enforcement="blocking")
-    call = {"author_disposition": DECISION}
-    assert rc.default_commit_continuation(blocking, call) == "" and call["author_disposition"] is None
-    assert "under Blocking enforcement this call's review decides" in blocking._commit_call_notes[0]
-    reviewed = _continuation_ctx(tmp_path, monkeypatch, [_attempt(1, "review_only", "a")], enforcement="blocking")
-    assert "a passing review lands the commit" in rc.default_commit_continuation(reviewed, {"author_disposition": DECISION})
-    assert "a passing review lands the commit" in rc.continuation_refusal(ValueError("requires Advisory"))
-    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
+    ctx = _continuation_ctx(tmp_path, monkeypatch, [])
     assert "collect that outcome" in rc.continuation_refusal(rc.ContinuationWaits("reviewers are still running"))
     assert "decide with the review_reference an outcome you read returned" in rc.continuation_refusal(ValueError("x"))
+    assert "a passing review lands the commit" not in rc.continuation_refusal(ValueError("x"))
 
     def unreadable(*_a, **_kw):
         raise OSError("state locked away")
     monkeypatch.setattr(review_state, "_load_state_unlocked", unreadable)
-    text = rc.default_commit_continuation(blocking, {"author_disposition": DECISION})  # advisory again here
+    text = rc.default_commit_continuation(ctx, {"author_disposition": DECISION})
     assert "unreadable (state locked away)" in text and "Next: name review_reference" in text
-    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "blocking")
-    assert "a passing review lands the commit" in rc.default_commit_continuation(blocking, {"author_disposition": DECISION})
-    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory")
-    assert rc.default_commit_continuation(blocking, {"author_disposition": DECISION, "review_reference": {}}) == ""
+    assert rc.default_commit_continuation(ctx, {"author_disposition": DECISION, "review_reference": {}}) == ""
 
 
 def test_a_continuation_sets_aside_the_fields_of_another_step_and_a_new_ask_keeps_them():

@@ -412,7 +412,7 @@ def collect_recorded_commit_actor(ctx, surface: str, slot_id: str, retry_key: st
     return (result.actors or [{}])[0]
 
 
-def prepare_recorded_commit_review(ctx, *, target_repo, blocking_review: bool, layer: str,
+def prepare_recorded_commit_review(ctx, *, target_repo, layer: str,
                                    frozen: Any = None, review_rebuttal: str = "") -> tuple:
     """Restore a paid packet from its roster without fresh source/catalog assembly.
 
@@ -432,8 +432,7 @@ def prepare_recorded_commit_review(ctx, *, target_repo, blocking_review: bool, l
     ctx._last_triad_models = list(plan["models"])
     return {"prompt": "", "stable_prefix_len": 0, "models": plan["models"],
             "routes": plan["routes"], "row_plan": plan, "session_task": "",
-            "target_repo": target_repo, "blocking_review": blocking_review,
-            "layer": layer}, None, False
+            "target_repo": target_repo, "layer": layer}, None, False
 
 
 # A settled attempt's lifecycle projection, per tool: a commit's outcome returned before Git

@@ -391,15 +391,6 @@ def _undecided_children_listing(undecided: list[Dict[str, Any]]) -> str:
     )
 
 
-def _plan_gate_identity(decision: Dict[str, Any]) -> str:
-    """Typed identity of the planning gate as the mind was last TOLD it: the decision's
-    own typed fields (status, the holding objections, the pending asks, the hurry
-    attribution) — never the rendered English (astra F3)."""
-    return "|".join(str(decision.get(key) or "") for key in (
-        "status", "allow", "enforcement", "owner_hurry_local_advisory", "unreadable",
-    )) + "|" + ",".join(str(x) for x in decision.get("holding") or []) + "|" + ",".join(str(x) for x in decision.get("pending_asks") or [])
-
-
 def _enforce_plan_gate(
     content: str,
     messages: List[Dict[str, Any]],
@@ -407,19 +398,13 @@ def _enforce_plan_gate(
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
 ) -> bool:
-    """Hold normal finalization while blocking plan work is open, and hand the mind
-    ONE fact when a hold it was told about was released behind its back (owner Q4=A).
+    """Hold normal finalization while the plan record cannot be read (the one hold left).
 
-    The marker advances ONLY on the two paths that actually append a message to
-    ``messages`` — the hold reminder and the release note — so it records what
-    entered the MIND's context, not what this gate observed. Every other gate
-    transition already reaches the mind by its own route and must not buy a round:
-    each settled answer arrives as typed review history at the next tool boundary or round,
-    or before delivery (``loop_delivery._unread_review_updates``), a rail
-    release rides the forced prompt's typed facts, and objections and withdrawals
-    are the mind's own ``plan_task`` results. The one residual is the owner's hurry, which the HQ1
-    no-chat contract forbids putting into ``messages``
-    (``loop_round_limits.py``) — that is the only release this fires on."""
+    Every other gate transition reaches the mind by its own route and buys no round: each
+    settled answer arrives as typed review history at the next tool boundary or round, or
+    before delivery (``loop_delivery._unread_review_updates``), a rail release rides the
+    forced prompt's typed facts, and objections and withdrawals are the mind's own
+    ``plan_task`` results."""
 
     decision = _loop()._plan_gate_decision(tools._ctx, llm_trace)
     if decision.get("required"):
@@ -427,39 +412,13 @@ def _enforce_plan_gate(
     else:  # the projection the outcome reads is THIS answer's gate: an earlier hold's never outlives it
         for stale in ("plan_gate", "force_plan_decision"):
             llm_trace.pop(stale, None)
-    identity = _plan_gate_identity(decision) if decision.get("required") else ""
-    told = str(getattr(tools._ctx, "_plan_gate_told_identity", "") or "")
     if decision.get("allow"):
-        # The one release the mind cannot see otherwise: the owner's hurry let it past
-        # objections that still hold (``holding``); a gate the mind cleared itself — a
-        # withdrawal, nothing pending — buys no round.
-        if not (
-            told and identity and identity != told
-            and decision.get("holding")
-            and decision.get("owner_hurry_local_advisory")
-            and not getattr(tools._ctx, "_plan_gate_release_told", False)
-        ):
-            return False
-        tools._ctx._plan_gate_told_identity = identity
-        tools._ctx._plan_gate_release_told = True
-        if content.strip():
-            messages.append({"role": "assistant", "content": content})
-        _loop()._append_or_merge_user_message(
-            messages,
-            "[PLAN_REVIEW_RELEASED]\n"
-            "The plan-review hold reported to you earlier is released by the owner's hurry "
-            "request, and the review is still open.\n" + _FACTS_LEAD + "\n"
-            + _plan_gate_facts(decision),
-        )
-        llm_trace["reasoning_notes"].append("Released plan-review gate reported before final response.")
-        emit_progress("Plan-review gate released before final response.")
-        return True
+        return False
     if content.strip():
         messages.append({"role": "assistant", "content": content})
     reminder = _loop()._plan_gate_reminder(decision)
     _loop()._append_or_merge_user_message(messages, reminder)
     llm_trace["reasoning_notes"].append(reminder)
-    tools._ctx._plan_gate_told_identity = identity
     emit_progress("Plan-review action required before final response.")
     return True
 
@@ -484,25 +443,17 @@ def _plan_gate_facts(decision: Dict[str, Any]) -> str:
     BIBLE P5/P6 — the host does not put a template in the mind's mouth).
 
     Only fields that do NOT depend on ``hard_rail`` are emitted, so the same line is
-    true on the normal rail and on every forced rail. ``owner_hurry_local_advisory``/
-    ``configured_enforcement`` carry the accurate hurry-vs-advisory attribution that
-    the recorded notice does not distinguish."""
+    true on the normal rail and on every forced rail."""
     if not decision.get("required"):
         return ""
     objections, pending = decision.get("open_objections") or [], decision.get("pending_asks") or []
     status = str(decision.get("status") or "")
-    if not objections and not pending and status not in {"unreadable", "held"}:
+    if not objections and not pending and status != "unreadable":
         return ""
     parts = ["plan_review_open=true", f"plan_gate_status={status}",
-             f"plan_open_objections={len(objections)}", f"plan_holding={len(decision.get('holding') or [])}",
-             f"plan_pending_asks={len(pending)}"]
-    if decision.get("enforcement"):
-        parts.append(f"plan_review_enforcement={decision['enforcement']}")
+             f"plan_open_objections={len(objections)}", f"plan_pending_asks={len(pending)}"]
     if decision.get("decision_authority"):
         parts.append(f"decision_authority={decision['decision_authority']}")
-    if decision.get("owner_hurry_local_advisory"):
-        parts.append("owner_hurry_local_advisory=true")
-        parts.append(f"configured_enforcement={decision.get('configured_enforcement') or 'blocking'}")
     if decision.get("unreadable"):
         parts.append("plan_record_unreadable=true")
     return " ".join(parts)

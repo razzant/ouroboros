@@ -137,14 +137,13 @@ def _build_policy_state(settings: Dict[str, Any]) -> dict:
     """Project configured versus process-effective owner policy for Settings UI.
 
     Persisted values are the pending choices.  Runtime access is boot-bound;
-    Supervisor and Review are hot-reloaded for the next task through the
+    Supervisor is hot-reloaded for the next task through the
     existing settings path.  The projection deliberately carries no authority
     and writes no second state record.  A managed deployment adds what its
     policy file fixes (``deployment``); the values above already read under it.
     """
     from ouroboros import config as _config
     from ouroboros.deployment_policy import policy_state
-    from ouroboros.review_model_routes import get_review_enforcement
 
     configured_access = _config.normalize_runtime_mode(
         settings.get("OUROBOROS_RUNTIME_MODE"))
@@ -152,9 +151,6 @@ def _build_policy_state(settings: Dict[str, Any]) -> dict:
     configured_supervisor = _config.normalize_safety_mode(
         settings.get("OUROBOROS_SAFETY_MODE"))
     effective_supervisor = _config.get_safety_mode()
-    configured_review = str(
-        settings.get("OUROBOROS_REVIEW_ENFORCEMENT") or "advisory").strip().lower()
-    effective_review = get_review_enforcement()
     running_task_snapshot = bool(_has_started_agent_tasks())
     return {
         "access": {
@@ -171,15 +167,6 @@ def _build_policy_state(settings: Dict[str, Any]) -> dict:
             "current_process": effective_supervisor,
             "next_task": configured_supervisor,
             "pending": configured_supervisor != effective_supervisor or running_task_snapshot,
-            "applies": "next_task",
-            "active_task_snapshot": running_task_snapshot,
-        },
-        "review": {
-            "configured": configured_review if configured_review in {"advisory", "blocking"} else "advisory",
-            "effective": effective_review,
-            "current_process": effective_review,
-            "next_task": configured_review if configured_review in {"advisory", "blocking"} else "advisory",
-            "pending": configured_review != effective_review or running_task_snapshot,
             "applies": "next_task",
             "active_task_snapshot": running_task_snapshot,
         },

@@ -84,10 +84,7 @@ def _plan_gate_decision(
     """Project plan finalization from existing review + policy SSOTs."""
     from ouroboros.owner_hurry import plan_gate_decision
 
-    return plan_gate_decision(
-        ctx, _llm_trace, hard_rail=hard_rail,
-        enforcement=_loop().get_review_enforcement(),
-    )
+    return plan_gate_decision(ctx, _llm_trace, hard_rail=hard_rail)
 
 
 def _plan_gate_reminder(decision: Dict[str, Any]) -> str:

@@ -362,7 +362,7 @@ def test_the_author_continuation_lands_over_its_attempts_decision_in_any_context
         actual._last_triad_raw_results = [{"slot_id": "critic", "status": "responded", "parsed": [finding], "raw_text": "x"}]
         if fails:
             actual._last_review_critical_findings, actual._last_review_block_reason = [finding], "critical_findings"
-            assert review._handle_review_block_or_warning(actual, False, "critical feedback", "") is None
+            assert review._handle_review_block_or_warning(actual, "critical feedback", "") is None
         return None, CouplingOutcome(verdict="PASS", status="responded"), "", []
 
     def head():

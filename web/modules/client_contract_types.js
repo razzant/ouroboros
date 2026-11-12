@@ -88,7 +88,7 @@
  */
 
 /**
- * A `reviewModes` or `runtimeModes` row; `value` is what the setting stores.
+ * A `runtimeModes` row; `value` is what the setting stores.
  * @typedef {Object} SetupModeChoice
  * @property {string} value
  * @property {string} label
@@ -135,7 +135,6 @@
  * @property {SetupProviderField[]} providerFields
  * @property {Object.<string,SetupProviderProfile>} providerProfiles
  * @property {SetupModelSlot[]} modelSlots
- * @property {SetupModeChoice[]} reviewModes
  * @property {SetupModeChoice[]} runtimeModes
  * @property {SetupLocalRoutingMode[]} localRoutingModes
  * @property {SetupBudgetField[]} budgetFields
@@ -159,7 +158,6 @@
  * @property {string} legacyCompatibleBaseUrl Saved OPENAI_BASE_URL, display only: completion never writes it.
  * @property {string} safetyModel
  * @property {string} providerProfile
- * @property {string} reviewEnforcement
  * @property {string} runtimeMode
  * @property {string} skillsRepoPath
  * @property {string} localPreset
@@ -230,12 +228,11 @@
  */
 
 /**
- * `_meta.policy_state`: configured versus effective Access, Supervisor and Review, plus what a managed
+ * `_meta.policy_state`: configured versus effective Access and Supervisor, plus what a managed
  * deployment's policy file fixes.
  * @typedef {Object} SettingsPolicyState
  * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access
  * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} supervisor
- * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} review
  * @property {boolean} running_task_snapshot
  * @property {SettingsDeploymentPolicy=} deployment  // absent outside a managed deployment
  */

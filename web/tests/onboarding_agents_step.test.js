@@ -373,7 +373,7 @@ test('the owner skip produces a declaration that asks for NO preset', () => {
 test('preview and completion can share one open provider/local/model draft', () => {
     const draft = onboardingSettingsDraft({
         state: {
-            openaiKey: ' key ', totalBudget: '25', reviewEnforcement: 'blocking',
+            openaiKey: ' key ', totalBudget: '25', reviewEnforcement: 'blocking',  // a stale draft field writes nothing
             localSource: '', localRoutingMode: 'cloud', mainModel: 'openai/gpt-5.6-sol',
             runtimeMode: 'advanced',
             connections: [{ kind: 'openai-compatible', name: 'local', base_url: 'http://127.0.0.1:41001/v1' }],
@@ -387,7 +387,7 @@ test('preview and completion can share one open provider/local/model draft', () 
     assert.deepEqual(draft.OUROBOROS_CONNECTIONS, [{ kind: 'openai-compatible', name: 'local', base_url: 'http://127.0.0.1:41001/v1' }]);
     assert.equal(draft.OUROBOROS_TOTAL_BUDGET_USD, 25);
     assert.equal(draft.OUROBOROS_MODEL, 'openai/gpt-5.6-sol');
-    assert.equal(draft.OUROBOROS_REVIEW_ENFORCEMENT, 'blocking');
+    assert.equal('OUROBOROS_REVIEW_ENFORCEMENT' in draft, false);
     assert.equal(draft.OUROBOROS_RUNTIME_MODE, 'advanced');
     assert.equal('OUROBOROS_MODEL_HEAVY' in draft, false);
 });

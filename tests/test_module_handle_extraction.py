@@ -405,7 +405,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         # The pre-delivery notice names direct children still running (its one child listing).
         "_load_direct_child_results", "_child_disposition_state",
         "_plan_gate_decision", "_loop_tree_accounting", "_skill_finalization_message",
-        "_skill_names_touched_by_trace", "get_review_enforcement",
+        "_skill_names_touched_by_trace",
     })),
     # F2.3a D06 lane rows (oracle ouroboros_v7_wip @ 9f691656, re-cut on tip
     # bytes). Declared sets are the tool-derived exact read sets; the
