@@ -818,15 +818,20 @@ def reserved_project_chat_ids(drive_root: Any, *, strict: bool = False) -> set:
     sections shows the task its own thread). ``strict=True`` RAISES on an
     unreadable registry instead of answering "no Projects".
     """
+    if not strict:
+        return readable_rooms(drive_root) or set()
+    projects = _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
+    return {project["chat_id"] for project in projects} - {0}
+
+
+def readable_rooms(drive_root: Any) -> Optional[set]:
+    """The chat ids the registry's readable rows reserve (a healthy row survives an invalid neighbour). ``None``
+    when no row can be read at all: an unknown set, never "no Projects"."""
     try:
-        projects = (_strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
-                    if strict else list_reserved_projects(drive_root))
-        return {project["chat_id"] for project in projects} - {0}
+        return {project["chat_id"] for project in list_reserved_projects(drive_root)} - {0}
     except Exception:
-        if strict:
-            raise
-        log.debug("reserved_project_chat_ids failed", exc_info=True)
-    return set()
+        log.debug("readable_rooms failed", exc_info=True)
+        return None
 
 
 _THREAD_LENS_CACHE: Dict[str, tuple] = {}

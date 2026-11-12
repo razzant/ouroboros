@@ -390,11 +390,11 @@ def test_a_closed_bounded_wait_reaches_the_replayed_card(tmp_path):
     assert "wait_for_answer" not in ask["quiz"]
 
 
-def test_main_refuses_its_recent_read_while_the_project_registry_cannot_be_read(tmp_path, monkeypatch):
-    """Main is "every room that is not a Project": decided from an empty set (an unreadable
-    registry) it would take the owner's rows typed in Project rooms (#3067's mechanism). It
-    answers the typed unavailable refusal instead, and reads as before once the registry reads."""
-    from ouroboros import projects_registry
+def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_be_read(tmp_path):
+    """Main is "every room that is not a Project": decided from an empty set (a registry no row of
+    which can be read) it would take the owner's rows typed in Project rooms (#3067's mechanism). It
+    answers the typed unavailable refusal instead. An invalid row beside readable ones is no such
+    case: the rooms the readable rows name are still Projects, and Main reads on."""
     from ouroboros.projects_registry import bind_task_to_project, create_project
 
     rooms = [create_project(tmp_path, slug, name=slug) for slug in ("alpha", "beta")]
@@ -409,15 +409,20 @@ def test_main_refuses_its_recent_read_while_the_project_registry_cannot_be_read(
     status, healthy = request(tmp_path)
     assert status == 200 and "main owner" in texts(healthy) and not texts(healthy) & room_rows
 
-    strict_read, lenient = projects_registry.reserved_project_chat_ids, set
-    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", lambda root, *, strict=False: (
-        (_ for _ in ()).throw(OSError("registry unreadable")) if strict else lenient()))
+    registry = tmp_path / "state" / "projects.json"
+    intact = registry.read_bytes()
+    registry.write_bytes(intact[: len(intact) // 2])  # no row can be read
     status, refused = request(tmp_path)
     assert not texts(refused) & room_rows, "a Project room's row reached Main's window"
     assert status == 503 and refused["reason_code"] == "history_source_unavailable"
     assert refused["has_more"] is True and refused["window"]["complete"] is False
 
-    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", strict_read)
+    data = json.loads(intact)
+    registry.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
+    status, beside = request(tmp_path)
+    assert status == 200 and "main owner" in texts(beside) and not texts(beside) & room_rows
+
+    registry.write_bytes(intact)
     restored = list(pages(tmp_path))
     assert "main owner" in {text for page in restored for text in texts(page)}
     assert not {text for page in restored for text in texts(page)} & room_rows

@@ -650,16 +650,18 @@ def test_a_direct_project_roots_own_warm_pause_stays_quiet_in_main(tmp_path, mon
         parked.join(10)
 
 
-def test_project_chat_ids_is_unknown_never_empty_while_the_registry_cannot_be_read(gateway, monkeypatch):
-    """``[]`` means "no Projects" (a fresh install); a registry that cannot be read is ``null``."""
-    from ouroboros import projects_registry
-
+def test_project_chat_ids_is_unknown_never_empty_while_no_row_of_the_registry_can_be_read(gateway):
+    """``[]`` means "no Projects" (a fresh install); a registry no row of which can be read is ``null``; an invalid
+    row beside readable ones leaves the rooms they name."""
     assert _state(gateway)["project_chat_ids"] == [], "a fresh install without a registry has no Projects"
     project = create_project(gateway.root, "known", name="Known")
     assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]
-    lenient = projects_registry.reserved_project_chat_ids
-    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", lambda root, *, strict=False: (
-        (_ for _ in ()).throw(OSError("registry unreadable")) if strict else lenient(root) - {project["chat_id"]}))
+    registry = gateway.root / "state" / "projects.json"
+    intact = registry.read_bytes()
+    registry.write_bytes(intact[: len(intact) // 2])
     assert _state(gateway)["project_chat_ids"] is None
-    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", lenient)
+    data = json.loads(intact)
+    registry.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
+    assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]
+    registry.write_bytes(intact)
     assert _state(gateway)["project_chat_ids"] == [project["chat_id"]]

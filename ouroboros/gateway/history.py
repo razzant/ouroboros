@@ -151,17 +151,17 @@ def _project_history_context(
 
     Preload bindings (the cursor fingerprint's explicit roots) and the room rule
     once per request; no per-row registry reads, no extra event-loop thread hops.
-    ``strict`` (an exact row's destination) raises unreadable authority as StoreError; so does
-    Main's every read, whose rows are "not a Project's" and cannot be told from an unknown set.
+    ``strict`` (an exact row's destination) raises unreadable authority as StoreError.
     """
-    from ouroboros.projects_registry import reserved_project_chat_ids, RoomResolver, all_task_bindings
+    from ouroboros.projects_registry import reserved_project_chat_ids, readable_rooms, RoomResolver, all_task_bindings
 
     try:
         project_chat_ids, classified = reserved_project_chat_ids(data_dir, strict=True), True
     except Exception:  # the rooms its readable rows name are still Projects; any other is unknown
-        if strict or thread_id == 1:
+        project_chat_ids, classified = readable_rooms(data_dir), False
+        if strict or (thread_id == 1 and project_chat_ids is None):  # no row reads: Main's rows cannot be told apart
             raise StoreError("Project registry unavailable") from None
-        project_chat_ids, classified = reserved_project_chat_ids(data_dir), False
+        project_chat_ids = project_chat_ids or set()
     try:
         rooms = RoomResolver(data_dir, strict=strict)
     except ValueError:
@@ -1465,10 +1465,10 @@ def _assemble_history_response(
     if lifecycle_row is not None:
         combined.append(lifecycle_row)
     result_cache[_READS].prefetch(row.get("task_id") for row in combined)
-    named = thread_id in project_chat_ids or thread_id == 1  # Main is read only with a readable registry
+    named = thread_id in project_chat_ids or (thread_id == 1 and classified)  # beside an invalid row Main reads on
     arrival = latest_arrival(combined, page, data_dir, row_matches_thread, _stored_chat_id, chat_gaps, lambda task_id: (
         _load_terminal_result(data_dir, task_id, result_cache))) if named else (
-        {} if classified else {"latest_message": None})  # an unclassified room may be a Project
+        {} if classified or thread_id == 1 else {"latest_message": None})  # an unclassified room may be a Project
     if recent:  # arrival is named above, before the tail and the annotation
         (messages, result_cache, human_rows_dropped, lineage_truncated, review_overlays_truncated, floor,
          anchored_children) = _apply_window_quotas(
