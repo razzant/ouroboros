@@ -1269,7 +1269,7 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
         use_local=ctx.active_use_local, preferred_mode=owner,
         tool_schemas=state["tool_schemas"],
         model_role=role, model_route=_conversation_account(ctx, messages, role, account), credential_profile_id=account,
-        route_is_preference=True,
+        route_is_preference=True, start_work=True,  # this process captured the start again: it is written, with its room
     )
     plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, **route,
         start_mode=ran if owner in MODES and ran in MODES[MODES.index(owner):] else None)

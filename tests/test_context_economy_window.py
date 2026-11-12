@@ -231,6 +231,7 @@ def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="ass
     root.mkdir(parents=True, exist_ok=True)
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx._accumulated_usage = usage
+    registry._ctx.active_model = "m2"  # the acting model string itself: another account or window of it, never a move
     evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window,
                                route_facts=facts or {})  # a declared window's RouteFacts (its units)
     monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m2", "provider": "p"}, evidence))
@@ -269,7 +270,11 @@ def test_a_rebind_keeps_the_sent_view_on_a_smaller_fitting_window_and_unfolds_no
         assert again.projection("low").memory_facts == low.projection("low").memory_facts
 
 
-def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_by_the_window_alone(tmp_path, monkeypatch):
+def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_and_takes_its_room(tmp_path, monkeypatch):
+    """A view that fits its new window is kept byte for byte (the tests around this one). A view the window cannot
+    hold is written again anyway, so it is narrowed from its own level to the window less one eighth of work room,
+    not to the window's very edge, where the next tool result would meet the same wall (owner, 30 Sep 2026: a fold
+    returns to the room line). Nothing unfolds, no owner target is applied again, and the tail is never touched."""
     from tests.test_memory_view_modes import _built
 
     _core, plan = _built(tmp_path / "w", monkeypatch)
@@ -283,11 +288,12 @@ def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_by_th
     floor = rebound.projection("low").memory_facts["floor"]
     assert mode == "low" and event["view_kept"] is False and messages[0] == rebound.projection("low").system_message()
     assert all(floor["steps"].get(step, 0) >= count for step, count in old["steps"].items())  # nothing unfolds
-    # The first host view pays this one-token shortfall before any additional memory step.
-    assert rebound.projection("low").memory_facts["host_sections_addressed"]
-    assert floor["steps"] == old["steps"]
+    assert rebound.projection("low").memory_facts["host_sections_addressed"]  # host views pay before memory detail
     assert floor["by_budget"] == old["by_budget"] and floor["budget_allowance_tokens"] is None  # no target refold
-    assert floor["allowance_tokens"] == floor["physical_allowance_tokens"]  # no working margin reapplied
+    # One eighth of the window stays for the work, the same room a fold returns to (never the role's start room);
+    # where memory cannot make all of it, memory keeps nothing back.
+    assert floor["allowance_tokens"] == max(0, floor["physical_allowance_tokens"] - math.ceil(tight / 8))
+    assert sum(floor["steps"].values()) > sum(old["steps"].values())  # memory's detail made that room
     assert messages[1:] == _long_tail(low)[1:]  # the actual tail is never touched
 
 
@@ -315,7 +321,9 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
     assert mode == "low" and event["view_kept"] is same_route
     # An accepted input above the stated total replaces it as an input bound; the reply stays beside it.
     assert rebound.window_tokens == (accepted + 65_536 if same_route else tight)
-    assert rebound.projection("low").memory_facts["floor"]["steps"] == old["steps"]
+    steps = rebound.projection("low").memory_facts["floor"]["steps"]
+    assert all(steps.get(step, 0) >= count for step, count in old["steps"].items())  # nothing unfolds
+    assert (steps == old["steps"]) is same_route  # the account that must narrow takes its work room with it
     assert bool(rebound.projection("low").memory_facts.get("host_sections_addressed")) is not same_route
 
 
@@ -740,11 +748,14 @@ def test_a_second_narrowing_in_nano_still_names_what_the_low_budget_took(main_ca
         assert ("context_fit_route_rebound", False) in kinds
     else:  # the same route refuses the request by 5,000 tokens
         window, fit = 100_000, loop._measure_round_main_fit(ctx, automatic_pass_used=False)
-        assert _coarsen_memory_view(ctx, fit, saving=5_000) is True  # the floor's memory step, sized by the refusal
+        # The move to Nano already took its work room from memory's detail (every form it had on this small
+        # window), so the floor's memory step has nothing left to give and says so; the pass's other steps pay.
+        assert _coarsen_memory_view(ctx, fit, saving=5_000) is False
     after = ctx.context_fit_plan
     floor = after.projection("nano").memory_facts["floor"]
     assert ctx.active_context_mode == "nano" and ctx.messages[0] == after.projection("nano").system_message()
-    assert addressed < _addressed(after, "nano") and not _unfolded(after, addressed, ctx.messages[0])
+    assert (addressed < _addressed(after, "nano")) is (second == "tighter_account")
+    assert not _unfolded(after, addressed, ctx.messages[0])
     assert floor["by_budget"] == by_budget and floor["target_tokens"] == OWNER_LOW_TARGET_TOKENS
     sent = json.dumps(ctx.messages[0], ensure_ascii=False)
     assert (f"Nano cuts for the window ({window} tokens) and the Low mode budget (250000 tokens)."
@@ -901,21 +912,26 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
 
 def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
     """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
-    window by (20,000, the numbers that lowered the books before memory paid in the first pass), memory alone
-    narrows and Max keeps its whole books (29.10)."""
+    window's send ceiling by (20,000 past the stated number less the reply floor), memory alone narrows and Max
+    keeps its whole books (29.10)."""
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from ouroboros import memory_floor as mf
     from ouroboros.memory_view import snapshot_json
     from ouroboros.tool_policy import initial_tool_schemas
     from tests import _memory_view_synthetic as syn
 
+    # A memory whose detail holds more than the pass must shed: the reply reserve the wall restores, the 20,000 and
+    # the return-after-fold eighth.
+    memory = syn.snapshot(room_facts=syn.room("1", legacy=23, legacy_chars=8_400, lane2=19), story=syn.pages(40, 20_000),
+                          conversations=[syn.conversation(i) for i in range(12)], mark_count=12)
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
-                                                         view=snapshot_json(syn.actor("main")), books=120_000)
+                                                         view=snapshot_json(memory), books=120_000)
     roomy = plan(10_000_000)
     full = roomy.projected_tokens_with_tools("max", initial_tool_schemas(tools, context_mode="max"))
     windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
     built = plan(window)
     words = "Owner, while you worked: keep the old API alive. "
-    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 20_000) * 4 / len(words))}
+    owner = {"role": "user", "content": words * math.ceil((window - full - NANO_MIN_HEADROOM_TOKENS + 20_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
     gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
     gateway.dispatch = ["response_received"]
@@ -1093,11 +1109,16 @@ def test_a_window_bounded_chosen_read_survives_next_host_rows_and_source_shrink(
     assert any(str(row.get("content", "")).startswith(CLOCK_NOTE_PREFIX) for row in sent["messages"])
     delivery = trace["tool_result_delivery"][0]
     active_window = windows[sent["account"]["profileId"]]
-    assert bounded_prompt_tokens_for_payload(sent, 0) + usage["_context_response_reserve_tokens"] < active_window
+    # The delivery sized the body against the usable input; the host rows added after it fall inside the reply
+    # reserve. The request stays under its send ceiling (the stated window less the reply floor) and goes out whole:
+    # nothing is cut again for those rows. Nano's reserve is that floor itself, so its candidate recovers before
+    # the send, as before.
+    assert bounded_prompt_tokens_for_payload(sent, 0) + 8_192 < active_window
     assert delivery["whole_tokens"] + delivery["reserve_tokens"] > window
     assert not usage.get(REFUSED_INPUTS_KEY)
     assert gateway.uploads[0][0]["account"] == {"mode": "pin", "profileId": "account-a"}
-    assert any(row.get("checkpoint_kind") == "context_fit_refused" for row in _drained(events))
+    refused = any(row.get("checkpoint_kind") == "context_fit_refused" for row in _drained(events))
+    assert refused is (owner_mode == "nano")
 
 
 def test_a_chosen_read_on_an_unknown_window_stays_whole_after_an_unmeasured_engine_refusal(

@@ -127,13 +127,16 @@ class ContextFitPlan:
                             current_messages: Optional[List[Dict[str, Any]]] = None,
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
-                            slack_tokens: int = 0) -> "ContextFitPlan":
+                            slack_tokens: int = 0, room_if_narrowed: bool = False) -> "ContextFitPlan":
         """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
         The measurement belongs to this candidate, includes tools and excludes the reply; withholding an image can shrink it.
         A requested saving alone does not establish pressure on held owner words or notes.
         ``slack_tokens`` asks room beyond the measured or refused excess: memory and ordinary host forms may pay it,
         a whole-or-outline section never (``memory_floor._host_steps``).
+        ``start_work`` sizes a start that is written anyway (an entry on a route that holds no copy of it, a restore)
+        with one eighth of work room; ``room_if_narrowed`` gives the same room to a view that must narrow for the
+        window alone, since narrowing writes it too. A view that fits is never touched for room.
         """
         from dataclasses import replace
 
@@ -170,10 +173,13 @@ class ContextFitPlan:
             overhead = int(measured_input_tokens) - raw if measured_input_tokens is not None else 0
             request = math.ceil((raw + overhead) * ratio)
             request += context_mode_limits(start, self.preferred_mode, output_reserve, **reserve_args)[1]
-            if start_work and known_window:
-                request += math.ceil((record.boundary if record else window_tokens) / context_budget.RECLAIM_LOW_WATER_DIVISOR)
+            room = math.ceil((record.boundary if record else window_tokens) / context_budget.RECLAIM_LOW_WATER_DIVISOR
+                             ) if known_window and window_tokens else 0
+            request += room if start_work else 0
             request -= math.ceil(required_book_addition(self, start) * ratio)  # nothing narrows to pay for the book
             measured, units = (request - window_tokens if known_window and window_tokens else 0), max(ratio, 0.01)
+            if room_if_narrowed and measured > 0 and not start_work:
+                start_work, measured = True, measured + room
             excess, deficit = max(measured, int(refused_tokens or 0)), max(measured, int(refused_tokens or 0) + slack_tokens)
             if deficit > 0 or select_mode:
                 snapshot = snapshot_from_json(self.core.memory_view_json) if self.core.memory_view_json else None
@@ -859,6 +865,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
             boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed)
 
+    def start_levels():  # the role's room at the work's first start; one eighth where a shown view is written again
+        return 1 if kept is not None else snapshot.spec.work_room_levels if snapshot else work_room_levels
+
     def frame(selected):
         nonlocal receipts
         sent = select_tool_schemas(tool_schemas or [], context_mode=selected, schema_names=names)
@@ -867,7 +876,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         record = replace(window_record, reserve=reserve) if window_record else None
         window = record.total_equivalent if record and record.usable is not None else window_tokens
         boundary = record.boundary if record else None
-        levels = snapshot.spec.work_room_levels if snapshot else work_room_levels
+        levels = start_levels()
         host_allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=0, target_tokens=target if kept is None else None,
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
@@ -897,8 +906,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     def work():
         target = context_budget.context_mode_limits(mode, preferred, output_reserve)[0]
-        return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
-            snapshot.spec.work_room_levels if snapshot else work_room_levels)
+        return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * start_levels()
 
     # Both Max decisions use the clean-start guard's minimum ordinary memory,
     # priced in this request with its receipt, schemas, reserve and work room.

@@ -706,7 +706,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     none. The reply reserve is the mode's (Nano keeps its own headroom). ``tool_names`` are
     the schemas this mode's request sends, which the floor note reads (``memory_read_path``).
     ``kept`` narrows a view already shown: from its level, against the window minus the reply
-    reserve alone -- no working margin, no target -- so nothing it addressed comes back.
+    reserve alone -- no target, and no working margin unless ``start_work`` (a start written anyway: one
+    eighth) -- so nothing it addressed comes back.
     What ``kept.by_budget`` counts the owner's mode target took (only it carries one), so the note
     and the fact name that budget in whatever mode the view is narrowed, hop after hop.
     ``shortest``: where this walk ends when only uncovered owner rows are left to address, with its
@@ -721,7 +722,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     window = int(window_tokens) if known_window and window_tokens else None
     allowances = floor_allowances(window_tokens=window, output_reserve_tokens=reserve, non_memory_tokens=non_memory_tokens,
                                   target_tokens=None if kept is not None else target, calibration_ratio=ratio,
-                                  work_room_levels=snapshot.spec.work_room_levels, boundary_tokens=boundary_tokens)
+                                  work_room_levels=1 if kept is not None else snapshot.spec.work_room_levels,
+                                  boundary_tokens=boundary_tokens)  # a view written again takes one eighth, not the role's
     if kept is not None and not start_work:
         allowances = {**allowances, "margin": allowances["physical"]}
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))

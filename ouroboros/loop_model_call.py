@@ -519,6 +519,7 @@ def _rebind_context_fit_plan(
     credential_profile_id: Optional[str] = None,
     start_mode: Optional[str] = None,  # the task's mode: a new route may lower it; a return to the primary resumes its held view
     route_is_preference: bool = False,  # ``model_route`` is the account a send will prefer (a restore), not one observed serving
+    start_work: Optional[bool] = None,  # the start is written anyway (a restore); None: when this work was never answered here
 ) -> Tuple[Any, str]:
     if plan is None or not all(
         hasattr(plan, name) for name in ("max_projection", "low_projection", "core_sha256")
@@ -528,7 +529,7 @@ def _rebind_context_fit_plan(
         )
     from ouroboros.context import _context_fit_route
     from ouroboros.context_timing import timed
-    from ouroboros.primary_route_observation import held_primary_view
+    from ouroboros.primary_route_observation import answered_on, held_primary_view
     from ouroboros.capability_evidence import evidence_model_route
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
                                        estimate_context_prompt_tokens, main_output_reserve_tokens)
@@ -585,7 +586,11 @@ def _rebind_context_fit_plan(
         window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
     ).reproject_for_route(  # the shown view kept while it fits this route's window, else narrowed
         window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried,
-        output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages)
+        output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages,
+        # A move to a route that holds no copy of this work's start, and a restore, write it whole: one eighth of room.
+        start_work=(_moves_route(tools._ctx, model, use_local) and not answered_on(
+            getattr(tools._ctx, "_accumulated_usage", None), model, use_local, role)) if start_work is None else start_work,
+        room_if_narrowed=True)
     mode = rebound.initial_mode
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas)
     shown = messages[0] if messages else None
@@ -620,6 +625,12 @@ def _rebind_context_fit_plan(
     except Exception:
         log.debug("Failed to emit route-switch context-fit checkpoint", exc_info=True)
     return rebound, mode
+
+
+def _moves_route(owner: Any, model: str, use_local: bool) -> bool:
+    """The rebind targets another model string or locality than the route now acting (``held_primary_view``'s pair)."""
+    return (str(model or ""), bool(use_local)) != (
+        str(getattr(owner, "active_model", "") or ""), bool(getattr(owner, "active_use_local", False)))
 
 
 def _adopt_view_facts(tool_ctx: Any, plan: Any, mode: str) -> None:
