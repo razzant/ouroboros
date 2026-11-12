@@ -531,7 +531,8 @@ def _host_checks(env):
 
 
 class TestHostWorkBeyondOnePass:
-    """The health block's fact about host work past one pass: present only when a law's half is broken, from the receipts."""
+    """The health block's fact about host work past one pass: present only when a build did work again on an input it
+    already had, from the receipts. The rows a capture read are a receipt and no line."""
 
     @pytest.fixture(autouse=True)
     def running(self, monkeypatch):
@@ -543,15 +544,9 @@ class TestHostWorkBeyondOnePass:
         env = _host_events(tmp_path, _host_receipt(view_renders=2, view_texts_kept=2, request_serializations=6, rows_read=31, rows_open=30, rows_new=1))
         assert _host_checks(env) == []
 
-    def test_rows_read_past_those_open_and_new_are_named_with_their_numbers(self, tmp_path):
-        env = _host_events(tmp_path, _host_receipt(rows_read=74963, rows_open=13834, rows_new=0))
-        [line] = _host_checks(env)
-        assert line.startswith("INFO: HOST WORK BEYOND ONE PASS under the running code (runningcode1)")
-        assert "read 74,963 rows of the chat tail for 13,834 open and 0 new" in line and "should" not in line
-
-    def test_an_unfilled_tail_names_the_rows_it_read_past_the_open_ones(self, tmp_path):
-        """Until the stored prefix stands every row of the tail is read live, and none is new after a stored end: a row
-        sealed long ago stays in what was read past the open ones, so the health line says so on this path too."""
+    def test_the_rows_a_capture_read_are_no_line(self, tmp_path):
+        """The stored tail is read whole on every capture, so rows read past those open and new are in every receipt: a
+        line about them stood in every context. The real capture path shows the receipt, and the block stays empty."""
         from ouroboros import chat_chain, memory_inventory
         from ouroboros.chronicle_store import ChronicleStore
         from ouroboros.context_timing import measured_sections, section_spans
@@ -570,15 +565,15 @@ class TestHostWorkBeyondOnePass:
         assert work["rows_read"] > work["rows_open"] and "rows_new" not in work, work
         root = tmp_path / "health"
         root.mkdir()
-        [line] = _host_checks(_host_events(root, _host_receipt(**work)))
-        assert f"read {work['rows_read']:,} rows of the chat tail for {work['rows_open']:,} open and 0 new" in line
+        assert _host_checks(_host_events(root, _host_receipt(**work))) == []
 
     def test_work_done_again_is_named_with_its_verb_and_count(self, tmp_path):
-        env = _host_events(tmp_path, _host_receipt(view_pieces=9, view_pieces_again=2, rows_read=5, rows_open=5),
-                      _host_receipt(view_renders=2, rows_read=5, rows_open=5))
+        env = _host_events(tmp_path, _host_receipt(view_pieces=9, view_pieces_again=2, rows_read=74963, rows_open=13834),
+                      _host_receipt(view_renders=2, rows_read=74963, rows_open=13834))
         [line] = _host_checks(env)
-        assert "1 of 2 recent builds did work again on an input they already had (view_pieces 2)" in line
-        assert "rows of the chat tail" not in line  # that half is whole
+        assert line.startswith("INFO: HOST WORK BEYOND ONE PASS under the running code (runningcode1) — 1 of 2 recent builds")
+        assert "did work again on an input they already had (view_pieces 2)" in line and "should" not in line
+        assert "rows" not in line  # the rows read stay in the receipt
 
     def test_an_older_code_s_receipts_and_empty_work_are_not_read(self, tmp_path):
         env = _host_events(tmp_path, _host_receipt(code="oldcode", rows_read=99, rows_open=1, view_pieces_again=7),

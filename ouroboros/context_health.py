@@ -48,28 +48,25 @@ def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
 
 def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
     """What the running code's recent builds did past one pass, from their ``context_memory_view`` receipts: work repeated
-    on the same input (a ``<verb>_again`` above zero) and rows read past those open and new. A fact for the mind, and
-    only when one of the two is there: in a healthy state nothing is added."""
+    on the same input (a ``<verb>_again`` above zero). A fact for the mind, and only when it is there: in a healthy state
+    nothing is added. The rows a capture read stay in the receipts and are no line: the stored tail is read whole on
+    every capture, so that fact stood in every context."""
     from ouroboros.transcript_prefix import _running_code
 
     code = _running_code()
     builds = [dict(receipt.get("work") or {}) for receipt in receipts if receipt.get("code") == code and receipt.get("work")]
-    if not builds:
-        return ""
     repeats: Counter = Counter()
     repeating = 0
     for work in builds:
         again = {verb[:-len("_again")]: n for verb, n in work.items() if verb.endswith("_again") and n}
         repeats.update(again)
         repeating += bool(again)
-    newest = builds[-1]
-    read, opened, new = (int(newest.get(name) or 0) for name in ("rows_read", "rows_open", "rows_new"))
-    facts = [f"the newest capture read {read:,} rows of the chat tail for {opened:,} open and {new:,} new"] if read > opened + new else []
-    if repeats:
-        facts.append(f"{repeating} of {len(builds)} recent builds did work again on an input they already had "
-                     f"({', '.join(f'{verb} {n:,}' for verb, n in repeats.most_common())})")
-    return (f"INFO: HOST WORK BEYOND ONE PASS under the running code ({code if ' ' in code else code[:12]}) — {'; '.join(facts)}. "
-            "Receipts: logs/events.jsonl, context_memory_view, field work.") if facts else ""
+    if not repeats:
+        return ""
+    return (f"INFO: HOST WORK BEYOND ONE PASS under the running code ({code if ' ' in code else code[:12]}) — "
+            f"{repeating} of {len(builds)} recent builds did work again on an input they already had "
+            f"({', '.join(f'{verb} {n:,}' for verb, n in repeats.most_common())}). "
+            "Receipts: logs/events.jsonl, context_memory_view, field work.")
 
 
 def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
