@@ -179,13 +179,13 @@ test('the let-through counter and the spare-model line say 24 h only when the ev
         { type: 'safety_verdict', ts: at(4) }, walk(25, 'openai::gpt-6-luna'), { type: 'safety_verdict', ts: at(26) },
         { type: 'task_done', ts: at(30) }]), ['1 safety check let through in the last 24 h.',
         '1 safety check was answered by a spare model in the last 24 h, because the Supervisor\'s own model gave no answer:'
-            + ' gpt-6-luna ×1. 1 check went to the spare models and got no answer. 1 verdict recorded in the same span.']);
+            + ' gpt-6-luna ×1. 1 check went to the spare models and got no answer. 1 check with a recorded verdict in the same span.']);
     // A full tail of 2,000 events from the last three hours never claims the day it did not read.
     const busy = Array.from({ length: 2000 }, (_, i) => (i === 1 ? walk(3 - i / 1000, 'openai::gpt-6-luna')
         : { type: i ? 'llm_round' : 'safety_mode_skip', ts: at(3 - i / 1000) }));
     const [said, spares] = await counter(busy);
     assert.match(said, /^1 safety check let through since \d\d:\d\d \(the latest 2,000 events\)\.$/);
-    assert.match(spares, /^1 safety check was answered by a spare model since (\d\d:\d\d) \(the latest 2,000 events\), because the Supervisor's own model gave no answer: gpt-6-luna ×1\. 0 verdicts recorded in the same span\.$/);
+    assert.match(spares, /^1 safety check was answered by a spare model since (\d\d:\d\d) \(the latest 2,000 events\), because the Supervisor's own model gave no answer: gpt-6-luna ×1\. 0 checks with a recorded verdict in the same span\.$/);
     assert.equal(spares.match(/since (\d\d:\d\d)/)[1], said.match(/since (\d\d:\d\d)/)[1], 'one span for both lines');
     assert.doesNotMatch(said + spares, /24 h/);
     // It reads each event's type and time, and a walk's answering model: the compact view, never 2,000 whole rows.

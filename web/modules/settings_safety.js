@@ -99,10 +99,12 @@ export async function refreshSafetySkipCounter(root, { logsTail = apiClient.logs
 }
 
 /** The checks a spare model answered because the Supervisor's own model gave none (``safety_route_fallback`` events,
- * by the model that answered), the walks no spare answered, and the verdicts recorded in the same span: counts of
- * events, never a share (a walk is written before its reply is read). */
+ * by the model that answered), the walks no spare answered, and the checks with a recorded verdict in the same span
+ * (``safety_verdict`` events; one holds both verdicts when the second check is on): counts of events, never a share
+ * (a walk is written before its reply is read). */
 export function spareWords(walks, verdicts, span) {
-    if (!walks.length) return `No safety check went to a spare model ${span}.`;
+    const checked = `${verdicts} ${verdicts === 1 ? 'check' : 'checks'} with a recorded verdict in the same span.`;
+    if (!walks.length) return `No safety check went to a spare model ${span}. ${checked}`;
     const byModel = new Map();
     for (const walk of walks) {
         const model = walk?.answered?.model;
@@ -114,7 +116,7 @@ export function spareWords(walks, verdicts, span) {
         answered ? `${answered} safety ${answered === 1 ? 'check was' : 'checks were'} answered by a spare model ${span}, because`
             + ` the Supervisor's own model gave no answer: ${[...byModel].map(([name, count]) => `${name} ×${count}`).join(', ')}.` : '',
         missed ? `${missed} ${missed === 1 ? 'check' : 'checks'} went to the spare models ${answered ? 'and' : span + ' and'} got no answer.` : '',
-        `${verdicts} ${verdicts === 1 ? 'verdict' : 'verdicts'} recorded in the same span.`,
+        checked,
     ].filter(Boolean).join(' ');
 }
 

@@ -251,7 +251,8 @@ test('Permissions and checks: three questions and what it is trusted with, doors
     assert.equal(page.container.querySelector('[data-safety-skips]').textContent, 'No safety checks let through in the last 24 h.',
         'the counter is read when the page is shown');
     assert.equal(page.container.querySelector('[data-safety-spares]').textContent,
-        'No safety check went to a spare model in the last 24 h.', 'the spare-model line is read from the same tail');
+        'No safety check went to a spare model in the last 24 h. 0 checks with a recorded verdict in the same span.',
+        'the spare-model line is read from the same tail');
     for (const [id, to] of [['permissions:rules', 'rules'], ['permissions:supervisor', 'models/role/safety'], ['permissions:second-check', 'agents'],
         ['permissions:reviewers', 'agents']]) {
         await page.press(page.row(id));
@@ -548,14 +549,15 @@ test('a switch a page draws by hand is stamped as a switch, so a narrow row keep
     assert.match(css, /@container \(max-width: 28rem\) \{\s*\.settings-row:is\(\[data-kind="door"\], \[data-kind="switch"\]/);
 });
 
-test('Permissions and checks: the checks a spare model answered are counted by model, beside the misses and the verdicts', () => {
+test('Permissions and checks: the checks a spare model answered are counted by model, beside the misses and the checks with a verdict', () => {
     const walk = (model) => ({ type: 'safety_route_fallback', answered: model ? { model, role: 'fallback:0' } : null });
-    assert.equal(spareWords([], 7, 'in the last 24 h'), 'No safety check went to a spare model in the last 24 h.');
+    assert.equal(spareWords([], 7, 'in the last 24 h'),
+        'No safety check went to a spare model in the last 24 h. 7 checks with a recorded verdict in the same span.');
     assert.equal(spareWords([walk('openrouter@openrouter-anthropic::anthropic/claude-opus-5.5'), walk('anthropic/claude-opus-5.5'),
         walk('anthropic/claude-fable-5.2'), walk(null)], 412, 'since 09:12 (the latest 2,000 events)'),
     '3 safety checks were answered by a spare model since 09:12 (the latest 2,000 events), because the Supervisor\'s own'
         + ' model gave no answer: anthropic/claude-opus-5.5 ×2, anthropic/claude-fable-5.2 ×1. 1 check went to the spare'
-        + ' models and got no answer. 412 verdicts recorded in the same span.');
+        + ' models and got no answer. 412 checks with a recorded verdict in the same span.');
     assert.equal(spareWords([walk(null)], 1, 'in the last 24 h'),
-        '1 check went to the spare models in the last 24 h and got no answer. 1 verdict recorded in the same span.');
+        '1 check went to the spare models in the last 24 h and got no answer. 1 check with a recorded verdict in the same span.');
 });
