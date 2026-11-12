@@ -74,7 +74,7 @@ def test_settings_get_exposes_policy_state_in_existing_meta(monkeypatch):
         "OUROBOROS_SAFETY_MODE": "full",
         "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     }
-    monkeypatch.setattr(gateway, "load_settings", lambda: dict(settings))
+    monkeypatch.setattr(gateway, "settings_read_view", lambda: (dict(settings), {}))
     monkeypatch.setattr(gateway, "apply_runtime_provider_defaults", lambda value: (value, False, []))
     monkeypatch.setattr(gateway, "_build_network_meta", lambda *_args: {})
     monkeypatch.setattr(gateway, "_port_file", lambda _request: SimpleNamespace(exists=lambda: False))

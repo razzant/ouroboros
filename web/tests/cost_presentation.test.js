@@ -9,8 +9,8 @@ import {
     taskCostProjection,
 } from '../modules/chat_activity.js';
 import { costPresentationDetail, costPresentationMeta, renderLiveCardMeta } from '../modules/chat_activity.js';
-import { BUDGET_LIMITS, TABLES, allowancePresentation, breakdownRowName, budgetSavePresentation, costBucketPresentation,
-    costDashboardPresentation, limitDraft, roomTimeText } from '../modules/costs.js';
+import { TABLES, allowancePresentation, breakdownRowName, costBucketPresentation, costDashboardPresentation,
+    roomTimeText } from '../modules/costs.js';
 import { normalizeConsciousness } from '../modules/consciousness_api.js';
 import { summarizeLogEvent } from '../modules/log_events.js';
 import {
@@ -754,45 +754,8 @@ test('Costs tables say what they group by: provider, a model over every provider
 
 // --- Costs › Budget: the consciousness allowance (moved from Settings, owner 10 Nov 2026) ---------------------------
 
-test('a limit is edited only when its number moved; an empty field is no number, and 0 is the allowance\'s own choice', () => {
-    const allowance = BUDGET_LIMITS.find((limit) => limit.key === 'OUROBOROS_CONSCIOUSNESS_DAILY_USD');
-    assert.equal(allowance.min, 0);
-    assert.deepEqual(BUDGET_LIMITS.filter((limit) => limit.min !== 0).map((limit) => [limit.key, limit.min]),
-        [['TOTAL_BUDGET', 0.01], ['OUROBOROS_PER_TASK_COST_USD', 0.01]], 'the shared budget minimum stays where it was');
-    assert.deepEqual(limitDraft('300', '300', 0), { value: 300, edited: false, valid: true });
-    assert.deepEqual(limitDraft('300.0', '300', 0), { value: 300, edited: false, valid: true }, 'the same number');
-    assert.deepEqual(limitDraft('390', '300', 0), { value: 390, edited: true, valid: true });
-    assert.deepEqual(limitDraft('0', '300', 0), { value: 0, edited: true, valid: true }, 'a real choice: it may not spend');
-    assert.deepEqual(limitDraft('12.75', '300', 0), { value: 12.75, edited: true, valid: true }, 'decimals');
-    assert.deepEqual(limitDraft(' ', '300', 0), { value: NaN, edited: true, valid: false }, 'an emptied field is never 0');
-    assert.deepEqual(limitDraft('', '', 0), { value: NaN, edited: false, valid: false }, 'never loaded, never touched');
-    assert.deepEqual(limitDraft('-1', '300', 0), { value: -1, edited: true, valid: false });
-    assert.deepEqual(limitDraft('0', '200', 0.01), { value: 0, edited: true, valid: false }, 'the total budget keeps 0.01');
-    assert.deepEqual(limitDraft('200', undefined, 0.01), { value: 200, edited: true, valid: true }, 'no baseline: sent as typed');
-});
-
-test('a saved allowance says the clock\'s next check uses it and a paused wake keeps its launch limit', () => {
-    const own = 'The next consciousness check uses it; a paused wake keeps its launch limit.';
-    const beside = 'The next consciousness check uses the new consciousness limit; a paused wake keeps its launch limit.';
-    const key = 'OUROBOROS_CONSCIOUSNESS_DAILY_USD';
-    // The server files the allowance under the next task; it is read at the next check instead.
-    assert.deepEqual(budgetSavePresentation({ next_task_changed: true }, { sent: [key] }),
-        { text: `Saved. ${own}`, tone: 'ok', transient: true });
-    assert.equal(budgetSavePresentation({ immediate_changed: true, next_task_changed: true }, { sent: ['TOTAL_BUDGET', key] }).text,
-        `Saved. Took effect immediately. ${beside}`, 'the total budget keeps its own words');
-    assert.equal(budgetSavePresentation({ next_task_changed: true }, { sent: ['OUROBOROS_PER_TASK_COST_USD', key] }).text,
-        `Saved. Applies on the next task. ${beside}`, 'the per-task cap keeps its own words');
-    assert.deepEqual(budgetSavePresentation({ next_task_changed: true, restart_required: true }, { sent: [key] }),
-        { text: `Saved. Restart required. ${own}`, tone: 'warn', transient: false }, 'an earlier restart still owed stays');
-    assert.equal(budgetSavePresentation({ no_changes: true }, { sent: [key] }).text, 'No changes.');
-    assert.equal(budgetSavePresentation({ next_task_changed: true, warnings: ['W.'] }, { sent: [key] }).text,
-        `Saved. ${own} Warnings: W.`);
-    // Without the allowance every save says what it said before.
-    for (const data of [{ immediate_changed: true }, { next_task_changed: true }, { immediate_changed: true, next_task_changed: true }]) {
-        assert.deepEqual(budgetSavePresentation(data, { sent: ['TOTAL_BUDGET', 'OUROBOROS_PER_TASK_COST_USD'] }),
-            budgetSavePresentation(data), JSON.stringify(data));
-    }
-});
+// Its field is a setting row: what a typed limit sends or refuses, and what a save says, are checked in
+// costs_limits.test.js and settings_rows.test.js.
 
 test('room returns by a whole minute after its instant, in a named zone, never early and never from the past', () => {
     const now = Date.UTC(2026, 10, 10, 19, 0);

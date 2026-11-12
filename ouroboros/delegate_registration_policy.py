@@ -1,10 +1,7 @@
 """Registration persistence policy and the STARTED-row field tables.
 
-The leaf module the delegate custody core leans on at the module line gate
-(both ``delegate_custody.py`` and ``tools/delegate.py`` sit exactly on the
-1600-line ceiling): the #362 persistence decision lives here, and the
-STARTED-row shape tables move here with it so the core pays for the marker
-by extraction, not compression.
+The leaf module the delegate custody core leans on: the #362 persistence
+decision and the STARTED-row shape tables live here.
 
 #362 (the f9356572 A3 remediation, ported): on engines that support the
 delegated ``workspaceRoot`` field the run registers the user's STABLE target

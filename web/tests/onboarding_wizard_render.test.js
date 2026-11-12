@@ -177,7 +177,7 @@ test('the setup contract renders Cyber Pro beside the independent Blocking choic
 // IMPL_SPEC §5, verbatim: what a Reviewer tick means per strictness (Cyber Pro outranks enforcement).
 const TICK = {
     blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
-    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all ticked reviewers and writes why; it never skips a check that is owed.',
+    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 };
 
@@ -315,7 +315,7 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
 // was saved before: exactly the answer that used to confirm a save it knew nothing about. A call for which
 // `server.hold(call)` is true waits for `server.release(prefix)`, and is answered as things stand then.
 const SAVE_TIMEOUT = { status: 503, body: { code: 'settings_save_timeout', saved: null,
-    error: 'the settings save is still running in the server after 60s and was left to finish on its own; reload Settings to see what landed' } };
+    error: 'the settings save is still running in the server after 60s and was left to finish on its own; open Settings again to see what landed' } };
 const receipt = (runtimeMode, restartRequired) => ({ ok: true, status: 'saved', runtime_mode: runtimeMode,
     restart_required: restartRequired, preset: { applied: false, reason: 'not_requested', harnesses: [], receipt: {} } });
 const SUMMARY_FIRST = {
@@ -430,8 +430,36 @@ test('a confirmed restart comes from the attempt\'s own receipt, never from a gu
         assert.deepEqual(server.replaced, [], 'a plain tab does not navigate past a pending restart');
         const html = doc.getElementById('root').innerHTML;
         assert.match(html, /Setup saved — restart to apply it/);
-        assert.match(html, /Ouroboros saved <code>pro<\/code> as the runtime mode for the next boot/);
+        assert.match(html, /Pro access applies from the next start/);
     }, { fetch: server.fetch, location: server.location });
+});
+
+test('a framed wizard tells its host the chosen access level by its label as well as its id', async () => {
+    // The browser twin of the restart screen (onboarding_overlay.js) prints the label; without it a person reads a stored id.
+    const server = completionServer();
+    await withWizard(SUMMARY_FIRST, 'save=framed-restart', async ({ doc }) => {
+        const posted = [];
+        window.parent = { postMessage: (message) => posted.push(message) };
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        server.attempts[server.sent[0]] = { saved: true, receipt: receipt('cyber_pro', true) };
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        assert.deepEqual(posted.map((message) => [message.type, message.restart_required, message.runtime_mode, message.runtime_label]),
+            [['ouroboros:onboarding-complete', true, 'cyber_pro', 'Cyber Pro']]);
+    }, { fetch: server.fetch, location: server.location });
+});
+
+test('the API section is badged by what is entered: a key or a local model reads Configured, nothing reads Optional', async () => {
+    const badge = async (query, initialState) => {
+        let html = '';
+        await withWizard({ ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, ...initialState } }, query,
+            ({ doc }) => { html = doc.getElementById('root').innerHTML; });
+        return html.match(/<span class="selection-badge">([^<]*)<\/span>/)?.[1];
+    };
+    assert.equal(await badge('badge=nothing', {}), 'Optional');
+    assert.equal(await badge('badge=key', { openrouterKey: 'sk-or-v1-abcdefghijklmnop' }), 'Configured');
+    assert.equal(await badge('badge=local', { localSource: '/models/local-test.gguf' }), 'Configured');
 });
 
 test('an answer that never arrives is unknown, and a failure recorded for the attempt reads like its reply', async () => {

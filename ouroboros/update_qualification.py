@@ -163,9 +163,10 @@ def post_merge_reds(repo_url: str, *, get_json=None) -> dict:
     and on each manual check).
 
     Each is a test or lint finding that stayed red after merges into the development branch, with the
-    merge it was bisected to when the bisection finished, and is still open: unfixed work on the body
-    this install runs or will run. One public page, no credential; a full page stays ``partial``. A
-    failed read is ``unavailable`` and lists nothing; ``kept_reds`` keeps the stored observation.
+    merge it was bisected to when the bisection finished, and is still open: a report still tracked on
+    the body this install runs or will run, whose fix or its confirmation may not yet be reflected in
+    the issue. One public page, no credential; a full page stays ``partial``. A failed read is
+    ``unavailable`` and lists nothing; ``kept_reds`` keeps the stored observation.
     """
     repo = _github_repo(repo_url)
     if repo is None:

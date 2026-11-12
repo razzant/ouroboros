@@ -68,6 +68,46 @@ def test_a_directly_required_handbook_is_reported_whole_in_every_mode(tmp_path, 
     assert development(False) == (['orientation'] if mode == 'max' else [])
 
 
+def test_the_start_text_is_written_as_the_mind_reads_it_and_a_declared_density_prices_the_start(tmp_path):
+    from devtools.context_fit_report import main
+
+    core, dump = scale.core(tmp_path), tmp_path / 'scratch' / 'start.txt'
+    dump.parent.mkdir()
+    plain = measure_core(core, scale.tools(), root=tmp_path, window=1_000_000, reserve=10000, dump=dump)
+    text = dump.read_text(encoding='utf-8')
+    assert text.startswith(core.base_prompt) and '## My story' in text and '## This room (Main)' in text
+    assert (plain['density'], plain['view']['work_room_tokens']) == (1.0, plain['margin_tokens'])
+    dense = measure_core(core, scale.tools(), root=tmp_path, window=1_000_000, reserve=10000, ratio=1.6)
+    assert dense['density'] == dense['fit']['measurement']['measurement_density'] == 1.6
+    assert dense['input_tokens'] > 1.5 * plain['input_tokens'] and dense['margin_tokens'] < plain['margin_tokens']
+    with pytest.raises(SystemExit):  # the report never writes under the data root it reads
+        main(['--data', str(tmp_path), '--room', '1', '--window', '1000', '--reserve', '10', '--dump', str(dump)])
+
+
+def test_view_counts_name_todays_forms_by_the_law_of_forms():
+    """Whole, my story's records and the closing sentences are retellings, task lines without one and a silent room's
+    line host facts, the words nobody considered named apart; at the deepest walk before uncovered owner words every
+    other reduced form is an emergency form by its step (pages by address, a conversation by its counters)."""
+    from devtools.context_fit_report import view_counts
+    from ouroboros import memory_floor as mf, memory_view as mv
+    from tests import _memory_view_synthetic as syn
+
+    snapshot = syn.snapshot(room_facts=syn.work_room(), story=syn.told_story(), conversations=syn.place_threads())
+    whole = view_counts(snapshot, mv.FULL_VIEW)
+    assert {k: v for k, v in whole.items() if k != "reduced_forms"} == {
+        'retellings': {"legacy, a helper's": 1, 'part': 1, 'page': 6, 'task summary': 3},
+        'host_facts': {'task line': 2, 'silent room': 1}, 'unconsidered': {'as text': 2, 'as a line': 1},
+        'emergency': {}, 'rows_as_words': 15}
+    deepest = mf.fit_memory_view(snapshot, {'margin': 0, 'physical': None})
+    result = view_counts(snapshot, deepest)
+    from ouroboros.memory_form_facts import form_counts
+    assert result['reduced_forms'] == form_counts(snapshot, deepest)
+    assert result['rows_as_words'] == 2
+    assert result['emergency']['conversation count'] == 1
+    assert 'F6w' not in result['emergency']  # those rows are swallowed by the count
+
+
+
 @pytest.mark.parametrize('stored_tail', [False, True])
 def test_real_scale_root_read_only_report(tmp_path, monkeypatch, capsys, stored_tail):
     import socket

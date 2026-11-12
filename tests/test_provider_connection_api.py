@@ -50,6 +50,7 @@ def settings_client(tmp_path, monkeypatch):
         monkeypatch.setattr(module, "apply_runtime_provider_defaults", defaults)
     monkeypatch.setattr(gateway, "_owner_read_settings_raw", load)
     monkeypatch.setattr(gateway, "_owner_settings_document", load)
+    monkeypatch.setattr(gateway, "settings_read_view", lambda: (load(), load()))
     monkeypatch.setattr(gateway, "_owner_write_settings", save)
     app = Starlette(routes=[Route("/api/settings", endpoint=srv.api_settings_get, methods=["GET"]),
                             Route("/api/settings", endpoint=srv.api_settings_post, methods=["POST"])])

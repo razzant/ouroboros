@@ -36,9 +36,10 @@ _BOOTSTRAP_COMMANDS = []  # live invocation owners only; never a scan of histori
 
 
 class _SourceHandoff:
-    """Keep a Windows successor owned until transfer or Panic has won termination.
+    """Admit a successor (POSIX exec, Windows spawn) only before Panic's stop claim; keep a
+    Windows successor owned until transfer or Panic has won termination.
 
-    The lock covers only publication and the terminal decision, never Popen or
+    The lock covers only publication and the terminal decision, never Popen, exec or
     stopping a child. Panic never waits for spawn: a compatible successor observes
     the inherited parent handle before startup, even before Popen returns here.
     """
@@ -913,21 +914,19 @@ LAUNCHER_HANDOFF_ENV = "OUROBOROS_LAUNCHER_HANDOFF"
 
 
 def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_lock: Callable[[], None],
-                         acquire_lock: Callable[[], bool], before_release: Callable[[], bool | None],
-                         on_failure: Callable[[], None], desktop: bool, macos: bool, cancelled=lambda: False) -> None:
+                         acquire_lock: Callable[[], bool], before_release: Callable[[], None],
+                         on_failure: Callable[[], None], desktop: bool, macos: bool, cancelled=lambda: False,
+                         windowed: Callable[[Callable[[], None]], bool] | None = None) -> None:
     """Hand off to compatible managed source; keep the shell on probe or spawn refusal.
 
-    Source imports are probed before teardown; refusal keeps the current shell.
-    macOS additionally checks MACOS_SOURCE_ENTRY_PROTOCOL and selects its signed
-    entry, retaining app identity, profile and the runtime-venv option. Body, venv
-    and import probes use plain Python; other successors drop consumed --runtime-venv.
-    POSIX replaces the process image with that exact command. Windows spawns quoted
-    argv, hides GUI successors and preserves attached CLI consoles. Stop fences
-    teardown/spawn; the old icon leaves while the lock is held. A definite refusal
-    retakes the lock before restoring the shell unless stopping, or exits if another
-    launcher took it; a released lock is never released again. Explicit False from
-    before_release preserves the shell and lock (legacy None means ready). A successor
-    that starts and then crashes has no fallback; no retry state is kept.
+    macOS selects its signed entry and probes imports/protocol with plain Python before
+    teardown or unlocking. POSIX replaces the process image with that exact command; a warm
+    macOS desktop shell passes ``windowed`` (``launcher_window_chrome.transfer_when_windowed``),
+    which runs that teardown and exec on the main thread once no window is in full screen, or
+    refuses before any teardown. Windows spawns a quoted argv, preserving an attached CLI console
+    and hiding only when there is none. Remove the old icon while holding the lock; a definite
+    refusal reacquires it before restoring the shell, or exits if another launcher took it.
+    A successor that starts and then fails is not a spawn refusal; no retry state is kept.
     """
     from ouroboros.platform_layer import IS_WINDOWS, inherited_console_kwargs
 
@@ -948,17 +947,43 @@ def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_
     env = embedded_python_env(context.data_dir, {**os.environ, LAUNCHER_HANDOFF_ENV: "1"})
     if cancelled():
         return
-    if before_release() is False:
-        context.log.warning("Native window preparation declined source handoff; keeping the current launcher")
+
+    def recover() -> None:  # a definite refusal after unlock
+        if acquire_lock():
+            on_failure()
+        elif source_handoff.begin(cancelled):  # never a hard exit over Panic's pending stop/writes
+            context.log.error("Another launcher took the single-instance lock meanwhile; this one exits")
+            source_handoff.leave(1, cancelled)
+
+    if not IS_WINDOWS:
+        released = False
+
+        def replace() -> None:  # Stop is checked again after unlock, Panic's claim included
+            nonlocal released
+            if source_handoff.begin(cancelled):
+                before_release()
+                release_lock()
+                released = True
+                if source_handoff.begin(cancelled):
+                    os.execve(command[0], command, env)  # returns only by raising
+
+        try:
+            if windowed is not None and macos and desktop:
+                windowed(replace)  # on the main thread once no window is in full screen, or never
+            else:
+                replace()
+        except Exception:
+            context.log.error("The checkout's launcher did not start", exc_info=True)
+        if released:  # a refusal before teardown leaves this shell as it was
+            recover()
         return
+    before_release()
     release_lock()
     try:
         if cancelled():
             if acquire_lock():
                 on_failure()
             return  # the Panic owner must finish even if another launcher took the lock
-        if not IS_WINDOWS:
-            os.execve(command[0], command, env)  # returns only by raising
         from ouroboros.server_control import _windows_restart_handoff
 
         # Use the direct-restart parent handle/stdio contract. A current source
@@ -975,13 +1000,7 @@ def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_
                 source_handoff.spawned(successor, cancelled)
     except Exception:
         context.log.error("The checkout's launcher did not start", exc_info=True)
-        if acquire_lock():
-            on_failure()
-            return
-        if cancelled():
-            return  # a failed spawn cannot hard-exit over Panic's pending stop/writes
-        context.log.error("Another launcher took the single-instance lock meanwhile; this one exits")
-        source_handoff.leave(1, cancelled)
+        recover()
         return
     source_handoff.leave(0, cancelled)  # no atexit release over the successor's PID lock
 

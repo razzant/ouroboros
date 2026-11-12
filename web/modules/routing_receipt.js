@@ -20,8 +20,8 @@ export function routingOptionLabel(option) {
     return option.project_id && !option.task_id ? tr('routing.generic_project', 'Project') : tr('routing.generic_task', 'Task');
 }
 
-/** Human text for a typed routing annotation ('' hides the line). */
-export function routingAnnotationText(annotation) {
+/** Human text for a typed routing annotation ('' hides the line) in the chat `chatId` that shows it (0: unknown). */
+export function routingAnnotationText(annotation, chatId = 0) {
     if (!annotation || typeof annotation !== 'object') return '';
     // A refused act carries the host's own owner-facing sentence (`cause`);
     // it outranks the status matrix below. Absent on scheduled/delivered/
@@ -31,8 +31,12 @@ export function routingAnnotationText(annotation) {
     const action = String(annotation.action || '');
     const status = String(annotation.status || '');
     const target = String(annotation.target || '');
-    // Words saved for an unnamed work say only that: a placeholder name would name nothing.
-    const targetLabel = String(annotation.target_label || '') || (!target || action === 'mailbox_delivery' ? ''
+    // Words saved for a work name it only where the name tells which work took them: an unnamed work gets no placeholder,
+    // and words that joined Main's running turn get no name at all, since there it tells the turn's first request, never
+    // theirs (owner 12.11). A Project room's own receipt keeps its work's name.
+    const saved = action === 'mailbox_delivery';
+    const joinedMain = saved && !annotation.project_id && Number(chatId) === 1 && ['delivered', 'read'].includes(status);
+    const targetLabel = joinedMain ? '' : String(annotation.target_label || '') || (!target || saved ? ''
         : action === 'project_route' ? tr('routing.generic_project', 'Project') : tr('routing.generic_task', 'Task'));
     if (status === 'pending') return tr('routing.pending', 'Choosing the right destination…');
     if (status === 'needs_manual_target') {
@@ -77,7 +81,7 @@ export function clearTransientRoutingAnnotations(messagesDiv = globalThis.docume
 
 export function renderRoutingAnnotation(bubble, annotation, chatId = 1) {
     if (!bubble) return false;
-    const text = routingAnnotationText(annotation);
+    const text = routingAnnotationText(annotation, chatId);
     let note = bubble.querySelector('.msg-routing-annotation');
     if (!text) {
         const hasStatus = bubble.dataset.chatAnnotationStatus !== undefined;

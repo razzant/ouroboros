@@ -905,7 +905,7 @@ def _handle_model_wait_control(
     remains the supervisor's death-then-settlement transaction.
     """
     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
-    from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait
+    from ouroboros.model_wait import OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait
     from ouroboros.transport_custody import outcome_unknown_on_chain
 
     reason = error.control_reason
@@ -914,8 +914,8 @@ def _handle_model_wait_control(
     # catches a hold's interruption raised outside the model call, must not
     # hand the same error back here.
     error.control_rails_seen = True
-    if reason == "owner_model":
-        return None  # a refused call's wait yielded; the next drain applies the durable primary
+    if reason in {"owner_model", OWNER_WORDS_WAITING}:
+        return None  # a refused call's wait or a granted repeat yielded; the next drain applies the primary or the words
     if reason == "owner_launch_authority_unavailable":
         # Only the positively unsent handoff waits, and only on positive lock contention;
         # sent effects never retry. Reuse this task's live stack and control/deadline
@@ -1248,7 +1248,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     pass (``refusal_policy``) frees a shown chosen read only after a provider's refusal (an estimate
     never cuts a chosen read)."""
     from ouroboros.context_budget import ContextReclaimRequest
-    from ouroboros.context_compaction import context_reclaim_transcript_sha256, emergency_address_view
+    from ouroboros.context_compaction import context_reclaim_transcript_sha256
+    from ouroboros.context_source_view import emergency_address_view
 
     measurement = disposition.measurement
     tool_ctx = ctx.tools._ctx

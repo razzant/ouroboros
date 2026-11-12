@@ -7,7 +7,7 @@ import pytest
 from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv, capability_evidence as ce
 from ouroboros.context_budget import ContextReclaimRequest, WHOLE_CATEGORY
 from ouroboros import context_compaction as cc
-from ouroboros.context_compaction import emergency_address_view
+from ouroboros.context_source_view import emergency_address_view
 from ouroboros.context_renewal import renewal_seed
 from tests import _memory_view_synthetic as syn
 from tests.test_memory_view_lever import plan as lever_plan
@@ -180,8 +180,8 @@ def test_core_without_memory_reserves_one_eighth_for_roots_and_direct_turns(monk
         assert plan.projection("low").calibrated_tokens + plan.output_reserve_tokens + 128_000 // 8 <= 128_000
 
 
-@pytest.mark.parametrize("replies,mode", [(2_400, "max"), (400, "max"), (24, "max")])
-def test_owner_max_is_judged_on_the_completed_start_view_with_the_real_catalog(main_loop, monkeypatch, replies, mode):
+@pytest.mark.parametrize("replies,mode", [(2_400, "low"), (400, "max"), (24, "max")])
+def test_owner_max_is_judged_on_the_ordinary_start_view_with_the_real_catalog(main_loop, monkeypatch, replies, mode):
     f = main_loop
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     snap = syn.snapshot(role="integrator", story=syn.pages(2, 200),
@@ -198,7 +198,8 @@ def test_owner_max_is_judged_on_the_completed_start_view_with_the_real_catalog(m
     sent = cf.estimate_context_prompt_tokens(f.inputs[0]["messages"], f.inputs[0]["tools"], provider="openai")
     assert plan.initial_mode == mode
     if replies == 2400:
-        assert plan.projection(mode).memory_facts['floor']['steps']['F7a'] == 1
+        # Replies without a gist are not an ordinary way to pay for Max's books.
+        assert plan.projection(mode).memory_facts['max_room']['need'] > 400_000
     assert (core.architecture_md in json.dumps(f.inputs[0]["messages"])) is (mode == "max")
     assert sent + plan.output_reserve_tokens + 400_000 // 8 <= 400_000
 

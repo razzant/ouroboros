@@ -123,7 +123,7 @@ def test_start_uses_one_floor_walk_and_calibrates_before_book_choice(tmp_path, m
         return render(*args, **kwargs)
     monkeypatch.setattr(mf, "render_view_for_mode", measured)
     assert build(330_000).initial_mode == "max"
-    assert walks == [False]  # a start whose room holds its request prices nothing and walks once
+    assert walks == [True, False]  # price the ordinary Max view, then walk the selected view once
     monkeypatch.setattr("ouroboros.context_fit._route_calibration_ratio", lambda *_a, **_kw: 4 / 2.7)
     assert build(330_000).initial_mode == "low"
     assert walks.count(False) == 2  # calibrated before the book choice: Low's one walk, never a Max walk first

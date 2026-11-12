@@ -45,7 +45,7 @@ def github_repair_hint(error: GitHubError, *, operation: str, repository: str,
     where = f"{operation} on {repository}" + (f" (branch {branch})" if branch else "")
     if error.http_status in (401, 403):
         return (f"GitHub answered HTTP {error.http_status} for {where}; read error_detail. If the "
-                "token lacks access, update GITHUB_TOKEN in Settings → Secrets, then retry.")
+                "token lacks access, update GITHUB_TOKEN in Settings → Accounts and keys, then retry.")
     if error.http_status == 409:
         return f"GitHub reported a conflict (HTTP 409) for {where}; resolve it on GitHub, then retry."
     if error.failure == "timeout":

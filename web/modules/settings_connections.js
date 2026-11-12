@@ -1,18 +1,23 @@
-// Settings → Accounts → API keys: the key rows of each provider card (docs/DESIGN.md §6 account-row anatomy,
-// §7 "Accounts"). A card holds its built-in key ("Default": today's flat settings, collected by settings.js
-// with the other inputs) and the keys added under it, which are rows of OUROBOROS_CONNECTIONS: kind, a name
-// derived once from the label and never changed, the label, `enabled`, the kind's fields. Turning a built-in
-// key off writes the secret-free row `{kind, name: "default", enabled: false}`. GET masks a row's secrets and
-// the save keeps an untouched mask by row identity, so a row travels with its fields as shown. A role names
-// the key it uses: nothing here picks, orders or rotates keys.
+// API keys (docs/DESIGN.md §6 account-row anatomy, "Settings"). A provider holds its built-in key ("Default": today's
+// flat settings) and the keys added beside it, which are rows of OUROBOROS_CONNECTIONS: kind, a name derived once
+// from the label and never changed, the label, `enabled`, the kind's fields. Turning a built-in key off writes the
+// secret-free row `{kind, name: "default", enabled: false}`. GET masks a row's secrets and the save keeps an
+// untouched mask by row identity, so a row travels with its fields as shown. A role names the key it uses: nothing
+// here picks, orders or rotates keys. Two hosts: setup draws every key of a provider as a row with its form in the
+// provider's card and collects them with its other answers (`createConnectionsEditor`);
+// Settings › Accounts and keys draws a head per key in its list and one key's form on that key's own page, and each
+// of them writes at once (`keyHeads`, `mountKeyPage`, below).
 import { apiClient } from './api_client.js';
-import { adoptConnectionLabels } from './connection_labels.js';
+import { adoptConnectionLabels, connectionLabel } from './connection_labels.js';
 import { API_PROVIDER_ORDER, apiConnections, apiProviderLabel, compatibleEndpoint, parseModelSource } from './route_editor_primitives.js';
-import { setButtonBusy } from './settings_controls.js';
+import { CONFIRMS, bindSettingRows, commitSetting, outcomeLine, readSettings, setButtonBusy, settingsRow } from './settings_controls.js';
 import { checkerFieldsNote, checkerReads, checkerUses, deploymentOf } from './settings_policy.js';
+import { rowById } from './settings_rows.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
-import { PROVIDER_CARDS, connectionRowHtml } from './settings_provider_cards.js';
+import { PROVIDER_CARDS, connectionFieldsHtml, connectionRowHtml } from './settings_provider_cards.js';
 import { revealNewRow, setInlineStatus } from './ui_helpers.js';
+import { setResult } from './ui_primitives.js';
+import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 export const CONNECTIONS_KEY = 'OUROBOROS_CONNECTIONS';
 
@@ -39,7 +44,7 @@ export function connectionNameFor(label, taken = []) {
 
 /**
  * Which saved roles and Agents rows name each API source (`kind` or `kind@name`), in the owner's words:
- * the roles by name ("Main", "Fallback 2"), then the Agents rows as a count ("3 subagents"). A role left
+ * the roles by name ("Main", "Fallback 2"), then the Agents rows as a count ("3 agents"). A role left
  * empty uses another role and names nothing itself.
  */
 export function connectionUsage(settings = {}, slots = []) {
@@ -72,7 +77,7 @@ export function connectionUsage(settings = {}, slots = []) {
     }
     for (const [source, count] of subagents) {
         if (!used.has(source)) used.set(source, []);
-        used.get(source).push(`${count} subagent${count === 1 ? '' : 's'}`);
+        used.get(source).push(`${count} agent${count === 1 ? '' : 's'}`);
     }
     return used;
 }
@@ -84,7 +89,7 @@ export function connectionRowFacts({ draft = false, enabled = true, configured =
     const users = usedBy.join(', ');
     if (!enabled) return { tone: 'neutral', label: 'Disabled', meta: `${users ? `Named by ${users}` : 'Not used by any role'} · nothing is sent through it` };
     const use = users ? `used by ${users}` : 'not used by any role';
-    const legacy = legacyAddress ? `Legacy OpenAI Base URL ${legacyAddress} with the OpenAI API key${fixed ? '' : ' · change the address in Settings → Accounts'}` : '';
+    const legacy = legacyAddress ? `Legacy OpenAI Base URL ${legacyAddress} with the OpenAI API key${fixed ? '' : ' · change the address in Settings → Accounts and keys'}` : '';
     if (!configured) return { tone: 'neutral', label: 'No key', meta: legacy ? `${legacy} · ${use}` : `${use[0].toUpperCase()}${use.slice(1)}` };
     return { tone: 'ok', label: 'Ready', meta: `${source === 'environment' ? 'Provided by environment' : legacy || 'Enabled'} · ${use}` };
 }
@@ -102,36 +107,6 @@ export function cacheHintsNote(entry) {
     const when = new Date(fact.learned_at || fact.since || '');
     return `Cache hints: refused by this server${Number.isFinite(when.getTime())
         ? ` since ${when.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : ''}`;
-}
-
-/** The save receipt's roles and rows that still name a removed or disabled key; '' when none.
- * A role is named in the owner's words ("Main", "Fallback 2", "Agents · reviewer-1"), the key by its picker label. */
-const REFERENCE_ROLE_LABELS = Object.freeze({
-    OUROBOROS_MODEL: 'Main', OUROBOROS_MODEL_LIGHT: 'Light', OUROBOROS_MODEL_SAFETY: 'Safety Supervisor',
-    OUROBOROS_MODEL_VISION: 'Vision', OUROBOROS_MODEL_CONSCIOUSNESS: 'Consciousness',
-    OUROBOROS_MODEL_FALLBACKS: 'Fallback', OUROBOROS_MODEL_FALLBACK: 'Fallback', OUROBOROS_WEBSEARCH_MODEL: 'Web search',
-    OUROBOROS_MODEL_DEEP_SELF_REVIEW: 'Deep review', OUROBOROS_SUBAGENTS: 'Agents',
-});
-
-export function connectionReferencesText(references, connections = []) {
-    const named = (Array.isArray(references) ? references : []).map((reference) => {
-        if (typeof reference === 'string') return reference.trim();
-        if (!reference || typeof reference !== 'object') return '';
-        const setting = String(reference.setting || '').trim();
-        const role = String(reference.label || REFERENCE_ROLE_LABELS[setting] || setting).trim();
-        const entry = String(reference.entry || '').trim();
-        const where = !entry ? role : setting === 'OUROBOROS_SUBAGENTS' ? `${role} · ${entry}` : `${role} ${entry}`;
-        const route = String(reference.route || '').trim();
-        const { source } = route ? parseModelSource(route) : { source: '' };
-        const id = source && !source.startsWith('subscription:') ? source : String(reference.connection || '').trim();
-        return [where, id ? `(${apiProviderLabel(id, {}, connections)})` : ''].filter(Boolean).join(' ');
-    }).filter(Boolean);
-    return named.length ? `Still naming a removed or disabled key, so they cannot send: ${named.join(', ')}` : '';
-}
-
-/** The "More providers" fold opens by itself only for a key set up inside it: a stored credential or an added key. */
-export function moreProvidersOpen(connections = [], kinds = []) {
-    return (connections || []).some((entry) => kinds.includes(entry.kind) && (entry.configured || !entry.builtin));
 }
 
 export function providerTestStatusText(result = {}) {
@@ -174,13 +149,11 @@ export function reachesAnotherPair(facts = {}, draft = {}) {
     return JSON.stringify(compatibleEndpoint(draft)) !== JSON.stringify(compatibleEndpoint(facts));
 }
 
-/** The Accounts API-key rows of one Settings page: load, draft edits, collect, validate, Test.
- * `pageDraft`: flat values the page edits outside these rows and outside `refresh` (Settings' legacy address). */
-export function createConnectionsEditor({ root, onChange = () => {}, test = (body) => apiClient.providerTest(body), pageDraft = () => ({}) } = {}) {
+/** The Accounts API-key rows of one Settings page: load, draft edits, collect, validate, Test. */
+export function createConnectionsEditor({ root, onChange = () => {}, test = (body) => apiClient.providerTest(body) } = {}) {
     const cards = new Map(PROVIDER_CARDS.filter((card) => root.querySelector(`[data-connection-rows="${card.kind}"]`))
         .map((card) => [card.kind, card]));
     const kinds = API_PROVIDER_ORDER.filter((kind) => cards.has(kind));
-    const advanced = PROVIDER_CARDS.filter((card) => card.advanced).map((card) => card.kind);
     const panel = root.querySelector('[data-settings-panel="providers"]');
     let entries = [];
     let listed = [];            // the document's own `_meta.connections` entries (facts the picker does not read)
@@ -355,8 +328,6 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         root.querySelectorAll('[data-connection-row]').forEach(expire);
         rowBaselines = new WeakMap([...root.querySelectorAll('[data-connection-row]')].map((row) => [row, rowFingerprint(row)]));
         paintAll();
-        const fold = root.querySelector('#settings-more-providers');
-        if (fold && moreProvidersOpen(entries, advanced)) fold.open = true;
         baseline = JSON.stringify(collectRows());
     }
 
@@ -409,7 +380,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     // The page's flat draft: the settings last loaded or refreshed under the built-in rows' current fields,
     // so a pair edited partly outside its row (the OpenAI key of a legacy compatible pair) reads as typed.
     function flatDraft() {
-        const values = { ...pageSettings, ...pageDraft() };
+        const values = { ...pageSettings };
         root.querySelectorAll('[data-connection-row][data-builtin="1"]').forEach((row) => {
             for (const field of cards.get(row.dataset.kind).fields) {
                 const input = fieldInput(row, field);
@@ -542,4 +513,371 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
             panel?.removeEventListener('input', onInput);
         },
     };
+}
+
+/* ---- Settings › Accounts and keys: a head per key in the list, one key on its own page -----------------------------
+   settings_accounts.js composes the list and hands a key's page its body. A head's switch and a key's Save, Turn off
+   and Remove each write at once, through the row helper (settings_controls.js commitSetting). A built-in key is its
+   flat settings: only the fields that changed travel, and a kept secret never does. A key added beside it is one row
+   of the list, written from a fresh read with that read's token: a list that changed meanwhile is refused and shown,
+   never retried. A secret is never shown back by a save: it has no "was" and no Undo. */
+
+const LIST_ROW = { id: CONNECTIONS_KEY, keys: [CONNECTIONS_KEY], page: 'accounts', name: 'API keys', control: { kind: 'custom' }, writer: 'generic' };
+const cardOf = (kind) => PROVIDER_CARDS.find((card) => card.kind === kind) || null;
+const landed = (outcome) => outcome?.state === 'saved' || outcome?.state === 'saved_then_failed';
+const TESTS = new Map();         // key id → what its last Test here said, `{ text, tone }`; an edit of the key ends it
+let keyWrites = Promise.resolve();  // one key write at a time: each starts from its own fresh read
+let pageSerial = 0;
+
+export const keyPath = (kind, name = '') => `accounts/key/${kind}${name ? `/${encodeURIComponent(name)}` : ''}`;
+const keyId = (kind, name = '') => (name ? `${kind}@${name}` : kind);
+
+/** `accounts/key/<kind>[/<name>]` as `{ kind, name }`, `accounts/key/new` as `{ fresh: true }`; null for neither. */
+export function parseKeyPath(path) {
+    const [family, word, kind = '', ...rest] = String(path || '').split('/');
+    if (family !== 'accounts' || word !== 'key') return null;
+    if (kind === 'new' && !rest.length) return { kind: '', name: '', fresh: true };
+    let name = rest.join('/');
+    try { name = decodeURIComponent(name); } catch { /* a name with a stray percent is read as written */ }
+    return cardOf(kind) ? { kind, name, fresh: false } : null;
+}
+
+/** A key's name, in the list and as its page's title: its provider as the pickers name it, then the key's own name. */
+const keyName = (kind, name = '') => `${apiProviderLabel(kind)} · ${name ? connectionLabel(keyId(kind, name)) : 'Default'}`;
+export function keyTitle(path) {
+    const key = parseKeyPath(path);
+    return !key ? 'API key' : key.fresh ? 'New key' : keyName(key.kind, key.name);
+}
+
+/** Who names a key, as one line: its roles and agents, or that none does. */
+const usedWords = (users = []) => (users.length ? users.join(', ') : 'No role uses it');
+
+/**
+ * The keys of a settings document as the list shows them: `keys`, a head for every key that exists (switched off or
+ * not), and `more`, the provider cards that have none yet. A head says who names the key; its chip speaks only of what
+ * stands in the way or was just proved: no key, the organization's key, or what the last Test here said.
+ */
+export function keyHeads(settings = {}, { tests = TESTS } = {}) {
+    const deployment = deploymentOf(settings?._meta);
+    const usage = connectionUsage(settings, settings?._meta?.setup_contract?.modelSlots || []);
+    const legacy = legacyAddressOf(settings);
+    adoptConnectionLabels(settings?._meta?.connections);
+    const keys = [];
+    const more = [];
+    for (const entry of apiConnections(settings)) {
+        const card = cardOf(entry.kind);
+        if (!card) continue;
+        if (entry.builtin && !entry.configured && entry.enabled) { more.push(card); continue; }
+        const fixed = checkerUses(deployment, entry.id);
+        const test = tests.get(entry.id);
+        const from = entry.source === 'environment' ? 'From the environment'
+            : entry.builtin && entry.kind === 'openai-compatible' && legacy ? `Legacy address ${legacy}` : '';
+        keys.push({
+            id: entry.id, kind: entry.kind, name: entry.builtin ? '' : entry.name, card, enabled: entry.enabled, fixed,
+            path: keyPath(entry.kind, entry.builtin ? '' : entry.name),
+            title: keyName(entry.kind, entry.builtin ? '' : entry.name),
+            meta: [from, usedWords(usage.get(entry.id))].filter(Boolean).join(' · '),
+            chip: fixed ? { text: 'Set by your organization', tone: 'neutral' }
+                : test && test.tone !== 'ok' ? { text: test.text, tone: 'warn' }
+                    : !entry.configured ? { text: 'No key', tone: 'neutral' } : test ? { text: test.text, tone: 'ok' } : null,
+        });
+    }
+    return { keys, more };
+}
+
+/** An editor's result line for an Outcome: the shared sentences, and `Saved` with when it applies for a landed write
+ *  (never the value: a key is a secret). */
+export function editorLine(outcome, saved = 'Saved') {
+    if (!outcome) return {};
+    if (outcome.state === 'unchanged') return { text: 'Nothing changed.', tone: 'muted' };
+    const line = outcomeLine({ keys: [], control: { kind: 'secret' } }, { ...outcome, old: undefined, withheld: outcome.withheld || 'structure' });
+    if (!line) return {};
+    const text = outcome.state === 'saved' ? line.text.replace(/^Saved/, saved) : line.text;
+    return { text: line.note ? `${text}. ${line.note}` : text, tone: line.tone, details: line.details };
+}
+
+/** Write the list of added keys from a fresh read: `change(rows, fresh)` answers the next list, or null when the key
+ *  it meant is no longer there. One write at a time. */
+function writeKeyList(change, { ask } = {}) {
+    const run = async () => {
+        let fresh;
+        try { fresh = await readSettings(); } catch (error) { return { state: 'refused', effect: 'now', withheld: '', message: String(error?.message || error), code: 'settings_unread' }; }
+        const next = change(connectionRows(fresh[CONNECTIONS_KEY]), fresh);
+        if (!next) return { state: 'changed_elsewhere', effect: 'now', withheld: '', message: '', code: '' };
+        return commitSetting(LIST_ROW, next, { confirmed: true, ifUnchanged: fresh._meta?.tokens?.[CONNECTIONS_KEY] || '', ask });
+    };
+    const queued = keyWrites.then(run);
+    keyWrites = queued.catch(() => {});
+    return queued;
+}
+
+/** Turn a key on or off at once. A built-in key keeps its fields: off is the secret-free row that names it. */
+export function setKeyEnabled({ kind, name = '' }, enabled, { ask } = {}) {
+    const stored = name || 'default';
+    return writeKeyList((rows) => {
+        const at = rows.findIndex((row) => row.kind === kind && row.name === stored);
+        if (name) return at < 0 ? null : rows.map((row, i) => (i === at ? { ...row, enabled: Boolean(enabled) } : row));
+        const rest = rows.filter((_, i) => i !== at);
+        return enabled ? rest : [...rest, { kind, name: 'default', enabled: false }];
+    }, { ask });
+}
+
+/**
+ * Mount one key's page: `accounts/key/<kind>` (the built-in key), `accounts/key/<kind>/<name>` (a key added beside
+ * it) or `accounts/key/new`. Its form is the key's own fields with Test and its own Save; Turn off and Remove stand
+ * under it, and Remove asks first. `ctx` is the shell's (`readSettings`, `openSettings`, `ask`); `test` sends one
+ * short model request; `left(note)` is called after the key was added or removed, with the sentence for the list.
+ */
+export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiClient.providerTest(body), left = () => {} } = {}) {
+    const key = parseKeyPath(path) || { kind: '', name: '', fresh: true };
+    const uid = `key-${pageSerial += 1}`;
+    const read = ctx.readSettings || readSettings;
+    let settings = null;
+    let asRead = '';        // the stored row this form was drawn from: a save over a newer one is refused
+    let kind = key.kind || PROVIDER_CARDS[0].kind;
+    let rows = null;
+    let generation = 0;     // an edit ends the Test in flight
+    let gone = false;
+    let said = null;        // the result line, kept across a redraw
+    const builtin = !key.fresh && !key.name;
+    const id = () => keyId(kind, key.name);
+    const card = () => cardOf(kind);
+    const find = (selector) => container.querySelector(selector);
+    const fieldInput = (field) => find(`[data-connection-field="${field.rowField}"]`);
+    const typed = (field) => { const input = fieldInput(field); return field.secret ? input?.value || '' : (input?.value || '').trim(); };
+    const changed = (field) => { const input = fieldInput(field); return input?.dataset.forceClear === '1' || typed(field) !== (input?.dataset.appliedValue ?? ''); };
+    const say = (line) => { said = line; setResult(find('[data-editor-result]'), line || {}); };
+    // A built-in key's write: the flat settings of the fields that travel, as one row of the helper.
+    const flatRow = (fields) => ({ id: `accounts:key:${kind}`, keys: fields.map((field) => field.settingKey), page: 'accounts',
+        name: card().title, control: { kind: 'custom' }, writer: 'generic' });
+    const storedRow = () => (key.name ? connectionRows(settings?.[CONNECTIONS_KEY]).find((row) => row.kind === kind && row.name === key.name) || null : null);
+    const entry = () => apiConnections(settings || {}).find((item) => item.id === id()) || null;
+
+    function draw() {
+        resetSecretReveals(container);
+        rows?.dispose();
+        rows = null;
+        const stored = storedRow();
+        asRead = JSON.stringify(stored);
+        if (key.name && !stored) {
+            container.innerHTML = '<p class="settings-page-lead">This key is no longer saved.</p>';
+            return;
+        }
+        const deployment = deploymentOf(settings?._meta);
+        const fixed = !key.fresh && checkerUses(deployment, id());
+        const on = entry()?.enabled !== false;
+        const usage = connectionUsage(settings, settings?._meta?.setup_contract?.modelSlots || []);
+        const form = connectionFieldsHtml(card(), builtin ? {} : { uid, name: key.name, label: stored?.label, values: stored || {}, draft: key.fresh });
+        const provider = key.fresh ? `<div class="form-field ui-field"><label for="${uid}-kind">Provider</label><select id="${uid}-kind" class="ui-control" data-key-kind>${
+            PROVIDER_CARDS.map((each) => `<option value="${each.kind}"${each.kind === kind ? ' selected' : ''}>${escapeHtml(each.title)}</option>`).join('')}</select></div>` : '';
+        const legacy = builtin && kind === 'openai' && rowById('OPENAI_BASE_URL');
+        const legacyFixed = legacy && checkerReads(deployment, legacy.id);
+        const legacyRow = legacyFixed ? { ...legacy, meta: checkerFieldsNote(['Legacy OpenAI Base URL']) } : legacy;
+        container.innerHTML = `<p class="settings-page-lead">${key.fresh ? 'A second key of a provider, under a name of its own. A role or an agent names the key it uses.'
+            : `${escapeHtml(usedWords(usage.get(id())))}.${on ? '' : ' It is off: nothing is sent through it.'}`}</p>
+            <section class="ui-card settings-card accounts-key" data-connection-row data-kind="${kind}"${builtin ? ` data-builtin="1" data-setting-row="accounts:key:${kind}"` : ` data-uid="${uid}" data-name="${escapeHtml(key.name)}"${key.fresh ? ' data-draft="1"' : ''}`}>
+                <div class="accounts-key-form">${provider}${form}</div>
+                <p class="settings-card-note" data-key-fixed${fixed ? '' : ' hidden'}>Set by your organization: its Safety Supervisor sends through this key.</p>
+                <p class="settings-card-note" data-connection-fixed-fields hidden></p>
+                <div class="ui-action-row">
+                    ${fixed ? '' : '<button type="button" class="btn btn-save" data-editor-save>Save</button>'}
+                    <button type="button" class="btn btn-default" data-connection-test>Test</button>
+                    <span class="ui-result" data-editor-result role="status" aria-live="polite"></span>
+                </div>
+                <p class="settings-card-note">Test sends one short model request. Provider charges may apply.</p>
+                ${card().note ? `<p class="settings-card-note">${card().note}</p>` : ''}
+            </section>
+            ${legacy ? `<section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold><summary>More: legacy base address</summary>
+                <div class="settings-rows">${settingsRow(legacyRow)}</div></details></section>` : ''}
+            ${key.fresh || fixed ? '' : `<div class="ui-action-row settings-foot">
+                <button type="button" class="btn btn-default" data-key-toggle>${on ? 'Turn off' : 'Turn on'}</button>
+                ${builtin && (card().fields.some((field) => checkerReads(deployment, field.settingKey)) || !(entry()?.configured && entry().source !== 'environment' && !(kind === 'openai-compatible' && legacyAddressOf(settings))))
+        ? '' : '<button type="button" class="btn btn-danger" data-editor-remove>Remove</button>'}</div>`}`;
+        for (const field of card().fields) {
+            const input = fieldInput(field);
+            if (!input) continue;
+            // The fields show what is stored: a secret as its mask, which never travels unless it is replaced.
+            const value = String((builtin ? settings?.[field.settingKey] : stored?.[field.rowField]) ?? '');
+            Object.assign(input, { value }).dataset.appliedValue = value;
+            const held = fixed || (builtin && checkerReads(deployment, field.settingKey));
+            input.readOnly = held;
+            if (held) input.closest('.form-field')?.querySelector('.secret-clear')?.setAttribute('hidden', '');
+        }
+        const borrowed = builtin && !fixed ? card().fields.filter((field) => checkerReads(deployment, field.settingKey)) : [];
+        Object.assign(find('[data-connection-fixed-fields]'), { textContent: checkerFieldsNote(borrowed.map((field) => field.label)), hidden: !borrowed.length });
+        if (fixed) container.querySelectorAll('.accounts-key-form input').forEach((input) => { input.readOnly = true; });
+        // A key with one secret has nothing to clear that Remove does not: its field keeps Show alone.
+        if (card().fields.filter((field) => field.secret).length < 2) container.querySelectorAll('.secret-clear').forEach((button) => { button.hidden = true; });
+        bindSecretInputs(container);
+        if (legacy) rows = bindSettingRows(find('[data-settings-fold]'), { rows: [legacyRow], ask: ctx.ask });
+        if (legacyFixed) find('[data-settings-fold] [data-setting-control]').readOnly = true;
+        if (said) setResult(find('[data-editor-result]'), said);
+    }
+
+    // What this form would send as one row of the list: the stored row under the fields as shown.
+    function rowValue(name) {
+        const original = storedRow() || {};
+        const value = { ...original, kind, name };
+        const label = find('[data-connection-label]')?.value.trim() || '';
+        if (label || 'label' in original) value.label = label;
+        for (const field of card().fields) {
+            const text = typed(field);
+            if (text || field.rowField in original) value[field.rowField] = text;
+        }
+        return value;
+    }
+
+    // The page's flat draft: the document under the built-in key's fields as typed (the pair its Test would reach).
+    function flatDraft() {
+        const values = { ...settings };
+        if (builtin) for (const field of card().fields) values[field.settingKey] = fieldInput(field)?.value ?? '';
+        return values;
+    }
+
+    // Only owner-edited fields travel: a saved secret arrives masked, so an untouched field tests the saved value.
+    function testRequest() {
+        const overrides = {};
+        for (const field of card().fields) if (changed(field)) overrides[builtin ? field.settingKey : field.rowField] = typed(field).trim();
+        return builtin ? builtinTestRequest(kind, overrides, flatDraft())
+            : { provider_id: kind, connection: key.name || connectionNameFor(find('[data-connection-label]')?.value, takenNames()), overrides };
+    }
+    const takenNames = () => connectionRows(settings?.[CONNECTIONS_KEY]).filter((row) => row.kind === kind).map((row) => row.name);
+
+    async function runTest() {
+        const button = find('[data-connection-test]');
+        const sent = generation;
+        setButtonBusy(button, true);
+        say({ text: 'Testing…', tone: 'muted' });
+        let verdict;
+        try {
+            const data = await test(testRequest());
+            verdict = { text: providerTestStatusText(data), tone: data?.ok ? 'ok' : 'danger' };
+        } catch (error) { verdict = { text: providerTestNetworkErrorStatus(error), tone: 'danger' }; }
+        setButtonBusy(find('[data-connection-test]'), false);
+        if (gone || sent !== generation) return;
+        if (!key.fresh) TESTS.set(id(), verdict);
+        say(verdict);
+    }
+
+    /** What a save would refuse here, as `{ input, message }`; null when it may go. */
+    function refusal() {
+        const label = find('[data-connection-label]');
+        if (key.fresh && !label.value.trim()) return { input: label, message: `${card().title}: name the new key.` };
+        for (const field of builtin ? [] : card().fields.filter((item) => item.required)) {
+            if (!typed(field).trim()) return { input: fieldInput(field), message: `${card().title}: enter the ${field.label}.` };
+        }
+        const named = label?.value.trim().toLowerCase();
+        const twin = named && connectionRows(settings?.[CONNECTIONS_KEY]).some((row) => row.kind === kind && row.name !== key.name
+            && String(row.label || row.name || '').trim().toLowerCase() === named);
+        return twin ? { input: label, message: `${card().title}: two keys are named ${label.value.trim()}. Give each its own name.` } : null;
+    }
+
+    async function save() {
+        const refused = refusal();
+        if (refused) {
+            refused.input?.setAttribute('aria-invalid', 'true');
+            refused.input?.focus?.();
+            say({ text: `Not saved. ${refused.message}`, tone: 'danger' });
+            return;
+        }
+        const button = find('[data-editor-save]');
+        setButtonBusy(button, true);
+        let outcome;
+        let name = key.name;
+        if (builtin) {
+            const fields = card().fields.filter(changed);
+            const values = fields.map((field) => (fieldInput(field).dataset.forceClear === '1' ? '' : typed(field)));
+            outcome = !fields.length ? { state: 'unchanged' } : await commitSetting(flatRow(fields), fields.length > 1 ? values : values[0], { confirmed: true, ask: ctx.ask });
+        } else {
+            const wanted = rowValue(name);
+            outcome = await writeKeyList((list) => {
+                const at = list.findIndex((row) => row.kind === kind && row.name === key.name);
+                if (key.fresh) {
+                    name = connectionNameFor(wanted.label, list.filter((row) => row.kind === kind).map((row) => row.name));
+                    return [...list, { ...wanted, name }];
+                }
+                // A row that changed since this form read it is shown, never written over.
+                if (at < 0 || JSON.stringify(list[at]) !== asRead) return null;
+                return list.map((row, i) => (i === at ? wanted : row));
+            }, { ask: ctx.ask });
+        }
+        setButtonBusy(find('[data-editor-save]'), false);
+        if (gone) return;
+        if (landed(outcome) && key.fresh) { left(`Added ${card().title} · ${find('[data-connection-label]').value.trim()}.`, keyId(kind, name)); return; }
+        if (landed(outcome) || outcome.state === 'changed_elsewhere') await reload();
+        say(editorLine(outcome));
+    }
+
+    async function toggle() {
+        const button = find('[data-key-toggle]');
+        const on = entry()?.enabled !== false;
+        setButtonBusy(button, true);
+        const outcome = await setKeyEnabled({ kind, name: key.name }, !on, { ask: ctx.ask });
+        if (gone) return;
+        await reload();
+        say(landed(outcome) ? {} : editorLine(outcome));
+    }
+
+    async function remove() {
+        const title = keyTitle(path);
+        if (!(await CONFIRMS.removeEntry({ name: title }, null, null, ctx.ask))) return;
+        const button = find('[data-editor-remove]');
+        setButtonBusy(button, true);
+        let outcome;
+        if (builtin) {
+            // The built-in key stays where it is typed: Remove clears what makes it usable.
+            const fields = card().fields.filter((field) => field.secret || field.credential);
+            outcome = await commitSetting(flatRow(fields), fields.length > 1 ? fields.map(() => '') : '', { confirmed: true, ask: ctx.ask });
+        } else {
+            outcome = await writeKeyList((list) => (list.some((row) => row.kind === kind && row.name === key.name)
+                ? list.filter((row) => !(row.kind === kind && row.name === key.name)) : null), { ask: ctx.ask });
+        }
+        if (gone) return;
+        TESTS.delete(id());
+        if (landed(outcome)) { left(`Removed ${title}.`); return; }
+        setButtonBusy(find('[data-editor-remove]'), false);
+        if (outcome.state === 'changed_elsewhere') await reload();
+        say(editorLine(outcome));
+    }
+
+    async function reload() {
+        try { settings = await read(); } catch { return; }  // the form keeps what it shows
+        adoptConnectionLabels(settings?._meta?.connections);
+        if (!gone) draw();
+    }
+
+    const onClick = (event) => {
+        const hit = (selector) => event.target?.closest?.(selector);
+        if (hit('[data-connection-test]')) void runTest();
+        else if (hit('[data-editor-save]')) void save();
+        else if (hit('[data-key-toggle]')) void toggle();
+        else if (hit('[data-editor-remove]')) void remove();
+    };
+    // An edit ends what the last Test said: the verdict was about the draft it tested.
+    const onInput = (event) => {
+        if (!event.target?.closest?.('.accounts-key-form')) return;
+        generation += 1;
+        TESTS.delete(id());
+        event.target.removeAttribute?.('aria-invalid');
+        say(null);
+    };
+    const onChange = (event) => {
+        if (!event.target?.matches?.('[data-key-kind]')) return;
+        kind = event.target.value;
+        draw();
+        find('[data-key-kind]')?.focus?.();
+    };
+    container.addEventListener('click', onClick);
+    container.addEventListener('input', onInput);
+    container.addEventListener('change', onChange);
+    container.innerHTML = '<p class="settings-page-lead">Reading the key…</p>';
+    const ready = reload();
+    return { ready, unmount() {
+        gone = true;
+        rows?.dispose();
+        resetSecretReveals(container);
+        container.removeEventListener('click', onClick);
+        container.removeEventListener('input', onInput);
+        container.removeEventListener('change', onChange);
+    } };
 }

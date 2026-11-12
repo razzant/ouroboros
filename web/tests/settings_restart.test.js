@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 
 import { readFileSync } from 'node:fs';
 
-import { confirmAndSendRestart } from '../modules/settings.js';
-import { confirmAndSendRestart as sharedRestart, restartConfirmBody } from '../modules/chat_activity.js';
+import { confirmAndSendRestart, restartConfirmBody } from '../modules/chat_activity.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 
 const noActivities = async () => [];
@@ -37,6 +36,9 @@ test('Restart now confirm-and-send sends exactly one non-queueable /restart', as
     const facts = seenOptions[0].details.rows.map((row) => `${row.label}: ${row.value}`).join('\n');
     assert.match(facts, /Running tasks: They stop, then eligible saved work resumes after the restart/);
     assert.match(facts, /already paused stay paused/);
+    // What this door does that an Update does not: a sleeping task is held, and the tasks' own engine runs end.
+    assert.match(facts, /Running tasks: [^\n]*Sleeping tasks wait for Resume\./);
+    assert.match(facts, /Running tasks: [^\n]*Runs they started in Claudexor end\./);
     assert.match(facts, /Queued tasks: Runnable ones return to the queue/);
     assert.match(facts, /Existing holds and limits still apply/);
     // Live routing: resumed work that follows a role takes its current model; an explicit choice stays.
@@ -45,7 +47,6 @@ test('Restart now confirm-and-send sends exactly one non-queueable /restart', as
 });
 
 test('Settings and the chat header share ONE restart confirmation (owner quiz 285597)', () => {
-    assert.equal(confirmAndSendRestart, sharedRestart);
     const bar = readFileSync(new URL('../modules/chat_header.js', import.meta.url), 'utf8');
     const header = bar.slice(bar.indexOf("if (command === 'restart')"), bar.indexOf("if (command === 'panic')"));
     // The header no longer sends /restart directly: it runs the same dialog.

@@ -1,6 +1,7 @@
 """Resolved Supervisor authority through generic writers, browser and owner doors."""
 import json
 from types import SimpleNamespace
+from unittest.mock import ANY
 
 import pytest
 from starlette.applications import Starlette
@@ -159,7 +160,8 @@ def test_owner_endpoints_keep_mode_response_shape_and_audit(settings_root):
     app.state.repo_dir = path.parent
     with TestClient(app) as client:
         response = client.post("/api/owner/safety-mode", json={"kind": "consciousness", "mode": "light"})
-        assert response.status_code == 200 and response.json() == {"ok": True, "safety_mode": "light"}
+        assert response.status_code == 200 and response.json() == {"ok": True, "safety_mode": "light", "changes": {
+            "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": {"old": "full", "new": "light", "token": ANY}}}
         assert json.loads(path.read_text())["OUROBOROS_SAFETY_MODE"] == "full"
         assert client.post("/api/owner/safety-mode", json={"kind": "forged", "mode": "off"}).status_code == 400
         response = client.post("/api/owner/safety-rules", json={"rules": "May send replies in my team."})

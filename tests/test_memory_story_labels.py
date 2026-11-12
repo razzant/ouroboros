@@ -9,6 +9,7 @@ from tests.test_memory_view_floor import tokens, frame
 def story_snapshot():
     pages = syn.pages(3, 8000)
     for n, page in enumerate(pages):
+        page['lead_rule'] = 1
         page['text'] = f'News from page {n}: ' + 'a' * 200 + '.\nA second sentence. ' + 'details ' * 1000
     account = {**pages[0], 'kind': 'account', 'id': 'resident-account', 'selection': 'selected-account',
                'text': 'My authored account across rooms. ' * 80, 'sources': []}

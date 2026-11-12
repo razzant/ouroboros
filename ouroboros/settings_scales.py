@@ -295,6 +295,36 @@ RESTART_REQUIRED_SETTINGS = frozenset({
 })
 
 
+# Presentation only: these getters run in the clock, outside an actor snapshot. A launched
+# wake keeps its admission facts; bounds apply when scheduling again, not to an existing alarm.
+CONSCIOUSNESS_CLOCK_SETTINGS = frozenset({
+    "OUROBOROS_CONSCIOUSNESS_AUTONOMY", "OUROBOROS_CONSCIOUSNESS_DAILY_USD",
+    "OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
+})
+
+
+def setting_effect(key: str) -> str:
+    """When an owner choice is consumed; never changes the actor's snapshot policy."""
+    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY
+    from ouroboros.route_choice import ROUTE_SETTING_KEYS
+
+    if key in RESTART_REQUIRED_SETTINGS:
+        return "local_model" if key.startswith("LOCAL_MODEL_") else "restart"
+    if key == "OUROBOROS_RUNTIME_MODE":
+        return "restart"
+    if key in CONSCIOUSNESS_CLOCK_SETTINGS:
+        return "next_wake"
+    if key in IMMEDIATE_SETTINGS or key in {
+        "OUROBOROS_NETWORK_PASSWORD",  # server_auth.NetworkAuthGate: every request
+        "OUROBOROS_FINALIZATION_GRACE_SEC",  # queue.refresh_timeouts_from_settings -> queue_timeouts
+        "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",  # config._settings_flag_enabled: disk on every read
+    }:
+        return "now"
+    if key in ROUTE_SETTING_KEYS and key != MODEL_CONTEXT_WINDOWS_KEY:
+        return "next_call"
+    return "next_task"
+
+
 # Optional positive bounds: a positive integer, or the literal "unlimited" for no bound. ONE
 # vocabulary for every such knob — the shared paid-review-cycle cap (review_cycles.py), the task
 # round limit and the absolute task lifetime — so the Settings UI, the settings write boundary and

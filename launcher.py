@@ -81,11 +81,10 @@ from ouroboros.launcher_onboarding import (
 )
 from ouroboros.launcher_background import (Background, DesktopApi, activate_running_instance, background_env, other_copy_line,
                                            request_tray_cleanup, restore_tray_after_handoff, stop_tray_before_exit)
-from ouroboros.launcher_macos_handoff import MacOSWindowHandoff
 from ouroboros.launcher_server_reaper import reap_same_install_strays as _reap_same_install_strays_impl
 from ouroboros.launcher_context_menu import attach_every_window
 from ouroboros.launcher_readiness import wait_for_server as _wait_for_server
-from ouroboros.launcher_window_chrome import paint_room
+from ouroboros.launcher_window_chrome import paint_room, transfer_when_windowed
 from ouroboros.standalone_page import themed_page
 from ouroboros.launcher_windows_runtime import (  # noqa: F401  (re-exported: same objects, prior launcher surface)
     _prepare_windows_webview_runtime,
@@ -225,13 +224,11 @@ def _already_running_window(line: str) -> None:
     webview.start(private_mode=False)
 
 
-def _exec_source_launcher() -> None:
+def _exec_source_launcher(windowed=None) -> None:
     exec_source_launcher(_bootstrap_context(), _launch_argv, release_lock=release_pid_lock,
-                         acquire_lock=acquire_pid_lock, before_release=lambda: _native_handoff.before_release(
-                             _shutdown_event.is_set, lambda: stop_tray_before_exit(lambda: None)),
-                         on_failure=lambda: (_native_handoff.release(), restore_tray_after_handoff()),
-                         desktop=not _external_ui, macos=IS_MACOS,
-                         cancelled=_shutdown_event.is_set)
+                         acquire_lock=acquire_pid_lock, before_release=lambda: stop_tray_before_exit(lambda: None),
+                         on_failure=restore_tray_after_handoff, desktop=not _external_ui, macos=IS_MACOS,
+                         cancelled=_shutdown_event.is_set, windowed=windowed)
 
 
 def _shell_facts() -> dict:
@@ -277,7 +274,6 @@ _shutdown_event = threading.Event()
 _agent_restart_requested = threading.Event()
 _agent_exit_before_ready = threading.Event()  # the child exited before it served: the UI wait ends now
 _webview_window = None
-_native_handoff = MacOSWindowHandoff()
 # Linux-only browser-fallback flag (#56): set by _detect_headless() when no
 # pywebview GUI backend can initialize. Stays False on macOS/Windows — the
 # probe never runs there, so every `if _headless:` branch is dead code on
@@ -813,7 +809,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
                         MAX_CRASH_RESTARTS, CRASH_WINDOW_SEC,
                     )
             if launcher_sources_changed(REPO_DIR, bundle_dir=_bundle_dir(), source_root=pathlib.Path(__file__).parent):
-                _exec_source_launcher()  # a refused successor: this launcher starts the next generation itself
+                _exec_source_launcher(transfer_when_windowed)  # refused: this shell starts the next generation
             continue
 
         now = time.time()
@@ -1574,7 +1570,6 @@ def main(argv=()):
         background_color="#0f0f11",
         text_select=True, hidden=background.start_hidden(options.launch_intent),
     )
-    _native_handoff.attach(window)
     _webview_window = attach_media_permissions(background.attach(window), url)  # Persist cookies and website data (ouroboros.theme); rebuild/limits: ARCHITECTURE §3.
     webview.start(func=background.run, debug=False, private_mode=False,
                   menu=setup_recovery_menu(window, lambda: _generation_port))

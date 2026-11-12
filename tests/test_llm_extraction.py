@@ -26,10 +26,6 @@ from ouroboros import (
     llm_substitution,
 )
 from ouroboros.llm import LLMClient
-from ouroboros.review import (
-    MAX_MODULE_LINES, SIZE_RATCHET_MANIFEST_PATH, TARGET_MODULE_LINES,
-    load_size_ratchet_manifest,
-)
 
 REPO = pathlib.Path(__file__).parents[1]
 PKG = REPO / "ouroboros"
@@ -257,23 +253,6 @@ def test_llm_mixin_composition_order_is_pinned():
         for name in _defined_members(pathlib.Path(sys.modules[base.__module__].__file__), base.__name__):
             assert name not in owners, f"{name} owned by both {owners.get(name)} and {base.__name__}"
             owners[name] = base.__name__
-
-
-def test_llm_facade_headroom_and_leaf_size_policy():
-    counts = {
-        pathlib.Path(module.__file__).relative_to(REPO).as_posix(): len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (llm, *_LEAVES)
-    }
-    assert counts["ouroboros/llm.py"] <= 750
-    # Coherent leaves use the same reviewed size bands as the rest of the repository.
-    band = load_size_ratchet_manifest(REPO / SIZE_RATCHET_MANIFEST_PATH).band_paths
-    for path, count in counts.items():
-        assert count <= MAX_MODULE_LINES, (path, count)
-        if count > TARGET_MODULE_LINES:
-            reason = band.get(path)
-            assert isinstance(reason, str) and reason.strip(), (path, count)
 
 
 def test_llm_leaf_import_graph_is_acyclic_and_shallow():
