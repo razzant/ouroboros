@@ -210,8 +210,8 @@ unchanged material under the same review contract is not re-reviewed without a
 genuinely new rebuttal, while an infrastructure outcome such as a missed
 reviewer quorum neither replays nor lapses a verdict. If attempts stop
 converging, reconsider the approach instead of repeating it. The shared retry
-note (`review_prompt_text.py::build_self_verification_template`, in the commit
-block message and the skill review block) and the open-obligation/debt branches
+note (`review_prompt_text.py::build_self_verification_template`, in the skill
+review block) and the open-obligation/debt branches
 of `review_status` `next_step` state this same duty.
 
 ---
