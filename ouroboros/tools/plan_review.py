@@ -393,11 +393,6 @@ def _ask_summary(prepared: Any, record: Mapping[str, Any]) -> str:
                 ("part", "in part"), ("attached_unknown", "attached, completeness not recorded"),
                 ("not_attached", "not attached"), ("unknown", "not recorded")) if counts[state]])
             + "; the ask below lists each locator and every reason.")
-    if ask.get("host_added"):
-        lines.append(("This reading concerns Ouroboros's own body" if ask.get("revision") is None
-                      else "This is the first ask on a body plan")
-                     + ", so every owner-marked reviewer was included: the host added "
-                     + ", ".join(ask["host_added"]) + " beside the participants you named.")
     unknown = [p["seat_id"] for p in sent if p.get("status") == "pending" and p.get("unresolved")]
     pending = [p["seat_id"] for p in sent if p.get("status") == "pending" and not p.get("unresolved")]
     if unknown:

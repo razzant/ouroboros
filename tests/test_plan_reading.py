@@ -100,7 +100,7 @@ def test_a_declared_body_reading_is_seated_like_a_first_body_ask_and_spends_none
     assert [s.slot_id for s in sub.calls[0]["slots"]] == ["s2"]
     ask = _record(harness)["asks"][0]
     assert ask["revision"] is None and ask["body_first_ask"] is True and ask["host_added"] == []
-    assert "This reading concerns Ouroboros's own body" in text
+    assert "the host added" not in text  # the narrowed reading is sent to exactly the named seat
     system_prompt = _user_text(sub.calls[0]["request"].slot_messages["s2"][0]["content"])
     assert "## BIBLE.md (constitution" in system_prompt and "## ARCHITECTURE.md" in system_prompt
     # A later reading names its participants like any later ask: the first reading heard everyone.
