@@ -12,9 +12,9 @@ governance document replaces or merges the description of the node it touches
 rather than adding beside it.
 
 **Application follows BIBLE P0/P3.** Review findings and failures are independent
-facts in every mode. In Cyber Pro they inform Ouroboros and never prohibit an
-action or require permission; the agent may configure its own subsequent work.
-Configured enforcement remains recorded as selected, and an author decision does
+facts in every mode; they inform Ouroboros, who has the last word. In Cyber Pro
+they never prohibit an action or require permission; the agent may configure its
+own subsequent work. An author decision does
 not rewrite FAIL, pending, missing source or an unperformed effect as PASS.
 Enforcement requirements below describe ordinary modes; Cyber applies the same
 checks as advice. This product rule does not replace an external developer's
@@ -45,9 +45,8 @@ explicit work-order review obligations.
   index, syntax of staged `.py` files), the tests preflight under its own policy
   (`skip_tests` is the one exemption, a documentation-only diff included; a
   managed resolution always runs it; a matching unsigned receipt of a complete run
-  counts), then the named row's look, then ONE review wave in which every seat on the panel (every pool
-  seat under Blocking; the pool seats Ouroboros named with a reason under
-  Advisory), shown the same test execution fact, answers both parts of the brief. The commit
+  counts), then the named row's look, then ONE review wave in which every seat on the panel (the pool
+  seats Ouroboros named, with a reason when narrowed), shown the same test execution fact, answers both parts of the brief. The commit
   records its preflight fact: `performed` with the record id, `skipped` for an
   explicit `skip_advisory_review=True`, `not_performed` when no row was named.
   `preflight_reviewer` and `skip_advisory_review=True` are opposite choices
@@ -61,32 +60,31 @@ explicit work-order review obligations.
   the coupling question, pre/post fingerprint and exact commit/tag binding still
   run; unresolved obligations/debt remain visible. Explain the judgment in the
   surrounding task narrative.
-- **Loud advisory enforcement (BIBLE P3 bound):** the owner chooses enforcement
-  outside Cyber Pro; Cyber may configure its own review and continue under P0;
-  `advisory` is legitimate ONLY while every decision blocking enforcement would
-  have stopped (critical findings, quorum failure, infrastructure failure,
-  missing advisory provider) leaves a durable trace: a `review_advisory_override`
+- **Loud continuation (BIBLE P3 bound):** a reviewer's answer never forbids a
+  commit; Cyber may configure its own review and continue under P0. Every
+  decision to continue over critical findings, quorum failure, infrastructure
+  failure or a missing review leaves a durable trace: a `review_advisory_override`
   event in `events.jsonl` plus the persistent `advisory_overrides_count` /
-  recent-overrides fields in `review_status`. Silent advisory is forbidden.
+  recent-overrides fields in `review_status`; restart and update notices name
+  the commits that landed over it. Silent continuation is forbidden.
 - **Author finality remains evidence, not reviewer PASS:** the authors of a task
   result, a skill and a commit may record an explicit author disposition against the
-  exact current subject after received feedback or a disclosed unavailable review under Advisory.
-  Advisory and Cyber commit outcomes return before Git; explicit continuation uses
+  exact current subject after received feedback or a disclosed unavailable review.
+  Commit outcomes return before Git; explicit continuation uses
   the returned `review_reference` and author disposition, with independent current
   preflight/test/Git checks and no new critic.
   Cyber may decide to continue without prior feedback, keeping the actual missing,
   failed or pending review separate from its own decision.
   A revised author subject keeps the original critic hash/findings separately;
   author finish precedes any repeat panel. The last paid panel still permits ordinary
-  author correction; N limits paid waves, not default author responses. Blocking may
-  save corrections and stop, but still needs fresh reviewer authority to advance.
+  author correction; N limits paid waves, not default author responses.
   An explicit unfinished stop creates neither approval nor an automatic follow-up.
   A skill's current deterministic preflight must pass; existing grants, enablement
-  and dependencies stay independent. Hub submission uses the same qualified Advisory
-  authority plus its existing publication consent and scanner, disclosing original
+  and dependencies stay independent. Hub submission uses the same qualified author
+  acceptance plus its existing publication consent and scanner, disclosing original
   critical severity and current author/published hashes without invented PASS.
   Pending physical work without feedback is not unavailable; preserved partial
-  feedback can support Advisory choice without cancelling the other actors.
+  feedback can support the author's choice without cancelling the other actors.
   Main judges semantic criteria and material evidence after acknowledging the
   observed owner source; source generation alone is not semantic supersession.
   Historical feedback remains independently addressable. For Main's finish over a
@@ -127,7 +125,7 @@ explicit work-order review obligations.
 
 ### Review-exempt operations
 
-Mechanical recovery is **exempt** from new blocking review (BIBLE P9);
+Mechanical recovery is **exempt** from new review (BIBLE P9);
 the caller's mode, root and task authority still apply:
 
 - `vcs_restore` — discards uncommitted changes (not a commit, no review needed)
@@ -193,8 +191,8 @@ The recorded review state — the verdict when one was reached and the individua
 findings, including the partial findings of a pending review; for commits also
 the open obligations and commit-readiness debt shown by `review_status` and the
 Review Continuity context section — stays recorded until a later review or
-successful commit resolves it; the author's response rewrites neither it nor the
-selected enforcement. Before the next attempt the author owes an outcome, not a
+successful commit resolves it; the author's response does not rewrite it.
+Before the next attempt the author owes an outcome, not a
 procedure: consider the open findings together against the evidence and accepted
 goal rather than patching one visible symptom. Repair what the requirement still
 needs, or replace or remove a chosen means within the applicable task authority,
@@ -695,7 +693,7 @@ release and is unreviewed again. No synthetic `clean` verdict is written;
 the deterministic preflight still gates the bytes an install or update lands (a
 built-in re-seeded with an app update carries the app's own release); a source's
 trust never rewrites earlier installs. A skill installed from a source that
-reviews each skill keeps blocker findings non-executable even under Advisory
+reviews each skill keeps blocker findings non-executable
 until the owner skips the review. Enablement of such installs is the
 owner's choice or the install's turn-on-when-ready request, never over an
 explicit Off. The Built in row of the source list sets built-in trust;
@@ -829,27 +827,24 @@ the reviewer's word.
 
 ### Severity rules
 
-- Skill review verdicts are enforcement-independent:
+- Skill review verdicts are mode-independent:
   - `clean` — no FAIL findings.
   - `warnings` — one or more advisory FAIL findings, no blocker findings.
   - `blockers` — one or more critical/blocker FAIL findings.
   - `pending` — no reliable completed review verdict.
-- Outside Cyber Pro, enforcement maps verdicts to execution:
-  - `OUROBOROS_REVIEW_ENFORCEMENT=blocking`: `clean` and `warnings` are
-    executable; `blockers` are not.
-  - `OUROBOROS_REVIEW_ENFORCEMENT=advisory`: `clean`, `warnings`, and
-    `blockers` are executable by operator choice. This changes
+- Outside Cyber Pro, verdicts map to execution:
+  - `clean`, `warnings`, and `blockers` are executable. This changes
     `executable_review` only; it does not rewrite the verdict, suppress
     findings, or change `skill_review_status` semantics.
   - Outside Cyber Pro, `pending` is not executable. A stale critic verdict does not authorize bytes;
-    under Advisory a separate current author acceptance may admit the payload
-    after deterministic preflight. Blocking still requires fresh critic evidence.
+    a separate current author acceptance may admit the payload
+    after deterministic preflight.
 - Review state stores findings and computes the verdict at load time. Agents
   and UI callers must use `review_gate.executable_review` / `executable_review`,
   not the raw status string, when deciding whether the skill is runnable.
 - A deterministic `skill_preflight` FAIL is a structural gate failure, not an LLM
-  verdict: it persists and aggregates to `pending`, which is non-executable under
-  ordinary enforcement mode (advisory included). Cyber keeps the failed check
+  verdict: it persists and aggregates to `pending`, which is non-executable
+  outside Cyber Pro. Cyber keeps the failed check
   and pending verdict visible while leaving the execution decision to Ouroboros.
 - Hard trust-boundary items are blocker findings on any FAIL regardless of
   reviewer-supplied severity: `manifest_schema`,
@@ -1058,7 +1053,7 @@ the reply's form and of who withdraws what. Adjudicate your own open objections 
 with why (the change or the answer removed the defect, or you were wrong), or restate what is still
 missing. A reformulation of an earlier objection is not a new one, and a new objection on a revision
 you saw before says why it was invisible then. An answer with no objection is legitimate.
-Nobody votes, and whether an open objection holds is the host's fact, not part of your judgment.
+Nobody votes; the mind weighs every open objection and decides.
 
 ### Rules for reviewers
 
