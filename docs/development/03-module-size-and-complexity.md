@@ -86,7 +86,7 @@ Apply ARCHITECTURE §10 invariant 10 to current-state readers. A new fact belong
 transition's transaction. The census snapshots controls/phases in one short transaction per
 addressed store, outside queue locks, released before display consumers; unavailable stays
 unknown for that request (`tests/test_hot_facts*.py` fix Stop/custody results while settled
-history grows 20→2,000 rows). Main batches question display views and warms lineage by
+history grows). Main batches question display views and warms lineage by
 generation, keeping strict per-member gaps if a batch fails (`tests/test_main_decisions_reads.py`);
 `tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows,
 `tests/test_cost_live_set.py` as the live set grows, one axis at a time (flat, at rest).
@@ -96,9 +96,10 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
   the original bytes; done is a durable installation fact a restored snapshot or an older
   body's write reopens, never a process flag. History-sized work stays a named durable
   maintenance-child job under sequence/source CAS. A display read never imports: unknown while
-  one is owed; passive control readers fall back only for underived rows. An import leaves by
-  owner acceptance naming the lost upgrade, never by age; double readers convert on touch,
-  proven both ways on old-install data.
+  one is owed; passive control readers fall back only for underived rows. Input the body cannot
+  rewrite is translated at one ingress seam. An import leaves by owner acceptance naming the
+  lost upgrade, never by age; double readers convert on touch, proven both ways on old-install
+  data.
 - **Store transactions** lease the shared core's per-thread connection, capture rows
   (`store_capture.py`) and end before decoding or external work; fork only outside them;
   lifecycle code quiesces users and calls `store.prepare_handoff` before renaming a database
@@ -124,8 +125,8 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
 
 CHECKLISTS item 9 `perf_lifecycle` covers changed readers, startup/shutdown, batches, endpoints, pollers, subscriptions and timers. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
 
-`tests/test_store_boot.py` fixes `prepare_startup_state` at 50/500 frozen results and 20/200
-child stores (a clean boot is one read transaction, no history access or writes);
+`tests/test_store_boot.py` fixes `prepare_startup_state` (a clean boot is one read
+transaction, no history access or writes);
 `tests/test_store_legacy_reconcile.py` covers both detector outcomes, cursor resume and the
 foreground CLI; the import/switch suites keep downgrade semantics.
 

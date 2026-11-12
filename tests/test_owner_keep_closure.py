@@ -461,8 +461,11 @@ def test_a_record_unreadable_under_custody_claims_nothing_about_its_pin_and_save
 
 
 def test_a_legacy_registry_awaiting_the_startup_import_leaves_the_copies_unknown(copies):  # noqa: F811
-    root = copies[0]
-    assert "private_copies" not in owner_keep.inventory(root, "finished", {})[1]
+    root, folder = copies[0], copies[2] / "finished"
+    folder.mkdir(parents=True)  # no record names it: the task its name carries, while the records are whole
+    places, unknown, _ = owner_keep.inventory(root, "finished", {})
+    assert "private_copies" not in unknown and str(folder.resolve()) in places
     sw._legacy_registry_path(root).parent.mkdir(parents=True, exist_ok=True)
     sw._legacy_registry_path(root).write_text('{"worktrees": []}', encoding="utf-8")
-    assert "private_copies" in owner_keep.inventory(root, "finished", {})[1]
+    places, unknown, _ = owner_keep.inventory(root, "finished", {})
+    assert "private_copies" in unknown and str(folder.resolve()) not in places, "no folder is named by guess meanwhile"
