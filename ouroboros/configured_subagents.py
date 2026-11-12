@@ -109,8 +109,8 @@ class ConfiguredSubagent:
     # ``native``/``packet`` on an api_model row (see REVIEW_DELIVERIES); "" on a
     # session row, which always retrieves. Absent in saved bytes means native.
     delivery: str = ""
-    # ``review_lane``/``factory_default`` when the runtime minted the row; "" for
-    # an owner-authored row. Round-trips as saved.
+    # ``review_lane``/``factory_default`` when the runtime minted the row; empty
+    # does not establish authorship. Round-trips as saved.
     minted_from: str = ""
 
 
