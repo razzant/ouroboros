@@ -530,6 +530,35 @@ class TestReplayedCallsAndReasoningShapes(unittest.TestCase):
                 else:
                     sys.modules[name] = value
 
+    def test_the_owned_server_installs_the_retry_before_it_serves(self):
+        import sys
+        import types
+        from ouroboros import local_model_server
+
+        class Formatter:
+            def __call__(self, *, messages, **kwargs):
+                return messages
+
+        served = []
+        package, chat_format = types.ModuleType("llama_cpp"), types.ModuleType("llama_cpp.llama_chat_format")
+        server_package, server_main = types.ModuleType("llama_cpp.server"), types.ModuleType("llama_cpp.server.__main__")
+        chat_format.Jinja2ChatFormatter, package.llama_chat_format = Formatter, chat_format
+        server_main.create_app = lambda *a, **k: None
+        server_main.main = lambda: served.append(getattr(Formatter.__call__, "_ouroboros_object_arguments", False))
+        package.server, server_package.__main__ = server_package, server_main
+        names = ("llama_cpp", "llama_cpp.llama_chat_format", "llama_cpp.server", "llama_cpp.server.__main__")
+        saved = {name: sys.modules.get(name) for name in names}
+        sys.modules.update(dict(zip(names, (package, chat_format, server_package, server_main))))
+        try:
+            local_model_server.main()
+            self.assertEqual(served, [True], "the vendor server starts with the retry already in place")
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = value
+
     def test_reasoning_that_mentions_a_call_still_ends_at_its_own_closing_line(self):
         from ouroboros.llm import LLMClient
         from ouroboros.llm_local import _split_leading_reasoning as split
