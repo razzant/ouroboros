@@ -84,7 +84,7 @@ from ouroboros.launcher_background import (Background, DesktopApi, activate_runn
 from ouroboros.launcher_server_reaper import reap_same_install_strays as _reap_same_install_strays_impl
 from ouroboros.launcher_context_menu import attach_every_window
 from ouroboros.launcher_readiness import wait_for_server as _wait_for_server
-from ouroboros.launcher_window_chrome import paint_room
+from ouroboros.launcher_window_chrome import paint_room, transfer_when_windowed
 from ouroboros.standalone_page import themed_page
 from ouroboros.launcher_windows_runtime import (  # noqa: F401  (re-exported: same objects, prior launcher surface)
     _prepare_windows_webview_runtime,
@@ -224,11 +224,11 @@ def _already_running_window(line: str) -> None:
     webview.start(private_mode=False)
 
 
-def _exec_source_launcher() -> None:
+def _exec_source_launcher(windowed=None) -> None:
     exec_source_launcher(_bootstrap_context(), _launch_argv, release_lock=release_pid_lock,
                          acquire_lock=acquire_pid_lock, before_release=lambda: stop_tray_before_exit(lambda: None),
                          on_failure=restore_tray_after_handoff, desktop=not _external_ui, macos=IS_MACOS,
-                         cancelled=_shutdown_event.is_set)
+                         cancelled=_shutdown_event.is_set, windowed=windowed)
 
 
 def _shell_facts() -> dict:
@@ -816,7 +816,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
                         MAX_CRASH_RESTARTS, CRASH_WINDOW_SEC,
                     )
             if launcher_sources_changed(REPO_DIR, bundle_dir=_bundle_dir(), source_root=pathlib.Path(__file__).parent):
-                _exec_source_launcher()  # a refused successor: this launcher starts the next generation itself
+                _exec_source_launcher(transfer_when_windowed)  # refused: this shell starts the next generation
             continue
 
         now = time.time()
