@@ -240,7 +240,7 @@ def _provider_unavailable_result(
         # Use the final usage facts: a forced call can itself end unresolved.
         if str(usage.get("reason_code") or "") not in {"", "deadline_local"}:
             usage["terminal_provider_notice"] = _provider_terminal_fallback_text(
-                usage, is_context_overflow=is_context_overflow, is_transport_wait=is_transport_wait,
+                usage, round_idx=ctx.round_idx, is_context_overflow=is_context_overflow, is_transport_wait=is_transport_wait,
                 waited_sec=waited_sec, interactive=interactive,
                 is_deadline_exhausted=is_deadline_exhausted, control_reason=control_reason, wait_cause=wait_cause,
             )
@@ -259,7 +259,7 @@ def _provider_unavailable_result(
         fallback = salvaged
     else:
         fallback = _provider_terminal_fallback_text(
-            ctx.accumulated_usage, is_context_overflow=is_context_overflow,
+            ctx.accumulated_usage, round_idx=ctx.round_idx, is_context_overflow=is_context_overflow,
             is_transport_wait=is_transport_wait, waited_sec=waited_sec,
             interactive=interactive, is_deadline_exhausted=is_deadline_exhausted,
             control_reason=control_reason, wait_cause=wait_cause,
@@ -303,7 +303,7 @@ def _provider_unavailable_result(
             source=no_call, provider_terminal=wall, host_words=not salvaged,
         )
         return with_terminal_notice(text, usage, llm_trace)
-    met = round_failure_words(ctx.accumulated_usage)  # a provider content refusal is named as itself, never an outage
+    met = round_failure_words(ctx.accumulated_usage, ctx.round_idx)  # a provider content refusal is named as itself, never an outage
     prompt = (
         "[DEADLINE] Primary model work reached the owner deadline. Produce the best final answer now from verified work and state what remains undone."
         if is_deadline_exhausted else

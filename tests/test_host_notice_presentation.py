@@ -156,9 +156,10 @@ def test_without_a_provider_sentence_the_host_classifies_and_points_at_logs(tmp_
 
 
 def test_a_terminal_names_every_failure_of_a_round_that_met_a_content_refusal():
-    """From the round's own record (its ``llm_call_refs`` rows, its kept refusals): each failure by its kind with its
-    routes and counts, a refusal in its own words and never as an outage, an outage that did happen in its own;
-    another round's rows stay out, and a round with no refusal kept reads exactly as before."""
+    """From the ending round's own record (its ``llm_call_refs`` rows, its kept refusals): each failure by its kind
+    with its routes and how often, a refusal in its own words and never as an outage, an outage that did happen in its
+    own; another round's rows stay out, a later round's end never reads an earlier round's record as its own, and a
+    round with no refusal kept reads exactly as before."""
     from ouroboros.loop_transport import _FAILURE_KIND_WORDS
     from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY
 
@@ -169,14 +170,16 @@ def test_a_terminal_names_every_failure_of_a_round_that_met_a_content_refusal():
                                *rows], ROUND_REFUSALS_KEY: [{"llm_call_id": "b", "round": 4}, {"llm_call_id": "d", "round": 4}],
              "_last_llm_error_kind": "content_filter", "_last_llm_error": "x"}
     flags = dict(is_context_overflow=False, waited_sec=300.0, interactive=True, is_deadline_exhausted=False)
-    met = (" This round's failed asks: a request that never reached the provider on primary/model (1 ask); "
-           f"{_FAILURE_KIND_WORDS['content_filter']} on spare/opus (2 asks); a quota or billing refusal on spare/fable (1 ask).")
-    outage = provider_terminal_fallback_text(usage, is_transport_wait=True, wait_cause="transport_unavailable", **flags)
+    met = (" This round's failed asks: a request that never reached the provider on primary/model once; "
+           f"{_FAILURE_KIND_WORDS['content_filter']} on spare/opus 2 times; a quota or billing refusal on spare/fable once.")
+    outage = provider_terminal_fallback_text(usage, round_idx=4, is_transport_wait=True, wait_cause="transport_unavailable", **flags)
     assert outage.endswith(met) and "ended as an outage" in outage
-    generic = provider_terminal_fallback_text(usage, is_transport_wait=False, **flags)
+    generic = provider_terminal_fallback_text(usage, round_idx=4, is_transport_wait=False, **flags)
     assert generic.endswith(met) and "outage" not in generic
+    later = provider_terminal_fallback_text(usage, round_idx=5, is_transport_wait=False, **flags)  # round 4's record kept
+    assert later == generic[:-len(met)]
     del usage[ROUND_REFUSALS_KEY]
-    assert provider_terminal_fallback_text(usage, is_transport_wait=False, **flags) == generic[:-len(met)]
+    assert provider_terminal_fallback_text(usage, round_idx=4, is_transport_wait=False, **flags) == generic[:-len(met)]
 
 
 def test_a_body_error_inside_an_empty_response_carries_the_providers_sentence(tmp_path):

@@ -822,12 +822,12 @@ def _unknown_terminal_recovery_hint(usage: Dict[str, Any]) -> str:
     )
 
 
-def provider_terminal_fallback_text(accumulated_usage: Dict[str, Any], **facts: Any) -> str:
-    """The terminal text, then every failure of a round whose record keeps a provider content refusal, each by its own
-    kind (``round_failure_words``): such a refusal is never called an outage, and an outage keeps its own words."""
+def provider_terminal_fallback_text(accumulated_usage: Dict[str, Any], *, round_idx: Any = None, **facts: Any) -> str:
+    """The terminal text, then every failure of the ending round ``round_idx`` whose record keeps a provider content refusal,
+    each by its own kind (``round_failure_words``): such a refusal is never called an outage, an outage keeps its words."""
     from ouroboros.primary_route_observation import round_failure_words
 
-    return _provider_terminal_text(accumulated_usage, **facts) + round_failure_words(accumulated_usage)
+    return _provider_terminal_text(accumulated_usage, **facts) + round_failure_words(accumulated_usage, round_idx)
 
 
 def _provider_terminal_text(

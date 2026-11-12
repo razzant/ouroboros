@@ -457,7 +457,7 @@ def test_a_declared_wait_ends_a_content_refused_round_and_without_one_the_spare_
     if declared:
         assert [model for model, _ in llm.sent] == [PRIMARY] * 3 and text == "summary"
         prompt = str(llm.sent[-1][1][-1].get("content"))
-        assert f"This round's failed asks: {words} on {PRIMARY} (1 ask)." in prompt and "outage" not in prompt
+        assert f"This round's failed asks: {words} on {PRIMARY} once." in prompt and "outage" not in prompt
         assert told == [f'⚠️ No usable reply after {words} on {PRIMARY}. The provider said: "Blocked here."']
         assert not any("Fallback" in note or "trying" in note for note in notes)
     else:

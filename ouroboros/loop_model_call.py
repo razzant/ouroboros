@@ -29,7 +29,7 @@ from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
 from ouroboros.observability import new_execution_id
-from ouroboros.primary_route_observation import refusal_facts_row, unasked_refusal_row
+from ouroboros.primary_route_observation import unasked_refusal_row, with_refusal_facts
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.transcript_prefix import rewrite_epoch, rewrite_view
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
@@ -1317,7 +1317,7 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     if observation:
         _loop()._append_or_merge_user_message(ctx.messages, observation)
     facts = getattr(ctx.tools._ctx, "_route_facts_pending", "")
-    if ctx.defer_resource_wait is None and (facts := facts or refusal_facts_row(ctx)):  # first own round after a switch or a refusal
+    if ctx.defer_resource_wait is None and (facts := with_refusal_facts(ctx, facts)):  # first own round after a switch or a refusal
         ctx.tools._ctx._route_facts_pending = ""
         _loop()._append_or_merge_user_message(ctx.messages, facts)
     _fit_route_tool_ceiling(ctx)

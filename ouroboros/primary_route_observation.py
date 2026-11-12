@@ -17,10 +17,11 @@ OBSERVATION_TIMEOUT_SEC = 3.0
 #: The primary's own last accepted call (``_last_round_cache_usage`` shape) and the ``binding`` it answered on.
 PRIMARY_CALL_KEY = "_primary_accepted_call"
 #: This round's provider content refusals (``note_content_refusal``) with what their calls' rows lack: the upstream,
-#: the money as reported and the provider's own words. Read once with the round's ``llm_call_refs`` rows by the next
-#: request (``refusal_facts``) or by the round's end (``round_failure_words``); another round's are dropped.
+#: the money as reported and the provider's own words. Read with the round's ``llm_call_refs`` rows, keyed to that
+#: round: by the next own request, which tells or drops it (``refusal_facts``), or by the round's end
+#: (``round_failure_words``); another round's are dropped. In this process's memory only: no checkpoint keeps it.
 ROUND_REFUSALS_KEY = "_round_refusals"
-#: A spare's closing: the means open to it, no advice (``route_facts_text``; ``refusal_facts_row`` read by a spare).
+#: A spare's closing: the means open to it, no advice (``route_facts_text``; ``with_refusal_facts`` read by a spare).
 _SPARE_CLOSING = ('Facts, not an instruction: stay on this route, return with switch_model(primary="return") '
                   '(the next real request tests the primary; a refusal there moves on to configured routes again), '
                   'or return and wait for it with switch_model(primary="wait"). '
@@ -208,14 +209,12 @@ def route_facts_text(tool_ctx, *, model: str, use_local: bool, role: str, failed
     from ouroboros.lead_fact import chooser_words, primary_basis
 
     chooser = chooser_words(primary_basis(tool_ctx), (getattr(tool_ctx, "task_metadata", None) or {}).get("lead"))
-    refused = refusal_facts(usage) if answered else ""  # the round's content refusals, told once in this one row
     return (f"[ROUTE FACTS] This task's primary route is {label(target, primary['role'])}"
             f"{'; ' + chooser if chooser else ''}; "
             f"{label(acting, role)} "
             f"{'answered this round' if answered else 'is now acting without a usable answer this round'} after "
             f"{failure.get('model') or failed_model} failed with {code}{f' ({detail})' if detail else ''} at {failure.get('ts') or 'an unrecorded time'}"
-            f"{f' (its engine dated a reset at {reset})' if reset else ''}.{meaning}{error} {answer} {before} "
-            f"{refused + ' ' if refused else ''}{_SPARE_CLOSING}")
+            f"{f' (its engine dated a reset at {reset})' if reset else ''}.{meaning}{error} {answer} {before} {_SPARE_CLOSING}")
 
 
 def refusal_words(usage: dict, msg: dict) -> dict:
@@ -247,10 +246,9 @@ def note_content_refusal(total: dict, usage: dict, msg: dict) -> dict:
     return words
 
 
-def _round_rows(usage: dict) -> list:
-    """The round's calls in ``llm_call_refs`` order, each refusal with its kept facts; [] while none is kept."""
-    kept = {entry.get("llm_call_id"): entry for entry in usage.get(ROUND_REFUSALS_KEY) or ()}
-    round_idx = next(iter(kept.values()), {}).get("round")
+def _round_rows(usage: dict, round_idx) -> list:
+    """Round ``round_idx``'s calls in ``llm_call_refs`` order, each refusal with its kept facts; [] while none is kept."""
+    kept = {entry.get("llm_call_id"): entry for entry in usage.get(ROUND_REFUSALS_KEY) or () if entry.get("round") == round_idx}
     return [{**row, **kept.get(row.get("llm_call_id"), {})} for row in usage.get("llm_call_refs") or ()
             if kept and isinstance(row, dict) and row.get("round") == round_idx]
 
@@ -259,56 +257,84 @@ def _ask_route(row: dict) -> str:
     return fallback_route_words(None, "", False, "", None, own_call=row)  # the binding the call's own record names
 
 
-def refusal_facts(usage: dict, *, before_round=None) -> str:
-    """An answered round's asks from its first provider content refusal on, told once (the record is then dropped): each
-    route asked, how many times and how each ask ended, each refusal's time, upstream and money in ``_call_money``'s
-    words, and one refusal's own words quoted as the provider's. "" before an answer, and for ``before_round``'s own."""
+def _times(count: int) -> str:
+    return "once" if count == 1 else f"{count} times"
+
+
+def _failed_money(rows: list) -> str:
+    """One route's failed asks' money in ``_call_money``'s words: the stated amounts summed (reported only when each one
+    was), and how many asks stated none; unknown never reads as zero."""
+    known, billing = [row for row in rows if call_cost_words(row)], {row.get("billing") for row in rows}
+    money = _call_money({"provider": rows[0].get("provider"), "cost": sum(row["cost"] for row in known) if known else None,
+                         "cost_final": all(row.get("cost_final") is True for row in known),
+                         "billing": billing.pop() if len(billing) == 1 else None})
+    return money + (f"; {len(rows) - len(known)} cost unknown" if 0 < len(known) < len(rows) else "")
+
+
+def refusal_facts(usage: dict, before_round: int) -> str:
+    """The record of a round before ``before_round`` (its own round's stays), dropped here and told once if that round
+    was answered: each route asked from its first provider content refusal on, its asks and how they ended counted,
+    its refusals' first and last time and upstream, its failed asks' money (``_failed_money``), and one refusal's own
+    words quoted as the provider's. Equal endings collapse, so the row stays short however long the round waited."""
+    from collections import Counter
     from ouroboros.loop_transport import _failure_words, _provider_quote
 
-    rows = _round_rows(usage)
+    held = next(iter(usage.get(ROUND_REFUSALS_KEY) or ()), {}).get("round")
+    if held is None or held >= before_round:
+        return ""  # none kept, or the round still asking
+    rows = _round_rows(usage, held)
+    usage.pop(ROUND_REFUSALS_KEY, None)  # told now, or dropped: an earlier round's record never outlives this request
     first = next((index for index, row in enumerate(rows) if row.get("failure_code") == "content_filter"), None)
-    if first is None or all(row.get("failure_code") for row in rows[first:]) or (
-            before_round is not None and rows[first].get("round") >= before_round):
-        return ""
-    usage.pop(ROUND_REFUSALS_KEY, None)
+    if first is None or all(row.get("failure_code") for row in rows[first:]):
+        return ""  # that round ended without an answer: nothing is told
     routes: dict = {}
     for row in rows[first:]:
-        code = row.get("failure_code")
-        routes.setdefault(_ask_route(row), []).append("answered" if not code else _failure_words(code) + (
-            f" at {row.get('ts') or 'an unrecorded time'} (upstream {json.dumps(row['response_provider']) if row.get('response_provider') else 'not named'}; "
-            f"{_call_money(row)})" if code == "content_filter" else ""))
+        routes.setdefault(_ask_route(row), []).append(row)
+    told = []
+    for route, asks in routes.items():
+        times = [row.get("ts") or "an unrecorded time" for row in asks if row.get("failure_code") == "content_filter"]
+        upstream = ", ".join(dict.fromkeys(json.dumps(row["response_provider"]) for row in asks if row.get("response_provider")))
+        when = f"at {times[0]}" if len(times) == 1 else f"first at {times[0]}, last at {times[-1]}" if times else ""
+        failed = [row for row in asks if row.get("failure_code")]
+        told.append(f"{route}, {len(asks)} ask{'s' * (len(asks) > 1)}: " + ", ".join(
+            f"{_failure_words(code) if code else 'answered'} {_times(count)}"
+            + (f" ({when}; upstream {upstream or 'not named'})" if code == "content_filter" else "")
+            for code, count in Counter(row.get("failure_code") or "" for row in asks).items())
+            + (f"; its failed asks: {_failed_money(failed)}" if failed else ""))
     said = next((row for row in rows[first:] if row.get("provider_message")), rows[first])
-    return ("This round's asks from its first provider content refusal on: " + "; ".join(
-        f"{route}, {len(ends)} ask{'s' * (len(ends) > 1)}: {', '.join(ends)}" for route, ends in routes.items()) + "."
-        + (_provider_quote({"_last_llm_provider_message": said.get("provider_message")})
-           or " The refusal carried no sentence on this connection.")
-        + f" Its category: {said.get('refusal_category') or 'not given on this connection'}.")
+    return ("This round's asks from its first provider content refusal on: " + ". ".join(told) + "."
+            + (_provider_quote({"_last_llm_provider_message": said.get("provider_message")})
+               or " The refusal carried no sentence on this connection.")
+            + f" Its category: {said.get('refusal_category') or 'not given on this connection'}.")
 
 
-def refusal_facts_row(ctx) -> str:
-    """At the acting route's first own request after an answered round that met a provider content refusal, with no
-    switch row pending: that round's facts once, closed for their reader (the primary is not told to return to itself)."""
+def with_refusal_facts(ctx, pending: str) -> str:
+    """At the acting route's own request, the pending route row joined with the facts of an answered earlier round that
+    met a provider content refusal (``refusal_facts``), each kept whole; the facts close for their reader by binding
+    (``primary_and_acting``): the primary is never told to return to itself, a spare reads its means once."""
     usage = ctx.accumulated_usage
-    if not (facts := usage.get(ROUND_REFUSALS_KEY) and refusal_facts(usage, before_round=ctx.round_idx)):
-        return ""  # the common request: no answered round's refusal is kept
-    primary = getattr(ctx.tools._ctx, "primary_route", None)
-    spare = isinstance(primary, dict) and (primary.get("model"), bool(primary.get("use_local"))) != (
-        ctx.active_model, bool(ctx.active_use_local))
-    return f"[ROUTE FACTS] {facts} {_SPARE_CLOSING if spare else 'Facts, not an instruction.'}"
+    if not (usage.get(ROUND_REFUSALS_KEY) and (facts := refusal_facts(usage, ctx.round_idx))):
+        return pending  # the common request: no answered earlier round's refusal is kept
+    from ouroboros.model_wait import current_model_wait
+
+    bindings = primary_and_acting(ctx, current_model_wait())
+    spare = bool(bindings) and bindings[0] != bindings[1] and _SPARE_CLOSING not in pending
+    return "\n\n".join(filter(None, (pending, f"[ROUTE FACTS] {facts} "
+                                              f"{_SPARE_CLOSING if spare else 'Facts, not an instruction.'}")))
 
 
-def round_failure_words(usage: dict) -> str:
-    """Every failure of a round whose record keeps a provider content refusal, each kind in the host's words with the
-    routes that met it and how often; "" for any other round (the forced final's prompt, the terminal text)."""
+def round_failure_words(usage: dict, round_idx) -> str:
+    """Every failure of round ``round_idx`` when its record keeps a provider content refusal, each kind in the host's
+    words with the routes that met it and how often; "" for any other round (the forced final's prompt, the terminal)."""
     from ouroboros.loop_transport import _failure_words
 
     kinds: dict = {}
-    for row in _round_rows(usage):
+    for row in _round_rows(usage, round_idx):
         if code := row.get("failure_code"):
             routes, route = kinds.setdefault(code, {}), _ask_route(row)
             routes[route] = routes.get(route, 0) + 1
     return "" if "content_filter" not in kinds else " This round's failed asks: " + "; ".join(
-        f"{_failure_words(code)} on " + ", ".join(f"{route} ({count} ask{'s' * (count > 1)})" for route, count in routes.items())
+        f"{_failure_words(code)} on " + ", ".join(f"{route} {_times(count)}" for route, count in routes.items())
         for code, routes in kinds.items()) + "."
 
 
@@ -334,27 +360,34 @@ def _settled(facts: dict) -> dict:
                                                 for row in quota.get(key) or []] for key in ("snapshots", "absences")}}}
 
 
+def primary_and_acting(ctx, waiter):
+    """The primary's binding and the acting route's, each under the owner's wait-card choices (``route_binding``); None
+    without a primary or on an exact model route, where no other route acts for it."""
+    from ouroboros.model_slots import route_binding, task_model_binding
+
+    owner = ctx.tools._ctx
+    primary, overrides = getattr(owner, "primary_route", None), waiter.overrides if waiter else None
+    if getattr(owner, "exact_model_route", False) or not isinstance(primary, dict) or not primary.get("model"):
+        return None
+    role, _ = task_model_binding({"task_metadata": getattr(owner, "task_metadata", {})},
+                                context_fit_plan=ctx.context_fit_plan, overrides=overrides)
+    return (route_binding(primary["model"], bool(primary["use_local"]), primary["role"], overrides=overrides),
+            route_binding(ctx.active_model, ctx.active_use_local, role, overrides=overrides))
+
+
 def observe_primary_route(ctx) -> str:
     from ouroboros.deadline_utils import dispatch_window_remaining_sec
     from ouroboros.llm_probe import upstream_transport_reachable
     from ouroboros.loop_transport import task_deadline_epoch, transport_repeat_stop_requested
-    from ouroboros.model_slots import route_binding, task_model_binding
     from ouroboros.model_wait import current_model_wait, dispatch_deadline_remaining_sec
     from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
 
     owner = ctx.tools._ctx
-    primary = getattr(owner, "primary_route", None)
-    if (ctx.defer_resource_wait is not None or getattr(owner, "exact_model_route", False)
-            or not isinstance(primary, dict) or not primary.get("model")):
+    primary, waiter = getattr(owner, "primary_route", None), current_model_wait()
+    bindings = primary_and_acting(ctx, waiter) if ctx.defer_resource_wait is None else None
+    if not bindings or bindings[0] == bindings[1]:
         return ""
-    waiter = current_model_wait()
-    overrides = waiter.overrides if waiter else None
-    role, _ = task_model_binding({"task_metadata": getattr(owner, "task_metadata", {})},
-                                context_fit_plan=ctx.context_fit_plan, overrides=overrides)
-    target = route_binding(primary["model"], bool(primary["use_local"]), primary["role"], overrides=overrides)
-    acting = route_binding(ctx.active_model, ctx.active_use_local, role, overrides=overrides)
-    if target == acting:
-        return ""
+    target = bindings[0]
     previous = getattr(owner, "_primary_route_observation", None) or {}
     now = time.monotonic()
     if previous.get("binding") == target and now - previous["checked_monotonic"] < OBSERVATION_INTERVAL_SEC:

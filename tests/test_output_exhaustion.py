@@ -332,7 +332,7 @@ def test_a_round_ending_on_a_content_refusal_names_it_and_never_an_outage(tmp_pa
     model = llm.requests[0]["model"]
     [prompt] = [row["content"] for row in llm.requests[-1]["messages"] if "[PROVIDER_UNAVAILABLE]" in str(row.get("content"))]
     rows = [note for note in notes if "No usable reply" in note]
-    met = f" This round's failed asks: {REFUSAL_WORDS} on {model} (1 ask)."
+    met = f" This round's failed asks: {REFUSAL_WORDS} on {model} once."
     assert llm.calls == 2 and ROUND_REFUSALS_KEY not in usage
     assert not any("Fallback" in note or "trying" in note for note in notes)
     if refused:
@@ -342,6 +342,37 @@ def test_a_round_ending_on_a_content_refusal_names_it_and_never_an_outage(tmp_pa
         assert rows == [f'⚠️ No usable reply after {REFUSAL_WORDS} on {model}. The provider said: "Blocked here."']
     else:
         assert "INTERRUPTED by this outage" in prompt and "failed asks" not in prompt and rows == []
+
+
+BODY_ERROR = ({"role": "assistant", "content": ""},
+              {"prompt_tokens": 5, "provider_error": {"kind": "provider_error", "code": 400, "message": "Rejected."}})
+REFUSAL = ({"role": "assistant", "content": "", "refusal": "Blocked here."},
+           {"prompt_tokens": 5, "response_finish_reason": "content_filter"})
+
+
+def test_a_later_rounds_end_names_its_own_failures_never_an_earlier_rounds_refusal(tmp_path, no_sleep, monkeypatch):
+    """Round 1: the primary's content refusal, and the adopted spare's reply spends its length limit (no answer).
+    Round 2: the spare answers with a tool call. Round 3: the spare, the walk's primary and the forced final's call
+    return a body error. Round 3's forced-final prompt and terminal text are round 3's own: today's outage words and
+    its body error's sentence. Round 1's refusal is never told as this round's (before: it was, and round 3's errors
+    were left out); its unanswered record is dropped at round 2's request, which carries no row of it."""
+    tools = ({"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {
+        "name": "chat_history", "arguments": "{}"}}]}, {"prompt_tokens": 1})
+    llm, result, usage, _trace = _walk_loop(tmp_path, monkeypatch, REFUSAL, _incident_reply(0), tools, BODY_ERROR,
+                                            BODY_ERROR, BODY_ERROR)
+
+    primary = llm.requests[0]["model"]
+    assert [request["model"] for request in llm.requests[:5]] == [primary] + ["other/model"] * 3 + [primary]
+    assert llm.calls == 6 and [row["round"] for row in usage["llm_call_refs"]
+                               if row.get("failure_code") == "content_filter"] == [1]
+    [prompt] = [row["content"] for row in llm.requests[-1]["messages"] if "[PROVIDER_UNAVAILABLE]" in str(row.get("content"))]
+    notice = usage["terminal_provider_notice"]
+    assert "INTERRUPTED by this outage" in prompt and "Rejected." in notice and result == notice
+    for text in (prompt, notice):
+        assert REFUSAL_WORDS not in text and "failed asks" not in text and "Blocked here." not in text
+    assert not any("[ROUTE FACTS] This round's asks" in str(row.get("content")) for request in llm.requests
+                   for row in request["messages"])
+    assert ROUND_REFUSALS_KEY not in usage
 
 
 # ------------------------------------------------------------------ the next ordinary round (T10)
