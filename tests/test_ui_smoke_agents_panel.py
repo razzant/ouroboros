@@ -412,6 +412,8 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
     settings_path = direct_server_with_data["data_dir"] / "settings.json"
     saved = json.loads(settings_path.read_text(encoding="utf-8"))
     saved.update(_LIST_EDITOR_ENTRIES)
+    if surface == "keys":
+        saved["REMOVE_FOCUS_Z_LAST"] = "last-synthetic-secret"
     settings_path.write_text(json.dumps(saved), encoding="utf-8")
     direct_server_with_data["restart_server"]()
 
@@ -419,14 +421,24 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
         browser = getattr(pw, engine).launch()
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 900})
+            def delayed_settings(route):
+                import time
+
+                response = route.fetch()
+                if route.request.method == "POST":
+                    time.sleep(0.15)  # Transport delay, never an assertion wait.
+                route.fulfill(response=response)
+
+            page.route("**/api/settings", delayed_settings)
             page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
             page.wait_for_selector("#page-chat", timeout=30_000)
             page.click('[data-nav-page="settings"]')
             page.wait_for_selector(".settings-shell", timeout=15_000)
 
             def remove(buttons, index, target, value=None):
-                buttons.nth(index).focus()
-                page.keyboard.press("Enter")
+                buttons.nth(index).press("Enter")
+                if surface == "fallbacks":
+                    page.locator("[data-confirm-ok]").click()
                 expect(page.locator(f"{target}:focus")).to_have_count(1)
                 if value is not None:
                     expect(page.locator(":focus")).to_have_value(value)
@@ -440,7 +452,8 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
 
             elif surface == 'tools':
                 open_settings(page, 'tools')
-                open_entry(page, 'alpha')
+                editor = open_entry(page, 'alpha')
+                editor.locator('[data-mcp-more] > summary').click()
                 headers = page.locator('[data-mcp-header-remove]')
                 remove(headers, 0, '[data-mcp-header-field="name"]', 'X-B')
                 remove(headers, 0, '[data-mcp-header-add]')
@@ -461,15 +474,37 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
 
             else:
                 level = open_settings(page, 'accounts')
-                for key in ('REMOVE_FOCUS_ONE', 'REMOVE_FOCUS_TWO'):
+                for key, next_key in [('REMOVE_FOCUS_Z_LAST', 'REMOVE_FOCUS_TWO'),
+                                      ('REMOVE_FOCUS_ONE', 'REMOVE_FOCUS_TWO'),
+                                      ('REMOVE_FOCUS_TWO', '')]:
                     row = level.locator(f'[data-setting-row="{key}"]')
                     row.locator('[data-secret-open]').click()
                     row.locator('[data-secret-remove]').focus()
+                    held = []
+
+                    def hold_write_answer(route):
+                        if route.request.method != "POST":
+                            route.fallback()
+                            return
+                        held.append((route, route.fetch()))
+                        page.evaluate("window.keyRemovalWriteHeld = true")
+
+                    if not next_key:
+                        page.route("**/api/settings", hold_write_answer)
                     page.keyboard.press('Enter')
                     page.locator('[data-confirm-ok]').click()
-                    # Clearing a saved key keeps its named row; Add is that row's next action.
-                    expect(row.locator('[data-secret-open]')).to_have_text('Add')
-                    expect(row.locator('[data-secret-open]')).to_be_focused()
+                    if not next_key:
+                        page.wait_for_function("window.keyRemovalWriteHeld === true")
+                        # A late write answer must not take the caret from another field the owner chose.
+                        level.locator('[data-setting-row="GITHUB_REPO"] [data-setting-control]').focus()
+                        page.unroute("**/api/settings", hold_write_answer)
+                        route, response = held.pop()
+                        route.fulfill(response=response)
+                    # A custom key leaves the server's list when cleared; named skill keys stay.
+                    expect(row).to_have_count(0)
+                    target = (f'[data-setting-row="{next_key}"] [data-secret-open]' if next_key
+                              else '[data-setting-row="GITHUB_REPO"] [data-setting-control]')
+                    expect(level.locator(target)).to_be_focused()
             capture(page, f"list-editor-remove-focus-{surface}-{engine}")
         finally:
             browser.close()
