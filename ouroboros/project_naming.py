@@ -494,10 +494,13 @@ def without_continue(name: Any) -> str:
 
 
 def summary_stands_as_name(record: Dict[str, Any]) -> bool:
-    """A run's display name is its own closing sentence and no author titled it: the exact equality the closing
-    write leaves. Every root once took its sentence as its name, so the current producer's narrower rule proves less."""
-    name = str(record.get("suggested_name") or "").strip()
-    return bool(name) and name == str(record.get("wake_summary") or "").strip() and not str(record.get("title") or "").strip()
+    """A run's display name is its own closing sentence and no author titled it: the equality the closing write
+    leaves, its gist's first sentence (``task_finalization``), or the whole gist a one-sentence summary wrote before.
+    Every root once took its sentence as its name, so the current producer's narrower rule proves less."""
+    from ouroboros.text_sentences import first_sentence
+
+    name, gist = str(record.get("suggested_name") or "").strip(), str(record.get("wake_summary") or "").strip()
+    return bool(name) and name in (gist, first_sentence(gist)) and not str(record.get("title") or "").strip()
 
 
 def _host_subject(record: Dict[str, Any]) -> str:
