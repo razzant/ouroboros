@@ -1,7 +1,8 @@
 """Receipts for the forms actually visible, and numeric prices of what holds the room.
 
-These diagnostics share the renderers' source identities; cached values are only
-counts and sizes, outside the persisted snapshot. No rejected full view is drawn.
+These diagnostics share the renderers' source identities; cached values are counts
+and sizes, outside the persisted snapshot, and the holding prices are keyed by the
+priced text itself, for the snapshot's life. No rejected full view is drawn.
 """
 from ouroboros import memory_view as mv, memory_view_conversations as conversations, memory_view_legacy as legacy
 from ouroboros.memory_view_work import works, folded_work_rows, task_line, task_gist_line, task_gists_before_work_lines
