@@ -644,6 +644,28 @@ def test_a_section_selector_must_begin_a_real_heading_and_its_refusal_shows_the_
     assert _meta(edit(_item(section="### Detail")))["knowledge_delta"]["removed_sections"][0]["heading"] == "### Detail"
 
 
+def test_a_section_selector_must_quote_its_whole_heading_line(tmp_path):
+    """``## Status`` begins ``## Status History``: a quote that stops inside a heading line could name a
+    longer heading, so it refuses and names the line; the whole line works (its CRLF end is not part of it)."""
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
+    original = store.write_knowledge_note(address(tmp_path, "status"),
+                                          "# Log\n\n## Status History\n\nOld.\n\n## Next\n\nKept.\n").current
+    before = _files(tmp_path)
+    refused = tools._knowledge_write(ctx, "status", mode="edit", scope="global", expected_revision=original.revision,
+                                     edits=[_item(section="## Status", new_str="")])
+    assert ('edit_refused: item 1: section text ends inside the heading line "## Status History"; quote the whole line'
+            in refused) and "Outline of 'status'" in refused and original.text not in refused
+    assert _files(tmp_path) == before
+    whole = store.write_knowledge_note(original.address, "", "edit", original.revision,
+                                       edits=[_item(section="## Status History", new_str="")])
+    assert whole.ok and whole.current.text == original.text.replace("## Status History\n\nOld.\n\n", "")
+    crlf = address(tmp_path, "crlf")
+    crlf.path.write_bytes(b"# Log\r\n\r\n## Status\r\n\r\nOld.\r\n")
+    edited = store.write_knowledge_note(crlf, "", "edit", store.read_knowledge_note(crlf).revision,
+                                        edits=[_item(section="## Status", new_str="")])
+    assert edited.ok and edited.current.raw == b"# Log\r\n\r\n"
+
+
 def test_a_setext_heading_has_no_section_of_its_own_to_replace(tmp_path):
     original = store.write_knowledge_note(address(tmp_path, "setext"), "# Top\n\nSetext\n------\n\nUnder it.\n").current
     refused = store.write_knowledge_note(original.address, "", "edit", original.revision,

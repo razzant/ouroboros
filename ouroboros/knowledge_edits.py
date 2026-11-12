@@ -8,6 +8,7 @@ publishes a result.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping
 
 from ouroboros.markdown_source import MarkdownSource
@@ -66,14 +67,24 @@ def edit_items(edits: Any) -> list[tuple[str, str, str]]:
     return items
 
 
+def _heading_line(raw: bytes, heading: Any) -> bytes:
+    """The heading's own line as the note spells it, without its line end (LF or CRLF)."""
+    line = raw[heading.span.start_byte:heading.span.end_byte]
+    return line[:-2] if line.endswith(b"\r\n") else line[:-1] if line.endswith(b"\n") else line
+
+
 def compile_edit_items(raw: bytes, source: MarkdownSource, items: list[tuple[str, str, str]]) -> bytes:
     """The body bytes of ``raw`` with every item applied, all or none; ``EditRefused`` names the item.
 
     ``("old_str", text, new)`` stands for its own bytes; ``("section", text, new)`` for the whole
     section (``MarkdownHeading.section``: the heading through its last child) of the heading
-    ``text`` begins at, so ``new`` replaces all of it. Each selector is found in the ORIGINAL body,
-    exactly once (an overlapping repeat counts); spans may touch, never overlap. Bytes: a valid
-    needle in valid UTF-8 lies on character boundaries, and unmentioned bytes stay as they were.
+    ``text`` begins at, so ``new`` replaces all of it. A section's text begins at the first byte
+    of a parsed heading and covers that heading's whole line, or continues past it: a quote that
+    stops inside the line could be the start of a longer heading (``## Status`` inside
+    ``## Status History``), so it refuses and names the line. Each selector is found in the
+    ORIGINAL body, exactly once (an overlapping repeat counts); spans may touch, never overlap.
+    Bytes: a valid needle in valid UTF-8 lies on character boundaries, and unmentioned bytes stay
+    as they were.
     """
     start_of_body = source.body_span.start_byte
     body, headings = raw[start_of_body:], {h.span.start_byte: h for h in source.headings}
@@ -95,6 +106,10 @@ def compile_edit_items(raw: bytes, source: MarkdownSource, items: list[tuple[str
             if heading.section.start_byte != heading.span.start_byte:
                 raise EditRefused(f"{where}: the heading at line {heading.span.start_line} has no section of its own "
                                   "(a setext heading); quote its text with old_str", True)
+            line = _heading_line(raw, heading)
+            if start_of_body + end < heading.span.start_byte + len(line):
+                raise EditRefused(f"item {number}: section text ends inside the heading line "
+                                  f"{json.dumps(line.decode('utf-8'), ensure_ascii=False)}; quote the whole line", True)
             if end > heading.section.end_byte - start_of_body:
                 raise EditRefused(f"{where}: the quote runs past the end of its section (line "
                                   f"{heading.section.end_line}); name each section as its own item", True)

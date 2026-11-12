@@ -407,8 +407,8 @@ def get_tools() -> List[ToolEntry]:
                 "Modes. overwrite replaces the note with content; its frontmatter fields merge with the retained ones. "
                 "append adds content at the end. edit replaces exact body text of the revision you read: one old_str by "
                 "content, or edits, a list of {old_str, section, new_str} items, each naming one selector and leaving "
-                "the other null. An old_str stands for its own text; a section is text that begins at a heading line "
-                "(normally that line) and stands for the heading's whole section, nested sections included. Each "
+                "the other null. An old_str stands for its own text; a section quotes a whole heading line (or more "
+                "from its start) and stands for the heading's whole section, nested sections included. Each "
                 "selector must occur exactly once in that revision's body (never in an earlier item's result); items may "
                 "touch but not overlap; all apply or none; an empty new_str deletes; a refused item is named by its "
                 "number. revert puts back an earlier version byte for byte: version is its revision "
@@ -430,7 +430,7 @@ def get_tools() -> List[ToolEntry]:
                 "mode": {"type": "string", "enum": list(_MODES), "description": "overwrite, append, edit, revert, archive or restore, as this tool's description explains. Missing notes are created by overwrite/append only. The overview always stays active."},
                 "reason": {"type": "string", "description": "Why this write: optional on every mode and required for archive, which also records it in the archive field. Kept in the note's history, never written into its body; no automatic classification or summarization occurs."},
                 "old_str": {"type": "string", "description": "mode=edit, one pair: non-empty exact body text that occurs once; content replaces it (empty text deletes it). Omit both to change only the summary; edits replaces several places at once."},
-                "edits": {"type": "array", "minItems": 1, "description": "mode=edit: several exact replacements in one revision-checked write, all or nothing. Each item names exactly one selector, the other null: old_str (exact body text) or section (exact body text beginning at a heading line: the item stands for that whole section, nested ones included); new_str replaces it, empty deletes. Selectors are found once each in the revision you read; spans may touch, not overlap.",
+                "edits": {"type": "array", "minItems": 1, "description": "mode=edit: several exact replacements in one revision-checked write, all or nothing. Each item names exactly one selector, the other null: old_str (exact body text) or section (exact body text from the start of a heading line through at least its end: the item stands for that whole section, nested ones included); new_str replaces it, empty deletes. Selectors are found once each in the revision you read; spans may touch, not overlap.",
                           "items": {"type": "object", "additionalProperties": False, "required": ["old_str", "section", "new_str"],
                                     "properties": {"old_str": {"type": ["string", "null"]}, "section": {"type": ["string", "null"]},
                                                    "new_str": {"type": ["string", "null"]}}}},
