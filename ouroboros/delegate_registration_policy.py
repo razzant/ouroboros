@@ -275,10 +275,10 @@ STARTED_STR_FIELDS: Tuple[Tuple[str, str], ...] = tuple(
         "continuation_of", "capture_id", "snapshot_task_id",
     )
 )
-# None means an old row omitted the choice; '' is a captured default choice. ``row_effort`` is
-# the configured row's pin ('' = Auto) beside ``effort``, the LEAF level the engine ran.
+# None means no optional fact; '' is a captured default choice, or an unknown recovered
+# window origin. ``row_effort`` is the configured pin ('' = Auto), ``effort`` the leaf's level.
 STARTED_MAPPING_FIELDS = ("authority_ceiling", "promotion")
-STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort")
+STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort", "window_started_at")
 # Progress carried forward from a previous row: an idempotent re-start writes a
 # SECOND started row; replacing wholesale would forget a settlement and put a
 # finished run back into the orphan sweep (which would cancel it).

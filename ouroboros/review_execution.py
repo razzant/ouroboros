@@ -58,8 +58,8 @@ from ouroboros.review_session_custody import (
     checkpoint_pending_invocation,
     owned_started_review_custody,
     recorded_review_shape,
-    review_recovery_facts, continuation_send_admitted, prepare_continuation_send,
-    continuation_generation_end, continuation_send, join_recorded_review_continuation, stopped_review_failure,
+    review_recovery_facts, continuation_send_admitted, rejoin_recorded_review,
+    continuation_send, join_recorded_review_continuation, stopped_review_failure,
 )
 from ouroboros.review_session_preparation import prepare_review_session_request, render_review_session_prompt
 from ouroboros.review_session_usage import (review_event_identity, session_custody_attribution,
@@ -710,8 +710,6 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             raise ReviewRouteUnavailable("delegated retry token has no durable invocation; refusing a second paid run",
                                          code="review_custody_lost")
         if recovering:
-            prepare_continuation_send(invocation, custody_drive, record, run_id)  # every continuation POST, replays too
-            generation_end = continuation_generation_end(invocation, record, run_id)
             source_request = record.get("work_order_source_request") or {}
             delivery_facts.update(source_request)
             route, project_id, existing_project, key, schema_asked = review_recovery_facts(
@@ -725,6 +723,8 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 checking["custody"] = {k: str(record.get(k) or "") for k in ("authority_source", "execution_root", "target_root")}
             thread_id = str(run_request.get("_thread_id") or thread_id)
             use_thread = bool(thread_id or run_request.get("_use_thread"))
+            seat_engine, gateway = seat_gateway(record, root)  # the recorded engine first reads what it accepted (#3138)
+            run_id, started_custody, generation_end = rejoin_recorded_review(invocation, custody_drive, gateway, record, run_id, started_custody)
         else:
             route = session_route if session_route is not None else review_session_route()
             if route is None:
@@ -735,7 +735,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
         if invocation.reconcile_only and not recovering:
             raise ReviewRouteUnavailable("the exact delegated review invocation is no longer available for "
                 "reconciliation; refusing to start a second paid run", code="review_custody_lost")
-        seat_engine, gateway = seat_gateway(record if recovering else None, root)  # recorded engine, else the domain's
+        seat_engine, gateway = (seat_engine, gateway) if recovering else seat_gateway(None, root)  # else the domain's
         if recovering and not run_id and (unproven := custody.replay_store_unproven(record, getattr(gateway, "store_identity", ""))):
             raise ReviewRouteUnavailable(f"{unproven}; the review start was not re-sent", code="invocation_store_unproven")
         if use_thread and shape.investigation and not run_id:
@@ -839,7 +839,6 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 raise ReviewRouteUnavailable(
                     f"Claudexor returned a queued handle without a run id: {handle!r}", code="queued_without_run_id")
         state["pending_invocation_id"] = invocation_id or retry_token
-        state["delegated_run_id"] = run_id
         if started_custody is not None:
             entry, custody_durable = started_custody, True
         else:
@@ -853,12 +852,13 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 ledger_root=str(custody_drive), idempotency_key=key, invocation_id=invocation_id or retry_token,
                 continuation_of=str((record or {}).get("continuation_of") or "") if recovering else "",
                 **checking.get("custody", {}), **seat_engine)
-            # A missing started row leaves the run process-local and unresumable.
-            custody_durable = bool(custody.record_started(custody_drive, entry, shape={
+            # A missing started row leaves the run process-local and unresumable; a read may have bound it first.
+            entry, custody_durable = custody.bind_started(custody_drive, entry, shape={
                 "effort": route.effort, "access": shape.access, "mode": shape.mode,
                 "isolation": shape.isolation, "delegated": shape.delegated, "max_seconds": seconds,
                 "root": root, "surface": surface, "slot_id": slot_id,
-            }))
+            })[:2]
+        run_id = state["delegated_run_id"] = entry.run_id
         window = min(float("inf") if timeout_sec is None else float(timeout_sec),  # no window: observe until terminal
                      float("inf") if generation_end is None else max(0.0, generation_end - time.monotonic()))
         poll_deadline = time.monotonic() + window

@@ -51,6 +51,8 @@ class _Engine:
                 return httpx.Response(200, json={"snapshots": []})
             if path == "/v2/projects":
                 return httpx.Response(200, json={"projects": [{"id": "prj-existing", "root": str(tmp_path)}]})
+            if path == "/v2/operations":  # an engine before the accepted-start lookup (#3138): the replay rule decides
+                return httpx.Response(200, json={"operations": []})
             assert path == "/v2/runs", path
             self.keys.append(request.headers.get("Idempotency-Key"))
             self.bodies.append(json.loads(request.read()))
@@ -202,12 +204,30 @@ def test_an_empty_retry_keeps_recorded_fingerprints_and_derives_only_a_missing_d
         assert run.work_order_source_request == recorded["work_order_source_request"]
 
 
+def _reading_engine(monkeypatch):
+    """An engine that answers only reads: the retry first asks it what it accepted (#3138), here an engine
+    whose catalog declares no such lookup, and any other request is a refused retry sending something."""
+    real_gateway = cx.ClaudexorGateway
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/operations":
+            return httpx.Response(200, json={"operations": []})
+        pytest.fail(f"a refused retry sent {request.method} {request.url.path}")
+
+    def connect(*_a, **_k):
+        gateway = real_gateway(cx.DaemonEndpoint("127.0.0.1", 1, "secret-token"))
+        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler),
+                                       headers=dict(gateway._client.headers))
+        return gateway
+    monkeypatch.setattr(cx, "ClaudexorGateway", connect)
+
+
 @pytest.mark.parametrize("drift", ["root_moved", "snapshot_gone", "workspace_inactive"])
 def test_an_empty_retry_still_proves_present_target_and_snapshot(tmp_path, monkeypatch, drift):
     from ouroboros.tools import delegate
 
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setattr(cx, "ClaudexorGateway", lambda *_a, **_k: pytest.fail("a refused retry reached the engine"))
+    _reading_engine(monkeypatch)
     ctx = _delegating_ctx(tmp_path, acting=True)
     target = tmp_path / "moved" if drift == "root_moved" else ctx.workspace_root
     assert custody.record_start_requested(
