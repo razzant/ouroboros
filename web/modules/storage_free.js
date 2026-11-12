@@ -155,10 +155,10 @@ export const CAUSES = {
     nothing_unsaved: 'nothing in it is unsaved any more', nested_repository: 'a repository inside it cannot be saved as a patch',
     commits_unprotected: 'its commits are not held by a branch', generation_closed: 'stopped by a restart',
     removal_failed: 'its removal failed', younger_than_retention: 'it is still inside the retention days',
-    source_recovery_pending: 'startup recovery is not confirmed complete: task trees and service logs wait',
-    closed_set_unrecorded: 'closed log files waiting for the next app restart (no earlier run of the app recorded them closed)',
+    source_recovery_pending: 'startup recovery is not confirmed complete: old task folders and service logs are kept',
+    closed_set_unrecorded: 'closed log files waiting for the next app restart (no earlier run of the app saw them closed)',
     prior_workers_unconfirmed: 'closed log files waiting for the next app restart (the previous run’s background processes are not confirmed stopped)',
-    closed_set_changed: 'closed log files waiting for the next app restart (their log’s archive changed since they were recorded)',
+    closed_set_changed: 'closed log files waiting for the next app restart (their log’s archive changed since the last run saw it)',
 };
 /** A code's words from the one map, `''` when it has none. */
 const causeWords = (code) => CAUSES[code] || KEPT_REASONS[code] || '';

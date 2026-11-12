@@ -344,7 +344,7 @@ test('a retirer pass says what it released and what it holds, by typed reason si
     const gate = [{ id: 'runtime_retirement', state: 'done', at, held: 0, held_since: at,
         holds: [{ class: 'source_recovery_pending', count: null, example: 'startup recovery report missing', since: at }] }];
     assert.equal(removerLine(gate, NOW), `Retirement: last change ${whenLabel(at, NOW)} · `
-        + `held since ${whenLabel(at, NOW)}: startup recovery is not confirmed complete: task trees and service logs wait`);
+        + `held since ${whenLabel(at, NOW)}: startup recovery is not confirmed complete: old task folders and service logs are kept`);
     assert.doesNotMatch(removerLine(gate, NOW), /holding \d/, 'an unknown count is never said as a number');
     const logs = [{ id: 'record_compression', state: 'done', at, compressed: 1204, saved_bytes: 2.1e9, held: 37, held_since: at,
         holds: [{ class: 'prior_workers_unconfirmed', count: 37, example: 'events_20261101T000000.jsonl', since: at }] }];

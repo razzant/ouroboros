@@ -43,8 +43,9 @@ BYTECODE_UNLINKS_PER_RUN = 20_000  # removals of one run; the rest is owed to th
 def record_startup(root, *, gaps, report=None):
     """Publish the recovery gate before a child may retire task sources. Missing means unknown.
     A gap also publishes how many records the recovery ``report`` left unresolved (its error lines
-    when it names none, one without a report) and its first error, cut to a hold example's bound:
-    the example of the pass's hold (``_startup_hold``). Every start also publishes
+    when it names none, one without a report), a trace for the operator that no pass reads, and its
+    first error, cut to a hold example's bound: the example of the pass's hold (``_startup_hold``),
+    which carries no count. Every start also publishes
     ``workers_unconfirmed``, which ``record_compression``'s log plane reads beside the generation:
     true unless the recovery report says the previous generation's workers ended
     (``prior_workers_ended``, set only once its PID check passed; one of them may still hold a log
