@@ -161,7 +161,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "description": (
                 "This child's reasoning effort: auto/omitted = this room's primary clamped into its "
                 "helper bounds. A level in the model name always holds; otherwise a row my human pinned keeps "
-                "its level and a request beyond the bounds runs at the nearest bound; in Cyber Pro my request is "
+                "its level; otherwise a request beyond the bounds runs at the nearest bound; in Cyber Pro my request is "
                 "applied as asked. The result says so. For a session row this is the delegated run's level."
             ),
         },
