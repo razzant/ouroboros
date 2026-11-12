@@ -768,5 +768,11 @@ test('a reminder and a skill notice ring under the messages toggle, titled by th
     assert.equal(notice.title, 'Notice from calendar');
     assert.equal(notice.body, 'Meeting with Ivan in 15 min');
     assert.equal(noticeTitle('skill_notice', ''), 'Notice from a skill');
+    const safety = classifyLiveFrame({ ...reminder, system_type: 'safety_notice',
+        content: "Safety Supervisor · not Ouroboros's words\nOuroboros re-issued this after the flag" },
+    { kind: 'chat', isMain: true });
+    assert.equal(safety.category, 'important', "the Supervisor's own row rides the same toggle");
+    assert.equal(safety.title, 'Safety Supervisor');
+    assert.equal(safety.body, 'Ouroboros re-issued this after the flag', 'its signature stays out of the body');
     assert.equal(noticeTitle('reminder', 'owner'), 'Reminder from owner', 'a row the owner set is signed by the owner');
 });
