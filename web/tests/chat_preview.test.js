@@ -155,7 +155,9 @@ test('equal times follow stream position exactly as the feed compares it, before
 
 test('the feed\'s own tie rule orders the preview: imported from chat_history_replay.js, never restated here', async () => {
     // Astra R2: a restated comparator agrees today (the test above pins it) and would silently fork with the next
-    // change to compareHistoryPosition; the import is acyclic (chat_history_replay.js imports only task_checkpoints.js).
+    // change to compareHistoryPosition. chat_history_replay.js imports only task_checkpoints.js, whose start row reads
+    // the Context capsule's sentences (context_observation.js → i18n.js → api_client.js → this module): every name
+    // read across that loop is read inside a function, so the order the modules evaluate in does not matter.
     const source = await readFile(new URL('../modules/chat_preview.js', import.meta.url), 'utf8');
     assert.match(source, /^import \{ compareHistoryPosition \} from '\.\/chat_history_replay\.js';$/m);
     assert.doesNotMatch(source, /localeCompare/, 'no second copy of the stream comparison');
