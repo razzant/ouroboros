@@ -79,10 +79,10 @@ def test_hot_reconfigured_mcp_keys_are_classified_immediate(monkeypatch, isolate
     read (mcp_client.ensure_configured_from_settings). This test pins the
     CLASSIFICATION; the hot apply itself and its failure disclosure are pinned
     by test_failed_mcp_reconfigure_becomes_a_save_warning below."""
-    from ouroboros.gateway.settings import _IMMEDIATE_KEYS
+    from ouroboros.settings_scales import IMMEDIATE_SETTINGS
 
     for key in ("MCP_ENABLED", "MCP_SERVERS", "MCP_TOOL_TIMEOUT_SEC"):
-        assert key in _IMMEDIATE_KEYS
+        assert key in IMMEDIATE_SETTINGS
     data = _save(monkeypatch, isolated_settings, {"MCP_ENABLED": "true"})
     assert data.get("immediate_changed") is True
     assert not data.get("next_task_changed")
