@@ -265,7 +265,10 @@ def _char_offsets(raw: bytes, positions: set[int]) -> dict[int, int]:
 
 
 def render_outline(note: Any, label: str = "") -> str:
-    """Summary, revision, state, size and every heading with its line and section range."""
+    """Summary, revision, state, size and every heading with its line and section range.
+
+    The ranges are of the text outlined: the note, or the earlier version a ``label`` marks, which
+    is read with its version."""
     summary = note.summary.strip()
     lines = [f"Outline of {note.address.topic!r} ({note.address.scope}){label}",
              "Summary: " + ("\n  ".join(summary.splitlines()) if summary else "no summary"),
@@ -279,8 +282,10 @@ def render_outline(note: Any, label: str = "") -> str:
         return "\n".join(lines) + "\n"
     spans = [_own_section(heading) or heading.span for heading in headings]
     chars = _char_offsets(note.raw, {edge for span in spans for edge in (span.start_byte, span.end_byte)})
+    outlined = (f"this version itself, read with the default view and version={note.revision}" if label
+                else "the note itself, read with the default view")
     lines.append("Headings (each heading line as written, its line, section range as start_char..end_char, size). "
-                 "The ranges are of the note itself, read with the default view. "
+                 f"The ranges are of {outlined}. "
                  "A section runs to the next heading of its level or higher, so a parent's range contains its children's:")
     for heading, span in zip(headings, spans):
         start, end = chars[span.start_byte], chars[span.end_byte]

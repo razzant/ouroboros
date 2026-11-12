@@ -176,6 +176,11 @@ def test_a_version_reads_back_exactly_in_ranges_and_as_its_outline(tmp_path):
     outline = tools._knowledge_read(ctx, TOPIC, version=first.revision, view="outline")
     assert "an earlier version, not the current note" in outline and "### Опоры" in outline
     assert f"Revision: {first.revision}" in outline
+    # Its ranges are of that version, not of the current note: the outline names the version to read them with.
+    assert f"The ranges are of this version itself, read with the default view and version={first.revision}." in outline
+    start, end = map(int, re.search(r"^### Опоры — line \d+, chars (\d+)\.\.(\d+) ", outline, re.M).groups())
+    assert tools._knowledge_read(ctx, TOPIC, version=first.revision, start_char=start, end_char=end).endswith(
+        "### Опоры\n\nДве.\n\n") and first.text[start:end] == "### Опоры\n\nДве.\n\n"
     assert "### Опоры" not in tools._knowledge_read(ctx, TOPIC, view="outline")
     assert tools._knowledge_read(ctx, TOPIC, version=second.revision).endswith(second.text)  # the current one too
     missing = tools._knowledge_read(ctx, TOPIC, version="0" * 64)
