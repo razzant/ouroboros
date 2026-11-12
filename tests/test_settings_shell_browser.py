@@ -74,6 +74,9 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     page.evaluate(TEST_PAGE)
     assert _layout(page) == ("stack" if width < 720 else "docked")
     assert _menu_visible(page)
+    # On a phone a sideways finger over a page's scroller is the drawer's (style.css, the stack layout's scrollers).
+    touch = "pan-y pinch-zoom" if width < 720 else "auto"
+    assert page.locator(HOME).evaluate("node => getComputedStyle(node).touchAction") == touch
 
     # The home: six groups, one row per home row, each a door to its page or place.
     wanted = page.evaluate("async () => (await import('/static/modules/settings_rows.js')).HOME_ROWS.map((r) => r.to)")
@@ -87,6 +90,7 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     setup_browser.capture(page, f"settings-page-{width}x{height}")
     assert kept > 0, "the home scrolls at this size, so its place is worth keeping"
     assert not page.locator(HOME).is_visible(), "one column: the page alone"
+    assert level.evaluate("node => getComputedStyle(node).touchAction") == touch
     back = level.locator("[data-settings-back]")
     assert back.inner_text().strip() == "Settings" and back.get_attribute("aria-label") == "Back to Settings"
     assert level.locator(".settings-page-title").inner_text().strip()

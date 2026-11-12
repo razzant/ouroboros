@@ -4173,7 +4173,7 @@ html[data-layout="stack"] #primary-sidebar {
    at every scroller, so it is declared on the scrollers themselves; a code block or a table inside scrolls sideways
    as its own scroller. */
 html[data-layout="stack"] :is(#chat-messages, .chat-messages, .files-list, .files-sidebar, .files-preview-content,
-    .skills-scroll, .widgets-scroll, .dashboard-body) {
+    .skills-scroll, .widgets-scroll, .settings-home, .settings-page, .dashboard-body) {
     touch-action: pan-y pinch-zoom;
 }
 /* Outside the scrollers too (a header, the composer's row of capsules, the attach button): the page itself only pans
