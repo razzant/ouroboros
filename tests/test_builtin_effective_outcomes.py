@@ -714,6 +714,7 @@ def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case
     assert invoke.ctx._pending_review_attempt is custody
     if case == "stopped":
         assert result.text.startswith("⚠️ REVIEW_STOPPED: the owner stopped this work; this commit was not made.")
+        assert "stays in its record" not in result.text, "no record id: no record is promised"
 
 
 @pytest.mark.parametrize("refused", [False, True])

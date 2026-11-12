@@ -852,8 +852,9 @@ def _reviewed_stage_cycle(
     if stop:  # the owner's control, not a review refusal: say what stopped it and keep what the review said
         record = str(getattr(ctx, "_current_review_record_id", "") or "")
         blocked, block_reason, combined_msg = True, "owner_stopped", (
-            f"⚠️ REVIEW_STOPPED: {REVIEW_STOP_WORDS[stop]}; this commit was not made. The review's own outcome stays in its "
-            f"record{f' ({record})' if record else ''}." + (f"\n\nThe review said before the stop:\n{combined_msg}" if combined_msg else ""))
+            f"⚠️ REVIEW_STOPPED: {REVIEW_STOP_WORDS[stop]}; this commit was not made."
+            + (f" The review's own outcome stays in its record ({record})." if record else "")
+            + (f"\n\nThe review said before the stop:\n{combined_msg}" if combined_msg else ""))
     if (author_source is None and (hand_back_all or (ordinary_advisory and material))
             and block_reason != "owner_stopped"):
         return _return_commit_feedback(ctx, commit_message, commit_start, pre_fingerprint, post_fingerprint,

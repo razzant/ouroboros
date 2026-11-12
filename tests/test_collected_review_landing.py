@@ -221,6 +221,7 @@ def test_the_owner_window_is_decided_after_the_owed_landing_tests(author, monkey
         assert "REVIEW_STOPPED" in landed and _commit_count(a) == commits, landed
         cause = "the owner stopped this work" if control == "stop" else "the owner's deadline for this work has passed"
         assert cause in landed and "this commit was not made" in landed, landed
+        assert "The review's own outcome stays in its record (rl-" in landed, landed
     assert [selection["full_tests"] for selection in tests.selections] == [False, True]
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "one physical send per seat"
 
