@@ -95,8 +95,9 @@ def listing(kind, marks, notes, label=None, outcome=mark_outcome, landing=None):
     wake once held as one pointer per mark is read here by choice. ``outcome`` reads one mark's outcome; the
     reader passes one that also reads the review record of a mark older than its own outcome facts, so the head
     can say how many of all listed are a PASS with no findings. ``landing`` (the reader's) says what is recorded
-    of the change a commit review read; with it the head counts the PASS commit reviews under which no commit
-    and no merge is recorded: approved work that may never have landed."""
+    of the change a commit review read; with it the head counts the PASS commit reviews with no commit under
+    that review and no merged receipt of their task: approved work that may never have landed, by these two
+    records alone."""
     if kind == "late_reviews":
         rows = []
         for m in late_reviews(marks):
@@ -119,8 +120,8 @@ def listing(kind, marks, notes, label=None, outcome=mark_outcome, landing=None):
                       f"memory_read(node_id='{row['id']}')" for row in items]
         return (f"{WAITING_CLASSES[kind]['subject']}: {len(rows)} in {len(rooms)} room{'' if len(rooms) == 1 else 's'}"
                 f"; {sum(row['clean'] for row in rows)} PASS with no findings"
-                + (f"; {sum(row['idle'] for row in rows)} commit review PASS with no commit or merge recorded"
-                   if landing else ""), "\n".join(lines))
+                + (f"; {sum(row['idle'] for row in rows)} PASS commit reviews with no commit under that review and no "
+                   "merged receipt of their task" if landing else ""), "\n".join(lines))
     rows = [{"id": n["id"], "room": room, "date": str(n.get("date") or "unknown")} for room, n in mind_notes(notes)]
     rows.sort(key=lambda row: (row["date"], row["id"]))
     return (f"{WAITING_CLASSES[kind]['subject']}: {len(rows)}",

@@ -144,8 +144,8 @@ def test_the_line_counts_clean_passes_from_published_facts_and_the_list_reads_an
         **facts, "count": 0, "clean_pass": 0, "unrecorded": 0}}), "nothing waits: nothing to count"
 
     listed = _memory_read(ctx, room_id="late_reviews")
-    assert listed.splitlines()[0] == ("late reviews: 3 in 3 rooms; 2 PASS with no findings; "
-                                      "0 commit review PASS with no commit or merge recorded")
+    assert listed.splitlines()[0] == ("late reviews: 3 in 3 rooms; 2 PASS with no findings; 0 PASS commit reviews with "
+                                      "no commit under that review and no merged receipt of their task")
     for task, words in (("main1", "PASS, no findings"), ("bound", "PASS, 1 advisory"), ("beta1", "PASS, no findings")):
         assert f"result review of task {task}; {words}; memory_read(node_id='late-review-" in listed, task
     review_ledger.record_path(tmp_path, record_id).unlink()

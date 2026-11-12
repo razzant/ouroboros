@@ -190,9 +190,11 @@ def outcome_facts(record: Any) -> Optional[Dict[str, Any]]:
 def clean_pass(outcome: Any) -> bool:
     """A PASS with nothing left to read: every answer asked of a counted seat arrived, every adviser answered
     and the record holds no finding of any kind. A PASS with notes, a PASS short of an answer, a FAIL and a
-    missing verdict are all something else."""
+    missing verdict are all something else, and so is an outcome kept before advisers were counted: an
+    unknown number of unheard advisers is not zero."""
     return (isinstance(outcome, Mapping) and outcome.get("verdict") == "PASS"
-            and not any(outcome.get(name) for name in ("critical", "advisory", "additional", "unheard"))
+            and not any(outcome.get(name) for name in ("critical", "advisory", "additional"))
+            and outcome.get("unheard") == 0
             and int(outcome.get("asked") or 0) > 0 and outcome.get("answered") == outcome.get("asked"))
 
 
@@ -205,40 +207,44 @@ def outcome_words(outcome: Any) -> str:
     if not outcome.get("verdict"):
         return "no verdict formed"
     kinds = [f"{outcome[name]} {name}" for name in ("critical", "advisory", "additional") if outcome.get(name)]
-    short, unheard = int(outcome.get("asked") or 0) - int(outcome.get("answered") or 0), int(outcome.get("unheard") or 0)
+    short, unheard = int(outcome.get("asked") or 0) - int(outcome.get("answered") or 0), outcome.get("unheard")
     return (str(outcome["verdict"]) + ", " + (", ".join(kinds) if kinds else "no findings")
             + (f", {short} asked answer{'' if short == 1 else 's'} missing" if short > 0 else "")
-            + (f", {unheard} adviser answer{'' if unheard == 1 else 's'} missing" if unheard else ""))
+            + (", adviser answers not recorded" if unheard is None
+               else f", {unheard} adviser answer{'' if unheard == 1 else 's'} missing" if unheard else ""))
 
 
 def mark_outcome(mark: Mapping[str, Any], drive_root: Any = None) -> Optional[Dict[str, Any]]:
-    """The outcome of one late-review mark: the facts published with it, else (a mark older than those facts,
-    asked with the data root) its review record as it reads now. A plan reply is advice by its kind, whatever
-    its council's record holds. ``None`` when nothing says: the deleted acceptance panel kept no record, and an
-    unreadable record is not a clean one."""
+    """The outcome of one late-review mark: the facts published with it when they are whole, else (asked with the
+    data root) its review record as it reads now. Facts are whole once they say how many advisers went unheard;
+    a mark kept before that, or before any outcome was kept, answers from its record, and keeps what it has when
+    the record cannot be read. A plan reply is advice by its kind, whatever its council's record holds. ``None``
+    when nothing says: the deleted acceptance panel kept no record, and an unreadable record is not a clean one."""
     review = mark.get("review") or {}
-    if isinstance(review.get("outcome"), dict):
-        return review["outcome"]
+    kept = review["outcome"] if isinstance(review.get("outcome"), dict) else None
+    if kept is not None and ("unheard" in kept or drive_root is None):
+        return kept
     if review.get("surface") == "plan_review":
         return {"advice": True}
     record_id = str((review.get("subject") or {}).get("record_id") or "")
     if drive_root is None or not record_id:
-        return None
+        return kept
     from ouroboros.review_ledger import load_record  # D15->D06 is lazy-only
 
     try:
-        return outcome_facts(load_record(drive_root, record_id))
+        return outcome_facts(load_record(drive_root, record_id)) or kept
     except (OSError, ValueError):
-        return None
+        return kept
 
 
 def mark_landing(mark: Mapping[str, Any], drive_root: Any) -> Optional[Dict[str, Any]]:
     """What is recorded, as it reads now, of the change a late commit review read: the commit that landed under
-    this review (``{"commit": sha}``), else the pull request its task merged, named by its address
-    (``{"pr": url}``: a fact about the task, which may have merged it in another repository), else that neither
-    is recorded (``{}``). ``None`` for any other review and whenever the record or the task's result cannot be
-    read: an unread fact is never told as nothing landed. Read on request and never kept on the mark, because a
-    successor of the task may still land the work."""
+    this review (``{"commit": sha}``), else the pull request a receipt of its task records as merged, named by its
+    address (``{"pr": url}``: a fact about the task's receipts, not proof of who merged it or that this change is in
+    it), else that neither is recorded (``{}``: no commit under this record and no merged receipt, which a commit
+    under another record of the task or a merge made outside ``pr_merge`` does not show). ``None`` for any other
+    review and whenever the record or the task's result cannot be read: an unread fact is never told as nothing
+    landed. Read on request and never kept on the mark, because a successor of the task may still land the work."""
     review = mark.get("review") or {}
     if review.get("surface") != "commit_gate":
         return None
@@ -255,14 +261,14 @@ def mark_landing(mark: Mapping[str, Any], drive_root: Any) -> Optional[Dict[str,
         if commits:
             return {"commit": commits[-1]["commit_sha"]}
         task = load_task_result(drive_root, str(review.get("task_id") or ""))
+        if not isinstance(task, dict):
+            return None
+        merged = [receipt for receipt in task.get(RECEIPTS_KEY) or []
+                  if isinstance(receipt, dict) and (receipt.get("outcome") or {}).get("status") == "merged"]
+        return {"pr": str((merged[-1].get("repo") or {}).get("url") or f"PR #{merged[-1].get('number')}")} if merged else {}
     except Exception:  # the list the mind asked for keeps its other rows when one work's facts cannot be read
         log.warning("Landing facts unavailable for late review mark %s", mark.get("id"), exc_info=True)
         return None
-    if not isinstance(task, dict):
-        return None
-    merged = [receipt for receipt in task.get(RECEIPTS_KEY) or []
-              if isinstance(receipt, dict) and (receipt.get("outcome") or {}).get("status") == "merged"]
-    return {"pr": str((merged[-1].get("repo") or {}).get("url") or f"PR #{merged[-1].get('number')}")} if merged else {}
 
 
 def landing_words(landing: Any) -> str:
@@ -272,8 +278,8 @@ def landing_words(landing: Any) -> str:
     if landing.get("commit"):
         return f"committed as {str(landing['commit'])[:12]} under this review"
     if landing.get("pr"):
-        return f"its task merged {landing['pr']}"
-    return "no commit under this review, no merge by its task recorded"
+        return f"a receipt of its task records {landing['pr']} as merged"
+    return "no commit under this review, no merged receipt of its task"
 
 
 def publish_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateReviewMark:

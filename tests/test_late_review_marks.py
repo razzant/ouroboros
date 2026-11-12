@@ -1072,6 +1072,9 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
     assert not clean_pass(advised("failed")) and not clean_pass(advised("custody_lost"))
     assert clean_pass(advised("responded")) and clean_pass(advised("failed", additional=False))
     assert outcome_facts(None) is None and not clean_pass(None), "no record says nothing, never a verdict"
+    earlier = {name: value for name, value in clean.items() if name != "unheard"}  # kept before advisers were counted
+    assert not clean_pass(earlier), "an unknown number of unheard advisers is not zero"
+    assert outcome_words(earlier) == "PASS, no findings, adviser answers not recorded"
     advice = outcome_facts({**_settled("NOT_PERFORMED"), "surface": "intention"})  # a plan council asks no verdict
     assert advice == {"advice": True} and outcome_words(advice) == "advice, not a verdict" and not clean_pass(advice)
     assert outcome_facts({**_settled("PASS"), "surface": "commit_gate"}) == clean, "a review that asks one keeps it"
@@ -1093,7 +1096,20 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
     assert outcome_words(mark_outcome(old, tmp_path)) == "PASS, 1 advisory"
     record_path(tmp_path, record_id).write_text("{broken", encoding="utf-8")
     assert mark_outcome(old, tmp_path) is None, "an unreadable record is not a clean one"
-    bad = publish_late_review(tmp_path, {**_record(tmp_path, "beta1", 1, "x"), "outcome": {"verdict": ["PASS"]}})
+    # A mark whose kept outcome does not say how many advisers went unheard answers from its record once the list
+    # is asked with the data root, and keeps what it has without the root or without a readable record.
+    held_id = "rl-20261017T000000-cccccccccccc"
+    held = {**_record(tmp_path, "beta1", 1, "kept earlier"), "outcome": earlier, "subject": {"record_id": held_id}}
+    assert publish_late_review(tmp_path, held).status == "saved"
+    [kept] = [m for m in _late_marks(tmp_path) if m["review"]["task_id"] == "beta1"]
+    assert mark_outcome(kept) == earlier == mark_outcome(kept, tmp_path), "no root or no record: what it has"
+    record_path(tmp_path, held_id).write_text(json.dumps({**_settled("PASS"), "rows": [
+        {"seat_id": "adv", "status": "failed", "additional": True}]}), encoding="utf-8")
+    assert mark_outcome(kept) == earlier, "the waiting line reads no record"
+    assert outcome_words(mark_outcome(kept, tmp_path)) == "PASS, no findings, 1 adviser answer missing"
+    record_path(tmp_path, held_id).write_text(json.dumps(_settled("PASS")), encoding="utf-8")
+    assert clean_pass(mark_outcome(kept, tmp_path)) and mark_outcome(mark, tmp_path) == clean, "whole facts: no read"
+    bad = publish_late_review(tmp_path, {**_record(tmp_path, "beta2", 1, "x"), "outcome": {"verdict": ["PASS"]}})
     assert bad.status == "invalid" and "outcome" in bad.detail
     # A wave whose record could not be read publishes no outcome: the list reads its record whenever it can.
     assert publish_late_review(tmp_path, {**_record(tmp_path, "pres1", 1, "gap"), "outcome": None}).status == "saved"
@@ -1131,16 +1147,18 @@ def test_a_late_commit_review_tells_what_is_recorded_of_the_change_it_read(tmp_p
     failed, _ = late("pres1", verdict="FAIL", receipts=[])
     assert mark_landing(committed, tmp_path) == {"commit": sha}
     assert landing_words({"commit": sha}) == "committed as abababababab under this review"
-    assert mark_landing(merged, tmp_path) == {"pr": pull} and landing_words({"pr": pull}) == f"its task merged {pull}"
+    assert mark_landing(merged, tmp_path) == {"pr": pull}
+    assert landing_words({"pr": pull}) == f"a receipt of its task records {pull} as merged"
     assert mark_landing(idle, tmp_path) == {} == mark_landing(failed, tmp_path)
-    assert landing_words({}) == "no commit under this review, no merge by its task recorded"
+    assert landing_words({}) == "no commit under this review, no merged receipt of its task"
 
     listed = _memory_read(_ctx(tmp_path, "reader"), room_id="late_reviews")
-    assert listed.splitlines()[0].endswith("; 3 PASS with no findings; 1 commit review PASS with no commit or merge recorded")
+    assert listed.splitlines()[0].endswith("; 3 PASS with no findings; 1 PASS commit reviews with no commit under that "
+                                           "review and no merged receipt of their task")
     for task, words in (("main1", "PASS, no findings; committed as abababababab under this review"),
-                        ("bound", f"PASS, no findings; its task merged {pull}"),
-                        ("beta1", "PASS, no findings; no commit under this review, no merge by its task recorded"),
-                        ("pres1", "FAIL, no findings; no commit under this review, no merge by its task recorded")):
+                        ("bound", f"PASS, no findings; a receipt of its task records {pull} as merged"),
+                        ("beta1", "PASS, no findings; no commit under this review, no merged receipt of its task"),
+                        ("pres1", "FAIL, no findings; no commit under this review, no merged receipt of its task")):
         assert f"commit review of task {task}; {words}; memory_read(node_id='late-review-" in listed, task
 
     # What cannot be read, and every other kind of review, says nothing about landing: never "nothing landed".
@@ -1153,4 +1171,5 @@ def test_a_late_commit_review_tells_what_is_recorded_of_the_change_it_read(tmp_p
     assert mark_landing(idle, tmp_path) is None and landing_words(None) == ""
     again = _memory_read(_ctx(tmp_path, "reader"), room_id="late_reviews")
     assert "commit review of task beta1; PASS, no findings; memory_read(node_id='late-review-" in again
-    assert again.splitlines()[0].endswith("; 0 commit review PASS with no commit or merge recorded")
+    assert again.splitlines()[0].endswith("; 0 PASS commit reviews with no commit under that review and no merged receipt "
+                                          "of their task")
