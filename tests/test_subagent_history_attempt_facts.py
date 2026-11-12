@@ -43,7 +43,7 @@ def _settled(index, *, cost, model="openai/gpt-fixture", task_id="history-actor"
             {**base, "state": "settled", "cost_usd": cost, "cost_final": cost is not None, "prompt_tokens": 900}]
 
 
-def _call(tmp_path, usage, *, pin="", observed="account-a", broken=False, model=TARGET, provider="claudexor"):
+def _call(tmp_path, usage, *, pin="", observed="account-a", broken=False, model=TARGET, provider="claudexor", served=""):
     route = {"source": "codex-models", "model": "observed-model", "credentialProfileId": observed} if observed else {}
 
     class Provider:
@@ -54,7 +54,7 @@ def _call(tmp_path, usage, *, pin="", observed="account-a", broken=False, model=
                 error.route = route
                 raise error
             return {"content": "Useful response"}, {"prompt_tokens": 1, "completion_tokens": 1,
-                "cost": 0.0, "provider": provider, "resolved_model": model,
+                "cost": 0.0, "provider": provider, "resolved_model": served or model,
                 "claudexor": {"route": route, "outcome": "succeeded"}}
 
     message, _ = call_llm_with_retry(Provider(), [{"role": "user", "content": "work"}], model,
@@ -306,6 +306,17 @@ def test_a_paid_rows_first_call_price_is_the_ledgers_first_attempt_on_its_model(
     assert shown["first_call"] == "≈$0.04 per first call (1 measured)" and shown["outcome"] == "succeeded"
     record_task_execution(_paid_task(), usage, drive_root=root)  # the same task observed again is one sample
     assert len(_first_calls(root)["worker"]) == 1
+
+
+def test_the_ledgers_own_name_for_the_first_answer_finds_its_attempt(root, monkeypatch):  # noqa: F811
+    """A route may send a model under a name no spelling rule derives from the row's target. The first answer's
+    record carries that name, so its attempt is still found; an attempt under any other name is not the row's."""
+    write_journal(root, [*_settled(0, cost=0.07, model="gateway/alias-2026"), *_settled(1, cost=0.5, model="gateway/other")])
+    ledger_rows(root)
+    usage = {}
+    assert _call(root, usage, model=PAID, provider="openrouter", served="gateway/alias-2026")
+    record_task_execution(_paid_task(), usage, drive_root=root)
+    assert [item["usd"] for item in _first_calls(root)["worker"]] == [0.07]
 
 
 def test_an_unpriced_first_call_is_cost_unknown_never_zero(root, monkeypatch):  # noqa: F811

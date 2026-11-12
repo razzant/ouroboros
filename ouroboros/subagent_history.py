@@ -41,21 +41,22 @@ def _price_class(identity: Any) -> list[str]:
     return [str(identity.get("target_id") or ""), str(identity.get("processing_preference") or "")]
 
 
-def _first_call_cost(drive_root, task_id: str, model: str) -> Optional[dict]:
-    """What this task's first call on ``model`` cost, as the usage ledger settled it: the first attempt of the
-    task that came back with input counted. The ledger names a model as its route sends it, so the two
-    spellings meet in ``normalize_model_identity``. ``usd`` is None when that attempt carries no price;
-    an unreadable ledger (the display wait, never longer) or no such attempt is no sample."""
+def _first_call_cost(drive_root, task_id: str, *names: Any) -> Optional[dict]:
+    """What this task's first call on the row's model cost, as the usage ledger settled it: the first attempt
+    of the task that came back with input counted. The ledger names a model as its route sends it, so
+    ``names`` (the row's target, the name its first answer was recorded under) and the ledger's spelling meet
+    in ``normalize_model_identity``. ``usd`` is None when that attempt carries no price; an unreadable ledger
+    (the display wait, never longer) or no such attempt is no sample."""
     from ouroboros import usage_store
     from ouroboros.provider_models import normalize_model_identity
 
-    own = normalize_model_identity(model)
+    own = {normalize_model_identity(str(name)) for name in names if name}
     try:
         with usage_store.read(drive_root, allow_stale=True) as txn:
             row = next((row for row in txn.conn.execute(
                 "SELECT model, cost_usd FROM attempts INDEXED BY attempts_task WHERE task_id=? "
                 "AND source='agent.task' AND state='settled' AND COALESCE(prompt_tokens, 0) > 0 "
-                "ORDER BY seq_first", (task_id,)) if normalize_model_identity(str(row["model"] or "")) == own), None)
+                "ORDER BY seq_first", (task_id,)) if normalize_model_identity(str(row["model"] or "")) in own), None)
     except Exception:
         log.debug("first-call cost unavailable from the usage ledger", exc_info=True)
         return None
@@ -272,7 +273,7 @@ def record_task_execution(task: Mapping[str, Any], usage: Mapping[str, Any], *, 
     # fallback's) on a route that bills money: the subscription engine and the local lane state no per-call cash.
     from ouroboros.usage_accounting import paid_admission
     first = next((row for row in calls if isinstance(row, dict) and row.get("usable_solve_response")), None)
-    first_call = (_first_call_cost(drive_root, str(task.get("id") or ""), model)
+    first_call = (_first_call_cost(drive_root, str(task.get("id") or ""), model, first.get("resolved_model"))
                   if first and selected(first) and paid_admission(first.get("provider"), None) else None)
     fallback = {key: other[key] for key in ("model", "llm_call_id", "ts") if key in other}
     if other:
