@@ -157,6 +157,14 @@ function updateWords(update) {
 }
 
 const START_WORDS = { on: 'Starts at sign-in', off: 'Starts by hand', other_copy: 'Another copy starts at sign-in', disabled_by_os: 'Start at sign-in is off in the system' };
+/** This computer: how it starts where the host says so (the desktop app); on a host that does not (a browser, a
+ *  server), who can open it, as the settings read reports what listens now. */
+function computerWords(autostart, settings) {
+    if (START_WORDS[autostart?.state]) return fmt(START_WORDS[autostart.state]);
+    const reach = settings?._meta?.reachability;
+    if (reach) return fmt(reach === 'loopback_only' ? 'Open only here' : 'Open to your network');
+    return autostart === null || settings === null ? fmt(NOT_CHECKED) : undefined;
+}
 
 /**
  * The current answer of every home row, keyed by what the row opens: `{ text, owner }`, `owner` when the next move
@@ -192,9 +200,12 @@ export function homeAnswers(facts = {}) {
     say('appearance', device.theme, (theme) => (['system', 'light', 'dark'].includes(theme) ? fmt({ system: 'System', light: 'Light', dark: 'Dark' }[theme]) : undefined));
     say('notifications', device.notify, (prefs) => fmt(!prefs.enabled ? 'Off on this device' : prefs.sound ? 'On, with sound' : 'On, silent'));
     say('voice', device.dictation, (engine) => (engine ? fmt('Dictation: {engine}', { engine }) : fmt('Dictation not chosen')));
-    say('dashboard:updates', update, updateWords);
+    // Until the update status answers, the row says the version that runs, which the state snapshot already holds.
+    if (update === undefined && state?.version) out['dashboard:updates'] = { text: fmt('Version {version}', { version: String(state.version) }), owner: false };
+    else say('dashboard:updates', update, updateWords);
     say('dashboard:storage', storage, (s) => (s.count ? formatBytes(s.count.bytes) : fmt('Not measured')));
-    say('computer', autostart, (host) => (START_WORDS[host?.state] ? fmt(START_WORDS[host.state]) : undefined));
+    const computer = autostart === undefined ? undefined : computerWords(autostart, settings);
+    if (computer !== undefined) out.computer = { text: computer, owner: false };
     return out;
 }
 
