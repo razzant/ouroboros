@@ -611,8 +611,9 @@ def test_history_stores_each_version_once_as_a_change_against_the_row_that_holds
     journal = target.shelf.parent / "knowledge_history.jsonl"
     digest = {key: value for key, value in rows[-1].items() if key not in ("base", "change", "chain_bytes")}
     for row in (digest, {**rows[-1], "new_content": ""}):  # as the digest compaction spelled it; and on a change row
-        journal.write_text(journal.read_text(encoding="utf-8") + json.dumps({**row, "new_content": "", "content_digested": True},
-                                                                            ensure_ascii=False) + "\n", encoding="utf-8")
+        with journal.open("ab") as stream:  # appended byte-exactly, as the writer appends: every offset holds
+            stream.write((json.dumps({**row, "new_content": "", "content_digested": True}, ensure_ascii=False) + "\n")
+                         .encode("utf-8"))
     again = store.write_knowledge_note(target, "# Report\n\nSecond, again.", expected_revision=second.current.revision)
     assert again.ok and history(target)[-1]["base"]["offset"] == offsets(target)[-4]
     assert replaced(tmp_path, history(target)[-1]) == second.current.text

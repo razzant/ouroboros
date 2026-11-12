@@ -395,7 +395,7 @@ def test_a_history_row_that_stores_a_change_reads_its_versions_whole_and_its_lin
                **knowledge_rows.encode(second, third, (named_at, named))}
     journal = tmp_path / "memory" / "knowledge_history.jsonl"
     journal.parent.mkdir(parents=True)
-    journal.write_text("".join(lines) + json.dumps(changed, ensure_ascii=False) + "\n", encoding="utf-8")
+    journal.write_bytes(("".join(lines) + json.dumps(changed, ensure_ascii=False) + "\n").encode("utf-8"))
     assert "new_content" not in changed and changed["base"] == {"offset": named_at, "sha256": sha(second)}
     entry = {"kind": "entry", "journal": "knowledge:global", "offset": at}
     new = document(tmp_path, {**entry, "field": ["new_content"]})

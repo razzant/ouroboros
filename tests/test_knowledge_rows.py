@@ -114,11 +114,11 @@ def test_a_wrong_base_address_is_caught_by_the_hash_and_never_applied(tmp_path):
     journal = tmp_path / "knowledge_history.jsonl"
     texts = ["# A\n\nalpha\n" * 30, "# A\n\nbeta\n" + "# A\n\nalpha\n" * 29, "# A\n\nbeta\n" + "# A\n\nalpha\n" * 28 + "gamma\n"]
     offsets = build(journal, texts)
-    raw = journal.read_bytes().decode("utf-8").splitlines(keepends=True)
-    wrong = json.loads(raw[2])
+    lines = journal.read_bytes().splitlines(keepends=True)  # byte-exact: every offset is the file's own
+    wrong = json.loads(lines[2])
     wrong["base"]["offset"] = offsets[0]  # names the first row, which holds another version
-    raw[2] = json.dumps(wrong, ensure_ascii=False) + "\n"
-    journal.write_text("".join(raw), encoding="utf-8")
+    lines[2] = (json.dumps(wrong, ensure_ascii=False) + "\n").encode("utf-8")
+    journal.write_bytes(b"".join(lines))
     # The rows link by hash: the version the base names is found where it is, and the text is exact.
     assert read(journal, offsets[2], "new") == texts[2] and read(journal, offsets[2], "old") == texts[1]
     damage(journal, offsets[1])  # now only the wrong address names that version: caught, never applied
@@ -128,9 +128,9 @@ def test_a_wrong_base_address_is_caught_by_the_hash_and_never_applied(tmp_path):
             f"{offsets[0]} holds {sha(texts[0])}, not {sha(texts[1])}") in str(caught.value), caught.value
     # A base whose version is wrong too: the change cannot rebuild the text it names, and nothing is guessed.
     wrong["base"]["sha256"] = wrong["old_sha256"] = sha(texts[0])
-    raw = journal.read_bytes().decode("utf-8").splitlines(keepends=True)
-    raw[2] = json.dumps(wrong, ensure_ascii=False) + "\n"
-    journal.write_text("".join(raw), encoding="utf-8")
+    lines = journal.read_bytes().splitlines(keepends=True)
+    lines[2] = (json.dumps(wrong, ensure_ascii=False) + "\n").encode("utf-8")
+    journal.write_bytes(b"".join(lines))
     with pytest.raises(rows.TextUnavailable, match="does not rebuild its version"):
         read(journal, offsets[2], "new")
 
@@ -209,11 +209,11 @@ def test_a_legacy_reference_reads_the_earlier_row_it_names(tmp_path):
     ref = {"kind": "entry", "journal": "knowledge:global", "offset": 0, "field": ["new_content"]}
     named = json.dumps({**legacy, "old_sha256": sha(first), "new_sha256": sha(second), "old_content_ref": ref,
                         "new_content": second}, ensure_ascii=False) + "\n"
-    journal.write_text(head + named, encoding="utf-8")
+    journal.write_bytes((head + named).encode("utf-8"))
     second_row = json.loads(named)
     fields = rows.encode(second, third, (len(head.encode("utf-8")), second_row))
-    journal.write_text(head + named + json.dumps({**legacy, "old_sha256": sha(second), "new_sha256": sha(third),
-                                                  **fields}, ensure_ascii=False) + "\n", encoding="utf-8")
+    journal.write_bytes((head + named + json.dumps({**legacy, "old_sha256": sha(second), "new_sha256": sha(third),
+                                                    **fields}, ensure_ascii=False) + "\n").encode("utf-8"))
     at = len((head + named).encode("utf-8"))
     assert read(journal, len(head.encode("utf-8")), "old") == first
     assert read(journal, at, "old") == second and read(journal, at, "new") == third
@@ -374,7 +374,7 @@ def test_rows_written_before_changes_then_change_rows_read_every_version_and_the
     named = json.dumps({**base, "old_sha256": sha(first), "new_sha256": sha(second), "old_content_ref": ref,
                         "new_content": second}, ensure_ascii=False) + "\n"
     journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(head + named, encoding="utf-8")
+    journal.write_bytes((head + named).encode("utf-8"))
     target.path.parent.mkdir(parents=True, exist_ok=True)
     target.path.write_bytes(second.encode("utf-8"))
     before = journal.read_bytes()
