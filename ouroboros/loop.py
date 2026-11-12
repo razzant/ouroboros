@@ -472,27 +472,29 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
     """
     from ouroboros.presence_carrier import reenter
 
-    carried, (saved, saved_pause, saved_working) = reenter(tools._ctx), carriers
-    if saved:
-        resumed = (*resume_native_loop(tools, saved, messages, trace, usage, seen), cost_ceiling, True, False, False)
-    elif saved_pause:
-        resumed = resume_paused_loop(tools, saved_pause, messages, trace, usage, seen,
-                                     budget_remaining_usd=budget_remaining_usd)
-        no_tool = saved_pause.get("resume_point", {}).get("budget_tail") == "no_tool"
-        resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), not no_tool, no_tool, no_tool)
-    elif saved_working:
-        *resumed, tool_tail = working_checkpoint.resume_from_working(tools, saved_working, messages, trace, usage, seen)
-        no_tool = not tool_tail and (saved_working.get("working") or {}).get("boundary") == working_checkpoint.RESUMED
-        resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
-    else:
-        resumed = (*route, cost_ceiling, False, False, False)
-        apply_current(tools._ctx)
-        from ouroboros.place_reply import seed_no_send
-        seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
-    if carried is not None:
-        carried.reentered(tools._ctx, messages)
-    from ouroboros.subagent_bootstrap import append_startup_receipt
-    append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
+    with measured_sections():  # restore, route rebind and tools: the first round's receipt names their spans
+        carried, (saved, saved_pause, saved_working) = reenter(tools._ctx), carriers
+        if saved:
+            resumed = (*resume_native_loop(tools, saved, messages, trace, usage, seen), cost_ceiling, True, False, False)
+        elif saved_pause:
+            resumed = resume_paused_loop(tools, saved_pause, messages, trace, usage, seen,
+                                         budget_remaining_usd=budget_remaining_usd)
+            no_tool = saved_pause.get("resume_point", {}).get("budget_tail") == "no_tool"
+            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), not no_tool, no_tool, no_tool)
+        elif saved_working:
+            *resumed, tool_tail = working_checkpoint.resume_from_working(tools, saved_working, messages, trace, usage, seen)
+            no_tool = not tool_tail and (saved_working.get("working") or {}).get("boundary") == working_checkpoint.RESUMED
+            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
+        else:
+            resumed = (*route, cost_ceiling, False, False, False)
+            apply_current(tools._ctx)
+            from ouroboros.place_reply import seed_no_send
+            seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
+        if carried is not None:
+            carried.reentered(tools._ctx, messages)
+        from ouroboros.subagent_bootstrap import append_startup_receipt
+        append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
+        tools._ctx._round_prologue = section_spans()
     return resumed
 
 
@@ -589,13 +591,11 @@ def run_llm_loop(
     limit_ctx: Optional[_RoundLimitContext] = None
     ctx._execution_trace = llm_trace
     try:
-        with measured_sections():  # restore, route rebind and tools: the first round's receipt names their spans
-            (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan, cost_ceiling,
-             pending_tool_budget, pending_no_tool_budget, free_redial) = _resume_continuation(
-                tools, (saved, saved_pause, saved_working), messages, llm_trace, accumulated_usage, _owner_msg_seen,
-                (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan),
-                cost_ceiling, budget_remaining_usd)
-            tools._ctx._round_prologue = section_spans()
+        (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan, cost_ceiling,
+         pending_tool_budget, pending_no_tool_budget, free_redial) = _resume_continuation(
+            tools, (saved, saved_pause, saved_working), messages, llm_trace, accumulated_usage, _owner_msg_seen,
+            (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan),
+            cost_ceiling, budget_remaining_usd)
         pending_candidate = resume_delivery_candidate(tools, saved_working, tool_schemas)
         while True:
             if free_redial or pending_tool_budget:
