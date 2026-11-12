@@ -915,7 +915,8 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
     returns to this turn's primary binding (the acting model's choice): its model, role,
     locality and account policy with the owner's live wait-card choice for that
     role; "wait" also keeps a refusal there on the primary's own wait instead of
-    paid alternatives. Effort intent is untouched.
+    paid alternatives, and a content filter's stop, with nothing to wait for, ends that round without them.
+    Effort intent is untouched.
 
     Effort follows the owner's range (``_effort_switch``): a Main focus — a chat turn,
     an ordinary root — keeps the level it works at outside Cyber Pro and the reply says

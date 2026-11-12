@@ -494,7 +494,8 @@ def get_tools() -> List[ToolEntry]:
                                             "(Auto stays Auto) plus the owner's wait-card choice; effort stays. 'return': "
                                             "if the primary refuses, configured routes are tried again. 'wait': if it "
                                             "refuses or is unreachable, wait for it where this turn may wait instead of "
-                                            "paid alternatives. The next real request tests it; no timer or probe does. "
+                                            "paid alternatives; a content filter's stop there has nothing to wait for "
+                                            "and ends that round without them. The next real request tests it; no timer or probe does. "
                                             "Not with model.")},
             }, "required": []},
         }, _switch_model),
