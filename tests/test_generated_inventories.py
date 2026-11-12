@@ -56,8 +56,8 @@ def _assert_identical(out_path: pathlib.Path, rendered: str):
         f"{out_path.name} is missing — run `python scripts/regenerate_inventories.py`")
     assert out_path.read_text(encoding="utf-8") == rendered, (
         f"{out_path.name} is stale (regeneration changes it) — run "
-        "`python scripts/regenerate_inventories.py` and commit docs/inventories/; a base that came "
-        "stale is repaired the same way")
+        "`python scripts/regenerate_inventories.py` and commit docs/inventories/; a base that was "
+        "already stale is repaired the same way")
 
 
 def test_frozen_contracts_inventory_is_byte_identical(frozen):
