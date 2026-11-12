@@ -327,9 +327,15 @@ def test_llm_embedded_safe_before_dangerous_uses_stricter_verdict(monkeypatch):
 
 
 def test_verdict_keeps_only_its_quote_and_drops_a_speech_mark():
-    """The checker's ``quote`` (the exact flagged words) rides with its verdict as a non-empty string; any other key,
-    a ``speech`` mark included, is no claim the host reads and is dropped, never coerced."""
+    """The checker's ``quote`` (the exact flagged words) rides with its verdict as a non-empty string, and its
+    ``owner`` claim only as ``true`` on a flag; any other key, a ``speech`` mark included, is no claim the host reads
+    and is dropped, never coerced."""
     from ouroboros.safety import _parse_safety_response
+
+    assert _parse_safety_response(json.dumps({"status": "DANGEROUS", "reason": "r", "owner": True})) == {
+        "status": "DANGEROUS", "reason": "r", "owner": True}
+    for status, owner in (("SUSPICIOUS", "true"), ("DANGEROUS", 1), ("DANGEROUS", False), ("SAFE", True)):
+        assert "owner" not in _parse_safety_response(json.dumps({"status": status, "reason": "r", "owner": owner}))
 
     assert _parse_safety_response(json.dumps({"status": "DANGEROUS", "reason": "owner rule 1", "speech": True,
                                               "quote": "App bullet"})) == {
