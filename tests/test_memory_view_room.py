@@ -112,6 +112,44 @@ def test_the_view_room_matches_own_room_chat_inside_projects(tmp_path):
         assert mv.view_spec_for_task(task, tmp_path).room_id == str(own_room_chat(ctx, tmp_path))
 
 
+def test_a_project_chat_the_capture_missed_is_confirmed_and_not_read_as_main(tmp_path, monkeypatch):
+    """The captured ``project_chat_ids`` is a snapshot: a chat it does not hold is read against the registry
+    now, so a Project task whose Project was created after the capture (or whose read failed while it was
+    taken) keeps its Project room instead of being told its project's words are another room's. An empty
+    answer still leaves every other chat to the caller: a transport conversation stays Main."""
+    from ouroboros import projects_registry
+
+    rooms = shared.projects(tmp_path)
+    alpha, beta = str(rooms["alpha"]), str(rooms["beta"])
+    bound = {"id": "bound", "chat_id": 1}  # the binding wins over chat_id 1 (own_room_chat)
+    assert mv.view_room_id(bound, None, tmp_path, project_chat_ids=set()) == alpha
+    assert mv.view_room_id({"id": "tb", "chat_id": rooms["beta"]}, None, tmp_path, project_chat_ids=set()) == beta
+    assert mv.view_room_id({"id": "tt", "chat_id": 777}, None, tmp_path, project_chat_ids=set()) == "1"
+    assert mv.view_room_id({"id": "tm", "chat_id": 1}, None, tmp_path, project_chat_ids={alpha}) == "1"
+    # A registry that cannot answer names no room: the caller's answer stands and no error reaches the view.
+    def refuse(_root, *_a, **_kw):
+        raise OSError("registry unavailable")
+
+    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", refuse)
+    assert mv.view_room_id(bound, None, tmp_path, project_chat_ids=set()) == "1"
+
+
+def test_this_room_names_its_chat_id_and_the_call_that_reads_its_rows(tmp_path):
+    """The line under the heading names the room by chat id (a label is renamed, a head is a hash) beside
+    the call that reads the rows the view shows only as addresses -- in every request, Main included."""
+    rooms, _rows = _install(tmp_path)
+    alpha = str(rooms["alpha"])
+    store = ChronicleStore(tmp_path)
+    _snap, text = _view(tmp_path, MAIN_TASK)
+    assert text.startswith(f"## This room (Main) — head {store.room_head('1')}\n"
+                           "This room is Main [chat_id=1]; memory_read(room_id='1', rows=true) "
+                           "reads any row this view shows only as an address.\n")
+    _snap, alpha_text = _view(tmp_path, {"id": "ra1", "chat_id": rooms["alpha"]})  # the label already spells it
+    assert (f"\nThis room is Project Alpha [chat_id={alpha}]; memory_read(room_id='{alpha}', rows=true) "
+            "reads any row this view shows only as an address.\n") in alpha_text
+    assert alpha_text.count("This room is ") == 1
+
+
 def test_a_place_focus_promotion_into_a_project_reads_that_project_as_this_room(focus, monkeypatch):
     """The real producers: a focus turn's ``start_task``, the supervisor's admission and the new root's view.
 
@@ -935,3 +973,30 @@ def test_this_room_has_no_sealing_invitation_and_a_linked_row_leaves_my_other_co
     room = next(room for group in snapshot.conversations for room in group["rooms"] if room["room_id"] == beta)
     assert [word["text"] if "text" in word else word["line"].rsplit("] ", 1)[-1] for word in room["words"]] == ["one more thing"]
     assert room["tasks"] == []  # the linked terminal row is no task line of the room either
+
+
+def test_a_room_the_capture_missed_keeps_its_project_rows_too(tmp_path, monkeypatch):
+    '''The confirmed chat is read as a Project room throughout the build, not only in its heading: the captured
+    membership is one snapshot, so a Project created after it -- or a read that failed while it was taken -- is
+    absent from that set, and the gate that adds the origins and the root's sealed owner rows must ask the same
+    fresh read that named the room. Otherwise the heading names Project Alpha while the words that started it
+    and its sealed owner rows drop out.'''
+    from ouroboros import memory_inventory
+    from ouroboros.owner_words import _HEADINGS
+    from ouroboros.tools.chronicle import page_covers
+
+    rooms, rows = _install(tmp_path)
+    alpha, task = str(rooms['alpha']), {'id': 'ra1', 'chat_id': rooms['alpha']}
+    covers = page_covers(tmp_path, alpha, from_addr=_addr(rows[11]), to_addr=_addr(rows[11]))['covers']
+    assert ChronicleStore(tmp_path).publish_page(room_id=alpha, text='alpha asked', covers=covers,
+                                                 author=shared.MIND).ok
+    kept_snapshot, kept = _view(tmp_path, task)
+    assert _HEADINGS['root'] in kept  # the registry reserves the chat: no confirmation is needed here
+
+    captured = memory_inventory.membership_facts(tmp_path)
+    monkeypatch.setattr(memory_inventory, 'membership_facts',
+                        lambda _root: captured._replace(project_chat_ids=frozenset()))
+    confirmed_snapshot, _confirmed = _view(tmp_path, task)
+    assert confirmed_snapshot.room['project_words'] == kept_snapshot.room['project_words']
+    assert confirmed_snapshot.room['project_words']  # the sealed owner row still renders under the frame
+    assert confirmed_snapshot.room['origins'] == kept_snapshot.room['origins']

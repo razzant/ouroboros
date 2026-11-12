@@ -325,9 +325,10 @@ def test_a_roomy_nano_projection_carries_the_memory_check_with_its_own_room():
     """The note reaches a real projection with this room's id: the shortest view names the call that reads
     back the addresses it shows, before any cut gave it a reason to."""
     snap = syn.snapshot(room_facts=syn.room("1", lane1=[syn.spoken(1, "human", 900)]))
-    story, room, facts = mf.render_view_for_mode(
+    fit = mf.render_view_for_mode(
         snap, mode="nano", owner_mode="nano", window_tokens=1_000_000, known_window=True, output_reserve=8_192,
         ratio=1.0, non_memory_tokens=1_000, tool_names=("memory_read",))
+    story, room, facts = fit.story, fit.room, fit.facts
     assert facts["floor"]["steps"] == {} and "### Physical floor" not in room
     assert room.rstrip().endswith("### Memory check\nNothing is cut for the window or a target: this Nano view shows "
                                  "memory whole. A form named only by address is not missing: "

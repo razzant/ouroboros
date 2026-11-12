@@ -7,8 +7,8 @@ story (``## My story``); block C the live part (this room's ``## Late review fee
 a root and a Project task are the integrator; consciousness; Presence; a delegated child; a nanny), or an
 explicit spec a task carries under ``memory_view``; every focus that integrates holds the same parts, only its
 room differs, and a delegated child or nanny carries its assignment instead of my other conversations. The
-current room is the task's own room (``dialogue_evidence.own_room_chat``); outside a Project and Main it is Main
-(a wake's too: it reads Main as the Main turn does), except a Presence turn, which sees its own conversation.
+current room is the task's own room (``dialogue_evidence.own_room_chat``): a Project chat, else a chat the
+captured membership or a read taken now still reserves, else Main (a wake's too), except a Presence turn, which sees its own conversation.
 
 ``capture_memory_view`` reads the facts once per request into a ``MemoryViewSnapshot``
 (texts included), so rendering for another window or mode reads nothing again. It
@@ -212,15 +212,37 @@ def _task_ctx(task: Mapping[str, Any]) -> SimpleNamespace:
                            current_chat_id=task.get("chat_id"))
 
 
+def _room_confirmed_now(own: Any, drive_root: Any) -> str:
+    """``own`` as this room when a registry read taken *now* still reserves that chat for a Project.
+
+    ``project_chat_ids`` is one captured membership snapshot: a Project created after that capture --
+    or a read that failed while it was taken -- is absent from it, and reading that absence as Main
+    told a Project task its own project's words were another room's. So a chat the snapshot does not
+    hold is confirmed against a fresh registry read; ``""`` when that read names nothing (one that
+    cannot answer, ``strict=False``, included), so every other chat keeps the caller's answer.
+    """
+    try:
+        chat = int(str(own))
+    except (TypeError, ValueError):
+        return ""
+    from ouroboros.projects_registry import reserved_project_chat_ids  # D03->D20 is lazy-only
+
+    try:
+        reserved = reserved_project_chat_ids(drive_root)
+    except (TypeError, ValueError, OSError):
+        return ""
+    return str(chat) if chat in reserved else ""
+
+
 def view_room_id(task: Mapping[str, Any], ctx: Any, drive_root: Any, *, project_chat_ids: Any,
                  presence: bool = False) -> str:
     """The task's own room (``own_room_chat``): the internal Project it lives in, then a Presence
     focus's own conversation, then any other own room.
 
-    A result outside the Projects and Main, or none (the hidden partition, another
-    transport chat, a task without a chat), is Main, as the old focused view was; a
-    Presence turn keeps its own conversation. Work a focus started carries that focus by
-    value, and its Project is still its room: the stored focus never outranks it.
+    A chat the captured membership lacks is confirmed against a registry read taken now, and
+    only one that read cannot vouch is Main -- as is no own chat at all (the hidden partition,
+    another transport chat, a task without a chat); a Presence turn keeps its own conversation.
+    Work a focus started carries that focus by value, and its Project is still its room.
     """
     from ouroboros.dialogue_evidence import own_room_chat  # D03->D06 is lazy-only
 
@@ -236,6 +258,8 @@ def view_room_id(task: Mapping[str, Any], ctx: Any, drive_root: Any, *, project_
         return str(focus["room_chat_id"])
     if own is not None and (presence or str(own) == MAIN_ROOM):
         return str(own)
+    if own is not None:  # the captured set does not hold this chat: confirm it against a registry read now
+        return _room_confirmed_now(own, drive_root) or MAIN_ROOM
     return MAIN_ROOM
 
 
@@ -816,8 +840,9 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
                   and record["id"] in teller]
         facts["told"] = told_here([*story, *folded], {room, *((LEGACY_ROOM_ID,) if main else ())})
     sealed = spec.room_lanes and spec.role == "integrator"  # the root's own view of its project's sealed rows
-    project = (spec.origin_words or sealed) and room.lstrip("-").isdigit() and int(room) in (
-        memory_inventory.membership_facts(root).project_chat_ids)
+    project = (spec.origin_words or sealed) and room.lstrip("-").isdigit() and room != MAIN_ROOM and (
+        int(room) in memory_inventory.membership_facts(root).project_chat_ids  # captured membership
+        or bool(_room_confirmed_now(room, root)))  # the same read that made it this room
     if spec.origin_words and project:
         facts["origins"] = _origins(root, room, entries if spec.room_lanes else [])
     if spec.room_lanes and entries:
@@ -1380,6 +1405,22 @@ def _marks_text(marks: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _room_confirmation(room: Mapping[str, Any]) -> str:
+    """The line under the heading: which room this request reads, and the call that reads its rows back.
+
+    A label alone does not identify a room -- a Project is renamed and an unresolved one is named by its
+    spelling -- while every row address is a chat id, and the identity a mistaken read is caught by is
+    the chat id. So each request names it beside the call that reads the rows the view shows only as
+    addresses (``### Memory check``). The inactive form names its chat id in its own words, and a label
+    that already spells it is not spelled twice.
+    """
+    room_id = str(room.get("room_id") or "")
+    label = str(room.get("label") or "")
+    named = label if room_id in label else f"{label} [chat_id={room_id}]".strip()
+    return (f"This room is {named}; memory_read(room_id='{room_id}', rows=true) "
+            "reads any row this view shows only as an address.")
+
+
 def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     """``## This room (<label>) — head <n>``: the room page, the words that started it, a project root's sealed
     rows of its human (``project_words``; folded by F7 into dated addresses), notes, two lanes, and last the
@@ -1392,7 +1433,7 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     bare = {ident[5:] for ident in mine | people if ident.startswith("bare:")}
     mine |= {ident[5:] for ident in mine if ident.startswith("bare:")}
     people |= {ident[5:] for ident in people if ident.startswith("bare:")}
-    lines = [f"## This room ({room['label']}) — head {room['head']}"]
+    lines = [f"## This room ({room['label']}) — head {room['head']}", _room_confirmation(room)]
     if room["legacy"]:
         lines += ["", "### Retold before the update (helper retelling, not lived)"]
         lines += [_retold(item, item["id"] in retold) for item in room["legacy"]]

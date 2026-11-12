@@ -237,9 +237,10 @@ def _hosts(plan):
 
 
 @pytest.mark.parametrize('window,shape,hosts,probes_count,walk_forms', [
-    # Version 2's receipt and physical forms move the old break-even windows.
-    (4765, {}, [('runtime', False), ('installed_skills', False)], 4, 1),
-    (5002, {}, [('runtime', False), ('installed_skills', True)], 3, 1),
+    # The room's addressing line moves each break-even up by its own price: the pins here move
+    # +20 and +18, and the shifted shape keeps its window; re-pinned, not loosened.
+    (4785, {}, [('runtime', False), ('installed_skills', False)], 4, 1),
+    (5020, {}, [('runtime', False), ('installed_skills', True)], 3, 1),
     (4045, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
      [('runtime', False), ('installed_skills', False)], 4, 1),
 ])
