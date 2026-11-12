@@ -50,6 +50,56 @@ export const unknownDeliveryRemovable = row => questionDeliveryPending(row)
 export const questionWaits = row => ANSWERABLE_QUIZ_STATES.includes(row.quiz_state)
     || (Boolean(row.project_id) && unknownDeliveryRemovable(row));
 
+// What a census read vouches for: complete, everything; incomplete, every question its gaps do
+// not name (a gap names a task, or a task and its quiz). A gap naming no task (index, registry or
+// bindings unavailable), an unexplained incompleteness or a failed read vouches for nothing.
+// Main's pill and the rooms' turn keep a question by this one scope (main_waiting.js, carryOpenQuestions).
+export function vouchedBy(data) {
+    if (data?.current_questions_complete === true) return () => true;
+    const gaps = Array.isArray(data?.current_questions_gaps) ? data.current_questions_gaps : [];
+    if (!gaps.length || gaps.some(gap => !gap?.task_id)) return () => false;
+    return (taskId, quizId) => !gaps.some(gap => String(gap.task_id) === String(taskId)
+        && (!gap.quiz_id || String(gap.quiz_id) === String(quizId)));
+}
+
+const listed = value => (Array.isArray(value) ? value : []);
+const sameQuestion = (one, other) => String(one?.task_id) === String(other?.task_id)
+    && (!one?.quiz_id || !other?.quiz_id || String(one.quiz_id) === String(other.quiz_id));
+
+/**
+ * One state body with the `open_question` items an earlier body (`prior`) had in its rooms and this one dropped
+ * without vouching against them (`vouchedBy`): the server recomputes each room's turn from the questions it could
+ * read, so a read with a gap would turn a room's amber off for one read while Main's pill keeps the question. A kept
+ * item stays in its room (with its work when that work is listed there, else as the room's own) and the room stays
+ * the owner's turn; a read never invents an item and a read that vouches against one, a complete one included,
+ * removes it. A body without the work projection is returned as it is.
+ */
+export function carryOpenQuestions(prior, data) {
+    if (!data || typeof data !== 'object' || !Array.isArray(data.works) || !data.rooms || typeof data.rooms !== 'object') {
+        return data;
+    }
+    const vouched = vouchedBy(data);
+    const complete = data.works_complete === true && data.supervisor_ready === true;
+    const rooms = { ...data.rooms };
+    let works = data.works;
+    for (const [chat, before] of Object.entries(prior?.rooms || {})) {
+        for (const item of listed(before?.turn)) {
+            if (item?.kind !== 'open_question' || !item.task_id || vouched(item.task_id, item.quiz_id)) continue;
+            const room = rooms[chat] && typeof rooms[chat] === 'object' ? rooms[chat]
+                : { activity: complete ? 'idle' : 'unknown', transition: 'none', call: '', turn: [], amber: false,
+                    mark: complete ? 'none' : 'ring', confirmed: complete, works: [] };
+            if (listed(room.turn).some(entry => ['question', 'open_question'].includes(entry?.kind) && sameQuestion(entry, item))) continue;
+            const { work_id: workId, ...own } = item;
+            const holder = workId && listed(room.works).includes(workId) ? workId : '';
+            if (holder) works = works.map(work => (work?.work_id === holder && String(work.room ?? 0) === chat
+                ? { ...work, turn: [...listed(work.turn), own] } : work));
+            rooms[chat] = { ...room, turn: [...listed(room.turn), holder ? item : own], amber: true };
+        }
+    }
+    return works === data.works && Object.keys(rooms).every(chat => rooms[chat] === data.rooms[chat])
+        ? data : { ...data, rooms, works };
+}
+
 // The lifecycle code of one row: a settled state names itself; an open one says whether the task waits.
 function lifecycleKey(row) {
     const state = row.quiz_state || row.state || 'unknown';

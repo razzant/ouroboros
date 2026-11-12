@@ -15,6 +15,7 @@ import {
 import { MARK_SHAPES } from '../modules/status_mark.js';
 import { clock } from '../modules/work_status.js';
 import { SERVER_CASES } from './work_fixture.js';
+import { createStateSnapshotSequencer } from '../modules/state_snapshots.js';
 
 // One server body whose case room is re-keyed to a Project chat id.
 function body(name, chatId = 42, extra = {}) {
@@ -121,6 +122,26 @@ test('a partial body marks only its omissions unknown; a room it lists describes
     const restored = reconcileProjectRooms(partial.rooms, body('held_continue', 42));
     assert.equal(restored.rooms.get('42').mark, 'moving');
     assert.equal(restored.rooms.has('43'), false, 'a complete body proves the paused room idle once it is not listed');
+});
+
+test('a question read with a gap keeps its room amber in the sidebar; the complete read that drops it turns it off', () => {
+    // Every reader takes the body the sequencer hands it, so the sidebar's rooms see what the pill keeps.
+    let rooms = new Map();
+    const snapshots = createStateSnapshotSequencer((data) => { rooms = reconcileProjectRooms(rooms, data).rooms; });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const read = (rooms_, extra = {}) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: rooms_, ...extra });
+    apply(read({ 42: { activity: 'idle', transition: 'none', call: '', turn: [item], amber: true, mark: 'none',
+        confirmed: true, works: [] } }, { current_questions_complete: true }));
+    assert.equal(rooms.get('42').owner, true);
+    apply(read({}, { current_questions_complete: false, current_questions_gaps: [{ task_id: 't' }] }));
+    assert.deepEqual([rooms.get('42')?.owner, rooms.get('42')?.note], [true, 'An unanswered question is here']);
+    // Across a failed read too: the next gap still keeps it.
+    snapshots.fail(snapshots.begin());
+    apply(read({}, { current_questions_gaps: [{ reason: 'question_index_unavailable' }] }));
+    assert.equal(rooms.get('42')?.owner, true);
+    apply(read({}, { current_questions_complete: true }));
+    assert.equal(rooms.has('42'), false);
 });
 
 test('the index reads Project rooms only; the header\'s one mark is the strongest shape and the owner\'s move', () => {

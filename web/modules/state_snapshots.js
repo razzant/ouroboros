@@ -1,4 +1,5 @@
 import { readState } from './api_client.js';
+import { carryOpenQuestions } from './question_presentation.js';
 
 /**
  * The page's state reads: one request/apply clock for every /api/state consumer
@@ -40,6 +41,10 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
     // Newest applied body until a failed read or retire() clears it (late-mount seed).
     let latest = null;
     let held = null;  // {revision, bindings}: the last full task_bindings map this page applied
+    // The rooms of the last body that carried them: an open question its successor does not vouch against stays in
+    // its room for every reader (question_presentation.carryOpenQuestions), across a failed read or a retire too, as
+    // Main's pill keeps it.
+    let asked = null;
     let inflight = null;
     let cancelInflight = null;  // aborts the signal of the read in flight
     let settled = null;
@@ -91,7 +96,8 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
                 const generation = Number(request?.generation) || 0;
                 if (!generation || generation <= appliedGeneration) return false;
                 appliedGeneration = generation;
-                latest = data = withBindings(data);
+                latest = data = carryOpenQuestions(asked, withBindings(data));
+                if (data?.rooms && Array.isArray(data.works)) asked = { rooms: data.rooms };
                 onApply(data, request.requestedAt, generation);
                 return true;
             } finally { settle(request); }
