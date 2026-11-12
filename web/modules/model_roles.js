@@ -13,8 +13,7 @@ import { setResult } from './ui_primitives.js';
 import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_status_store.js';
 import { parseModelSource, composeModelSource, apiConnections, configuredApiProviders, indexProfilesByHarness,
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
-    DEFAULT_API_PROVIDER } from './route_editor_primitives.js';
-import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
+    DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions } from './route_editor_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
