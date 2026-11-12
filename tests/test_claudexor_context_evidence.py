@@ -484,6 +484,40 @@ def test_an_early_window_that_cannot_hold_the_core_yields_to_the_usual_points_an
     assert plan.model_route["credentialProfileId"] == "account-b"
 
 
+@pytest.mark.parametrize("flip", [True, False])
+def test_a_route_changed_during_the_wait_voids_the_early_answer(monkeypatch, flip):
+    """Fix round 1 (Grok B2): the fit compares its route with the one asked about again once its wait on the handle
+    ends: a route changed while the early read was in flight (a model or pin edited in Settings) asks its own
+    question; an unchanged one takes the early answer."""
+    import threading
+    from ouroboros import context_fit as cf
+
+    state, asked, release, waiting = {"key": "K1"}, [], threading.Event(), threading.Event()
+
+    def key(_task):
+        if threading.current_thread().name == "fit-caller":
+            waiting.set()  # the fit has made its first comparison and waits on the handle
+        return state["key"]
+
+    def resolver(_task, *, allow_fetch):
+        asked.append(state["key"])
+        if len(asked) == 1:
+            release.wait(5)  # the early read in flight
+        return {"model": state["key"]}, object()
+
+    monkeypatch.setattr(cf, "_route_key", key)
+    question, box = cf.RouteQuestion({"id": "t"}, resolver), {}
+    caller = threading.Thread(target=lambda: box.update(out=question({"id": "t"}, allow_fetch=True)), name="fit-caller")
+    caller.start()
+    assert waiting.wait(5)
+    if flip:
+        state["key"] = "K2"
+    release.set()
+    caller.join(5)
+    assert (box["out"][0]["model"], question.early) == (("K2", False) if flip else ("K1", True))
+    assert asked == (["K1", "K2"] if flip else ["K1"])
+
+
 def test_a_changed_route_voids_the_early_answer_and_asks_its_own_question(tmp_path, monkeypatch, catalog):
     """One handle per route: the build whose route changed (here the role's pin) after the question started asks its
     own question; the early answer is never applied to it, and the account that just failed is never spent by it."""

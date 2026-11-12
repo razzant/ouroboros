@@ -676,7 +676,7 @@ class RouteQuestion:
         key, self.key, self.early = self.key, None, False  # used once: any later call asks its own question
         if allow_fetch and key is not None and _route_key(task) == key:
             timed("fit.route_wait", self.asked.wait)
-            if self.asked_key == key:
+            if self.asked_key == key and _route_key(task) == key:  # a route changed during the wait asks its own
                 self.early = True
                 if self.error is not None:
                     raise self.error
