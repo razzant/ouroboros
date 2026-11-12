@@ -283,10 +283,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     function onCatalog(event) {
         if (destroyed) return;
         const data = event.detail;
-        // A refresh that failed (Models › Refresh) lists nothing: the suggestions read earlier stay.
-        let models;
-        try { models = modelSuggestions(data); } catch { return; }
-        ui.models = models;
+        ui.models = modelSuggestions(data);
         ui.catalog = data;
         for (const field of body.querySelectorAll('[data-model-chooser]')) updateModelChooser(field, ui.models, catalogPrograms(data));
     }
