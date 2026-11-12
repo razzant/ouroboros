@@ -7,8 +7,8 @@ a ``readiness_warning:advisory:`` fingerprint) — survives every ordinary save 
 stored and is named where it lives (``review_status.advisory_run_archive``, the store
 actually read), while the context, the ``review_status`` projection and the task evidence
 read as if it were absent. An ``advisory_stale`` debt copy of the stale marker is archived
-the same way; the preflight look and its marker stay live beside it. Since step 5 the
-obligation layer's own debts are an archive too, kept in the same stored list and named by
+the same way; the preflight look and its marker stay live beside it. The retired obligation
+layer's own debts are an archive too, kept in the same stored list and named by
 ``review_status.obligation_archive``; no live debt remains.
 
 Retired with that decision, because their subject no longer exists: rendering old runs in
@@ -247,7 +247,7 @@ def test_context_status_and_evidence_read_as_if_the_archive_were_absent(ctx):
 
 
 def test_review_status_names_the_obligation_archive_and_projects_no_obligation_or_debt(ctx):
-    """Home (step 5): ``review_status`` projects no obligation, debt or retry anchor, and its next step names none.
+    """``review_status`` projects no obligation, debt or retry anchor, and its next step names none.
     When the state file holds what the retired obligation layer stored, ``obligation_archive`` names the store it
     read and counts those rows as stored, the advisory lane's debts staying in ``advisory_run_archive``; with none
     it is absent."""

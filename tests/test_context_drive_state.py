@@ -152,7 +152,7 @@ def test_settled_continuations_retire_after_age_window(tmp_path):
 
 
 def test_a_settled_continuation_stays_while_an_earlier_obligation_mark_awaits_a_landing(tmp_path):
-    """Home (step 5): an aged continuation of a settled task stays in context while it carries an obligation mark
+    """An aged continuation of a settled task stays in context while it carries an obligation mark
     written before obligations retired (its ids or its snapshot) and no commit has landed in its checkout since it
     was written. A landing after it, findings alone, or no record of work at all leave it to the age rule, which
     archives it (durable, disclosed). The rule reads the continuation and the landings, never an obligation table."""

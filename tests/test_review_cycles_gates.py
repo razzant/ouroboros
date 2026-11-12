@@ -101,7 +101,7 @@ def test_finalize_blocked_review_records_block_class(tmp_path, monkeypatch):
 
 
 def test_an_owner_stop_is_named_by_its_cause_never_as_a_review_refusal(tmp_path, monkeypatch):
-    """Home (step 5) over the owner's stop of a commit review: its cause in words, its own phase and continuation
+    """The owner's stop of a commit review: its cause in words, its own phase and continuation
     source, and no commit. Neither the stop nor a blocked review asks a model about the findings or turns them into
     obligations or debt: each attempt and its continuation keep the findings exactly as the reviewers gave them, and
     the state file gains no obligation or debt key."""

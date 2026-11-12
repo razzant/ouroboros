@@ -4,7 +4,7 @@ Covers the verdict-authoritative and verification-only instructions in the ONE
 shared `build_review_history_section` — as the packet seat (`review.py`) and the
 two-part brief (`review_brief_coupling.py`) both render it — plus the Part-2
 coupling-history block, and that earlier rounds reach the next wave as written,
-with no obligation layer on top (step 5).
+with no obligation layer on top.
 """
 import json
 import pathlib
@@ -92,7 +92,7 @@ def test_coupling_history_section_verdict_authoritative():
 
 
 # ---------------------------------------------------------------------------
-# Earlier rounds reach the next wave as written (step 5 home).
+# Earlier rounds reach the next wave as written.
 # ---------------------------------------------------------------------------
 
 
@@ -105,7 +105,7 @@ def _init_git_repo(path: pathlib.Path) -> None:
 
 
 def test_the_next_wave_reads_earlier_rounds_as_written_without_an_obligation_layer(tmp_path):
-    """Home (step 5): with a state file that still holds an open obligation for the checkout (left by a body
+    """With a state file that still holds an open obligation for the checkout (left by a body
     with Blocking), the packet section's owner and the retrieving brief carry an earlier round's finding verbatim
     under the verdict and verification-only rules, and carry neither the stored obligation, its id nor the
     item-name rule; with no earlier round neither renders a history."""

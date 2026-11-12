@@ -3,7 +3,7 @@
 Split out of ``tests/test_agent_task_pipeline.py`` when that module was divided
 by theme. Covers task-scoped recent attempts, the repo-scoped stale marker, and
 that a task's evidence inherits no obligation or debt the retired obligation
-layer stored for its checkout (step 5).
+layer stored for its checkout.
 
 The advisory-run ATTRIBUTION cases (own versus ``foreign_advisory_runs``, legacy
 rows with no creator) retired with the run lists themselves: the retired advisory
@@ -96,7 +96,7 @@ def test_collect_review_evidence_scopes_the_stale_marker_to_repo(tmp_path):
 
 
 def test_task_evidence_and_its_ledger_inherit_no_obligation_the_checkout_stored(tmp_path):
-    """Home (step 5): over a state file that still holds an open obligation and a debt for the checkout, a task's
+    """Over a state file that still holds an open obligation and a debt for the checkout, a task's
     review evidence carries neither (nor an omission counter for them), so it has no evidence until the task records
     something of its own, and the task's verification ledger fails on nothing it did not record."""
     import json

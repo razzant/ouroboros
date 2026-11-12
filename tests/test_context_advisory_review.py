@@ -172,7 +172,7 @@ class TestAdvisoryReviewStatusInContext:
         assert dynamic_text.index("## Runtime context") < dynamic_text.index("## Review Continuity")
 
     def test_review_continuity_shows_earlier_obligations_until_a_commit_lands_never_as_current(self, tmp_path):
-        """Home (step 5): an open obligation this checkout recorded before obligations retired shows once in each
+        """An open obligation this checkout recorded before obligations retired shows once in each
         Review Continuity view, a foreign checkout's never, beside the continuation's record address; no obligation
         count, debt or retry anchor is projected; a commit that lands here after it ends the block."""
         import json

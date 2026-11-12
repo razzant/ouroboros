@@ -129,7 +129,7 @@ def test_compact_encoding_preserves_full_legacy_payload_and_nested_evidence(tmp_
 
 
 def test_the_retired_obligation_rows_survive_every_save_as_stored_and_a_fresh_state_writes_none(tmp_path):
-    """Home (step 5): what the retired obligation layer stored stays under its own keys, right after the attempts,
+    """What the retired obligation layer stored stays under its own keys, right after the attempts,
     exactly as stored through an ordinary attempt write, a blocked one with findings included: no coalescing, no
     counter coercion, no new obligation; ``retired_review_rows`` reads it back. A state that never held such rows
     saves none of the four keys."""
