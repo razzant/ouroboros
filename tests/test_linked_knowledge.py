@@ -593,6 +593,36 @@ def test_a_refused_item_says_whether_its_text_is_missing_or_where_it_repeats(tmp
     assert store.write_knowledge_note(target, "", "edit", original.revision, edits=[_item("once", new_str="1")]).ok
 
 
+def test_an_item_whose_text_is_only_in_the_frontmatter_says_where_it_is(tmp_path):
+    """Items search the body. Text the mind saw in the note's summary (in the index or a read) is not there: the
+    refusal says it occurs in the frontmatter and how a summary is revised, also when YAML wrapped the summary
+    across lines. Text that is nowhere in the note is still plain "not found"."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="items"))
+    summary = ("Нина — коллега из ML daily; ведёт ревью моделей ранжирования и спрашивает про метрики каждую среду, "
+               "до планёрки.")
+
+    def write(**arguments):
+        return registry.execute("knowledge_write", {"topic": "people/nina", "scope": "global", **arguments})
+
+    _meta(write(content="# Нина\n\nРаботает над ранжированием.\n", summary=summary))
+    note = store.read_knowledge_note(address(tmp_path, "people/nina"))
+    assert note.summary == summary and summary not in note.text  # the writer's YAML wraps a long summary
+    in_front = "not found in the body; it occurs in the frontmatter (a summary is revised with summary=...)"
+    before = _files(tmp_path)
+    for old_str, said in (("коллега из ML daily", in_front), (summary, in_front), ("type: note", in_front),
+                          ("Отсутствует.", "not found"), ("Нина — коллега из ML weekly", "not found")):
+        reply = write(mode="edit", expected_revision=note.revision, edits=[_item("ранжированием", new_str="поиском"),
+                                                                           _item(old_str, new_str="x")])
+        assert reply == (f"⚠️ TOOL_ERROR: Knowledge write not completed: edit_refused: item 2 (old_str): {said}. "
+                         "Nothing was written."), (old_str, reply)
+    assert _files(tmp_path) == before
+    _meta(write(mode="edit", expected_revision=note.revision, edits=[_item("ранжированием", new_str="поиском")]))
+    _meta(write(mode="edit", expected_revision=store.read_knowledge_note(note.address).revision,
+                summary=summary.replace("ML daily", "ML weekly")))
+    assert store.read_knowledge_note(note.address).summary.startswith("Нина — коллега из ML weekly;")
+
+
 def test_items_keep_crlf_multibyte_and_a_missing_final_newline_byte_exact(tmp_path):
     target = address(tmp_path, "legacy")
     target.path.parent.mkdir(parents=True)

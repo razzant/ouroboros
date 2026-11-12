@@ -59,14 +59,20 @@ def edit_items(edits: Any) -> list[tuple[str, str]]:
     return items
 
 
+def _in_frontmatter(front: bytes, old: str) -> bool:
+    """``old`` occurs in the frontmatter, also across the line breaks where YAML wraps a long value."""
+    text, words = front.decode("utf-8"), " ".join(old.split())
+    return old in text or bool(words) and words in " ".join(text.split())
+
+
 def compile_edit_items(raw: bytes, body_start: int, items: list[tuple[str, str]]) -> bytes:
     """The body bytes of ``raw`` (from ``body_start``) with every item applied, all or none.
 
     Each ``old_str`` stands for its own bytes and is found in the ORIGINAL body, exactly once (an
     overlapping repeat counts); spans may touch, never overlap. ``EditRefused`` names the item: not
-    found, found N times (with the first eight of its lines in the whole note), or overlapping
-    another. Bytes: a valid needle in valid UTF-8 lies on character boundaries, and unmentioned
-    bytes stay as they were.
+    found (and where, when the text is in the frontmatter instead), found N times (with the first
+    eight of its lines in the whole note), or overlapping another. Bytes: a valid needle in valid
+    UTF-8 lies on character boundaries, and unmentioned bytes stay as they were.
     """
     body, spans = raw[body_start:], []
     for number, (old, new) in enumerate(items, 1):
@@ -77,8 +83,10 @@ def compile_edit_items(raw: bytes, body_start: int, items: list[tuple[str, str]]
             at = body.find(needle, at + 1)
         if len(hits) != 1:
             lines = ", ".join(str(raw.count(b"\n", 0, body_start + hit) + 1) for hit in hits[:8])
-            raise EditRefused(f"item {number} (old_str): "
-                              + (f"found {len(hits)} times at lines {lines}" if hits else "not found"))
+            raise EditRefused(f"item {number} (old_str): " + (
+                f"found {len(hits)} times at lines {lines}" if hits else
+                "not found in the body; it occurs in the frontmatter (a summary is revised with summary=...)"
+                if _in_frontmatter(raw[:body_start], old) else "not found"))
         spans.append((hits[0], hits[0] + len(needle), number, new.encode("utf-8")))
     spans.sort()
     for left, right in zip(spans, spans[1:]):
