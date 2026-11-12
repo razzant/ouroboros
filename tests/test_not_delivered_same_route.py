@@ -203,7 +203,7 @@ def test_a_recovered_repeat_never_dials_the_configured_route(tmp_path, monkeypat
     result, _usage, _trace = run_llm_loop(
         **_loop_kwargs(tmp_path, ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path), [], llm=llm))
     assert result == "done"
-    assert llm.calls == 3 and slept == [4.0, 8.0]
+    assert llm.calls == 3 and loop_env == [4.0, 8.0] and slept == []  # the repeats' waits wake for owner words
     assert chain_calls["n"] == 0  # without the repeat the first receipt went straight to the paid route
     assert _read_network_wait_events(tmp_path) == []
 
@@ -226,9 +226,9 @@ def test_an_episode_redial_is_one_attempt_after_the_burst(tmp_path, loop_env, sl
     result, _usage, _trace = run_llm_loop(
         **_loop_kwargs(tmp_path, ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path), [], llm=llm))
     assert result == "done"
-    # The round's burst (three sends, 4 s and 8 s), then the free wait: each redial is one send.
-    assert slept == [4.0, 8.0]
-    assert llm.calls == 5 and len(loop_env) == 2
+    # The round's burst (three sends, waits of 4 s and 8 s), then the free wait: each redial is one send.
+    assert slept == [] and loop_env[:2] == [4.0, 8.0]
+    assert llm.calls == 5 and len(loop_env) == 4
     assert [row["phase"] for row in _read_network_wait_events(tmp_path)] == ["entered", "waiting", "waiting", "recovered"]
 
 
@@ -241,3 +241,36 @@ def test_a_host_connect_failure_keeps_configured_routes_before_any_repeat(tmp_pa
         **_loop_kwargs(tmp_path, ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path), [], llm=llm))
     assert result == "fallback-ok"
     assert llm.calls == 1 and chain_calls["n"] == 1 and slept == []
+
+
+@pytest.mark.parametrize("words", [True, False])
+def test_owner_words_during_a_granted_repeat_ride_the_next_send(tmp_path, monkeypatch, loop_env, slept, words):
+    """#2996 joins a Main follow-up to the running turn. Words that arrive while its request fails undelivered end the
+    repeat's wait: the round start drains them and the next send on the same route carries them. Without them the
+    granted repeat re-sends the request as built, after the same 4 s."""
+    from ouroboros.owner_mailbox import write_owner_message
+
+    waits: list = []
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda sec, wake: (waits.append(sec), wake())[1])
+    chain, chain_calls = _counting_chain(answer_on=1)
+    monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", chain)
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "other/model")
+    sent: list = []
+
+    class _Recording(_ScriptedLLM):
+        def chat(self, **kwargs):
+            sent.append(json.dumps(kwargs["messages"], ensure_ascii=False))
+            if words and self.calls == 0:  # the owner writes while the first request is failing
+                assert write_owner_message(tmp_path, "Any reply yet?", "t-wait", msg_id="m-follow-up")
+            return super().chat(**kwargs)
+
+    llm = _Recording(fail_times=1)
+    result, _usage, _trace = run_llm_loop(
+        **_loop_kwargs(tmp_path, ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path), [], llm=llm))
+    assert result == "done" and llm.calls == 2 and chain_calls["n"] == 0  # same route, no configured route
+    assert waits == [4.0] and slept == []  # the repeat's wait, woken at once only when words are waiting
+    assert "Any reply yet?" not in sent[0]
+    assert ("Any reply yet?" in sent[1]) is words
+    rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["reason_code"] for row in rows if row.get("type") == "llm_not_dispatched"] == (
+        ["owner_words_waiting"] if words else [])

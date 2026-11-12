@@ -27,7 +27,9 @@ from ouroboros.knowledge import observed_route_stamp
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
 from ouroboros.llm_claudexor import propagate_model_error, presence_refusal_unstarted
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
-from ouroboros.model_wait import current_model_wait, model_wait_reason, propagate_model_control
+from ouroboros.model_wait import (
+    OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait, model_wait_reason, propagate_model_control,
+)
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
 from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal, single_physical_send, track_physical_attempts
 from ouroboros.observability import new_call_id, new_execution_id, persist_call
@@ -377,15 +379,20 @@ def _retry_backoff_sec(attempt: int, is_transient: bool) -> float:
     return min(2.0 ** attempt * 4, _TRANSIENT_BACKOFF_CAP_SEC if is_transient else 30.0)
 
 
+def _deadline_allows(seconds: float, deadline_ts: Optional[float]) -> bool:
+    """The task deadline (epoch seconds) can absorb ``seconds`` and still leave another attempt."""
+    return not deadline_ts or float(deadline_ts) - time.time() >= float(seconds) + _DEADLINE_RETRY_FLOOR_SEC
+
+
 def _sleep_within_deadline(
     seconds: float, deadline_ts: Optional[float], *, wake_check: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """Sleep ``seconds`` if the task deadline (epoch seconds) allows another
     attempt afterwards. Returns False — without sleeping — when the remaining
     time budget cannot absorb the backoff, signalling the caller to stop.
-    An optional typed-control wake also returns False after interrupting sleep;
-    only the paid transport-repeat caller opts into that control check."""
-    if deadline_ts and float(deadline_ts) - time.time() < float(seconds) + _DEADLINE_RETRY_FLOOR_SEC:
+    An optional wake also returns False after interrupting sleep: the paid
+    transport repeat's typed control, an ordinary repeat's unread owner words."""
+    if not _deadline_allows(seconds, deadline_ts):
         return False
     if wake_check is not None:
         from ouroboros.loop_transport import interruptible_wait_sleep
@@ -477,6 +484,7 @@ class _LlmErrorContext:
     transport_death_retries: int = 0
     transport_reserve_sec: Optional[float] = None
     stop_retry_check: Optional[Callable[[], bool]] = None
+    owner_input_check: Optional[Callable[[], bool]] = None  # unread owner words: a granted repeat yields to the round start
     requested_profile: Optional[str] = None
     configured_api_child: bool = False  # its parent chose this exact API actor (``TIMEOUT_REPEAT_KEY``)
     prior_attempt_id: Optional[str] = None  # the attempt last captured before this call began (``_own_capture``)
@@ -1061,8 +1069,18 @@ def _stop_after_llm_error(ctx: _LlmErrorContext) -> bool:
             "state": "granted" if backoff is not None else "spent", "budget_spent": backoff is None}
         _save_timeout_repeat(accumulated_usage)
     if backoff is not None:
-        if _sleep_within_deadline(backoff, ctx.deadline_ts):
+        # A granted repeat re-sends the request as built. Owner words that arrived meanwhile end its wait instead: the
+        # round start drains them and rebuilds, same route and logical round (#2996 joins Main follow-ups to this turn).
+        # A timeout repeat resends its own bytes.
+        owner_words = None if timed_out else ctx.owner_input_check
+        fits = _deadline_allows(backoff, ctx.deadline_ts)
+        if fits and _sleep_within_deadline(backoff, None, wake_check=owner_words):
             return False
+        if fits:  # only those words wake this sleep
+            append_jsonl(ctx.drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "llm_not_dispatched", "task_id": ctx.task_id, "round": ctx.round_idx,
+                "model": ctx.model, "reason_code": OWNER_WORDS_WAITING, "error_kind": error_kind})
+            raise ModelWaitInterrupted(OWNER_WORDS_WAITING)
         _emit_retry_deadline_exhausted(
             ctx.drive_logs, task_id=ctx.task_id, execution_id=ctx.execution_id,
             round_id=ctx.round_id, round_idx=ctx.round_idx, attempt=ctx.attempt,
@@ -1326,7 +1344,7 @@ def call_llm_with_retry(
     task_attempt: Any = None, response_meta_out: Optional[Dict[str, Any]] = None,
     transport_reserve_sec: Optional[float] = None, transport_death_retries: int = 0,
     initial_messages: Optional[List[Dict[str, Any]]] = None,
-    stop_retry_check: Optional[Callable[[], bool]] = None,
+    stop_retry_check: Optional[Callable[[], bool]] = None, owner_input_check: Optional[Callable[[], bool]] = None,
     model_role: str = "main", model_turn_state: Any = None, model_account_override: Optional[str] = None,
     processing_preference: Optional[str] = None, physical_send_claim: Optional[Callable[[Any], None]] = None,
     send_clock_policy: Any = None, max_tokens: int = MAIN_LOOP_MAX_TOKENS, configured_api_child: bool = False,
@@ -1575,7 +1593,8 @@ def call_llm_with_retry(
                     task_attempt=task_attempt, deadline_ts=deadline_ts,
                     max_retries=max_retries, transient_budget=transient_budget,
                     transport_death_retries=transport_death_retries, transport_reserve_sec=transport_reserve_sec,
-                    stop_retry_check=stop_retry_check, configured_api_child=configured_api_child,
+                    stop_retry_check=stop_retry_check, owner_input_check=owner_input_check,
+                    configured_api_child=configured_api_child,
                     requested_profile=host_route.get("credential_profile_id", model_account_override),
                     prior_attempt_id=prior,
                 ),
