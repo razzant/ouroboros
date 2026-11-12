@@ -56,7 +56,8 @@ Boundaries (tags in the output):
   jobs run here, and what they report stays on the pass: ``child_reports``), and the body's driver
   thread stays parked while its tick is driven here;
 - ``T:*`` (B10, last): one owner message as the supervisor loop handles it (the state read, the
-  canonical inbound row, the routing pre-pass) and the production direct turn it starts, counted
+  canonical inbound row, the routing pre-pass) and the production direct turn it starts, its body once
+  that handling has returned (``_owner_turn``), counted
   up to the turn's first model request (``T:<tag>@request``), where the refused model call ends
   it (a turn the product ends before it keeps the supervisor log's record of how: ``ended``):
   ``T:main`` the process's first owner turn, ``T:mainw`` the next, ``T:main:foreign`` Main
@@ -110,8 +111,11 @@ CLOCKS: Dict[str, float] = {
     # ``utils``, ``skill_identity`` and ``skill_discovery_reuse`` (a copy made at import) ``_RACY_NS``, 2 s: a file read
     # within a clock tick of its write is read again, and each restore of the stand leaves its rewritten files that
     # young (#2961: B2's 16 reads of the project bindings, a stat each or an open each). A file's identity (inode, size,
-    # nanosecond times) still names every write the process meets.
-    "racy_ns": 0,
+    # nanosecond times) still names every write the process meets. Held below zero, not at it: with 0 a file written
+    # in its reader's own tick still reads as just written where ``time.time_ns`` ticks at 15.6 ms (Windows), and how
+    # many reads fall in that tick is timing (T:main's capability evidence: one or two more opens). It holds every
+    # boundary through ``hold_clocks`` and the stand's turns; the live set resets only ``utils`` to 0 (``_live_set``).
+    "racy_ns": -2_000_000_000,
     # ``task_status._SNAPSHOT_OWNERSHIP_FRESH_SEC``, 10 s: the held supervisor never refreshes its queue stamp, so a
     # pass that outlasts it takes every queued task for live (B7: three evidence tasks wait, 336 VM steps and 16
     # statements each).
@@ -332,11 +336,33 @@ def _mark(result: Dict[str, Any], name: str) -> None:
 def _install_checkpoints(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pathlib.Path) -> Dict[str, threading.Event]:
     import functools
 
-    from ouroboros import server_liveness, store_journal, store_switch
+    from ouroboros import owned_shutdown, server_liveness, store_journal, store_switch, usage_store
     from supervisor import message_bus
     from tests._cost_meter import tagged
 
     events = {"ready": threading.Event(), "release": threading.Event()}
+    # B1c's usage import enumerates state/ for unfinished usage.sqlite imports. Hold the two background
+    # writers until it finishes: otherwise that census may meet current.sqlite-wal/-shm and
+    # owned_processes.json (or the writers' temporary files). They still run and count under their own tags.
+    usage_imported = threading.Event()
+
+    def after_usage_import(call):
+        def run(*args, **kwargs):
+            usage_imported.wait()
+            return call(*args, **kwargs)
+        return run
+
+    store_switch._run = after_usage_import(store_switch._run)
+    owned_shutdown.import_inherited_records = after_usage_import(owned_shutdown.import_inherited_records)
+    migrate_usage = usage_store.migrate_from_journal
+
+    def usage_first(*args, **kwargs):
+        try:
+            return migrate_usage(*args, **kwargs)
+        finally:
+            usage_imported.set()
+
+    usage_store.migrate_from_journal = usage_first
     when_ready = store_switch.when_ready
     prepare_children = store_journal.prepare_children
 
@@ -351,8 +377,8 @@ def _install_checkpoints(meter: CostMeter, srv: Any, result: Dict[str, Any], roo
         return {**_summary(meter, "B2"), "child_headers": _summary(meter, "B2_child_headers")}
 
     def publication_steps(root, *steps):
-        # What waits on the store's publication is B2 wherever it runs: on the import thread, or on
-        # the lifespan's own thread when the import already finished (then it also delays health).
+        # What waits on the store's publication is B2 wherever it runs (the product's ``when_ready`` runs
+        # it on a background thread, the import's or ``store-ready-steps``, never the caller's).
         result.setdefault("when_ready_threads", []).append(threading.current_thread().name)
         return when_ready(root, *[functools.partial(tagged, "B2", step) for step in steps])
 
@@ -564,11 +590,35 @@ def _lane_rows_ended() -> None:
 def _owner_turn(srv: Any, ctx: Any, chat_id: int, message_id: str) -> int:
     """One owner message as the supervisor loop handles it (``server._handle_bridge_update_batch``): the state
     read, the canonical inbound row, the routing pre-pass and the direct turn it starts on its own thread, which
-    inherits this boundary up to its first model request."""
+    inherits this boundary up to its first model request. The turn's body runs once that handling has returned. A
+    live install runs the body in a lane worker, a process whose memos the loop's reads never fill; no worker starts
+    here, so it runs on an inline carrier's thread of this process, and nothing else would order the loop's last
+    records of the new turn against the body's first writes of its task: whether the loop's lineage read finds the
+    task absent, as its placeholder (``create_only``, no room yet) or admitted, and whether it runs before the turn's
+    request at all, would be the scheduler's choice, and this process keeps what that read found
+    (``projects_registry._TASK_LINEAGE``). The hold is class-wide: any carrier built while the handling runs waits
+    for it, not only the turn's; in the stand no other carrier is built then. Neither wait has a timeout: the handling
+    must not wait on the body it starts, and the usage hold (``_install_checkpoints``) assumes no boot step before the
+    usage import waits for the store's publication; both hold in the product today."""
+    from supervisor.inline_carrier import InlineCarrier
+
     update = {"update_id": next(_UPDATE_IDS), "message": {
         "chat": {"id": chat_id}, "from": {"id": 7}, "text": f"owner turn {message_id}", "source": "web",
         "client_message_id": message_id, "sender_session_id": "cost-contract"}}
-    return srv._handle_bridge_update_batch(ctx.bridge, [update], 0, ctx, [0])
+    handled, carrier = threading.Event(), InlineCarrier.__init__
+
+    def after_handling(self: Any, target: Callable[[], None], *args: Any, **kwargs: Any) -> None:
+        def body() -> None:
+            handled.wait()
+            target()
+        carrier(self, body, *args, **kwargs)
+
+    InlineCarrier.__init__ = after_handling  # any carrier built while the handling runs starts its body after it
+    try:
+        return srv._handle_bridge_update_batch(ctx.bridge, [update], 0, ctx, [0])
+    finally:
+        InlineCarrier.__init__ = carrier
+        handled.set()
 
 
 def _turn_ends(log: pathlib.Path, start: int) -> List[Dict[str, Any]]:

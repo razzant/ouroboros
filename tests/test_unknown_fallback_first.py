@@ -412,8 +412,57 @@ def test_a_declared_wait_keeps_refusals_and_outages_on_the_primary():
                         ("provider_outcome_unknown", {})):
         assert loop_transport.fallback_chain_allowed(ctx, kind, None, usage) is False
     assert loop_transport.fallback_chain_allowed(ctx, "bad_request", None, {}) is True  # ordinary recovery stays
+    # Owner choice A (12.11): the wait holds after a content refusal too, which has nothing to wait for: no episode.
+    assert loop_transport.fallback_chain_allowed(ctx, "content_filter", None, {}) is False
+    assert "content_filter" not in loop_transport.PRIMARY_REFUSAL_KINDS
+    assert loop_transport.primary_refusal_wait(ctx, "content_filter") is False
     ctx.route_wait_on_primary = False
     assert loop_transport.fallback_chain_allowed(ctx, "subscription_window_exhausted", None, refusal) is True
+    assert loop_transport.fallback_chain_allowed(ctx, "content_filter", None, {}) is True  # the walk as before
+
+
+class _RepliesLLM(_RouteLLM):
+    """``_RouteLLM`` whose ``(message, usage)`` steps are replies as written; an empty one is a provider's refusal."""
+
+    def chat(self, **kwargs):
+        steps = self.scripts.get(kwargs["model"]) or []
+        if steps and isinstance(steps[0], tuple):
+            self.sent.append((kwargs["model"], [dict(row) for row in kwargs["messages"]]))
+            return tuple(json.loads(json.dumps(steps.pop(0))))  # each reply its own copy
+        return super().chat(**kwargs)
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_a_declared_wait_ends_a_content_refused_round_and_without_one_the_spare_is_asked(
+        data_root, tmp_path, monkeypatch, declared):
+    """After the primary's content refusal a declared wait asks no configured route: the round ends through the
+    forced final, its prompt naming the refusal (never an outage), with the refusal's one feed row. Without a
+    declared wait the walk asks the spare as before and its answer continues the work."""
+    from tests.test_completion_selection import finish
+
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
+    tool = {"name": "switch_model", "arguments": json.dumps({"primary": "wait"})} if declared else {
+        "name": "chat_history", "arguments": "{}"}
+    first = {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": tool}]}
+    refusal = ({"role": "assistant", "content": "", "refusal": "Blocked here."}, {"response_finish_reason": "content_filter"})
+    tokens = {"prompt_tokens": 1, "completion_tokens": 1}
+    tools = {"role": "assistant", "content": "", "tool_calls": [{"id": "c2", "type": "function", "function": {
+        "name": "chat_history", "arguments": "{}"}}]}
+    llm, notes = _RepliesLLM(data_root, **{PRIMARY: [(first, tokens), refusal, (finish("summary"), tokens)],
+                                           "fb/one": [(tools, tokens), (finish("answer from fb/one"), tokens)]}), []
+    text, _usage, _trace, _registry = _run(tmp_path, llm, notes=notes)
+
+    words = loop_transport._FAILURE_KIND_WORDS["content_filter"]
+    told = [note for note in notes if note.startswith("⚠️ No usable reply")]
+    if declared:
+        assert [model for model, _ in llm.sent] == [PRIMARY] * 3 and text == "summary"
+        prompt = str(llm.sent[-1][1][-1].get("content"))
+        assert f"This round's failed asks: {words} on {PRIMARY} once." in prompt and "outage" not in prompt
+        assert told == [f'⚠️ No usable reply after {words} on {PRIMARY}. The provider said: "Blocked here."']
+        assert not any("Fallback" in note or "trying" in note for note in notes)
+    else:
+        assert [model for model, _ in llm.sent] == [PRIMARY, PRIMARY, "fb/one", "fb/one"] and text == "answer from fb/one"
+        assert told == [] and any(note.startswith("⚡ Fallback: trying fb/one") and "Blocked here." in note for note in notes)
 
 
 def test_primary_return_rebinds_role_and_leaves_auto_unpinned(monkeypatch):

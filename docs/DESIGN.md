@@ -82,7 +82,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    sapphire lift and an explicit `Your choice` label; other options lie flat. No outlines. Shape follows content: a
    one-line control is a capsule; a choice that carries a paragraph (an offered answer)
    is a card with the object radius, standing like every other. A label that acts takes the
-   primary ink; a setting's name or an unchosen option the secondary ink; a setting's
+   primary ink; a capsule's name or an unchosen option the secondary ink; a setting's
    value the meta ink, never the darkest; a chosen state its tone's ink, on the fill or, for a
    control that stays bodiless when chosen (Read aloud while it speaks, a mark), as a word on
    its own (`--tone-crimson-word`); a chosen choice in a menu (a model, a voice) keeps a faint
@@ -298,10 +298,10 @@ caps with `text-transform`.
 **A secondary page orders by meaning, not paint** (audit №9, owner
 2026-10-28T22:09Z). Costs leads with the known spend and, in the same card,
 whether it is final, its unresolved upper bound and what is unknown; the
-composition, the hold and technical counts follow, quieter. Budget edits three limits; the consciousness
-field shows its 24-hour spend (pending, unpriced). Below the fields, a full-width row names that limit with
+composition, the hold and technical counts follow, quieter. Budget's three limits are rows; under them the consciousness
+limit shows its 24-hour spend (pending, unpriced) and a full-width row names that limit with
 “If its charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown) and a
-wake held at it with its card's door. Save posts edited limits only. Activity names a
+wake held at it with its card's door. Activity names a
 work whole in primary ink above its facts; a duration reads in seconds below a
 minute, then in minutes or hours, and one the row lacks is absent, never `0s`. A narrow temporary-space tray puts
 a qualified size under its group's name. A widget card's ⋮ menu and move handle
@@ -327,7 +327,7 @@ The criterion is the same one that governs the whole table: **if the owner has
 to read it to act, it is `--text-meta` or brighter.** A load-bearing caveat, a
 one-off note, a hint that explains a control: those stay at meta. A control's own
 label is not content: it follows bible principle 4 (an action's label is primary, a
-setting's name or an unchosen option secondary). A tone or an
+capsule's name or an unchosen option secondary). A tone or an
 unclassifiable ink is what produced the original "too much small
 high-contrast white text" report from the opposite direction, so a rule that
 declares a size and no colour is still the worst of the options.
@@ -392,36 +392,31 @@ to recolour, so an outline outside it would be a second frame.
 ### Controls and editable choices
 
 Text, number, password, select and multiline fields use the same `.ui-control`
-family; `.ui-checkbox` keeps native checkbox behavior. `.ui-field` groups a
+family; `.ui-switch` acts at once, `.ui-checkbox` on its form's Save. `.ui-field` groups a
 label, control and optional `.ui-field-help`. A placeholder is an example,
 never the field's only name. Help and validation belong to that field without
 changing the alignment of neighboring controls and their actions.
 
 **Secret visibility has one meaning across Settings.** Show reveals the complete
 current value as selectable, read-only text in the masked field's own place,
-never as a second field; long values wrap within the column. An edited value is
-shown from the local draft; an untouched saved value is read only when requested.
+never as a second field; long values wrap within the column. A typed value is
+shown as typed; an untouched saved value is read only when requested.
 A prefix or a configured-value placeholder is never a successful reveal. Hide
-brings back the unchanged masked field and its draft; typing a new value starts
-with Hide or Clear. Viewing changes neither the dirty state nor the values
-submitted by Save or Test. Clearing, renaming the entry, reloading or leaving the
+brings back the unchanged masked field and what was typed; typing a new value starts
+with Hide or Clear. Viewing changes neither the value nor what a save or Test
+sends. Clearing, renaming the entry, reloading or leaving the
 page closes the reveal, and a late read cannot reopen it. Built-in, custom,
 skill-requested and MCP header fields use the same interaction; loading Settings
 keeps saved secrets masked. Pending reads and failures are shown at the field.
 
-A segmented choice row gives every choice the same width. Up to four fill their
-row; a longer scale wraps into equal columns of four and leaves its last row partly
-empty rather than stretching a lone choice; a narrow card stacks two; one-glyph
-values such as review cycles stay one row. An empty inherit choice is as real as
-any other, and the focused choice wears the one focus ring. A choice the running
-Access suspends — Blocking under Cyber Pro — stays selected; the note beside it
-names its effect for the current process and for the selected next start, from
-the draft before Save.
-
-Short fixed choices keep native selects, including the platform's own popup.
-A control never widens its column: a select shows its chosen label on one
-line, clipped at its own edge, and the full label stays in the platform's
-popup.
+A choice among a few short words is one strip: one track, each option as wide as its word and at
+least a touch target, only the chosen one filled; it wraps and never scrolls sideways. A choice
+that needs a line per option is a list of choices (Access), and a choice of many or long labels
+is a native select, clipped at its own edge with the full label in the platform's popup: a control
+never widens its column. The composer's capsules are the same control with a sliding thumb. An
+empty inherit choice is as real as any other, and the focused choice wears the one focus ring. A
+choice the running Access suspends (Blocking under Cyber Pro) stays chosen; its row says what
+holds now and after restart.
 Model selection uses the shared editable chooser: suggestions assist typing
 without becoming an allowlist. A saved unknown model remains editable; a
 catalog refresh preserves the real input, selection and composition. Escape
@@ -431,8 +426,8 @@ Availability never rewrites a selection: a Claude `[1m]` variant whose base
 model a usable account lists reads Available, noting that the engine checks the
 variant at session start, and an unread catalog reads Not checked. Maximum
 response sits beside the context window as Auto or a whole number for this
-exact model, server and account; Apply acknowledges it outside the Settings
-draft, and a route change clears it. Web search is its own Source and Model:
+exact model, server and account; Apply acknowledges it at once, and
+a route change clears it. Web search is its own Source and Model:
 Auto lists the routes it may use, a chosen source is strict, and skills, MCP
 and browser tools stay independent.
 
@@ -487,11 +482,12 @@ above the row like the hint and never move the composer**: Main, the recents, th
 that can lead a work (those Settings offers the Main role, never agent sessions). With one source, its models stand
 under its own name without a source step; when Main has a row above, its model is omitted from this section.
 A recent may also appear under its source. A row is one model through one source, however many accounts list it, never an account: the source, whether
-it is a subscription or paid by key, its window when known (an unknown window is omitted), `Unavailable` when no
+it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one:
+`OpenRouter · $4 in / $20 out`), its window when known (an unknown window is omitted), `Unavailable` when no
 account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
 and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps
 Settings' "(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings ›
-Accounts. The catalog suggests and never admits: any id can be used as typed. It is read when the capsule opens,
+Accounts and keys. The catalog suggests and never admits: any id can be used as typed. It is read when the capsule opens,
 never polled. Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the
 field, then leaves the search, then closes. A room's pick posts at once; Send waits for it, Panic never does.
 
@@ -638,15 +634,11 @@ meaning a reader has to obtain.
 ### A selected state is not exempt from contrast
 
 A **status hue** and a **status foreground** are different values, and the
-selected state of a control must use the foreground. Selected Advisory in the
-enforcement group once read `--amber` (`#f59e0b`) over a 12% amber wash: ~2:1 on the
-light surface, unreadable exactly when the owner had chosen it. The rule that
-closes this: a selected control takes a tone, a fill with its own ink that each theme
-defines (a chosen option the soft crimson, `--tone-crimson-soft` with its `-soft-ink`); a
-status colour reaches a control only through the `--status-*-fg` / `-bg` / `-border`
-triple, also defined per theme, and never through the raw hue token, which is not. A
-setting value carries no status tone at all: Advisory now takes the shared chosen-option
-tone (Status marks).
+selected state of a control must use the foreground: a selected control takes a tone, a fill
+with its own ink that each theme defines (a chosen option the soft crimson, `--tone-crimson-soft`
+with its `-soft-ink`); a status colour reaches a control only through the `--status-*-fg` / `-bg` /
+`-border` triple, also defined per theme, and never through the raw hue token, which is not. A
+setting value carries no status tone at all (Status marks).
 
 The same reasoning covers images. A colour baked into a `data:` URI cannot be
 themed, because a custom property cannot be interpolated into the URI string —
@@ -697,9 +689,9 @@ its timer pauses on hover or focus, and a non-expiring toast has a visible keybo
 The problem, needed restart or unconfirmed outcome stays in its authoritative view (a card, Updates record or
 in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
 never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
-place may end by itself, but where the line is its fact's only home (Costs' budget save) an error, a warning or a
-needed restart stays until the next save, or an edit of what it is about, replaces it. A current fact ends with its fact; unread ends when the message
-is shown; a retained record (Updates, history, the Settings save result, `Input saved`) lives with its record, with
+place may end by itself, but where the line is its fact's only home (a setting's row) an error, a warning or a
+needed restart stays until the row's next result, an edit or leaving its page. A current fact ends with its fact; unread ends when the message
+is shown; a retained record (Updates, history, `Input saved`) lives with its record, with
 no timer. Toasts and statuses older than this rule are checked against it when touched.
 
 Activity schedule rows use the same factual status rule: `active`, `disabled`,
@@ -1072,7 +1064,7 @@ this Project" came to be drawn six ways. The rule is therefore about intents.
 ### Chat authorship and System rows
 
 Voice follows authorship, not severity or transport. Model-authored replies use
-Ouroboros's assistant voice; host-composed commands, receipts and diagnostics use
+Ouroboros's voice; host-composed commands, receipts and diagnostics use
 System voice. A **System row** is a chat message with `role="system"`, in the
 yellow/amber system treatment or its task-card placement. `role` alone selects
 voice; `system_type` names the kind, not the author (the Project question and
@@ -1093,7 +1085,7 @@ A standalone System row exists only where nothing else can carry the fact: no mi
 can speak, no mind will read the message, the owner's own direct act, the
 runtime's state (a settings change saved outside the app: one
 `settings_changed` row per save, what changed and who changed it; the app's own
-Save publishes none), Main's Project lifecycle, or words signed by their author (a reminder, a
+writes publish none), Main's Project lifecycle, or words signed by their author (a reminder, a
 skill notice). It is one short typed mark in owner words, never a
 paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
 every host type stamped as a literal at its send site in one of these classes, with
@@ -1564,31 +1556,22 @@ recipient, opens another pane or manufactures activity.
 
 ### List editors
 
-A list editor is any section where the owner adds and edits entries in place:
-the Available subagents roster, MCP servers, custom keys.
+A list editor is a section where the owner adds and edits entries in place: setup's roster and
+keys, a tool server's headers. Settings draws a list as heads (§7 “Settings”).
 
-- A section-level add action acts from its group's header (§6). A list editor's
-  new entry appears at the end of its own group, is scrolled into view (the
-  shortest distance, without animation) and takes the caret in its first field.
-  A button that stays in view while the entry it made is born off-screen has not
-  finished its job. Remove hands the caret the same way to the entry now in its
-  place (the next, else the previous), or to the add action once the group is
-  empty, never to the page.
-- A freshly added entry is an invitation, not an error. Where a list editor
-  validates in the browser (today the Available subagents roster), the entry
-  shows a neutral hint in its own meta line until the owner tries to save; the
-  error then names the entry and stands beside it (the entry tinted with the
-  status pair, never dimmed), with the section-level line as the summary. A save
-  attempt judges the entries that existed then; one added afterwards is an
-  invitation again.
-- A per-entry on/off switch is a native `.ui-checkbox` leading that entry's
-  head, before its title, with its own accessible name and pointer target. It
-  is a draft like every other field — the section's Save is the one writer, and
-  no entry saves on its own click. An entry switched off is not dimmed, locked
-  or removed: it keeps every control editable and its own status reading, and
-  the switch never merges into the availability axis beside it.
-- A multi-field card (an MCP server) follows the add-and-reveal rule without
-  adopting the §6 row anatomy.
+- A new entry, added from its group's header (§6), appears at the end of its own group, is
+  scrolled into view (the shortest distance, without animation) and takes the caret in its
+  first field; one saved from its own page is revealed in its list the same way. Remove hands
+  the caret to the entry now in its place (the next, else the previous), or to the add action
+  once the group is empty, never to the page.
+- A freshly added entry is an invitation, not an error: where a list validates in the browser
+  (setup's roster) it shows a neutral hint in its meta line until the owner tries to save; the
+  error then names the entry and stands beside it (tinted with the status pair, never dimmed),
+  the section-level line its summary, and an entry added later is an invitation again.
+- A per-entry on/off switch is a `.ui-switch` closing that entry's head and acts at once (a
+  `.ui-checkbox` in setup's form), with its own accessible name and target. An entry switched
+  off is not dimmed, locked or removed: it stays editable and keeps its own status, and the
+  switch never merges into the availability axis beside it.
 
 ### Reviews inside task cards
 
@@ -1819,7 +1802,7 @@ granted in Skills`; an enabled reader missing its grant explains that it cannot 
 are granted), and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
 the enabled readers: they may use the new value at their next call, some keep the old one until disabled and
 re-enabled. Skills › Installed shows an enabled skill's unset (or unreadable) declared secret as one
-neutral tray with `Open Secrets`; an unset one also lists it under Needs you. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
+neutral tray with `Open Accounts and keys`; an unset one also lists it under Needs you. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
 refused, the form re-renders as Replace or Save and keeps the draft and focus. Close, Escape and a click outside hide
 the form, but wait for a save in flight, whose reply settles it (both Close buttons and `Enter secret…` are
 disabled while a save or cancel is in flight, for at most 15 s as on a quiz card: a save with no reply or no readable body by then is shown as unconfirmed (Save blocked, `Check status` offered, Close available, nothing resent), a stalled cancel frees the card's actions and a stalled status read offers `Check status`; the call itself is never abandoned, and its late reply still settles the request but never rewrites a form it was not made for); only the card's `Cancel request` cancels. A finished task's card keeps both actions and says that saving
@@ -2141,8 +2124,8 @@ Money keeps card scope: confirmed zero is `$0.00`, an unavailable amount is
 “spend unknown”; known parts retain “Tracked:” and “up to”.
 Open accounting keeps “so far”; it is no final total.
 The allowance's “Some calls have no price” and “next check at” promise no admission.
-Visible and accessible words agree. The allowance is edited only in Costs › Budget, behind a door line;
-own tasks and conversations stay in Settings. A wake held at the allowance it started with says so without a
+Visible and accessible words agree. The allowance is edited only in Costs › Budget, behind a door row; its other
+settings are rows of this tab. A wake held at the allowance it started with says so without a
 clock; beneath it, quieter: Resume keeps that limit, a higher allowance does not raise it, Stop now frees the clock.
 
 “Open in Main ↗” lands on the card Main draws, else finds it through around-history; a focus door
@@ -2211,8 +2194,8 @@ where it was confirmed.
 
 Empty notes ask: “Who am I here? What may I do? What calls me at once? What matters
 here? What must I never do? What do you want to see afterwards?” Hints are never saved.
-Below notes, Full adds “Ouroboros reads your words every time; the Safety Supervisor reads them before
-actions.” Light: “before some actions”; Off: “the Safety Supervisor is off.”
+Below notes, + Commands adds “Ouroboros reads your words every time; the Safety Supervisor reads them before
+actions.” Outgoing: “before some actions”; Off: “the Safety Supervisor is off.”
 All add “Silent and Paused are locks; words are not.” Absent Safety keeps the old
 explanation. Notes retain authorship.
 
@@ -2714,14 +2697,14 @@ a server entry):
    an instant is humanized. A row never leads with a raw ISO timestamp.
 6. **Actions** — docked right in a slot of their own, legible at rest. An action
    rendered at secondary ink reads as disabled: its label is `--text-primary` (a
-   setting's name and an unchosen option take the secondary ink, bible principle 4).
+   capsule's name and an unchosen option take the secondary ink, bible principle 4).
 
 **A row's words follow bible principle 7.** Its primary choices and owner actions stay
 visible and a value keeps its honest form (`up to`, `Tracked:`, unknown). Accounts keeps
 an explicit store failure in view, metrics under Diagnostics and exact program text under
 Details.
-A rule every row shares is said once for the section, an unsaved draft once by the editor
-or its host page, and a checked box is not re-said beside it. A conditional line never
+A rule every row shares is said once for the section, an unsaved draft once by its editor,
+and a checked box is not re-said beside it. A conditional line never
 moves the control that caused it.
 
 The result of an action sits in the row of its control, right after it, on a line
@@ -2742,13 +2725,14 @@ instead, and let the status text carry the claim.
 
 ## 7. Onboarding density
 
-Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider's card (the built-in Default, then the keys added with the card's Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, Disable/Enable and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
+Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider (the built-in Default, then the keys added with Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, its on/off and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
-confirming sheet says it before it writes Main; it forecasts no tokens
-or cost. The account is a property of that role: Auto
+confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
+published price per 1M tokens where it states one (`$4 in / $20 out`), which never sorts or filters the list;
+nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
@@ -2880,9 +2864,28 @@ stops clear of them.
 - Field labels are sentence case at meta ink: a step shows a dozen at once to
   get one value typed, not to present a grid of headings.
 
-### Advanced settings
+### Settings
 
-The panels a new owner opens first (Models, Providers, Agents, Behavior) show only what an owner touches in the first week. Anything a typical owner never needs or must look up to use safely lives under Advanced: deployment plumbing (bind hosts, process pools, runtime limits), transport and trust knobs such as the extra CA bundle, MCP servers, and the rarely used provider cards, which stay on the Providers page but fold under "More providers". A control needing a paragraph of explanation to be safe is Advanced by definition. Seams: the `advanced` settings panel and the `advanced: true` flag in `web/modules/settings_provider_cards.js` (DEVELOPMENT "Onboarding and Settings surfaces").
+**A row is a question with its current answer, and a setting has one row** (§6); its one line says what it
+means and what a change did, and a paragraph waits behind `More`. The home is Ouroboros's card, search and six
+groups of rows; a wide window keeps it beside the open page, whose first row is Back. A row opens its page or is a
+door: what lives elsewhere (a Dashboard tab beside its live state, Main's composer) shows its value here and leads
+there, and a tab or page opened from here leads back. A list of entries (agents, tool servers, keys, fallbacks) is heads:
+a press opens the entry's page, Add an unsaved one. The card speaks in Ouroboros's voice: what it has read that
+waits for the owner here, each with its one action, and a neutral Check for what it has not read.
+
+**No page-wide Save, no page draft.** A switch (an entry's too), a strip and a choice act when pressed; a typed
+value is written when its field is left, and its line says `Saved`, the value it replaced and `Undo` (a
+secret: `Saved` alone). A change that waits says when in that line, as the server answers: from the next model
+call or wake, to new tasks, after restart, on the local model's restart; while a restart waits the row shows both
+values. A refusal keeps the typed text and says why. Raising Access, lowering a Safety level, opening to the
+network, turning automatic grants on and a removal ask first. An editor of several fields and the owner's rules
+keep their own Save.
+
+**More and Advanced.** A page's rare rows fold under one `More` that names what it holds; what an install rarely
+changes is This computer › Advanced. One word names one thing on a page. Search is literal over names,
+old names and keys and ends by handing the words to Ouroboros as a draft in Main; an address no page registers
+opens the home with its word searched.
 
 ## 8. Author freedom
 
@@ -2908,7 +2911,7 @@ engineering rules; no second policy list may exist.
 never *look, I am still working*. It exists so the owner can leave the window
 and still be reached by a question or a finished task.
 
-**Startup & background.** Behavior owns host lifecycle choices; Appearance is client-local. Sign-in startup is opt-in and names the host computer, also in remote clients. OS registration is truth, never a saved-settings guess: another copy, OS-disabled entry and unavailable build remain visible. Automatic startup preserves Panic and saved pauses; an explicit owner start releases Panic. *Keep Ouroboros running in the background when the window is closed* is also opt-in, stored on the host. First close asks once whether to keep tasks, schedules and Telegram running; its answer sets the checkbox, dismissal quits. macOS uses Keep running/Quit; Windows uses standard OK/Cancel and explains which keeps running. Closing with background on hides only behind a live indicator, so a hidden process always has a visible way back; otherwise it quits. Windows keeps one icon even with background/notifications off: after runtime and PID-lock/automatic-start checks, before Git/bootstrap. macOS shows its menu-bar item and Dock while background is on. The menu names starting, confirmed work, errors, unconfirmed activity or no answer; it offers Open, Panic and Quit. Early Panic stops installation work, including the retained daemon, and persists the stop marker; failed stops/writes are disclosed. Quit, Cmd+Q and sign-out quit unasked. Automatic start hides only with both checkboxes on and a live indicator; opening during boot shows the window. There is no separate start-minimized setting. Linux says background is unavailable and closes to quit. Android retains automatic boot by default with Panic preservation. This card is last on Behavior; browser/Docker hosts explain it without offering unsupported controls. Unavailable controls explain why in meta ink, without a warning dot; duplicate reasons appear once after both. Changeable states (another copy, OS-disabled entry) use warning; failed reads/writes use error. Notes align with checkbox text, status dots hang beneath the checkbox.
+**Startup & background.** Sign-in startup is opt-in and names the host computer, also in remote clients. OS registration is truth, never a saved-settings guess: another copy, OS-disabled entry and unavailable build remain visible. Automatic startup preserves Panic and saved pauses; an explicit owner start releases Panic. *Keep running when the window is closed* is also opt-in, stored on the host. First close asks once whether to keep tasks, schedules and Telegram running; its answer sets the switch, dismissal quits. macOS uses Keep running/Quit; Windows uses standard OK/Cancel and explains which keeps running. Closing with background on hides only behind a live indicator, so a hidden process always has a visible way back; otherwise it quits. Windows keeps one icon even with background/notifications off: after runtime and PID-lock/automatic-start checks, before Git/bootstrap. macOS shows its menu-bar item and Dock while background is on. The menu names starting, confirmed work, errors, unconfirmed activity or no answer; it offers Open, Panic and Quit. Early Panic stops installation work, including the retained daemon, and persists the stop marker; failed stops/writes are disclosed. Quit, Cmd+Q and sign-out quit unasked. Automatic start hides only with both switches on and a live indicator; opening during boot shows the window. There is no separate start-minimized setting. Linux says background is unavailable and closes to quit. Android retains automatic boot by default with Panic preservation. This card leads This computer; browser/Docker hosts explain it without offering unsupported controls. Unavailable controls explain why in meta ink, without a warning dot; duplicate reasons appear once after both. Changeable states use warning; failed reads/writes use error.
 
 Panic sends immediately, without confirmation or an ordinary chat bubble. Acceptance clears only unchanged sent command text; unknown/refused delivery keeps it. Newer edits, reply and attachments stay. Desktop uses its independent stop bridge, also while the socket reconnects: no veil covers the app or its Panic. Browser uses its captured socket, never a queue/reconnect. Missing acceptance says “Panic was not confirmed”, pointing desktop to its tray/menu bar and browser to the host computer.
 
@@ -3074,15 +3077,13 @@ browser click cannot unhide the window. A visible window keeps the browser banne
 Attention cues prove no system delivery; unsupported and legacy launchers fall
 back as described above.
 
-**Settings.** The controls live on **Settings → Appearance**, under the theme
-block, and are stored per address: the desktop window and each browser keep their
+**Settings.** The controls are **Settings → Notifications**, stored per address: the desktop window and each browser keep their
 own, another port starts from the defaults, and nothing reaches the server. Under Sound,
 **App tone volume** controls only the app tone, never system volume. Automatic
 fallback requires a client that can report positive system permission and sound
 settings (currently macOS); elsewhere the control affects Preview only. Moving
 it is silent; **Preview tone** explicitly plays the chosen tone, even without
-notification permission, but not with Sound or notifications off. Both use the
-existing controls and button styles, not another panel. A test
+notification permission, but not with Sound or notifications off. A test
 button is the honest way to see what this system actually does with a
 notification, including a denied permission, and in the desktop app it is the
 gesture that lets the system ask. The status line names the surface this client
@@ -3393,7 +3394,7 @@ System appearance, and respects Telegram's safe areas on all four sides
 (`web/modules/host_telegram.js`). Everything else is the same page.
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
-page and every Settings tab in WebKit and Chromium at 360, 390, a Telegram-like
+page and Settings' home and pages in WebKit and Chromium at 320, 360, 390, a Telegram-like
 390 × 780, 719, 720, 721, 1280 and short windows (no page scrolls sideways, coarse
 targets reach 44 px, default-width bars stay one row, one scroller per sidebar, Projects
 scroll by touch); `tests/test_shell_layout_static.py`,

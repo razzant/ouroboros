@@ -39,7 +39,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.force_remove import force_rmtree as _force_rmtree  # the shared permission-granting removal
-from ouroboros.utils import atomic_write_json, utc_now_iso, write_bytes_atomic
+from ouroboros.utils import atomic_write_json, fsync_folder, utc_now_iso, write_bytes_atomic
 from ouroboros.config import DATA_DIR, get_subagent_worktree_root
 from ouroboros.retention import age_cutoff, get_gc_retention_days
 from ouroboros.unindexed import copy_path  # new checkouts are born where desktop search skips them
@@ -243,15 +243,16 @@ def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str,
     digest, where the bytes are kept) are synced. Its absence is what "imported" means, so a restored
     snapshot or an older body's write is imported at the next start. Unreadable bytes are reported and
     kept the same way (``rows: None``): their copies have no record and show as unregistered in the
-    owner's Free action. Returns the receipt, ``{"busy": True}`` while another process imports, ``None`` with no file."""
+    owner's Free action. Returns the receipt; ``{"busy": True}`` while another process imports, or
+    ``{"error": "lock_<reason>"}`` when no lock can be taken (the file waits either way); ``None`` with no file."""
     legacy, root = _legacy_registry_path(data_dir), _data_dir(data_dir)
     if not legacy.is_file():
         return None
-    lock = _records_dir(data_dir) / ".legacy-import.lock"
-    fd = acquire_exclusive_file_lock(lock, timeout_sec=0.0, stale_sec=_LOCK_STALE_SEC,  # a start never waits here
+    lock, outcome = _records_dir(data_dir) / ".legacy-import.lock", {}
+    fd = acquire_exclusive_file_lock(lock, timeout_sec=0.0, stale_sec=_LOCK_STALE_SEC, outcome=outcome,  # never waits
                                      metadata=f"pid={os.getpid()} op=legacy_import", owner_aware_stale=True)
     if fd is None:
-        return {"busy": True}
+        return {"busy": True} if outcome.get("reason") == "contention" else {"error": f"lock_{outcome.get('reason')}"}
     try:
         if not legacy.is_file():
             return None
@@ -272,12 +273,8 @@ def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str,
         receipt = {"at": utc_now_iso(), "rows": rows, "moved": moved, "legacy_sha256": digest,
                    "kept": kept.relative_to(root).as_posix()}
         atomic_write_json(_records_dir(data_dir) / ".legacy-import.json", receipt, trailing_newline=True, fsync=True)
-        for folder in () if os.name == "nt" else (kept.parent, _records_dir(data_dir), legacy.parent, root):
-            sync = os.open(folder, os.O_RDONLY)  # the new names too: a failure keeps the original (Windows syncs no folder)
-            try:
-                os.fsync(sync)
-            finally:
-                os.close(sync)
+        for folder in (kept.parent, _records_dir(data_dir), legacy.parent, root):  # the new names too; a failure keeps
+            fsync_folder(folder)  # the original (where no folder can be synced, file-level durability is the limit)
         legacy.unlink()
         return receipt
     finally:

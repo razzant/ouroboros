@@ -80,6 +80,8 @@ MagicMock/
 .review-evidence-iter2/
 # A delegated worker's evidence folder: generated diagnostics, never source (the candidate capture skips it)
 .review-evidence/
+# Test runs' evidence (scripts/safe_test.py writes <checkout>/../.test-evidence, inside any enclosing checkout)
+.test-evidence/
 
 # GAIA benchmark scratch: the in-repo solver/agent downloads task attachments and
 # writes OCR / extracted-image output into cwd (= repo root) during gaia runs.

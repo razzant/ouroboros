@@ -850,6 +850,22 @@ class ReviewPoolResponse(TypedDict):
 
 # --- Local model, MCP and the model catalog ----------------------------------------------------
 
+class ModelPriceTier(TypedDict):
+    """From ``min_prompt_tokens`` input tokens on, a request is charged these USD per 1M tokens."""
+
+    min_prompt_tokens: int
+    input: float
+    output: float
+
+
+class ModelPrice(TypedDict, total=False):
+    """A catalog's published token price, USD per 1M tokens; ``tiers`` only when input length changes it."""
+
+    input: Required[float]
+    output: Required[float]
+    tiers: List[ModelPriceTier]
+
+
 class ModelCatalogItem(TypedDict, total=False):
     """One selectable model. ``value`` is what a model setting stores: the raw id for OpenRouter,
     ``<provider_id>::<id>`` for another API provider, ``<kind>@<name>::<id>`` for a named API
@@ -882,6 +898,7 @@ class ModelCatalogItem(TypedDict, total=False):
     problem: Any
     processing: Any
     use_local: bool
+    price: ModelPrice  # OpenRouter rows only, when the catalog states both token prices and no per-request fee
 
 
 class ModelCatalogResponse(TypedDict, total=False):
@@ -917,7 +934,7 @@ class LocalModelStartRequest(TypedDict):
     filename: NotRequired[str]  # required for a repo
     port: NotRequired[int]  # default 8766
     n_gpu_layers: NotRequired[int]  # default -1
-    n_ctx: NotRequired[int]  # 0 means 16384
+    n_ctx: NotRequired[int]  # 0 means the factory LOCAL_MODEL_CONTEXT_LENGTH
     chat_format: NotRequired[str]
 
 
@@ -1332,6 +1349,7 @@ __all__ = [
     "ClaudexorQuotaRefreshRequest", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
     "ClaudexorAccountResetReceipt", "ClaudexorLoginRequest", "ClaudexorLoginInputRequest",
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
+    "ModelPriceTier", "ModelPrice",
     "ModelCatalogItem", "ModelCatalogResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
     "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",

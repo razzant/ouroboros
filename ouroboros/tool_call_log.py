@@ -12,7 +12,10 @@ same frozen facts:
   the start), with the host-measured ``elapsed_ms`` of the whole call, distinct
   from a process's own ``duration_ms``. ``status`` is the outcome bucket and
   ``tool_result_code`` the exact published code; a call a control ended before its
-  handler returned is ``interrupted`` with its ``control_reason``.
+  handler returned is ``interrupted`` with its ``control_reason``. A row the host
+  settles itself (``host_error``, ``interrupted``, a refused browser call) carries
+  no handler bucket or code; a pause can also refuse a launch through the handler,
+  whose typed refusal names it in ``tool_result_meta.control_reason``.
 - ``tool_call_timeout`` — the caller's wait ended; the worker may still settle
   later. Timeout and settlement are independent facts and may land in either order.
   It names where the worker stood at that moment (``worker_position``), so an
@@ -45,12 +48,18 @@ CALL_WAIT_ENDED = "tool_call_timeout"
 # a control that ended the call (Pause, Cancel, a deadline), named in the row's ``control_reason``.
 HOST_INTERRUPTED = "interrupted"
 HOST_SETTLED_STATUSES = frozenset({"host_error", HOST_INTERRUPTED})
-_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status")
+_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status", "chronicle_lead_rule")
 _ACTIVE_CALL = ContextVar("active_tool_call", default=None)
 
 
 def current_tool_call_id() -> str:
     return str((_ACTIVE_CALL.get() or {}).get("tool_call_id") or "")
+
+
+def chronicle_lead_metadata() -> Dict[str, Any]:
+    """The producing attempt's lead fact, frozen before this worker was submitted."""
+    rule = (_ACTIVE_CALL.get() or {}).get("chronicle_lead_rule")
+    return {"lead_rule": rule} if rule is not None else {}
 
 
 def current_args_source() -> Dict[str, Any]:

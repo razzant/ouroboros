@@ -43,7 +43,8 @@ starts, counted up to the turn's first model request, where the driver refuses t
 history it must not reread (tests/_turn_shapes.py) is the old memory folded by parts, the archived dialogue sealed
 by pages and rooms sealed after the frontier, met in the steady state a long-lived install keeps (the tail facts
 stored, the OpenRouter catalogue recorded). L1: a project room's turn does the same work at k=1 and k=30; L2:
-Main's turns make the same round trips and decode the same rows (their payload is delivered once: Main shows its story);
+integrating turns make the same round trips apart from the stored tail's exact page reads and the recent sections'
+exact archive backfill, and decode the same rows (their payload is delivered once: Main shows its story);
 L3/L4 (k=1): after 40 live rooms and 10 running roots, 650 open rows, or 40 archived knowledge notes and old
 rescue snapshots, only the dialogue's page reads may grow, by B9's allowance per page (their statements by the
 lease's per transaction); L5: each turn reaches its request and nothing it does reaches the network; L6: the
@@ -52,7 +53,8 @@ no piece or whole render of the view and no form of the request is produced twic
 texts delivered (the walk builds a piece's text once per key to price it and keeps only its length), whole-request
 serializations equal the request's forms at every size, a capture reads what it shows and what is new, a chronicle
 record is parsed once. A breach in today's code is a ``TURN_GAPS`` row (tests/_turn_law.py): a
-strict xfail with its numbers, its remover or why it has none, and a ceiling its growth may not pass.
+strict xfail (non-strict for a host-dependent row) with its numbers, its remover or why it has none, and a ceiling its
+growth may not pass.
 The first turn's census of the host's processes is the host's, not the history's: tests/test_cost_host.py. The law's second axis,
 every recurring pass against the live set rather than history, is tests/test_cost_live_set.py.
 """
@@ -364,6 +366,8 @@ ROUND = ("connect", "begins", "statements", "lock_acquired", "open", "os_open", 
 # turn before made (the lease's, not a constant). A lock, a connection, a file or a child per room, root or row is
 # a breach.
 ROWS_PER_PAGE = 500  # the memory's chat reader reads rows a page at a time (``chat_chain``)
+TAIL_PAGE = 2_000  # the stored tail is read a page of rows at a time (``chronicle_store._TAIL_PAGE``)
+ARCHIVES_BACKFILLED = 3  # the recent sections open at most this many newest archives of a log (``jsonl_tail``)
 MAIN_TURNS = ("T:main", "T:mainw", "T:main:foreign")
 BREADTH_TURNS = ("T:main:broad", "T:main:rows", "T:main:archive:first", "T:main:archive")  # the k=1 root only
 
@@ -380,6 +384,38 @@ def _growth(before: Dict[str, Any], after: Dict[str, Any], keys: Iterable[str]) 
     return {key: after["counts"].get(key, 0) - before["counts"].get(key, 0) for key in keys}
 
 
+def _round_trips(measured: Dict[Any, Any], tag: str, k: int) -> Dict[str, Any]:
+    """``tag``'s count at its request at size ``k`` apart from two terms of the root, each checked exactly first at the
+    sizes pinned above. The stored tail's page reads: one statement per ``TAIL_PAGE`` stored rows plus the empty end
+    page. That is the whole-tail read, which grows with the stored tail for every integrating turn; L7d names it as
+    debt for Main's first turns only. The recent sections' archive backfill (``Memory.read_task_recent``): a turn's own
+    task is new, so each log they read opens its newest archives, as many as the boot's listing holds up to
+    ``ARCHIVES_BACKFILLED`` (the small root holds two of the tools log, a larger one dozens). Both sizes are pinned
+    here, not read from the product: a smaller page or a larger backfill is more work per unit of history."""
+    from ouroboros.chronicle_store import _TAIL_PAGE
+    from ouroboros.jsonl_tail import ARCHIVE_BACKFILL_MAX
+
+    assert (_TAIL_PAGE, ARCHIVE_BACKFILL_MAX) == (TAIL_PAGE, ARCHIVES_BACKFILLED), (
+        "L2 sets the stored tail's pages and the archive backfill apart at the sizes pinned here; a smaller page or a "
+        "larger backfill is more work per unit of history, so a change of either is judged here, not followed",
+        _TAIL_PAGE, ARCHIVE_BACKFILL_MAX)
+    entry = at_request(measured, tag, k)
+    work = entry["view"]["work"]
+    stored = work["rows_read"] - work["rows_new"]
+    pages = sum(amount for source, amount in entry["callers"].items()
+                if source.startswith("statements <- ") and "ouroboros.chronicle_store._tail_rows" in source.split(" <- "))
+    assert pages == -(-stored // TAIL_PAGE) + 1, ("stored tail pages", pages, stored, TAIL_PAGE)
+    held = measured[k]["turn_shapes"]["steady"]["listings"]["archives"]
+    backfill = sum(amount for source, amount in entry["callers"].items() if source.startswith("open:archive <- ")
+                   and "ouroboros.memory.read_task_recent" in source.split(" <- "))
+    assert backfill == sum(min(ARCHIVES_BACKFILLED, count) for count in held.values()), (
+        "archive backfill", backfill, held, {source: amount for source, amount in entry["paths"].items()
+                                             if source.startswith("open archive/")})
+    counts = {**entry["counts"]}
+    counts["statements"], counts["open"] = counts["statements"] - pages, counts["open"] - backfill
+    return {**entry, "counts": counts}
+
+
 @pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L2", tag))
                                  for tag in (*MAIN_TURNS, "T:room")])
 def test_b10_an_integrating_turn_makes_the_same_round_trips_at_every_size(measured, tag):
@@ -387,10 +423,11 @@ def test_b10_an_integrating_turn_makes_the_same_round_trips_at_every_size(measur
     Main's (the process's first, the next one, one after activity elsewhere) and a project room's direct turn,
     which integrates as a root task does (BIBLE P1: the whole horizon stays resident there, so its view holds
     every room's story and a line per live room). Its payload is delivered once: an integrating view shows its story. The
-    transactions ``COUNT_JITTER`` lets come and go (which thread first remembers a turn's own lineage is timing)
-    bring their statements, as in L3; a read per unit of history still adds 29 transactions."""
+    stored tail's pages and the recent sections' archive backfill are checked exactly and apart (``_round_trips``).
+    The transactions ``COUNT_JITTER`` lets come and go bring their statements, as in L3; a read per unit of history
+    still adds 29 transactions."""
     large = measured["large"]
-    little, big = at_request(measured, tag, K_SMALL), at_request(measured, tag, large)
+    little, big = (_round_trips(measured, tag, k) for k in (K_SMALL, large))
     keys = (*ROUND, "rows_decoded")
     per_begin = little["counts"].get("statements", 0) / max(1, little["counts"].get("begins", 0))
     allowed = {**dict.fromkeys(keys, COUNT_JITTER), "statements": math.ceil(per_begin * COUNT_JITTER)}
@@ -516,6 +553,24 @@ def test_the_work_law_fails_a_breach_no_gap_names_and_excuses_only_its_own(monke
     for pairs in ({"verb(k=1)": (10, 3)}, {"other(k=1)": (2, 1)}):  # past its ceiling; a pair it does not name
         with pytest.raises(AssertionError, match="unexcused") as caught:
             hold_work_equal("Lx", "tag", pairs)
+        assert not isinstance(caught.value, TurnLawBreach)
+
+
+def test_a_host_dependent_gap_is_a_non_strict_xfail_that_still_fails_other_growth():
+    """The L3 broad row's excused growth depends on the host's own sections (a macOS development host: open +3; the Ubuntu
+    runner holds the law), so its xfail is not strict; every other row stays strict, and on that row growth it does
+    not name, or past its ceiling, still fails for real (a plain AssertionError)."""
+    from tests._turn_law import HOST_DEPENDENT_GAPS
+    assert HOST_DEPENDENT_GAPS == {("L3", "T:main:broad")}
+    for law, tag in TURN_GAPS:
+        [mark] = turn_gap(law, tag)
+        assert mark.kwargs["raises"] is TurnLawBreach and mark.kwargs["strict"] is ((law, tag) not in HOST_DEPENDENT_GAPS)
+    allowed = {"open": 0, "read_bytes": 0}
+    with pytest.raises(TurnLawBreach):
+        hold_turn_law("L3", "T:main:broad", {"open": 3, "read_bytes": 0}, allowed, [])
+    for growth in ({"open": 4, "read_bytes": 0}, {"open": 0, "read_bytes": 1}):  # past its ceiling; a counter not named
+        with pytest.raises(AssertionError, match="grew past its gap") as caught:
+            hold_turn_law("L3", "T:main:broad", growth, allowed, [])
         assert not isinstance(caught.value, TurnLawBreach)
 
 

@@ -94,7 +94,7 @@ The desktop packages already contain an optional CLI installer. On macOS, after 
 
 ### Reinstall, move or remove
 
-`~/Ouroboros` (data, memory and the code Ouroboros runs) is the installation; the app is a replaceable host. To replace or move the app, quit Ouroboros, put the new copy in place and open it: your data and code stay, and skill packages and sign-in startup follow the new copy at its next start. A new app changes only the bundled Python, SQLite and Node, never the code in `~/Ouroboros/repo`; in-app Update changes the code. **Settings → About** and the Updates page show both versions, and Ouroboros sees them in its host facts. Quit leaves the Claudexor engine running, by design.
+`~/Ouroboros` (data, memory and the code Ouroboros runs) is the installation; the app is a replaceable host. To replace or move the app, quit Ouroboros, put the new copy in place and open it: your data and code stay, and skill packages and sign-in startup follow the new copy at its next start. A new app changes only the bundled Python, SQLite and Node, never the code in `~/Ouroboros/repo`; in-app Update changes the code. **Settings → This computer → About** and the Updates page show both versions, and Ouroboros sees them in its host facts. Quit leaves the Claudexor engine running, by design.
 
 - **macOS:** drag the new `Ouroboros.app` onto Applications and choose Replace, then open it from Applications in Finder: Spotlight can take a while to list a new copy while it indexes. Do not run Ouroboros from the disk image.
 - **Windows:** keep the extracted folder in one permanent place and run it from there, never from inside the ZIP. To update, quit, remove the old folder and extract the new ZIP to the same place.
@@ -126,6 +126,18 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-osworld.svg" width="375" alt="OSWorld-Verified: Ouroboros against the public leaderboard, including the matched Claude Sonnet-4.6 pair"></a>
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-cl-bench.svg" width="375" alt="CL-Bench: Ouroboros against in-context learning baselines, Claude Code, and Codex on matched models"></a>
 </p>
+
+<!-- LLM rating card, for the README at the repository root. The image paths are relative to that README and stable: every edition overwrites the same files, so this block never needs editing. -->
+<p align="center">
+  <a href="https://ouroboros-agent.ai/llm-rating/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/llm-rating/card/latest-en-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="docs/llm-rating/card/latest-en-light.png">
+      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with, with a letter for each kind of work" src="docs/llm-rating/card/latest-en-light.png" width="880">
+    </picture>
+  </a>
+</p>
+<p align="center"><a href="https://ouroboros-agent.ai/llm-rating/"><b>What Ouroboros thinks of your LLMs</b></a>: my monthly ranking of the models I work with, and who I call for what.</p>
 
 ---
 
@@ -234,7 +246,7 @@ Chromium and WebKit binaries are bundled, but their distro-level shared librarie
 
 ### Connected coding subscriptions
 
-Use your existing **Codex, Claude Code, or Cursor subscriptions** for delegated coding and review. Ouroboros drives them through [Claudexor](https://github.com/razzant/claudexor), its bundled multi-harness engine. Connect accounts in **Settings → Accounts** and choose their roles in **Agents**; no separate Claudexor install is needed. Release artifacts carry the exact reviewed engine and Node archives. Source checkouts obtain those same pinned archives on first use.
+Use your existing **Codex, Claude Code, or Cursor subscriptions** for delegated coding and review. Ouroboros drives them through [Claudexor](https://github.com/razzant/claudexor), its bundled multi-harness engine. Connect accounts in **Settings → Accounts and keys** and choose their roles in **Agents**; no separate Claudexor install is needed. Release artifacts carry the exact reviewed engine and Node archives. Source checkouts obtain those same pinned archives on first use.
 
 ### Headless CLI with uv
 
@@ -475,13 +487,12 @@ The full component map, data flow, API surface, storage layout, safety boundary,
 
 ## Philosophy
 
-The 13 Constitution principles — Agency, Continuity, Meta-over-Patch,
-Immune Integrity, Self-Creation, LLM-First, Authenticity & Reality
-Discipline, Minimalism, Becoming, Versioning and Releases, the absorbed
-Iterations / Spiral lineage, and Epistemic Stability — are defined in
-full in [`BIBLE.md`](BIBLE.md). That file is the constitutional SSOT
-(Bible P4 Ship-of-Theseus protection) and this README intentionally does
-not paraphrase it.
+The Constitution's principles P0–P13 — Agency, Continuity, Meta-over-Patch,
+Immune Integrity, Self-Creation, LLM-First, Authenticity & Reality Discipline,
+Minimalism, Becoming, Versioning and Releases, the absorbed Iterations / Spiral
+lineage, Epistemic Stability and Emergence — are defined in full in
+[`BIBLE.md`](BIBLE.md). That file is the constitutional SSOT and this README
+intentionally does not paraphrase it.
 
 ---
 

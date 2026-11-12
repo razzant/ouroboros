@@ -1,7 +1,7 @@
 """What stays honest after the old dialogue writer is retired.
 
 An authored note with a summary still becomes resident in the index (Light no
-longer nominates notes at all); Health states when identity.md was last written as a
+longer nominates notes at all); Health states identity.md's last update record as a
 fact, passes no verdict on its length or the scratchpad's, and no longer reports the
 retired writer's state, whatever the frozen ``dialogue_meta.json`` holds (its pending
 nominations are imported as marks); and the frozen cursor is still read strictly, so an
@@ -10,7 +10,6 @@ unreadable file is never taken for an empty one.
 
 from __future__ import annotations
 
-import re
 from types import SimpleNamespace
 
 import pytest
@@ -39,14 +38,14 @@ def test_an_authored_note_with_a_summary_becomes_resident_in_the_index(tmp_path)
 
 
 def test_identity_age_is_a_plain_fact_and_memory_sizes_get_no_verdict(tmp_path):
-    """A four-character identity and a one-character scratchpad: the block says when identity.md
-    was written and nothing else about either file (the STALE/THIN/EMPTY/BLOATED verdicts and their
-    OK lines left with the owner's rule that no threshold stands in for judgment)."""
+    """A four-character identity and a one-character scratchpad: the block says what the journal holds
+    of identity.md's last update and nothing else about either file (the STALE/THIN/EMPTY/BLOATED verdicts
+    and their OK lines left with the owner's rule that no threshold stands in for judgment)."""
     env = _health_env(tmp_path)
     (tmp_path / "memory" / "identity.md").write_text("thin", encoding="utf-8")
     (tmp_path / "memory" / "scratchpad.md").write_text("x", encoding="utf-8")
     text = context_health.build_health_invariants(env)
-    assert re.search(r"^- identity\.md last updated \d+\.\d h ago$", text, re.MULTILINE)
+    assert "- identity.md: no update_identity record" in text.splitlines()
     for verdict in ("STALE IDENTITY", "THIN IDENTITY", "EMPTY SCRATCHPAD", "BLOATED SCRATCHPAD", "OK:", "scratchpad"):
         assert verdict not in text, verdict
     (tmp_path / "memory" / "identity.md").unlink()
@@ -70,7 +69,7 @@ def test_health_carries_no_retired_dialogue_writer_state(tmp_path, meta):
     else:
         atomic_write_json(path, meta)
     text = context_health.build_health_invariants(env)
-    assert "DIALOGUE" not in text and "OK:" not in text and "identity.md last updated 0.0 h ago" in text
+    assert "DIALOGUE" not in text and "OK:" not in text and "identity.md: no update_identity record" in text
 
 
 def test_frozen_cursor_reads_strictly(tmp_path):
