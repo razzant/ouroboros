@@ -416,7 +416,7 @@ def test_inline_inventory_migrates_to_a_base_of_the_transition_chain(clock, vers
 @pytest.mark.parametrize(("restart", "failure"), [(False, 'readback'), (True, 'write'), (True, 'bootstrap_write')])
 def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, failure, restart):
     from ouroboros import artifacts, chat_chain
-    from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness import OBSERVATION_BOOTSTRAP_STATE_KEY, OBSERVATION_STATE_KEY
     from tests.test_consciousness_wake import _write
 
     _chat_row(root=clock.root, ts=_iso(T0 - 1), direction='in', chat_id=1, source='web', text='before bootstrap')
@@ -427,7 +427,6 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
             fault.setattr(artifacts, 'read_actor_source_bytes', lambda *a, **kw: b'bad readback')
         if failure == 'bootstrap_write':
             from supervisor import state
-            from ouroboros.consciousness import OBSERVATION_BOOTSTRAP_STATE_KEY
 
             update = state.update_state
 
@@ -447,6 +446,7 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
     monkeypatch.setattr(clock_module.time, 'time', lambda: finish_at)
     clock.finish('wake0001', not restart)
     assert not clock.store.get(OBSERVATION_STATE_KEY)  # the failed source rode no accepted boundary to the clock
+    assert clock.store[OBSERVATION_BOOTSTRAP_STATE_KEY] == T0  # nothing accepted: the bootstrap stays
     alarm = BackgroundConsciousness(clock.root, clock.root / 'repo', lambda: 7, now=finish_at + 1) if restart else clock.clock
     clock.receipt['task_id'] = 'wake0002'
     assert alarm.tick(alarm.next_wake_at) == 'launched'
@@ -455,6 +455,9 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
     assert 'before bootstrap' not in _observed(clock)
     clock.finish('wake0002', True, alarm=alarm)
     assert clock.store[OBSERVATION_STATE_KEY]
+    # An accepted boundary moves the bootstrap to its capture: a body without the chain reader starts there.
+    captured = clock_module.parse_deadline_ts(clock.store[OBSERVATION_STATE_KEY]['captured_at']).timestamp()
+    assert clock.store[OBSERVATION_BOOTSTRAP_STATE_KEY] == captured == alarm._observation_bootstrap_since > T0
     clock.receipt['task_id'] = 'wake0003'
     assert alarm.tick(alarm.next_wake_at + DEFAULT) == 'launched'
     assert 'during first wake' not in _observed(clock)

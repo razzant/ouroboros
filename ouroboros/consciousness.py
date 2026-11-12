@@ -584,6 +584,11 @@ class BackgroundConsciousness:
             accepted = bound.get("accepted_boundary") if isinstance(bound, dict) else None
             if isinstance(accepted, dict) and accepted.get("task_id") == task_id:
                 self._set_state(OBSERVATION_STATE_KEY, accepted)
+                # A body that cannot read the boundary's transition chain bootstraps by time from this capture,
+                # never from the installation's first start; persisted with the settlement below.
+                captured = parse_deadline_ts(accepted.get("captured_at"))
+                if captured is not None:
+                    self._observation_bootstrap_since = captured.timestamp()
             if ok:
                 pause = (row or {}).get("budget_pause") or {}
                 owner_pause = (row or {}).get("owner_pause") or {}
