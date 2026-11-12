@@ -27,6 +27,8 @@ def open_settings(page, path: str = "", row: str = "", *, timeout: float = 10_00
     assert opened is not False, f"Settings refused to open {path!r}"
     level = settings_page(page, path)
     level.wait_for(state="visible", timeout=timeout)
+    if row:
+        level.locator(f'[data-setting-row="{row}"]').wait_for(state="visible", timeout=timeout)
     return level
 
 
