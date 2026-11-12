@@ -1068,11 +1068,11 @@ def _stop_after_llm_error(ctx: _LlmErrorContext) -> bool:
         # drains them and rebuilds, same route and round (#2996 joins Main follow-ups to this turn). Words a yield already
         # met cannot wake again (a row that drain leaves unread); a timeout repeat resends its own bytes.
         unread = None if timed_out else ctx.owner_input_check
-        fresh = (lambda: (ids := unread()) and ids != accumulated_usage.get("_owner_words_met")) if unread else None
+        fresh = (lambda: not set(unread()) <= set(accumulated_usage.get("_owner_words_met") or ())) if unread else None
         if _sleep_within_deadline(backoff, ctx.deadline_ts, **({"wake_check": fresh} if fresh else {})):
             return False
         if fresh is not None and fresh():  # woken for them, or out of time: the round start reads them first
-            accumulated_usage["_owner_words_met"] = unread()
+            accumulated_usage["_owner_words_met"] = [mark for mark in unread() if mark != "direct_incoming"]  # drained
             append_jsonl(ctx.drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "llm_not_dispatched", "task_id": ctx.task_id,
                          "round": ctx.round_idx, "model": ctx.model, "reason_code": OWNER_WORDS_WAITING, "error_kind": error_kind})
             raise ModelWaitInterrupted(OWNER_WORDS_WAITING)

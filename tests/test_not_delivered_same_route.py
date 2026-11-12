@@ -294,4 +294,21 @@ def test_unread_input_a_yield_already_met_wakes_no_second_repeat(tmp_path, monke
     assert call(["stuck"]) == (None, 0.0) and llm.calls == 4  # the same unread row: an ordinary burst
     with pytest.raises(ModelWaitInterrupted):
         call(["new", "stuck"])  # new words still end the wait
-    assert llm.calls == 5
+    assert llm.calls == 5 and call(["stuck"]) == (None, 0.0) and llm.calls == 8  # the met stuck row alone: a burst
+
+
+@pytest.mark.parametrize("unread", [["m-1"], []])
+def test_waiting_words_yield_even_when_the_deadline_refuses_the_repeat(tmp_path, monkeypatch, slept, unread):
+    """Out of time for the 4 s repeat: waiting words still yield, so the round start reads them before its deadline rail
+    refuses another send; without them the repeat stops as deadline-exhausted, as before."""
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    llm, usage = _ScriptedLLM(fail_times=99), {}
+    try:
+        call_llm_with_retry(llm, [{"role": "user", "content": "hi"}], "test-model", None, "low", 3, tmp_path, "t-nd", 1,
+                            None, usage, deadline_ts=time.time() + 5, owner_input_check=lambda: unread)
+        yielded = False
+    except ModelWaitInterrupted:
+        yielded = True
+    assert (yielded, llm.calls, slept) == (bool(unread), 1, [])
+    assert (RETRY_WALL_EXHAUSTED_KEY in usage) is not bool(unread)
