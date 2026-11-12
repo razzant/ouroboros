@@ -85,7 +85,7 @@ def get_tools() -> list[ToolEntry]:
                        "Only your human switches a place to Active, on its sheet or by a word in Main; propose it there. "
                        "Only an owner-door turn may confirm an owner account. When your human changes a standing "
                        "instruction for a place, remove or replace the superseded note in this turn. Safety checks read "
-                       "the current notes of places the host identifies for the call. A note that is their exact "
+                       "the current notes of places the host identifies for each call. A note that is their exact "
                        "words, written in an owner-door turn, is recorded as theirs; your summary is recorded as "
                        "yours and is no instruction of theirs. "
                        "Circles group places under shared words every place in one inherits beside its own notes: "
