@@ -697,25 +697,29 @@ def test_an_unexamined_result_is_noticed_once_and_an_examined_one_is_not(turn, m
     assert ("verification_red_unreconciled" in warnings) is (after_write == "red_check"), warnings
 
 
-def test_a_bound_result_review_examines_what_it_was_bound_to_not_a_later_change():
-    """A result review counts as the examination of the result as it stood when it was bound (its position in the
-    turn): a change after the binding is unexamined again, and a run bound beside the delivered bytes as an
-    earlier version's examines nothing delivered. A run recorded before positions existed counts as before."""
+def test_only_a_current_bound_result_review_examines_the_result():
+    """A bound result review speaks for the subject it was bound to. The next delivery candidate supersedes it (a
+    change after it is unexamined again), a run of an earlier version stands beside the delivered bytes as that
+    version's, and a $0 refusal examined nothing; the exact subject delivered again is current again."""
     from ouroboros.outcomes import result_unexamined
-    from ouroboros.tools.review_result import _bind_review_run
+    from ouroboros.tools.review_result import _bind_review_run, supersede_result_runs
+
+    def record(aggregate="PASS"):
+        return {"record_id": "r1", "verdict": {"aggregate": aggregate}, "subject": {"diff_sha": "s1"}}
 
     write = {"tool": "write_file", "status": "ok", "args": {"path": "report.md"}}
     trace = {"tool_calls": [dict(write)], "review_runs": []}
-    run = _bind_review_run(trace, {"record_id": "r1", "verdict": {"aggregate": "PASS"}, "subject": {"diff_sha": "s1"}},
-                           "s1", "advisory")
-    assert result_unexamined(trace) is False, "bound after the write: it examined this result"
+    run = _bind_review_run(trace, record(), "s1", "advisory")
+    assert result_unexamined(trace) is False, "bound to this result"
     trace["tool_calls"].append(dict(write))
+    supersede_result_runs(trace, "candidate-2")  # the next door's candidate, before its notice
     assert result_unexamined(trace) is True, "the result changed after the binding"
-    _bind_review_run(trace, {"record_id": "r1", "verdict": {"aggregate": "PASS"}, "subject": {"diff_sha": "s1"}},
-                     "s2", "advisory", earlier_revision=True)
+    _bind_review_run(trace, record(), "s2", "advisory", earlier_revision=True)
     assert run["earlier_revision"] and result_unexamined(trace) is True, "an earlier version's review"
-    trace["review_runs"] = [{"surface": "result"}]
-    assert result_unexamined(trace) is False, "a run recorded before positions existed"
+    _bind_review_run(trace, record(), "s1", "advisory")
+    assert result_unexamined(trace) is False, "the exact subject it reviewed is delivered again"
+    trace["review_runs"] = [{"surface": "result", "aggregate": "NOT_DISPATCHED"}]
+    assert result_unexamined(trace) is True, "a refusal dispatched no reviewer"
 
 
 def test_the_notice_shown_before_a_continuation_is_not_shown_again_after_it(tmp_path, monkeypatch):

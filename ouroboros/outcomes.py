@@ -311,10 +311,11 @@ def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
             return False
         if tool == "review_change" and str(args.get("subject") or "") == "result":
             return False
-    # A bound result review examined the result as it stood at its binding: one bound before the last change,
-    # or bound beside the delivered bytes as an earlier version's, does not examine what changed after it.
-    return not any(isinstance(run, dict) and run.get("surface") == "result" and not run.get("earlier_revision")
-                   and int(run.get("tool_calls_at_bind", last["index"] + 1)) > last["index"]
+    # Only a current bound review speaks for this result: every new delivery candidate supersedes the runs bound
+    # so far (``review_result.supersede_result_runs``), a run of an earlier version stands beside the delivered
+    # bytes as that version's, and a $0 refusal examined nothing.
+    return not any(isinstance(run, dict) and run.get("surface") == "result" and not run.get("superseded_by_revision")
+                   and not run.get("earlier_revision") and run.get("aggregate") != "NOT_DISPATCHED"
                    for run in llm_trace.get("review_runs") or [])
 
 
