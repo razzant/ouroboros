@@ -24,10 +24,13 @@ links to the nearest stored text, applying changes. When that path breaks: from 
 the note (a whole row, an inline old text, the live note) through the changes that connect it to the
 version by hash, applying or unapplying them. So a landed version of a connected segment is reachable
 from both of its ends, which are whole texts or the live note, and one damaged row loses no landed
-version; a capture that never landed lives only in its own row (its version was never the note's, so
-it is nobody's base). A miss is ``TextUnavailable``, naming where the path broke; a returned text
-always hashes to the version asked for. Rows stay uncompressed; nothing here writes, indexes or keeps
-anything beyond one ``Texts``.
+version. The live note is a segment's newer end only while it still holds the segment's last version:
+after an outside edit or a deleted note the next row has no verified base and keeps the outside text
+inline, so that segment reads only forward from its whole start, and a damaged row in it loses the
+versions after it (typed misses, never a wrong text). A capture that never landed lives only in its
+own row (its version was never the note's, so it is nobody's base). A miss is ``TextUnavailable``,
+naming where the path broke; a returned text always hashes to the version asked for. Rows stay
+uncompressed; nothing here writes, indexes or keeps anything beyond one ``Texts``.
 """
 from __future__ import annotations
 

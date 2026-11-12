@@ -314,6 +314,38 @@ def test_a_note_deleted_or_edited_outside_the_writer_makes_the_next_row_whole_wi
     every_version_reads(target, [a.text, b.text, outside.text, c.text, d.text])
 
 
+@pytest.mark.parametrize("closed_by", ["an outside edit", "a deleted note", None])
+def test_a_segment_closed_outside_the_writer_reads_only_forward_so_a_damaged_row_loses_the_versions_after_it(
+        tmp_path, closed_by):
+    """The live note is a segment's newer end only while it still holds the segment's last version. After an outside
+    edit or a deleted note the next row has no verified base and keeps the outside text inline, so the segment whole
+    A, change B, change C reads only forward from A: damaging B's row loses B and C, as typed misses, never a wrong
+    text. While the live note still holds C (and the next write takes C's row as its base), nothing is lost."""
+    target = note(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    b = store.write_knowledge_note(target, "# Река\n\nOne, two.\n", expected_revision=a.revision).current
+    c = store.write_knowledge_note(target, "# Река\n\nOne, two, three.\n", expected_revision=b.revision).current
+    (_, _), (b_at, b_row), (_, c_row) = journal_rows(target)
+    assert "new_content" not in b_row and "new_content" not in c_row  # the segment's newer end is the live note alone
+    outside = []
+    if closed_by == "an outside edit":
+        target.path.write_bytes("# Река\n\nEdited by hand.\n".encode("utf-8"))
+        outside.append(store.read_knowledge_note(target).text)
+    elif closed_by == "a deleted note":
+        target.path.unlink()
+    d = store.write_knowledge_note(target, "# Река\n\nFour.\n", expected_revision=(
+        None if closed_by == "a deleted note" else sha(outside[0]) if outside else c.revision)).current
+    assert ("base" in journal_rows(target)[-1][1]) is (closed_by is None)
+    damage(target.shelf.parent / "knowledge_history.jsonl", b_at)
+    every_version_reads(target, [a.text, d.text, *outside])
+    if closed_by is None:
+        every_version_reads(target, [b.text, c.text])  # from the live note back through D's and C's changes
+        return
+    for lost in (b.text, c.text):
+        with pytest.raises(versions.VersionUnavailable, match=f"the line at byte offset {b_at} is not a JSON row"):
+            versions.find_version(target, sha(lost))
+
+
 def test_a_capture_that_never_landed_is_nobodys_base_and_lives_only_in_its_own_row(tmp_path, monkeypatch):
     target = note(tmp_path)
     a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
