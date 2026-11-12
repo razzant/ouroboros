@@ -327,6 +327,32 @@ def test_a_retirer_pass_row_is_read_as_its_place_remover_with_its_holds_since_wh
     assert by_remover == {"copy_retirement": {"released": 3, "at": copies["at"], "holds": row["holds"]}}
 
 
+def test_a_closed_recovery_gate_is_the_retirement_job_hold_and_an_open_one_leaves_the_plain_job_line(data):
+    """Task trees and service logs kept behind a closed recovery gate are the retirement job's typed hold beside
+    every place it retires for and in the mind's ``storage`` fact; with the gate open the job reads as before."""
+    from ouroboros import maintenance_retirement
+
+    def retirement():
+        maintenance.run_job(data, "runtime_retirement")
+        found = storage_removers.place_removers(data, engine=False)
+        facts = [next(fact for fact in found[place] if fact["id"] == "runtime_retirement")
+                 for place in ("task_results", "app_state", "data_other")]
+        assert facts[0] == facts[1] == facts[2]
+        return facts[0]
+
+    maintenance_retirement.record_startup(data, gaps=True)
+    closed = retirement()
+    assert [(hold["class"], hold["count"], hold["example"]) for hold in closed["holds"]] == [
+        ("source_recovery_pending", 1, "startup recovery report missing")]
+    assert closed["state"] == "done" and closed["held"] == 1 and closed["held_since"] == closed["holds"][0]["since"]
+    assert storage_fact(data)["holds"]["runtime_retirement"]["holds"] == closed["holds"]
+
+    maintenance_retirement.record_startup(data, gaps=False)
+    opened = retirement()
+    assert opened == {"id": "runtime_retirement", "state": "done", "at": opened["at"]}, "the plain job: no pass fields"
+    assert storage_fact(data).get("holds") is None
+
+
 def test_the_custody_sweep_records_the_engine_pass_once_and_the_runtime_fact_reads_that_row(data, monkeypatch):
     from ouroboros import store_import
 

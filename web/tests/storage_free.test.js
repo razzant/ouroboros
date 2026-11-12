@@ -380,7 +380,7 @@ test('every reason the server can send has its own words; none falls through to 
 
 // The exact codes beside a group: a Free item's `cause` (and a kept row's `causes`), which the server's listers and
 // retirers send (`storage_free._KEPT_REASONS`, the seat and checkout listers), and the hold classes the five server
-// retirers report on a place's remover line.
+// retirers and the retirement job's closed recovery gate (`source_recovery_pending`) report on a place's remover line.
 const CONTRACT_CAUSES = ['child_result_unadopted', 'child_refs_pending', 'call_inventory_pending', 'call_inventory_changed',
     'inputs_uncustodied', 'unread_mailbox_uncustodied', 'verification_receipts_uncustodied', 'raw_evidence_uncustodied',
     'artifact_source_missing', 'canonical_changed', 'drive_occupant_changed', 'canonical_not_settled', 'post_work_open',
@@ -391,7 +391,7 @@ const CONTRACT_CAUSES = ['child_result_unadopted', 'child_refs_pending', 'call_i
     'capture_unproven', 'capture_incomplete', 'retained_process_environment', 'undeclared_environment', 'producer_retained',
     'changed', 'nothing_unsaved', 'nested_repository', 'commits_unprotected', 'unproven_excluded_inputs', 'owner_keep',
     'generation_closed', 'in_use', 'run_open', 'seat_open', 'seat_busy', 'custody_unreadable', 'capture_failed', 'removal_failed',
-    'younger_than_retention'];
+    'younger_than_retention', 'source_recovery_pending'];
 
 test('every exact cause reads its own words from the one map, the same in the Free tray and on the Storage line', () => {
     const escape = (said) => said.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

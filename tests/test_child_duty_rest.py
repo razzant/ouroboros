@@ -53,19 +53,49 @@ def test_retirement_rests_after_unrelated_completion_and_wakes_at_earliest_age(t
     assert costs[0] == costs[1]
 
 
-def test_child_requires_recorded_startup_success_and_keeps_unknown_recovery_links(tmp_path):
+def test_child_requires_recorded_startup_success_and_keeps_unknown_recovery_links(tmp_path, monkeypatch):
+    """A closed recovery gate keeps every task tree and is the pass's typed hold on its job row (what
+    recovery left, one example, since when); an open gate retires the tree and leaves no ``holds`` field."""
+    from ouroboros import obligations
+
     write_task_result(tmp_path, "settled", "completed", ts="2000-01-01T00:00:00+00:00")
     tree = tmp_path / "task_trees/settled"
     tree.mkdir(parents=True)
     os.utime(tree, (1, 1))
-    maintenance.run_job(tmp_path, "runtime_retirement")
+    T1, T2, T3, T4, T5, T6, T7 = (f"2026-11-0{day}T00:00:00+00:00" for day in range(1, 8))
+    clock = [""]
+    monkeypatch.setattr("ouroboros.utils.utc_now_iso", lambda *_a, **_kw: clock[0])
+
+    def passed(at):
+        clock[0] = at
+        maintenance.run_job(tmp_path, "runtime_retirement")
+        row = maintenance_jobs.job(tmp_path, "runtime_retirement")
+        assert row["state"] == "done"
+        return row
+
+    def held(count, example, since):
+        return [{"class": "source_recovery_pending", "count": count, "example": example, "since": since}]
+
+    assert passed(T1)["holds"] == held(1, "no startup recovery record", T1)
     assert tree.exists(), "missing startup result is unknown, not success"
+    unread = "a: ValueError: task result authority is unreadable or invalid: task:a " + "x" * 200
+    maintenance_retirement.record_startup(tmp_path, gaps=True, report={"unresolved": ["a", "b", "*"], "errors": [unread, "b: OSError"]})
+    assert passed(T2)["holds"] == held(2, unread[:maintenance_jobs.HOLD_EXAMPLE_CHARS], T1), \
+        "the gap's own count and first error; since stays while the class stays held"
+    maintenance_retirement.record_startup(tmp_path, gaps=True, report={"unresolved": [], "errors": ["ownership unknown"]})
+    assert passed(T3)["holds"] == held(1, "ownership unknown", T1), "no unresolved record: the error lines are counted"
     maintenance_retirement.record_startup(tmp_path, gaps=True)
-    maintenance.run_job(tmp_path, "runtime_retirement")
-    assert tree.exists()
+    assert passed(T4)["holds"] == held(1, "startup recovery report missing", T1)
+    obligations.add(tmp_path, "pending_drives", "ghost")
     maintenance_retirement.record_startup(tmp_path, gaps=False)
-    maintenance.run_job(tmp_path, "runtime_retirement")
+    assert passed(T5)["holds"] == held(1, "recovery links unreadable", T1), "no gap, but a recovery link has no record"
+    assert tree.exists()
+    obligations.remove(tmp_path, "pending_drives", "ghost")
+    maintenance_retirement.record_startup(tmp_path, gaps=False)
+    assert "holds" not in passed(T6), "an open gate: the field is gone, never an empty list"
     assert not tree.exists()
+    maintenance_retirement.record_startup(tmp_path, gaps=True)
+    assert passed(T7)["holds"] == held(1, "startup recovery report missing", T7), "a released class is held anew"
 
 
 def test_malformed_retention_date_does_not_abort_a_task_write_or_schedule_retirement(tmp_path):

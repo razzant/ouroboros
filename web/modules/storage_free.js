@@ -155,6 +155,7 @@ export const CAUSES = {
     nothing_unsaved: 'nothing in it is unsaved any more', nested_repository: 'a repository inside it cannot be saved as a patch',
     commits_unprotected: 'its commits are not held by a branch', generation_closed: 'stopped by a restart',
     removal_failed: 'its removal failed', younger_than_retention: 'it is still inside the retention days',
+    source_recovery_pending: 'startup recovery is not confirmed complete: task trees and service logs wait',
 };
 /** A code's words from the one map, `''` when it has none. */
 const causeWords = (code) => CAUSES[code] || KEPT_REASONS[code] || '';
