@@ -9,6 +9,7 @@ from starlette.responses import JSONResponse
 
 from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or
+from ouroboros.gateway.completion_gist import short_schedule_gists
 from ouroboros.schedule_contract import (
     HOST_ATTESTED_TEMPLATE_FIELDS, RESERVED_TEMPLATE_FIELDS, cron_error, schedule_id_error, timezone_error,
 )
@@ -38,7 +39,7 @@ def _schedules_list(_request: Request) -> JSONResponse:
             # UNKNOWN, and the Activity section says so instead of showing empty.
             return json_error(str(exc), 503)
         from supervisor.followup_policy import observed_store
-        return JSONResponse(schedule_activity_projection(observed_store(request_drive_root(_request), store)))
+        return JSONResponse(short_schedule_gists(schedule_activity_projection(observed_store(request_drive_root(_request), store))))
     except Exception as exc:
         return json_exception(exc)
 

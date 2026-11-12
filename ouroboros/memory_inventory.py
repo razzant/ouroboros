@@ -883,7 +883,7 @@ class ShortageFact:
     mode: str = ""
 
 
-_ROW_STEPS = frozenset({"F2", "F7"})  # my replies, this room's people: the steps that ask the mind
+_ROW_STEPS = frozenset({"F2", "F7"})  # this room's rows a step took: my replies (addresses or work lines) and its people
 _NARRATIVE_STEPS = frozenset({"F4", "F5l", "F5"})  # this room's retold page, story labels and pointers
 
 
@@ -895,7 +895,7 @@ def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
     narrative by label or pointer (F4, F5l, F5), names those records, and the window alone took
     them (``by_budget == 0``; an owner-selected mode target is no shortage of the window).
     ``other_room``: neither, but the floor folded the words or the line of a room of my other
-    conversations where my human or I spoke (``folded_rooms``, oldest first): the oldest of them.
+    conversations where my human or I spoke, beyond unread host/window facts (``folded_rooms``).
     Fact lines (F1), retold pointers (F3) alone, a foreign shape or no fact: ``None``.
     """
     fact = trace.get(VIEW_TRACE_KEY) if isinstance(trace, Mapping) else None

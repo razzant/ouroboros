@@ -407,11 +407,18 @@ def test_rejecting_a_cited_draft_follows_local_authority_and_the_account_shows_i
     rejected = store.decide(h1, False, shared.MIND, "not what happened in Beta")
     assert rejected.ok and all(r["id"] != h1 for r in store.room_records(beta)) and store.sealed_row_refs(beta) == set()
     assert store.decide(h1, True, shared.MIND, "changed my mind").reason == "invalid"  # one-shot, as before
-    assert store.decide(b1, False, shared.MIND, "mine").reason == "invalid"  # my own page takes no decision
-    src = store.accounts()[0]["sources"][1]
+    # Commit 5: my own page is withdrawn like a draft, its rows reopen; accepting it or deciding again stays refused.
+    assert store.decide(b1, True, shared.MIND, "accept mine").reason == "invalid"  # only an undecided draft is accepted
+    sealed = store.sealed_row_refs("1")
+    assert sealed and store.decide(b1, False, shared.MIND, "mine").ok
+    assert store.sealed_row_refs("1") == set() and all(r["id"] != b1 for r in store.room_records("1"))
+    assert store.decide(b1, False, shared.MIND, "again").reason == "invalid"  # a withdrawn record stays withdrawn
+    own, src = store.accounts()[0]["sources"]
     assert (src["status"], src["status_now"]) == ("draft", "rejected")
+    assert (own["status"], own["status_now"]) == ("final", "rejected")
     story = _story(tmp_path)
     block = _block(story, synthetic["id"])
+    assert f"- my later rejection of its source {b1} (not in this account):\n  mine" in block
     assert f"- my later rejection of its source {h1} (not in this account):\n  not what happened in Beta" in block
     assert f"- source: page {h1} of Project Beta [chat_id={beta}], revision {h1}, a draft then;" in block
     assert "told through this account" not in block  # a rejected draft is no entry of the story

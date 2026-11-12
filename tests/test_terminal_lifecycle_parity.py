@@ -140,12 +140,20 @@ def test_the_exception_writer_stores_a_failed_lifecycle_and_keeps_its_loop_evide
     env = SimpleNamespace(drive_root=tmp_path)
     logs = tmp_path / "logs"
     logs.mkdir(exist_ok=True)
-    _task_exception_terminal(env, {"id": "exc-task", "type": "task"}, RuntimeError("boom"), logs)
+    boom = RuntimeError("boom")
+    boom._ouroboros_loop_usage = {"rounds": 1, "execution_id": "exec_boom"}
+    boom._ouroboros_loop_trace = {"reasoning_notes": [], "tool_calls": [
+        {"tool": "write_file", "result": "ok", "trace_ref": {"call_id": "tool_write_1"}}]}
+    _task_exception_terminal(env, {"id": "exc-task", "type": "task"}, boom, logs)
     raw = _raw_body(tmp_path, "exc-task")
     assert raw["status"] == raw["outcome_axes"]["lifecycle"]["status"] == "failed"
     assert raw["outcome_axes"]["execution"]["status"] == "infra_failed"
     assert raw["reason_code"] == "task_exception"
     assert raw["loop_outcome"]["outcome_axes"]["lifecycle"]["status"] == "completed"
+    # The loop's trace refs are stored once, at the top level; the saved outcome keeps the rest.
+    assert raw["trace_refs"]["execution_id"] == "exec_boom"
+    assert [ref["call_id"] for ref in raw["trace_refs"]["tool_call_refs"]] == ["tool_write_1"]
+    assert "trace_refs" not in raw["loop_outcome"] and raw["loop_outcome"]["usage"]["total_rounds"] == 1
     # A late exception at the worker boundary never rewrites a row that already settled.
     write_task_result(tmp_path, "done-task", "completed", outcome_axes=_axes("completed", execution="ok"))
     signature, settled = result_signature(tmp_path, "done-task"), _raw_body(tmp_path, "done-task")

@@ -49,6 +49,10 @@ from ouroboros.task_store import patch_handoff, put_handoffs
 from ouroboros.utils import utc_now_iso
 
 
+# A granted same-request repeat yielded to unread owner words: the round start drains and rebuilds (``loop_llm_call``).
+OWNER_WORDS_WAITING = "owner_words_waiting"
+
+
 class ModelWaitInterrupted(RuntimeError):
     """A live model wait ended on the task's existing control/deadline rail."""
 

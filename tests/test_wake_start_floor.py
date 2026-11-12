@@ -10,6 +10,7 @@ before now start; an unreadable source still rescues nothing.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 
 import pytest
@@ -182,8 +183,9 @@ def test_a_projection_that_saves_nothing_never_stops_the_pointer_or_the_whole_in
 def test_a_busy_window_lists_the_places_messages_and_starts_with_my_humans_words_in_my_view(tmp_path, monkeypatch):
     """Opus N2's window: thousands of short messages of a participant beside one of my human's. The wake lists the
     participant's messages whole and counts my human's (the source keeps every line), so its whole input is unfit and
-    the bare pointer starts; my human's words reach the first request in my view, and the participant's silent room is
-    one line with its count."""
+    the bare pointer starts; my human's words reach the first request in my view. The participant's room is a
+    conversation (a recorded person spoke there) with no word of my human or reply of mine: its oldest unread words
+    yield first to one host line that counts them and quotes how the latest begins, the newest stay whole."""
     from ouroboros import dialogue_store as ds, places
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.consciousness_wake import bind_wake_observation, observe_wake
@@ -218,5 +220,10 @@ def test_a_busy_window_lists_the_places_messages_and_starts_with_my_humans_words
     assert messages[1]["content"] == wake["projection_text"], "the whole input is unfit: the bare pointer starts"
     view = json.dumps(messages[0], ensure_ascii=False)
     assert words in view, "my human's words reach the first request, in my view"
-    assert "message number 17 " not in view and "6000 words nobody considered" in view
+    # Decision 1A and commit 4: a count line, its opening bounded, for the oldest yielded words; every word is either.
+    yielded = int(re.search(r"No recorded consideration: (\d+) words; \[", view)[1])
+    opening = re.search(r"latest by Sasha[^\]]*\]\] «([^»]*)»", view)[1]
+    assert "message number 17 " not in view and "message number 5999 " in view and 0 < yielded < 6000
+    assert opening == f"message number {yielded - 1} " + "s" * 60 and len(opening) <= 160
+    assert view.count("message number ") == 6000 - yielded + 1
     assert _delivery_records(env) == [("wake_input_by_source", 0, "pointer")]

@@ -1,5 +1,6 @@
 """Saved settings are compared with actual component startup/health facts."""
 
+from ouroboros.local_model import RUNTIME_PROBE
 import asyncio
 import json
 import subprocess
@@ -130,7 +131,7 @@ def healthy_model_process(tmp_path, monkeypatch):
         return original_popen(command, **kwargs)
 
     def run(command, **kwargs):
-        if command[-1] == "import llama_cpp":
+        if command[-1] == RUNTIME_PROBE:
             return subprocess.CompletedProcess(command, 0, "", "")
         return original_run(command, **kwargs)
 
@@ -165,7 +166,8 @@ def test_actual_local_start_health_and_restart_clear_saved_mismatch(healthy_mode
     assert response.status_code == 200
     assert settled.wait(10)
     assert manager.is_running, manager.status_dict()
-    assert commands[-1][commands[-1].index("--n_ctx") + 1] == "16384"
+    # 0 starts the runtime with the factory window.
+    assert commands[-1][commands[-1].index("--n_ctx") + 1] == str(config.SETTINGS_DEFAULTS["LOCAL_MODEL_CONTEXT_LENGTH"])
     assert manager.settings_application(saved)["pending_keys"] == []
     saved["LOCAL_MODEL_CONTEXT_LENGTH"] = 8192
     assert manager.settings_application(saved)["pending_keys"] == ["LOCAL_MODEL_CONTEXT_LENGTH"]
