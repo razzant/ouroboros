@@ -390,12 +390,16 @@ def test_a_closed_bounded_wait_reaches_the_replayed_card(tmp_path):
     assert "wait_for_answer" not in ask["quiz"]
 
 
-def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_be_read(tmp_path, monkeypatch):
+def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_be_read(tmp_path, monkeypatch, caplog):
     """Main is "every room that is not a Project": decided from an empty set (a registry no row of
     which can be read) it would take the owner's rows typed in Project rooms (#3067's mechanism). It
     answers the typed unavailable refusal instead. An invalid row beside readable ones is no such
-    case: the rooms the readable rows name are still Projects, and Main reads on."""
+    case: the rooms the readable rows name are still Projects, and Main reads on. The refusal names its cause,
+    in its body and once in the server log, since nothing else would say why Main stays empty."""
+    from ouroboros.gateway import history as history_module
     from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    monkeypatch.setattr(history_module, "_WITHHELD_SAID", set())  # this process has named no cause yet
 
     rooms = [create_project(tmp_path, slug, name=slug) for slug in ("alpha", "beta")]
     bind_task_to_project(tmp_path, "bound", rooms[0]["id"], origin={"absent": "system"})
@@ -408,6 +412,7 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
     texts = lambda payload: {message.get("text") for message in payload["messages"]}  # noqa: E731
     status, healthy = request(tmp_path)
     assert status == 200 and "main owner" in texts(healthy) and not texts(healthy) & room_rows
+    assert "detail" not in healthy
 
     registry = tmp_path / "state" / "projects.json"
     intact = registry.read_bytes()
@@ -416,6 +421,7 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
     assert not texts(refused) & room_rows, "a Project room's row reached Main's window"
     assert status == 503 and refused["reason_code"] == "history_source_unavailable"
     assert refused["has_more"] is True and refused["window"]["complete"] is False
+    assert refused["detail"] == "Project registry unavailable", "the refusal names its cause"
 
     data = json.loads(intact)
     registry.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
@@ -428,6 +434,9 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
             registry.write_text(json.dumps({**data, "projects": [{"chat_id": 7}]}), encoding="utf-8")
         status, refused = request(tmp_path)
         assert status == 503 and not texts(refused) & room_rows, unknown
+        assert refused["detail"] == "Project registry unavailable", unknown
+    said = [record for record in caplog.records if "is withheld" in record.getMessage()]
+    assert [record.levelname for record in said] == ["WARNING"], "the server log names the cause once"
 
     registry.write_bytes(intact)
     restored = list(pages(tmp_path))

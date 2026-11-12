@@ -96,6 +96,28 @@ def test_a_failed_read_is_never_unchanged(read_state):
     assert read("")["task_bindings_unchanged"] is False
 
 
+def test_a_registry_that_vouches_for_no_room_sends_the_map_without_a_revision(read_state):
+    """The map's Project names come from the registry: while it vouches for no room (lost beside its commit witness,
+    or only invalid rows) the map goes without a revision, so a reader keeps the one it holds instead of the
+    Project ids standing in for names. A readable registry gives back the revision it had."""
+    root, read = read_state
+    registry.create_project(root, "beta", name="Beta")
+    registry.bind_task_to_project(root, "t3", "beta", origin={"absent": "system"})
+    healthy = read()
+    assert healthy["task_bindings"]["t3"]["project_name"] == "Beta" and healthy["task_bindings_revision"]
+    path = root / "state" / "projects.json"
+    intact = path.read_bytes()
+    for unknown in ("lost beside its commit witness", "only an invalid row"):
+        path.unlink(missing_ok=True)
+        if unknown == "only an invalid row":
+            path.write_text(json.dumps({**json.loads(intact), "projects": [{"chat_id": 7}]}), encoding="utf-8")
+        body = read(healthy["task_bindings_revision"])
+        assert body["task_bindings_revision"] == "" and body["task_bindings_unchanged"] is False, unknown
+        assert body["project_chat_ids"] is None and body["project_listable_count"] is None, unknown
+    path.write_bytes(intact)
+    assert read()["task_bindings_revision"] == healthy["task_bindings_revision"]
+
+
 def test_a_store_changed_within_a_clock_tick_names_the_map_it_sent(read_state, monkeypatch):
     root, read = read_state
     revision = read()["task_bindings_revision"]

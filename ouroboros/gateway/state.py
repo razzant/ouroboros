@@ -302,6 +302,10 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         project_chat_ids = None if rooms is None else sorted(rooms)
     except Exception:  # unknown, never "no Projects": a reader keeps the set it holds
         project_chat_ids = None
+    if project_chat_ids is None:
+        # The same registry counts the feed and names the bound tasks' Projects: while it vouches for no room,
+        # the count is unknown too (never "none listed"), and the bindings map below carries no revision.
+        project_listable_count = None
     from ouroboros.gateway.ui_preferences import main_room_revision
 
     main_visible_revision = main_room_revision(request_drive_root(request))
@@ -334,8 +338,10 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "project_chat_ids": project_chat_ids,
         "main_visible_revision": main_visible_revision,
         "task_bindings": task_bindings,
-        # The map names its own revision (a digest of what a reader receives); a failed read has none.
-        "task_bindings_revision": map_revision(task_bindings) if bindings_complete else "",
+        # The map names its own revision (a digest of what a reader receives); a failed read has none, and so has a
+        # map whose Project names an unknown registry could not vouch for (a reader keeps the map it holds).
+        "task_bindings_revision": (map_revision(task_bindings) if bindings_complete and project_chat_ids is not None
+                                   else ""),
         # A carried Presence turn is a census row of its own kind (CLIENT_CONTRACT), never the owner's direct turn.
         "active_direct_turns": [row for row in direct_turns if row.get("kind") != "presence"],
         "active_chat_activities": activities,

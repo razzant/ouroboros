@@ -46,6 +46,7 @@ from ouroboros.task_results import TASK_COST_META_FIELDS as _TASK_COST_META_FIEL
 from ouroboros.utils import strip_markdown, utc_now_iso
 
 log = logging.getLogger(__name__)
+_WITHHELD_SAID: set[str] = set()  # the causes of a refused history this process has already logged
 
 # Hard cap on binding-backed origin rows synthesized per /api/chat/history
 # response (realistically 1-3 per project; the cap keeps the endpoint's
@@ -1588,7 +1589,14 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         except (HistoryCursorError, OSError, StoreError) as exc:
             reason = (exc.reason if isinstance(exc, HistoryCursorError) else
                       "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
+            # A refusal that can outlast a restart (an unreadable Project registry) names its cause: the body says
+            # it, and the server log says it once per process and cause.
+            detail = str(exc) if isinstance(exc, StoreError) and not isinstance(exc, StoreMigrating) else ""
+            if detail and detail not in _WITHHELD_SAID:
+                _WITHHELD_SAID.add(detail)
+                log.warning("Saved history of chat %s is withheld: %s", thread_id, detail)
             return Response(content=json.dumps({"messages": [], "error": reason, "reason_code": reason,
+                                                **({"detail": detail} if detail else {}),
                                                 "next_cursor": cursor, "has_more": True,
                                                 "window": {"complete": False, "truncated_by": [reason]}}),
                             status_code=exc.status if isinstance(exc, HistoryCursorError) else 503,
