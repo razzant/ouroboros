@@ -144,6 +144,24 @@ test('a question read with a gap keeps its room amber in the sidebar; the comple
     assert.equal(rooms.has('42'), false);
 });
 
+test('a known question survives a room whose works are unconfirmed; an owner turn is never invented', () => {
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const served = { activity: 'unknown', transition: 'none', call: '', turn: [item], amber: true, mark: 'ring',
+        confirmed: false, works: [] };
+    assert.deepEqual(summarizeRoom(served), { mark: 'ring', owner: true, word: 'Activity unconfirmed',
+        note: 'An unanswered question is here', label: 'Activity unconfirmed · An unanswered question is here' });
+    assert.equal(summarizeRoom({ ...served, turn: [], amber: false }).owner, false);
+    // The works' census incomplete and the question unreadable: the room keeps the question it had, drawn unconfirmed.
+    let rooms = new Map();
+    const snapshots = createStateSnapshotSequencer((data) => { rooms = reconcileProjectRooms(rooms, data).rooms; });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    apply({ supervisor_ready: true, works: [], works_complete: true, current_questions_complete: true,
+        rooms: { 42: { ...served, activity: 'idle', mark: 'none', confirmed: true } } });
+    apply({ supervisor_ready: true, works: [], works_complete: false, rooms: {},
+        current_questions_gaps: [{ task_id: 't' }] });
+    assert.deepEqual(['mark', 'owner', 'word'].map((key) => rooms.get('42')[key]), ['ring', true, 'Activity unconfirmed']);
+});
+
 test('the index reads Project rooms only; the header\'s one mark is the strongest shape and the owner\'s move', () => {
     const rooms = new Map([
         ['42', summary('paused_by_owner')], ['43', summary('spending_limit')], ['1', summary('held_continue')],
