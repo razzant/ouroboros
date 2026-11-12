@@ -851,7 +851,9 @@ def test_a_nonfit_start_ends_its_task_named_and_the_same_worker_runs_the_next(tm
     assert stored["status"] == "failed" and stored["reason_code"] == "context_capacity"
     assert stored["outcome_axes"]["execution"]["reason_code"] == "context_capacity"
     text = next(row["text"] for row in events if row.get("type") == "send_message" and row.get("task_id") == "needs-book")
-    assert "directly requires the whole development handbook" in text and "window=150000" in text
+    assert "directly requires the whole development handbook" in text and "without it the start fits" in text
+    assert "the model's limit here is 150,000" in text
+    assert "window=" not in text, "a person reads the limit in words, never the refusal's key=value record"
     assert "larger window" in text and "Context mode" in text and "without this requirement" in text
     assert "Error during processing" not in text and "task_exception" not in json.dumps(stored.get("outcome_axes"))
     # Nothing is invented for this attempt: its own loop evidence is absent, never a zero or a no-effect claim.
