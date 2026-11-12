@@ -115,7 +115,7 @@ def test_a_version_reads_back_exactly_in_ranges_and_as_its_outline(tmp_path):
     target = address(tmp_path)
     first = store.write_knowledge_note(target, RIVER).current
     second = store.write_knowledge_note(target, "", "edit", first.revision,
-                                        edits=[{"old_str": None, "section": "## Мост", "new_str": ""}]).current
+                                        edits=[{"old_str": "## Мост\n\nСтарый мост.\n\n### Опоры\n\nДве.\n\n", "new_str": ""}]).current
     old = tools._knowledge_read(ctx, TOPIC, version=first.revision)
     assert old.endswith(first.text) and "Earlier version, not the current note" in old
     assert f"The current revision is {second.revision}" in old and "focus unknown (overwrite; reason: not recorded)" in old

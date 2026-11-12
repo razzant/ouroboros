@@ -362,8 +362,6 @@ def _knowledge_write(
         meta["knowledge_changes_since"] = result.held["facts"]["revision"]
     elif not result.show_source:  # a refused edit item is named; the note it was looked for in is not resent
         text += " Nothing was written."
-        if result.current is not None and result.show_outline:
-            text += "\n\n" + knowledge_versions.render_outline(result.current)
     else:
         if result.reason in ("revision_required", "revision_conflict"):
             text += " Read the current source and pass its revision as expected_revision when replacing it."
@@ -427,11 +425,9 @@ def get_tools() -> List[ToolEntry]:
                 "note's enduring scope and when to open it, and is not a dated log of the latest edit. "
                 "Modes. overwrite replaces the note with content; its frontmatter fields merge with the retained ones. "
                 "append adds content at the end. edit replaces exact body text of the revision you read: one old_str by "
-                "content, or edits, a list of {old_str, section, new_str} items, each naming one selector and leaving "
-                "the other null. An old_str stands for its own text; a section quotes a whole heading line (or more "
-                "from its start) and stands for the heading's whole section, nested sections included. Each selector "
-                "must occur exactly once in that revision's body (never in an earlier item's result); items may touch "
-                "but not overlap; all apply or none; an empty new_str deletes; a refused item is named by its number. "
+                "content, or edits, a list of {old_str, new_str} items. Each old_str must occur exactly once in that "
+                "revision's body (never in an earlier item's result); items may touch but not overlap; all apply or "
+                "none; an empty new_str deletes; a refused item is named by its number. "
                 "revert puts back an earlier version byte for byte: version is its revision. Text a write removes stays "
                 "in the note's history, which I can read (knowledge_read with view='history' or version=...) and put "
                 "back (mode='revert'). archive and restore own only the archive field and keep the body bytes; archive "
@@ -452,10 +448,9 @@ def get_tools() -> List[ToolEntry]:
                 "mode": {"type": "string", "enum": list(_MODES), "description": "overwrite, append, edit, revert, archive or restore, as this tool's description explains. Missing notes are created by overwrite/append only. The overview always stays active."},
                 "reason": {"type": "string", "description": "Why this write: optional on every mode and required for archive, which also records it in the archive field. Kept in the note's history, never written into its body; no automatic classification or summarization occurs."},
                 "old_str": {"type": "string", "description": "mode=edit, one pair: non-empty exact body text that occurs once; content replaces it (empty text deletes it). Omit both to change only the summary; edits replaces several places at once."},
-                "edits": {"type": "array", "minItems": 1, "description": "mode=edit: several exact replacements in one revision-checked write, all or nothing. Each item names exactly one selector, the other null: old_str (exact body text) or section (exact body text from the start of a heading line through at least its end: the item stands for that whole section, nested ones included); new_str replaces it, empty deletes. Selectors are found once each in the revision you read; spans may touch, not overlap.",
-                          "items": {"type": "object", "additionalProperties": False, "required": ["old_str", "section", "new_str"],
-                                    "properties": {"old_str": {"type": ["string", "null"]}, "section": {"type": ["string", "null"]},
-                                                   "new_str": {"type": ["string", "null"]}}}},
+                "edits": {"type": "array", "minItems": 1, "description": "mode=edit: several exact replacements in one revision-checked write, all or nothing. Each item is {old_str, new_str}: old_str is exact body text found once in the revision you read; new_str replaces it, empty deletes. Spans may touch, not overlap.",
+                          "items": {"type": "object", "additionalProperties": False, "required": ["old_str", "new_str"],
+                                    "properties": {"old_str": {"type": "string"}, "new_str": {"type": "string"}}}},
                 "summary": {"type": "string", "description": "A summary names the note's enduring scope and says when to open this note, not a dated log of its latest edit: it is shown in the resident knowledge index, while the body is read on demand. Passed with overwrite, append or edit, it replaces the current summary in the same revision-checked write (mode=edit may pass it alone); omit it to keep the current one."},
                 "expected_revision": {"type": "string", "description": "The note's current revision, as knowledge_read, a receipt or a refusal returns it. Required to replace an existing note: overwrite, edit, revert, archive, restore and an append with summary. Omit, or pass empty, only to create a missing note or for a bare append; a stale revision writes nothing."},
                 "version": {"type": "string", "description": "mode=revert: the revision of an earlier version of this note (knowledge_read(view='history') lists them); its exact stored bytes become the current note."},

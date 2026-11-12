@@ -540,9 +540,9 @@ def _meta(reply):
     return json.loads(reply.split("\n", 1)[1])
 
 
-def _item(old_str=None, section=None, new_str=""):
-    """An item as a strict provider sends it: every field present, the unused selector null."""
-    return {"old_str": old_str, "section": section, "new_str": new_str}
+def _item(old_str=None, new_str=""):
+    """An item as a strict provider sends it: both fields present."""
+    return {"old_str": old_str, "new_str": new_str}
 
 
 def test_several_exact_items_land_in_one_revision_or_none_does(tmp_path):
@@ -606,12 +606,16 @@ def test_items_keep_crlf_multibyte_and_a_missing_final_newline_byte_exact(tmp_pa
 
 
 def test_item_shapes_and_spellings_that_cannot_mean_one_thing_are_argument_errors(tmp_path):
+    """An item is {old_str, new_str}, both text: a section selector is no item field (it was dropped)."""
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
     original = store.write_knowledge_note(address(tmp_path, "shape"), "# Shape\n\nText.\n").current
     for kwargs, message in (
-            ({"edits": [_item("Text.", "# Shape", "x")]}, "exactly one selector"),
-            ({"edits": [_item(new_str="x")]}, "exactly one selector"),
-            ({"edits": [_item("Text.", new_str=None)]}, "new_str must be text"),
+            ({"edits": [{"old_str": None, "section": "# Shape", "new_str": "x"}]}, "old_str and new_str only"),
+            ({"edits": [{"old_str": "Text.", "section": None, "new_str": "x"}]}, "old_str and new_str only"),
+            ({"edits": [_item(new_str="x")]}, "item 1: old_str must be non-empty exact body text"),
+            ({"edits": [_item("", new_str="x")]}, "item 1: old_str must be non-empty exact body text"),
+            ({"edits": [{"old_str": "Text."}]}, "item 1: new_str must be text"),
+            ({"edits": [_item("Text.", new_str=None)]}, "item 1: new_str must be text"),
             ({"edits": []}, "non-empty array"),
             ({"edits": [_item("Text.", new_str="x")], "old_str": "Text."}, "edits carries its own replacements"),
             ({"edits": [_item("Text.", new_str="x")], "content": "x"}, "edits carries its own replacements")):
@@ -620,82 +624,14 @@ def test_item_shapes_and_spellings_that_cannot_mean_one_thing_are_argument_error
     assert "edits is used only with mode=edit" in tools._knowledge_write(
         ctx, "shape", "x", mode="overwrite", scope="global", expected_revision=original.revision, edits=[_item("x")])
     assert store.read_knowledge_note(original.address).raw == original.raw
+    schema = next(entry for entry in tools.get_tools() if entry.name == "knowledge_write").schema
+    assert schema["parameters"]["properties"]["edits"]["items"] == {
+        "type": "object", "additionalProperties": False, "required": ["old_str", "new_str"],
+        "properties": {"old_str": {"type": "string"}, "new_str": {"type": "string"}}}
+    assert "section" not in json.dumps(schema["parameters"]["properties"]["edits"])
     _meta(tools._knowledge_write(ctx, "shape", mode="edit", scope="global", expected_revision=original.revision,
-                                 edits=[{"old_str": "Text.", "section": "", "new_str": "Prose."}]))  # "" means "not this kind"
-
-
-SECTIONS = ("# Top\n\nIntro.\n\n## Old part\n\nOld text.\n\n### Detail\n\nDetail text.\n\n"
-            "## Kept\n\nKept text.\n\n```\n## Fenced\n```\n\n## Last\n\nLast text.\n")
-OLD_PART = "## Old part\n\nOld text.\n\n### Detail\n\nDetail text.\n\n"
-
-
-def test_a_section_item_replaces_its_heading_with_every_child_and_empty_deletes_it(tmp_path):
-    target = address(tmp_path, "sections")
-    original = store.write_knowledge_note(target, SECTIONS).current
-    new_part = store.write_knowledge_note(target, "", "edit", original.revision,
-                                          edits=[_item(section="## Old part", new_str="## New part\n\nNew text.\n\n")])
-    assert new_part.ok and new_part.current.text == original.text.replace(OLD_PART, "## New part\n\nNew text.\n\n")
-    assert new_part.delta["removed_sections"] == [
-        {"heading": "## Old part", "chars": len(OLD_PART), "first_line": "Old text."},
-        {"heading": "### Detail", "chars": len("### Detail\n\nDetail text.\n\n"), "first_line": "Detail text."}]
-    longer = store.write_knowledge_note(target, "", "edit", new_part.current.revision,
-                                        edits=[_item(section="## Kept\n\nKept", new_str="")])  # a longer quote from the heading
-    assert longer.ok and "## Kept" not in longer.current.text and "## Fenced" not in longer.current.text
-    assert longer.current.text.endswith("New text.\n\n## Last\n\nLast text.\n")
-
-
-def test_a_section_selector_must_begin_a_real_heading_and_its_refusal_shows_the_outline(tmp_path):
-    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
-    original = store.write_knowledge_note(address(tmp_path, "sections"), SECTIONS).current
-    before = _files(tmp_path)
-
-    def edit(*items):
-        return tools._knowledge_write(ctx, "sections", mode="edit", scope="global", expected_revision=original.revision,
-                                      edits=list(items))
-
-    fenced = edit(_item(section="## Fenced"))  # inside a code fence: not a heading
-    assert "item 1 (section): does not begin at a heading line" in fenced and "Outline of 'sections'" in fenced
-    assert "## Kept — line 17" in fenced and original.text not in fenced
-    assert "does not begin at a heading line" in edit(_item(section="Old text."))
-    nested = edit(_item(section="## Old part"), _item(section="### Detail"))
-    assert "item 2: overlaps item 1" in nested and "Outline of" in nested
-    past = edit(_item(section="### Detail\n\nDetail text.\n\n## Kept"))
-    assert "runs past the end of its section" in past
-    quoted = edit(_item("Absent"))
-    assert "item 1 (old_str): not found" in quoted and "Outline of" not in quoted
-    assert _files(tmp_path) == before
-    assert _meta(edit(_item(section="### Detail")))["knowledge_delta"]["removed_sections"][0]["heading"] == "### Detail"
-
-
-def test_a_section_selector_must_quote_its_whole_heading_line(tmp_path):
-    """``## Status`` begins ``## Status History``: a quote that stops inside a heading line could name a
-    longer heading, so it refuses and names the line; the whole line works (its CRLF end is not part of it)."""
-    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
-    original = store.write_knowledge_note(address(tmp_path, "status"),
-                                          "# Log\n\n## Status History\n\nOld.\n\n## Next\n\nKept.\n").current
-    before = _files(tmp_path)
-    refused = tools._knowledge_write(ctx, "status", mode="edit", scope="global", expected_revision=original.revision,
-                                     edits=[_item(section="## Status", new_str="")])
-    assert ('edit_refused: item 1: section text ends inside the heading line "## Status History"; quote the whole line'
-            in refused) and "Outline of 'status'" in refused and original.text not in refused
-    assert _files(tmp_path) == before
-    whole = store.write_knowledge_note(original.address, "", "edit", original.revision,
-                                       edits=[_item(section="## Status History", new_str="")])
-    assert whole.ok and whole.current.text == original.text.replace("## Status History\n\nOld.\n\n", "")
-    crlf = address(tmp_path, "crlf")
-    crlf.path.write_bytes(b"# Log\r\n\r\n## Status\r\n\r\nOld.\r\n")
-    edited = store.write_knowledge_note(crlf, "", "edit", store.read_knowledge_note(crlf).revision,
-                                        edits=[_item(section="## Status", new_str="")])
-    assert edited.ok and edited.current.raw == b"# Log\r\n\r\n"
-
-
-def test_a_setext_heading_has_no_section_of_its_own_to_replace(tmp_path):
-    original = store.write_knowledge_note(address(tmp_path, "setext"), "# Top\n\nSetext\n------\n\nUnder it.\n").current
-    refused = store.write_knowledge_note(original.address, "", "edit", original.revision,
-                                         edits=[_item(section="Setext\n------")])
-    assert refused.reason.startswith("edit_refused: item 1 (section): the heading at line 7 has no section of its own")
-    assert store.write_knowledge_note(original.address, "", "edit", original.revision,
-                                      edits=[_item(section="# Top", new_str="# Top\n")]).ok
+                                 edits=[_item("Text.", new_str="Prose.")]))
+    assert store.read_knowledge_note(original.address).text.endswith("# Shape\n\nProse.\n")
 
 
 def test_revert_publishes_the_exact_bytes_of_an_earlier_version(tmp_path):
@@ -774,7 +710,7 @@ def test_the_receipt_names_the_replaced_version_counts_both_ways_and_its_calls_w
     assert "knowledge_outline" not in meta  # the write named its revision: it saw the earlier text
     second = store.read_knowledge_note(original.address)
     gone = _meta(tools._knowledge_write(ctx, "host", mode="edit", scope="global", expected_revision=second.revision,
-                                        edits=[_item(section="## Gone")]))
+                                        edits=[_item("## Gone\n\nObsolete.\n")]))
     assert gone["knowledge_delta"]["removed_sections"] == [{"heading": "## Gone", "chars": len("## Gone\n\nObsolete.\n"),
                                                             "first_line": "Obsolete."}]
     assert gone["knowledge_previous"]["reason"] == "the host moved"

@@ -580,7 +580,7 @@ def _write_content(current: KnowledgeNote | None, content: str, mode: str,
         body_start = current.source.body_span.start_byte
         body = current.raw[body_start:].decode("utf-8")
         if items is not None:
-            body = compile_edit_items(current.raw, current.source, items).decode("utf-8")
+            body = compile_edit_items(current.raw, body_start, items).decode("utf-8")
         elif old_str is not None or summary is None:  # a summary-only revision keeps every body byte
             body = compile_anchored_edits(body, [(old_str, content)])
         if summary is None or current.metadata.get("summary") == summary:
@@ -667,7 +667,6 @@ class KnowledgeWriteResult:
     previous: dict[str, Any] | None = None  # who wrote the replaced version: knowledge_versions.row_facts
     held: dict[str, Any] | None = None  # a stale revision this note's tail holds: knowledge_versions.held_version
     show_source: bool = True  # an edit item's refusal names the item instead of resending the note
-    show_outline: bool = False
 
 
 def body_chars(note: KnowledgeNote | None) -> int:
@@ -705,7 +704,7 @@ def write_knowledge_note(
     the row, never in the body.
 
     ``mode=edit`` replaces one ``old_str`` by ``content``, or applies ``edits``
-    (``knowledge_edits.compile_edit_items``: exact ``old_str``/``section`` items in the
+    (``knowledge_edits.compile_edit_items``: exact ``{old_str, new_str}`` items in the
     original body, all or nothing; a refused item is ``edit_refused``, named).
     ``mode=revert`` publishes the stored bytes of an earlier ``version`` of this
     note exactly (``knowledge_versions.find_version``: verified by sha256), so the
@@ -791,8 +790,7 @@ def write_knowledge_note(
             if mode in {"append", "overwrite"} and summary is not None:  # the written note's summary-only edit
                 raw = _write_content(_note(address, raw), "", "edit", None, summary)
         except EditRefused as exc:
-            return KnowledgeWriteResult(False, f"edit_refused: {exc}", current, revision, show_source=False,
-                                        show_outline=exc.outline)
+            return KnowledgeWriteResult(False, f"edit_refused: {exc}", current, revision, show_source=False)
         except (ValueError, yaml.YAMLError) as exc:
             return KnowledgeWriteResult(False, f"invalid_note: {exc}", current, revision)
         updated = _note(address, raw)
