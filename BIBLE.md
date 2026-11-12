@@ -344,9 +344,9 @@ Outside Cyber Pro, the configured enforcement and obligations apply.
    deterministic checks (version sync, changelog cap, syntax, tests,
    codebase size) that run before or
    instead of the expensive LLM review. The codebase-size ratchet is
-   anchored to the official line: the official repository's CI blocks
-   size regressions pairwise (base versus tip), while every local
-   checkout surfaces the same validator's findings as loud, durable
+   anchored to the official line: its release gate blocks size
+   regressions pairwise (base versus tip), while every local checkout
+   surfaces the same validator's findings as loud, durable
    warnings instead of commit blocks — an update of a locally-evolved
    fork is never trapped by structural debt it inherited.
 
