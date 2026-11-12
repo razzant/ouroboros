@@ -1,5 +1,5 @@
 """The owner-visible trace of a review that returned FAIL or no verdict, the author's choice to go on over it and the
-commits that landed over it (BIBLE P3 "Selected enforcement").
+commits that landed over it (BIBLE P3).
 
 ``record_override`` counts the outcome wherever the gate lets work go on past one (critical findings, an unparseable
 answer, a failed check, a quorum or infrastructure failure, every other reason ``tools/review.py`` names), once per
@@ -11,7 +11,7 @@ an author who goes on over it unread or unsettled counts it then, once per revie
 shows each part only when recorded (absent is unknown, not zero), in the app (``web/modules/review_gate_card.js``,
 live from the event) and in its Telegram completion message (``card_line``).
 
-Advisory and Cyber Pro hand every outcome back before Git, so a commit usually lands from a later call naming the
+Every outcome returns to the author before Git, so a commit usually lands from a later call naming the
 reviewed attempt, which keeps the reason (``review_override_reason``); a wave handed back still open stands at what
 its review record holds when the author goes on (nothing once it passed). After Git recorded the commit,
 ``note_override_landing`` adds it to the counter's ``landed`` list (the newest 64, under the install's data root, with
@@ -122,8 +122,7 @@ def record_override(ctx: Any, blocked_msg: str) -> None:
 def _count(ctx: Any, reason: str, message: str, record_id: str = "") -> None:
     """Count one outcome: the event, the install counter and the work's fact. ``record_id`` names the review record
     of an outcome counted when the author goes on over it; the same record and reason as the work's latest count once."""
-    from ouroboros.config import get_review_enforcement
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
+    from ouroboros.tools.review_helpers import cyber_review_authority
 
     task_id, at, repeat = str(getattr(ctx, "task_id", "") or ""), utc_now_iso(), []
     latest = {"at": at, "reason": reason, "task_id": task_id, "text": _head(message),  # a cut head says it is one
@@ -141,8 +140,8 @@ def _count(ctx: Any, reason: str, message: str, record_id: str = "") -> None:
         return
     try:
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
-            "ts": at, "type": "review_advisory_override", "review_enforcement": get_review_enforcement(),
-            "decision_authority": "advisory" if review_enforcement_blocks("blocking") else "cyber_pro",
+            "ts": at, "type": "review_advisory_override",
+            "decision_authority": "cyber_pro" if cyber_review_authority() else "advisory",
             "block_reason": reason, "message_head": message[:600], "task_id": task_id,
             **({"work_task_id": work, WORK_KEY: fact} if fact else {})})  # the open card's live copy
     except Exception:

@@ -701,7 +701,9 @@ def test_a_late_pass_outcome_from_the_server_process_reaches_the_live_log_once(p
     frames = [e for e in production_sink.frames if e.get("type") == "review_late_result"]
     [row] = _late_rows(root)
     assert len(frames) == 1 and frames[0]["chat_id"] == 1 and frames[0]["current_outcome"] == row["current_outcome"]
-    assert row["current_outcome"]["outcome_phase"] == "warn", "the independent receipt_absent stays"
+    objective = row["current_outcome"]["outcome_axes"]["objective"]
+    assert objective["warnings"] == ["receipt_absent"], "the independent receipt_absent stays"
+    assert row["current_outcome"]["outcome_phase"] == "done", "as a detail: the headline is Done (9 Nov 2026)"
 
 
 def test_a_late_pass_outcome_from_a_worker_reaches_the_live_log_once_through_the_supervisor(production_sink, monkeypatch):

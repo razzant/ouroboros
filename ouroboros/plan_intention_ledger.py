@@ -94,9 +94,9 @@ def write_intention_record(ctx: Any, prepared: PreparedAsk, facts_by_seat: Mappi
     delivery of each seat, costs and custody. Returns ``{seat_id: delivery_ref}``. A reading of
     the request before any plan (``revision=None``) records ``plan_revision: None``."""
     from ouroboros import review_ledger as ledger
-    from ouroboros.config import get_review_enforcement, get_runtime_mode
+    from ouroboros.config import get_runtime_mode
     from ouroboros.plan_record import ask_subject
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY
 
     revision = revision or {}
     rows, delivery_refs = [], {}
@@ -126,8 +126,7 @@ def write_intention_record(ctx: Any, prepared: PreparedAsk, facts_by_seat: Mappi
                "checklist": {"layer": "body" if prepared.body else "core", "body_fact": "true" if prepared.body else "false",
                              "how": "plan_is_body", "checklist_hash": "", "rules_source": {"path": "docs/CHECKLISTS.md", "sha": ""}},
                "plan_ask": prepared.ask_id, "plan_revision": revision.get("n")},
-        enforcement=str(get_review_enforcement() or ""), mode=str(get_runtime_mode() or ""),
-        enforcement_blocks=review_enforcement_blocks(prepared.enforcement), panel=panel, rows=rows,
+        enforcement=RECORDED_REVIEW_AUTHORITY, mode=str(get_runtime_mode() or ""), panel=panel, rows=rows,
         verdict=_intention_verdict(rows), tests={"policy": "NOT_RUN", "result": ledger.UNKNOWN},
         cost={"usd": round(sum(float(r["usd"]) for r in rows if isinstance(r.get("usd"), (int, float))), 6),
               "unknown": any(not isinstance(r.get("usd"), (int, float)) for r in rows)},

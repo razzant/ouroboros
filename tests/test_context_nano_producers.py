@@ -46,7 +46,7 @@ def test_capture_failure_keeps_producer_full(tmp_path, monkeypatch):
 def test_pool_and_continuity_keep_current_facts_once_with_history_by_address(tmp_path, monkeypatch):
     parts = {p.section_id: p for p in shape.host_sections(tmp_path, monkeypatch)}
     pool = parts['review_pool']
-    assert 'enforcement=advisory; mode=advanced' in pool.operative_view
+    assert 'mode=advanced' in pool.operative_view and 'enforcement=' not in pool.operative_view
     assert all(row['subagent_id'] in pool.operative_view for row in shape.pool()['pool'])
     continuity = parts['review_continuity']
     for debt in shape.review_state(tmp_path).commit_readiness_debts:
@@ -113,7 +113,7 @@ def test_roster_advice_stays_whole_and_skill_legend_factors_exact_repeats(tmp_pa
     assert 'same advice as' not in part.operative_view
     skills = shape.skills_section(tmp_path, monkeypatch)
     for text in (skills.full_text, skills.operative_view):
-        assert text.count('Current payload accepted by author under Advisory; reviewer evidence remains at its original hash.') == 1
+        assert text.count('Current payload accepted by its author; reviewer evidence remains at its original hash.') == 1
         assert text.count('  author_accepted=true') == 8
         # The compact form keeps each skill's purpose and trigger (owner 2.11.2026), tools stay the full form's.
         assert text.count('(behavior, v1, advisory): Skill capability description.') == 8

@@ -99,11 +99,12 @@ SCENARIOS = {
     # hot-adoption variant that removes the restart (W3B-F1) — enable after boot
     # must reach the workers already running, not only the pool's next generation.
     "S13": ("skills lifecycle E2E: payload -> stub review -> grants -> enable -> dispatch -> disable/delete + Model Experience; hot-adoption variant: enable after boot dispatches in an ALREADY-SPAWNED worker with no restart", LANE_MOCK),
-    # Ф4 wave 3a (plan §8: commit triad+scope BOTH enforcement classes +
-    # stale-rejection). Renumbered at integration: the parallel
+    # Ф4 wave 3a (plan §8: commit triad+scope after critical feedback +
+    # stale-rejection; the two enforcement classes it once pinned became one when
+    # Blocking retired). Renumbered at integration: the parallel
     # wave-3b lane claimed S11-S13 first; S14 (plan review) retired with its engine.
-    "S15": ("commit triad+scope, ADVISORY class: red verdicts recorded + waved through with durable override, commit lands", LANE_MOCK),
-    "S16": ("commit triad+scope, BLOCKING class: red blocks (HEAD unmoved), identical resubmit refused free, green lands; post-verdict revalidation", LANE_MOCK),
+    "S15": ("commit triad+scope, critical feedback: red verdicts return before Git, the author's explicit continuation goes over them with a durable override, commit lands", LANE_MOCK),
+    "S16": ("commit triad+scope, revision: a red outcome returns before Git (HEAD unmoved), an identical resubmit returns it again at $0, the revised diff's clean PASS returns first too and lands on the author's continuation; post-verdict revalidation", LANE_MOCK),
     # S17 (the acceptance loop) retired with the task-acceptance machine.
     # Ф4 wave 4 (plan §8 remainder: update variations, chat-lineage cancel,
     # absorb kill-recovery, delegated interactive answer).
@@ -143,7 +144,7 @@ SCENARIOS = {
     # #1539 own-body candidates: the smallest real consumer of the authoring seam.
     "S36": ("own-body candidate on a real server: the root's first body write in the installation's spelling binds a candidate, later repo/… and absolute serving spellings reach the same candidate files, the serving clone is byte-identical, a refused resume is the typed CANDIDATE_MISSING in the tool log, and a process in the candidate sees its isolated data root", LANE_MOCK),
     "S37": ("restart-bound adoption on one real server: a reviewed candidate commit, request_restart(adopt_commit) arms on the stop evidence, the in-place re-exec switches the clean serving checkout before its imports, generation B settles it adopted and verifies the restart on the serving SHA", LANE_MOCK),
-    "S38": ("evolution crash between the candidate commit and its receipts: the supervisor's cycle commits in its candidate under blocking review, the tree is SIGKILLed and the post-commit receipts removed; a fresh boot recovers the exact commit and its reviewed provenance at worker boot and does not absorb it (the serving checkout never held it)", LANE_MOCK),
+    "S38": ("evolution crash between the candidate commit and its receipts: the supervisor's cycle commits in its candidate through the review organ (its clean outcome returned first, the commit its explicit continuation), the tree is SIGKILLed and the post-commit receipts removed; a fresh boot recovers the exact commit and its reviewed provenance at worker boot and does not absorb it (the serving checkout never held it)", LANE_MOCK),
     # Deployment: both container modes on real Docker, keyless (stub models through an exec relay).
     "S39": ("container lifecycle: the managed image boots a released seed into a body checkout and runtime venv on volumes (parent and split layouts), keeps code, packages and data across recreation, stays stopped after Panic until an owner start, refuses a mounted repository and a second container on shared data; the immutable image admits one server per data volume and, networkless, serves onboarding, a project, a task with a child and an artifact across a restart; an Update adding a local-wheel dependency survives an offline recreation, a task imports it, and rollback restores the old lock with the package disclosed", LANE_CONTAINER),
     # #1729/#1730 in real processes: the owner's doors on one live task that keeps its id (no retry exists since #1376).
@@ -556,13 +557,14 @@ class LoopbackModelServer:
         class _Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 - stdlib callback name
                 if self.path.rstrip("/").endswith("/models"):
-                    # The default is >=1M ON PURPOSE, and it is load-bearing twice: the capability-
-                    # evidence /models probe stores this as a CONFIRMED window, which
-                    # (a) sizes the triad fit budget (a 400K window under the cold
-                    # 1.65 density floor caps input at ~202K — BELOW the ~226K
-                    # governance pack, blocking every commit_reviewed before
-                    # dispatch), and (b) satisfies the BIBLE P3 >=1M floor that
-                    # scope review's BLOCKING authority requires.
+                    # The default is >=1M ON PURPOSE: the capability-evidence /models probe stores
+                    # this as a CONFIRMED window, which (a) sizes the triad fit
+                    # budget (a 400K window under the cold 1.65 density floor caps
+                    # input at ~202K — BELOW the ~226K governance pack, so every
+                    # commit_reviewed would return without a verdict, nothing
+                    # dispatched), and (b) keeps the seats' absolute output reserves
+                    # (reviewer_window). A window is sizing only, never a condition
+                    # of a review's authority (owner 2026-09-17, BIBLE P3).
                     return self._send({"data": [
                         {"id": model_id, "max_model_len": outer.window_tokens}
                         for model_id in outer._model_ids()

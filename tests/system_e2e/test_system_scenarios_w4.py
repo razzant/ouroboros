@@ -935,7 +935,6 @@ def test_s22_absorb_kill_recovery_absorbs_once_and_never_twice(
 
     settings_kwargs = dict(
         OUROBOROS_RUNTIME_MODE="cyber_pro",  # explicit in-place authoring is Cyber Pro only (#1620)
-        OUROBOROS_REVIEW_ENFORCEMENT="blocking",  # the panel still runs; S16 proves enforcement
     )
     marker_glob = "pending_restart_verify*"
     state_dir = data_root / "state"

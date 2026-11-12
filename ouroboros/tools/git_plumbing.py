@@ -65,14 +65,6 @@ def _publish_git_error(ctx: ToolContext, text: str) -> str:
     )
 
 
-def _publish_review_blocked(ctx: ToolContext, text: str) -> str:
-    """Publish one reviewer-finding rejection without relabelling other blocks."""
-    return _publish_tool_result(
-        ctx,
-        ToolResult(status="ok", code="REVIEW_BLOCKED", text=text),
-    )
-
-
 _BINARY_EXTENSIONS = frozenset({
     ".so", ".dylib", ".dll", ".a", ".lib", ".o", ".obj",
     ".pyc", ".pyo", ".whl", ".egg",

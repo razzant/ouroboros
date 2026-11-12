@@ -248,7 +248,6 @@ _MOVED_OWNERS = {
     "parse_fallback_chain": model_slots,
     "_exclusive_direct_remote_provider_env": review_model_routes,
     "adaptive_quorum": review_model_routes,
-    "get_review_enforcement": review_model_routes,
     "resolved_review_model_target": review_model_routes,
     "BODY_MAINTENANCE_INTERVAL_SEC": runtime_limits,
     "MAX_ACTIVE_SUBAGENTS_HARD_CAP": runtime_limits,

@@ -149,7 +149,7 @@ const mountPermissions = rowsPage('permissions', {
                 after: note('data-safety-skips role="status"') + note('data-safety-spares role="status" hidden') + note('data-safety-exits hidden')
                     + note('data-safety-organization-rules hidden', 'Your organization’s rules apply too; its administrator sets them.') })
             + card({ title: 'Who checks its results', lead: 'Reviewers are other models that read finished work.',
-                rows: rows('OUROBOROS_TASK_REVIEW_MODE', 'OUROBOROS_REVIEW_ENFORCEMENT', 'permissions:reviewers') })
+                rows: rows('OUROBOROS_TASK_REVIEW_MODE', 'permissions:reviewers') })
             + card({ title: 'Trust it without asking', rows: rows('OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS') })
             + foldCard('review rounds', rows('OUROBOROS_REVIEW_MAX_CYCLES'));
     },

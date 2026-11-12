@@ -953,3 +953,30 @@ def test_content_panel_rebuttal_and_the_authors_ask_stay_material(harness):
     (h.skill_dir / "scripts" / "hello.py").write_text("print('changed bytes')\n", encoding="utf-8")
     changed = _review(h, reviewers=["t1"], reason=REASON)
     assert changed.paid and changed.content_hash != first.content_hash and len(h.sends) == 6
+
+
+def test_the_recorded_authority_is_advisory_whatever_a_leftover_setting_says(monkeypatch):
+    """Identity bytes after Blocking left (STEP4 7(iv) item 3): the commit contract records ``advisory`` on every
+    install, so a fingerprint recorded under Advisory before the change still matches and a Blocking-era one never
+    does; a leftover value of the retired setting moves no byte."""
+    import hashlib
+
+    from ouroboros.tools.commit_gate import commit_review_contract_fingerprint, commit_review_contract_material
+
+    set_review_pool(monkeypatch, shared.golden_pool())
+    seen = set()
+    for leftover in (None, "advisory", "blocking"):
+        if leftover is None:
+            monkeypatch.delenv("OUROBOROS_REVIEW_ENFORCEMENT", raising=False)
+        else:
+            monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", leftover)
+        assert commit_review_contract_material()["enforcement"] == "advisory"
+        seen.add(commit_review_contract_fingerprint())
+    [current] = seen
+    assert current
+
+    def digest(material):
+        return hashlib.sha256(json.dumps(material, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    assert digest(commit_review_contract_material()) == current, "the Advisory-era bytes are today's bytes"
+    assert digest({**commit_review_contract_material(), "enforcement": "blocking"}) != current, "a Blocking-era key lapses"

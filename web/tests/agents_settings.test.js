@@ -47,7 +47,7 @@ function fakeServer(env, { items = ROSTER(), saved = true } = {}) {
     server.agent = (id) => server.roster.items.find((item) => item.subagent_id === id);
     server.document = () => ({
         [KEY]: server.saved ? JSON.stringify(server.roster) : '', ...server.plain,
-        OUROBOROS_REVIEW_ENFORCEMENT: 'blocking', OUROBOROS_RUNTIME_MODE: 'pro',
+        OUROBOROS_RUNTIME_MODE: 'pro',
         _meta: { tokens: { [KEY]: server.token() }, effects: { [KEY]: 'next_task', OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: 'next_task' },
             available_subagents: { source: server.saved ? 'configured' : 'undecided', candidate: server.saved ? null : server.roster } },
     });
@@ -302,8 +302,8 @@ test('an agent\'s page: a switch never publishes its unsaved form, and Save writ
     assert.deepEqual(page.container.querySelectorAll('.agents-card-title').map((node) => node.textContent), ['In use', 'What it is good at', 'Runs on']);
     assert.equal(field('enabled').getAttribute('role'), 'switch', 'a saved agent\'s on/off acts at once');
     assert.equal(field('rechecks_flags'), null, 'only an API row with Packet delivery, or the marked one, may take the re-check');
-    // The Reviewer row says what the mark means under the saved strictness.
-    assert.match(page.container.querySelector('.agent-page').textContent, /Counts toward review: every ticked reviewer checks each change/);
+    // The Reviewer row says what the mark means under the saved Access.
+    assert.match(page.container.querySelector('.agent-page').textContent, /Counts when chosen: for each check Ouroboros asks one, several or all reviewers/);
     field('recommended_use').value = 'UNSAVED WORDS';
     await field('recommended_use').fire('input', { target: field('recommended_use') });
 

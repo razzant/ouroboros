@@ -36,8 +36,8 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_skill_names_touched_by_trace _skill_finalization_message _plan_gate_decision "
         "_plan_gate_reminder _plan_gate_disclosure _maybe_inject_time_budget_milestone "
         "_maybe_inject_cost_budget_milestone "
-        "_inject_round_checkpoints _forced_delegation_note _nanny_finalization_message "
-        "_maybe_inject_finalization_nudges _answer_protocol_active"
+        "_inject_round_checkpoints _forced_delegation_note "
+        "_maybe_inject_finalization_nudges _claim_pre_delivery_notice _pre_delivery_notice _answer_protocol_active"
     ),
     "loop_model_call": (
         "_adopt_fallback_route _snapshot_context_fit_usage _restore_context_fit_usage "
@@ -72,7 +72,6 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_direct_child_results "
         "_project_child_result_dispositions _record_forced_finalization "
         "_forced_orphan_note _claimed_child_dispositions _undispositioned_children "
-        "_maybe_enforce_child_absorption_gate "
         "_enforce_plan_gate _finalize_forced_services _disclose_service_finalization "
         "_drain_forced_owner_directives "
         "_call_forced_model_once _publish_model_forced_candidate "

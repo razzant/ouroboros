@@ -73,7 +73,7 @@ class SetupModelSlot(TypedDict):
 
 
 class SetupModeChoice(TypedDict):
-    """A ``reviewModes`` or ``runtimeModes`` row; ``value`` is what the setting stores."""
+    """A ``runtimeModes`` row; ``value`` is what the setting stores."""
 
     value: str
     label: str
@@ -117,7 +117,6 @@ class SetupContract(TypedDict):
     providerFields: List[SetupProviderField]
     providerProfiles: Dict[str, SetupProviderProfile]
     modelSlots: List[SetupModelSlot]
-    reviewModes: List[SetupModeChoice]
     runtimeModes: List[SetupModeChoice]
     localRoutingModes: List[SetupLocalRoutingMode]
     budgetFields: List[SetupBudgetField]
@@ -141,7 +140,6 @@ class SetupInitialState(TypedDict):
     legacyCompatibleBaseUrl: str  # saved OPENAI_BASE_URL, display only: completion never writes it
     safetyModel: str
     providerProfile: str
-    reviewEnforcement: str
     runtimeMode: str
     skillsRepoPath: str
     localPreset: str
@@ -237,12 +235,11 @@ class SettingsReadResponse(TypedDict, total=False):
 
 
 class SettingsPolicyState(TypedDict):
-    """``_meta.policy_state`` of ``GET /api/settings``: configured versus effective Access, Supervisor and
-    Review (``gateway.settings._build_policy_state``), plus what a managed deployment's policy fixes."""
+    """``_meta.policy_state`` of ``GET /api/settings``: configured versus effective Access and Supervisor
+    (``gateway.settings._build_policy_state``), plus what a managed deployment's policy fixes."""
 
     access: _contracts.SettingsPolicyAxis
     supervisor: _contracts.SettingsPolicyAxis
-    review: _contracts.SettingsPolicyAxis
     running_task_snapshot: bool
     deployment: NotRequired[SettingsDeploymentPolicy]  # absent outside a managed deployment
 

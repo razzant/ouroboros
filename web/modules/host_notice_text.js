@@ -32,6 +32,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     optional_bounds_notice: ['⚙️ Task limits on this install: '],
     legacy_memory_notice: ['🧠 Memory: '],
     command_timeout_notice: ['⏱️ The separate per-call ceiling'],
+    review_enforcement_notice: ['⚙️ This install had reviews set to Blocking.'],
     task_admission_notice: ['🚫 Budget exhausted. '],
     budget_notice: ['🚫 Model budget reached. '],
     deep_self_review_queued: ['🔎 Deep self-review queued: '],

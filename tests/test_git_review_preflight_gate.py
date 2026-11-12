@@ -30,7 +30,7 @@ from ouroboros.tools.registry import ToolContext
 @pytest.fixture
 def candidate(tmp_path, monkeypatch):
     """One staged change in a fresh repository, its release-metadata and readiness checks
-    and the managed-proof probe stubbed, under blocking enforcement."""
+    and the managed-proof probe stubbed."""
     repo, drive = tmp_path / "repo", tmp_path / "data"
     repo.mkdir()
     drive.mkdir()
@@ -49,7 +49,6 @@ def candidate(tmp_path, monkeypatch):
     monkeypatch.setattr(commit_admission, "release_metadata_diagnostics", lambda *a, **kw: {
         "status": "not_applicable", "findings": [], "unavailable": []})
     monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda ctx: False)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     return ctx
 
 
@@ -797,8 +796,8 @@ def test_a_performed_preflight_of_the_same_tree_never_answers_the_commit_panel(c
     fact = candidate._commit_preflight
     assert fact["status"] == "performed" and fact["record_id"] and fact["reviewer"] == "api-scout"
     preflight = rl.load_record(rl.ledger_root(candidate), fact["record_id"])
-    gate = rl.load_record(rl.ledger_root(candidate), result["review_record_id"])
+    gate = rl.load_record(rl.ledger_root(candidate), result["review_reference"]["review_record_id"])
     assert (preflight["surface"], gate["surface"]) == ("preflight", "commit_gate")
     assert [seat["seat_id"] for seat in preflight["rows"]] == ["api-scout"]
     assert preflight["fingerprints"]["reuse_key"] != gate["fingerprints"]["reuse_key"]
-    assert gate["preflight"] == fact and result["status"] == "passed"
+    assert gate["preflight"] == fact and result["status"] == "reviewed"  # the panel's PASS returns before Git

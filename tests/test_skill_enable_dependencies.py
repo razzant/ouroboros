@@ -38,7 +38,7 @@ MANIFEST = (
 )
 ADMITTING = ["trusted_source", "self_check", "owner_skip", "owner_edit", "cyber_authority", "author_accepted_advisory",
              "ready", "warnings_do_not_block_execution", "blockers_allowed_by_advisory_enforcement"]
-REFUSING = ["review_pending", "review_stale", "blocker_findings_need_owner", "blocker_findings_under_blocking_enforcement"]
+REFUSING = ["review_pending", "review_stale", "blocker_findings_need_owner"]
 
 
 @pytest.fixture
@@ -46,7 +46,6 @@ def drive(tmp_path, monkeypatch):
     drive = tmp_path / "data"
     (drive / "skills" / "external").mkdir(parents=True)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(tmp_path / "empty"))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     return drive
 
 
@@ -342,7 +341,6 @@ def test_the_launcher_grant_goes_through_the_server(tmp_path, monkeypatch):
 
     loaded = load_skill(payload, drive)
     save_review_state(drive, "demo", SkillReviewState(status="clean", content_hash=loaded.content_hash))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setattr(launcher, "DATA_DIR", drive)
     monkeypatch.setattr(launcher, "_load_settings", lambda: {})
     monkeypatch.setattr(launcher, "_read_port_file", lambda: 9876)

@@ -547,10 +547,6 @@ def test_load_review_state_live_aggregates_soft_findings(tmp_path, monkeypatch):
     )
     save_review_state(drive_root, "x", state)
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    assert load_review_state(drive_root, "x", skill_type="script").status == "warnings"
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     assert load_review_state(drive_root, "x", skill_type="script").status == "warnings"
 
 
@@ -1234,34 +1230,30 @@ def test_valid_review_statuses_exported():
     assert "pending_phase4" in VALID_REVIEW_STATUSES
 
 
-def test_skill_review_gate_allows_warnings_under_blocking(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+def test_skill_review_gate_allows_warnings_and_records_one_authority(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
 
     gate = skill_review_gate("warnings", stale=False)
 
     assert gate["executable_review"] is True
     assert gate["blocking_reason"] == "warnings_do_not_block_execution"
-    assert gate["review_enforcement"] == "blocking"
+    assert gate["review_enforcement"] == "advisory"
 
 
 def test_skill_review_gate_allows_legacy_advisory_pass(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-
     gate = skill_review_gate("advisory_pass", stale=False)
 
     assert gate["executable_review"] is True
 
 
-def test_skill_review_gate_revalidates_advisory_pass_under_blocking(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-
+def test_skill_review_gate_revalidates_advisory_pass_as_warnings(monkeypatch):
     gate = skill_review_gate("advisory_pass", stale=False)
 
     assert gate["executable_review"] is True
     assert gate["blocking_reason"] == "warnings_do_not_block_execution"
 
 
-def test_warnings_available_under_blocking(tmp_path, monkeypatch):
+def test_a_legacy_advisory_pass_is_available_as_warnings(tmp_path, monkeypatch):
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     repo_root = tmp_path / "skills"
@@ -1279,7 +1271,6 @@ def test_warnings_available_under_blocking(tmp_path, monkeypatch):
         "alpha",
         SkillReviewState(status="advisory_pass", content_hash=compute_content_hash(skill_dir)),
     )
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
 
     summary = summarize_skills(drive_root)
@@ -1542,7 +1533,6 @@ def test_auto_grant_if_enabled_uses_executable_review_gate(tmp_path, monkeypatch
 
     monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing-settings.json")
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     drive_root = tmp_path / "drive"
     skill_dir = tmp_path / "skill"
     drive_root.mkdir()
@@ -1558,7 +1548,8 @@ def test_auto_grant_if_enabled_uses_executable_review_gate(tmp_path, monkeypatch
             env_from_settings=["OPENROUTER_API_KEY"],
         ),
         content_hash="hash-a",
-        review=SkillReviewState(status="blockers", content_hash="hash-a"),
+        # No verdict and no acceptance basis for these bytes: the gate does not permit them.
+        review=SkillReviewState(status="pending", content_hash="hash-a"),
     )
 
     outcome = auto_grant_if_enabled(drive_root, skill)

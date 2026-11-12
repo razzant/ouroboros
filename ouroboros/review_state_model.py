@@ -249,10 +249,9 @@ class AdvisoryReviewState:
         """Authority-preserving eviction (Q16 fix round, F1): trimming to the
         historical cap may only evict NON-authoritative rows, oldest first.
         Paid rows are the money ledger ``count_paid_review_cycles`` derives the
-        per-root-task ceiling from, and verdict-block rows anchor the
-        identical-diff refusal streak (the quoted verdict) — evicting either
-        would let a capped root task loop free refusals until the ceiling and
-        the refusal both forget themselves. Both preserved classes are bounded
+        per-root-task ceiling from — evicting them would let a capped root task
+        loop until the ceiling forgets itself — and verdict-block rows are kept
+        with them. Both preserved classes are bounded
         by the money ceiling itself, so only the noise portion (free refusals,
         preflight facts, unpaid infra rows) is capped at
         ``_MAX_ATTEMPT_HISTORY``; the list may exceed the cap only by the

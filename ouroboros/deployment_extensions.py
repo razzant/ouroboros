@@ -55,8 +55,7 @@ TRUST_SENTENCES = {
     "elsewhere": "Your organization’s administrator delivers it from another folder, so this copy doesn’t run.",
     "changed": "Its files differ from the version your organization’s administrator delivered, so it doesn’t run.",
 }
-_REVIEW_REASONS = frozenset({"review_pending", "review_stale", "review_missing_or_unknown",
-                             "blocker_findings_need_owner", "blocker_findings_under_blocking_enforcement"})
+_REVIEW_REASONS = frozenset({"review_pending", "review_stale", "review_missing_or_unknown", "blocker_findings_need_owner"})
 _VERBS = {"disable": "turned off", "delete": "removed", "uninstall": "removed", "install": "replaced or shadowed",
           "update": "updated", "rollback": "rolled back", "repair": "handed to a repair task", "edit": "edited"}
 

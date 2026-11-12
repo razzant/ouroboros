@@ -170,9 +170,9 @@ def test_a_legacy_review_json_still_admits_its_exact_bytes_and_reads_the_fold_fi
     (d / "review.json").write_text(json.dumps(legacy), encoding="utf-8")
     state = load_review_state(tmp_path, "legacy", skill_type="script")
     assert (state.status, state.content_hash, state.record_id, state.governance, state.seats) == ("warnings", "h-legacy", "", {}, [])
-    gate = state.gate_for("h-legacy", enforcement="blocking")
+    gate = state.gate_for("h-legacy")
     assert gate["executable_review"] is True and gate["stale"] is False
-    assert state.gate_for("h-other", enforcement="blocking")["executable_review"] is False
+    assert state.gate_for("h-other")["executable_review"] is False
     projected = SkillReviewState(status="clean", content_hash="h2", timestamp="t", record_id="rl-1",
                                  governance={"owed_chars": 12}, seats=[{"seat_id": "s1"}])
     save_review_state(tmp_path, "legacy", projected)
@@ -182,7 +182,7 @@ def test_a_legacy_review_json_still_admits_its_exact_bytes_and_reads_the_fold_fi
 
 def test_deterministic_preflight_persists_pending_and_is_non_executable(tmp_path, monkeypatch):
     """A deterministic preflight FAILURE is a structural fact, not an LLM verdict: it persists as PENDING,
-    non-executable under EVERY enforcement mode, and grants nothing."""
+    non-executable outside Cyber Pro, and grants nothing."""
     import ouroboros.skill_review as sr
     import ouroboros.tools.skill_preflight as pf
     from ouroboros.skill_review_status import skill_review_gate
@@ -196,7 +196,31 @@ def test_deterministic_preflight_persists_pending_and_is_non_executable(tmp_path
                             manifest=SimpleNamespace(env_from_settings=["OPENROUTER_API_KEY"], permissions=[], subscribe_events=[]))
     outcome = sr._run_deterministic_preflight(SimpleNamespace(), tmp_path, skill, "hash123", persist=True)
     assert outcome is not None and outcome.status == sr.STATUS_PENDING
-    assert skill_review_gate(outcome.status, enforcement="advisory")["executable_review"] is False
-    assert skill_review_gate(outcome.status, enforcement="blocking")["executable_review"] is False
+    assert skill_review_gate(outcome.status)["executable_review"] is False
     assert granted == []
     assert outcome.requested_keys == ["OPENROUTER_API_KEY"]
+
+
+@pytest.mark.parametrize("access", ["pro", "cyber_pro"])
+def test_blockers_veto_nothing_outside_a_strict_source_and_no_input_names_the_retired_reason(monkeypatch, access):
+    """The skill gate after Blocking left: outside Cyber Pro a review with blockers runs and its findings stay
+    recorded (``blockers_allowed_by_advisory_enforcement``); a source that reviews each skill keeps it off until the
+    owner's Skip (``blocker_findings_need_owner``); no input yields the retired Blocking reason, whatever a leftover
+    value of the setting says. Cyber Pro acts on its own judgment."""
+    from ouroboros.skill_review_status import skill_review_gate
+
+    monkeypatch.setattr("ouroboros.tools.review_helpers.cyber_review_authority", lambda: access == "cyber_pro")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
+    ordinary = skill_review_gate("blockers", stale=False, current_hash="d" * 64)
+    strict = skill_review_gate("blockers", stale=False, current_hash="d" * 64, acceptance={"strict_review": True})
+    if access == "cyber_pro":
+        assert (ordinary["executable_review"], ordinary["blocking_reason"]) == (True, "cyber_authority")
+        assert (strict["executable_review"], strict["blocking_reason"]) == (True, "cyber_authority")
+    else:
+        assert (ordinary["executable_review"], ordinary["blocking_reason"]) == (True, "blockers_allowed_by_advisory_enforcement")
+        assert (strict["executable_review"], strict["blocking_reason"]) == (False, "blocker_findings_need_owner")
+    assert ordinary["review_enforcement"] == strict["review_enforcement"] == "advisory"
+    reasons = {skill_review_gate(status, stale=stale, current_hash="d" * 64, acceptance=acceptance)["blocking_reason"]
+               for status in ("clean", "warnings", "blockers", "pending") for stale in (False, True)
+               for acceptance in (None, {"strict_review": True})}
+    assert "blocker_findings_under_blocking_enforcement" not in reasons

@@ -111,7 +111,6 @@ class HarborCommandConfig:
     settings_path: pathlib.Path
     execute: bool
     light_model: str
-    review_enforcement: str = "blocking"
     safety_mode: str = "light"
     setup_timeout_multiplier: float = 1.0
     build_timeout_multiplier: float = 1.0
@@ -507,7 +506,6 @@ def _write_agent_job_config(config: HarborCommandConfig) -> pathlib.Path:
         "ouroboros_light_model": config.light_model,
         "host_settings_path": str(config.settings_path),
         "task_review_mode": "required",
-        "review_enforcement": config.review_enforcement,
         "safety_mode": config.safety_mode,
         "install_timeout_sec": 1200,
         "server_start_timeout_sec": 240,
@@ -923,8 +921,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--low-k-floor", type=int, default=5, help="k below this is graded local/low-confidence (debug_only at k=1) in report_grade (default 5).")
     parser.add_argument("--n-concurrent", type=int, default=1)
     parser.add_argument("--task", action="append", default=[], help="optional include-task-name; repeatable")
-    parser.add_argument("--review-enforcement", default="blocking", choices=["blocking", "advisory"],
-                        help="in-task review enforcement mode forwarded to the container (default blocking)")
     parser.add_argument("--safety-mode", default="light", choices=["full", "light", "off"],
                         help="LLM safety mode inside the task container (default light; off disables the LLM safety pass, deterministic guards stay)")
     parser.add_argument("--run-root", default="")
@@ -1220,7 +1216,6 @@ def main(argv: list[str] | None = None) -> int:
             settings_path=settings_path,
             execute=bool(args.execute),
             light_model=args.light_model,
-            review_enforcement=args.review_enforcement,
             safety_mode=args.safety_mode,
             setup_timeout_multiplier=args.setup_timeout_multiplier,
             build_timeout_multiplier=args.build_timeout_multiplier,

@@ -142,10 +142,10 @@ def test_managed_permissions_say_what_the_organization_fixes(direct_server_with_
                     page.keyboard.press("End")
                     assert page.evaluate("document.activeElement.dataset.settingValue") == "pro"
                     # A change the policy allows still saves at once; the raw shadowed Access stays the employee's.
-                    assert commit_row(page, "OUROBOROS_REVIEW_ENFORCEMENT", "blocking") == \
-                        "Saved · applies to new tasks · was Advisory · Undo"
+                    assert commit_row(page, "OUROBOROS_TASK_REVIEW_MODE", "required") == \
+                        "Saved · applies to new tasks · was Auto · Undo"
                     saved = json.loads(settings_path.read_text(encoding="utf-8"))
-                    assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+                    assert saved["OUROBOROS_TASK_REVIEW_MODE"] == "required"
                     assert saved["OUROBOROS_RUNTIME_MODE"] == "light"
                     assert "OUROBOROS_SAFETY_MODE" not in saved and "OUROBOROS_MODEL_SAFETY" not in saved
                     # The employee's own rules stay editable, beside the sentence that the organization's apply too.

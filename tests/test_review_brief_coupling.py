@@ -12,8 +12,8 @@ Verifies:
   and the ambiguous-workspace refusal
 - the coupling answer's fail-closed parsing (incomplete matrix, a PASS without a reason,
   invalid severity) and the PASS rows kept on the actor record
-- enforcement: advisory downgrades every critical coupling item; blocking keeps
-  its authority whatever the seat's window
+- authority: no critical coupling item blocks; each returns to the author, whatever a
+  retired setting still says
 - the Part 2 prompt contract (full matrix, one-line PASS pointer, ONE anti-pattern guard)
 - coupling-only seat identity (one mint, distinct ids)
 - reviewer-window sizing and its provenance wording
@@ -252,20 +252,18 @@ class TestCouplingAnswerFailClosed:
 
 
 # ---------------------------------------------------------------------------
-# Enforcement at the dispatch seam
+# Authority at the dispatch seam: a finding informs, nothing refuses
 # ---------------------------------------------------------------------------
 
 
 def _prepared(repo_dir, parts):
-    from ouroboros.config import get_review_enforcement
     from ouroboros.review_execution import ReviewRouteKind
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
 
     n = len(parts)
     models = [f"m/{i + 1}" for i in range(n)]
     return {
         "prompt": "PACKET", "stable_prefix_len": 0, "models": models, "routes": [ReviewRouteKind.API_CHAT] * n,
-        "target_repo": repo_dir, "blocking_review": review_enforcement_blocks(get_review_enforcement()),
+        "target_repo": repo_dir,
         "layer": "body", "task_evidence": None,
         "row_plan": {"models": models, "routes": [ReviewRouteKind.API_CHAT] * n,
                      "slot_ids": [f"slot_{i + 1}" for i in range(n)], "parts": [tuple(p) for p in parts],
@@ -285,19 +283,17 @@ def _dispatch_ctx(tmp_path):
     )
 
 
-def test_advisory_downgrades_every_critical_coupling_item(subtests, tmp_path, monkeypatch):
-    """NW-2 guardrail (58a52c4 class): under owner-chosen advisory enforcement a
-    critical coupling finding for ANY required item must NOT block. The
-    dispatch seam runs the real enforcement branch for every item with a
-    complete matrix (one critical FAIL + the rest valid PASS), so a per-item
-    always-block hardcode fails here."""
+def test_no_critical_coupling_item_blocks(subtests, tmp_path, monkeypatch):
+    """NW-2 guardrail (58a52c4 class): a critical coupling finding for ANY required
+    item must NOT block; it returns to the author. The dispatch seam runs the real
+    branch for every item with a complete matrix (one critical FAIL + the rest valid
+    PASS), so a per-item always-block hardcode fails here."""
     case_paths = case_folders(tmp_path)
     for crit_item in REQUIRED:
         tmp_path = next(case_paths)
         with subtests.test(crit_item=crit_item), monkeypatch.context() as monkeypatch:
             from ouroboros.tools import review as review_mod
 
-            monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
             answer = json.dumps({"change": [], "change_clean": True, "coupling": _matrix(fail=crit_item)})
             results = [{"model": "m/1", "slot_id": "slot_1", "verdict": "OK", "text": answer},
                        {"model": "m/2", "slot_id": "slot_2", "verdict": "OK", "text": answer}]
@@ -306,14 +302,17 @@ def test_advisory_downgrades_every_critical_coupling_item(subtests, tmp_path, mo
 
             result = review_mod._dispatch_unified_review(ctx, "test commit", _prepared(ctx.repo_dir, [("change", "coupling")] * 2))
 
-            assert result is None, f"advisory mode must NOT block critical coupling item {crit_item!r}"
+            assert result is None, f"critical coupling item {crit_item!r} must NOT block"
             assert ctx._last_review_verdict["aggregate"] == "FAIL"
             assert ctx._last_coupling_result.blocked is False
             assert any(f.get("item") == crit_item for f in ctx._last_coupling_result.critical_findings)
             assert any(crit_item in str(note) for note in ctx._review_advisory)
 
 
-def test_blocking_keeps_authority_on_a_critical_coupling_item(tmp_path, monkeypatch):
+def test_a_leftover_blocking_value_still_returns_a_critical_coupling_item(tmp_path, monkeypatch):
+    """The retired setting's Blocking value, still in the environment, changes nothing: the critical
+    coupling item is recorded as the gate's reason and returned, never a refusal (both directions with
+    the test above: the item is critical, and it still blocks nothing)."""
     from ouroboros.tools import review as review_mod
 
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
@@ -325,9 +324,10 @@ def test_blocking_keeps_authority_on_a_critical_coupling_item(tmp_path, monkeypa
 
     result = review_mod._dispatch_unified_review(ctx, "test commit", _prepared(ctx.repo_dir, [("change", "coupling")] * 2))
 
-    assert result and "REVIEW_BLOCKED" in result and "intent_alignment" in result
+    assert result is None
     assert ctx._last_review_block_reason == "critical_findings"
-    assert ctx._last_coupling_result.blocked is True
+    assert ctx._last_coupling_result.blocked is False
+    assert any("intent_alignment" in str(note) for note in ctx._review_advisory)
 
 
 def test_coupling_question_is_asked_in_every_context_mode(monkeypatch):

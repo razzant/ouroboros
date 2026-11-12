@@ -92,7 +92,6 @@ LIVE_SNAPSHOT = {
 WIZARD_PAYLOAD = {
     "OPENROUTER_API_KEY": "sk-or-v1-abcdefghijklmnop",
     "OUROBOROS_MODEL": "openai/gpt-5.6-luna",
-    "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     "OUROBOROS_RUNTIME_MODE": "advanced",
     "TOTAL_BUDGET": 25.0,
     "OUROBOROS_PER_TASK_COST_USD": 5.0,
@@ -1590,7 +1589,7 @@ def _bootstrap_draft(onboarding, monkeypatch, **environ) -> dict:
         state = client.get("/api/onboarding/bootstrap").json()["bootstrap"]["initialState"]
     return {CONNECTIONS_KEY: state["connections"], "OPENAI_API_KEY": state["openaiKey"],
             "OUROBOROS_MODEL": state["mainModel"], "OUROBOROS_MODEL_LIGHT": state["lightModel"],
-            "OUROBOROS_MODEL_FALLBACKS": state["fallbackModel"], "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+            "OUROBOROS_MODEL_FALLBACKS": state["fallbackModel"],
             "OUROBOROS_RUNTIME_MODE": "advanced", "TOTAL_BUDGET": 25.0, "OUROBOROS_PER_TASK_COST_USD": 5.0,
             "subscriptionsConnected": False}
 

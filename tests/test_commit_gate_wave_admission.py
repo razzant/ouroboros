@@ -117,7 +117,7 @@ def _prepared(tmp_path) -> dict:
     return {
         "prompt": "PACKET " * 20, "stable_prefix_len": 0, "models": list(row_plan["models"]),
         "routes": list(row_plan["routes"]), "row_plan": row_plan, "session_task": "",
-        "target_repo": tmp_path, "blocking_review": True, "brief_texts": {"brief-sha": BRIEF},
+        "target_repo": tmp_path, "brief_texts": {"brief-sha": BRIEF},
     }
 
 
@@ -135,9 +135,6 @@ def gate(tmp_path, monkeypatch):
     monkeypatch.setattr(ua, "_reservation_cost", lambda request: BOUNDS[request.model])
     monkeypatch.setattr(parallel_review, "run_cmd", lambda *_a, **_k: "staged diff")
     monkeypatch.setattr(review, "_prepare_unified_review", lambda *_a, **_k: (_prepared(tmp_path), None, False))
-    from ouroboros import config as cfg
-
-    monkeypatch.setattr(cfg, "get_review_enforcement", lambda: "blocking")
     return root
 
 
@@ -166,6 +163,13 @@ def _run(root, tmp_path, monkeypatch, llm, *, fence: float, env_fence: float | N
 
 def _ledger(root):
     return ledger_rows(root)
+
+
+def _returned(ctx, review_err):
+    """A declined or uncounted wave refuses nothing: its words reach the author with the returned
+    outcome (``_review_advisory``), and the commit is the author's explicit decision on it."""
+    assert review_err is None, review_err
+    return "\n".join(str(note) for note in ctx._review_advisory)
 
 
 def test_fence_that_fits_the_whole_wave_dispatches_every_seat(gate, tmp_path, monkeypatch):
@@ -207,16 +211,17 @@ def test_known_spend_at_the_fence_declines_the_wave_at_zero_dollars(gate, tmp_pa
     ctx, (review_err, coupling, block_reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=4.0)
 
     assert llm.calls == [] and _ledger(gate) == before
-    assert review_err and "commit-gate review wave declined before dispatch ($0 spent)" in review_err
-    assert "Known spend has reached the per-task budget fence $4.000000" in review_err
-    assert "known spend=$4.000000, remaining=" in review_err, "nothing uncounted: no blended or zero hold"
-    assert "remaining=$0.000000" in review_err
-    assert "reservation upper bound would have been $5.000000" in review_err
+    said = _returned(ctx, review_err)
+    assert "commit-gate review wave declined before dispatch ($0 spent)" in said
+    assert "Known spend has reached the per-task budget fence $4.000000" in said
+    assert "known spend=$4.000000, remaining=" in said, "nothing uncounted: no blended or zero hold"
+    assert "remaining=$0.000000" in said
+    assert "reservation upper bound would have been $5.000000" in said
     # The root axis binds; the global axis is disclosed beside it with its own remainder.
-    assert "the global budget $100.000000 alone would leave $96.000000" in review_err
-    assert "raise the per-task budget (OUROBOROS_PER_TASK_COST_USD)" in review_err
+    assert "the global budget $100.000000 alone would leave $96.000000" in said
+    assert "raise the per-task budget (OUROBOROS_PER_TASK_COST_USD)" in said
     # Every seat is named with its own bound, in wave order.
-    assert review_err.index("multi_model_review:slot_native coupling/model $3.000000") < review_err.index(
+    assert said.index("multi_model_review:slot_native coupling/model $3.000000") < said.index(
         "multi_model_review:slot_1 triad/a $1.000000")
     assert block_reason == "review_wave_budget_insufficient"
     assert [r["status"] for r in ctx._last_triad_raw_results] == ["not_dispatched"] * 3
@@ -247,12 +252,13 @@ def test_global_known_spend_at_the_limit_declines_the_wave_before_any_seat_reser
     ctx, (review_err, coupling, block_reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=10.0)
 
     assert llm.calls == [] and len(_ledger(gate)) == 1  # the other root's attempt only (one current row)
-    assert review_err and "commit-gate review wave declined before dispatch ($0 spent)" in review_err
-    assert "Known spend has reached the global budget TOTAL_BUDGET $100.000000: known spend=$100.000000 across every task" in review_err
-    assert "across every task, remaining=" in review_err
-    assert "remaining=$0.000000" in review_err
-    assert "the per-task budget fence $10.000000 alone would leave $10.000000" in review_err
-    assert "raise TOTAL_BUDGET" in review_err and "OUROBOROS_PER_TASK_COST_USD" not in review_err
+    said = _returned(ctx, review_err)
+    assert "commit-gate review wave declined before dispatch ($0 spent)" in said
+    assert "Known spend has reached the global budget TOTAL_BUDGET $100.000000: known spend=$100.000000 across every task" in said
+    assert "across every task, remaining=" in said
+    assert "remaining=$0.000000" in said
+    assert "the per-task budget fence $10.000000 alone would leave $10.000000" in said
+    assert "raise TOTAL_BUDGET" in said and "OUROBOROS_PER_TASK_COST_USD" not in said
     assert block_reason == "review_wave_budget_insufficient"
     assert [r["status"] for r in ctx._last_triad_raw_results] == ["not_dispatched"] * 3
     assert coupling.status == "not_dispatched"
@@ -363,12 +369,13 @@ def test_refusal_names_open_holds_beside_known_spend(gate, tmp_path, monkeypatch
         ua.mark_dispatched(settled)
         ua.settle_attempt(settled, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=8.0, cost_final=True)
     llm = LedgerLLM()
-    _ctx, (review_err, _coupling, _reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=8.0)
+    ctx, (review_err, _coupling, _reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=8.0)
 
     assert llm.calls == []
+    said = _returned(ctx, review_err)
     # A dispatched call's bound is the ledger's unresolved upper bound, said by that name, never "reserved".
-    assert "known spend=$8.000000 (up to $1.000000 for calls without a known price; not counted)" in review_err
-    assert "remaining=$0.000000" in review_err
+    assert "known spend=$8.000000 (up to $1.000000 for calls without a known price; not counted)" in said
+    assert "remaining=$0.000000" in said
     assert len(_ledger(gate)) == 2  # the two seeded attempts only (one current row each)
 
 
@@ -540,7 +547,7 @@ def test_the_triad_user_turn_is_one_literal_for_send_and_admission(monkeypatch):
     monkeypatch.setattr(review, "_handle_multi_model_review", _fanout)
     review._dispatch_unified_review(
         SimpleNamespace(task_id=ROOT, _review_history=[], _review_advisory=[], pending_events=[]),
-        "m", {"blocking_review": True, "prompt": "p", "models": ["triad/a"], "stable_prefix_len": 0,
+        "m", {"prompt": "p", "models": ["triad/a"], "stable_prefix_len": 0,
               "routes": [ReviewRouteKind.API_CHAT], "session_task": "", "target_repo": ".", "row_plan": {}})
     assert captured["content"] == TRIAD_USER_TURN
 
@@ -657,12 +664,13 @@ def test_raised_root_without_group_amendment_refuses_the_whole_wave(gate, tmp_pa
 
     assert llm.calls == [] and _ledger(gate) == before
     assert reason == "review_wave_budget_insufficient" and coupling.status == "not_dispatched"
-    assert review_err and "remaining=$0.000000" in review_err
+    said = _returned(ctx, review_err)
+    assert "remaining=$0.000000" in said
     event = next(e for e in ctx.pending_events if e.get("type") == "review_wave_budget_insufficient")
     assert event["binding_axis"] == "group" and event["limit_usd"] == 8.0
-    assert "whole-work billing-group budget fence" in review_err
-    assert "amend the original billing-group owner's cap explicitly" in review_err
-    assert "raise the per-task budget" not in review_err
+    assert "whole-work billing-group budget fence" in said
+    assert "amend the original billing-group owner's cap explicitly" in said
+    assert "raise the per-task budget" not in said
     assert [r["status"] for r in ctx._last_triad_raw_results] == ["not_dispatched"] * 3
 
 
@@ -698,8 +706,9 @@ def test_bound_fence_that_does_not_fit_refuses_even_when_the_environment_is_room
         gate, tmp_path, monkeypatch, llm, fence=8.0, env_fence=50.0)
 
     assert llm.calls == [] and len(_ledger(gate)) == 1  # the seeded attempt only (one current row)
-    assert review_err and "per-task budget fence $8.000000" in review_err
-    assert "remaining=$0.000000" in review_err
+    said = _returned(ctx, review_err)
+    assert "per-task budget fence $8.000000" in said
+    assert "remaining=$0.000000" in said
     assert block_reason == "review_wave_budget_insufficient"
     assert coupling.status == "not_dispatched"
 
@@ -768,7 +777,7 @@ def test_admission_that_raises_fails_open_loudly_and_typed(gate, tmp_path, monke
 def test_a_packet_only_wave_is_admitted_and_then_not_performed(gate, tmp_path, monkeypatch):
     """The gate counts only a PASS/FAIL answer: a wave of packet seats alone is
     priced, admitted and dispatched, and then NOT_PERFORMED — no seat was asked
-    the coupling question — so the commit blocks naming Part 2, not the money."""
+    the coupling question — so the returned outcome names Part 2, not the money."""
     prepared = _prepared(tmp_path)
     plan = prepared["row_plan"]
     for key in list(plan):
@@ -779,7 +788,8 @@ def test_a_packet_only_wave_is_admitted_and_then_not_performed(gate, tmp_path, m
     ctx, (review_err, coupling, block_reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=10.0)
 
     assert sorted(llm.calls) == sorted(PACKET_MODELS)
-    assert review_err and "NOT_PERFORMED" in review_err and "Part 2" in review_err
+    said = _returned(ctx, review_err)
+    assert "NOT_PERFORMED" in said and "Part 2" in said
     assert block_reason == "coupling_not_performed" and coupling.status == "not_performed"
     assert ctx._last_review_verdict["per_question"] == {"change": "PASS", "coupling": "not_performed"}
     assert REVIEW_JSON_ARRAY_CONTRACT  # the packet seats answered contract A

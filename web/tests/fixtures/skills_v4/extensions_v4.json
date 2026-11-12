@@ -30,7 +30,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "trusted_source",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -95,7 +95,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "trusted_source",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -160,7 +160,7 @@
         "stale": false,
         "executable_review": false,
         "blocking_reason": "review_pending",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Review is pending or did not produce an executable verdict.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -234,7 +234,7 @@
         "stale": true,
         "executable_review": true,
         "blocking_reason": "owner_edit",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "The owner, or Ouroboros on the owner's instruction, edited these exact bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -295,7 +295,7 @@
         "stale": true,
         "executable_review": false,
         "blocking_reason": "review_pending",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Review is pending or did not produce an executable verdict.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -352,9 +352,9 @@
         "status": "blockers",
         "stale": false,
         "executable_review": false,
-        "blocking_reason": "blocker_findings_under_blocking_enforcement",
-        "review_enforcement": "blocking",
-        "summary": "Review is blocked: blocker findings must be fixed or review enforcement must be advisory.",
+        "blocking_reason": "blocker_findings_need_owner",
+        "review_enforcement": "advisory",
+        "summary": "Review found blockers in a skill from a source that reviews each skill; it stays off until the owner skips the review for these bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false
       },
@@ -401,7 +401,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "ready",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Review is executable: verdict clean.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -440,7 +440,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "ready",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Review is executable: verdict clean.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -495,7 +495,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "ready",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Review is executable: verdict clean.",
         "preflight_failed": false,
         "preflight_failed_stale": false

@@ -35,24 +35,24 @@ def test_generic_builtin_sidecar_none_read_denies_unpublished_and_wrong_context(
     assert _published_tool_result(ctx, None) is stale
 
 
-def test_review_cycle_publishes_only_structural_critical_finding_rejection(
+def test_no_review_verdict_publishes_a_refusal_and_an_owner_stop_publishes_its_own(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """Only a critical-findings VERDICT publishes REVIEW_BLOCKED; other blocks do not.
+    """No review verdict publishes a structural refusal: a critical-findings or a scope-only
+    outcome returns before Git for the author's decision and leaves the published result alone;
+    only the owner's stop publishes its LEGACY_BLOCKED refusal.
 
     Tip adaptation of the reference pin: this tree's stage cycle reads its
     collaborators through the call-time facade handle _git() and gates with
-    _free_cycle_gate/_preflight_and_tests_gate (the reference's
-    _check_advisory_freshness/advisory_gate_unavailable/_refuse_capped_attempt
-    spellings do not exist here), so the facade is the patch point and the
-    aggregate verdict is stubbed per scenario. The durable fact is unchanged."""
+    _free_cycle_gate/_preflight_and_tests_gate, so the facade is the patch point,
+    the aggregate verdict is stubbed per scenario and the handback is captured."""
     from types import SimpleNamespace
 
+    import ouroboros.review_custody as review_custody
     from ouroboros.tools import git as git_facade
     from ouroboros.tools import git_review_cycle as git_tools
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     sentinel = object()
     ctx = SimpleNamespace(
         repo_dir=tmp_path,
@@ -80,50 +80,26 @@ def test_review_cycle_publishes_only_structural_critical_finding_rejection(
     monkeypatch.setattr(git_facade, "classify_review_block", lambda *_a, **_k: "verdict")
     monkeypatch.setattr(
         git_facade,
-        "_run_parallel_review",
-        lambda *_a, **_k: ("⚠️ REVIEW_BLOCKED: critical findings", None, "critical_findings", []),
-    )
-    monkeypatch.setattr(
-        git_facade,
-        "_aggregate_review_verdict",
-        lambda *_a, **_k: (
-            True,
-            "⚠️ REVIEW_BLOCKED: critical findings",
-            "critical_findings",
-            [],
-            [],
-        ),
-    )
-    monkeypatch.setattr(
-        git_facade,
         "_finalize_blocked_review",
         lambda *_a, combined_msg, **_k: combined_msg,
     )
+    handed_back = []
+    monkeypatch.setattr(git_tools, "_return_commit_feedback", lambda *_a, reason="", **_k: (
+        handed_back.append(reason) or {"status": "reviewed", "message": "returned before commit"}))
 
-    outcome = git_tools._run_reviewed_stage_cycle(ctx, "fixture", 0.0)
+    for message, reason in (("⚠️ REVIEW_BLOCKED: critical findings", "critical_findings"),
+                            ("⚠️ SCOPE_REVIEW_BLOCKED: scope only", "scope_blocked")):
+        monkeypatch.setattr(git_facade, "_run_parallel_review", lambda *_a, _m=message, _r=reason, **_k: (_m, None, _r, []))
+        monkeypatch.setattr(git_facade, "_aggregate_review_verdict",
+                            lambda *_a, _m=message, _r=reason, **_k: (True, _m, _r, [], []))
+        outcome = git_tools._run_reviewed_stage_cycle(ctx, "fixture", 0.0)
+        assert outcome == {"status": "reviewed", "message": "returned before commit"}
+        assert handed_back[-1] == reason and ctx._active_builtin_tool_result is sentinel
+
+    monkeypatch.setattr(review_custody, "review_stop_cause", lambda _ctx: "stopped")
+    stopped = git_tools._run_reviewed_stage_cycle(ctx, "fixture", 0.0)
     published = ctx._active_builtin_tool_result
-    assert outcome["message"] == "⚠️ REVIEW_BLOCKED: critical findings"
-    assert isinstance(published, ToolResult)
-    assert published.code == "REVIEW_BLOCKED"
-    assert published.text == outcome["message"]
-
-    ctx._active_builtin_tool_result = sentinel
-    monkeypatch.setattr(
-        git_facade,
-        "_run_parallel_review",
-        lambda *_a, **_k: (None, object(), "critical_findings", []),
-    )
-    monkeypatch.setattr(
-        git_facade,
-        "_aggregate_review_verdict",
-        lambda *_a, **_k: (
-            True,
-            "⚠️ SCOPE_REVIEW_BLOCKED: scope only",
-            "scope_blocked",
-            [],
-            [],
-        ),
-    )
-    scope_only = git_tools._run_reviewed_stage_cycle(ctx, "fixture", 0.0)
-    assert scope_only["message"] == "⚠️ SCOPE_REVIEW_BLOCKED: scope only"
-    assert ctx._active_builtin_tool_result is sentinel
+    assert stopped["status"] == "blocked" and stopped["block_reason"] == "owner_stopped"
+    assert stopped["message"].startswith("⚠️ REVIEW_STOPPED: this work was stopped; this commit was not made.")
+    assert isinstance(published, ToolResult) and published.code == "LEGACY_BLOCKED"
+    assert published.text == stopped["message"] and len(handed_back) == 2

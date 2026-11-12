@@ -23,11 +23,9 @@ from ouroboros import _outcome_receipts
 # The receipt projections below parameterize the reconciliation core and live
 # with it; these historical names stay resolvable through this module.
 from ouroboros._outcome_receipts import (  # explicit re-exports, one statement
-    latest_agent_defined_verification as latest_agent_defined_verification,
     latest_unreconciled_failed_receipt as latest_unreconciled_failed_receipt,
     latest_unreconciled_failed_verification as latest_unreconciled_failed_verification,
     latest_unreconciled_masked_pass as latest_unreconciled_masked_pass,
-    latest_unreconciled_masked_verification as latest_unreconciled_masked_verification,
 )
 # Tool-call trace vocabulary + execution-axis classifier (leaf module). Re-exported
 # here so `from ouroboros.outcomes import _classify_tool_errors/_POLICY_DENIAL_STATUSES/...`
@@ -215,32 +213,23 @@ ACCEPTANCE_FINALIZED_UNACCEPTED = "finalized_unaccepted"
 # execution axis is OK yet "did it actually work?" was never judged: surface a
 # structural warning so a default-`auto` overclaim isn't displayed as clean.
 WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW = "residual_tool_errors_without_review"
-# FR3: a turn produced real effects and finished cleanly, but the agent recorded
-# NO host-attested verification (no verify_and_record receipt and no trivial
-# write/edit deliverable). A BINARY transparency flag that keeps the result solved
-# (never a downgrade — anti-oscillation), surfaced loudly on the objective axis.
+# A turn produced reviewable effects and nothing examined the result after its last effect
+# (``result_unexamined``): no executed check and no result review. A declaration that nothing
+# is machine-checkable, a confirmed path and the write itself are statements, not an
+# examination. A BINARY transparency flag that keeps the result solved (never a downgrade —
+# anti-oscillation), shown in the details, never on the headline (owner, 9 Nov 2026).
 WARN_RECEIPT_ABSENT = "receipt_absent"
-# Receipt statuses that count as host-attested grounding (suppress receipt_absent):
-# a verify_and_record pass, an observed artifact, or an honest no_visible_machine_contract
-# declaration. NOT a fail (that is an overclaim signal, not grounding). A trivial write/
-# edit deliverable is its OWN grounding via _trace_has_write_edit_grounding (derived from
-# the trace, not a receipt), so it needs no receipt status here.
+# A check of this task failed and no later check of the same verification passed
+# (``_outcome_receipts.unreconciled_failed``): its own word, never "no receipt" (audit 11.11).
+WARN_VERIFICATION_RED = "verification_red_unreconciled"
+# Finished direct children whose results carry no recorded decision (``child_result_dispositions.undecided``).
+WARN_CHILDREN_UNDECIDED = "children_undecided"
+# Facts for the owner's details that ask nothing of the owner: the headline stays Done (9 Nov 2026).
+DETAIL_ONLY_WARNINGS = frozenset({WARN_RECEIPT_ABSENT, WARN_VERIFICATION_RED, WARN_CHILDREN_UNDECIDED})
+# The verify_and_record kinds that RUN a check whose outcome the author then sees.
+_EXAMINING_VERIFY_KINDS = frozenset({"explicit_command", "explicit_metric", "visible_verifier"})
+# Receipt statuses that are not ledger failures: a pass, an observed artifact, an honest declaration.
 _RECEIPT_GROUNDING_STATUSES = frozenset({"pass", "observed", "declared"})
-
-
-def _verification_receipt_is_grounding(receipt: Dict[str, Any]) -> bool:
-    """Whether one receipt grounds the task's declared deliverable.
-
-    ``delegation_zero_run`` is a typed lifecycle decision: it proves that the
-    configured actor deliberately closed the no-leaf branch, not that the
-    requested artifact or answer is correct.  It stays visible among the normal
-    receipts, but must not suppress ``receipt_absent`` or turn a
-    lifecycle declaration into host-attested deliverable evidence.
-    """
-    return (
-        str(receipt.get("status") or "") in _RECEIPT_GROUNDING_STATUSES
-        and str(receipt.get("contract_kind") or "") != "delegation_zero_run"
-    )
 
 
 def _terminal_zero_run_receipt_present(receipts: List[Dict[str, Any]]) -> bool:
@@ -298,66 +287,49 @@ def _merge_objective_warning(objective: Dict[str, Any], code: str) -> None:
         objective["warning"] = code
 
 
-def _trace_has_write_edit_grounding(llm_trace: Dict[str, Any]) -> bool:
-    """Host-derived trivial grounding (FR3): a successful non-scratch write_file/
-    edit_text IS its own file-exists receipt (the deliverable provably exists), so it
-    suppresses receipt_absent without forcing the agent to call verify_and_record for
-    a plain write. Derived from the durable trace at finalization, so no per-write
-    handler hook is needed."""
-    for call in llm_trace.get("tool_calls") or []:
+def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
+    """Whether nothing examined this result since it last changed: the turn has reviewable effects
+    and, after the last of them, no executed check ran (``verify_and_record`` of a run kind, any
+    verdict: its author saw the outcome) and no result review was asked for or bound. A reviewed
+    commit as the last effect passed its change review. The finish-door notice and the
+    ``receipt_absent`` record read this one fact (P7; audit 11.11, item 18). Typed calls only,
+    never message content (P5)."""
+    effects = reviewable_effect_projection(llm_trace)
+    if not effects:
+        return False
+    last = effects[-1]
+    if last["tool"] in _EFFECT_COMMIT_TOOLS:
+        return False
+    for call in (llm_trace.get("tool_calls") or [])[last["index"] + 1:]:
         if not isinstance(call, dict) or call.get("is_error"):
             continue
-        if str(call.get("status") or "ok") not in _OK_TOOL_STATUSES:
-            continue
-        if str(call.get("tool") or "") in _ROOT_WRITE_TOOLS:
-            args = call.get("args") if isinstance(call.get("args"), dict) else {}
-            if str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
-                return True
-    return False
-
-
-def verification_grounding_present(
-    llm_trace: Dict[str, Any], drive_root: Any, task_id: str,
-    *, receipts: Optional[List[Dict[str, Any]]] = None,
-) -> bool:
-    """True when the turn already carries host-attested grounding — a verify_and_record
-    receipt with a grounding status, or a trivial write/edit deliverable. Read-only
-    (shared by the one-shot nudge gate and the receipt_absent flag)."""
-    receipt_rows = (
-        receipts if isinstance(receipts, list)
-        else read_verification_receipts(drive_root, task_id)
-    )
-    if any(_verification_receipt_is_grounding(receipt) for receipt in receipt_rows):
-        return True
-    return _trace_has_write_edit_grounding(llm_trace)
-
-
-def should_nudge_verification(
-    llm_trace: Dict[str, Any], drive_root: Any, task_id: str,
-    *, receipts: Optional[List[Dict[str, Any]]] = None,
-) -> bool:
-    """FR3 one-shot nudge gate: the turn produced real reviewable effects but recorded
-    NO host-attested grounding yet — ping the agent ONCE to verify_and_record before it
-    finalizes. Binary; the caller latches it so it fires at most once per task."""
-    if not turn_has_reviewable_effects(llm_trace):
-        return False
-    return not verification_grounding_present(
-        llm_trace, drive_root, task_id, receipts=receipts,
-    )
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        tool = str(call.get("tool") or "")
+        if tool == "verify_and_record" and str(args.get("contract_kind") or "") in _EXAMINING_VERIFY_KINDS:
+            return False
+        if tool == "review_change" and str(args.get("subject") or "") == "result":
+            return False
+    # Only a current bound review speaks for this result: every new delivery candidate supersedes the runs bound
+    # so far (``review_result.supersede_result_runs``), a run of an earlier version stands beside the delivered
+    # bytes as that version's, and a $0 refusal examined nothing.
+    return not any(isinstance(run, dict) and run.get("surface") == "result" and not run.get("superseded_by_revision")
+                   and not run.get("earlier_revision") and run.get("aggregate") != "NOT_DISPATCHED"
+                   for run in llm_trace.get("review_runs") or [])
 
 
 def apply_receipt_absent_flag(
     loop_outcome: Dict[str, Any], llm_trace: Dict[str, Any], drive_root: Any, task_id: str,
     *, receipts: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """FR3 flag — run by the host AFTER ``derive_loop_outcome`` and BEFORE the
-    verification ledger. Inject durable verify_and_record receipts into the trace so
-    the ledger records them, then on a clean turn (execution ok — NOT best_effort/
-    degraded/failed) with real reviewable effects but no host-attested grounding flag
-    ``receipt_absent`` on the objective axis: a BINARY warning that keeps the result
-    solved (never a downgrade — anti-oscillation). A turn without effects is never
-    flagged: how many tools an answer used is not a judgment of the answer (plain prose
-    can itself be the deliverable). Applied before ``outcome_axes`` is normalized so the
+    """Run by the host AFTER ``derive_loop_outcome`` and BEFORE the verification ledger. Inject
+    durable verify_and_record receipts into the trace so the ledger records them; then, on a clean
+    turn (execution ok — NOT best_effort/degraded/failed), flag ``receipt_absent`` when nothing
+    examined the result after it last changed (``result_unexamined``) and
+    ``verification_red_unreconciled`` when a check failed and no later check of it passed, and
+    ``children_undecided`` for finished direct children without a recorded decision. All are
+    BINARY details that keep the result solved (never a downgrade — anti-oscillation) and never
+    raise the headline (``DETAIL_ONLY_WARNINGS``). A turn without effects is never flagged: plain
+    prose can itself be the deliverable. Applied before ``outcome_axes`` is normalized so the
     persisted axes and the ledger agree."""
     receipt_rows = (
         receipts if isinstance(receipts, list)
@@ -368,17 +340,14 @@ def apply_receipt_absent_flag(
     axes = loop_outcome.get("outcome_axes") if isinstance(loop_outcome.get("outcome_axes"), dict) else {}
     objective = axes.get("objective") if isinstance(axes.get("objective"), dict) else None
     execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
-    if not isinstance(objective, dict):
+    if not isinstance(objective, dict) or str(execution.get("status") or "") != EXECUTION_OK:
         return
-    if str(execution.get("status") or "") != EXECUTION_OK:
-        return
-    if not turn_has_reviewable_effects(llm_trace):
-        return
-    if verification_grounding_present(
-        llm_trace, drive_root, task_id, receipts=receipt_rows,
-    ):
-        return
-    _merge_objective_warning(objective, WARN_RECEIPT_ABSENT)
+    if result_unexamined(llm_trace):
+        _merge_objective_warning(objective, WARN_RECEIPT_ABSENT)
+    if _outcome_receipts.unreconciled_failed(receipt_rows):
+        _merge_objective_warning(objective, WARN_VERIFICATION_RED)
+    if (llm_trace.get("child_result_dispositions") or {}).get("undecided"):
+        _merge_objective_warning(objective, WARN_CHILDREN_UNDECIDED)
 
 
 def terminal_outcome_axes(
@@ -437,15 +406,17 @@ def current_custody_debt(*records: Any) -> Optional[list]:
 
 
 def objective_warned(objective: Any, debt: Optional[list]) -> bool:
-    """The headline's objective warning: a nonempty current debt list warns, and an older
-    row's custody warning stops counting once that list is known empty; every other warning,
-    and one beside an absent list, keep the stored word. Twin: log_events.js ``objectiveWarned``."""
+    """The headline's objective warning: a nonempty current debt list warns, and an older row's custody warning
+    stops counting once that list is known empty; every other warning, and one beside an absent list, keep the stored
+    word; a detail-only fact (``DETAIL_ONLY_WARNINGS``) asks nothing of the owner (9 Nov 2026). Twin:
+    log_events.js ``objectiveWarned``."""
     objective = objective if isinstance(objective, dict) else {}
-    primary = objective.get("warning")
-    if debt or debt is None or primary != WARN_DELEGATED_CUSTODY_UNRECONCILED:
-        return bool(debt) or bool(primary)
+    if debt:
+        return True
     warnings = objective.get("warnings") if isinstance(objective.get("warnings"), list) else []
-    return any(code and code != WARN_DELEGATED_CUSTODY_UNRECONCILED for code in warnings)
+    return any(code and code not in DETAIL_ONLY_WARNINGS
+               and not (debt is not None and code == WARN_DELEGATED_CUSTODY_UNRECONCILED)
+               for code in [objective.get("warning"), *warnings])
 
 # Tools/roots whose successful use means the turn produced reviewable work.
 # Root-aware write tools: these take a `root` arg, so the scratch-exclusion rule

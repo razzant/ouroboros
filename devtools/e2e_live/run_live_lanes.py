@@ -596,8 +596,6 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
             child_model = stub_lane.STUB_CHILD_SLUG
             cfg = stub_lane.stub_settings(stub, template)
         cfg.update(scenario.overrides(child_model, cfg))
-        if args.profile == "wiring":
-            cfg["OUROBOROS_REVIEW_ENFORCEMENT"] = "advisory"
         # The lane's ceiling is its own reservation: disjoint from the other lanes', never the whole cap.
         cfg["TOTAL_BUDGET"] = budget.ceiling(job)
         row["budget"] = {"reservation_usd": budget.reservation(scenario.root_tasks, scenario.expects_absorb),

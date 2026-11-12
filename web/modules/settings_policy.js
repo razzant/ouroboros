@@ -68,21 +68,8 @@ export function policyValueLabel(value, axis = '') {
     const key = String(value || '').trim().toLowerCase();
     const level = SAFETY_LEVELS.find((item) => item.value === key);
     if (level && (axis === 'coverage' || key !== 'light')) return level.label;
-    const labels = { light: 'Light', advanced: 'Advanced', pro: 'Pro', cyber_pro: 'Cyber Pro', advisory: 'Advisory', blocking: 'Blocking' };
+    const labels = { light: 'Light', advanced: 'Advanced', pro: 'Pro', cyber_pro: 'Cyber Pro' };
     return labels[key] || String(value || 'Unknown');
-}
-
-// Review findings never block actions under Cyber Pro Access (review_helpers.review_enforcement_blocks). What that
-// does to a saved Blocking, from the Access in force now and the Access saved for the next start; '' when Blocking is
-// simply enforced, or not the saved choice.
-export function cyberReviewNote(state) {
-    const blocking = (state?.review?.next_task || state?.review?.configured) === 'blocking';
-    const now = (state?.access?.current_process || state?.access?.effective) === 'cyber_pro';
-    const next = state?.access?.configured === 'cyber_pro';
-    if (!blocking || (!now && !next)) return '';
-    if (now && next) return 'Not enforced under Cyber Pro: reviews advise, it decides.';
-    return now ? `Not enforced now, under Cyber Pro. Enforced after the restart that applies ${policyValueLabel(state.access.configured)}.`
-        : 'Enforced now. Not enforced after the restart that applies Cyber Pro.';
 }
 
 const AXES = { OUROBOROS_RUNTIME_MODE: 'access', OUROBOROS_SAFETY_MODE: 'coverage', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'coverage' };
@@ -90,7 +77,7 @@ const AXES = { OUROBOROS_RUNTIME_MODE: 'access', OUROBOROS_SAFETY_MODE: 'coverag
 /**
  * The rows of Permissions and checks as this installation's policy leaves them (`rows`: copies of the descriptors,
  * changed in place). A managed deployment's ceiling on Access and floor under a Safety level leave only the options
- * it allows, and the row says whose limit it is; a saved Blocking says what Cyber Pro does to it.
+ * it allows, and the row says whose limit it is.
  */
 export function applyPolicyToRows(rows, settings, described = (id) => null) {
     const state = settings?._meta?.policy_state || null;
@@ -104,11 +91,6 @@ export function applyPolicyToRows(rows, settings, described = (id) => null) {
             row.meta = note || base.meta;
             row.control = { ...base.control, options: options.map((option) => (
                 note && axis === 'coverage' ? { ...option, note: `${option.note} ${note}.` } : { ...option })) };
-        }
-        if (row.id === 'OUROBOROS_REVIEW_ENFORCEMENT') {
-            const cyber = cyberReviewNote(state);
-            row.control = { ...base.control, options: base.control.options.map((option) => (
-                cyber && option.value === 'blocking' ? { ...option, note: cyber } : { ...option })) };
         }
     }
     return rows;

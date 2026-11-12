@@ -208,8 +208,7 @@ def resolve_prompt_cache_ttl() -> str:
     return raw if raw in PROMPT_CACHE_TTL_SCALE else default
 
 
-# Runtime mode and review enforcement are separate axes.  ``cyber_pro`` is the
-# owner-selected high-power access level; it remains an ordinary member of the
+# ``cyber_pro`` is the owner-selected high-power access level; it remains an ordinary member of the
 # same closed scale so every consumer shares one vocabulary and rank.
 VALID_RUNTIME_MODES = ("light", "advanced", "pro", "cyber_pro")
 

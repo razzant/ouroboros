@@ -254,7 +254,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_presence_forced_declaration", "_presence_forced_pending", "_presence_completion_accepted",
             "_presence_selection_seq", "_presence_released", "_presence_delivered", "_presence_covered",
             "_swarm_handoff_attempt", "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation",
-            "_owner_reply_revision", "_owner_message_sent",
+            "_owner_reply_revision", "_owner_message_sent", "_pre_delivery_noticed", "_subagent_handoff_shown",
         ) if getattr(ctx, key, None) is not None},
         # The block keeps its stored name; the task-acceptance flags it once carried are gone
         # (a pre-fold continuation still has them: ``restore_continuation_state`` ignores them).

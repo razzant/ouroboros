@@ -10,7 +10,8 @@ and the owner hears once how much of it there is and that Ouroboros can be asked
 to keep folding it, part by part. The per-call ceiling went the other way: the
 owner retired it on every install, a configured value included, so each install
 with a settings document hears once what bounds a command, an in-slot wait and the
-silence before attention now. (Which reviewers run is no longer a notice
+silence before attention now. Blocking reviews went that way too: an install that had them
+hears once that the setting is gone and what still holds. (Which reviewers run is no longer a notice
 of this module: the review lanes became rows of the subagent catalog, and the
 migration's own one-time report — ``server_maintenance._startup_review_pool_notice``
 — says which rows run now.)
@@ -28,6 +29,7 @@ boot rather than claimed as published.
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -36,7 +38,9 @@ log = logging.getLogger(__name__)
 OPTIONAL_BOUNDS_NOTICE_KEY = "optional_bounds_notified"
 LEGACY_MEMORY_NOTICE_KEY = "legacy_memory_notified"
 COMMAND_TIMEOUT_NOTICE_KEY = "command_timeout_notified"
+REVIEW_ENFORCEMENT_NOTICE_KEY = "review_enforcement_notified"
 _CALL_CEILING_KEY = "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC"
+_REVIEW_ENFORCEMENT_KEY = "OUROBOROS_REVIEW_ENFORCEMENT"
 # The old dialogue writer's retelling; its cursor file alone holds no retelling to tell about.
 _LEGACY_MEMORY_FILES = ("dialogue_blocks.json", "dialogue_summary.md")
 _NOT_PIECES = frozenset({"gap", "cursor_gap"})
@@ -125,6 +129,25 @@ def command_timeout_notice(document: Optional[Mapping[str, Any]], settings: Mapp
             "this platform cannot wait on, starts no command. An in-slot await_messages wait lasts as long as it asks, "
             f"within the deadline and Stop. A task is flagged idle after Idle Timeout{idle_shown} of silence, no longer "
             "after at least that ceiling plus two minutes.")
+
+
+def review_enforcement_notice(document: Optional[Mapping[str, Any]], environ: Mapping[str, str]) -> str:
+    """The owner-facing sentence that Blocking left the product, owed once to an install that had it.
+
+    Read the value the install ran with, before the read seam drops the retired key: the raw document's
+    non-empty value (a saved choice outranked the environment), else the process environment (an exported
+    variable of a Docker unit, a Colab cell or a benchmark adapter). Only ``blocking``, whatever its case or
+    spaces, owes it; another value, or no value in either place, is silent.
+    """
+    saved = document.get(_REVIEW_ENFORCEMENT_KEY) if isinstance(document, Mapping) else None
+    value = saved if str(saved if saved is not None else "").strip() else environ.get(_REVIEW_ENFORCEMENT_KEY)
+    if str(value if value is not None else "").strip().lower() != "blocking":
+        return ""
+    return ("⚙️ This install had reviews set to Blocking. That setting is gone with this update: a reviewer's serious "
+            "finding, or a review that gave no answer, no longer stops Ouroboros. Outside Cyber Pro it still asks for a "
+            "review before changing its own code and reads the answer first; when it disagrees, it goes ahead and says "
+            "why. Each time it goes ahead over a serious finding or without an answer, the work card, the restart "
+            "message and the update description name it.")
 
 
 def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
@@ -217,6 +240,10 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
             text = command_timeout_notice(_raw_settings_document(), settings or {})
             if text:
                 owed.append((COMMAND_TIMEOUT_NOTICE_KEY, text, "command_timeout_notice"))
+        if not state.get(REVIEW_ENFORCEMENT_NOTICE_KEY):
+            text = review_enforcement_notice(_raw_settings_document(), os.environ)
+            if text:
+                owed.append((REVIEW_ENFORCEMENT_NOTICE_KEY, text, "review_enforcement_notice"))
         if not state.get(LEGACY_MEMORY_NOTICE_KEY) and message_bus.DATA_DIR:
             try:
                 text = legacy_memory_notice(legacy_memory_facts(message_bus.DATA_DIR))

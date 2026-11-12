@@ -63,7 +63,6 @@ keeps its factory value:
 |---|---|---|
 | Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
 | Access level | `advanced` | the level chosen |
-| Review | `advisory` | the mode chosen |
 | Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
 | Consciousness | off; $20 over 24 hours once started | off unless ticked |
 
@@ -77,7 +76,7 @@ A setting the file does not hold is read from the environment variable of its na
 (a Colab launch writes the ones named here into its file: `TOTAL_BUDGET` and
 `OUROBOROS_RUNTIME_MODE` from the notebook's variables at each launch that sets them,
 the rest as the file held them, or at factory values on a first launch), for example
-`TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`, `OUROBOROS_REVIEW_ENFORCEMENT`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
+`TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
 `OUROBOROS_RUNTIME_MODE` (read at a start). The exceptions are the choices only the
 owner's controls author, Safety coverage and the Context mode among them: Settings
 shows their saved or factory value whatever the environment says. Neither is

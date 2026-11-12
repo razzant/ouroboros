@@ -12,18 +12,16 @@ staged_body = e2e.staged_body
 
 
 def test_advisory_commit_seats_exactly_the_named_reviewers(staged_body, tmp_path, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     record, sent = e2e._gate_with_critic(staged_body, tmp_path, monkeypatch, mode="pro",
                                      reviewers=["s1", "scout"], reason=e2e.REASON, expected_status="reviewed")
     assert sent == ["s1", "scout"]
     assert record["panel"]["assigned"] == ["s1"] and record["panel"]["additional"] == ["scout"]
-    assert record["panel"]["reason"] == e2e.REASON and record["panel"]["widened_from"] == []
+    assert record["panel"]["reason"] == e2e.REASON and "widened_from" not in record["panel"]
     assert record["panel"]["strictness"] == "advisory"
 
 
 def test_reasonless_advisory_commit_refuses_before_staging(staged_body, tmp_path, monkeypatch):
     repo = Path(staged_body["repo"])
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setattr(substrate, "run_review_request", lambda *a, **k: pytest.fail("no wave may be paid"))
     ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "gate-drive")
     e2e.shared.git(repo, "reset", "-q", "HEAD")

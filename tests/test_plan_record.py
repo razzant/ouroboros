@@ -35,7 +35,7 @@ def _record(*asks, revisions=1):
 
 
 def _gate(record, **over):
-    kwargs = {"enforcement": "blocking", "cyber_pro": False, "hurry": False}
+    kwargs = {"cyber_pro": False}
     kwargs.update(over)
     return pr.gate_projection(record, **kwargs)
 
@@ -100,9 +100,9 @@ def test_a_quoted_object_in_a_preamble_is_not_the_reply_and_a_malformed_item_is_
     assert [(i["key"], i["index"], i["id"], i["reason"]) for i in mixed["ignored"]] == [
         ("objections", 1, "", "no usable id"), ("objections", 2, "", "not an object"), ("objections", 3, "o3", "text must be text"),
         ("withdrawn", 0, "bad id!", "no usable id")]
-    # Through the fold: the raiser's withdrawal beside a malformed item still releases the hold.
+    # Through the fold: the raiser's withdrawal beside a malformed item still closes the objection.
     held = _record([_participant(SEAT_A, reply={"objections": [{"id": "o1", "text": "low"}]})])
-    assert _gate(held)["status"] == "held"
+    assert _gate(held)["status"] == "objections_open"
     withdrawn, _ = pr.parse_reply('{"withdrawn": [{"id": "o1", "why": "raised"}, {"id": "", "why": "void"}]}')
     released = _record(held["asks"][0]["participants"], [_participant(SEAT_A, reply=withdrawn)])
     assert _gate(released)["status"] == "clear" and pr.read_view(released)["asks"][1]["participants"][0]["ignored_items"] == 1
@@ -113,7 +113,8 @@ def test_a_quoted_object_in_a_preamble_is_not_the_reply_and_a_malformed_item_is_
 def test_objection_stands_until_its_raiser_withdraws_it():
     raised = _record([_participant(SEAT_A, reply={"objections": [{"id": "o1", "text": "the bar is too low"}]})])
     [objection] = pr.open_objections(raised)
-    assert objection["seat_id"] == SEAT_A and objection["id"] == "o1" and objection["holds"] is True
+    assert objection["seat_id"] == SEAT_A and objection["id"] == "o1" and objection["owner_marked"] is True
+    assert "holds" not in objection
     assert objection["not_adjudicated"] is False and objection["raised_in"] == "a1"
     withdrawn = _record(raised["asks"][0]["participants"],
                         [_participant(SEAT_A, reply={"withdrawn": [{"id": "o1", "why": "revision 2 raised the bar"}]})], revisions=2)
@@ -139,14 +140,14 @@ def test_another_seat_cannot_withdraw_it_and_omission_keeps_it_flagged():
     assert again["not_adjudicated"] is False and again["text"] == "still: x" and again["ask_id"] == "a3" and again["raised_in"] == "a1"
 
 
-def test_unparseable_reply_changes_nothing_and_mind_added_critics_never_hold():
+def test_unparseable_reply_changes_nothing_and_mind_added_critics_are_named_as_added():
     record = _record(
         [_participant(SEAT_A, reply={"objections": [{"id": "o1", "text": "x"}]}),
          _participant(CRITIC, owner_marked=False, reply={"objections": [{"id": "k1", "text": "critic says no"}]})],
         [_participant(SEAT_A, status="unparseable")])
     opened = {(o["seat_id"], o["id"]): o for o in pr.open_objections(record)}
-    assert opened[(SEAT_A, "o1")]["holds"] is True and opened[(SEAT_A, "o1")]["not_adjudicated"] is False
-    assert opened[(CRITIC, "k1")]["holds"] is False and opened[(CRITIC, "k1")]["open"] is True
+    assert opened[(SEAT_A, "o1")]["owner_marked"] is True and opened[(SEAT_A, "o1")]["not_adjudicated"] is False
+    assert opened[(CRITIC, "k1")]["owner_marked"] is False and opened[(CRITIC, "k1")]["open"] is True
 
 
 def test_participant_views_track_last_seen_revision_and_last_answered_ask():
@@ -188,9 +189,9 @@ def test_a_readings_reply_is_advice_that_moves_no_objection_in_any_mode():
     objecting = _participant(SEAT_A, reply={"objections": [{"id": "o1", "text": "the owner asked for a story"}]})
     reading = {**pr.empty_record(), "asks": [_reading(objecting)]}
     assert pr.fold_objections(reading) == [] and pr.open_objections(reading) == []
-    for mode in ({}, {"enforcement": "advisory"}, {"cyber_pro": True}):
+    for mode in ({}, {"cyber_pro": True}):
         decision = _gate(reading, **mode)
-        assert decision["allow"] is True and decision["holding"] == [] and decision["open_objections"] == []
+        assert decision["allow"] is True and "holding" not in decision and decision["open_objections"] == []
     assert pr.read_view(reading)["asks"][0]["revision"] is None  # the reading itself stays visible
     # A standing objection on revision 1: a later reading's withdrawal, restatement or silence leaves it as it was.
     standing = _record([objecting])
@@ -198,32 +199,33 @@ def test_a_readings_reply_is_advice_that_moves_no_objection_in_any_mode():
                   {"prose": "nothing about o1"}):
         late = {**standing, "asks": [*standing["asks"], _reading(_participant(SEAT_A, reply=reply), ask_id="a2")]}
         [objection] = pr.open_objections(late)
-        assert (objection["holds"], objection["ask_id"], objection["text"], objection["not_adjudicated"]) == (
+        assert (objection["owner_marked"], objection["ask_id"], objection["text"], objection["not_adjudicated"]) == (
             True, "a1", "the owner asked for a story", False)
-        assert _gate(late)["status"] == "held"
-    # The other direction: the same objection stated about a stored revision holds, and its raiser's withdrawal there releases it.
+        assert _gate(late)["status"] == "objections_open"
+    # The other direction: the same objection stated about a stored revision stands, and its raiser's withdrawal there closes it.
     on_plan = _record([objecting])
-    assert _gate(on_plan)["status"] == "held" and pr.open_objections(on_plan)[0]["revision"] == 1
+    assert _gate(on_plan)["status"] == "objections_open" and pr.open_objections(on_plan)[0]["revision"] == 1
     released = _record([objecting], [_participant(SEAT_A, reply={"withdrawn": [{"id": "o1", "why": "fine now"}]})], revisions=2)
     assert _gate(released)["status"] == "clear"
 
 
-def test_a_reading_leaves_an_imported_legacy_objection_holding():
+def test_a_reading_leaves_an_imported_legacy_objection_standing():
     legacy = pr.import_legacy_v2(_v2_state(closed=False, blocking_findings=("triad_old",)))
     withdrawal = {"withdrawn": [{"id": "triad_old:f1", "why": "fixed"}]}
     reading = {**pr.empty_record(), "asks": [_reading(_participant("triad_old", reply=withdrawal))]}
     decision = _gate(reading, legacy=legacy)
-    assert decision["status"] == "held" and decision["holding"] == ["triad_old:triad_old:f1"]
+    assert decision["status"] == "objections_open" and [o["id"] for o in decision["open_objections"]] == ["triad_old:f1"]
     assert pr.open_objections(reading, legacy)[0]["not_adjudicated"] is False
     assert _gate(_record([_participant("triad_old", reply=withdrawal)]), legacy=legacy)["status"] == "clear"
 
 
 # ---------------------------------------------------------------- the gate
 
-def test_blocking_holds_only_on_an_open_objection_of_an_owner_marked_seat():
+def test_an_open_objection_is_disclosed_never_held_and_its_raisers_withdrawal_clears_it():
     held = _record([_participant(SEAT_A, reply={"objections": [{"id": "o1", "text": "x"}]})])
     decision = _gate(held)
-    assert decision["status"] == "held" and decision["allow"] is False and decision["holding"] == [f"{SEAT_A}:o1"]
+    assert decision["status"] == "objections_open" and decision["allow"] is True and "holding" not in decision
+    assert [(o["seat_id"], o["id"], o["owner_marked"]) for o in decision["open_objections"]] == [(SEAT_A, "o1", True)]
     critic_only = _record([_participant(CRITIC, owner_marked=False, reply={"objections": [{"id": "k1", "text": "x"}]})])
     assert _gate(critic_only)["status"] == "objections_open" and _gate(critic_only)["allow"] is True
     withdrawn = _record(held["asks"][0]["participants"], [_participant(SEAT_A, reply={"withdrawn": [{"id": "o1", "why": "ok"}]})])
@@ -240,34 +242,28 @@ def test_silence_refusals_and_pending_asks_never_hold():
     assert _gate(nothing_sent)["status"] == "clear"
 
 
-def test_advisory_cyber_and_hurry_disclose_instead_of_holding():
+def test_cyber_pro_and_the_hard_rail_disclose_and_say_so():
     held = _record([_participant(SEAT_A, reply={"objections": [{"id": "o1", "text": "x"}]})])
-    advisory = _gate(held, enforcement="advisory")
-    assert advisory["allow"] is True and advisory["status"] == "objections_open" and advisory["holding"] == [f"{SEAT_A}:o1"]
     cyber = _gate(held, cyber_pro=True)
     assert cyber["allow"] is True and cyber["decision_authority"] == "cyber_pro"
-    hurry = _gate(held, hurry=True)
-    assert hurry["allow"] is True and hurry["owner_hurry_local_advisory"] is True and hurry["configured_enforcement"] == "blocking"
+    assert "decision_authority" not in _gate(held)
     rail = _gate(held, hard_rail="round_limit")
     assert rail["allow"] is True and rail["status"] == "rail_degraded" and rail["reason"] == "round_limit"
 
 
 def test_unasked_and_unroutable_plans_never_hold_without_an_objection():
-    for enforcement in ("blocking", "advisory"):
-        for record in (pr.empty_record(), _record(revisions=1),
-                       _record([_participant(SEAT_A, dispatched=False, status="not_dispatched")])):
-            decision = _gate(record, enforcement=enforcement)
-            assert decision["allow"] is True
+    for record in (pr.empty_record(), _record(revisions=1),
+                   _record([_participant(SEAT_A, dispatched=False, status="not_dispatched")])):
+        assert _gate(record)["allow"] is True
     reached = _gate(_record([_participant(SEAT_A)]))
     assert reached["status"] == "awaiting" and reached["allow"] is True
 
 
 def test_a_task_without_a_plan_is_not_required_and_an_unreadable_record_is_engaged():
-    assert _gate(pr.empty_record()) == {"required": False, "allow": True, "status": "not_required", "enforcement": "blocking",
-                                        "open_objections": [], "holding": [], "pending_asks": [], "revision": 0}
+    assert _gate(pr.empty_record()) == {"required": False, "allow": True, "status": "not_required",
+                                        "open_objections": [], "pending_asks": [], "revision": 0}
     unreadable = _gate(pr.empty_record(), unreadable=True)
     assert unreadable["required"] is True and unreadable["allow"] is False and unreadable["status"] == "unreadable"
-    assert _gate(pr.empty_record(), unreadable=True, enforcement="advisory")["allow"] is False
     assert _gate(pr.empty_record(), unreadable=True, cyber_pro=True)["allow"] is True
 
 
@@ -302,19 +298,19 @@ def _v2_state(*, closed, blocking_findings=(), claims=("a", "b"), fingerprint="f
                        + [{"finding_id": "triad_z:n1", "class": "note", "slot": "triad_z", "summary": "a note"}]}]}
 
 
-def test_legacy_open_blocking_findings_become_holding_objections_of_their_seats():
+def test_legacy_open_blocking_findings_become_open_objections_of_their_seats():
     legacy = pr.import_legacy_v2(_v2_state(closed=False, blocking_findings=("triad_old",)))
     assert legacy["engaged"] is True and legacy["done_when"] == [] and legacy["asks_dispatched"] == 1
     assert legacy["open_objections"] == [{"seat_id": "triad_old", "id": "triad_old:f1", "owner_marked": True, "text": "wrong shape",
                                           "fingerprint": "f" * 64}]
     decision = _gate(pr.empty_record(), legacy=legacy)
-    assert decision["status"] == "held" and decision["source"] == "legacy_v2" and decision["open_objections"][0]["legacy"] is True
-    assert _gate(pr.empty_record(), legacy=legacy, enforcement="advisory")["allow"] is True
+    assert decision["status"] == "objections_open" and decision["allow"] is True
+    assert decision["source"] == "legacy_v2" and decision["open_objections"][0]["legacy"] is True
     # The seat that raised it releases it through the new organ; nobody else can.
     released = _record([_participant("triad_old", reply={"withdrawn": [{"id": "triad_old:f1", "why": "fixed"}]})])
     assert _gate(released, legacy=legacy)["status"] == "clear"
     other = _record([_participant(SEAT_B, reply={"withdrawn": [{"id": "triad_old:f1", "why": "I say so"}]})])
-    assert _gate(other, legacy=legacy)["status"] == "held"
+    assert _gate(other, legacy=legacy)["status"] == "objections_open"
 
 
 def test_legacy_closed_wave_and_advisory_author_selection_bind_as_done_when():
@@ -384,7 +380,7 @@ def test_a_v1_record_reads_as_kept_history_and_imports_read_only(tmp_path):
 
 def test_legacy_in_flight_wave_is_one_pending_ask_that_discloses_and_never_holds():
     """An in-flight v2 wave at upgrade: its unanswered reviewers are ONE pending ask the final
-    answer discloses (silence never holds); a blocking finding already landed still holds."""
+    answer discloses (silence never holds); a blocking finding already landed stays open."""
     from ouroboros.owner_hurry import plan_review_disclosure
 
     state = _v2_state(closed=False)
@@ -402,21 +398,21 @@ def test_legacy_in_flight_wave_is_one_pending_ask_that_discloses_and_never_holds
     settled = pr.import_legacy_v2(state)
     assert settled["pending_asks"] == [] and _gate(pr.empty_record(), legacy=settled)["status"] == "clear"
     assert pr.import_legacy_v2(_v2_state(closed=True))["pending_asks"] == []
-    # a landed blocking finding holds whether or not the rest of the wave is still owed
+    # a landed blocking finding stays open whether or not the rest of the wave is still owed
     held_state = _v2_state(closed=False, blocking_findings=("triad_old",))
     held_state["waves"][0]["custody_pending"] = True
     held = _gate(pr.empty_record(), legacy=pr.import_legacy_v2(held_state))
-    assert held["status"] == "held" and held["pending_asks"] == ["legacy wave " + "f" * 12]
+    assert held["status"] == "objections_open" and held["pending_asks"] == ["legacy wave " + "f" * 12]
 
 def test_legacy_objections_stand_when_the_author_moved_on_but_claims_do_not_follow():
     """A changed spec at the cap or an author plan moves the attempt's fingerprint to a wave that
-    never ran: the latest wave's open blocking findings still hold (a Blocking hold is not dropped
-    by deployment), while a closed wave the author left behind binds no claims."""
+    never ran: the latest wave's open blocking findings still stand open (deployment drops none),
+    while a closed wave the author left behind binds no claims."""
     moved = _v2_state(closed=False, blocking_findings=("triad_old",))
     moved["current_attempt"] = {"fingerprint": "e" * 64, "status": "cycles_exhausted", "reason": "spent"}
     legacy = pr.import_legacy_v2(moved)
     assert [o["seat_id"] for o in legacy["open_objections"]] == ["triad_old"] and legacy["open_objections"][0]["fingerprint"] == "f" * 64
-    assert _gate(pr.empty_record(), legacy=legacy)["status"] == "held"
+    assert _gate(pr.empty_record(), legacy=legacy)["status"] == "objections_open"
     left_behind = _v2_state(closed=True)
     left_behind["current_attempt"] = {"fingerprint": "e" * 64, "status": "open", "reason": "author_current_plan"}
     stale = pr.import_legacy_v2(left_behind)
@@ -513,7 +509,7 @@ def test_record_history_binds_each_reply_to_its_source_and_rows_carry_the_object
     (row,) = history["decision_rows"]
     assert row["decision_kind"] == "plan_objection" and row["seat_id"] == SEAT_A and row["objection_id"] == "o1"
     assert row["remark"] == "no export" and row["history_role"] == "open" and row["source"] == reply_ref
-    assert row["status"]["open"] is True and row["status"]["holds"] is True and row["status"]["withdrawn_in"] == ""
+    assert row["status"]["open"] is True and row["status"]["owner_marked"] is True and row["status"]["withdrawn_in"] == ""
     assert pr.operative_revision(record)["kind"] == "plan_revision" and pr.operative_revision(pr.empty_record()) is None
     # The raiser withdrawing it makes the row history, sourced at the withdrawing reply.
     later = pr.append_ask(tmp_path, "task-h", {"ask_id": "a2", "ts": "t2", "revision": 1, "message": "fixed",
@@ -636,7 +632,7 @@ def test_unroutable_asks_stay_recorded_without_creating_a_plan_obligation():
     asked = {**_record(revisions=1), "attempts": [attempt]}
     decision = _gate(asked)
     assert decision["status"] == "clear" and decision["allow"] is True
-    assert decision["asks_unroutable"] == 1 and decision["holding"] == []
+    assert decision["asks_unroutable"] == 1 and "holding" not in decision
     assert _gate(_record(revisions=1))["allow"] is True
     assert _gate({**pr.empty_record(), "attempts": [attempt]})["allow"] is True
     assert pr.unroutable_asks(asked) == 1 and pr.read_view(asked)["attempts"] == [attempt]
@@ -665,7 +661,7 @@ def test_a_pending_echo_never_reopens_a_settled_seat_under_the_records_lock(tmp_
     assert still["operation_state"] == "pending_dispatch" and still["late_result_pending"] is True
     merged = pr.update_participant(root, task, ask_id="a1", seat_id=SEAT_A, facts={"reply_ref": {"status": "empty"}})
     assert merged["asks"][0]["participants"][0]["reply_ref"] == {"status": "empty"}, "status-less facts still merge"
-    assert pr.open_objections(merged)[0]["holds"] is True
+    assert pr.open_objections(merged)[0]["open"] is True
 
 
 def test_the_one_legacy_loader_names_the_read_that_failed_and_projects_the_rest(tmp_path, monkeypatch):

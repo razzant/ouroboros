@@ -77,13 +77,16 @@ OUROBOROS_REPO_DIR=/opt/ouroboros-src
 OUROBOROS_DATA_DIR=/logs/agent/ouroboros-data
 OUROBOROS_SETTINGS_PATH=/logs/agent/ouroboros-data/settings.json
 OUROBOROS_RUNTIME_MODE=pro
-OUROBOROS_REVIEW_ENFORCEMENT=blocking
 OUROBOROS_TASK_REVIEW_MODE=required
 OUROBOROS_SAFETY_MODE=light
 OUROBOROS_MAX_WORKERS=4
 OUROBOROS_MODEL_LIGHT=google/gemini-3.5-flash
 OUROBOROS_WORKER_START_METHOD=spawn
 ```
+
+**2026-11-12:** trials before the release that retires `OUROBOROS_REVIEW_ENFORCEMENT` ran it as
+`blocking`; after it a review FAIL is shown to the agent, which decides. Those rows are a new
+methodology, never compared with earlier ones.
 
 This means:
 
