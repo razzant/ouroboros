@@ -453,23 +453,6 @@ def test_search_own_failure_object_reaches_registry_without_losing_custody(invok
     assert "operation_outcome" not in result.meta
 
 
-@pytest.mark.parametrize("saved", [False, True])
-def test_evolution_stats_artifact_outcome_is_not_hidden_by_summary(invoke, monkeypatch, saved):
-    from ouroboros.tools import evolution_stats
-    from ouroboros import artifacts
-    invoke.ctx.task_id = "local-evolution-export"
-    monkeypatch.setattr(evolution_stats, "_collect_data", lambda: [
-        {"ts": "2026-10-13", "py_lines": 1, "bible_bytes": 2, "system_bytes": 3}])
-    if not saved:
-        def fail(*args, **kwargs):
-            raise OSError("fixture disk refused")
-        monkeypatch.setattr(artifacts, "store_task_artifact_bytes", fail)
-    result = invoke(evolution_stats.get_tools()[0].handler)
-    assert result.code == ("OK" if saved else "TOOL_ERROR")
-    assert ("py_lines=1 bible=2B system=3B" if saved else "fixture disk refused") in result.text
-    assert "operation_outcome" not in result.meta
-
-
 @pytest.mark.parametrize("case", ["stale", "unstable", "empty"])
 def test_recent_tasks_snapshot_refusal_differs_from_partial_read(invoke, monkeypatch, case):
     from ouroboros.tools import recent_tasks

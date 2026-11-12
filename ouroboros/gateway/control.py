@@ -701,9 +701,9 @@ def _fence_failure(blockers: list[str], stash_note: str = "") -> JSONResponse:
     if active_only:
         names = ", ".join(str(item)[len("active:"):] for item in blockers)
         error = (
-            f"Active work is still running or finishing review ({names}). "
-            "No work was stopped and the repository was not changed; wait for it to finish, "
-            "pause it, or restart Ouroboros to clear the blocker."
+            f"Active work is still running or finishing review ({names}). No work was stopped and the repository "
+            "was not changed; wait for it to finish, pause it, or restart Ouroboros to clear the blocker. Paused work "
+            "stays paused until you resume it, and a review that is already running can still block the request."
         )
     else:
         error = (

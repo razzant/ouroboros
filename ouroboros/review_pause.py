@@ -929,7 +929,7 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
                       settled: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """The late-review record of one left wave, composed from its attempt row and retained source."""
     from ouroboros.artifacts import store_actor_source_bytes
-    from ouroboros.late_review_marks import outcome_facts  # D06->D15 is lazy-only
+    from ouroboros.late_review_marks import outcome_facts, outcome_words  # D06->D15 is lazy-only
     from ouroboros.merge_receipts import review_settlement_facts
 
     surface, task_id, retry_key = str(record["surface"]), str(record["task_id"]), str(record["retry_key"])
@@ -952,18 +952,18 @@ def _left_review_mark(record: Dict[str, Any], attempt: Any, seats: List[Dict[str
     how = ("that its author stopped waiting for" if record.get("left") == "unwaited"
            else "that never reached its author" if record.get("left") == "unread"
            else "that its author left for an addressed message")
-    verdict = str(((settled or {}).get("verdict") or {}).get("aggregate") or "")
+    outcome = outcome_facts(settled)  # the same facts the mark keeps, told in the same words as the list
     # Lifecycle facts only: the author's task ended; whether a seat answered is each seat's own line. The effect
     # clause speaks of this call alone: what the task merged under another record is not this mark's to deny.
     head = (f"The paid {surface} review ({named}) {how}, kept here because its author's task ended. "
-            + (f"Its record now reads {verdict}" if verdict and (settled or {}).get("state") == "settled"
+            + (f"Its record now reads {outcome_words(outcome)}" if (outcome or {}).get("verdict")
                else "No panel verdict was formed for it") + "; the review call itself committed or applied nothing; "
             + (f"its record could not be read ({gap}), so every seat's outcome stays unknown."
                if gap else "each seat's recorded state follows."))
     if unknown:
         head += f" {len(unknown)} seat(s) have no retained outcome and stay unknown; nothing is sent again."
     return {"surface": _LEFT_SURFACES.get(surface, surface), "task_id": task_id, "source_ref": ref,
-            "publication_id": _left_publication_id(record), **room_facts, "outcome": outcome_facts(settled),
+            "publication_id": _left_publication_id(record), **room_facts, "outcome": outcome,
             "lines": [head, *merge_words, *(f"- {seat.get('model') or 'reviewer'} (seat {seat['slot_id']}): {_seat_words(seat)}"
                               for seat in seats)],
             "subject": {"retry_key": retry_key, "attempt": attempt_no, "record_id": str(record.get("record_id") or ""),

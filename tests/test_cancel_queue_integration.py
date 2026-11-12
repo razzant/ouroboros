@@ -15,6 +15,7 @@ import json
 import types
 import pytest
 from ouroboros import cancel_intents as ci
+from ouroboros.terminal_time import terminal_time_fact
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
     STATUS_CANCELLED,
@@ -58,6 +59,7 @@ def test_drop_cancelled_pending_consults_the_intent_projection(qenv, monkeypatch
     assert stored["result"] == ("Cancelled before start." if attempt == 1
                                 else "Cancelled before this continuation started.")
     assert "cost_accounting_status" in stored  # reconstructed, not omitted
+    assert terminal_time_fact(stored)["source"] == "supervisor_cancel"  # the supervisor dropped it and saw the end
     assert ci.active_intent(qenv.drive, "dropme") is None
     assert emitted and emitted[0][0] == "dropme" and emitted[0][1] == "cancelled"
 

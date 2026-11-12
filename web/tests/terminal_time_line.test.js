@@ -43,6 +43,12 @@ test('an unknown end still says so, and is never the notification time', (t) => 
     }
     assert.deepEqual(terminalTimeNote(ended('2026-10-17T18:41:00Z'), '', now),
         { short: 'Ended 18:41', full: `Task ended ${at('2026-10-17T18:41:00Z')}` }, 'an unreadable row time adds nothing');
+    // A cancel the supervisor recorded is an end the host observed too: the same line, the same words.
+    const cancelled = { v: 1, source: 'supervisor_cancel', occurred_at: '2026-10-17T18:41:00Z', attempt: {} };
+    assert.deepEqual(terminalTimeNote(cancelled, '2026-10-17T18:46:00Z', now),
+        terminalTimeNote(ended('2026-10-17T18:41:00Z'), '2026-10-17T18:46:00Z', now));
+    assert.equal(savedTerminalRowNote({ system_type: 'task_summary', ts: '2026-10-17T18:41:20Z', terminal_time: cancelled }), '',
+        'a row added in the minute its work was cancelled needs no second time');
 });
 
 test('two different minutes that read alike across a DST fallback carry their zone names', (t) => {

@@ -153,14 +153,15 @@ def _project_history_context(
     once per request; no per-row registry reads, no extra event-loop thread hops.
     ``strict`` (an exact row's destination) raises unreadable authority as StoreError.
     """
-    from ouroboros.projects_registry import reserved_project_chat_ids, RoomResolver, all_task_bindings
+    from ouroboros.projects_registry import reserved_project_chat_ids, readable_rooms, RoomResolver, all_task_bindings
 
     try:
         project_chat_ids, classified = reserved_project_chat_ids(data_dir, strict=True), True
     except Exception:  # the rooms its readable rows name are still Projects; any other is unknown
-        if strict:
+        # One lenient read decides: unread or lost, Main's rows are unknown; the rooms it named stay Projects.
+        if strict or ((project_chat_ids := readable_rooms(data_dir)) is None and thread_id == 1):
             raise StoreError("Project registry unavailable") from None
-        project_chat_ids, classified = reserved_project_chat_ids(data_dir), False
+        project_chat_ids, classified = project_chat_ids or set(), False
     try:
         rooms = RoomResolver(data_dir, strict=strict)
     except ValueError:
@@ -1464,7 +1465,7 @@ def _assemble_history_response(
     if lifecycle_row is not None:
         combined.append(lifecycle_row)
     result_cache[_READS].prefetch(row.get("task_id") for row in combined)
-    named = thread_id in project_chat_ids or (thread_id == 1 and classified)  # an unreadable registry: Main reads on
+    named = thread_id in project_chat_ids or (thread_id == 1 and classified)  # beside an invalid row Main reads on
     arrival = latest_arrival(combined, page, data_dir, row_matches_thread, _stored_chat_id, chat_gaps, lambda task_id: (
         _load_terminal_result(data_dir, task_id, result_cache))) if named else (
         {} if classified or thread_id == 1 else {"latest_message": None})  # an unclassified room may be a Project

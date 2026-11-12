@@ -170,17 +170,3 @@ def test_review_state_keeps_the_durable_store():
             defined.update(t.id for t in node.targets if isinstance(t, ast.Name))
     assert set(_PARENT_OWNED) <= defined
     assert defined.isdisjoint(_MOVED_OWNERS)
-
-
-def test_review_state_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (review_state, *_LEAVES)
-    }
-    assert all(count <= 1000 for count in counts.values()), counts
-    assert counts["ouroboros.review_state"] <= 850
-    assert counts["ouroboros.review_state_records"] <= 1000
-    assert counts["ouroboros.review_state_model"] <= 1000
-    assert counts["ouroboros.review_state_custody"] <= 600

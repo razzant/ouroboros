@@ -458,3 +458,134 @@ def test_catalog_producer_survives_flattening_without_borrowing_a_version(accoun
     payload = model_catalog_api._subscription_model_catalog("codex", "a")
     assert payload["items"] == []
     assert payload["account_catalogs"][0]["accounts"][0]["catalog"]["sourceProgram"] == program
+
+
+# --- the catalog's published price on an OpenRouter row (T06) ---------------------------------
+
+def _openrouter_items(records):
+    class Client:
+        async def get(self, url, **_kwargs):
+            return _Response({"data": records})
+
+    return asyncio.run(model_catalog_api._fetch_openrouter_model_catalog(Client(), "or-key"))
+
+
+@pytest.mark.parametrize("pricing, expected", [
+    ({"prompt": "0.000004", "completion": "0.00002"}, {"input": 4.0, "output": 20.0}),
+    ({"prompt": "0.000000075", "completion": "0.0000003", "request": "0"}, {"input": 0.075, "output": 0.3}),
+    # An explicit zero is a free model's price, not a missing one.
+    ({"prompt": "0", "completion": "0"}, {"input": 0.0, "output": 0.0}),
+    ({"prompt": "0.000002", "completion": "0.00001", "input_cache_read": "0.0000002", "overrides": [
+        {"min_prompt_tokens": 200000, "prompt": "0.000004", "completion": "0.000015"}]},
+     {"input": 2.0, "output": 10.0, "tiers": [{"min_prompt_tokens": 200000, "input": 4.0, "output": 15.0}]}),
+])
+def test_an_openrouter_row_carries_the_price_its_catalog_states(pricing, expected):
+    [item] = _openrouter_items([{"id": "vendor/model", "name": "Vendor: Model", "pricing": pricing}])
+    assert item["price"] == expected
+    assert item["label"] == "OpenRouter · Vendor: Model", "the name stays the name"
+
+
+@pytest.mark.parametrize("pricing", [
+    None, {}, {"prompt": "0.000004"}, {"completion": "0.00002"}, {"prompt": "0.000004", "completion": None},
+    {"prompt": "0.000004", "completion": "0.00002", "request": "0.005"},  # a per-request fee on every call
+    {"prompt": "0.000004", "completion": "0.00002", "request": "n/a"},
+    {"prompt": "-1", "completion": "-1"},  # the router's variable price
+    {"prompt": "n/a", "completion": "0.00002"}, {"prompt": [1], "completion": "0.00002"},
+    {"prompt": "nan", "completion": "0.00002"}, {"prompt": "0.002", "completion": "0.00002"},  # over $1000 per 1M
+    {"prompt": "0.000004", "completion": "0.00002", "overrides": [{"min_prompt_tokens": 1000, "prompt": "-0.000001"}]},
+    # A tier accounting cannot read or skips leaves the price partial: no price rather than the base alone.
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": "n/a", "completion": "0.000015"}]},
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": "inf"}]},
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": "0.002"}]},
+    # A price that changes with the hour is not an input-length tier the picker can state.
+    {"prompt": "0.00000015", "completion": "0.0000006", "overrides": [{"utc_start": 1500, "utc_end": 100, "prompt": "0.000000075"}]},
+    # A charge four decimals per 1M would print as zero is never shown as free.
+    {"prompt": "0.00000000001", "completion": "0.00000000001"},
+    {"prompt": "0.00000000001", "completion": "0.000005"},
+])
+def test_an_openrouter_row_without_a_complete_token_price_has_no_price_field(pricing):
+    record = {"id": "vendor/model", "name": "Vendor: Model", **({} if pricing is None else {"pricing": pricing})}
+    [item] = _openrouter_items([record])
+    assert "price" not in item, "absent, never null or zero"
+    assert item["value"] == "vendor/model", "a price never decides whether a model is listed"
+
+
+def test_the_shown_price_is_the_catalog_row_fetch_openrouter_pricing_reads():
+    from unittest.mock import MagicMock, patch
+    from ouroboros.llm_pricing import fetch_openrouter_pricing, openrouter_catalog_price
+
+    record = {"id": "vendor/tiered", "pricing": {"prompt": "0.00000125", "completion": "0.00001", "overrides": [
+        {"min_prompt_tokens": 200000, "prompt": "0.0000025", "completion": "0.000015"},
+        {"min_prompt_tokens": 100000, "completion": "0.000012"}]}}
+    response = MagicMock()
+    response.json.return_value = {"data": [record]}
+    with patch("requests.get", return_value=response):
+        row = fetch_openrouter_pricing(timeout_sec=5.0)["vendor/tiered"]
+    assert openrouter_catalog_price(record) == {"input": row[0], "output": row[3], "tiers": [
+        {"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]} for minimum, tier in row.tiers]}
+    assert [tier["min_prompt_tokens"] for tier in openrouter_catalog_price(record)["tiers"]] == [100000, 200000]
+
+
+def test_a_direct_route_with_the_same_model_id_gets_no_openrouter_price(monkeypatch):
+    from ouroboros.gateway.management_contracts import ModelCatalogItem, ModelCatalogResponse
+    from ouroboros.gateway.schema import validate_ingress
+
+    priced = {"prompt": "0.000004", "completion": "0.00002"}
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"OPENROUTER_API_KEY": "or-key",
+                                                                     "OPENAI_API_KEY": "openai-key"})
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, **_kwargs):
+            # A direct server answering with the very same records, pricing field included, still prices nothing.
+            return _Response({"data": [{"id": "openai/gpt-x", "name": "OpenAI: GPT X", "pricing": priced},
+                                       *([] if "openrouter.ai" in url else [{"id": "gpt-x", "pricing": priced}])]})
+
+    monkeypatch.setattr(model_catalog_api.httpx, "AsyncClient", Client)
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+
+    prices = {item["value"]: item.get("price") for item in payload["items"]}
+    assert prices == {"openai/gpt-x": {"input": 4.0, "output": 20.0}, "openai::openai/gpt-x": None, "openai::gpt-x": None}
+    assert not any("price" in item for item in payload["items"] if item["value"].startswith("openai::"))
+    # The published shape declares the field and its type.
+    assert "price" in ModelCatalogItem.__annotations__
+    assert not validate_ingress(payload, ModelCatalogResponse)
+    damaged = {**payload, "items": [{**payload["items"][0], "price": {"input": "4", "output": 20.0}}]}
+    assert validate_ingress(damaged, ModelCatalogResponse)
+
+
+@pytest.mark.parametrize("second, expected", [
+    ({"prompt": "0.000004", "completion": "0.00002"}, {"input": 4.0, "output": 20.0}),  # the records agree: one price
+    ({"prompt": "0.000005", "completion": "0.000025"}, None),  # they disagree: no record's price is the model's
+    (None, None),  # one record states none
+])
+def test_two_catalog_records_of_one_model_show_a_price_only_when_they_agree(monkeypatch, second, expected):
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"OPENROUTER_API_KEY": "or-key"})
+    first = {"id": "vendor/x", "name": "Vendor: X", "pricing": {"prompt": "0.000004", "completion": "0.00002"}}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, **_kwargs):
+            return _Response({"data": [first, {"id": "vendor/x", "name": "Vendor: X",
+                                               **({} if second is None else {"pricing": second})}]})
+
+    monkeypatch.setattr(model_catalog_api.httpx, "AsyncClient", Client)
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+    [item] = [item for item in payload["items"] if item["value"] == "vendor/x"]
+    assert item.get("price") == expected and item["name"] == "Vendor: X", "the model stays listed either way"
