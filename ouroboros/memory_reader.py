@@ -23,7 +23,7 @@ by their files. ``memory_read`` and this reader share one composition of a recor
   ``revision_mismatch`` once its text changed. A ``field`` of a stored record, journal entry or note
   front matter reads that value: a string as text, anything else as its JSON. A knowledge history row
   that stores a change reads its ``old_content``/``new_content`` as that version's whole text, verified
-  (``knowledge_rows``); ``field: []`` is every line as stored.
+  (``knowledge_rows``), and its listing entry names those addresses; ``field: []`` is every line as stored.
 - ``changes`` returns the chronicle records after a position; the position it returns is the last
   record returned, never a newer head. Knowledge and plain files have no change feed: compare
   their ``revision`` on a later read.
@@ -574,7 +574,9 @@ def _journal_page(root: pathlib.Path, journal: str, params: Mapping[str, Any],
     A line that would cross the window starts the next page; a page's first line is read whole however long
     (one record-sized read), so every line is reached and none is cut. The offset advances only over
     complete lines: an unterminated last line (an append in progress) stays for a later read. An
-    unparseable line is an entry marked ``unreadable``, never skipped. Each row is projected (``_project``).
+    unparseable line is an entry marked ``unreadable``, never skipped. Each row is projected (``_project``); a
+    knowledge history row that carries a change also names, by reference only, the address of each text it does not
+    store whole (``old_content``/``new_content``, read through ``_version_text``): no text is rebuilt for a page.
     """
     path, offset, limit = _journal_path(root, journal), _number_cursor(params, "o"), _limit(params)
     if not path.is_file():
@@ -609,7 +611,11 @@ def _journal_page(root: pathlib.Path, journal: str, params: Mapping[str, Any],
             if not isinstance(row, dict):
                 entries.append({"offset": start, "unreadable": True, "bytes": len(raw), "address": {**at, "field": []}})
             elif match is None or match(row):
-                entries.append({"offset": start, "address": {**at, "field": []}, "fields": _project(row, at, [], [ENTRY_BUDGET])})
+                fields = _project(row, at, [], [ENTRY_BUDGET])
+                if journal.startswith("knowledge:") and "change" in row and len(row) <= KEYS_MAX:
+                    fields.update({key: {"ref": "text", "address": {**at, "field": [key]}}
+                                   for key in ("old_content", "new_content") if key not in row})
+                entries.append({"offset": start, "address": {**at, "field": []}, "fields": fields})
     complete = position + tail >= size
     return {"journal": journal, "exists": True, "position": f"o{position}", "unterminated_tail_bytes": tail,
             "entries": entries, "next": None if complete else f"o{position}", "complete": complete}

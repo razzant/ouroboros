@@ -419,6 +419,46 @@ def test_a_history_row_that_stores_a_change_reads_its_versions_whole_and_its_lin
     assert gap.value.code == "not_found" and f"the line at byte offset {named_at} is not a JSON row" in gap.value.message
 
 
+def test_the_history_listing_names_where_a_change_rows_two_texts_read_whole(tmp_path):
+    """A listed row that carries a change also names, by reference only, the address of each of its two texts (no
+    text is rebuilt for a page), and a read through either address returns that version, verified; a whole row and a
+    row written before changes list exactly as stored."""
+    import json
+
+    from ouroboros import knowledge_rows
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+
+    sha = knowledge_rows.sha256_text
+    target = resolve_knowledge_address(tmp_path, "река", "global")
+    first, second = "# Река\n\nOld one.\n", "# Река\n\nOld two.\n"
+    base = {"topic": "река", "address": target.as_dict(), "publication": "source_capture", "mode": "overwrite"}
+    head = {**base, "old_sha256": "", "new_sha256": sha(first), "old_content": "", "new_content": first}
+    named = {**base, "old_sha256": sha(first), "new_sha256": sha(second), "new_content": second,
+             "old_content_ref": {"kind": "entry", "journal": "knowledge:global", "offset": 0, "field": ["new_content"]}}
+    journal = tmp_path / "memory" / "knowledge_history.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b"".join((json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8") for row in (head, named)))
+    target.path.parent.mkdir(parents=True, exist_ok=True)
+    target.path.write_bytes(second.encode("utf-8"))
+    third = write_knowledge_note(target, "# Река\n\nOld two, new three.\n", expected_revision=sha(second)).current
+    fourth = write_knowledge_note(target, "Rewritten whole.\n", expected_revision=third.revision).current
+    stored = [json.loads(line) for line in journal.read_bytes().splitlines()]
+    assert "new_content" not in stored[2] and {"new_content", "change"} <= set(stored[3])  # change-only; whole + change
+    entries, _ = every(tmp_path, "history", address={"kind": "note", "scope": "global", "topic": "река"})
+    assert [set(entry["fields"]) for entry in entries[:2]] == [set(head), set(named)]  # as stored, as before
+    assert entries[0]["fields"]["new_content"] == first and "old_content" not in entries[1]["fields"]
+    for entry, old, new in ((entries[2], second, third.text), (entries[3], third.text, fourth.text)):
+        at = {"kind": "entry", "journal": "knowledge:global", "offset": entry["offset"]}
+        assert entry["fields"]["old_content"] == {"ref": "text", "address": {**at, "field": ["old_content"]}}
+        assert document(tmp_path, entry["fields"]["old_content"]["address"])["text"] == old
+        if isinstance(entry["fields"]["new_content"], str):  # a whole row's stored text lists as stored
+            assert entry["fields"]["new_content"] == new == stored[3]["new_content"]
+        else:
+            assert entry["fields"]["new_content"] == {"ref": "text", "address": {**at, "field": ["new_content"]}}
+            assert document(tmp_path, entry["fields"]["new_content"]["address"])["text"] == new
+    assert isinstance(entries[3]["fields"]["new_content"], str) and isinstance(entries[2]["fields"]["new_content"], dict)
+
+
 def test_note_links_resolve_present_unwritten_and_external(memory):
     root, _store, _ids = memory
     from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
