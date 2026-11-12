@@ -198,6 +198,40 @@ test('an amber Projects header always has an amber row: what waits counts only t
     assert.deepEqual([...buildProjectActivityIndex(rooms, undefined, [{ chat_id: 43 }]).byChat.keys()], ['43']);
 });
 
+test('a carried amber room keeps its feed row and the header its amber; a complete read or a deleted Project drops them', () => {
+    // The page as app.js applies each body: the rooms, then the index over the feed's rows.
+    let rooms = new Map();
+    let index = buildProjectActivityIndex();
+    let feed = [];
+    const snapshots = createStateSnapshotSequencer((data) => {
+        rooms = reconcileProjectRooms(rooms, data).rooms;
+        feed = data.projects;
+        index = buildProjectActivityIndex(rooms, data.project_chat_ids, data.projects);
+    });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    const recent = { id: 'recent', chat_id: 41 };
+    const old = { id: 'old', chat_id: 42 };
+    const asked = { activity: 'idle', transition: 'none', call: '', turn: [{ kind: 'open_question', task_id: 't', quiz_id: 'q' }],
+        amber: true, mark: 'none', confirmed: true, works: [] };
+    const read = (extra) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: {}, projects: [recent],
+        project_chat_ids: [41, 42], ...extra });
+    // The old Project is in the feed only because its room is the owner's turn.
+    apply(read({ rooms: { 42: asked }, projects: [recent, old], current_questions_complete: true }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['recent', 'old'], true]);
+    // A gap over its question: the server keeps neither the room nor its row; the page keeps both, the row after the
+    // body's own rows, and the header stays amber over a row it can show.
+    const gap = { current_questions_gaps: [{ task_id: 't' }] };
+    apply(read(gap));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, index.byChat.get('42')?.owner], [['recent', 'old'], true, true]);
+    // The Project deleted meanwhile (its chat id no longer named): its row is never brought back.
+    apply(read({ ...gap, project_chat_ids: [41] }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['recent'], false]);
+    // The complete read that drops the question drops both.
+    apply(read({ rooms: { 42: asked }, projects: [recent, old], current_questions_complete: true }));
+    apply(read({ current_questions_complete: true }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, rooms.has('42')], [['recent'], false, false]);
+});
+
 test('a mark\'s words: its place\'s label and new messages, in one phrase', () => {
     assert.equal(markWords(summary('paused_by_owner')), `Paused · You paused it · ${PRESSED}`);
     assert.equal(markWords(summary('paused_by_owner'), true), `Paused · You paused it · ${PRESSED} · new messages`);

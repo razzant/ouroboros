@@ -73,7 +73,10 @@ const sameAddress = (one, other) => String(one?.task_id) === String(other?.task_
  * read, so a read with a gap would turn a room's amber off for one read while Main's pill keeps the question. A kept
  * item stays in its room (with its work when that work is listed there, else as the room's own) and the room stays
  * the owner's turn; a read never invents an item and a read that vouches against one, a complete one included,
- * removes it. A body without the work projection is returned as it is.
+ * removes it. A room kept so keeps its feed row too: the row `prior.projects` held for it stays after this body's
+ * `projects` when they no longer hold it (the server kept it only while it could read the question), unless the
+ * body's `project_chat_ids` no longer name the room (a deleted Project is never brought back). A body without the
+ * work projection is returned as it is.
  */
 export function carryOpenQuestions(prior, data) {
     if (!data || typeof data !== 'object' || !Array.isArray(data.works) || !data.rooms || typeof data.rooms !== 'object') {
@@ -82,6 +85,7 @@ export function carryOpenQuestions(prior, data) {
     const vouched = vouchedBy(data);
     const complete = data.works_complete === true && data.supervisor_ready === true;
     const rooms = { ...data.rooms };
+    const kept = new Set();
     let works = data.works;
     for (const [chat, before] of Object.entries(prior?.rooms || {})) {
         for (const known of listed(before?.turn)) {
@@ -99,10 +103,20 @@ export function carryOpenQuestions(prior, data) {
             if (holder) works = works.map(work => (work?.work_id === holder && String(work.room ?? 0) === chat
                 ? { ...work, turn: [...listed(work.turn), own] } : work));
             rooms[chat] = { ...room, turn: [...listed(room.turn), holder ? item : own], amber: true };
+            kept.add(String(chat));
         }
     }
-    return works === data.works && Object.keys(rooms).every(chat => rooms[chat] === data.rooms[chat])
-        ? data : { ...data, rooms, works };
+    let projects = data.projects;
+    if (Array.isArray(projects) && kept.size) {
+        const named = Array.isArray(data.project_chat_ids) ? new Set(data.project_chat_ids.map(String)) : null;
+        const shown = new Set(projects.map(row => String(row?.chat_id)));
+        const rows = listed(prior?.projects).filter(row => kept.has(String(row?.chat_id))
+            && !shown.has(String(row?.chat_id)) && (!named || named.has(String(row?.chat_id))));
+        if (rows.length) projects = [...projects, ...rows];
+    }
+    return works === data.works && projects === data.projects
+        && Object.keys(rooms).every(chat => rooms[chat] === data.rooms[chat])
+        ? data : { ...data, rooms, works, ...(projects === data.projects ? {} : { projects }) };
 }
 
 // The lifecycle code of one row: a settled state names itself; an open one says whether the task waits.
