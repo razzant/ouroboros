@@ -10,7 +10,7 @@ Server startup raises descriptor capacity for per-run transports (`server_proces
 |---|---|---|---|
 | Desktop close, keep-running on, live indicator | none: window hides | all tasks, schedules, companions and daemon | none |
 | Close, quit, SIGTERM, launcher gone (pipe EOF, POSIX too) | this generation's workers, maintenance child, services, owned executor/task processes and unfinished reviews | shared daemon/clients; saved pauses; saved work held for Resume | `shutdown_entry.json`, then `server_shutdown.cause`: `external_signal`, `launcher_quit` or `launcher_gone` |
-| Planned restart (self-restart, update, rollback) | same; off-pin daemon unless newer | saved pauses; saved work/cut owner turns/runnable queue, returned; same-pin or newer daemon | restart handoff, then `shutdown_entry.json` |
+| Planned restart (self-restart, update) | same; off-pin daemon unless newer | saved pauses; saved work/cut owner turns/runnable queue, returned; same-pin or newer daemon | restart handoff, then `shutdown_entry.json` |
 | Manual Restart (owner) | same; its own delegated runs end | as Planned restart (§3) | restart transaction `door=owner_restart`, `shutdown_entry.json` |
 | Panic | all owned work | sleeping work: owner Resume; working: saved for Resume after launch; pauses unchanged | `panic_stop.flag` (`panic`), then `panic_ingress_receipt` |
 | Fault (`bus_lost`, `loop_failed`; §5) | as Close; kept work's delegated runs end | as Close; unsaved rows `cancelled` | as Close, cause named; a `supervisor_failure` row, then the startup notice and one recovery turn per died generation (`state/core_loss_recovery.json`); exit 1 under a launcher, else census and re-exec (`server_process.fault_exit`); Panic owns exit; never 42/99 |

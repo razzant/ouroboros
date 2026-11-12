@@ -299,6 +299,19 @@ def test_floor_exists_in_this_checkout():
     assert all((root / path).is_file() and invariant for path, invariant in selection.FLOOR_TESTS.items())
 
 
+def test_a_change_an_inventory_reads_as_data_runs_its_pin_and_stays_selected():
+    """An inventory reads its sources as data, so changing them selects its pin through no import: a book
+    chapter (#3187), a new folder named like a data-layout entry (#3235) and a control's text (#3207) each
+    left the target red while the selection of its merge never named the pin. The pin runs for every change
+    now, and such a change still selects nothing else and never escalates to full."""
+    root = Path(__file__).resolve().parents[1]
+    for change in ("docs/architecture/01-high-level-architecture.md", "docs/llm-rating/data/latest.json",
+                   "web/modules/onboarding_wizard.js"):
+        result = selection.select_from_paths(root, [change], base="base")
+        assert "tests/test_generated_inventories.py" in result.files, change
+        assert result.tier == "selected" and set(result.files) == set(selection.FLOOR_TESTS), change
+
+
 def test_reviewed_tool_binds_widening_and_force_uses_full(repo, monkeypatch):
     from types import SimpleNamespace
     from ouroboros.tools import git, review_helpers

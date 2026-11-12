@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.config import load_settings
+from ouroboros.llm_pricing import openrouter_catalog_price
 from ouroboros.net_transport import ExtraCaBundleError, extra_ca_bundle, verify_kwargs
 from ouroboros.gateway._helpers import json_error, json_exception
 from ouroboros.observability import redact_projection
@@ -90,7 +91,7 @@ def _build_model_catalog_entry(
 async def _fetch_openrouter_model_catalog(
     client: httpx.AsyncClient,
     api_key: str,
-) -> list[dict[str, str]]:
+) -> list[dict]:
     response = await client.get(
         "https://openrouter.ai/api/v1/models",
         headers={"Authorization": f"Bearer {api_key}"},
@@ -99,20 +100,20 @@ async def _fetch_openrouter_model_catalog(
     data = response.json()
     raw_models = data.get("data", []) or []
 
-    models: list[dict[str, str]] = []
+    models: list[dict] = []
     for item in raw_models:
         model_id = str(item.get("id", "") or "").strip()
         if not model_id or "/" not in model_id:
             continue
-        models.append(
-            _build_model_catalog_entry(
-                "openrouter",
-                _provider_label_from_model_id(model_id),
-                model_id,
-                str(item.get("name", "") or "").strip() or model_id.split("/", 1)[1],
-                source="OpenRouter",
-            )
+        entry = _build_model_catalog_entry(
+            "openrouter",
+            _provider_label_from_model_id(model_id),
+            model_id,
+            str(item.get("name", "") or "").strip() or model_id.split("/", 1)[1],
+            source="OpenRouter",
         )
+        price = openrouter_catalog_price(item)  # only this source's rows: a direct key's same id stays unpriced
+        models.append(entry if price is None else {**entry, "price": price})
     return models
 
 
@@ -484,7 +485,7 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
     settings = load_settings()
     items = list(subscription["items"])
     errors = list(subscription["errors"])
-    seen_values: set[str] = set()
+    kept_at: dict[str, int] = {}
     specs = _provider_specs(settings, record_image_input=True)
 
     timeout = httpx.Timeout(_CATALOG_HTTP_TIMEOUT_SEC)
@@ -513,10 +514,14 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
             continue
         for item in provider_items:
             value = str(item.get("value", "") or "")
-            if not value or value in seen_values:
+            if value in kept_at:
+                kept = items[kept_at[value]]
+                if "price" in kept and kept["price"] != item.get("price"):  # records disagree: no one price to show
+                    items[kept_at[value]] = {key: field for key, field in kept.items() if key != "price"}
                 continue
-            seen_values.add(value)
-            items.append(item)
+            if value:
+                kept_at[value] = len(items)
+                items.append(item)
 
     items.extend(filter(None, [_local_model_entry(settings)]))
     items.sort(key=lambda item: (item.get("provider", "").lower(), item.get("name", "").lower()))
