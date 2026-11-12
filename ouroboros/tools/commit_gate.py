@@ -47,9 +47,9 @@ def _list_or_default(items: Optional[List[Any]], fallback: List[Any]) -> List[An
     return list(items)
 
 
-def _continuation_source(status: str, *, late_result_pending: bool) -> str:
+def _continuation_source(status: str, *, late_result_pending: bool, stopped: bool = False) -> str:
     if status == "blocked":
-        return "blocked_review"
+        return "owner_stopped" if stopped else "blocked_review"
     if late_result_pending:
         return "late_result_pending"
     if status == "failed":
@@ -616,7 +616,7 @@ def _record_commit_attempt(
         task_id = str(getattr(ctx, "task_id", "") or "")
 
         _findings_for_attempt = critical_findings
-        if status == "blocked" and critical_findings:
+        if status == "blocked" and critical_findings and block_reason != "owner_stopped":  # no model after a stop
             try:
                 from ouroboros.tools.review_synthesis import synthesize_to_canonical_issues
                 from ouroboros.review_state import load_state as _ls_synth
@@ -627,16 +627,15 @@ def _record_commit_attempt(
                     open_obligations=_open_obs,
                     ctx=ctx,
                 )
-            except Exception as _synth_exc:
+            except Exception as _synth_exc:  # the findings stay as reviewers wrote them
                 log.debug("review_synthesis: pre-lock synthesis skipped: %s", _synth_exc)
-                _findings_for_attempt = critical_findings
 
         # C9.3: resolve semantic-dedup redirects for free-text (bug_*/risk_*) obligations
         # from a PRE-LOCK snapshot — the light-model call must stay OUTSIDE the review
         # state lock. Fail-open: any failure yields no redirect (a finding opens a new
         # obligation) and never blocks the gate. Only blocked attempts mint obligations.
         _obligation_redirects: Dict[str, str] = {}
-        if status == "blocked" and _findings_for_attempt:
+        if status == "blocked" and _findings_for_attempt and block_reason != "owner_stopped":
             try:
                 from ouroboros.review_state import (
                     compute_obligation_semantic_redirects,
@@ -645,9 +644,8 @@ def _record_commit_attempt(
                 _obligation_redirects = compute_obligation_semantic_redirects(
                     _ls_dedup(dr), _findings_for_attempt, repo_key=repo_key, drive_root=dr
                 )
-            except Exception as _dedup_exc:
+            except Exception as _dedup_exc:  # no redirect: a finding opens its own obligation
                 log.debug("obligation semantic dedup skipped: %s", _dedup_exc)
-                _obligation_redirects = {}
 
         from ouroboros.tools.review_change_custody import continued_attempt, late_write_check
         outlived = late_write_check(ctx, phase if status == "reviewing" else "", review_record_id, triad_raw_results, scope_raw_result)
@@ -798,7 +796,8 @@ def _record_commit_attempt(
                 if status == "succeeded":
                     clear_review_continuation(dr, task_id)
                 else:
-                    source = _continuation_source(status, late_result_pending=late_result_pending)
+                    source = _continuation_source(status, late_result_pending=late_result_pending,
+                                                  stopped=block_reason == "owner_stopped")
                     if source:
                         latest_state = load_state(dr)
                         latest_attempt = latest_state.latest_attempt_for(
@@ -1429,7 +1428,6 @@ def _review_ledger_facts(ctx: ToolContext, commit_message: str, *, goal: str, sc
     except Exception:
         mode = ""
     tests_passed = getattr(ctx, "_preflight_tests_passed", None)
-    pre_fingerprint = pre_fingerprint or {}
     panel = commit_panel_facts(ctx)
     return {
         **_review_body_facts(ctx),
@@ -1516,6 +1514,7 @@ def settle_commit_review_ledger(ctx: ToolContext, commit_message: str, *, goal: 
     continuation buys no record: it notes the author's decision on the record it answered.
     Ledger failure never changes the gate's decision; it is logged and the id stays ""."""
     from ouroboros import review_ledger as ledger
+    from ouroboros.review_overrides import note_author_continuation
     from ouroboros.tools import git as git_mod
 
     ctx._current_review_record_id = ""
@@ -1526,6 +1525,7 @@ def settle_commit_review_ledger(ctx: ToolContext, commit_message: str, *, goal: 
             if prior and ledger.load_record(root, prior) is not None:
                 ledger.note_author_decision(root, prior, dict(getattr(ctx, "_author_commit_record", None) or {}))
                 ctx._current_review_record_id = prior
+            note_author_continuation(ctx, getattr(ctx, "_author_commit_record", None))  # over a FAIL or no verdict
             return ctx._current_review_record_id
         structured = dict(getattr(ctx, "_last_review_structured", {}) or {})
         refusal = None

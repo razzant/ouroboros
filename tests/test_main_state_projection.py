@@ -98,7 +98,9 @@ def test_optional_terminal_question_outside_history_and_sidebar_reaches_state(ga
     assert not any(row.get("quiz_id") == "format" for row in history.json()["messages"])
 
     payload = _state(gateway)
-    assert project["id"] not in {row["id"] for row in payload["projects"]}
+    # Older than the feed's recent slice, its room is still the owner's turn: the feed keeps its row (state.py).
+    assert project["id"] in {row["id"] for row in payload["projects"]}
+    assert len(payload["projects"]) == 50 + 1
     assert project["chat_id"] in payload["project_chat_ids"]
     assert payload["current_questions_complete"] is True
     [question] = payload["current_questions"]
@@ -112,6 +114,21 @@ def test_optional_terminal_question_outside_history_and_sidebar_reaches_state(ga
     assert question["project_chat_id"] == project["chat_id"]
     assert payload["main_attention"] == []
     assert load_task_result(gateway.root, task["id"])["owner_quiz"]["format"]["state"] == "expired_terminal"
+
+
+def test_a_current_question_reaches_its_rooms_turn_through_the_state_composition(gateway):
+    """What Main's pill counts is its room's turn on the wire: ``state.py`` hands Main's current questions to the work
+    projection, so the room of a question whose task ended stays the owner's turn (amber) at rest, and the tray's
+    count holds it once."""
+    project, task = _ask(gateway)
+    write_task_result(gateway.root, task["id"], "completed", result="Result ready")
+    reconcile_terminal(gateway.root, task["id"])
+    payload = _state(gateway)
+    assert [row["quiz_id"] for row in payload["current_questions"]] == ["format"]
+    room = payload["rooms"][str(project["chat_id"])]
+    assert room["turn"] == [{"kind": "open_question", "task_id": task["id"], "quiz_id": "format"}]
+    assert room["amber"] is True and room["activity"] == "idle"
+    assert payload["work_summary"]["turn"] == 1
 
 
 def test_state_carries_current_model_access_and_budget_resume_controls(gateway):

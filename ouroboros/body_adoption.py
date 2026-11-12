@@ -26,7 +26,7 @@ exact commit on ``request_restart``; this module carries that one transition.
   result keeps ``body_adoptions`` and its card gets the row in the task's own room
   (a room it cannot name gets none); only a handoff that names no task stays an
   owner-wide runtime notice. The outcome names the adopted range's commits that landed over a review
-  Blocking would have stopped, "running" only when ``adopted`` (``review_overrides.landed_line``).
+  FAIL or no verdict, "running" only when ``adopted`` (``review_overrides.landed_line``).
 """
 
 from __future__ import annotations

@@ -176,6 +176,8 @@ def _validate_candidate_facts(row: Dict[str, Any], sequence: int) -> None:
         if density is not None and (isinstance(density, bool) or not isinstance(density, (int, float))
                                     or not math.isfinite(density) or density <= 0):
             raise UsageLedgerCorrupt(f"invalid physical_context measurement_density in usage row seq={sequence}")
+        if context.get("prefix") is not None and not isinstance(context["prefix"], dict):  # absent on earlier rows
+            raise UsageLedgerCorrupt(f"invalid physical_context prefix in usage row seq={sequence}")
     manifest_ref = row.get("candidate_manifest_ref")
     if manifest_ref is not None and (
         not isinstance(manifest_ref, dict)

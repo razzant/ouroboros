@@ -407,6 +407,98 @@ def test_room_finalizing_only_says_finalizing_and_empty_rooms_are_idle_or_unknow
     assert unconfirmed["confirmed"] is False and unconfirmed["mark"] == "ring"
 
 
+def _question(task_id, quiz_id="q1", *, state="open", project=None, **extra):
+    asked = {"task_id": task_id, "quiz_id": quiz_id, "quiz_state": state, "chat_id": 1, **extra}
+    return {**asked, "project_id": project[0], "project_chat_id": project[1]} if project else {**asked, "native": True}
+
+
+def test_a_current_question_is_its_rooms_turn_as_mains_pill_counts_it():
+    """The owner's turn is one set: what Main's pill counts in a room is that room's amber, whether the asking task
+    still waits, goes on with an assumption or has ended; a question that waits for nobody lights nothing."""
+    project = ("p1", 42)
+    live = {**_work("working", work_id="w"), "room": 42, "release": "self", "members": {"ids": ["w", "helper"]}}
+    asleep = {**_work("waiting", work_id="s"), "room": 42, "release": "self", "members": {"ids": ["s"]}}
+    waits = {**_work("waiting", work_id="b", turn=[{"kind": "question", "task_id": "b"}]), "room": 42,
+             "release": "owner", "members": {"ids": ["b"]}}
+    works = [live, asleep, waits]
+    loose = ws.place_questions(works, [
+        _question("helper", project=project),                                  # a helper asked and went on
+        _question("s", "q2", project=project),                                 # its task sleeps on something else
+        _question("b", "q3", project=project),                                 # the member's own wait already says it
+        _question("ended", "q4", state="expired_terminal", project=project),   # its task ended: no work holds it
+        _question("main-ended", "q5"),                                         # Main's own
+        _question("answered", "q6", state="answered", project=project),        # settled: waits for nobody
+        _question("elsewhere", "q7", project=("p2", 77)),                      # a Project with no work at all
+    ])
+    assert live["turn"] == [{"kind": "open_question", "task_id": "helper", "quiz_id": "q1"}]
+    assert asleep["turn"] == [{"kind": "open_question", "task_id": "s", "quiz_id": "q2"}]
+    # Said once, as the wait its task holds: the wait that named no quiz takes the one open question's address.
+    assert waits["turn"] == [{"kind": "question", "task_id": "b", "quiz_id": "q3"}]
+    # The works keep their word and who moves them: an open question is the owner's turn, never the work's state.
+    assert [(work["activity"], work["release"]) for work in works] == [
+        ("working", "self"), ("waiting", "self"), ("waiting", "owner")]
+    assert loose == {"42": [{"kind": "open_question", "task_id": "ended", "quiz_id": "q4"}],
+                     "1": [{"kind": "open_question", "task_id": "main-ended", "quiz_id": "q5"}],
+                     "77": [{"kind": "open_question", "task_id": "elsewhere", "quiz_id": "q7"}]}
+    room = ws.roll_up_room(works, questions=loose["42"])
+    assert room["amber"] is True and room["activity"] == "working"
+    assert [item["task_id"] for item in room["turn"]] == ["helper", "s", "b", "ended"]
+    assert room["turn"][0]["work_id"] == "w" and "work_id" not in room["turn"][-1]
+    # A room at rest with an open question is the owner's turn too; without one it stays quiet.
+    rest = ws.roll_up_room([], questions=loose["77"])
+    assert (rest["activity"], rest["mark"], rest["amber"]) == ("idle", "none", True)
+    assert ws.roll_up_room([])["amber"] is False and ws.place_questions([{**live, "turn": []}], []) == {}
+    # The tray's count: each work with a turn once, and each question no work holds.
+    assert ws.roll_up_summary({"42": room, "77": rest}, works)["turn"] == 3 + 2
+
+
+def test_a_wait_that_names_no_quiz_never_absorbs_an_exact_question():
+    """An exact current question keeps its address: a member's wait that names no quiz takes the address of its
+    task's one open question (it stays the question the task waits for); with several, each stands beside it as its own
+    item, and the tray still counts each question once."""
+    def waiting():
+        return {**_work("waiting", work_id="b", turn=[{"kind": "question", "task_id": "b"}]), "room": 42,
+                "release": "owner", "members": {"ids": ["b"]}}
+    project = ("p1", 42)
+    one = waiting()
+    assert ws.place_questions([one], [_question("b", "q1", project=project)]) == {}
+    assert one["turn"] == [{"kind": "question", "task_id": "b", "quiz_id": "q1"}]
+    two = waiting()
+    ws.place_questions([two], [_question("b", "q1", project=project), _question("b", "q2", project=project)])
+    assert two["turn"] == [{"kind": "question", "task_id": "b"},
+                           {"kind": "open_question", "task_id": "b", "quiz_id": "q1"},
+                           {"kind": "open_question", "task_id": "b", "quiz_id": "q2"}]
+    assert ws.roll_up_summary({"42": ws.roll_up_room([two])}, [two])["turn"] == 1
+
+
+def test_an_answer_whose_delivery_is_unknown_is_named_by_its_code():
+    """A Project's answered question whose delivery a restart left unknown is the owner's turn (Main's pill counts it)
+    and says so: its item carries ``delivery_unknown``; an unanswered one carries no code."""
+    owed = {"state": "owed", "reason_code": "late_answer_delivery_unknown"}
+    loose = ws.place_questions([], [_question("ended", "q1", state="answered", project=("p1", 42), question_delivery=owed),
+                                    _question("open", "q2", project=("p1", 42))])
+    assert loose == {"42": [{"kind": "open_question", "task_id": "ended", "quiz_id": "q1", "code": "delivery_unknown"},
+                            {"kind": "open_question", "task_id": "open", "quiz_id": "q2"}]}
+
+
+def test_one_question_is_counted_once_while_both_of_its_rooms_show_it():
+    """A private Presence question is asked in Main while the work that asked it waits in its Project: both rooms are
+    the owner's turn (Main, where the card is answered; the Project, where the work stands), and the tray counts the
+    question once. A loose question no counted work carries still counts, and another quiz of the same task too."""
+    waits = {**_work("waiting", work_id="b", turn=[{"kind": "question", "task_id": "b", "quiz_id": "q1"}]),
+             "room": 42, "release": "owner", "members": {"ids": ["b"]}}
+    loose = ws.place_questions([waits], [_question("b", "q1"), _question("b", "q2"), _question("main", "q3")])
+    rooms = {"42": ws.roll_up_room([waits]), "1": ws.roll_up_room([], questions=loose["1"])}
+    assert rooms["42"]["amber"] is True and rooms["1"]["amber"] is True
+    assert [item["quiz_id"] for item in rooms["1"]["turn"]] == ["q1", "q2", "q3"]
+    assert ws.roll_up_summary(rooms, [waits])["turn"] == 1 + 2  # the work, then q2 and q3; q1 is the work's own
+    # A work's turn that names no quiz carries its task's question as well; an action never stands for a question.
+    bare = {**waits, "turn": [{"kind": "question", "task_id": "b"}]}
+    assert ws.roll_up_summary(rooms, [bare])["turn"] == 1 + 1
+    acting = {**waits, "turn": [{"kind": "action", "task_id": "b"}]}
+    assert ws.roll_up_summary(rooms, [acting])["turn"] == 1 + 3
+
+
 # ---- the server adapter ------------------------------------------------------------------------------
 
 _REAL_OPEN_RUNS = wp._open_runs  # the custody reader itself, before a fixture fakes it

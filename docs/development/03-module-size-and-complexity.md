@@ -215,8 +215,8 @@ an unresolved destination shows unavailable, keeping the view; Main notices open
 Main); a later click supersedes an unfinished lookup; hydration stays silent.
 
 Classification and gating are pure over a frame and stored preferences, testable
-without DOM or socket. Preferences stay client-local, outside `s-`, settings-dirty
-tracking and `/api/settings`. Delivery degrades rather than disappearing and never
+without DOM or socket. Preferences stay client-local, outside the settings writer
+and `/api/settings`. Delivery degrades rather than disappearing and never
 requests OS permission. Importance adds no host field, text heuristic or model call
 (mechanism: `web/modules/notifications.js` header). Enforcement:
 `web/tests/notifications.test.js`.

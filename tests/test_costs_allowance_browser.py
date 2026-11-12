@@ -1,7 +1,8 @@
 """The consciousness allowance in Costs › Budget, through the real candidate server (owner, 10 Nov 2026).
 
-Costs is the allowance's one editor: a typed 0 and decimals save and read back after a reload, the posted body is
-the one edited limit, and an unrelated Settings save keeps it (Settings has no field for it, only a door to Costs).
+Costs is the allowance's one editor, a setting row that saves when its field is left: a typed 0 and decimals save
+and read back after a reload, the posted body is that one limit, and an unrelated row written elsewhere keeps it: a
+row posts its own key and nothing else. Settings has no control for it, only the home's door to Costs.
 Under the field stands the clock's own 24-hour window, from spend seeded through the ledger itself: what it leaves
 out, a reached limit with its conditional room time in the viewer's named zone. A wake held at the allowance it started
 with, the Off switch and an unreadable ledger are said apart; the held state's snapshot is the consciousness
@@ -23,6 +24,8 @@ pytestmark = [pytest.mark.ui_browser]
 
 HOUR = 3600.0
 KEY = "OUROBOROS_CONSCIOUSNESS_DAILY_USD"
+FIELD = f"#setting-{KEY}"  # the allowance's setting row (settings_controls.js settingsRow)
+UNRELATED = "OUROBOROS_GC_RETENTION_DAYS"  # another tab's row: how long finished work is kept (Storage › Cleanup)
 ZONE = "Europe/Moscow"  # the viewer's zone: the room time must name it
 COMBOS = [(1440, 900, "light"), (1440, 900, "dark"), (390, 844, "light"), (390, 844, "dark")]
 
@@ -41,11 +44,12 @@ def _settings(data_dir: Path) -> dict:
 
 
 def _page(browser, engine, *, width=1440, height=900, theme="light"):
-    """A page in the viewer's zone; its uncaught errors in ``page.errors`` (``tests/ui_console_errors.PageErrors``:
-    only WebKit's own-origin fetch a navigation cancelled is set aside, #1468)."""
+    """A page in the viewer's zone and in English (the page writes a date in the browser's locale, and WebKit takes
+    the host's unless told: "12 нояб." where ``_room_words`` says "Nov 12"); its uncaught errors in ``page.errors``
+    (``tests/ui_console_errors.PageErrors``: only WebKit's own-origin fetch a navigation cancelled is set aside, #1468)."""
     from tests.ui_console_errors import PageErrors
 
-    context = browser.new_context(viewport={"width": width, "height": height}, color_scheme=theme,
+    context = browser.new_context(viewport={"width": width, "height": height}, color_scheme=theme, locale="en-US",
                                   timezone_id=ZONE, has_touch=width < 720, device_scale_factor=2)
     page = context.new_page()
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
@@ -69,10 +73,33 @@ def _costs(page, url: str, *, load: bool = True) -> None:
         page.wait_for_selector("#page-chat", timeout=30_000)
     _nav(page, "dashboard")
     page.click('[data-dashboard-tab="costs"]')
-    expect(page.locator("#s-consciousness-allowance")).to_be_visible(timeout=30_000)
+    expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
     page.wait_for_function("document.getElementById('costs-allowance-spend').textContent.trim() !== 'Reading…'"
-                           " && document.getElementById('s-consciousness-allowance').dataset.loaded !== undefined",
-                           timeout=30_000)
+                           f" && document.getElementById('setting-{KEY}').value !== ''", timeout=30_000)
+
+
+def _saving(page):
+    """The settings write a row sends when its field is left, awaited to its answer."""
+    return page.expect_response(lambda response: response.request.method == "POST"
+                                and response.url.endswith("/api/settings"), timeout=30_000)
+
+
+def _write_unrelated(page, data_dir: Path, posts: list, days: int) -> dict:
+    """Type and leave another tab's row (Storage's retention): its save carries that key alone. Returns what is stored."""
+    from playwright.sync_api import expect
+
+    page.click('[data-dashboard-tab="storage"]')
+    field = page.locator(f"#setting-{UNRELATED}")
+    expect(field).to_be_visible(timeout=30_000)
+    page.wait_for_function(f"document.getElementById('setting-{UNRELATED}').value !== ''", timeout=30_000)
+    with _saving(page):
+        field.fill(str(days))
+        field.press("Tab")
+    expect(page.locator(f"#setting-{UNRELATED}-result")).to_contain_text("Saved", timeout=30_000)
+    assert posts[-1] == {UNRELATED: days}, f"a row's save carries its own key and never the allowance: {posts[-1]}"
+    stored = _settings(data_dir)
+    assert int(stored[UNRELATED]) == days, stored
+    return stored
 
 
 def _switch(page, url: str, on: bool) -> None:
@@ -110,7 +137,7 @@ def _shoot(page, name: str) -> None:
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_settings_save(direct_server_with_data, engine):
+def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_written_elsewhere(direct_server_with_data, engine):
     from playwright.sync_api import expect, sync_playwright
 
     url, data_dir = direct_server_with_data["url"], direct_server_with_data["data_dir"]
@@ -124,18 +151,21 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_settin
                     if request.method == "POST" and request.url.endswith("/api/settings") else None)
             _switch(page, url, True)  # a fresh install starts it Off, which this card says first
             _costs(page, url)
-            allowance = page.locator("#s-consciousness-allowance")
+            allowance = page.locator(FIELD)
             expect(allowance).to_have_value("20")
-            expect(page.locator("label[for=s-consciousness-allowance]")).to_have_text("Consciousness per 24 hours ($)")
+            expect(page.locator(f"label[for=setting-{KEY}]")).to_have_text("Consciousness per 24 hours")
             # The keyboard reaches it after the per-task cap, as the card reads.
-            page.focus("#s-per-task-cost")
+            page.focus("#setting-OUROBOROS_PER_TASK_COST_USD")
             page.keyboard.press("Tab")
-            assert page.evaluate("document.activeElement.id") == "s-consciousness-allowance"
-            allowance.fill("0")
-            page.click("#btn-save-budget")
-            status = page.locator("#budget-save-status")
-            expect(status).to_contain_text("Saved. The next consciousness check uses it; a paused wake keeps its launch limit.",
-                                           timeout=30_000)
+            assert page.evaluate("document.activeElement.id") == f"setting-{KEY}"
+            with _saving(page):
+                allowance.fill("0")
+                allowance.press("Tab")  # leaving the field saves it
+            status = page.locator(f"#setting-{KEY}-result")
+            expect(status).to_contain_text("Saved", timeout=30_000)
+            # LANE A: with the server's receipt the line also says when it applies and "was 20", with Undo.
+            said = status.inner_text()
+            assert said == "Saved" or (said.startswith("Saved · ") and "was 20" in said), said
             assert posts[-1] == {KEY: 0}, posts
             assert float(_settings(data_dir)[KEY]) == 0
             expect(page.locator("#costs-allowance-state")).to_contain_text(
@@ -143,51 +173,40 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_settin
             _shoot(page, f"{engine}-zero-saved")
             _costs(page, url)  # a full reload reads the saved 0 back
             expect(allowance).to_have_value("0")
-            # A saved 0 is a value: an unrelated Settings save keeps it (it once wrote the field's '20' back), since
-            # Settings has no field for it and its save never posts it.
-            _nav(page, "settings")
-            expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
-            assert page.locator("#s-consciousness-daily-usd").count() == 0
-            page.click('[data-settings-tab="advanced"]')
-            page.locator("#s-gh-repo").fill("owner/unrelated-edit")
-            page.click("#btn-save-settings")
-            expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=30_000)
-            assert KEY not in posts[-1], "a Settings save never carries the allowance"
-            stored = _settings(data_dir)
-            assert stored["GITHUB_REPO"] == "owner/unrelated-edit" and float(stored[KEY]) == 0, stored
+            # A saved 0 is a value: an unrelated row written elsewhere keeps it (the page-wide Save of the old Settings
+            # once wrote the field's '20' back). A row posts its own key and nothing else.
+            stored = _write_unrelated(page, data_dir, posts, 9)
+            assert float(stored[KEY]) == 0, stored
             _costs(page, url)
             expect(allowance).to_have_value("0")
             allowance.fill("12.75")
-            page.locator("[data-costs-consciousness]").click()
+            with _saving(page):  # leaving the field for the Consciousness door saves it first
+                page.locator("[data-costs-consciousness]").click()
             _costs(page, url, load=False)
-            expect(allowance).to_have_value("12.75")  # tab return must not replace the draft with stored 0
-            page.focus("#btn-save-budget")
-            page.keyboard.press("Enter")
-            expect(status).to_contain_text("The next consciousness check uses it", timeout=30_000)
+            expect(allowance).to_have_value("12.75")
             assert posts[-1] == {KEY: 12.75}, posts
             assert float(_settings(data_dir)[KEY]) == 12.75
             _costs(page, url)
             expect(allowance).to_have_value("12.75")
             expect(page.locator("#costs-allowance-spend")).to_contain_text("of $12.75 in the last 24 hours")
-            # Another unrelated Settings save keeps the decimal too.
+            # Another unrelated row keeps the decimal too.
+            stored = _write_unrelated(page, data_dir, posts, 11)
+            assert float(stored[KEY]) == 12.75, stored
+            # It is edited in Costs alone: the page holds one control for it, Settings none, and the home's Costs row is
+            # the door to it, which leads back.
+            assert page.locator(f'[data-setting-row="{KEY}"]').count() == 1
             _nav(page, "settings")
-            expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
-            page.click('[data-settings-tab="advanced"]')
-            page.locator("#s-gh-repo").fill("owner/second-edit")
-            page.click("#btn-save-settings")
-            expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=30_000)
-            assert KEY not in posts[-1], "a Settings save never carries the allowance"
-            stored = _settings(data_dir)
-            assert stored["GITHUB_REPO"] == "owner/second-edit" and float(stored[KEY]) == 12.75, stored
-            # Its door in Behavior opens Costs.
-            page.click('[data-settings-tab="behavior"]')
-            door = page.locator("[data-costs-open]")
+            home = page.locator("#page-settings [data-settings-home]")
+            expect(home).to_be_visible(timeout=30_000)
+            assert page.locator(f'#page-settings [data-setting-row="{KEY}"], #page-settings #setting-{KEY}').count() == 0
+            door = home.locator('[data-settings-open="dashboard:costs"]')
             door.scroll_into_view_if_needed()
             if (shot := _evidence(f"{engine}-settings-door.png")) is not None:
-                page.locator("#settings-consciousness").screenshot(path=str(shot))
+                door.screenshot(path=str(shot))
             door.click()
-            expect(page.locator("#s-consciousness-allowance")).to_be_visible(timeout=30_000)
+            expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
             expect(allowance).to_have_value("12.75")
+            expect(page.locator("#dashboard-panel-costs > .dashboard-back")).to_have_text("Settings")
             assert page.errors.unexpected() == [], page.errors.report()
         finally:
             browser.close()
@@ -305,15 +324,18 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             def spend_says(text):
                 return lambda page: expect(page.locator("#costs-allowance-spend")).to_have_text(text)
 
-            # 1. Room left: the server's own window, the unpriced call said, no condition line.
+            # 1. Room left: the server's own window, the unpriced call said, no condition line; last, the model its
+            # wake-ups think with (this server's Main, the slot left empty), in every state but Off.
             normal = "≥ $12.40 of $20.00 in the last 24 hours · 1 without a price · Consciousness ›"
+            model = "Thinks with mock-model (Main model)."
             each("normal", lambda page: (spend_says(normal)(page),
-                                         expect(page.locator("#costs-allowance-state")).to_be_empty()))
+                                         expect(page.locator(".costs-allowance-line")).to_have_text([model])))
             # 2. The limit reached: what waits, and when room returns if nothing more is charged, in the viewer's zone.
             page = pages[COMBOS[0]]
-            page.locator("#s-consciousness-allowance").fill("10")
-            page.click("#btn-save-budget")
-            expect(page.locator("#budget-save-status")).to_contain_text("The next consciousness check uses it", timeout=30_000)
+            with _saving(page):
+                page.locator(FIELD).fill("10")
+                page.locator(FIELD).press("Enter")  # Enter commits the field as leaving it does
+            expect(page.locator(f"#setting-{KEY}-result")).to_contain_text("Saved", timeout=30_000)
             served = page.evaluate("fetch('/api/consciousness').then(r => r.json())")
             assert served["allowance_status"] == "exhausted" and served["daily_usd"] == 10, served
             assert abs(dt.datetime.fromisoformat(served["allowance_room_after"]).timestamp() - leaves) < 1, served
@@ -321,20 +343,21 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                        f"as they are, there is room again by {_room_words(leaves, now)}.")
             each("reached", lambda page: (spend_says("≥ $12.40 of $10.00 in the last 24 hours · 1 without a price · "
                                                      "Consciousness ›")(page),
-                                          expect(page.locator(".costs-allowance-line")).to_have_text([reached])))
+                                          expect(page.locator(".costs-allowance-line")).to_have_text([reached, model])))
             # 3. Its wake held at the allowance it started with: two facts, the window and the wake, with its card's door.
             for page in pages.values():
                 _overlay(page, _held)
             held = ("The consciousness wake-up is paused at the allowance it had left when it started ($2.99). Resume keeps "
                     "that limit, so it pauses again while its known spend is at it; room returning or a higher limit does "
                     "not raise it. Stop now on its card ends it and frees the clock for its next check. Open in Main ↗")
-            each("held", lambda page: expect(page.locator(".costs-allowance-line")).to_have_text([reached, held]))
+            each("held", lambda page: expect(page.locator(".costs-allowance-line")).to_have_text([reached, held, model]))
             page = pages[COMBOS[0]]
             opened = page.evaluate_handle("""() => { const seen = [];
                 window.addEventListener('ouro:open-task', (event) => seen.push(event.detail)); return seen; }""")
             page.locator(".costs-allowance-line [data-open-task]").click()
             assert opened.json_value() == [{"task_id": "wake-held", "chat_id": 1}]
-            # ... said on the Consciousness tab with the owner's mark and its door to Costs, and in the Shade.
+            # ... said on the Consciousness tab with the owner's mark and its allowance door, which opens that row in
+            # Costs, and in the Shade.
             for (width, _height, theme), page in pages.items():
                 _costs(page, url)
                 page.locator("[data-costs-consciousness]").click()
@@ -347,8 +370,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                     "does not raise it. Stop now on its card ends it and frees the clock for its next check.")
                 if (shot := _evidence(f"{engine}-{width}-{theme}-held-consciousness.png")) is not None:
                     page.locator("[data-cx-summary]").screenshot(path=str(shot))
-                page.locator('[data-cx-act="costs"]').click()
-                expect(page.locator("#s-consciousness-allowance")).to_be_visible(timeout=30_000)
+                page.locator('#page-dashboard [data-setting-row="consciousness-allowance"]').click()
+                expect(page.locator(FIELD)).to_be_focused(timeout=30_000)
                 _nav(page, "chat")
                 chip = page.locator("#page-chat .cx-chip")
                 expect(chip).to_be_visible(timeout=30_000)
@@ -367,14 +390,21 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 if (shot := _evidence(f"{engine}-{width}-{theme}-held-shade.png")) is not None:
                     page.screenshot(path=str(shot))
                 costs.click()
-                expect(page.locator("#s-consciousness-allowance")).to_be_visible(timeout=30_000)
+                expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
             # 4. An unreadable ledger: unknown, never $0, and no time.
             for page in pages.values():
                 _overlay(page, _unreadable)
             each("unknown", lambda page: (
                 spend_says("What it spent in the last 24 hours is unknown. · Consciousness ›")(page),
                 expect(page.locator(".costs-allowance-line")).to_have_text(
-                    ["The usage ledger could not be read, so whether consciousness has room is unknown."])))
+                    ["The usage ledger could not be read, so whether consciousness has room is unknown.", model])))
+            # 4b. A long model id with no break point of its own (no space, hyphen or slash: only the line's overflow-wrap
+            # breaks it) stays inside the card, a phone's included.
+            long_id = "qwen3_coder_480b_a35b_instruct_" * 3 + "fp8"
+            for page in pages.values():
+                _overlay(page, lambda bg: {**bg, "model_route": {"value": long_id, "layer": "consciousness", "local": False}})
+            each("long-model", lambda page: expect(page.locator(".costs-allowance-line").last).to_have_text(
+                f"Thinks with {long_id}."))
             # 5. Off, through the tab's own switch: nothing counts here until it is started again.
             for page in pages.values():
                 _overlay(page, None)

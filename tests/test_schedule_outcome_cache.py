@@ -102,7 +102,8 @@ def test_result_observed_for_an_old_task_cannot_overwrite_a_new_last_run(q, monk
     assert _rows(q)["s1"]["last_outcome"]["line"] == "New"
 
 
-def test_due_previous_run_fact_is_set_once_then_cleared(q):  # noqa: F811
+@pytest.mark.parametrize("summary", ["", "Проверка завершена.\n42 строки в /tmp/result.csv. Следующий шаг за владельцем."])
+def test_due_previous_run_fact_is_set_once_then_cleared(q, summary):  # noqa: F811
     _row(q, intent={"kind": "system_repo"}, cron=True)
     q.queue.check_scheduled_tasks()
     [task] = q.pending
@@ -121,14 +122,14 @@ def test_due_previous_run_fact_is_set_once_then_cleared(q):  # noqa: F811
     q.queue.check_scheduled_tasks()
     assert _rows(q)["s1"]["previous_run_open"] == fact and len(q.pending) == 1
     q.pending.clear()
-    write_task_result(q.root, task["id"], "completed", result="Previous result")
+    write_task_result(q.root, task["id"], "completed", result="Previous result", wake_summary=summary)
     q.queue.check_scheduled_tasks()
     row = _rows(q)["s1"]
     assert "previous_run_open" not in row
     [next_task] = q.pending
     timing = next_task["metadata"]["schedule_occurrence"]
     assert timing["previous_task_id"] == task["id"]
-    assert timing["previous"]["line"] == "Previous result" and timing["previous"]["state"] == "completed"
+    assert timing["previous"]["line"] == (summary or "Previous result") and timing["previous"]["state"] == "completed"
 
 
 @pytest.mark.parametrize("cached_id", ["previous", "older"])

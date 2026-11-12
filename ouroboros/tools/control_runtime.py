@@ -915,7 +915,8 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
     returns to this turn's primary binding (the acting model's choice): its model, role,
     locality and account policy with the owner's live wait-card choice for that
     role; "wait" also keeps a refusal there on the primary's own wait instead of
-    paid alternatives. Effort intent is untouched.
+    paid alternatives; after its content filter's stop nothing is there to wait for, so this run ends as
+    interrupted, without them. Effort intent is untouched.
 
     Effort follows the owner's range (``_effort_switch``): a Main focus — a chat turn,
     an ordinary root — keeps the level it works at outside Cyber Pro and the reply says
@@ -1049,7 +1050,7 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  silent: bool = False, swarm_comparison: str | None = None, summary: str = "",
                  fold_read: bool = False) -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
-    without a Presence binding) may choose silence and may leave one sentence for its human.
+    without a Presence binding) may choose silence and may leave a gist for its human.
     A task that answers its own retained place conversation (its reply carrier: a promoted or
     scheduled place root) may choose silence too; inherited binding authority alone names no speaker."""
     request, error = completion_request(ctx, {
@@ -1095,9 +1096,9 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
     fold_read = arguments.get("fold_read")
     if fold_read is not None and not isinstance(fold_read, bool):
         return None, "fold_read must be true or false"
-    summary = " ".join((summary or "").split())
+    summary = (summary or "").strip()
     if fold_read and not summary:
-        return None, "fold_read folds what this run read into its summary: give the sentence"
+        return None, "fold_read folds what this run read into its summary: give the gist"
     if silent and action != "finish":
         return None, "silent requires action=finish"
     # A sentence for a human this run does not speak to is decorative: dropped and named, never a veto on the answer;

@@ -840,9 +840,10 @@ class StateResponse(WorkStateFields):
     served_ui: NotRequired[ServedUiState]  # this generation's main interface; absent on older cores
 
 
-class SettingsNetworkMeta(TypedDict):
-    """Network fields inside the ``GET /api/settings`` ``_meta`` block."""
+from ouroboros.gateway.client_contracts import SettingsReceipt, SettingsTiming, SettingsRestartState
 
+
+class SettingsNetworkMeta(TypedDict):
     bind_host: str
     bind_port: int
     lan_ip: str
@@ -876,24 +877,22 @@ class SettingsPolicyAxis(TypedDict, total=False):
     applies: Literal["restart", "next_task"]
 
 
-class SettingsMeta(SettingsNetworkMeta, total=False):
-    """Complete ``GET /api/settings`` ``_meta`` block."""
-
+class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):
     custom_secret_keys: list[str]
     setup_contract: Dict[str, Any]
     available_subagents: AvailableSubagentsSettingsMeta
     policy_state: SettingsPolicyState
-    restart_state: Dict[str, Any]
+    restart_state: SettingsRestartState
     connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
     main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
 
 
-class SettingsSaveResponse(TypedDict, total=False):
+class SettingsSaveResponse(SettingsReceipt, total=False):
     status: str
     no_changes: bool
     restart_required: bool
     restart_keys: list[str]
-    restart_state: Dict[str, Any]
+    restart_state: SettingsRestartState
     immediate_changed: bool
     next_task_changed: bool
     warnings: list[str]
@@ -904,25 +903,25 @@ class SettingsSaveResponse(TypedDict, total=False):
     connection_references: list[Dict[str, str]]  # rows naming a connection that cannot serve them (they refuse)
 
 
-class OwnerRuntimeModeResponse(TypedDict):
+class OwnerRuntimeModeResponse(SettingsReceipt):
     ok: bool
     runtime_mode: str
     restart_required: bool
 
 
-class OwnerAutoGrantResponse(TypedDict):
+class OwnerAutoGrantResponse(SettingsReceipt):
     ok: bool
     enabled: bool
 
 
-class OwnerContextModeResponse(TypedDict):
+class OwnerContextModeResponse(SettingsReceipt):
     ok: bool
     context_mode: str
     project_id: str
     cognition: ProjectCognition
 
 
-class OwnerSafetyModeResponse(TypedDict):
+class OwnerSafetyModeResponse(SettingsReceipt):
     ok: bool
     safety_mode: str  # full | light | off (v6.54.3)
 
@@ -1193,7 +1192,7 @@ class TaskDetailResponse(TypedDict, total=False):
     # Every adoption this task authorized, as boot settled them: {adoption_id, outcome, commit_sha, previous_sha, branch,
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
-    review_overrides: Dict[str, Any]  # a root's decisions Blocking would have stopped: {count, latest} (review_overrides.py)
+    review_overrides: Dict[str, Any]  # a root's review trace: {count?, latest?, continued?, landed?} (review_overrides.py)
     error: str
 
 
@@ -1454,7 +1453,7 @@ class OnboardingAttemptResponse(TypedDict):
     post_commit_failed: NotRequired[str]
 
 
-class SettingsPostCommitFailureResponse(TypedDict):
+class SettingsPostCommitFailureResponse(SettingsReceipt):
     """500 after settings bytes landed; post_commit_failed names the later step.
     Retry that step, never re-save. Shared by settings and onboarding writes."""
 

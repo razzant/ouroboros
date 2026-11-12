@@ -78,17 +78,17 @@ test('the OS state paints the toggle and explains entries it does not own', asyn
     assert.equal(block.status.textContent, '');
 
     state = 'disabled_by_os'; // switched off in Windows Startup apps meanwhile
-    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    win.fire('ouro:settings-page-shown', { detail: { path: 'computer' } });
     await settle();
     assert.equal(block.box.checked, false);
     assert.match(block.status.textContent, /Turned off in the host operating system/);
     assert.equal(block.status.dataset.tone, 'warn');
 
     state = 'other_copy';
-    win.fire('ouro:page-shown', { detail: { page: 'chat' } });
+    win.fire('ouro:settings-page-shown', { detail: { path: 'permissions' } });
     await settle();
-    assert.match(block.status.textContent, /host operating system/, 'another page does not trigger a read');
-    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    assert.match(block.status.textContent, /host operating system/, 'another Settings page does not trigger a read');
+    win.fire('ouro:settings-page-shown', { detail: { path: 'computer' } });
     await settle();
     assert.match(block.status.textContent, /from a different entry \(another copy/);
 });
@@ -163,13 +163,13 @@ test('a failed write and failed read never assert a guessed host state', async (
     assert.match(block.status.textContent, /Current host state could not be read/);
     assert.equal(block.status.dataset.tone, 'danger');
     unreadable = false;
-    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    win.fire('ouro:settings-page-shown', { detail: { path: 'computer' } });
     await settle();
     assert.equal(block.box.checked, false);
     assert.equal(block.box.disabled, false);
 });
 
-test('a failed first read shows the block with the error and retries when Settings opens', async (t) => {
+test('a failed first read shows the block with the error and retries when the page is shown again', async (t) => {
     let failing = true;
     const win = withApi(t, {
         read: async () => {
@@ -185,7 +185,7 @@ test('a failed first read shows the block with the error and retries when Settin
     assert.equal(block.status.textContent, 'Could not read the host startup entry: systemctl did not answer');
     assert.equal(block.status.dataset.tone, 'danger');
     failing = false;
-    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    win.fire('ouro:settings-page-shown', { detail: { path: 'computer' } });
     await settle();
     assert.equal(block.box.disabled, false);
     assert.equal(block.status.textContent, '');
@@ -200,7 +200,7 @@ test('pagehide releases every listener the block took', async (t) => {
     assert.equal(block.bound(), true, 'a bfcache hide keeps the page alive');
     win.fire('pagehide', { persisted: false });
     assert.equal(block.bound(), false);
-    assert.equal(win.has('ouro:page-shown'), false);
+    assert.equal(win.has('ouro:settings-page-shown'), false);
     assert.equal(win.has('pagehide'), false);
 });
 
@@ -290,7 +290,7 @@ test('hosts without background mode show the reason on a disabled control', asyn
     assert.equal(block.backgroundStatus.textContent, reason);
 });
 
-test('one Settings visit re-reads both host controls and one pagehide releases both', async (t) => {
+test('one showing of the page re-reads both host controls and one pagehide releases both', async (t) => {
     let reads = 0;
     let server = 'off';
     const win = withBothApis(t, { background: async () => { reads += 1; return { state: server }; } });
@@ -298,13 +298,13 @@ test('one Settings visit re-reads both host controls and one pagehide releases b
     bindAutostartControl(block.page);
     await settle();
     server = 'on'; // the desktop's first-close answer landed meanwhile
-    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    win.fire('ouro:settings-page-shown', { detail: { path: 'computer' } });
     await settle();
     assert.equal(reads, 2);
     assert.equal(block.background.checked, true);
     win.fire('pagehide', { persisted: false });
     assert.equal(block.handlers.size, 0);
-    assert.equal(win.has('ouro:page-shown'), false);
+    assert.equal(win.has('ouro:settings-page-shown'), false);
 });
 
 function sharedSection() {
@@ -347,7 +347,7 @@ test('an environment fact is a plain note, and two rows that share it say it onc
     assert.equal(block.background.attrs.get('aria-describedby'), 'settings-autostart-note');
     // Different reasons stay under their own rows.
     background = { state: 'unavailable', reason: 'Not available on Linux yet: closing the window quits Ouroboros.' };
-    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    win.fire('ouro:settings-page-shown', { detail: { path: 'computer' } });
     await settle();
     assert.equal(block.note.hidden, true);
     assert.equal(block.startupStatus.hidden, false);
@@ -356,7 +356,7 @@ test('an environment fact is a plain note, and two rows that share it say it onc
     assert.equal(block.startup.attrs.has('aria-describedby'), false);
     // A state the owner can change keeps its warning.
     background = { state: 'on' };
-    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    win.fire('ouro:settings-page-shown', { detail: { path: 'computer' } });
     await settle();
     assert.equal(block.note.hidden, true);
     assert.equal(block.startupStatus.textContent, reason);

@@ -141,7 +141,7 @@ def get_safety_mode(kind: str = "owner") -> str:
 
 
 OWNER_RULES_KEY = "OUROBOROS_SAFETY_OWNER_RULES"
-_RULES_ADDRESS = "Settings › Behavior › Safety Supervisor › Your rules"
+_RULES_ADDRESS = "Settings › Your rules"
 
 
 def owner_rules_section(*, session: bool = False) -> str:

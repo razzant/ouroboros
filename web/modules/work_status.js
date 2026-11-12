@@ -31,13 +31,19 @@ const IDLE_ROOM = Object.freeze({ activity: 'idle', transition: 'none', call: ''
     confirmed: true, works: [] });
 const CALL_WORDS = { preparing: 'preparing', sending: 'sending', thinking: 'thinking' };
 const list = (value) => (Array.isArray(value) ? value : []);
+// `question`: a task waits for the owner's answer (the work's own word says so). `open_question`: a question that is
+// still unanswered while its work goes on or after it ended: the owner's turn, never the work's word.
 const asked = (state) => list(state?.turn).some((item) => item?.kind === 'question');
+const QUESTIONS = new Set(['question', 'open_question']);
 
 /** The state one chat instance shows before its first body: an idle room and no works. */
 export function emptyWorkState() {
     return { room: IDLE_ROOM, works: [], episodes: new Map(), members: new Set(), attempts: new Map(), complete: false,
-        main: null, leads: new Map() };
+        main: null, leads: new Map(), questions: new Map() };
 }
+
+// One question's key across the turn, the census rows and the work list: its task and its quiz.
+const questionKey = (item) => `${item.task_id}:${item.quiz_id || ''}`;
 
 // What an incomplete body did not list again: still shown, never as confirmed work and never with controls or a line;
 // its mark is the ring of unconfirmed state.
@@ -50,7 +56,10 @@ const unconfirmedWork = (work) => ({ ...work, activity: 'unknown', transition: '
  * portal's work runs in its Project) and `members` holds every member id; `attempts` is each census row's attempt,
  * so a control opened for one attempt of an episode is not pressed on the next. `main` is Main's route as the body
  * says it (the last one said, when this body does not) and `leads` the model fact of each activity row that
- * publishes one, for a direct turn's card (CLIENT_CONTRACT §5). Only a complete supervisor-ready
+ * publishes one, for a direct turn's card (CLIENT_CONTRACT §5). `questions` holds the current-question row of each
+ * `open_question` in this room's turn (by `task_id:quiz_id`), from the same body, else the row an earlier body carried
+ * while the turn still lists it: a question's row says its own words for exactly as long as its item makes the row.
+ * Only a complete supervisor-ready
  * body read over an open socket proves absence; an incomplete one keeps the works it omitted, unconfirmed. A body
  * without the projection, or a failed read (null), changes nothing.
  */
@@ -78,7 +87,14 @@ export function reconcileWorkState(prior, data, chatId, connected = true) {
     const leads = new Map(rows.filter((row) => row.lead && typeof row.lead === 'object')
         .map((row) => [String(row.activity_id), row.lead]));
     const main = data.main_route && typeof data.main_route === 'object' ? data.main_route : before.main || null;
-    return { room, works: [...listed, ...kept], episodes, members, attempts, complete, main, leads };
+    const carried = new Map(list(data.current_questions).filter((row) => row?.task_id).map((row) => [questionKey(row), row]));
+    const questions = new Map();
+    for (const item of list(room.turn)) {
+        if (item?.kind !== 'open_question' || !item.task_id) continue;
+        const said = carried.get(questionKey(item)) || before.questions?.get(questionKey(item));
+        if (said) questions.set(questionKey(item), said);
+    }
+    return { room, works: [...listed, ...kept], episodes, members, attempts, complete, main, leads, questions };
 }
 
 /** A work's or a room's one short word, from its activity, transition and exact call (the cards' chip words). */
@@ -231,20 +247,36 @@ export function roomSpeaker(room, works = [], word = activityWord(room)) {
     return list(room?.works).map((id) => byId.get(id)).find((work) => work && activityWord(work) === word) || null;
 }
 
-/** What waits for the owner in a room ('question' | 'action'), '' when nothing does or its own word says so. */
-export const roomAmber = (room) => (!room?.amber || (room.activity === 'waiting' && asked(room)) ? ''
-    : asked(room) ? 'question' : 'action');
+/** What a `turn` holds for the owner ('question' | 'action' | 'unanswered' | 'delivery'), '' when nothing: a
+ *  question a task waits on, else an action only the owner takes, else a question still unanswered while its work
+ *  goes on or after it ended, or only answers whose delivery is unknown. A room's note and a card chip's name both
+ *  say it by this one rule. */
+export const turnAmber = (turn) => {
+    const items = list(turn);
+    if (!items.length) return '';
+    if (items.some((item) => item?.kind === 'question')) return 'question';
+    const open = items.filter((item) => item?.kind === 'open_question');
+    if (items.some((item) => item?.kind === 'action') || !open.length) return 'action';
+    return open.every((item) => item.code === 'delivery_unknown') ? 'delivery' : 'unanswered';
+};
 
-/** The amber mark said in words, for the room's accessible name: the colour is never the only way it is told. */
+/** What waits for the owner in a room (turnAmber), '' when nothing does or its own word says so. */
+export const roomAmber = (room) => (!room?.amber || (room.activity === 'waiting' && asked(room)) ? ''
+    : turnAmber(room.turn) || 'action');
+
+/** The amber mark said in words, for the room's accessible name: the colour is never the only way it is told. An
+ *  unanswered question nobody waits on is never said as a wait. */
 export const amberNote = (kind) => (kind === 'question' ? tr('work.amber.question', 'A question waits for your answer')
-    : kind === 'action' ? tr('work.amber.action', 'Something here waits for you') : '');
+    : kind === 'unanswered' ? tr('work.amber.unanswered', 'An unanswered question is here')
+        : kind === 'delivery' ? tr('work.amber.delivery', 'An answer here was recorded; its delivery is unknown')
+            : kind === 'action' ? tr('work.amber.action', 'Something here waits for you') : '');
 
 /**
  * The room's status in its bar: the server's room in short words, with the client's own facts on top. Tone is the
  * word's ink (live, queued, wait for the owner's own question, held, unknown, starting, offline, online); `mark` the
  * work's shape after it (the server's room mark under this module's four overlays; the transcript's typing bubble
  * shows while it is `moving`, whatever waits for the owner); `owner` whether something waits for the owner (the room's
- * turn: its amber dot takes the mark's place, the word keeps its ink); `amber` what waits (question | action), said in
+ * turn: status_mark.js draws it amber, the word keeps its ink); `amber` what waits (roomAmber's kinds), said in
  * words where the word does not already say it. `stopping` is the owner's own Stop press on every working work of the
  * room ('finalize' | 'immediate'); until the host is `ready`, an idle room says its start in the words of the host's
  * `boot` phases (host_starting_status.js). A room still preparing names as its `step` the step its speaking work
@@ -280,7 +312,8 @@ export function roomStatusView(state, {
     case 'waiting': return view('online', activityWord(room), asked(room) ? 'wait' : 'held', mark, turn);
     case 'paused': return view('online', activityWord(room), 'held', mark, turn);
     case 'unknown': return view('online', activityWord(room), 'unknown', mark, turn);  // a listed turn still waits
-    default: return ready ? view('online', 'Online', 'online', mark)
+    // A room at rest keeps the owner's turn: a question of an ended work still waits there.
+    default: return ready ? view('online', 'Online', 'online', mark, turn)
         : { ...view('starting', 'Starting…', 'starting', 'none'), ...startingStatus(boot) };
     }
 }
@@ -295,7 +328,7 @@ export function ownStopPress(state, records) {
 /**
  * One work's row in the room's work list: its word (an outcome beside Finalizing…), its line beside it, the row's tone
  * (the word's ink), its `mark` (the work's shape as the server names it; the owner's own Stop press moves it), `owner`
- * whether something in the work waits for the owner (its turn: the amber dot takes the mark's place; a Pause by the
+ * whether something in the work waits for the owner (its turn: status_mark.js draws it amber; a Pause by the
  * owner or by Ouroboros is not the owner's move) and `outcome`, the known outcome said beside Finalizing… (its dot in
  * the outcome's tone). `stopping` is the owner's own Stop press on the work's card ('finalize' | 'immediate'), said
  * at once as the card says it.
@@ -325,7 +358,7 @@ export function workRowView(work = {}, { stopping = '' } = {}) {
 
 /** The question a row's View question goes to: the first question in the work's turn, by its exact quiz id. */
 export function workQuestion(work) {
-    const question = list(work?.turn).find((item) => item?.kind === 'question' && item.quiz_id && item.task_id);
+    const question = list(work?.turn).find((item) => QUESTIONS.has(item?.kind) && item.quiz_id && item.task_id);
     return question ? { taskId: String(question.task_id), quizId: String(question.quiz_id) } : null;
 }
 
@@ -379,7 +412,10 @@ export function applyCardWorkViews(records, state) {
         } else if (record.cardModel && !portal && !state?.complete) paintCardModel(record, { ...record.cardModel.view, target: '' });
         else paintCardModel(record, null);
         const view = cardWorkView(work);
-        const look = work?.episode?.live ? { mark: String(work.mark || 'none'), owner: list(work.turn).length > 0 } : null;
+        // What waits in the work, said as the room says it: the chip's name names that, never only "something".
+        const note = amberNote(turnAmber(work?.turn));
+        const look = work?.episode?.live ? { mark: String(work.mark || 'none'), owner: list(work.turn).length > 0,
+            ...(note ? { note } : {}) } : null;
         if (JSON.stringify([view, look]) !== JSON.stringify([record.workView || null, record.workLook || null])) changed = true;
         record.workView = view;
         record.workLook = look;

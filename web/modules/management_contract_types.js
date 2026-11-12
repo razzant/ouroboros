@@ -699,7 +699,7 @@
  * @property {*=} problem
  * @property {*=} processing
  * @property {boolean=} use_local
- * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states both token prices and no per-request fee
+ * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
  */
 
 /**
@@ -1017,6 +1017,7 @@
  * @property {Object=} by_task_category
  * @property {Object} accounting
  * @property {Object=} unattributed
+ * @property {Object=} period  only with `?period=24h|7d|30d`: that period's models and cache writes (cost_period.js)
  */
 
 /**

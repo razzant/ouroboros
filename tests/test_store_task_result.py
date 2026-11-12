@@ -156,3 +156,58 @@ def test_store_task_result_allows_recovered_tool_failure_success(tmp_path):
     assert payload["outcome_axes"]["execution"]["status"] == "ok"
     assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
     assert payload["loop_outcome"]["failure"] is None
+
+
+def test_store_task_result_keeps_trace_refs_in_one_place(tmp_path):
+    """The stored row names its trace refs once, at the top level; its ``loop_outcome`` carries none.
+
+    The refs grow by one row per model answer and per tool call and the body is rewritten whole on
+    every write, so a second copy doubles each rewrite. The caller's outcome object keeps its
+    refs, and the top-level reader (a retained call's source) answers alike over this row and
+    over a row that holds both copies, which is read as stored.
+    """
+    from ouroboros.observability import persist_call
+    from ouroboros.outcomes import collect_trace_refs, derive_loop_outcome
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_task_results import _get_task_result
+    from ouroboros.tools.registry import ToolContext
+
+    task_id = "task-trace-refs"
+    call = persist_call(tmp_path, task_id=task_id, call_id="tool_read_1", call_type="tool_call",
+                        payload={"tool": "read_file", "result": "retained bytes"})
+    usage = {"rounds": 1, "cost": 0.0, "execution_id": "exec_trace_refs",
+             "llm_call_refs": [{"llm_call_id": "llm_1", "round": 1, "response_ref": {"path": "resp"}}]}
+    llm_trace = {"tool_calls": [{"tool": "read_file", "result": "ok", "trace_ref": call}],
+                 "reasoning_notes": []}
+    outcome = derive_loop_outcome("done", usage, llm_trace)
+    refs = collect_trace_refs(usage, llm_trace)
+    assert refs["llm_call_refs"] and refs["tool_call_refs"] and outcome["trace_refs"] == refs
+
+    pipeline._store_task_result(
+        env=SimpleNamespace(drive_root=tmp_path), task={"id": task_id, "type": "task", "text": "hi"},
+        text="done", usage=usage, llm_trace=llm_trace, review_evidence={}, loop_outcome=outcome,
+    )
+
+    stored = read_result(tmp_path, task_id)
+    assert stored["trace_refs"] == refs
+    assert "trace_refs" not in stored["loop_outcome"]
+    assert stored["loop_outcome"]["usage"]["total_rounds"] == 1  # the rest of the outcome is stored whole
+    assert outcome["trace_refs"] == refs  # the caller's object is not the stored projection
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path, task_id="parent", budget_drive_root=str(tmp_path),
+                      task_metadata={"budget_drive_root": str(tmp_path)})
+
+    def call_source():
+        return json.loads(_get_task_result(
+            ctx, task_id=task_id, call_id="tool_read_1", manifest_sha256=call["manifest_ref"]["sha256"],
+        ))["call_source"]
+
+    single = call_source()
+    assert single["task_id"] == task_id and single["call_type"] == "tool_call"
+    write_task_result(tmp_path, task_id, stored["status"],
+                      loop_outcome={**stored["loop_outcome"], "trace_refs": refs})
+    doubled = read_result(tmp_path, task_id)
+    assert doubled["trace_refs"] == doubled["loop_outcome"]["trace_refs"] == refs
+    assert call_source() == single

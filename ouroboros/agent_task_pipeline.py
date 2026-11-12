@@ -1340,7 +1340,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             review_status=dict(outcome_axes.get("review") or {}),
             task_contract=task_contract,
             _is_direct_chat=bool(task.get("_is_direct_chat")),
-            loop_outcome=loop_outcome,
+            loop_outcome={k: v for k, v in loop_outcome.items() if k != "trace_refs"},  # the refs are stored once: the top-level ``trace_refs`` below
             project_id=str(task.get("project_id") or ""),
             parent_task_id=task.get("parent_task_id"),
             root_task_id=task.get("root_task_id"),

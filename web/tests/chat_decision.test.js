@@ -146,7 +146,8 @@ test('required waiting copy ends when the answer settles, including history repl
         assert.equal(card.querySelector('.chat-quiz-assumption'), null);
         assert.ok(card.querySelectorAll('.chat-quiz-option').every((btn) => btn.disabled));
         assert.deepEqual(markOf(card), ['dot', 'ok', false]);
-        const hues = { answered: 'ok', expired_terminal: 'neutral', superseded: 'ink' };
+        // Still unanswered after its task ended, Main's pill counts it: amber, like every question it counts.
+        const hues = { answered: 'ok', expired_terminal: 'owner', superseded: 'ink' };
         for (const state of ['answered', 'expired_terminal', 'superseded']) {
             const replay = fx.decision.buildQuizCard({
                 task_id: 't-1', text: required.question,
@@ -168,7 +169,7 @@ test('quiz card renders full anatomy from a WS frame', () => {
         assert.match(card.querySelector('.chat-quiz-stake').textContent, /At stake: release timing/);
         assert.match(card.querySelector('.chat-quiz-assumption').textContent, /Continuing meanwhile: continuing with the merge/);
         assert.equal(card.querySelector('.chat-quiz-status-text').textContent, 'Unanswered');
-        assert.deepEqual(markOf(card), ['dot', 'neutral', false], 'no wait evidence, no amber');
+        assert.deepEqual(markOf(card), ['dot', 'owner', false], 'unanswered: the pill counts it, so amber');
         const buttons = card.querySelectorAll('.chat-quiz-option');
         assert.equal(buttons.length, 2);
         assert.equal(buttons[1].querySelector('.chat-quiz-option-detail').textContent, 'wait for CI');
@@ -230,7 +231,7 @@ test('a required card that outlived its task stops claiming the task is waiting'
         assert.equal(card.querySelector('.chat-quiz-wait'), null);
         assert.ok(card.querySelector('.chat-quiz-comment'));
         assert.ok(card.querySelectorAll('.chat-quiz-option').every((btn) => !btn.disabled));
-        assert.deepEqual(markOf(card), ['dot', 'neutral', false], 'answerable, but nothing waits for the owner');
+        assert.deepEqual(markOf(card), ['dot', 'owner', false], 'its task ended, the question still waits for the owner');
     } finally { fx.restore(); }
 });
 
@@ -389,6 +390,59 @@ test('a retry reuses the SAME request_id (stable idempotency key)', async () => 
         assert.equal(seen.length, 2);
         assert.equal(seen[0], seen[1]);
     } finally { fx.restore(); }
+});
+
+test('an answer whose delivery is unknown is amber on a Project question\'s cards and not on Main\'s own', () => {
+    const delivery = { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' };
+    const answered = { ...WS_MSG, state: 'answered', answered_index: 0, question_delivery: delivery };
+    // Main's own question: the pill does not count it, its head is not amber.
+    const main = fixture({ isMain: true });
+    try {
+        assert.deepEqual(markOf(main.decision.buildQuizCard(answered)), ['dot', 'ok', false]);
+    } finally { main.restore(); }
+    // The same answer of a Project's question, in its own room: the pill counts it, the head is amber.
+    const room = fixture({ projectId: 'p1', chatId: 23 });
+    try {
+        assert.deepEqual(markOf(room.decision.buildQuizCard({ ...answered, project_id: 'p1' })), ['dot', 'owner', false]);
+    } finally { room.restore(); }
+    // And on its Main copy, which offers Remove from pending.
+    const column = new NodeStub();
+    const mirror = fixture({ isMain: true, frameNode: frameBubble, insertMessageNode: (node) => { column.append(node); return true; } });
+    try {
+        mirror.decision.appendQuestionPointer({ role: 'system', system_type: 'project_question_pointer', task_id: 't-1',
+            quiz_id: 'qz-1', project_id: 'p1', project_chat_id: 23, project_name: 'Storage', ts: '2026-09-18T22:00:00+00:00',
+            quiz_state: 'answered', question: 'Merge now?', options: ['Yes', 'No'], answered_index: 0, question_delivery: delivery });
+        const card = column.querySelector('.chat-quiz-card');
+        assert.equal(card.querySelector('.chat-quiz-dismiss')?.textContent, 'Remove from pending');
+        assert.deepEqual(markOf(card), ['dot', 'owner', false]);
+    } finally { mirror.restore(); }
+});
+
+test('a private Presence question is Main\'s wherever it is drawn: its unknown delivery is not amber in its work\'s Project', async () => {
+    const delivery = { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' };
+    const answered = { ...WS_MSG, state: 'answered', answered_index: 0, question_delivery: delivery };
+    // From history: the row names its work's Project only as a reference; its contact says it is Main's.
+    const history = fixture({ projectId: 'p1', chatId: 23 });
+    try {
+        const card = history.decision.buildQuizCard({ ...answered, project_id: 'p1',
+            presence_contact: { task_id: 't-1', binding_id: 'binding', source_event_id: 'event' } });
+        assert.deepEqual(markOf(card), ['dot', 'ok', false]);
+    } finally { history.restore(); }
+    // Read canonically first (Main's own room, shown in the Project too): building the room's card keeps that fact.
+    const block = { ...WS_MSG, state: 'answered', answered_index: 0, asked_at: WS_MSG.ts,
+        delivery: { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' } };
+    const read = fixture({ projectId: 'p1', chatId: 23, fetchDetail: async () => ({ task_id: 't-1', owner_quiz: { 'qz-1': block },
+        question_rooms: { 'qz-1': { state: 'known', chat_id: 1, project_id: '', also_project_ids: ['p1'] } } }) });
+    try {
+        const question = await read.decision.readQuestion('t-1', 'qz-1', 'p1');
+        assert.equal(question?.project_id, '');
+        assert.deepEqual(markOf(read.decision.buildQuizCard({ ...answered, project_id: 'p1' })), ['dot', 'ok', false]);
+    } finally { read.restore(); }
+    // An ordinary question of that Project drawn in its room stays amber, as the pill counts it.
+    const own = fixture({ projectId: 'p1', chatId: 23 });
+    try {
+        assert.deepEqual(markOf(own.decision.buildQuizCard(answered)), ['dot', 'owner', false]);
+    } finally { own.restore(); }
 });
 
 test('applyQuizStateFrame settles an existing card and ignores unknown ids', async () => {
@@ -958,13 +1012,13 @@ test('a bounded wait that closed stops saying waiting while the card stays answe
         assert.equal(quizCard.querySelector('.chat-quiz-wait'), null);
         assert.match(quizCard.querySelector('.chat-quiz-assumption').textContent, /wait ended/);
         assert.equal(quizCard.dataset.state, 'open');
-        assert.deepEqual(markOf(quizCard), ['dot', 'neutral', false], 'the bound closed: no longer the owner\'s move');
+        assert.deepEqual(markOf(quizCard), ['dot', 'owner', false], 'the bound closed; the question still waits for the owner');
         // History replay renders the ended wait from the projection (wait_ended_at, no wait_for_answer).
         const replayed = fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-r', wait_ended_at: '2026-08-31T10:05:00Z' });
         const rcard = replayed;
         assert.match(rcard.querySelector('.chat-quiz-assumption').textContent, /wait ended/);
         assert.equal(rcard.querySelector('.chat-quiz-wait'), null);
-        assert.deepEqual(markOf(rcard), ['dot', 'neutral', false]);
+        assert.deepEqual(markOf(rcard), ['dot', 'owner', false]);
     } finally { fx.restore(); }
 });
 
@@ -981,7 +1035,7 @@ test('reconciling a replayed row into an existing card projects the closed bound
         assert.equal(fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-m', wait_ended_at: '2026-08-31T10:05:00Z' }), null);
         assert.equal(quizCard.querySelector('.chat-quiz-wait'), null);
         assert.match(quizCard.querySelector('.chat-quiz-assumption').textContent, /wait ended/);
-        assert.deepEqual(markOf(quizCard), ['dot', 'neutral', false]);
+        assert.deepEqual(markOf(quizCard), ['dot', 'owner', false], 'unanswered: still the owner\'s move');
         assert.equal(quizCard.querySelector('.chat-quiz-mark'), mark, 'the same mark is repainted, never replaced');
     } finally { fx.restore(); }
 });

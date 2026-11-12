@@ -8,6 +8,7 @@ import pathlib
 from datetime import datetime
 from decimal import Decimal
 
+from ouroboros.store import StoreBusy
 from ouroboros.subagent_metrics import number
 
 log = logging.getLogger(__name__)
@@ -162,8 +163,11 @@ def publish(root, root_task_id, *, task=None):
                                                 "published_at": utc_now_iso()}}
         row = patch_document(root, root_task_id, update)
         return row.get("swarm_receipt")
+    except StoreBusy:  # contention is no fault: the tree's next publication folds the same rows
+        log.warning("swarm receipt publication unavailable: store busy (root_task_id=%s)", root_task_id)
+        return None
     except Exception:
-        log.warning("swarm receipt publication unavailable", exc_info=True)
+        log.warning("swarm receipt publication unavailable (root_task_id=%s)", root_task_id, exc_info=True)
         return None
     finally:
         release_exclusive_file_lock(lock_path, lock)
