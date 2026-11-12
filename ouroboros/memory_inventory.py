@@ -883,7 +883,7 @@ class ShortageFact:
     mode: str = ""
 
 
-_ROW_STEPS = frozenset({"F2", "F7"})  # my replies, this room's people: the steps that ask the mind
+_ROW_STEPS = frozenset({"F2", "F7"})  # this room's rows a step took: my replies (addresses or work lines) and its people
 _NARRATIVE_STEPS = frozenset({"F4", "F5l", "F5"})  # this room's retold page, story labels and pointers
 
 
