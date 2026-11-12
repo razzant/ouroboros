@@ -127,6 +127,9 @@ test('only the client facts overlay the room, each with its mark: socket closed,
     const idle = emptyWorkState();
     assert.deepEqual(roomStatusView(idle),
         { kind: 'online', text: 'Online', tone: 'online', mark: 'none', owner: false, amber: '' });
+    // A room at rest keeps the owner's turn: a question whose work ended still waits there, Online beside the owner's dot.
+    assert.deepEqual(roomStatusView({ room: room('idle', { turn: [{ kind: 'open_question', task_id: 't', quiz_id: 'q' }] }) }),
+        { kind: 'online', text: 'Online', tone: 'online', mark: 'none', owner: true, amber: 'unanswered' });
     assert.deepEqual(roomStatusView(idle, { ready: false }),
         { kind: 'starting', text: 'Starting…', tone: 'starting', mark: 'none', owner: false, amber: '', title: '' });
     // The owner's own unconfirmed send outranks a quiet room, never work the room already does; it moves.

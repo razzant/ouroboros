@@ -544,6 +544,10 @@ test('the one mark after the word is the room\'s shape, the owner\'s amber dot i
         assert.deepEqual(paint(roomStatusView(inRoom('waiting', question))), ['wait', 'dot', 'owner', '']);
         // At rest the room says Online beside its green dot; the client's own facts lay their marks over the room.
         assert.deepEqual(paint(roomStatusView(emptyWorkState())), ['online', 'dot', 'ok', '']);
+        // A question whose work ended keeps the room the owner's turn: Online stands beside the owner's dot, said in words.
+        const unanswered = { turn: [{ kind: 'open_question', task_id: 't-ask', quiz_id: 'q-1' }] };
+        assert.deepEqual(paint(roomStatusView(inRoom('idle', unanswered))),
+            ['online', 'dot', 'owner', 'An unanswered question is here']);
         assert.deepEqual(paint(roomStatusView(inRoom('working', question), { connected: false })), ['offline', 'ring', 'ink', '']);
         assert.deepEqual(paint(roomStatusView(emptyWorkState(), { ready: false })), ['starting', 'hidden', 'ink', '']);
         assert.deepEqual(paint(roomStatusView(emptyWorkState(), { sending: true })), ['live', 'moving', 'ink', '']);
