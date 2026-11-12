@@ -676,6 +676,7 @@ def run_llm_loop(
                 if final_result is not None:
                     return final_result
                 continue
+            model_call = None  # this round's call, once it starts: a yield before it keeps the loop's own state
             try:
                 from ouroboros.loop_llm_call import timeout_repeat_blocked
                 if timeout_repeat_blocked(accumulated_usage):  # before compaction can buy a call on re-entry
@@ -739,6 +740,9 @@ def run_llm_loop(
                     text, accumulated_usage, forced_trace = controlled
                     _merge_finalization_trace(llm_trace, forced_trace)
                     return text, accumulated_usage, llm_trace
+                if model_call is not None:  # the redial starts from what the yielded call applied (wait card, view, low)
+                    active_model, active_use_local = model_call.active_model, model_call.active_use_local
+                    context_fit_plan, active_context_mode = model_call.context_fit_plan, model_call.active_context_mode
                 free_redial = True
                 continue
             # A wait-card switch can change the route within this very call.
