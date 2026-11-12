@@ -116,6 +116,21 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
     assert section(main_c, "## This room (Main)") in main_c.split("## Other conversations", 1)[0]  # the room first
 
 
+def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch):
+    """A' and B are bytes of their sources alone (DEVELOPMENT "Cache-friendliness invariant"): another task, another
+    owner message and a wall clock three days on, at one state of memory, change only C. A paid route writes its
+    whole start again whenever these bytes move, so a capture fact in them is paid by every task that follows."""
+    import time
+
+    env, memory, _rooms = world(tmp_path)
+    first = blocks(env, memory, MAIN)
+    later = time.time() + 3 * 86_400
+    monkeypatch.setattr(time, "time", lambda: later)
+    second = blocks(env, memory, {"id": "another-task", "chat_id": 1, "text": "a different owner message, much later"})
+    assert second[0] == first[0] and second[1] == first[1]
+    assert second[2] != first[2]  # the changing context is the capture's own
+
+
 def test_full_roles_share_the_first_block_and_only_eligible_tasks_get_the_handbook(tmp_path):
     """A real workspace binding must not invalidate the common governance prefix."""
     env, memory, _rooms = world(tmp_path)

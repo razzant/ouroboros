@@ -53,6 +53,11 @@ def _call(data, *, model=OPUS, prompt, read=0, write=0, output=0, cost, ttl="1h"
     return attempt
 
 
+def _settle(attempt, *, prompt, read=0, write=0, output=0, cost, ttl="1h"):
+    ua.settle_attempt(attempt, {"prompt_tokens": prompt, "completion_tokens": output, "cached_tokens": read,
+                                "cache_write_tokens": write, "prompt_cache_ttl": ttl}, cost_usd=cost, cost_final=True)
+
+
 def _day_after(moment):
     """``now`` for a 24-hour period that starts at ``moment``."""
     return moment + cost_period.PERIODS["24h"]
@@ -186,3 +191,59 @@ def test_a_display_reads_tariffs_without_a_fetch_and_falls_back_to_the_recorded_
     monkeypatch.setattr(llm_capability_policy, "recorded_openrouter_catalog", lambda: ({}, ""))
     bare = cost_period.cost_period(root, "24h")
     assert bare["tariff_observed_at"] == "" and bare["models"][0]["by_class"] is None and bare["models"][0]["unshared_cost"] == 0.01
+
+
+def test_a_rebuilt_store_gives_the_same_period(root):
+    """An import inserts attempts in the order of their LAST record (``usage_store._build``): a call reserved before
+    the period and settled inside it then stands after the period's calls, and position alone would misplace the
+    start. The period is still exactly the calls reserved in it, before and after the rebuild."""
+    early = _call(root, prompt=10, write=5, cost=None, settle=False)        # reserved before the period...
+    time.sleep(0.05)
+    start = time.time()
+    time.sleep(0.05)
+    inside = _call(root, prompt=20, write=7, cost=None, settle=False)       # reserved inside it, answered late
+    _call(root, prompt=30, write=9, cost=0.125)                             # reserved and settled inside it
+    _settle(inside, prompt=20, write=7, cost=0.25)
+    _settle(early, prompt=10, write=5, cost=0.5)                            # ...and settled last of all
+    before = cost_period.cost_period(root, "24h", now=_day_after(start))
+    assert [(row["calls"], row["cost"]) for row in before["models"]] == [(2, 0.375)]
+    assert sorted(cause["write_tokens"] for cause in before["cache_writes"]) == [16]
+    usage_store.export_journal(root)
+    usage_store.migrate_from_journal(root)  # the store rebuilt from its journal
+    assert cost_period.cost_period(root, "24h", now=_day_after(start)) == before
+    with usage_store.hold(root) as txn:  # and with the early call standing last, where its last record puts it
+        columns = [column[1] for column in txn.conn.execute("PRAGMA table_info(attempts)")]
+        row = tuple(txn.conn.execute("SELECT * FROM attempts WHERE attempt_id=?", (early.attempt_id,)).fetchone())
+        txn.conn.execute("DELETE FROM attempts WHERE attempt_id=?", (early.attempt_id,))
+        txn.conn.execute(f"INSERT INTO attempts ({','.join(columns)}) VALUES ({','.join('?' * len(columns))})", row)
+        last = txn.conn.execute("SELECT attempt_id FROM attempts ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+    assert last == early.attempt_id
+    assert cost_period.cost_period(root, "24h", now=_day_after(start)) == before
+    whole = cost_period.cost_period(root, "24h")
+    assert [(row["calls"], row["cost"]) for row in whole["models"]] == [(3, 0.875)]
+
+
+def test_the_serving_upstream_and_the_write_split_reach_the_settled_row(root):
+    from types import SimpleNamespace
+
+    from ouroboros._usage_response import usage_from_response
+    from ouroboros._usage_settlement import settlement_fields
+
+    raw = {"provider": "Claude Platform on AWS",
+           "usage": {"prompt_tokens": 100, "completion_tokens": 5, "response_provider": "a nested claim",
+                     "prompt_tokens_details": {"cached_tokens": 40, "cache_write_tokens": 30},
+                     "cache_creation": {"ephemeral_1h_input_tokens": 20, "ephemeral_5m_input_tokens": 10}}}
+    usage, _cost, _final = usage_from_response(raw, payload=raw)
+    assert usage["response_provider"] == "Claude Platform on AWS"        # the response's own outer label
+    assert usage["cache_write_tokens_by_ttl"] == {"5m": 10, "1h": 20}
+    unnamed = {key: value for key, value in raw.items() if key != "provider"}
+    assert "response_provider" not in usage_from_response(unnamed, payload=unnamed)[0]  # a nested label names nothing
+    reservation = SimpleNamespace(provider="openrouter", model=OPUS, processing_preference=None, submitted_processing_mode=None)
+    fields = settlement_fields(reservation, usage, 0.01, True, estimate_cost_optional=lambda *_a, **_k: None)
+    assert fields["response_provider"] == "Claude Platform on AWS" and fields["cache_write_tokens_by_ttl"] == {"5m": 10, "1h": 20}
+    # On the row, read back through the store: the period view prices the writes by the provider's own split.
+    attempt = _call(root, prompt=100, cost=None, settle=False)
+    ua.settle_attempt(attempt, {**usage, "prompt_cache_ttl": "1h"}, cost_usd=0.01, cost_final=True)
+    with usage_store.read(root) as txn:
+        row = txn.attempt(attempt.attempt_id)
+    assert row["response_provider"] == "Claude Platform on AWS" and row["cache_write_tokens_by_ttl"] == {"5m": 10, "1h": 20}

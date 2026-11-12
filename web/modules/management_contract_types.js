@@ -1000,6 +1000,7 @@
  * @property {Object=} by_task_category
  * @property {Object} accounting
  * @property {Object=} unattributed
+ * @property {Object=} period  only with `?period=24h|7d|30d`: that period's models and cache writes (cost_period.js)
  */
 
 /**
