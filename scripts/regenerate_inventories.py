@@ -277,9 +277,10 @@ def build_layout_inventory(book: ReferenceBook | None = None) -> tuple[str, list
         for i in range(1, len(parts)):
             tracked_dirs.add("/".join(parts[:i]))
 
+    # A tracked module deleted but not yet staged reads as gone, as it will once staged.
     runtime_blob = "\n".join(
         (REPO_ROOT / p).read_text(encoding="utf-8", errors="replace")
-        for p in sorted(tracked_population(REPO_ROOT)))
+        for p in sorted(tracked_population(REPO_ROOT)) if (REPO_ROOT / p).is_file())
 
     findings: list[str] = []
     rows: list[tuple[str, str, str]] = []
