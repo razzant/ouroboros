@@ -12,7 +12,6 @@ import { deploymentOf, safetyExitsNote } from './settings_policy.js';
 import { rowById } from './settings_rows.js';
 import { setResult } from './ui_primitives.js';
 
-export const CONSCIOUSNESS_SAFETY_KEY = 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE';
 export const SAFETY_RULES_KEY = 'OUROBOROS_SAFETY_OWNER_RULES';
 export const SAFETY_MODEL_KEY = 'OUROBOROS_MODEL_SAFETY';
 
