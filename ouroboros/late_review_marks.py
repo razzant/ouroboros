@@ -158,12 +158,16 @@ def _mark(mark_id: str, room: str, facts: Mapping[str, Any]) -> Dict[str, Any]:
                        **({"outcome": outcome} if isinstance(outcome, dict) else {})}}
 
 
-def outcome_facts(record: Any) -> Dict[str, Any]:
+def outcome_facts(record: Any) -> Optional[Dict[str, Any]]:
     """What a review record says at this moment, as the scalars a late mark keeps beside its words: the verdict
     word, how many findings of each kind the record holds, and how many of the answers asked of its counted
     seats arrived (one per seat and question; the seat count for a record that keeps no per-question tally). A
-    record that is absent or not settled formed no verdict: ``{"verdict": ""}``, never a guessed PASS."""
-    if not isinstance(record, Mapping) or record.get("state") != "settled":
+    record that is not settled formed no verdict: ``{"verdict": ""}``, never a guessed PASS. No record at all
+    says nothing (``None``): a mark published without one keeps no outcome, so its list line reads the record
+    whenever it can be read."""
+    if not isinstance(record, Mapping):
+        return None
+    if record.get("state") != "settled":
         return {"verdict": ""}
     verdict = record.get("verdict") or {}
     quorum = verdict.get("quorum") or {}
@@ -208,10 +212,9 @@ def mark_outcome(mark: Mapping[str, Any], drive_root: Any = None) -> Optional[Di
     from ouroboros.review_ledger import load_record  # D15->D06 is lazy-only
 
     try:
-        record = load_record(drive_root, record_id)
+        return outcome_facts(load_record(drive_root, record_id))
     except (OSError, ValueError):
         return None
-    return outcome_facts(record) if record else None
 
 
 def publish_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateReviewMark:

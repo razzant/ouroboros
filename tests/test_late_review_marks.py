@@ -1054,7 +1054,7 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
               "no verdict formed": _settled("PASS", state="pending")}
     for words, record in others.items():
         assert outcome_words(outcome_facts(record)) == words and not clean_pass(outcome_facts(record)), words
-    assert outcome_facts(None) == {"verdict": ""} and not clean_pass(None)
+    assert outcome_facts(None) is None and not clean_pass(None), "no record says nothing, never a verdict"
     assert not clean_pass({"verdict": "PASS"}), "a PASS that names no asked answer is not known to be whole"
     assert outcome_words(None) == "outcome not recorded"
 
@@ -1075,3 +1075,7 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
     assert mark_outcome(old, tmp_path) is None, "an unreadable record is not a clean one"
     bad = publish_late_review(tmp_path, {**_record(tmp_path, "beta1", 1, "x"), "outcome": {"verdict": ["PASS"]}})
     assert bad.status == "invalid" and "outcome" in bad.detail
+    # A wave whose record could not be read publishes no outcome: the list reads its record whenever it can.
+    assert publish_late_review(tmp_path, {**_record(tmp_path, "pres1", 1, "gap"), "outcome": None}).status == "saved"
+    [gap] = [m for m in _late_marks(tmp_path) if m["review"]["task_id"] == "pres1"]
+    assert "outcome" not in gap["review"]
