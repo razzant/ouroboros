@@ -9,12 +9,12 @@ LIVING = (
     "Tools", "Appearance", "Notifications", "Voice and calls", "This computer",
 )
 PENDING = {}
-# Exact (file, line) exceptions only: protected text and blocked bundled-skill releases.
+# A release's row of README's Version History says what that release called a page; history is not rewritten, and
+# every release moves the rows, so they are known by their shape and not by a line number.
+RELEASE_ROW = re.compile(r"^\| \d+\.\d+\.\d+\S* \| \d{4}-\d{2}-\d{2} \|")
+# Exact (file, line) exceptions only: blocked bundled-skill releases.
 # Each entry must explain the debt; new addresses elsewhere in these files still fail.
 PROTECTED_KNOWN = {
-    ('README.md', 502): 'COMMON: release history is protected',
-    ('README.md', 505): 'COMMON: release history is protected',
-    ('README.md', 506): 'COMMON: release history is protected',
     ('skills/telegram/lib/telegram_api.py', 1002): "wording only; changes at the skill's next release",
     ('skills/telegram/lib/telegram_api.py', 1007): "wording only; changes at the skill's next release",
     ('skills/telegram/lib/telegram_connection.py', 1): "wording only; changes at the skill's next release",
@@ -47,6 +47,8 @@ def test_written_settings_addresses_name_living_pages():
     living = "Settings→Models; Settings › Agents; Settings > Your rules; Settings->Permissions and checks; Settings → Accounts and keys; Settings › Tools; Settings > Appearance; Settings->Notifications; Settings → Voice and calls; Settings › This computer › Advanced; System Settings → Privacy & Security"
     assert len(list(dead_addresses(broken))) == 7
     assert list(dead_addresses(living)) == []
+    assert RELEASE_ROW.match("| 7.9.0 | 2026-10-28 | **feat: Settings → Accounts holds several API keys.**")
+    assert not RELEASE_ROW.match("Add the key in Settings → Secrets.")
     tracked = subprocess.check_output(
         ["git", "ls-files", "-z", "--", "ouroboros/", "supervisor/", "skills/",
          "web/modules/", "docs/", "prompts/", "README.md"], cwd=ROOT,
@@ -57,7 +59,11 @@ def test_written_settings_addresses_name_living_pages():
             continue
         if any(name.startswith(path) if path.endswith("/") else name == path for path in PENDING):
             continue
-        for line, address in dead_addresses((ROOT / name).read_text(encoding="utf-8")):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        rows = text.splitlines()
+        for line, address in dead_addresses(text):
+            if name == "README.md" and RELEASE_ROW.match(rows[line - 1]):
+                continue
             location = (name, line)
             if location in PROTECTED_KNOWN:
                 seen.add(location)
