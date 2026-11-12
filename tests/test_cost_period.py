@@ -37,7 +37,7 @@ def root(tmp_path, monkeypatch):
     return data
 
 
-def _call(data, *, model=OPUS, prompt, read=0, write=0, output=0, cost, ttl="1h", prefix=None, settle=True):
+def _call(data, *, model=OPUS, prompt, read=0, write=0, output=0, cost, ttl="1h", prefix=None, settle=True, dispatch=True):
     physical = PhysicalAttemptContext(
         profile="owner_max", rendered_mode="max", measurement_basis="fresh_route_usage", route_fp="fp",
         round_id="exec:round:1", target_total_tokens=None, capacity_total_tokens=1_000_000, context_target_miss=False,
@@ -47,7 +47,8 @@ def _call(data, *, model=OPUS, prompt, read=0, write=0, output=0, cost, ttl="1h"
         task_id="task", root_task_id="root", category="task", source="test.period", prompt_cache_ttl=ttl,
         candidate_measurement_kind="canonical_json_v1", candidate_raw_sha256="0" * 64, candidate_context_sha256="1" * 64,
         candidate_raw_size_bytes=2, candidate_context_size_bytes=1, physical_context=physical))
-    ua.mark_dispatched(attempt)
+    if dispatch:
+        ua.mark_dispatched(attempt)
     if settle:
         ua.settle_attempt(attempt, {"prompt_tokens": prompt, "completion_tokens": output, "cached_tokens": read,
                                     "cache_write_tokens": write, "prompt_cache_ttl": ttl}, cost_usd=cost, cost_final=True)
@@ -342,3 +343,21 @@ def test_the_price_ratio_follows_the_lifetimes_the_provider_says_the_writes_were
                                 "cache_write_tokens_by_ttl": {"5m": 900}, "prompt_cache_ttl": "1h"}, cost_usd=0.01, cost_final=True)
     model, = cost_period.cost_period(root, "24h")["models"]
     assert (model["write_price_in_reads"], model["write_price_lifetime"]) == (25.0, "5m")  # requested 1h, written at 5m
+
+
+def test_a_long_prompt_tier_weighs_its_own_one_hour_write_price():
+    tier = pricing.PricingSchedule((6.0, 0.6, 7.5, 22.5), cache_write_1h=15.0)
+    schedule = pricing.PricingSchedule((3.0, 0.3, 3.75, 15.0), ((200_000, tier),), cache_write_1h=6.0)
+    usage = {"prompt_tokens": 300_000, "completion_tokens": 1_000, "cached_tokens": 100_000, "cache_write_tokens": 50_000,
+             "prompt_cache_ttl": "1h"}
+    exact = pricing._cost_addends(schedule, 300_000, 1_000, usage, exact_cache_tiers=True)
+    weights = pricing.cost_class_weights(schedule, usage)
+    assert weights["cache_write"] == pytest.approx(exact[2] + exact[3]) == pytest.approx(50_000 * 15.0 / 1e6)
+
+
+def test_released_reservations_start_no_call_and_a_z_stamp_reads(root):
+    ua.release_attempt(_call(root, model="vendor/released", prompt=0, cost=None, settle=False, dispatch=False))
+    _call(root, prompt=1_000, read=900, write=50, output=5, cost=0.01)
+    assert [model["model"] for model in cost_period.cost_period(root, "24h")["models"]] == [OPUS]
+    assert cost_period._epoch("2026-11-12T10:00:00Z") == cost_period._epoch("2026-11-12T10:00:00+00:00") \
+        == cost_period._epoch("2026-11-12T10:00:00")

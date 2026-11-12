@@ -44,6 +44,14 @@ def _catalog_path(drive_root: Any) -> pathlib.Path:
     return pathlib.Path(drive_root) / "state" / "openrouter_models.json"
 
 
+def _records_prices() -> bool:
+    try:
+        return any(isinstance(row, dict) and isinstance(row.get("pricing"), dict)
+                   for row in recorded_openrouter_catalog()[0].values())
+    except Exception:
+        return False
+
+
 def recorded_openrouter_catalog() -> tuple[dict, str]:
     """Read the host's dated catalogue without fetching or asserting freshness.
 
@@ -251,8 +259,9 @@ class _CapabilityPolicyMixin:
 
     @classmethod
     def prefetch_openrouter_catalog(cls) -> None:
-        """At boot, off every turn: observe the catalogue unless a process recorded a current one."""
-        if not cls._adopt_recorded_catalog():
+        """At boot, off every turn: observe the catalogue unless a process recorded a current one with its prices (a
+        record from before prices were kept is observed once more, so Costs can split a period from the first look)."""
+        if not cls._adopt_recorded_catalog() or not _records_prices():
             cls._fetch_openrouter_capabilities()
 
     @classmethod

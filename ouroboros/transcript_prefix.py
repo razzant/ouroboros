@@ -368,13 +368,13 @@ def _route_record(messages: Sequence[Mapping[str, Any]], tools_identity: str, di
 
 
 def note_prefix_answer(usage: Any, response_usage: Any, model: Any, use_local: Any) -> None:
-    """Where a Main response arrives (``loop_llm_call``): an answer whose usage says the provider read its input (input
-    tokens reported, no provider error) is what moves its route's base, an empty or output-limited reply included;
-    a body error read nothing and moves nothing. Kept in ``usage`` as ``(count, route, time)``."""
+    """Where a Main response arrives (``loop_llm_call``): an answer whose usage shows the provider read its input (input
+    tokens reported or output generated, no provider error) is what moves its route's base, an empty or output-limited
+    reply included; a body error read nothing and moves nothing. Kept in ``usage`` as ``(count, route, time)``."""
     if not isinstance(usage, dict) or not isinstance(response_usage, Mapping) or response_usage.get("provider_error"):
         return
     try:
-        if int(response_usage.get("prompt_tokens") or 0) <= 0:
+        if int(response_usage.get("prompt_tokens") or 0) <= 0 and int(response_usage.get("completion_tokens") or 0) <= 0:
             return
     except (TypeError, ValueError):
         return
@@ -386,12 +386,14 @@ def note_prefix_answer(usage: Any, response_usage: Any, model: Any, use_local: A
 
 
 def _answer(usage: Any) -> tuple:
-    """``(count, route, epoch)`` of the last answer that read its input (``note_prefix_answer``); ``(0, "", None)``."""
+    """``(count, route, epoch)`` of the last answer that read its input (``note_prefix_answer``); ``(0, "", None)``
+    without one, or for a record no writer made: reading it never stops a send or a reply."""
     held = usage.get(ANSWER_KEY) if isinstance(usage, Mapping) else None
-    if not isinstance(held, Mapping):
+    try:
+        at = held.get("at")
+        return int(held.get("n") or 0), str(held.get("route") or ""), (float(at) if isinstance(at, (int, float)) else None)
+    except Exception:
         return 0, "", None
-    at = held.get("at")
-    return int(held.get("n") or 0), str(held.get("route") or ""), (float(at) if isinstance(at, (int, float)) else None)
 
 
 def _promote(slot: Any, route: str, record: Mapping[str, Any], at: Any, carried: Optional[int] = None) -> None:
@@ -479,7 +481,8 @@ def attempt_prefix_fact(slot: Any, messages: Sequence[Mapping[str, Any]], tools:
     elif base.get("blocks") != record["blocks"]:
         old = base.get("blocks") or []
         index = next((i for i, (a, b) in enumerate(zip(old, record["blocks"])) if a != b), min(len(old), len(record["blocks"])))
-        fact.update(departs="system", index=index, of=len(record["blocks"]), block=_system_block_name(messages[0], index))
+        fact.update(departs="system", index=index, of=len(record["blocks"]),
+                    block=_system_block_name(messages[0], index) if record["blocks"] else "removed block")
     else:
         old, new = base.get("messages") or [], record["messages"]
         index = next((i for i, (a, b) in enumerate(zip(old, new)) if a != b), None)

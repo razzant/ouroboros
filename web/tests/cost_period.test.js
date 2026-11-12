@@ -12,9 +12,10 @@ const VIEW = {
             tokens: { cache_write: 538_000_000, cache_read: 5_500_000_000, output: 26_400_000, uncached_input: 29_800_000 },
             by_class: { cache_write: 4306.97, cache_read: 1101.77, output: 527.36, uncached_input: 119.03 }, write_price_in_reads: 40,
             write_price_lifetime: '1h' },
+        // A subscription reports no write count: its unread input is counted apart, as `period_models` answers it.
         { model: 'claudexor::codex=gpt-6-astra', calls: 56724, cost: null, open_rows: 0, unpriced_rows: 56724, unshared_cost: 0,
-            tokens: { cache_write: 0, cache_read: 34_500_000_000, output: 210_000_000, uncached_input: 2_900_000_000 },
-            by_class: null, write_price_in_reads: null },
+            tokens: { cache_write: 0, cache_read: 34_500_000_000, output: 210_000_000, uncached_input: 0 },
+            by_class: null, write_price_in_reads: null, uncounted_calls: 56724, uncounted_input_tokens: 2_900_000_000 },
         { model: 'vendor/unlisted', calls: 3, cost: 0.4, open_rows: 0, unpriced_rows: 0, unshared_cost: 0.4,
             tokens: { cache_write: 50, cache_read: 100, output: 7, uncached_input: 350 }, by_class: null, write_price_in_reads: null,
             uncounted_calls: 1, uncounted_input_tokens: 2_400 },
@@ -46,8 +47,11 @@ test('a period shows each model\'s recorded cost by class, and tokens alone wher
     // A subscription model has no cost to share: its tokens by class are the fact shown, and its bar is by tokens and says so.
     assert.equal(codex.sum, 'no recorded cost · 56,724 calls');  // unknown, never $0.00
     assert.deepEqual([codex.split, codex.bar], [false, true]);
-    assert.deepEqual(codex.parts.map((part) => part.text), ['0 tokens · 0%', '34.5B tokens · 92%', '210M tokens · 1%', '2.9B tokens · 8%']);
-    assert.deepEqual(codex.notes, ['56,724 ended without a price.', 'The bar is by tokens: there is no recorded cost.']);
+    assert.deepEqual(codex.parts.map((part) => part.text),
+        ['0 tokens · 0%', '34.5B tokens · 92%', '210M tokens · 1%', '0 tokens · 0%', '2.9B tokens · 8%']);
+    assert.equal(codex.parts.at(-1).label, 'Unclassified input');  // never shown as 99% reads and no uncached input
+    assert.deepEqual(codex.notes, ['56,724 calls reported no complete cache counts: 2.9B input tokens are in no class.',
+        '56,724 ended without a price.', 'The bar is by tokens: there is no recorded cost.']);
     assert.ok(Math.abs(codex.parts.reduce((sum, part) => sum + part.share, 0) - 1) < 1e-9);
     // A priced call with no price list at hand: the amount stands, the split is said to be absent, never invented.
     assert.deepEqual([unlisted.split, unlisted.bar], [false, true]);
@@ -101,4 +105,13 @@ test('a later period choice abandons the read it replaces', async () => {
     assert.equal(signals.length, 2);
     assert.equal(signals[0].aborted, true);
     assert.equal(signals[1].aborted, false);
+});
+
+test('a recorded cost of nothing is said, never called unsplit', () => {
+    const view = { available: true, models: [{ model: 'local-model', calls: 4, cost: 0, open_rows: 0, unpriced_rows: 0, unshared_cost: 0,
+        tokens: { cache_write: 0, cache_read: 0, output: 9, uncached_input: 0 }, by_class: null, uncounted_calls: 4, uncounted_input_tokens: 30 }] };
+    const [local] = costPeriodPresentation(view).models;
+    assert.match(local.notes.at(-1), /^The bar is by tokens: the recorded cost is \$0\.00\.$/);
+    assert.deepEqual(local.parts.filter((part) => part.share > 0).map((part) => [part.key, Math.round(part.share * 100)]),
+        [['output', 23], ['unclassified', 77]]);  // 30 input tokens in no class beside 9 output, not 100% output
 });

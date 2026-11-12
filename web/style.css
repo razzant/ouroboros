@@ -6111,9 +6111,15 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-period-parts dd { margin: 0 0 0 auto; color: var(--text-primary); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .costs-period-subtitle { margin: var(--space-2) 0 0; color: var(--text-primary); font-size: var(--type-body); font-weight: 600; }
 [data-cost-class="cache_write"] { --class-hue: var(--chart-series-2); }
-[data-cost-class="cache_read"] { --class-hue: color-mix(in srgb, var(--chart-series-2) 42%, transparent); }
+[data-cost-class="cache_read"] { --class-hue: var(--chart-series-2); opacity: 0.42; }  /* older WebKit has no color-mix() */
 [data-cost-class="output"] { --class-hue: var(--chart-series-3); }
 [data-cost-class="uncached_input"] { --class-hue: var(--text-meta); }
+[data-cost-class="unclassified"] { --class-hue: var(--text-meta); opacity: 0.4; }
+.costs-period-writes td:first-child { overflow-wrap: anywhere; }
+/* The period choice wraps on a narrow card: under a finger it takes the touch minimum as its height. */
+@media (pointer: coarse) {
+    .costs-period-choice { --control-h: var(--touch-target-min); }
+}
 .costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }
 .cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cost-table .cost-cell-right { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -6136,7 +6142,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     .cost-table :is(th, td) { border-bottom: 0; }
     .cost-table tr > :first-child { grid-column: 1 / -1; }
     .cost-table tr > :nth-child(2) { text-align: left; }
-    .costs-period-writes tr { grid-template-columns: minmax(0, 1fr) auto auto; }  /* its three figures share one line */
+    /* Its three figures share one line, in columns every row shares; a figure wraps between words, never inside one. */
+    .costs-period-writes tr { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr); }
+    .cost-table.costs-period-writes :is(th, td) { white-space: normal; }
     .cost-table .cost-cell-name { width: auto; max-width: none; padding-bottom: 0; }
     .cost-table .cost-cell-note { white-space: normal; }
 }

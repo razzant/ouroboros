@@ -32,10 +32,11 @@ def _tokens_by_class(row: Dict[str, Any]) -> Dict[str, int]:
 
 
 def _epoch(stamp: Any) -> Optional[float]:
-    try:
-        return _dt.datetime.fromisoformat(str(stamp)).timestamp() if stamp else None
+    try:  # a "Z" stamp (an imported row) reads on Python 3.10 too; a stamp without a zone is UTC
+        moment = _dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")) if stamp else None
     except ValueError:
         return None
+    return None if moment is None else (moment if moment.tzinfo else moment.replace(tzinfo=_dt.timezone.utc)).timestamp()
 
 
 def _shares(row: Dict[str, Any], tariff: Optional[tuple]) -> Optional[Dict[str, float]]:
@@ -166,6 +167,8 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
                 cause["write_cost"] += float(row["usd"]) * shares["cache_write"]
     rows: List[Dict[str, Any]] = []
     for name, model in models.items():
+        if not (model["calls"] or model["open_rows"]):
+            continue  # every reservation of the model was released before it was sent: no call started
         lifetimes = sorted(model.pop("_written").items(), key=lambda item: (-item[1][0], item[0]))
         ratios = [(ttl, _write_price_in_reads(held[1], ttl)) for ttl, held in lifetimes]
         lifetime, ratio = next(((ttl, value) for ttl, value in ratios if value), ("", None))

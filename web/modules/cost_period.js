@@ -57,21 +57,29 @@ export function costPeriodPresentation(view) {
         }
         // Where no cost can be shared (a subscription model, a call without a price list) the bar is by tokens, and says so.
         const counts = CLASS_WORDS.map(([key]) => Math.max(0, Number(row.tokens?.[key]) || 0));
-        const counted = counts.reduce((sum, count) => sum + count, 0);
+        // Input of calls that reported no complete cache counts is in no class: by tokens it is a part of its own.
+        const unclassified = Math.max(0, Number(row.uncounted_input_tokens) || 0);
+        const counted = counts.reduce((sum, count) => sum + count, 0) + unclassified;
         const byMoney = Boolean(split && shared > 0);
         if (!byMoney && counted > 0) {
             notes.push(row.cost === null || row.cost === undefined ? 'The bar is by tokens: there is no recorded cost.'
-                : 'The bar is by tokens: the recorded cost could not be split.');
+                : Number(row.cost) > 0 ? 'The bar is by tokens: the recorded cost could not be split.'
+                    : `The bar is by tokens: the recorded cost is ${formatUsd(0)}.`);
+        }
+        const parts = CLASS_WORDS.map(([key, label], index) => {
+            const share = byMoney ? split[index].usd / shared : counted > 0 ? counts[index] / counted : 0;
+            const tokens = `${compactTokens(counts[index])} tokens`;
+            return { key, label, share, text: byMoney ? `${formatUsd(split[index].usd)} · ${percent(share)} · ${tokens}` : `${tokens} · ${percent(share)}` };
+        });
+        if (!byMoney && unclassified > 0) {
+            const share = unclassified / counted;
+            parts.push({ key: 'unclassified', label: 'Unclassified input', share, text: `${compactTokens(unclassified)} tokens · ${percent(share)}` });
         }
         return {
             name: row.model,
             // No call with a recorded price: the amount is unknown (a subscription, a route without a price list), never $0.
             sum: `${row.cost === null || row.cost === undefined ? 'no recorded cost' : formatUsd(row.cost)} · ${number(row.calls)} ${row.calls === 1 ? 'call' : 'calls'}`,
-            parts: CLASS_WORDS.map(([key, label], index) => {
-                const share = byMoney ? split[index].usd / shared : counted > 0 ? counts[index] / counted : 0;
-                const tokens = `${compactTokens(counts[index])} tokens`;
-                return { key, label, share, text: byMoney ? `${formatUsd(split[index].usd)} · ${percent(share)} · ${tokens}` : `${tokens} · ${percent(share)}` };
-            }),
+            parts,
             split: byMoney,
             bar: byMoney || counted > 0,
             notes,

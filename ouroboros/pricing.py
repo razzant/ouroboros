@@ -269,7 +269,7 @@ def cost_class_weights(pricing: Optional[tuple], usage: Dict[str, Any]) -> Optio
         if prompt >= int(min_prompt_tokens):
             rates = tier_pricing
     write_price = float(rates[2] or 0.0)
-    extended = getattr(pricing, "cache_write_1h", None) if rates is pricing else None
+    extended = getattr(rates, "cache_write_1h", None)  # a long-prompt tier's own 1-hour price, as the bill takes it
     extended = float(extended) if extended is not None else write_price * (2.0 / 1.25)  # the estimator's own ratio
     uncached, cache_read, _written, _extended, output = addends
     write = (lifetimes[0] * write_price + lifetimes[1] * extended) / 1_000_000

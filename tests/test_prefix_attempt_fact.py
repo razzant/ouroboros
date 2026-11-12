@@ -311,7 +311,7 @@ def test_a_body_error_read_nothing_and_moves_no_base():
     ctx = _main_ctx(slot, usage, [system(), {"role": "user", "content": "task"}])
     prefix.remember_attempt_prefix(ctx)
     _answered(usage, read=False)  # a structured error in an HTTP 200 body
-    prefix.note_prefix_answer(usage, {"completion_tokens": 3}, OPUS, False)  # no input reported: no evidence either
+    prefix.note_prefix_answer(usage, {"completion_tokens": 0}, OPUS, False)  # neither input nor output: no evidence
     assert prefix.ANSWER_KEY not in usage
     ctx.messages = ctx.messages + turn(1)
     prefix.remember_attempt_prefix(ctx)
@@ -401,3 +401,36 @@ def test_an_unmeasured_route_ends_the_wait_at_its_real_call_site():
                           context_fit_plan=SimpleNamespace(model=OPUS), active_model=CODEX, active_use_local=False)
     assert loop_model_call._measure_round_main_fit(ctx, automatic_pass_used=False) is None
     assert getattr(slot, prefix.PENDING_ROUTE_ATTR) is None and prefix.ATTEMPT_PREFIX_KEY not in usage
+
+
+def test_a_generated_reply_without_an_input_count_still_read_its_input(monkeypatch):
+    """Output proves the provider read the input, its count reported or not: a retry extends that answered request."""
+    import time
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+    slot, usage = SimpleNamespace(), {}
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    ctx = _main_ctx(slot, usage, start + turn(1))
+    prefix.remember_attempt_prefix(ctx)
+    bound = prefix.with_attempt_prefix(_physical(), usage)
+    clock["now"] = 399.0
+    prefix.note_prefix_answer(usage, {"completion_tokens": 3}, OPUS, False)
+    assert prefix.refresh_attempt_prefix(bound, usage, OPUS, False).prefix == {"departs": "append", "base_at": 399.0}
+
+
+def test_a_malformed_answer_record_never_blocks_a_send_or_consumes_a_reply():
+    usage = {prefix.ANSWER_KEY: {"n": "invalid-persisted-count", "route": OPUS, "at": "x"},
+             prefix.ATTEMPT_PREFIX_KEY: {"departs": "append"}}
+    assert prefix.with_attempt_prefix(_physical(), usage).prefix == {"departs": "append"}
+    prefix.note_prefix_answer(usage, {"prompt_tokens": 10}, OPUS, False)
+    assert usage[prefix.ANSWER_KEY]["n"] == 1 and usage[prefix.ANSWER_KEY]["route"] == OPUS
+
+
+def test_a_candidate_without_a_system_row_names_the_removed_block():
+    slot = SimpleNamespace()
+    send(slot, [system(), {"role": "user", "content": "task"}], OPUS, now=0.0)
+    fact = prefix.attempt_prefix_fact(slot, [{"role": "user", "content": [{"type": "text", "text": "## Identity\nhi"}]}],
+                                      TOOLS, OPUS, now=1.0)
+    assert (fact["departs"], fact["of"], fact["block"]) == ("system", 0, "removed block")

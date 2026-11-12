@@ -14,7 +14,8 @@ import pytest
 from tests._shared import _PROVIDER_CATALOG_PRISTINE, _restore_provider_catalog
 
 CATALOGUE = {"data": [{"id": "vendor/known", "context_length": 200_000,
-                       "supported_parameters": ["max_tokens", "tools"]}]}
+                       "supported_parameters": ["max_tokens", "tools"],
+                       "pricing": {"prompt": "0.000003", "completion": "0.000015"}}]}
 
 
 @pytest.fixture
@@ -181,3 +182,17 @@ def test_a_reader_overlapping_a_catalogue_read_in_flight_takes_its_answer(catalo
         assert probe.window_tokens == 200_000 and "failed" not in probe.response_limit["source"]
     else:
         assert probe.response_limit["source"] == "openrouter metadata: metadata read failed"
+
+
+def test_a_record_from_before_prices_were_kept_is_observed_once_more_at_boot(catalogue):
+    """A current record written before the catalogue kept prices would leave Costs unable to split a period for a day."""
+    from ouroboros.utils import atomic_write_json
+
+    client, gets, record = catalogue
+    atomic_write_json(record, {"observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "models": {
+        "vendor/known": {"context_length": 200_000, "supported_parameters": ["max_tokens", "tools"]}}})
+    client.prefetch_openrouter_catalog()  # the first boot after the upgrade
+    assert len(gets) == 1
+    _another_process(client)
+    client.prefetch_openrouter_catalog()  # the record it wrote carries the prices
+    assert len(gets) == 1
