@@ -501,8 +501,8 @@ def _bind_review_run(llm_trace: Dict[str, Any], record: Dict[str, Any], subject_
              "dispatch_refusal": str((record.get("dispatch_refusal") or {}).get("kind") or "")}
     reviewed = str((record.get("subject") or {}).get("diff_sha") or "")
     if bound is not None:
-        if earlier_request or earlier_revision or reviewed == subject_sha:
-            bound["binding_hash"] = subject_sha
+        if earlier_request or earlier_revision or reviewed == subject_sha:  # the position: what it examined
+            bound.update(binding_hash=subject_sha, tool_calls_at_bind=len(llm_trace.get("tool_calls") or []))
         if earlier_request:
             bound["earlier_request"] = True
         if earlier_revision:
@@ -524,7 +524,7 @@ def _bind_review_run(llm_trace: Dict[str, Any], record: Dict[str, Any], subject_
         return bound
     bound = {"surface": RESULT_KIND, "authority": "host_root", "panel_id": record_id, "record_id": record_id,
              "binding_hash": subject_sha, **facts, "enforcement": enforcement, "outcomes": outcomes,
-             **({"earlier_request": True} if earlier_request else {}),
+             "tool_calls_at_bind": len(llm_trace.get("tool_calls") or []), **({"earlier_request": True} if earlier_request else {}),
              **({"earlier_revision": True, "reviewed_subject_sha": reviewed} if earlier_revision else {})}
     runs.append(bound)
     return bound

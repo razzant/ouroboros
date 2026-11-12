@@ -160,7 +160,7 @@ def test_result_review_cards_say_the_authors_acceptance_in_both_themes(direct_se
             browser.close()
 
 
-RECEIPT = ("Nothing checked this result after its last change: no check ran and no result review was asked for; "
+RECEIPT = ("Nothing checked this result after its last change: no check ran and no result review was asked for after it; "
            "this does not establish whether other checks ran.")
 # name: (independent warning at the end, late verdict, headline after, words the collapsed line never says after)
 LATE = {

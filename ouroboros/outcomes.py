@@ -311,7 +311,10 @@ def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
             return False
         if tool == "review_change" and str(args.get("subject") or "") == "result":
             return False
-    return not any(isinstance(run, dict) and run.get("surface") == "result"
+    # A bound result review examined the result as it stood at its binding: one bound before the last change,
+    # or bound beside the delivered bytes as an earlier version's, does not examine what changed after it.
+    return not any(isinstance(run, dict) and run.get("surface") == "result" and not run.get("earlier_revision")
+                   and int(run.get("tool_calls_at_bind", last["index"] + 1)) > last["index"]
                    for run in llm_trace.get("review_runs") or [])
 
 

@@ -22,11 +22,11 @@ def _custody_drive(tmp_path):
     return tmp_path
 
 
-def _run_full(tools, drive, task_id, msgs, tool_calls):
+def _run_full(tools, drive, task_id, msgs, tool_calls, progress=None):
     tools._ctx.drive_root = drive
     return _maybe_inject_finalization_nudges(
-        tools, drive, task_id,
-        {"reasoning_notes": [], "tool_calls": tool_calls}, "done", msgs, lambda *_: None,
+        tools, drive, task_id, {"reasoning_notes": [], "tool_calls": tool_calls}, "done", msgs,
+        (progress.append if progress is not None else (lambda *_: None)),
     )
 
 
@@ -44,16 +44,16 @@ def test_succeeded_delegated_run_suppresses_the_reminder(tmp_path):
         "model": "claude-opus-5", "state": "succeeded", "cost_usd": 0.0,
         "cost_final": True, "spend_disclosed": True, "spend_estimated": False,
     })
-    ctx = SimpleNamespace(_nanny_route_dispatched=True, _nanny_finalization_injected=False)
+    ctx = SimpleNamespace(_nanny_route_dispatched=True)
     msgs: list = []
     assert _run_full(_tools(ctx, ["delegate_start", "delegate_wait"]),
                      drive, "child-1", msgs, []) is False
-    assert not any("NANNY" in m.get("content", "") for m in msgs)
+    assert msgs == []
 
 
 def _split_root_ctx(parent, child):
     return SimpleNamespace(
-        _nanny_route_dispatched=True, _nanny_finalization_injected=False,
+        _nanny_route_dispatched=True,
         task_metadata={"budget_drive_root": str(parent)}, drive_root=str(child),
     )
 
@@ -243,11 +243,15 @@ def test_a_nanny_is_told_once_about_its_open_runs_and_nothing_about_runs_that_en
     _emit_started(live, "run-dead", "child-1")
     _emit_settled(live, "run-dead", "child-1", "failed")
     _emit_started(live, "run-live", "child-1")
-    nanny = SimpleNamespace(_nanny_route_dispatched=True)
+    nanny, progress = SimpleNamespace(_nanny_route_dispatched=True), []
     tools = _tools(nanny, ["delegate_start", "delegate_wait"])
-    assert _run_full(tools, live, "child-1", msgs, []) is True
+    assert _run_full(tools, live, "child-1", msgs, [], progress) is True
     notice = _pre_delivery_notice(tools, live, "child-1", {"tool_calls": []}, [])
     assert notice and _open_delegated_runs(nanny, "child-1") == 1
     assert msgs[-1]["content"] == f"[SYSTEM REMINDER]\n{notice}"
     assert nanny._completion_hold_cause == "pre_delivery_notice"
-    assert _run_full(tools, live, "child-1", msgs, []) is False, "the next finish is accepted"
+    assert progress == [], "a nanny's notice writes no line into the owner's chat (owner, 15.08)"
+    assert _run_full(tools, live, "child-1", msgs, [], progress) is False, "the next finish is accepted"
+    plain, shown = SimpleNamespace(), []
+    assert _run_full(_tools(plain, ["delegate_start", "delegate_wait"]), live, "child-1", [], [], shown) is True
+    assert shown == ["Pre-delivery facts shown before final response."], "an ordinary task's progress line stays"

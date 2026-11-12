@@ -628,7 +628,7 @@ def test_a_parent_finishing_beside_a_running_child_is_told_once_inside_the_one_h
     [door] = [row for row in requests[1] if "[SUBAGENT_RESULTS" in str(row.get("content") or "")]
     assert notice in door["content"], "the notice rides the handoff's own message"
     assert sum(notice in str(row.get("content") or "") for row in requests[1]) == 1
-    assert [(row["reason"], row["subreason"]) for row in holds(tmp_path)] == [("subagent_handoff", None)]
+    assert [(row["reason"], row["subreason"]) for row in holds(tmp_path)] == [("subagent_handoff", "pre_delivery_notice")]
     assert "child1" in usage["terminal_host_notice"], "the orphan note"
     assert derive_loop_outcome(result, usage, trace)["outcome_axes"]["execution"]["status"] == "degraded"
 

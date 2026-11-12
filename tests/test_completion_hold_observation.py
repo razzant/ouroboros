@@ -697,6 +697,61 @@ def test_an_unexamined_result_is_noticed_once_and_an_examined_one_is_not(turn, m
     assert ("verification_red_unreconciled" in warnings) is (after_write == "red_check"), warnings
 
 
+def test_a_bound_result_review_examines_what_it_was_bound_to_not_a_later_change():
+    """A result review counts as the examination of the result as it stood when it was bound (its position in the
+    turn): a change after the binding is unexamined again, and a run bound beside the delivered bytes as an
+    earlier version's examines nothing delivered. A run recorded before positions existed counts as before."""
+    from ouroboros.outcomes import result_unexamined
+    from ouroboros.tools.review_result import _bind_review_run
+
+    write = {"tool": "write_file", "status": "ok", "args": {"path": "report.md"}}
+    trace = {"tool_calls": [dict(write)], "review_runs": []}
+    run = _bind_review_run(trace, {"record_id": "r1", "verdict": {"aggregate": "PASS"}, "subject": {"diff_sha": "s1"}},
+                           "s1", "advisory")
+    assert result_unexamined(trace) is False, "bound after the write: it examined this result"
+    trace["tool_calls"].append(dict(write))
+    assert result_unexamined(trace) is True, "the result changed after the binding"
+    _bind_review_run(trace, {"record_id": "r1", "verdict": {"aggregate": "PASS"}, "subject": {"diff_sha": "s1"}},
+                     "s2", "advisory", earlier_revision=True)
+    assert run["earlier_revision"] and result_unexamined(trace) is True, "an earlier version's review"
+    trace["review_runs"] = [{"surface": "result"}]
+    assert result_unexamined(trace) is False, "a run recorded before positions existed"
+
+
+def test_the_notice_shown_before_a_continuation_is_not_shown_again_after_it(tmp_path, monkeypatch):
+    """The notice comes once for the task, not once per process: a continuation (an owner wait, a restart, a budget
+    pause) saves the shown notice with the other delivery facts, and the resumed execution shows nothing again."""
+    from ouroboros import owner_wait
+    from ouroboros.loop_nudges import _claim_pre_delivery_notice
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: "auto")
+    trace = {"reasoning_notes": [], "tool_calls": [{"tool": "write_file", "status": "ok", "args": {"path": "r.md"}}]}
+    ctx, limit = _loop_ctx(tmp_path, "t")
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=ctx), tmp_path, "t", trace, []), "the first door shows it"
+    saved = owner_wait.continuation_state(ctx, limit.messages, {}, {}, 3, [], set())
+    unsaved, _ = _loop_ctx(tmp_path, "t")
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=unsaved), tmp_path, "t", trace, []), "nothing carried it"
+    resumed, _ = _loop_ctx(tmp_path, "t")
+    owner_wait.restore_continuation_state(SimpleNamespace(_ctx=resumed), saved, [], {}, {}, set())
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, []) == ""
+
+
+@pytest.mark.parametrize("mode", ["auto", "off"])
+def test_the_notice_offers_a_result_review_only_where_this_install_runs_one(tmp_path, monkeypatch, mode):
+    """Task review Off refuses every result review (``review_result.refuse_when_off``): there the notice says so
+    and offers the check and the honest delivery; under Auto it also offers the review call."""
+    from ouroboros.loop_nudges import _pre_delivery_notice
+
+    tools, trace, _content = _nudge_case("pre_delivery_notice", tmp_path, monkeypatch)
+    monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: mode)
+    notice = _pre_delivery_notice(tools, tmp_path, "t", trace, [])
+    assert notice.startswith("Before delivery: nothing has examined this result since it last changed.")
+    assert ('review_change with subject="result"' in notice) is (mode != "off")
+    assert ("off on this install" in notice) is (mode == "off")
+    assert "verify_and_record" in notice and "deliver it as it is" in notice
+
+
 @pytest.mark.parametrize("cause", ["findings", "blocking_refusal", "pass"])
 def test_each_result_review_hold_names_its_own_cause(tmp_path, monkeypatch, cause):
     import ouroboros.review_substrate as substrate

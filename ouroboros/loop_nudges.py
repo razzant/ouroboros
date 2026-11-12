@@ -14,7 +14,7 @@ import queue
 from typing import Any, Callable, Dict, List, Optional
 from ouroboros import task_pacing
 from ouroboros.nanny_pacing import nanny_burn_fact, nanny_metered_since_delegate_activity
-from ouroboros.outcomes import extract_final_answer, latest_unreconciled_failed_verification, result_unexamined, reviewable_effect_projection, turn_has_reviewable_effects
+from ouroboros.outcomes import _ROOT_WRITE_TOOLS, extract_final_answer, latest_unreconciled_failed_verification, result_unexamined, reviewable_effect_projection, turn_has_reviewable_effects
 # D18b: the trace-touched skill-name scan lives with the readiness predicate that
 # consumes it (upstream 0463c6bb); the historical private name stays bound here so
 # loop.py's re-export and every existing caller keep addressing one object.
@@ -296,7 +296,6 @@ def _forced_delegation_note(tools_ctx: Any, llm_trace: Dict[str, Any]) -> str:
 
 _EFFECT_WORDS = {"commit_reviewed": "commit", "vcs_commit_reviewed": "commit",
                  "integrate_subagent_patch": "integrated patch", "integrate_delegated_patch": "integrated patch"}
-_WRITE_TOOLS = frozenset({"write_file", "edit_text", "apply_patch", "edit_batch"})
 
 
 def _changed_fact(llm_trace: Dict[str, Any]) -> str:
@@ -305,7 +304,7 @@ def _changed_fact(llm_trace: Dict[str, Any]) -> str:
     for effect in reviewable_effect_projection(llm_trace):
         tool, args = str(effect.get("tool") or ""), effect.get("args") or {}
         label = (_EFFECT_WORDS.get(tool)
-                 or (f"written to {args.get('root') or 'active_workspace'}" if tool in _WRITE_TOOLS else "")
+                 or (f"written to {args.get('root') or 'active_workspace'}" if tool in _ROOT_WRITE_TOOLS else "")
                  or f"artifact registered by {tool} outputs")
         counts[label] = counts.get(label, 0) + 1
     return "; ".join(f"{label} x{n}" for label, n in counts.items())
@@ -321,8 +320,11 @@ def _recorded_fact(drive_root: Any, task_id: str, receipt_rows: List[Dict[str, A
         parts.append(f"{status.count('pass')} check(s) passed before the last change")
     if status.count("observed"):
         parts.append(f"{status.count('observed')} path set(s) confirmed to exist")
-    if status.count("declared"):
+    kinds = {str(row.get("contract_kind") or "") for row in receipt_rows if row.get("status") == "declared"}
+    if "no_visible_machine_contract" in kinds:
         parts.append('"no machine check exists" declared')
+    if kinds - {"no_visible_machine_contract"}:
+        parts.append("a zero-run decision recorded")
     red = latest_unreconciled_failed_verification(drive_root, task_id, receipts=receipt_rows)
     if red is not None:
         check, code = str(red.get("check") or "").strip(), red.get("returncode")
@@ -385,6 +387,7 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
     (``outcomes.result_unexamined``; not where Required's floor reviews it at delivery), direct children still
     running, this task's own delegated runs still open. Typed facts only, never parsed prose (P5); a red check,
     a masking pipe and an agent-defined criterion were said when the check ran and stay on the record."""
+    from ouroboros.config import get_task_review_mode
     from ouroboros.tools.review_result import required_root_wave
 
     lines: List[str] = []
@@ -392,16 +395,20 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
     # door back (owner 12.11: such a record no longer counts as a check). The notice states the declaration.
     if (result_unexamined(llm_trace) and not required_root_wave(tools._ctx)
             and not _zero_run_closed(tools._ctx, receipt_rows)):
+        mode = get_task_review_mode()  # Off refuses a result review; Required reviews only a root at delivery
+        review = ("ask for a result review (review_change with subject=\"result\" and the seats you choose; its "
+                  "verdict comes back before delivery); " if mode != "off" else "")
         lines += [
             "Before delivery: nothing has examined this result since it last changed.",
             f"Changed: {_changed_fact(llm_trace)}.",
             f"Recorded about it: {_recorded_fact(drive_root, task_id, receipt_rows)}.",
             f"This answer is read by: {_reader_fact(tools._ctx)}.",
-            "Result review: none for this answer; under Auto a result review runs only when you ask for one.",
+            "Result review: off on this install (task review mode Off)." if mode == "off" else
+            f"Result review: none for this answer; under {mode.capitalize()} a result review "
+            f"{'of a child ' if mode == 'required' else ''}runs only when you ask for one.",
             "Ways forward: check the result against what was asked (verify_and_record runs the check and records "
-            "what it showed); ask for a result review (review_change with subject=\"result\" and the seats you "
-            "choose; its verdict comes back before delivery); or deliver it as it is and say in the answer what was "
-            "not checked, which the record then shows.",
+            f"what it showed); {review}or deliver it as it is and say in the answer what was not checked, which the "
+            "record then shows.",
         ]
     try:
         running = _running_children(tools, drive_root, task_id)
