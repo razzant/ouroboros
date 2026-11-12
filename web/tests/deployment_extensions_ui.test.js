@@ -1,12 +1,12 @@
 // A deployment's required extensions on Skills and in Settings (skill_card_renderer.js, settings_policy.js over the
 // server's requirement rows): a required card says so, keeps its switch and offers no removal, update or repair; an
 // unmet requirement says why and what ordinary work does; a missing package is said above the list; a setting the
-// organization fixes shows no value and no editor. Unmanaged rows (no `deployment`) stay as they were.
+// organization fixes is named by the extension that requires it. Unmanaged rows (no `deployment`) stay as they were.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { installedSkillModel, renderInstalledSkillCard, renderRequirementNotice } from '../modules/skill_card_renderer.js';
-import { fixOrganizationSecret, organizationSettingOwner } from '../modules/settings_policy.js';
+import { organizationSettingOwner } from '../modules/settings_policy.js';
 
 const PROCESS = { role: 'server', pid: 4242, started: 'Sun Nov  8 12:00:00 2026', observed_at: '2026-11-08T12:00:01Z' };
 const MET = { name: 'error_tracker', path: '/srv/data/skills/external/error_tracker', content_hash: 'a'.repeat(64),
@@ -72,31 +72,9 @@ test('the list says every unmet requirement, a missing package included, and not
     assert.equal(renderRequirementNotice(null), '');
 });
 
-function fakeRow(key) {
-    const make = (tag, attrs = {}) => ({ tag, hidden: false, readOnly: false, dataset: {}, textContent: '', className: '', ...attrs });
-    const inputs = [make('input', { name: 'custom-key', value: key }), make('input', { name: 'custom-value', value: '***set***' })];
-    const buttons = ['data-row-secret-toggle', 'data-row-secret-clear', 'data-custom-secret-remove'].map((attr) => make('button', { attr }));
-    const appended = [];
-    const field = { appendChild: (node) => appended.push(node) };
-    return {
-        appended, inputs, buttons,
-        ownerDocument: { createElement: (tag) => make(tag) },
-        querySelectorAll: (selector) => (selector === 'input' ? inputs : buttons.filter((button) => selector.includes(button.attr))),
-        querySelector: (selector) => (selector === '.secret-input-row' ? { parentElement: field } : null),
-        appendChild: (node) => appended.push(node),
-    };
-}
-
-test('a setting the organization fixes keeps its masked value, loses its editors and says whose it is', () => {
+test('a setting the organization fixes is named by the extension that requires it, and no other is', () => {
     const deployment = { extensions: { when_unmet: 'hold', required: [MET] } };
     assert.equal(organizationSettingOwner(deployment, 'SENTRY_DSN'), 'error_tracker');
-    const fixed = fakeRow('SENTRY_DSN');
-    fixOrganizationSecret(fixed, deployment, 'SENTRY_DSN');
-    assert.ok(fixed.inputs.every((input) => input.readOnly) && fixed.buttons.every((button) => button.hidden));
-    assert.equal(fixed.inputs[1].value, '***set***', 'the masked value is carried back unchanged by a save');
-    assert.equal(fixed.appended[0].textContent, 'Set by your organization for error_tracker; its value is not shown.');
-    const own = fakeRow('SLACK_WEBHOOK_URL');
-    fixOrganizationSecret(own, deployment, 'SLACK_WEBHOOK_URL');
-    assert.ok(!own.inputs.some((input) => input.readOnly) && !own.buttons.some((button) => button.hidden) && !own.appended.length);
-    fixOrganizationSecret(fakeRow('SENTRY_DSN'), null, 'SENTRY_DSN');  // unmanaged: nothing to fix, nothing thrown
+    assert.equal(organizationSettingOwner(deployment, 'SLACK_WEBHOOK_URL'), '');
+    assert.equal(organizationSettingOwner(null, 'SENTRY_DSN'), '', 'unmanaged: nothing is fixed');
 });

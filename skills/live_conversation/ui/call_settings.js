@@ -106,7 +106,7 @@ export function mountCallSettings(form, { skill, env = globalThis, read = () => 
         delete form.dataset.extensionSettingsBlocked;
         save.disabled = false;
     }).catch(() => {
-        if (!disposed) status.textContent = 'Call settings could not be read. Reload Settings to retry.';
+        if (!disposed) status.textContent = 'Call settings could not be read. Open this page again to retry.';
     });
     return { ready, dispose() {
         disposed = true;

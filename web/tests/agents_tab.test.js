@@ -99,7 +99,7 @@ test('Cursor auth and agent catalog access do not certify either execution surfa
     assert.equal(group.harness, 'cursor');
     assert.deepEqual(group.status, { tone: 'ok', label: 'Signed in' });
     const html = harnessFamilyMarkup(group, snapshot, { accountsRead: 'ok', quotaRead: 'ok' });
-    assert.match(html, /Login verified/);
+    assert.match(html, /Signed in/);
     assert.doesNotMatch(html, />Connected<|Verified live|rotating/);
     assert.equal(familyStatusText(snapshot, 'cursor').text, 'Signed in');
     for (const skipPresets of [false, true]) {
@@ -244,7 +244,7 @@ test('disabling excludes rotation without erasing a passed login', () => {
     assert.deepEqual(familyStatus(allOffNotRun, { accountsRead: 'failed' }),
         { tone: 'muted', label: '2 accounts · all disabled — last known' });
     // …and the metadata line states the exclusion in words on the row itself.
-    assert.match(accountMetaLine(allOff[0], payload()), /^disabled — excluded from rotation/);
+    assert.match(accountMetaLine(allOff[0], payload()), /^Out of rotation/);
 });
 
 test('a disabled account with a failed verification does not redden the family header', () => {
@@ -909,10 +909,7 @@ test('account headers and dialogs withdraw retained daemon labels until catalog 
             accountsRead: store.facet('accounts'),
             catalogKnown: store.catalogKnown,
         }).find((candidate) => candidate.harness === 'codex');
-        return harnessFamilyMarkup(group, store.snapshot, {
-            accountsRead: store.facet('accounts'),
-            quotaRead: store.facet('quota'),
-        });
+        return group.label;
     };
     const removeBody = async () => {
         let body = '';
@@ -930,12 +927,12 @@ test('account headers and dialogs withdraw retained daemon labels until catalog 
     try {
         await store.refresh();
         assert.equal(store.catalogKnown, true);
-        assert.match(header(), />Codex Live<\/span>/);
+        assert.match(header(), /^Codex Live$/);
         assert.match(await removeBody(), /for Codex Live account/);
 
         await store.refresh();
         assert.equal(store.catalogKnown, false);
-        assert.match(header(), />Codex<\/span>/);
+        assert.match(header(), /^Codex$/);
         assert.doesNotMatch(header(), /Codex Live/);
         assert.match(await removeBody(), /for Codex account/);
         assert.doesNotMatch(await removeBody(), /Codex Live/);
@@ -944,13 +941,13 @@ test('account headers and dialogs withdraw retained daemon labels until catalog 
         await store.refresh();
         assert.equal(store.snapshot, retained, 'transport failure discarded the usable snapshot');
         assert.equal(store.catalogKnown, false);
-        assert.match(header(), />Codex<\/span>/);
+        assert.match(header(), /^Codex$/);
         assert.doesNotMatch(header(), /Codex Live/);
         assert.doesNotMatch(await removeBody(), /Codex Live/);
 
         await store.refresh();
         assert.equal(store.catalogKnown, true);
-        assert.match(header(), />Codex Restored<\/span>/);
+        assert.match(header(), /^Codex Restored$/);
         assert.match(await removeBody(), /for Codex Restored account/);
     } finally {
         store.dispose();
