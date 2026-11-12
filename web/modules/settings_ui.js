@@ -260,8 +260,8 @@ function mountVoice(container, { ctx }) {
         if (shape === drawn) return;
         drawn = shape;
         handle?.dispose();
-        const custom = (row) => factHtml(row.id);
-        container.innerHTML = card({ rows: rows.slice(0, 2).map((row) => settingsRow(row, { custom })).join('') })
+        const doorValue = (row) => factHtml(row.id);
+        container.innerHTML = card({ rows: rows.slice(0, 2).map((row) => settingsRow(row, { doorValue })).join('') })
             + (doors.length ? card({ title: 'Calls', lead: 'Talk to Ouroboros by voice from the message field.', rows: doors.map((row) => settingsRow(row)).join('') }) : '');
         setFact(container, 'voice:dictation', facts.dictation);
         setFact(container, 'voice:read-aloud', facts.readAloud);

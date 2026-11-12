@@ -151,14 +151,14 @@ export const ROWS = [
         meta: 'What Ouroboros sends there is set with each place, in Circles.', more: '',
         control: { kind: 'door', to: 'page:circles' }, aliases: [], writer: '', codec: '', confirm: '', hiddenWhen: '' },
 
-    // Voice and calls: no setting of its own. Two rows say the saved choice and where it is made; a skill that
+    // Voice and calls: no setting of its own. Two doors to Main say the saved choice and where it is made; a skill that
     // registered a live conversation gets a door to its own form, drawn by the page from the contributions store.
     { id: 'voice:dictation', keys: [], page: 'voice', fold: false, name: 'Dictation',
         meta: 'Chosen at the message field: +, then Add dictation.', more: '',
-        control: { kind: 'custom' }, aliases: ['speech to text', 'microphone', 'Whisper'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
+        control: { kind: 'door', to: 'main:context' }, aliases: ['speech to text', 'microphone', 'Whisper'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'voice:read-aloud', keys: [], page: 'voice', fold: false, name: 'Read aloud',
         meta: 'Chosen in a reply’s menu: Read aloud, then its voice.', more: '',
-        control: { kind: 'custom' }, aliases: ['voice', 'text to speech'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
+        control: { kind: 'door', to: 'main:context' }, aliases: ['voice', 'text to speech'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
 
     // This computer: the host's two switches (settings_autostart.js), who can reach it, and doors to its two pages.
     { id: 'computer:autostart', keys: [], page: 'computer', fold: false, name: 'Start when I sign in', meta: '', more: '',
@@ -181,7 +181,7 @@ export const ROWS = [
         meta: 'Type it in a browser on the same network.', more: '',
         control: { kind: 'custom' }, aliases: ['LAN URL', 'Copy link'], writer: '', codec: '', confirm: '', hiddenWhen: 'noLanAddress' },
     { id: 'computer:advanced', keys: [], page: 'computer', fold: false, name: 'Advanced',
-        meta: 'Workers, the interface folder, certificates.', more: '',
+        meta: 'Tasks at once, the interface folder, certificates.', more: '',
         control: { kind: 'door', to: 'computer/advanced' }, aliases: [], writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'computer:about', keys: [], page: 'computer', fold: false, name: 'About', meta: '', more: '',
         control: { kind: 'door', to: 'computer/about' }, aliases: ['version', 'licences'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
@@ -211,7 +211,6 @@ export const ROWS = [
         meta: 'Deletes state, memory, logs and settings, then restarts. The code stays.', more: '',
         control: { kind: 'custom' }, aliases: ['Danger Zone', 'Erase all data', 'Reset All Data'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
 
-    // Dashboard › Consciousness: the card "On its own" (the first four, then its fold), then the doors of "Around it".
     // Dashboard › Consciousness: the card "On its own" (the first four, then its fold), then the four doors of "Around it".
     // The strip's labels are AUTONOMY_LEVELS (consciousness_autonomy.js); a test keeps the two equal. A row without a
     // meta says its value in its own words on the tab (the chosen level, the range in minutes or hours).

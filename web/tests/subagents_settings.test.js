@@ -654,7 +654,7 @@ test('shared route primitive preserves each semantic owner account spelling', ()
 // IMPL_SPEC §5, verbatim: the Reviewer tick means whose agreement counts, said per saved strictness.
 const TICK = {
     blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
-    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all ticked reviewers and writes why; it never skips a check that is owed.',
+    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 };
 

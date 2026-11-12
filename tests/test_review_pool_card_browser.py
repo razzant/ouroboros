@@ -34,7 +34,7 @@ CARD_LINES = (
     "Wave total: $0.42 for the priced seats · 1 seat on a subscription · 1 seat cost unknown",
 )
 TICK = {
-    "advisory": "Counts when chosen: for each check Ouroboros asks one, several or all ticked reviewers"
+    "advisory": "Counts when chosen: for each check Ouroboros asks one, several or all reviewers"
                 " and writes why; it never skips a check that is owed.",
     "blocking": "Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself,"
                 " each skill and each required result; a critical finding stops it.",

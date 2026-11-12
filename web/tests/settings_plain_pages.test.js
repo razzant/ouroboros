@@ -257,7 +257,7 @@ test('Permissions and checks: three questions and what it is trusted with, doors
     grant.checked = true;
     await page.container.fire('change', { target: grant });
     await settle();
-    assert.equal(page.asked.at(-1).title, 'Reviewed-skill auto-grant');
+    assert.equal(page.asked.at(-1).title, 'Give reviewed skills their keys?');
     assert.deepEqual(page.server.writes('/api/owner/auto-grant'), [{ enabled: true }]);
     assert.doesNotMatch(settingsPageSource(), / title="/, 'what a row needs to say is in its meta or its result line');
 });
@@ -370,6 +370,13 @@ test('Voice and calls says the saved choices and opens the form of whoever regis
     assert.deepEqual(page.container.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow), ['voice:dictation', 'voice:read-aloud']);
     assert.equal(page.container.querySelectorAll('[data-setting-control], input, select').length, 0);
     assert.equal(page.meta('voice:dictation'), 'Chosen at the message field: +, then Add dictation.');
+    // Each row says its value and leads to Main, where the choice is made; a row of another page stays a row.
+    for (const id of ['voice:dictation', 'voice:read-aloud']) {
+        assert.equal(page.row(id).dataset.kind, 'door', id);
+        assert.ok(page.row(id).querySelector(`[data-fact="${id}"]`), `${id} says its value`);
+        await page.press(page.row(id));
+        assert.equal(page.opened.at(-1), 'main:context', id);
+    }
     assert.ok(page.calls.includes('/api/extensions'), 'the skills are read when the page is shown');
     assert.doesNotMatch(settingsPageSource(), /live_conversation|skill\/[a-z]/, 'no skill id is written in the page');
 });

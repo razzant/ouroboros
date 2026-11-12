@@ -405,9 +405,9 @@ export const CONFIRMS = {
     autoGrantOn(row, next, current, ask = openConfirmDialog) {
         // The desktop's bridge asks in its own dialog when it writes (saveAutoGrant).
         if (!truthy(next) || globalThis.window?.pywebview?.api?.request_auto_grant_reviewed_skills_change) return true;
-        return ask({ title: 'Reviewed-skill auto-grant',
-            body: 'Enable reviewed-skill auto-grant? It only applies after a fresh executable review for the current content hash.',
-            confirmLabel: 'Enable' });
+        return ask({ title: 'Give reviewed skills their keys?',
+            body: 'A skill gets the keys and permissions it asks for after a review of exactly that version.',
+            confirmLabel: 'Turn on' });
     },
     removeEntry(row, next, current, ask = openConfirmDialog) {
         return ask({ title: `Remove ${row?.name || 'this entry'}?`, body: 'It is removed at once. There is no Undo.', confirmLabel: 'Remove', danger: true });
@@ -636,7 +636,7 @@ function controlHtml(row, control, ctx) {
         `<button type="button" class="settings-choice" role="radio" aria-checked="false" data-setting-value="${escapeHtmlAttr(option.value)}">`
         + `<span class="settings-choice-name">${escapeHtmlAttr(option.label ?? option.value)}<span class="settings-choice-mark" data-setting-mark></span></span>`
         + `<span class="settings-choice-note">${escapeHtmlAttr(option.note || '')}</span></button>`).join('')}</div>`;
-    case 'door': return doorSign(control.to);
+    case 'door': return `${ctx.doorValue?.(row) || ''}${doorSign(control.to)}`;  // a door may say its value before its sign
     default: return ctx.custom?.(row) || '';
     }
 }

@@ -1377,7 +1377,7 @@ export function availableSubagentsEditorHost(hostId = 'available-subagents-edito
 // Access outranks the enforcement it keeps but never enforces (review_helpers.review_enforcement_blocks).
 export const REVIEWER_TICK_CAPTIONS = Object.freeze({
     blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
-    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all ticked reviewers and writes why; it never skips a check that is owed.',
+    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 });
 export const reviewerTickCaption = (enforcement, access) => REVIEWER_TICK_CAPTIONS[String(access || '').trim().toLowerCase() === 'cyber_pro'
