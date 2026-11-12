@@ -1503,10 +1503,10 @@ def test_a_panel_fail_behind_a_failed_check_is_named_and_counted_when_the_author
     prepare, calls = review._prepare_unified_review, []
 
     def with_failed_check(ctx, *args, **kwargs):
-        if not calls:  # as _prepare_unified_review does when the preflight finds something under Advisory
+        if not calls:  # as _prepare_unified_review does when the preflight finds something
             calls.append(True)
             ctx._last_review_block_reason = "preflight"
-            assert review._handle_review_block_or_warning(ctx, False, "PREFLIGHT: the version carriers disagree", "") is None
+            assert review._handle_review_block_or_warning(ctx, "PREFLIGHT: the version carriers disagree", "") is None
         return prepare(ctx, *args, **kwargs)
 
     monkeypatch.setattr(review, "_prepare_unified_review", with_failed_check)

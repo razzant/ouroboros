@@ -636,7 +636,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     except ValueError as exc:
         ctx._last_review_block_reason = "infra_failure"
         _handle_review_block_or_warning(ctx, f"⚠️ REVIEW_BLOCKED: invalid review pool configuration — {exc}",
-                                        "Invalid review pool configuration did not block commit. ")
+                                        "Invalid review pool configuration; an explicit author decision is required. ")
         return None, None, True
     models, row_routes = row_plan["models"], row_plan["routes"]
     ctx._last_triad_models = list(models)  # forensic: actual resolved model IDs

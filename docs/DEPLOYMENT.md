@@ -63,7 +63,6 @@ keeps its factory value:
 |---|---|---|
 | Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
 | Access level | `advanced` | the level chosen |
-| Review | `advisory` | the mode chosen |
 | Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
 | Consciousness | off; $20 over 24 hours once started | off unless ticked |
 

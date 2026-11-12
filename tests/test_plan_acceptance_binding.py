@@ -48,7 +48,7 @@ def test_the_latest_revision_binds_always_with_every_revisions_text_in_the_exhib
     assert exhibit["binding"] == "latest_revision:2"
     assert [[c["claim"] for c in r["done_when"]] for r in exhibit["revisions"]] == [["five slides"], ["a five-slide story", "speaker notes"]]
     assert exhibit["revisions"][0]["seen_by_asks"] == ["a1"] and exhibit["revisions"][1]["seen_by_asks"] == []
-    assert exhibit["open_objections"] == [{"seat_id": "s1", "id": "o1", "text": "the bar is low", "holds": True,
+    assert exhibit["open_objections"] == [{"seat_id": "s1", "id": "o1", "text": "the bar is low",
                                           "not_adjudicated": False, "ask_id": "a1", "revision": 1}]
 
 

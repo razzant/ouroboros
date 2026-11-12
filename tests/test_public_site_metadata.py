@@ -161,8 +161,7 @@ def test_readme_install_page_and_deployment_guide_name_the_factory_values():
     table = (DOCS / "DEPLOYMENT.md").read_text(encoding="utf-8")
     assert f"| Limits | ${total} in total, ${task} for one task and its helpers, of known spend |" in table
     assert f"| Consciousness | off; ${daily} over 24 hours once started |" in table
-    for label, key in (("Safety coverage", "OUROBOROS_SAFETY_MODE"), ("Access level", "OUROBOROS_RUNTIME_MODE"),
-                       ("Review", "OUROBOROS_REVIEW_ENFORCEMENT")):
+    for label, key in (("Safety coverage", "OUROBOROS_SAFETY_MODE"), ("Access level", "OUROBOROS_RUNTIME_MODE")):
         assert f"| {label} | `{defaults[key]}`" in table, label
 
 
