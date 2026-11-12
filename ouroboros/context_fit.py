@@ -618,6 +618,7 @@ def resolve_context_fit_route(
         base_url=route["base_url"],
         use_local=route["use_local"],
         allow_fetch=allow_fetch,
+        force=bool(task.get("route_read_again")),  # the horizon guard's repeat of its own failed early read
         options=route["options"] or None,
         **({"ask": {"source_id": route["options"]["source_id"], "credential_profile_id": route["account_pin"]}}
            if carried else {}),
@@ -683,9 +684,11 @@ class RouteQuestion:
         return timed("fit.route", self.resolver, task, allow_fetch=allow_fetch)
 
     def again(self, task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
-        """The same question at the fit's usual point (the horizon guard)."""
-        self.early = False
-        return timed("fit.route", self.resolver, task, allow_fetch=True)
+        """The same question at the fit's usual point (the horizon guard). When the early answer came from a read that
+        failed, the question is read anew: the failure that read wrote in this build answers nothing here."""
+        early, self.early = self.answer, False
+        failed = isinstance(early, tuple) and len(early) == 2 and getattr(early[1], "read", "") == "failed"
+        return timed("fit.route", self.resolver, {**task, "route_read_again": True} if failed else task, allow_fetch=True)
 
 
 def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mode: str, preferred: str,

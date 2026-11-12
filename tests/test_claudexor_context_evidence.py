@@ -432,6 +432,36 @@ def test_the_memory_view_receipt_names_the_kind_and_age_of_its_window_evidence(t
     assert row["window_evidence"]["kind"] == "live" and 0 <= row["window_evidence"]["age_s"] < 3600
 
 
+@pytest.mark.parametrize("repeat", ["answers", "fails"])
+def test_the_guards_repeat_after_an_early_failed_read_asks_the_engine_again(tmp_path, monkeypatch, repeat):
+    """Fix round 1 (Opus B2): the early read failed (an engine stalled at build start) and the pool's fresh smaller
+    statement narrows the view, so the guard asks again at the usual point. That repeat reads the engine anew: the
+    failure the early read wrote in this build answers nothing. An engine back by then sizes the plan; one still
+    silent leaves today's failed-read path (the pool bound) after exactly one more question."""
+    from ouroboros import context_fit as cf
+    from ouroboros.llm import LLMClient
+
+    small = _catalog("account-s", "identity-s", 70_000)
+    small["models"][0]["contextWindow"] = 70_000
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda *_a, **_kw: copy.deepcopy(small)))
+    ce.probe(tmp_path, provider="claudexor", model=MODEL)  # the pool holds a fresh 70K statement of account-s
+    big, calls = _catalog("account-b", "identity-b", 872_000), []
+
+    def stalled(*_a, **_kw):
+        calls.append(1)
+        if len(calls) == 1 or repeat == "fails":
+            raise TimeoutError("engine stalled")
+        return copy.deepcopy(big)
+
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(stalled))
+    plan, spans = _built(monkeypatch, tmp_path, lambda task: cf.RouteQuestion(task, cf.resolve_context_fit_route))
+    assert len(calls) == 2 and spans["work"]["catalog_calls"] == 2  # the early read and one repeat, no more
+    if repeat == "answers":
+        assert (plan.initial_mode, plan.window_tokens, plan.window_evidence[0]) == ("max", 872_000, "live")
+    else:
+        assert (plan.window_evidence[0], plan.window_tokens) == ("pool", 70_000) and plan.initial_mode != "max"
+
+
 def test_a_changed_route_voids_the_early_answer_and_asks_its_own_question(tmp_path, monkeypatch, catalog):
     """One handle per route: the build whose route changed (here the role's pin) after the question started asks its
     own question; the early answer is never applied to it, and the account that just failed is never spent by it."""

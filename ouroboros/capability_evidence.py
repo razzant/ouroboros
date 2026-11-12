@@ -1164,7 +1164,7 @@ def probe(drive_root: Any, *, ask: Optional[Dict[str, Any]] = None, **route) -> 
     from ouroboros.response_limits import probe_response_limit
 
     identity = str((route.get("options") or {}).get("account_fingerprint") or "") if ask is not None else ""
-    evidence, read = _probe_window(drive_root, **{**route, "allow_fetch": False}) if identity else (None, "")
+    evidence, read = _probe_window(drive_root, **{**route, "allow_fetch": False, "force": False}) if identity else (None, "")
     if evidence is None or evidence.stale or evidence.source == SOURCE_NONE:  # no usable record of the identity
         route = {**route, "options": ask} if identity else route
         evidence, read = _probe_window(drive_root, **route)
