@@ -986,7 +986,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # directory always existed as each blob's parent; no writer spelling was added or removed.
 # 465 -> 466: the vendor program observation adds one named singleton,
 # ``state/harness_programs.json`` (``ouroboros/harness_program_facts.py``); its own row.
-EXPECTED_SCAN_PATHS = 466
+# 466 -> 467: the legacy private-copy registry's bytes, kept by its startup import as
+# ``archive/subagent_worktrees_<sha256>.json`` (``subagent_worktrees.import_legacy_registry``; the records row).
+EXPECTED_SCAN_PATHS = 467
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
