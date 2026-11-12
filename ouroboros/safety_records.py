@@ -177,8 +177,8 @@ def tell_owner_over_flag(ctx, tool_name, arguments, subject, verdicts, level) ->
     """The Supervisor's own row to my human when Ouroboros's identical re-issue is let through over a flag whose final
     reading marked the act as one my human would want to stop (``"owner": true``). Host-composed from typed facts
     through the terminal outbox, signed as the Supervisor's, one per work and destination: the declared words' places
-    and every recipient, else the exact call, shown redacted as the bundle shows it (``delivery_id``, so reworded words
-    to the same place, a restart or a later finding there add none). A first mark a failed second check left
+    and every recipient, else the exact call, shown with every known secret shape masked (``delivery_id``, so reworded
+    words to the same place, a restart or a later finding there add none). A first mark a failed second check left
     unconfirmed tells nobody. ``subject`` resolves what the call says and where (``safety._exit_subject``), read only
     for a marked flag. Never in the tool's result, never changing what the call does; claims no delivery."""
     final = verdicts[-1] if verdicts else {}
@@ -186,6 +186,7 @@ def tell_owner_over_flag(ctx, tool_name, arguments, subject, verdicts, level) ->
         return
     try:
         import hashlib
+        from ouroboros.redaction import redact_projection
         from ouroboros.safety import _render_subject_json
         from ouroboros.tool_access_paths import canonical_data_root
         from supervisor.schedule_notes import owner_chat_id
@@ -196,7 +197,7 @@ def tell_owner_over_flag(ctx, tool_name, arguments, subject, verdicts, level) ->
             return
         said, destinations, exact, _labels = subject()
         if exact:  # any call that declares no words and place: the exact call is its destination
-            shown = " ".join(_render_subject_json(arguments or {}).split())
+            shown = " ".join(_render_subject_json(redact_projection(arguments or {}).value).split())
             call, identity = (f"Call: {tool_name} {shown[:240]}{'…' if len(shown) > 240 else ''}",
                               json.dumps(["call", said], ensure_ascii=False))
         else:
