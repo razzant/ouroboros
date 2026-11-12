@@ -325,6 +325,31 @@ def test_a_finish_that_folds_what_it_read_stands_for_it_elsewhere_and_leaves_it_
     assert "beta reply" in own_text and "read and folded" not in own_text  # the room itself reads every row
 
 
+@pytest.mark.parametrize("quoted", [True, False], ids=["owner-quoted", "note-only"])
+def test_a_fold_read_finish_leaves_a_relay_row_whole_elsewhere_and_still_folds_my_reply(tmp_path, quoted):
+    """rev_carbon REV3C: a ``fold_read`` finish folded a relay row that quotes my human's words into its sentence, so my
+    other foci lost those words at a full view. A relay row stays out of the fold, like my human's own words; my
+    reply in the same room still folds into the finish's sentence."""
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+    rooms, rows = _install(tmp_path)
+    beta = str(rooms["beta"])
+    said = shared.msg(_ts(26), "Keep the March batch frozen until Friday.", chat_id=1, client_message_id="said-limit")
+    relay = shared.msg(_ts(27), "A limit from my human for this work.", chat_id=int(beta), direction="out",
+                       type="relay_entry", task_id="tb9", client_message_id="relay:limit:tb9",
+                       relay={**relay_envelope("limit", [owner_quote(tmp_path, said)] if quoted else [], chat_id=1,
+                                               summary="Passed on a limit."), "sender": {"task_id": "teller"}})
+    finish = shared.msg(_ts(30), "Done.", chat_id=int(beta), direction="system", type="task_summary", task_id="tb9",
+                        root_task_id="tb9", summary_kind="terminal_root_projection", status="completed",
+                        wake_summary="Read Beta's thread; nothing owed.", fold_read=True)
+    shared.append(tmp_path / "logs" / "chat.jsonl", said, relay, finish)
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    item = _room(snapshot, beta)
+    beta_section = text[text.index(f"### Project Beta [chat_id={beta}]"):]
+    assert any(word["address"] == _addr(relay) for word in item["words"])  # the relay row stands in the block
+    assert ("Keep the March batch frozen until Friday." in beta_section) is quoted
+    assert "beta reply" not in beta_section and item["folded"]["count"] == 1  # my reply there still folds
+
+
 def test_my_accounts_arrival_considers_nothing_and_my_delivery_there_does(tmp_path):
     """§3.4 (i): the considered point is my own outward row. An arrival from the account I send as (an operator session
     or a `gh` call publishing as me) leaves a person's earlier word nobody considered, though it keeps the room one

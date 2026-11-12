@@ -185,7 +185,10 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                 cls["author"]["kind"] == "place_fact" and entry[1].get("direction") == "out"
             ):
                 continue
-            if fold and entry[2] <= fold[0] and not owner_speech(entry[1], cls["author"]):  # my human's stay whole
+            # My human's words stay whole, and so does a relay row, which may carry them quoted (``relay_quotes``):
+            # a fold of what a finish read stands for its room's other words only.
+            if (fold and entry[2] <= fold[0] and not owner_speech(entry[1], cls["author"])
+                    and entry[1].get("type") != "relay_entry"):
                 folded = item["folded"] or {"sentence": str(fold[1]["wake_summary"]), "ts": str(fold[1].get("ts") or ""),
                                             "task": str(fold[1].get("task_id") or ""),
                                             "count": 0, "chars": 0, "from": chat_chain.format_address(entry[0])}
