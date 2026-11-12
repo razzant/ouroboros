@@ -439,7 +439,7 @@ def test_onboarding_steps_and_stylesheet_keep_their_owner_facing_shape():
     rails = {step["railCopy"] for step in contract["steps"]}
     css = (REPO / "web" / "onboarding.css").read_text(encoding="utf-8")
 
-    assert {"Connect your accounts", "Choose models", "Choose review mode", "Review limits"} <= titles
+    assert {"Connect your accounts", "Choose models", "Choose review and access", "Review limits"} <= titles
     assert {"Subscriptions + API", "model slots"} <= rails
     assert "@media (max-width: 720px)" in css
     assert "scroll-snap-type: x proximity;" in css
