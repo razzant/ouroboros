@@ -24,7 +24,7 @@ ANSWER = "The complete report includes the requested budget."
 AWAITED_NOTICE = ("\n\n⚠️ Plan review: the answers of ask(s) a1 had not arrived when the task ended; "
                   "silence holds nothing and is not agreement.")
 OBJECTIONS_NOTICE = ("\n\n⚠️ Plan review: 1 open objection remains open — triad_a/o1 (ask a1, revision 1): the bar is low; "
-                     "work proceeded under the owner-selected advisory enforcement.")
+                     "work proceeded with them open.")
 AWAITED_SENTENCE = "Not every plan reviewer had answered when the task ended."
 OBJECTIONS_SENTENCE = TASK_CAUSE_PHRASES["plan_review_objections_open"]
 
