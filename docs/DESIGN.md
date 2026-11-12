@@ -298,7 +298,9 @@ caps with `text-transform`.
 **A secondary page orders by meaning, not paint** (audit №9, owner
 2026-10-28T22:09Z). Costs leads with the known spend and, in the same card,
 whether it is final, its unresolved upper bound and what is unknown; the
-composition, the hold and technical counts follow, quieter. Budget's three limits are rows; under them the consciousness
+composition, the hold and technical counts follow, quieter. Budget's three limits are rows; one line under them names
+what they cannot count, roles whose route has no known price (`Not counted: Web search, Agents (price unknown).`,
+`all model roles` when none has one), and is absent when every route Settings configures has a price; under it the consciousness
 limit shows its 24-hour spend (pending, unpriced) and a full-width row names that limit with
 “If its charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown) and a
 wake held at it with its card's door. Activity names a
@@ -2740,7 +2742,7 @@ Source / Model / Account row. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
 confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
 published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
-sorts or filters the list;
+sorts or filters the list; the line under an API role whose price is not that says `Price unknown`;
 nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned

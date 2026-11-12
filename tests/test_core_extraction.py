@@ -13,7 +13,6 @@ import hashlib
 import json
 import pathlib
 
-from ouroboros import review
 from ouroboros.tools import core, core_artifacts, core_file_tools
 from ouroboros.tools.registry import ToolContext
 
@@ -175,8 +174,11 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # keeps the work alive with what it holds, until when, and what the default does; nothing else changed
     # (8892c8af... before).
     # Presence clarification keeps the question notice private and names the requested wait's boundary.
+    # Rolled for the one release of words (#3257): escalate's first sentence asks by authority (BIBLE P0),
+    # its wait clause names work that cannot go on without the answer, and "with an explanation" leaves
+    # the closing sentence; nothing else changed (76a2871b... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "76a2871bb599a0ae52b1d5442c26db7cbe21e83c4990e273a6a39e25d42a4a80"
+        "4da8992f58a5e0db0c4cf195a08673488961777dafc9801f36ccc18419b462b1"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
@@ -228,14 +230,3 @@ def test_extracted_read_and_list_result_bytes_are_stable(tmp_path):
     assert core_file_tools._repo_list(ctx, ".").encode() == (
         b'[\n  "nested/",\n  "sample.txt"\n]'
     )
-
-
-def test_core_extraction_size_bounds_have_meaningful_headroom():
-    """The core tool family meets the repository's line contract as the size lane's tip check reads it: a module in
-    the 1001-1500 band or past the cap has its entry in `ouroboros/size_ratchet_manifest.py` (one at 1501-1600 lines
-    needs none). The `size_ratchet` lane is that contract's blocking home; this test keeps no number of its own."""
-    inventory = review.collect_size_ratchet_inventory(REPO, repo_paths=[
-        pathlib.Path(module.__file__).relative_to(REPO).as_posix() for module in (core, core_file_tools, core_artifacts)])
-    manifest = review.load_size_ratchet_manifest(REPO / review.SIZE_RATCHET_MANIFEST_PATH)
-    assert inventory.band_paths <= set(manifest.band_paths)
-    assert inventory.giant_paths <= manifest.giant_paths

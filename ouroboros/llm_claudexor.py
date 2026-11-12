@@ -28,13 +28,11 @@ from ouroboros.llm_attempt import _PhysicalSendNotStarted, _attempt_request, _ca
 from ouroboros.llm_capability_policy import model_catalog as model_catalog, catalog_admits_model as catalog_admits_model
 from ouroboros.send_clock import stamp_clock_note
 from ouroboros.llm_substitution import (
-    AccountRotation, CapabilityRetry, SubstitutionBudget, capability_refusal_text, substitution_fact, failed_account_preference,
-    take_failed_account_preference)
-from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
+    AccountRotation, CapabilityRetry, SubstitutionBudget, capability_refusal_text, substitution_fact, send_account)
 from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope, current_model_wait,
                                   dispatch_deadline_remaining_sec, prepared_call_scope)
 from ouroboros.observability import persist_call, update_call_manifest_metadata
-from ouroboros.context_timing import host_step, timed
+from ouroboros.context_timing import host_step, mark, span_since, timed
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
@@ -75,7 +73,7 @@ def prepare_processing_target(target: dict) -> dict:
         return target
     prepared = {**target, "processing_preferences": []}
     try:
-        sources = model_sources(processing_view=True)
+        sources = timed("claudexor.processing", model_sources, processing_view=True)
     except ClaudexorUnavailable:
         return prepared
     source = next((row for row in sources.get("sources", [])
@@ -293,28 +291,11 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
             isinstance(block, dict) and block.get("type") == "text" for block in content
         ):
             message["content"] = context_fit.extract_plain_text_from_content(content)
-    role = parameters.get("model_role", "")
-    override = parameters.get("model_account_override")
-    if override is not None and not isinstance(override, str):
-        raise ValueError("model_account_override must be a profile name, empty Auto, or None")
-    pin = override.strip() if override is not None else model_role_option(MODEL_ACCOUNTS_KEY, role)
-    account = {"mode": "pin", "profileId": pin} if pin else {"mode": "auto"}
-    # The next matching-route DISPATCH only; Pin still consumes it. A prospective
-    # build reads the same fact without spending it, so the priced candidate and
-    # the send it admits stay identical.
-    failed_profile = (take_failed_account_preference if not parameters.get("prospective")
-                      else failed_account_preference)(target, parameters)
-    if not pin and not parameters.get("_no_account_preference"):
-        # Carry the conversation's last account as a preference, not admission;
-        # the engine still chooses. A round already answered by the wrong model
-        # carries none, so its ranking decides where every redo lands.
-        for message in reversed(prepared):
-            native = message.get("nativeContinuation") or {}
-            route = native.get("route") or {}
-            if route.get("source") == target["source"] and route.get("model") == target["resolved_model"]:
-                if route.get("credentialProfileId") and route["credentialProfileId"] != failed_profile:
-                    account["preferredProfileId"] = route["credentialProfileId"]
-                break
+    # The conversation's account, else the account this task's plan rests on, as a preference the engine may overrule
+    # (``send_account``). The failed account is spent by the next matching DISPATCH only; Pin still consumes it. A
+    # prospective build reads that fact without spending it, so the priced candidate and the send it admits stay identical.
+    plan = getattr(getattr(current_model_wait(), "tool_context", None), "context_fit_plan", None)
+    account = send_account(target, prepared, parameters, plan=plan, consume=not parameters.get("prospective"))[0]
     options = {wire: parameters[key] for key, wire in (
         ("reasoning_effort", "reasoningEffort"), ("temperature", "temperature"),
         ("cache_affinity", "cacheKey"),
@@ -696,6 +677,7 @@ class _ModelInvocation:
                      **({"wire_layout": dict(self.target["wire_layout"])} if isinstance(self.target.get("wire_layout"), dict) else {}),
                      claudexor={"operation_id": self.operation_id, "model_role": self.role,
                                 "requested_profile": str((self.payload.get("account") or {}).get("profileId") or ""),
+                                **_dispatch_facts(self.payload, self.detail, result),
                                 "route": copy.deepcopy(route), "cost_evidence": copy.deepcopy(result.get("cost")),
                                 "outcome": result.get("outcome"), "problem": copy.deepcopy(result.get("problem")),
                                 "requested_options": copy.deepcopy(self.payload.get("options") or {}),
@@ -774,6 +756,23 @@ class _ModelInvocation:
             gateway.close()
 
 
+def _dispatch_facts(payload: dict, detail: dict, result: dict) -> dict:
+    """What the engine's own operation record says of this send's account and start, beside the round's receipt: the
+    profile the send preferred, the engine's ``routing.selectionReason``, and ``engine_until_dispatch_ms``, the time
+    until dispatch started by the engine's record (``startedAt`` to ``dispatch.startedAt``; the dispatch mark precedes
+    the vendor request's bytes, so it is no wire time). An absent field adds nothing."""
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    preferred = (payload.get("account") or {}).get("preferredProfileId")
+    reason = (result.get("routing") or detail.get("routing") or {}).get("selectionReason")
+    started, dispatched = (parse_deadline_ts(value) for value in (detail.get("startedAt"),
+                                                                    (detail.get("dispatch") or {}).get("startedAt")))
+    return {**({"preferred_profile": str(preferred)} if preferred else {}),
+            **({"selection_reason": reason} if isinstance(reason, str) and reason else {}),
+            **({"engine_until_dispatch_ms": round((dispatched - started).total_seconds() * 1000)}
+               if started and dispatched and dispatched >= started else {})}
+
+
 def _reset_native(payload: dict, error: ClaudexorModelNotDispatched, invocation: _ModelInvocation) -> dict | None:
     from ouroboros.llm_messages import reset_native_payload
 
@@ -802,9 +801,14 @@ def _accounted_request(invocation: _ModelInvocation):
     if not invocation.payload.get("retryOfOperationId"):
         invocation.payload = stamp_clock_note(invocation.payload)
     # The engine relays to the vendor: its loopback address is not where the model runs (a not-started receipt is a remote-hop fact).
-    request = replace(_attempt_request(invocation.target, invocation.payload), route_is_loopback=False,
+    request = replace(timed("candidate.measure", _attempt_request, invocation.target, invocation.payload), route_is_loopback=False,
                       force_unknown_reservation=True, max_completion_tokens=invocation.output_reserve)
-    return request, _candidate_before_dispatch(invocation.payload, request, prepare=invocation.prepare)
+    before, handed = _candidate_before_dispatch(invocation.payload, request, prepare=invocation.prepare), mark()
+
+    def reserved(reservation):  # the ledger reserved this attempt between the hand-over and this call
+        span_since("candidate.reserve", handed)
+        return before(reservation)
+    return request, reserved
 
 
 def _unstarted_retry_preparation(target: dict, payload: dict, parameters: dict, error: ClaudexorModelNotDispatched):
