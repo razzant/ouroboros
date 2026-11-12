@@ -42,7 +42,6 @@ from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import (owner_speech, place_row_facts, recorded_person, recorded_speaker, row_class,
                                            warm_lineage)
 
-from ouroboros.memory_view_conversation_forms import AUTHORITY as AUTHORITY, AUDIENCE as AUDIENCE
 _RANKS = ("retold", "considered", "nobody considered")  # F6w folds the first first
 MAIN = str(WEB_UI_CHAT_ID)
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
