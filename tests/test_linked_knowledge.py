@@ -673,6 +673,37 @@ def test_empty_optional_write_values_take_the_omitted_path_and_say_so(tmp_path):
     assert _files(tmp_path) == before
 
 
+def test_a_blank_version_outside_revert_takes_the_omitted_path_and_a_revert_still_needs_one(tmp_path):
+    """A model fills version with whitespace as well as with nothing (the experiment saw ' ' 18 times): a blank
+    value names no revision, so outside revert it is ignored and said; inside revert 'requires version' stays,
+    and a non-blank version outside revert still refuses, typed."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="blank"))
+    target = address(tmp_path, "blank")
+    store.write_knowledge_note(target, "# Blank\n\nOne.\n")
+
+    def write(**arguments):
+        return registry.execute("knowledge_write", {"topic": "blank", "scope": "global", **arguments})
+
+    for blank, old, new in ((" ", "One.", "Two."), ("\t\n ", "Two.", "Three.")):
+        revision = store.read_knowledge_note(target).revision
+        saved = _meta(write(mode="edit", old_str=old, content=new, expected_revision=revision, version=blank))
+        assert saved["ignored_arguments"] == [f"version={blank!r} ignored: only mode=revert takes a version"], saved
+    current = store.read_knowledge_note(target)
+    assert current.text.endswith("# Blank\n\nThree.\n")
+    appended = _meta(write(mode="append", content="Four.\n", version=" "))
+    assert appended["ignored_arguments"] == ["version=' ' ignored: only mode=revert takes a version"]
+    current, before = store.read_knowledge_note(target), _files(tmp_path)
+    for arguments, refusal in (
+            ({"mode": "revert", "version": " ", "expected_revision": current.revision}, "mode=revert requires version"),
+            ({"mode": "revert", "version": "\n", "expected_revision": current.revision}, "mode=revert requires version"),
+            ({"mode": "edit", "old_str": "Four.", "content": "4.", "version": " abc ",
+              "expected_revision": current.revision}, "version is used only with mode=revert")):
+        reply = write(**arguments)
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR") and refusal in reply, (arguments, reply)
+    assert _files(tmp_path) == before
+
+
 def test_the_one_pair_edit_takes_its_replacement_as_content_or_new_str(tmp_path):
     """Other editors spell the replacement new_str: with mode=edit and old_str it is exactly content; both given
     and different is an argument error; elsewhere an empty new_str is ignored and a non-empty one names content."""

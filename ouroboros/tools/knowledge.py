@@ -142,7 +142,7 @@ def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
     if view in (None, ""):
         notes.append(ignored_argument_note("view", view, "the default view, the note itself"))
         view = "note"
-    if version == "":
+    if isinstance(version, str) and not version.strip():  # empty or whitespace: a blank value names no revision
         notes.append(ignored_argument_note("version", version, "no revision named; this is the current note"))
         version = None
     try:
@@ -272,7 +272,8 @@ def _knowledge_write(
     new_str: str | None = None,
 ) -> str:
     notes = []  # a value that means what omission means takes the omitted path, said in the result (tools/arg_feedback)
-    if version == "" and mode != "revert":
+    blank_version = isinstance(version, str) and not version.strip()  # empty or whitespace: it names no revision
+    if blank_version and mode != "revert":
         notes.append(ignored_argument_note("version", version, "only mode=revert takes a version"))
         version = None
     if isinstance(edits, list) and not edits:
@@ -313,7 +314,7 @@ def _knowledge_write(
                              else "edits is used only with mode=edit")
         if mode not in ("overwrite", "append", "edit") and summary is not None:
             raise ValueError(f"summary is used only with mode=overwrite, append or edit, not mode={mode}")
-        if mode == "revert" and version in (None, ""):
+        if mode == "revert" and (version is None or blank_version):
             raise ValueError("mode=revert requires version, the revision to put back")
         if mode != "revert" and version is not None:
             raise ValueError("version is used only with mode=revert; knowledge_read(version=...) reads one")

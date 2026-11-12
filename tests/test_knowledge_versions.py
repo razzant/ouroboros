@@ -182,6 +182,8 @@ def test_an_empty_or_null_view_or_version_reads_the_current_note_and_says_so(tmp
     plain = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global"})
     assert plain.endswith(note.text) and "[Argument note]" not in plain
     for arguments, said in (({"version": ""}, ["version='' ignored: no revision named; this is the current note"]),
+                            ({"version": " "}, ["version=' ' ignored: no revision named; this is the current note"]),
+                            ({"version": "\t\n"}, ["version='\\t\\n' ignored: no revision named"]),
                             ({"view": ""}, ["view='' ignored: the default view, the note itself"]),
                             ({"view": None}, ["view=None ignored: the default view, the note itself"]),
                             ({"view": None, "version": ""}, ["view=None ignored", "version='' ignored"])):
@@ -190,8 +192,11 @@ def test_an_empty_or_null_view_or_version_reads_the_current_note_and_says_so(tmp
         assert all(f"[Argument note] {item}" in read for item in said), (arguments, read[:600])
     history = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "view": "history", "version": ""})
     assert history.startswith("[Knowledge history]") and "[Argument note] version='' ignored" in history
-    malformed = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "version": "abc"})
-    assert malformed.startswith("⚠️ TOOL_ERROR: version_unavailable: a version is a revision") and note.text not in malformed
+    history = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "view": "history", "version": " "})
+    assert history.startswith("[Knowledge history]") and "[Argument note] version=' ' ignored" in history
+    for malformed in ("abc", " abc "):  # a value that names something still refuses, typed
+        read = registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "version": malformed})
+        assert read.startswith("⚠️ TOOL_ERROR: version_unavailable: a version is a revision") and note.text not in read
     assert "view='diff'" in registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "view": "diff"})
 
 
