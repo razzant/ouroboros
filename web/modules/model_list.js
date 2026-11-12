@@ -42,7 +42,7 @@ export function modelSearchField(doc, listId) {
  * The list painted into `el` and driven by `input`. `main()`, `current()` and `recents()` are the caller's routes
  * (Main's now, the chosen one, the recent ones to offer); `mainRow` puts Main's model first, tagged, and
  * `mainFacts()` says in its facts what a press on it means where that is not Main's own route facts; `rule` is the
- * line under the rows. `onRoute(route)` takes a pick, `onSettings()` the way to Settings › Accounts where nothing but
+ * line under the rows. `onRoute(route)` takes a pick, `onSettings()` the way to Settings › Accounts and keys where nothing but
  * Main can lead, `onLeave({focus})` an Escape with nothing typed (`focus`) or a Tab out; `onPaint()` follows every
  * repaint (the list may have changed size). Returns `{ paint, destroy }`.
  */
@@ -87,7 +87,7 @@ export function createModelList({ el, input, id, store, main, current, recents, 
                 note(status.failed ? 'The model catalog could not be read.' : 'Only Main\'s model can lead work here.');
                 picks.set('accounts', { settings: true });
                 parts.push(`<div class="chat-model-row chat-model-door" role="option" data-row="accounts" aria-selected="false">`
-                    + '<span class="chat-model-row-id">Add a subscription or a key in Settings › Accounts</span></div>');
+                    + '<span class="chat-model-row-id">Add a subscription or a key in Settings › Accounts and keys</span></div>');
             } else if (index.sources.length === 1) {
                 // One source: its models at once, no source step.
                 section(index.sources[0].label, true);

@@ -112,7 +112,7 @@ function stateHtml(place, ui) {
     const state = placeStateOf(place.state);
     const silent = place.state === 'silent';
     const options = PLACE_STATES.map(({ value, label }) => ({ value, label }));
-    const group = renderSegmentedField({ target: `place-state-${place.id}`, options, modifier: 'data-place-state', title: 'Changes at once' });
+    const group = renderSegmentedField({ target: `place-state-${place.id}`, options, modifier: 'data-place-state' });
     // What the chosen state does: a quiet note in the tray; what Silent guarantees is a host fact in the
     // System voice, under the tray (fills never stack). While consciousness is off it only hears (the host's
     // `only_hears`), whatever the stored choice says it would do.

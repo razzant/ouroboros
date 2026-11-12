@@ -67,6 +67,7 @@ def settings_client(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway, "_apply_settings_to_env", lambda *a, **k: None)
     monkeypatch.setattr(gateway, "apply_runtime_provider_defaults", provider_defaults)
     monkeypatch.setattr(gateway, "_owner_read_settings_raw", fake_load_settings)
+    monkeypatch.setattr(gateway, "settings_read_view", lambda: (fake_load_settings(), {}))
     monkeypatch.setattr(gateway, "_owner_write_settings", fake_save_settings)
 
     # server's compatibility wrapper copies these four globals into the gateway

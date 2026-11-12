@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from urllib.request import urlopen
 
 import pytest
+from tests.settings_browser_helpers import open_settings
 
 from tests.candidate_checkout import candidate_checkout
 from tests.test_claudexor_capability_replay import replay as replay
@@ -104,7 +105,7 @@ def test_capability_line_and_main_notice(capability_ui, width, height, theme):
     page.set_viewport_size({"width": width, "height": height})
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
     page.goto(ui["url"] + "/#settings")
-    page.click('[data-settings-tab="providers"]')
+    open_settings(page, "accounts/codex")
     lines = page.locator("[data-model-capability]")
     lines.first.wait_for()
     assert lines.count() == 2
@@ -132,7 +133,7 @@ def test_capability_line_and_main_notice(capability_ui, width, height, theme):
     (evidence / f"geometry-{stem}.json").write_text(json.dumps(geometry, indent=2), encoding="utf-8")
     page.clock.set_fixed_time(mark["expires_at"])
     page.reload()
-    page.click('[data-settings-tab="providers"]')
+    open_settings(page, "accounts/codex")
     expect(lines).to_have_count(2)
     expect(lines.first).to_contain_text("temporary mark set")
     expect(lines.first).to_contain_text("the next request may recheck it")
@@ -151,7 +152,7 @@ def test_capability_line_and_main_notice(capability_ui, width, height, theme):
     ui["fixture"]["status"]["reads"]["accounts"] = "failed"
     navigate(page, "settings")
     page.reload()
-    page.click('[data-settings-tab="providers"]')
+    open_settings(page, "accounts/codex")
     page.locator('.harness-account-row[data-profile="a"]').wait_for()
     assert page.locator("[data-model-capability]").count() == 0
     ui["fixture"]["status"]["reads"]["accounts"] = "ok"
@@ -161,7 +162,7 @@ def test_capability_line_and_main_notice(capability_ui, width, height, theme):
     marks = profiles.pop("routing_evidence")
     profiles["routing_evidence_read"] = {"state": "failed", "observed_at": marks["capabilities"][0]["observed_at"]}
     page.reload()
-    page.click('[data-settings-tab="providers"]')
+    open_settings(page, "accounts/codex")
     page.locator('.harness-account-row[data-profile="a"]').wait_for()
     assert page.locator("[data-model-capability]").count() == 0
     note = page.locator("#harness-model-marks-note")
@@ -170,7 +171,7 @@ def test_capability_line_and_main_notice(capability_ui, width, height, theme):
     # An older engine advertises no capability rows: the host does not ask and shows nothing.
     profiles.pop("routing_evidence_read")
     page.reload()
-    page.click('[data-settings-tab="providers"]')
+    open_settings(page, "accounts/codex")
     page.locator('.harness-account-row[data-profile="a"]').wait_for()
     assert page.locator("[data-model-capability]").count() == 0
     assert not page.locator("#harness-model-marks-note").is_visible()

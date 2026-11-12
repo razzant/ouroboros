@@ -69,7 +69,7 @@ const state = {
     mainSeenRevision: null,
     mainSeenLoaded: false,
     activePage: 'chat',
-    settingsActiveSubtab: 'providers',
+    settingsPath: '',
     dashboardActiveSubtab: 'logs',
     beforePageLeave: null,
     // Project-thread isolation SSOT for the live WS fan-out. Initialized to an
@@ -223,18 +223,14 @@ async function showPage(name, options = {}) {
     return true;
 }
 
-async function openSettingsTab(tabName) {
-    if (!await showPage('settings')) return false;
-    if (settingsControls && typeof settingsControls.activateTab === 'function') {
-        settingsControls.activateTab(tabName);
-    }
-    return true;
+async function openSettings(path = '', options = {}) {
+    return settingsControls ? settingsControls.open(path, options) : showPage('settings');
 }
 
-async function openDashboardTab(tabName) {
+async function openDashboardTab(tabName, options = {}) {
     if (!await showPage('dashboard')) return false;
     if (dashboardControls && typeof dashboardControls.activateTab === 'function') {
-        dashboardControls.activateTab(tabName);
+        dashboardControls.activateTab(tabName, options);
     }
 }
 // A line elsewhere that points at a Dashboard tab (a quiet place's sheet at Consciousness) asks for it by this event.
@@ -594,7 +590,7 @@ const ctx = {
     state,
     showPage,
     onReadingLatest: () => void acknowledgeMainAfterPaint(),
-    openSettingsTab,
+    openSettings,
     openDashboardTab,
     isProjectOpening: () => projectPanelOpeningSince > 0,
     stateSnapshots,
@@ -659,7 +655,7 @@ const visibleDraft = draftPort(() => projectInstances.get(navState.activeProject
 bridgeContributedActions({ store: contributions, draft: visibleDraft });
 registerMessageShare();
 startVoice({ hosts: startHostModules({ store: contributions, draft: visibleDraft }) });
-startConversations({ hosts: startHostModules(), openSettings: openSettingsTab, roomOptions: projectRoomOptions({ rows: () => lastProjectRows, nav: navState, state, title: projectPanelTitle, freshProjectRow, openProjectPanel, showPage, putAway: (pid) => rooms.putAway(pid) }) });
+startConversations({ hosts: startHostModules(), openSettings, roomOptions: projectRoomOptions({ rows: () => lastProjectRows, nav: navState, state, title: projectPanelTitle, freshProjectRow, openProjectPanel, showPage, putAway: (pid) => rooms.putAway(pid) }) });
 // The starts the previous page did not outlive are named in the chat that owns each item (holds.js, POST /api/ui/holds).
 reportFoundHolds(getHolds(), (payload) => apiClient.reportUiHolds(payload));
 
@@ -1346,8 +1342,8 @@ ws.on('projects_changed', (msg) => {
 // The page's state read: every 3 s while a room is on screen (Main or a Project) in a shown page, every 20 s anyway.
 setInterval(function pollShownRoomState() { if (state.activePage === 'chat' && !document.hidden) refreshProjectsNav(false); }, 3000);
 setInterval(() => refreshProjectsNav(false), 20000);
-settingsControls = initSettings(ctx);
-dashboardControls = initDashboard(ctx);
+settingsControls = initSettings({ ...ctx, layers });
+dashboardControls = initDashboard({ ...ctx, layers });
 initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs') });
 evolution = initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution') });
 initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates') });

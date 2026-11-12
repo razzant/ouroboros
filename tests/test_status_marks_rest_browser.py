@@ -162,7 +162,7 @@ def test_skills_jobs_in_flight_are_neutral_and_the_owner_move_amber(subscription
                     animation: getComputedStyle(mark.querySelector('i')).animationName } }];
         }));
         const pill = getComputedStyle(host.querySelector('.app-tab-pill'));
-        const track = host.querySelector('.skills-card[data-skill="locked"] .skills-switch.is-locked .skills-switch-track');
+        const track = host.querySelector('.skills-card[data-skill="locked"] .ui-switch.is-locked .ui-switch-track');
         return { chips, pill: { size: pill.fontSize, family: pill.fontFamily, color: pill.color, background: pill.backgroundColor },
             track: getComputedStyle(track).backgroundColor };
     }""", rows)
