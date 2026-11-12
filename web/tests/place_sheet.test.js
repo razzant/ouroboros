@@ -533,6 +533,10 @@ test('while consciousness is off the sheet says the place only hears: Active\'s 
     // «A checked kind calls it here at once» stays the rule; the exception under it says Off suspends it, as Paused does.
     assert.match(active, /While consciousness is off, nothing here wakes it\./);
     assert.doesNotMatch(placeSheetBodyHtml(slack), /While consciousness is off/);
+    // Beside it the one way to Start: the door to Dashboard › Consciousness, never a second Start; only while Off.
+    assert.match(active, /data-place-act="open-consciousness"[^>]*>Consciousness ›</);
+    assert.doesNotMatch(active, /data-place-act="start"|>Start</);
+    assert.doesNotMatch(placeSheetBodyHtml(slack), /open-consciousness/);
     const silent = placeSheetBodyHtml(off(community));
     assert.match(silent, /While consciousness is off, nothing here wakes it\./);
     assert.doesNotMatch(silent, /these still wake it to read and think/);
