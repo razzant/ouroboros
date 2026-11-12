@@ -48,6 +48,12 @@ def test_shell_sheets_key_structure_off_the_layout_attribute_not_width_queries()
     assert 'html[data-layout="stack"] #app' in css
     assert 'html[data-layout="stack"] #primary-sidebar' in css
     assert 'html[data-layout="stack"] .project-panel' in css
+    # The docked sidebar keeps its hairline beside the room; the stack drawer lies under the room card, whose curved
+    # edge is its edge, so it has none (owner 12.11: a straight line doubled the card's edge).
+    desk = css.split("\n#primary-sidebar {", 1)[1].split("}", 1)[0]
+    assert "border-right: 1px solid" in desk, desk
+    drawer = css.split('\nhtml[data-layout="stack"] #primary-sidebar {', 1)[1].split("}", 1)[0]
+    assert "border-right: 0;" in drawer, drawer
     # Docked, the Project panel keeps its own width beside Main and never covers the sidebar (owner 18.10, 4A): it
     # is placed in the columns after the sidebar's, and its cap is that area.
     placed = css.split('html[data-layout="docked"] .project-panel-backdrop,\nhtml[data-layout="docked"] .project-panel {', 1)[1]

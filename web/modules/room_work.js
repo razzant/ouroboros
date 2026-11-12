@@ -21,6 +21,7 @@ import { createStartFailure, startFailureCause } from './host_starting_status.js
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
 import { fmt, tr } from './i18n.js';
+import { questionPresentation } from './question_presentation.js';
 import { taskCancelPending } from './log_events.js';
 import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
@@ -262,6 +263,13 @@ export function createRoomWork({
         const said = clean(bubble?.querySelector?.('.message')?.textContent);
         if (said) return { text: fmt('Reply to “{text}”', { text: clip(said, REPLY_CHARS) }),
             full: fmt('Reply to “{text}”', { text: said }), source: 'owner_message' };
+        if (item.kind === 'question') {
+            // The question's own words name its row; a row that carries none (Main's own question) keeps a plain name.
+            // Its opening words, plain and bounded: the card it leads to holds the whole question.
+            const words = clip(clean(item.said?.question).replace(/\*\*|__|`/g, ''), REPLY_CHARS);
+            return words ? { text: words, full: words, source: 'question' }
+                : named(tr('room_work.name.question', 'Question'), 'neutral');
+        }
         const when = clock(item.startedAt);
         if (item.kind === 'task') return named(when ? fmt('Task started {time}', { time: when }) : tr('room_work.name.task', 'Task'), 'neutral');
         // A turn with no owner message of its own (a consciousness wake-up) is not a reply.
@@ -296,8 +304,34 @@ export function createRoomWork({
                 view: { word: tr('room_work.sending', 'Sending…'), secondary: '', tone: 'live', mark: 'moving', owner: false,
                     outcome: '', focus: '' } });
         }
-        // A Project with nothing else keeps its way to the latest represented root card.
-        if (asPanel && !items.length) {
+        // Every question of the room's turn is reachable from the list: a confirmed work's row leads to its first one
+        // (decorate), and each further question of that work, one whose work is unconfirmed (its row offers no way
+        // there) or one no listed work holds (its work ended), has its own row.
+        const linked = new Set(listOf(state.works).filter((work) => work.confirmed !== false)
+            .map((work) => workQuestion(work)).filter(Boolean).map((ask) => `${ask.taskId}:${ask.quizId}`));
+        for (const entry of current ? listOf(state.room?.turn) : []) {
+            if (!['question', 'open_question'].includes(entry?.kind) || !entry.task_id) continue;
+            if (entry.work_id ? !entry.quiz_id : entry.kind !== 'open_question') continue;
+            const ask = { taskId: String(entry.task_id), quizId: String(entry.quiz_id || '') };
+            const key = `${ask.taskId}:${ask.quizId}`;
+            if (linked.has(key) || items.some((item) => item.id === `question:${key}`)) continue;
+            // The question's own row, held with its item (work_status.reconcileWorkState): its card's words say its
+            // state here too, never new ones.
+            const said = state.questions?.get?.(key);
+            // Without its row, a question its task stands on waits for the answer and an answer whose delivery is
+            // unknown says so (the item's code); any other is plainly unanswered.
+            const fallback = entry.kind === 'question' ? { quiz_state: 'open', wait_for_answer: true }
+                : entry.code === 'delivery_unknown'
+                    ? { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'late_answer_delivery_unknown' } }
+                    : { quiz_state: 'open' };
+            items.push({ id: `question:${key}`, kind: 'question', work: null, record: null,
+                confirmed: true, online: true, cmid: '', startedAt: 0, episode: ask.taskId, attempt: null,
+                activity: 'waiting', ask, said,
+                view: { word: questionPresentation(said || fallback).status, secondary: '', tone: 'held',
+                    mark: 'none', owner: true, outcome: '', focus: '' } });
+        }
+        // A Project with no work listed keeps its way to the latest represented root card, beside any question row.
+        if (asPanel && !items.some((item) => item.kind !== 'question')) {
             const latest = latestRepresentedRoot([...records.values()]);
             if (latest) items.push({ id: latest.groupId, kind: 'task', work: null, record: latest, latest: true,
                 view: cardRowView(desiredLiveCardPhase(latest, replayTerminalPhase(latest)), { settled: latest.finished, closing: closingLine(latest) }),
@@ -327,7 +361,7 @@ export function createRoomWork({
             card: Boolean(card), target: card || bubble, loaded: Boolean(card || bubble),
             startedAt: item.startedAt, cmid: item.cmid, controls,
             canMenu: Boolean(controls && workMenuActions(controls).length), resume: controls?.resume || '',
-            question: item.confirmed ? workQuestion(work) : null, tone: view.tone,
+            question: item.confirmed ? item.ask || workQuestion(work) : null, tone: view.tone,
         };
     }
 
@@ -415,6 +449,7 @@ export function createRoomWork({
         if (attempt) lines.push([row.work.last_resume.by?.actor === 'host' ? tr('room_work.detail.last_start', 'Last start')
             : tr('room_work.detail.last_resume', 'Last Resume'), attempt]);
         const what = row.kind === 'pending' ? tr('room_work.what.pending', 'Your message, being sent')
+            : row.kind === 'question' ? tr('room_work.what.question', 'A question that waits for you')
             : row.kind === 'direct' ? (row.cmid ? tr('room_work.what.reply', 'A reply to your message')
                 : tr('room_work.what.turn', 'A turn in this chat'))
                 : tr('room_work.what.task', 'A task');
@@ -475,6 +510,8 @@ export function createRoomWork({
 
     function activateRow(row) {
         if (!row) return;
+        // A question's own row leads where its View question does: it is no task whose message history could find.
+        if (row.kind === 'question') { if (row.question) void viewQuestion(row); return; }
         if (row.target?.isConnected) navigate(row);
         else if (row.kind === 'pending') return;
         else if (history && !['absent', 'moved', 'loading'].includes(row.lookup)) void reveal(row);
@@ -491,9 +528,11 @@ export function createRoomWork({
         const view = viewFor(row);
         view.row = row;
         const { el, main } = view;
-        const navigable = Boolean(row.target?.isConnected);
+        const asks = row.kind === 'question' && Boolean(row.question);
+        const navigable = asks || Boolean(row.target?.isConnected);
         // An unloaded row asks the room's history on its press: until then it claims nothing about where its message is.
-        const lookable = !navigable && row.kind !== 'pending' && Boolean(history) && !['absent', 'moved'].includes(row.lookup);
+        const lookable = !navigable && !['pending', 'question'].includes(row.kind) && Boolean(history)
+            && !['absent', 'moved'].includes(row.lookup);
         // Opened details survive a census change; a press then asks again where its message is.
         const detailable = !navigable && row.kind !== 'pending' && (!history || Boolean(row.lookup) || expanded.has(row.key));
         const isOpen = detailable && expanded.has(row.key);
@@ -507,8 +546,8 @@ export function createRoomWork({
         if (navigable || lookable || detailable) {
             main.setAttribute('role', 'button');
             main.tabIndex = 0;
-            main.setAttribute('aria-label', navigable
-                ? fmt(row.card ? 'Go to task: {name}, {state}' : 'Go to message: {name}, {state}', { name: full, state })
+            main.setAttribute('aria-label', asks ? fmt('View question: {name}, {state}', { name: full, state })
+                : navigable ? fmt(row.card ? 'Go to task: {name}, {state}' : 'Go to message: {name}, {state}', { name: full, state })
                 : lookable ? fmt('Open: {name}, {state}', { name: full, state })
                     : fmt('Details: {name}, {state}', { name: full, state }));
             if (row.lookup === 'loading') main.setAttribute('aria-busy', 'true');
@@ -523,11 +562,12 @@ export function createRoomWork({
         } else {
             for (const name of ['role', 'tabindex', 'aria-label', 'aria-expanded', 'aria-controls', 'aria-busy']) main.removeAttribute(name);
         }
-        main.dataset.target = navigable ? 'card' : lookable ? 'history' : detailable ? 'details' : 'none';
+        main.dataset.target = asks ? 'question' : navigable ? 'card' : lookable ? 'history' : detailable ? 'details' : 'none';
         // The whole name is in the DOM; CSS clamps it to two lines, focus and open details show it whole.
         if (view.full !== full) { view.full = full; view.nameEl.textContent = full; }
-        // The work's shape in its word's ink; something in it that waits for the owner is the amber dot in its place
-        // (a pause is not the owner's move), and a known outcome is a dot in the outcome's tone beside its word.
+        // The work's shape in its word's ink; something in it that waits for the owner takes the owner's hue as
+        // status_mark.js markView draws it (a pause is not the owner's move), and a known outcome is a dot in the
+        // outcome's tone beside its word.
         paintStatusMark(view.mark, markView({ mark: row.view.mark, owner: row.view.owner, outcome: row.view.outcome }));
         if (view.word.textContent !== row.view.word) view.word.textContent = row.view.word;
         const secondary = String(row.view.secondary || '');
@@ -767,9 +807,9 @@ export function createRoomWork({
         trigger.title = text;  // the whole status, never clipped away (an extra, not the only path)
         caret.hidden = !listed;
         // The work's shape in the word's ink; while something in the room waits for the owner (a question, or an action
-        // only the owner takes) the amber dot takes its place and the word keeps its own ink: Working with a question
-        // elsewhere stays Working. A pause by the owner or by Ouroboros is not the owner's move. The room at rest says
-        // Online beside its green dot.
+        // only the owner takes) the mark takes the owner's hue as status_mark.js markView draws it, and the word keeps
+        // its own ink: Working with a question elsewhere stays Working. A pause by the owner or by Ouroboros is not the
+        // owner's move. The room at rest says Online beside its green dot.
         const owner = statusBadge.dataset.owner === '1';
         const reshaped = paintStatusMark(mark, tone === 'failed' ? START_FAILED
             : tone === 'online' && !owner ? AT_REST : markView({ mark: statusBadge.dataset.mark, owner }));

@@ -4158,6 +4158,7 @@ html[data-layout="stack"] #primary-sidebar {
     inset: 0 auto 0 0;
     z-index: var(--z-sidebar);  /* under the room: the room is the card that moves */
     width: var(--drawer-w);
+    border-right: 0;  /* the room card's curved edge is the drawer's edge; the desk's hairline would draw a straight double */
     /* Closed it lies under the room a little to the left and faded (p = 0), and comes up from there as the room
        slides away; it closes in 280ms and opens in 340ms on the iOS sheet curve, or at the finger's speed after a
        drag (--drawer-settle, drawer_drag.js). */
