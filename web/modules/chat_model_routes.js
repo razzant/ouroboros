@@ -141,7 +141,7 @@ export function buildModelIndex({ catalog = {}, connections = null } = {}) {
         // Any account that can serve it makes the row available; unavailable only when every account says so.
         row.available = row.states.has('available') ? true
             : row.states.size === 1 && row.states.has('unavailable') ? false : null;
-        // The catalogue's price, while every item of the row states that same one (only OpenRouter's rows state any).
+        // The catalog's price, while every item of the row states that same one (only OpenRouter's rows state any).
         row.price = row.prices.size === 1 ? [...row.prices][0] : '';
         delete row.states;
         delete row.prices;

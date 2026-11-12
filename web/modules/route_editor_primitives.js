@@ -291,16 +291,16 @@ function routeCatalogItems(route, items = []) {
         && (!pin || !item?.credential_profile_id || item.credential_profile_id === pin));
 }
 
-// A dollar figure as the catalogue states it, to four decimals and in cents at least: $4, $2.50, $0.075.
+// A dollar figure as the catalog states it, to four decimals and in cents at least: $4, $2.50, $0.075.
 function usd(value) {
     const [whole, fraction = ''] = String(Math.round(value * 1e4) / 1e4).split('.');
     return `$${whole}${fraction ? `.${fraction.padEnd(2, '0')}` : ''}`;
 }
 
 /**
- * A catalogue's published price (`ModelCatalogItem.price`) in the owner's words, USD per 1M tokens: `$4 in / $20 out`;
+ * A catalog's published price (`ModelCatalogItem.price`) in the owner's words, USD per 1M tokens: `$4 in / $20 out`;
  * where input length changes it, each figure's range (`$2–4 in / $10–15 out`); `free` when every figure is zero;
- * '' when the catalogue states none. `unit` names the unit. Words only: a price never sorts, filters or admits a model.
+ * '' when the catalog states none. `unit` names the unit. Words only: a price never sorts, filters or admits a model.
  */
 export function priceWords(price, { unit = false } = {}) {
     const stated = (figure) => Number.isFinite(figure) && figure >= 0;
@@ -322,7 +322,7 @@ export function priceWords(price, { unit = false } = {}) {
  * alias resolves to (`resolved_model`, shown only while every supplying row agrees)
  * and a row known only from the engine's frozen list (`origin: "hint"` on every
  * supplying row; absent origin is live). The value stays the row id either way.
- * The catalogue's price travels apart from the label, as `meta`, while every
+ * The catalog's price travels apart from the label, as `meta`, while every
  * supplying row states that same price.
  */
 export function catalogModelOptions(items = []) {

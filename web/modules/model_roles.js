@@ -352,7 +352,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const rowCatalog = catalogs.get(catalogKey(row));
             // A subscription row reports its own account read in full; an API row
             // sits under the section banner, so it keeps to the compact form. An
-            // API row whose own catalogue (OpenRouter's) states a price says it.
+            // API row whose own catalog (OpenRouter's) states a price says it.
             const own = Boolean(sourceId(row) && rowCatalog);
             const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !own });
             const choosing = !row.local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);

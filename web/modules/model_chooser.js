@@ -6,7 +6,7 @@ import { bindModelProgramFooter } from './model_program.js';
 
 const choosers = new WeakMap();
 
-/** `meta` is a fact beside the name (a catalogue price): shown apart, never part of the label or the search. */
+/** `meta` is a fact beside the name (a catalog price): shown apart, never part of the label or the search. */
 export function modelOptions(items = []) {
     const seen = new Set();
     return items.map((item) => typeof item === 'string' ? { value: item, label: item }
