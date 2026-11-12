@@ -10,6 +10,7 @@ belong to ``openrouter_cost`` and the accounting writer, never normalization.
 from __future__ import annotations
 
 import logging
+from math import isfinite
 from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.provider_models import normalize_model_identity
@@ -115,6 +116,35 @@ def openrouter_price_row(model: Dict[str, Any]) -> Optional[Tuple[Optional[float
             except (TypeError, ValueError):
                 log.warning("Skipping malformed pricing override for %s", model_id)
     return PricingSchedule(row, tuple(tiers)) if tiers else row
+
+
+def openrouter_catalog_price(model: Any) -> Optional[Dict[str, Any]]:
+    """The price a model picker shows for one OpenRouter catalog record, USD per 1M tokens.
+
+    ``{"input", "output"}``, plus ``tiers`` (``[{"min_prompt_tokens", "input",
+    "output"}]``) when the price changes with input length: the row accounting
+    reads (``openrouter_price_row``). None when the record states no complete
+    token price, adds a per-request fee, or holds an unreadable, negative or
+    non-finite figure: the picker then shows no price, never a partial one.
+    """
+    pricing = model.get("pricing") if isinstance(model, dict) else None
+    if not isinstance(pricing, dict):
+        return None
+    try:
+        # A per-request fee is part of every call's price, which per-token figures would not say.
+        if pricing.get("request") is not None and float(pricing["request"]) != 0:
+            return None
+        row = openrouter_price_row(model)
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    if row is None:
+        return None
+    tiers = [{"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]}
+             for minimum, tier in getattr(row, "tiers", ())]
+    figures = [row[0], row[3], *(tier[key] for tier in tiers for key in ("input", "output"))]
+    if not all(isfinite(figure) and figure >= 0 for figure in figures):
+        return None
+    return {"input": row[0], "output": row[3], **({"tiers": tiers} if tiers else {})}
 
 
 def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Optional[float], ...]]:
