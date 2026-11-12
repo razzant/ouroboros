@@ -573,19 +573,19 @@ export function bareRowStatusText(accountsRead, { accountsUnsupported = false } 
     if (accountsUnsupported) return ACCOUNTS_UNSUPPORTED_STATUS;
     if (accountsRead === READ_OK) return 'No account connected';
     if (accountsRead === READ_UNREAD) return 'Checking…';
-    if (accountsRead === READ_TRANSPORT) return 'Not checked — the status request did not complete';
-    if (accountsRead === READ_FAILED) return 'Not checked — the daemon did not answer this read';
+    if (accountsRead === READ_TRANSPORT) return 'Not checked: the status request did not complete';
+    if (accountsRead === READ_FAILED) return 'Not checked: the daemon did not answer this read';
     // The coarse state: the answer did not complete, and it does not say which
     // read was the one that failed — so the row claims nothing beyond that.
     // Without this branch a legacy payload's global refusal fell through to
     // "never asked", which is the opposite of what happened.
-    if (accountsRead === READ_INDETERMINATE) return 'Not checked — the status answer did not complete';
+    if (accountsRead === READ_INDETERMINATE) return 'Not checked: the status answer did not complete';
     // NOT READ says nobody asked; it does NOT say why. "the agent daemon is not
     // running" named a cause this row cannot see — a runtime awaiting repair, a
     // foreign daemon on the stale port and an ownership problem all arrive here
     // as the same unread facet, and the tab's ONE banner is the place that
-    // explains which of them it is.
-    return 'Not checked — the agent daemon was never asked';
+    // explains which of them it is. So the row says only that it has not happened yet.
+    return 'Not checked yet';
 }
 
 export function familyStatus(rows, { accountsRead = READ_OK, accountsUnsupported = false } = {}) {

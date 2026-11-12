@@ -149,16 +149,16 @@ test('the wake range is one row of two numbers; a first number above the second 
         OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20, OUROBOROS_MODEL_CONSCIOUSNESS: '', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'light',
         OUROBOROS_POST_TASK_EVOLUTION: 'true', OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:3' }), {
         OUROBOROS_CONSCIOUSNESS_AUTONOMY: AUTONOMY_LEVELS[1].note, OUROBOROS_BG_WAKEUP: 'It picks a moment between 5 minutes and 2 hours.',
-        'consciousness-allowance': '$20 a day', 'consciousness-model': 'Main model',
+        'consciousness-allowance': '$20', 'consciousness-model': 'Main model',
         'consciousness-safety': SAFETY_LEVELS.find((level) => level.value === 'light').label, 'consciousness-evolution': 'Every 3 tasks' });
     assert.deepEqual(words({ OUROBOROS_BG_WAKEUP_MIN: 900, OUROBOROS_BG_WAKEUP_MAX: 900, OUROBOROS_CONSCIOUSNESS_DAILY_USD: '12.5',
         OUROBOROS_MODEL_CONSCIOUSNESS: 'anthropic::claude-test', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'off',
         OUROBOROS_POST_TASK_EVOLUTION: false, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:3' }), {
         OUROBOROS_CONSCIOUSNESS_AUTONOMY: '', OUROBOROS_BG_WAKEUP: 'It wakes every 15 minutes.',
-        'consciousness-allowance': '$12.50 a day', 'consciousness-model': 'claude-test', 'consciousness-safety': 'Off', 'consciousness-evolution': 'Off' });
+        'consciousness-allowance': '$12.50', 'consciousness-model': 'claude-test', 'consciousness-safety': 'Off', 'consciousness-evolution': 'Off' });
     assert.deepEqual(words({}), { OUROBOROS_CONSCIOUSNESS_AUTONOMY: '', OUROBOROS_BG_WAKEUP: '', 'consciousness-allowance': '',
         'consciousness-model': 'Main model', 'consciousness-safety': '', 'consciousness-evolution': '' },
-    'a value that was not read is not said: no "$0 a day", no level and no "Off" the document did not carry');
+    'a value that was not read is not said: no "$0", no level and no "Off" the document did not carry');
     // The Safety door speaks the scale's one list, whatever its words are, and the evolution door the choice's own names.
     for (const level of SAFETY_LEVELS) assert.equal(words({ OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: level.value })['consciousness-safety'], level.label);
     assert.deepEqual([[true, 'llm'], ['1', 'every_n:1'], [true, 'every_n:12'], ['false', 'llm']].map(whenName),
@@ -202,7 +202,9 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     assert.deepEqual(range.querySelectorAll('[data-setting-control]').map((input) => input.value), ['300', '7200']);
     assert.equal(range.querySelectorAll('.settings-row-unit').map((unit) => unit.textContent).join(' '), 'to s', '[300] to [7200] s');
     assert.equal(range.querySelector('[data-row-caption]').textContent, 'It picks a moment between 5 minutes and 2 hours.');
-    assert.equal(rowNode(card, 'consciousness-allowance').querySelector('[data-row-value]').textContent, '$20 a day');
+    // One name for one limit: the door carries the name its row has on Costs (a rolling 24 hours), and the sum alone.
+    assert.equal(rowNode(card, 'consciousness-allowance').querySelector('.ui-row-title').textContent, rowById('OUROBOROS_CONSCIOUSNESS_DAILY_USD').name);
+    assert.equal(rowNode(card, 'consciousness-allowance').querySelector('[data-row-value]').textContent, '$20');
     assert.equal(rowNode(card, 'consciousness-model').querySelector('[data-row-value]').textContent, 'Main model');
     assert.equal(rowNode(card, 'consciousness-places').querySelector('[data-row-value]'), null, 'a door with nothing to say says nothing');
     assert.deepEqual(['consciousness-safety', 'consciousness-evolution'].map((id) => [rowNode(card, id).querySelector('.ui-row-title').textContent,

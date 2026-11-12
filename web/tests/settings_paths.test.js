@@ -144,3 +144,44 @@ test('an address no page registers lands on the home with its last part searched
     await settle();
     assert.deepEqual(pages(), ['test-known']);
 });
+
+test('words the shell searched are spent by the first press on their results; words the owner typed stay', async (t) => {
+    const { content, state, showPage } = world(t);
+    const dashboard = [];
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {} });
+    const field = () => content.querySelector('#settings-search');
+    const results = () => content.querySelectorAll('[data-settings-result]').map((row) => row.dataset.settingsResult);
+    const press = async (id) => {
+        const home = content.querySelector('[data-settings-home]');
+        await home.fire('click', { target: content.querySelectorAll('[data-settings-result]').find((row) => row.dataset.settingsResult === id) });
+        await settle();
+    };
+
+    // An old address: its word is searched for the owner, who presses the row it became.
+    await controls.open('old-tabs/budget');
+    await settle();
+    assert.equal(field().value, 'budget');
+    assert.ok(results().includes('home:costs'), String(results()));
+    await press('home:costs');
+    assert.deepEqual(dashboard.at(-1), ['costs', { row: '', back: '' }], 'the door was pressed inside Settings: the tab leads back to the home');
+    // The search did its work: the field is empty and the home shows its rows again, so a return finds no stale results.
+    assert.deepEqual([field().value, results()], ['', []]);
+    assert.ok(content.querySelector('[data-settings-open="models"]'), 'the home\'s own rows are back');
+
+    // Words the owner typed are the owner's: they stay after a press, as they would on any return to the home.
+    field().value = 'budget';
+    await field().fire('input', {});
+    await press('home:costs');
+    assert.equal(field().value, 'budget');
+    assert.ok(results().includes('home:costs'));
+
+    // Searched by the shell, then changed by the owner: the owner's now.
+    await controls.open('old-tabs/budget');
+    await settle();
+    field().value = 'budget limits';
+    await field().fire('input', {});
+    field().value = 'budget';
+    await field().fire('input', {});
+    await press('home:costs');
+    assert.equal(field().value, 'budget');
+});

@@ -72,7 +72,7 @@ test('Models distinguishes an unread Accounts facet from a confirmed empty accou
     assert.match(noAccounts[0].options[0].label, /connect one in Accounts/i);
     const empty = modelSourceGroups({ catalogKnown: true, accountsKnown: true, hasConfiguredAccounts: true });
     assert.match(empty[0].options[0].label, /No model sources listed/);
-    assert.match(empty[0].options[0].label, /refresh Model Catalog/i);
+    assert.match(empty[0].options[0].label, /press Read again in Models/);
     assert.doesNotMatch(empty[0].options[0].label, /connect one in Accounts/i);
     const saved = modelSourceGroups({ current: 'subscription:owner-source' });
     assert.equal(saved[0].options[0].value, 'subscription:owner-source');

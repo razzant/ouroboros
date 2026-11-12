@@ -828,7 +828,11 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
 
 /* The action row: the trigger, then its result as the next sibling, 8px apart. The result keeps one meta line of
    height from the start (reserved, never display: none), so a late word never moves the control or its neighbours;
-   in a narrow container the result wraps under the trigger into that same reserved line. */
+   in a narrow container the result wraps under the trigger into that same reserved line.
+   After two actions or more (Save and Discard changes, Save and Test) the result stands beside them only in a row
+   wide enough for all three: in a narrower one the actions themselves may wrap, and a result that then sat beside
+   the last of them read in a sliver, so there it takes the row's whole width on its own line (its basis outgrows the
+   row; DESIGN "a row too narrow for both gives it its own line"). */
 .ui-action-row {
     display: flex;
     flex-wrap: wrap;
@@ -837,6 +841,7 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
     min-width: 0;
 }
 .ui-action-row > .ui-result { flex: 1 1 var(--result-copy-min-width); }
+.ui-action-row > .btn:not([hidden]) ~ .btn:not([hidden]) ~ .ui-result { flex-basis: max(var(--result-copy-min-width), (30rem - 100%) * 999); }
 /* The result: a status sentence (the meta size, a dot and a word in the tone's ink) with the raw text, if any, behind
    one disclosure. ui_primitives.js setResult writes it; a plain acknowledgement ends by itself, a warning, a needed
    restart or a failure stays until the next result or an edit in the same subject replaces it (DESIGN "Status and

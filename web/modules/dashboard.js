@@ -117,17 +117,19 @@ export function focusSettingRow(panel, id) {
 }
 
 /**
- * The way back to Settings from a tab it opened (PINS §2): a first row that names Settings, above the tab's scroller,
- * drawn as a Settings page draws its own Back (settings.css), and one `page: true` layer, so Escape and the system's
- * Back return there too. Every way of returning leaves a focused field first, so a typed value is saved as it would be
- * on leaving it; leaving the tab or the Dashboard any other way drops the row. Answers `{ show(panel, path), clear() }`.
+ * The way back to Settings from a place a door of Settings opened (PINS §2): a Dashboard tab, or a page of its own
+ * (Circles, Skills: settings.js `leave`). A first row that names Settings, above the place's scroller, drawn as a
+ * Settings page draws its own Back (settings.css), and one `page: true` layer (`id`), so Escape and the system's Back
+ * return there too. Every way of returning leaves a focused field first, so a typed value is saved as it would be on
+ * leaving it; leaving the tab or the page any other way drops the row (its owner calls `clear`). Answers
+ * `{ show(host, path, before), clear() }`: the row goes into `host` before `before`, its first child when none is named.
  */
-export function settingsReturn({ layers = null, openSettings = null } = {}) {
+export function settingsReturn({ layers = null, openSettings = null, id = BACK_LAYER } = {}) {
     let row = null;
     const clear = () => {
         row?.remove();
         row = null;
-        layers?.remove(BACK_LAYER);
+        layers?.remove(id);
     };
     const go = (path) => {
         const field = document.activeElement;
@@ -135,14 +137,14 @@ export function settingsReturn({ layers = null, openSettings = null } = {}) {
         clear();
         void openSettings?.(path);
     };
-    const show = (panel, path) => {
+    const show = (host, path, before = host.firstChild) => {
         clear();
         row = document.createElement('div');
         row.className = 'settings-back-row dashboard-back';
         row.innerHTML = `<button type="button" class="settings-back ui-hit-area" data-dashboard-back aria-label="Back to Settings">${SHELL_ICONS.back}<span>Settings</span></button>`;
         row.querySelector('[data-dashboard-back]').addEventListener('click', () => go(path));
-        panel.insertBefore(row, panel.firstChild);
-        layers?.push({ id: BACK_LAYER, el: panel, page: true, modal: false, focus: false, opener: null, onClose: () => go(path) });
+        host.insertBefore(row, before);
+        layers?.push({ id, el: host, page: true, modal: false, focus: false, opener: null, onClose: () => go(path) });
     };
     return { show, clear };
 }

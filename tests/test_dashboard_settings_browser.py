@@ -236,7 +236,9 @@ def test_every_n_tasks_shows_its_count_and_saves_both_keys_in_one_body(ui):
 def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(ui):
     page, _ = _open(ui, tab="consciousness")
     row = lambda name: f'#page-dashboard [data-setting-row="{name}"]'
-    page.wait_for_function("(s) => document.querySelector(s)?.textContent.includes('$20 a day')", arg=row("consciousness-allowance"))
+    # The allowance door carries the name its limit has on Costs (a rolling 24 hours, never "a day") and the sum alone.
+    page.wait_for_function("(s) => document.querySelector(s)?.querySelector('[data-row-value]')?.textContent === '$20'", arg=row("consciousness-allowance"))
+    assert page.locator(row("consciousness-allowance") + " .ui-row-title").inner_text() == "Consciousness per 24 hours"
     assert page.locator("#page-dashboard [data-cx-summary] :is([data-cx-act='settings'], [data-cx-act='costs'], [data-cx-act='circles'])").count() == 0
     assert page.locator(row("OUROBOROS_CONSCIOUSNESS_AUTONOMY") + " [data-row-caption]").inner_text().startswith("Also acts on its own")
     assert page.locator(row("OUROBOROS_BG_WAKEUP") + " [data-row-caption]").inner_text() == "It picks a moment between 5 minutes and 2 hours."
@@ -358,9 +360,13 @@ def test_no_tab_scrolls_sideways_at_the_floor_and_a_three_way_choice_keeps_one_l
     tops = page.locator(f'#page-dashboard [data-setting-row="OUROBOROS_CONSCIOUSNESS_AUTONOMY"] [data-setting-value]').evaluate_all(
         "(buttons) => buttons.map((button) => Math.round(button.getBoundingClientRect().top))")
     assert len(tops) == 3 and len(set(tops)) == 1, f"Advises, Acts and Evolves stand on one line at 320 px: {tops}"
-    # A number and a door keep their place at the row's end; a range goes under its words.
+    # A number and a door keep their place at the row's end; a range goes under its words. "At the row's end" is
+    # beside the words: right of the name and no lower than the last line under it. (The control is centred against
+    # the name and its line of meaning, so beside three such lines a 34 px number starts a pixel under the name's own
+    # line: its top against the name's bottom said nothing about where it stands.)
     ends = page.evaluate("""() => Object.fromEntries(['OUROBOROS_CONSCIOUSNESS_MAX_TASKS', 'consciousness-allowance', 'OUROBOROS_BG_WAKEUP'].map((id) => {
         const row = document.querySelector(`#page-dashboard [data-setting-row="${id}"]`);
-        const title = row.querySelector('.ui-row-title').getBoundingClientRect(), actions = row.querySelector('.ui-row-actions').getBoundingClientRect();
-        return [id, actions.top < title.bottom]; }))""")
+        const box = (selector) => row.querySelector(selector).getBoundingClientRect();
+        const [title, meta, actions] = [box('.ui-row-title'), box('.ui-row-meta'), box('.ui-row-actions')];
+        return [id, actions.left >= title.right - 1 && actions.top < Math.max(title.bottom, meta.bottom)]; }))""")
     assert ends == {"OUROBOROS_CONSCIOUSNESS_MAX_TASKS": True, "consciousness-allowance": True, "OUROBOROS_BG_WAKEUP": False}, ends

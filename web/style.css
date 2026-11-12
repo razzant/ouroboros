@@ -6444,6 +6444,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .dashboard-settings > .dashboard-card-title { margin-bottom: var(--space-3); }
 .dashboard-settings-lead { margin: calc(-1 * var(--space-2)) 0 var(--space-3); color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .dashboard-settings-fold { margin-top: var(--space-3); }
+.costs-limits .settings-row-field > .ui-control { width: 5.25rem; }  /* money: room for a larger limit than a row's short number */
 /* A card that is one row (data-solo): the row's name is the card's title, its meta the lead, its control the body. */
 .dashboard-settings[data-solo] > .settings-row { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); padding: 0; border: 0; background: none; }
 .dashboard-settings[data-solo] .ui-row-title { font-size: var(--type-section); font-weight: 600; }
@@ -6456,6 +6457,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .settings-back-row.dashboard-back { position: static; flex: none; margin: var(--space-2) 0 var(--space-1); padding: 0 20px; background: none; }
 .dashboard-back + .dashboard-body { padding-top: var(--space-2); }
 html[data-layout="stack"] .settings-back-row.dashboard-back { padding-inline: var(--space-3); }
+/* The same row on a page a door of Settings opened (settings.js `leave`). Circles keeps the Dashboard's shell, so the
+   rules above place it there too; on Skills it stands right under the header, at that page's own gutter. */
+#page-skills > .settings-back-row.dashboard-back { padding-inline: var(--space-5); }
 /* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
    screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
 html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }

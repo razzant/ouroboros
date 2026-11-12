@@ -19,6 +19,7 @@
  * Settings is shown, after a reconnect and when the window is seen again. A page reads and repaints on it for its own
  * path; the row helper never rewrites a field that holds focus or typed text. */
 
+import { settingsReturn } from './dashboard.js';
 import { renderPageHeader } from './page_header.js';
 import { SHELL_ICONS } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
@@ -68,17 +69,29 @@ export function initSettings(ctx = {}) {
     const home = mountSettingsHome(homeEl, { open: (path, options = {}) => go(path, { ...options, fresh: true }),
         ctx: { ...pageCtx, stateSnapshots } });
 
-    // A door out of Settings: a Dashboard tab gets a Back to the page it was opened from; Circles, Skills and Main are
-    // pages of their own (`main:context` shows Main and does nothing else: the Context capsule is the room's).
-    function leave(door, { row = '' } = {}) {
+    // A door out of Settings. Pressed inside Settings (`back`: the path it was pressed on), it gives where it leads a
+    // first-row Back to that path: a Dashboard tab draws it in its panel, a page of its own (Circles, Skills) takes the
+    // same row (dashboard.js settingsReturn) under its header and its tabs, above what scrolls: inside the Dashboard's
+    // shell where the page has one. Leaving that page any other way drops it (onPageShown). A door asked for from
+    // outside Settings (a capsule's `dashboard:costs`) gets no Back: nobody came from Settings. `main:context` shows
+    // Main and does nothing else: the Context capsule is the room's.
+    const doorBack = settingsReturn({ layers, openSettings: (path) => openFromOutside(path), id: 'settings-door-back' });
+    async function leave(door, { row = '', back } = {}) {
         const [kind, name] = door.split(':');
-        if (kind === 'dashboard') return openDashboardTab?.(name, { row, back: state.settingsPath });
-        return showPage?.(kind === 'main' ? 'chat' : name);
+        const inside = typeof back === 'string';
+        if (kind === 'dashboard') return openDashboardTab?.(name, inside ? { row, back } : { row });
+        const left = await showPage?.(kind === 'main' ? 'chat' : name);
+        const landed = left !== false && kind === 'page' && inside ? document.getElementById(`page-${name}`) : null;
+        let first = landed && [...landed.children].find((part) => part.matches('.app-page-header'))?.nextElementSibling;
+        if (first?.matches('.app-page-tabs')) first = first.nextElementSibling;
+        if (first?.matches('.dashboard-shell')) doorBack.show(first, back);
+        else if (first) doorBack.show(landed, back, first);
+        return left;
     }
 
     function go(path = '', { row = '', back = null, fresh = false, opener = null } = {}) {
         const target = String(path || '');
-        if (isDoorId(target)) return leave(target, { row });
+        if (isDoorId(target)) return leave(target, { row, back: state.settingsPath });
         if (target && !settingsPageFor(target)) {
             closeLevels(0);
             home.search((target.split('/').filter(Boolean).pop() || '').replace(/[-_]+/g, ' ').trim());
@@ -250,6 +263,7 @@ export function initSettings(ctx = {}) {
         if (box === homeEl || levels.some((level) => level.el === box)) places.set(box, box.scrollTop);
     };
     const onPageShown = (event) => {
+        doorBack.clear();  // a door's page was left (its own showing came before its row was drawn)
         syncLayers();
         if (event.detail?.page === 'settings' && !opening) announce();
     };
@@ -279,6 +293,7 @@ export function initSettings(ctx = {}) {
         resize?.disconnect();
         disposeFade();
         offReconnect?.();
+        doorBack.clear();
         window.removeEventListener('ouro:page-shown', onPageShown);
         document.removeEventListener('visibilitychange', onVisible);
         home.dispose();

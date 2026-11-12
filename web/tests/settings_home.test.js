@@ -125,6 +125,31 @@ test('a row answers its fact, says when it was not read, and marks the owner\'s 
     assert.equal(homeAnswers({ settings: { _meta: {} } }).permissions.text, 'Not reported');
 });
 
+test('This computer and Updates answer on every host: who can open it where the host starts nothing, the version until the status is read', () => {
+    const listens = (reachability) => ({ _meta: { reachability } });
+    const computer = (facts) => homeAnswers(facts).computer?.text;
+    // The desktop app knows how it starts: that is the answer, whatever listens.
+    assert.equal(computer({ autostart: { state: 'on' }, settings: listens('lan_reachable') }), 'Starts at sign-in');
+    // A browser or a server host starts nothing itself (`unavailable`): the row says who can open it, from the settings read.
+    assert.equal(computer({ autostart: { state: 'unavailable' }, settings: listens('loopback_only') }), 'Open only here');
+    assert.equal(computer({ autostart: { state: 'unavailable' }, settings: listens('lan_reachable') }), 'Open to your network');
+    assert.equal(computer({ autostart: { state: 'unavailable' }, settings: listens('host_ip_unknown') }), 'Open to your network');
+    assert.equal(computer({ autostart: null, settings: listens('loopback_only') }), 'Open only here', 'a failed host read still leaves the settings\' fact');
+    // Nothing is claimed before the host answered (no word that the next read would replace), nor from a document
+    // that does not say what listens; a read that failed with nothing else to say says so.
+    assert.equal(computer({ settings: listens('loopback_only') }), undefined);
+    assert.equal(computer({ autostart: { state: 'unavailable' }, settings: { _meta: {} } }), undefined);
+    assert.equal(computer({ autostart: { state: 'unavailable' } }), undefined);
+    assert.equal(computer({ autostart: null, settings: null }), 'Not checked');
+    assert.equal(computer({ autostart: { state: 'unavailable' }, settings: null }), 'Not checked');
+    // Updates: the running version from the state snapshot until the status read answers, then what that read says.
+    const updates = (facts) => homeAnswers(facts)['dashboard:updates']?.text;
+    assert.equal(updates({ state: { version: '7.10.2' } }), 'Version 7.10.2');
+    assert.equal(updates({ state: {} }), undefined, 'no version, no claim');
+    assert.equal(updates({ state: { version: '7.10.2' }, update: { managed: true, check_ok: true, current_version: '7.10.2' } }), 'Up to date · 7.10.2');
+    assert.equal(updates({ state: { version: '7.10.2' }, update: null }), 'Not checked', 'a status read that failed says so');
+});
+
 test('the card says who it is and its state, never that nothing waits', () => {
     assert.deepEqual(beingState({ connected: true, state: { supervisor_ready: true } }), { text: 'Online', tone: 'ok' });
     assert.deepEqual(beingState({ connected: false, state: { supervisor_ready: true } }), { text: 'Reconnecting…', tone: 'muted' });
@@ -195,9 +220,62 @@ test('the Context door shows Main and nothing else: with a project room open it 
     assert.deepEqual(posts, [], 'no POST /api/owner/context-mode, no write of any kind');
     assert.ok(!env.calls.some((call) => String(call).includes('context-mode')));
     assert.deepEqual(dashboard, []);
-    // A door to a Dashboard tab carries the row and the Settings path to return to.
+    // A door to a Dashboard tab asked for from outside Settings (a capsule's limit door) carries its row and no way
+    // back: nobody came from Settings.
     await controls.open('dashboard:costs', { row: 'TOTAL_BUDGET' });
-    assert.deepEqual(dashboard, [['costs', { row: 'TOTAL_BUDGET', back: '' }]]);
+    assert.deepEqual(dashboard, [['costs', { row: 'TOTAL_BUDGET' }]]);
+});
+
+test('a door pressed inside Settings leads back to it: a Dashboard tab by its path, a page of its own by the same first row', async (t) => {
+    const { env, content, state, shown, showPage } = world(t);
+    const dashboard = [];
+    const layered = [];
+    const layers = { push: (layer) => layered.push(`push ${layer.id}`), remove: (id) => layered.push(`remove ${id}`), batch: (fn) => fn() };
+    // Circles keeps the Dashboard's shell; Skills has its tabs and its own parts under the header.
+    const pageOf = (id, html) => {
+        const page = env.document.createElement('div');
+        page.id = id;
+        page.innerHTML = html;
+        content.appendChild(page);
+        return page;
+    };
+    const circles = pageOf('page-circles', '<div class="app-page-header"></div><div class="dashboard-shell"><div class="dashboard-body"></div></div>');
+    const skills = pageOf('page-skills', '<div class="app-page-header"></div><div class="app-page-tabs"></div><div class="skills-search-chrome"></div><div class="skills-scroll"></div>');
+    const controls = initSettings({ state, ws: env.ws, showPage, layers, openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {} });
+    await controls.open('');
+    await settle();
+    const homeEl = content.querySelector('[data-settings-home]');
+    const press = async (to) => { await homeEl.fire('click', { target: homeEl.querySelector(`[data-settings-open="${to}"]`) }); await settle(); };
+    const backOf = (page) => page.querySelector('.settings-back-row');
+
+    // A Dashboard tab: the path the door was pressed on travels with it, and the tab draws the row.
+    await press('dashboard:costs');
+    assert.deepEqual(dashboard, [['costs', { row: '', back: '' }]]);
+
+    // Circles: the row is the first thing in the Dashboard's shell, above what scrolls, with its one layer.
+    await press('page:circles');
+    assert.deepEqual(shown.at(-1), ['circles']);
+    assert.equal(circles.querySelector('.dashboard-shell').children[0], backOf(circles));
+    assert.equal(backOf(circles).querySelector('[data-dashboard-back]').getAttribute('aria-label'), 'Back to Settings');
+    assert.equal(layered.at(-1), 'push settings-door-back', 'Escape and the system\'s Back return to Settings too');
+    // Its press returns to Settings, and the row and its layer are gone.
+    await backOf(circles).querySelector('[data-dashboard-back]').fire('click', {});
+    await settle();
+    assert.deepEqual([shown.at(-1), backOf(circles)], [['settings'], null]);
+    assert.ok(layered.includes('remove settings-door-back'));
+
+    // Skills: under the header and its tabs, above the page's own first part.
+    await press('page:skills');
+    assert.deepEqual(skills.children.map((part) => part.className),
+        ['app-page-header', 'app-page-tabs', 'settings-back-row dashboard-back', 'skills-search-chrome', 'skills-scroll']);
+    // Leaving that page any other way drops the row.
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'files' } }));
+    assert.equal(backOf(skills), null);
+
+    // The same door asked for from outside Settings shows the page and no way back.
+    await controls.open('page:circles');
+    await settle();
+    assert.deepEqual([shown.at(-1), backOf(circles)], [['circles'], null]);
 });
 
 test('Ask Ouroboros puts the words into Main as an unsent draft and replaces no draft that is there', async () => {

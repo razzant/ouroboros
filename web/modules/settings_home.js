@@ -157,6 +157,14 @@ function updateWords(update) {
 }
 
 const START_WORDS = { on: 'Starts at sign-in', off: 'Starts by hand', other_copy: 'Another copy starts at sign-in', disabled_by_os: 'Start at sign-in is off in the system' };
+/** This computer: how it starts where the host says so (the desktop app); on a host that does not (a browser, a
+ *  server), who can open it, as the settings read reports what listens now. */
+function computerWords(autostart, settings) {
+    if (START_WORDS[autostart?.state]) return fmt(START_WORDS[autostart.state]);
+    const reach = settings?._meta?.reachability;
+    if (reach) return fmt(reach === 'loopback_only' ? 'Open only here' : 'Open to your network');
+    return autostart === null || settings === null ? fmt(NOT_CHECKED) : undefined;
+}
 
 /**
  * The current answer of every home row, keyed by what the row opens: `{ text, owner }`, `owner` when the next move
@@ -192,9 +200,12 @@ export function homeAnswers(facts = {}) {
     say('appearance', device.theme, (theme) => (['system', 'light', 'dark'].includes(theme) ? fmt({ system: 'System', light: 'Light', dark: 'Dark' }[theme]) : undefined));
     say('notifications', device.notify, (prefs) => fmt(!prefs.enabled ? 'Off on this device' : prefs.sound ? 'On, with sound' : 'On, silent'));
     say('voice', device.dictation, (engine) => (engine ? fmt('Dictation: {engine}', { engine }) : fmt('Dictation not chosen')));
-    say('dashboard:updates', update, updateWords);
+    // Until the update status answers, the row says the version that runs, which the state snapshot already holds.
+    if (update === undefined && state?.version) out['dashboard:updates'] = { text: fmt('Version {version}', { version: String(state.version) }), owner: false };
+    else say('dashboard:updates', update, updateWords);
     say('dashboard:storage', storage, (s) => (s.count ? formatBytes(s.count.bytes) : fmt('Not measured')));
-    say('computer', autostart, (host) => (START_WORDS[host?.state] ? fmt(START_WORDS[host.state]) : undefined));
+    const computer = autostart === undefined ? undefined : computerWords(autostart, settings);
+    if (computer !== undefined) out.computer = { text: computer, owner: false };
     return out;
 }
 
@@ -338,7 +349,8 @@ function needRowHtml(row) {
  * Draw the home into `root` and take its presses. `open(path, { row, opener })` opens a row's page or door; `ctx`
  * is the shell's (`ws`, `showPage`, `readSettings`, `stateSnapshots`). Answers `{ mark(path), search(words), refresh(),
  * dispose() }`: `mark` names the row whose page is shown beside the home; `search` puts words into the search field and
- * shows their results; `refresh` reads the facts again and repaints.
+ * shows their results, until the first press on them (words the owner typed stay); `refresh` reads the facts again
+ * and repaints.
  */
 export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatus, ask = openConfirmDialog } = {}) {
     root.innerHTML = `<div class="settings-column settings-home-column">
@@ -358,6 +370,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     let current = '';
     let needs = [];
     let shownQuery = '';
+    let handed = '';  // the words `search` put into the field, until the owner types there
     let serial = 0;
     let busy = '';
     let needsHtml = '';
@@ -484,17 +497,28 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             else if (row) void runNeed(row);
             return;
         }
-        if (hit('[data-settings-ask]')) { void askOuroboros(shownQuery, { showPage: ctx.showPage }); return; }
+        // Words the shell searched for an address no page has (`search`) served their purpose with the first press on
+        // their results: the field is emptied, so a later return shows the home. Words the owner typed stay.
+        const spend = () => {
+            if (!handed || searchEl.value !== handed) return;
+            const held = listEl.contains(root.ownerDocument?.activeElement);  // beside the page it opened, the pressed row keeps the focus
+            searchEl.value = handed = '';
+            paintList();
+            if (held) listEl.querySelector('[aria-current="page"]')?.focus?.({ preventScroll: true });
+        };
+        if (hit('[data-settings-ask]')) { void askOuroboros(shownQuery, { showPage: ctx.showPage }); spend(); return; }
         const row = hit('[data-settings-open]');
         if (!row || !root.contains(row)) return;
         const found = row.dataset.settingsResult ? searchSettings(shownQuery).find((entry) => entry.id === row.dataset.settingsResult) : null;
         open(row.dataset.settingsOpen, { row: found?.row || '', opener: row });
+        spend();
     };
+    const onType = () => { handed = ''; paintList(); };
     // A setting saved while the home is on screen may start or end a wait for a restart: the document is read again.
     const onSaved = () => { if (root.getClientRects?.().length) void read('settings', serial); };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
     root.addEventListener('click', onClick);
-    searchEl.addEventListener('input', paintList);
+    searchEl.addEventListener('input', onType);
     globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
     paint();
     return {
@@ -503,7 +527,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             paintRows();
         },
         search(words) {
-            searchEl.value = String(words || '');
+            searchEl.value = handed = String(words || '');
             paintList();
             searchEl.parentElement?.scrollIntoView?.({ block: 'start' });
         },
@@ -512,7 +536,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             serial += 1;
             offStore();
             root.removeEventListener('click', onClick);
-            searchEl.removeEventListener('input', paintList);
+            searchEl.removeEventListener('input', onType);
             globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
         },
     };
