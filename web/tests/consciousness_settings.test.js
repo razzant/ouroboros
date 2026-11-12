@@ -1,6 +1,7 @@
-// The owner's consciousness, places and safety surfaces in Settings, read against the contract's shapes
-// (fixtures/consciousness_contract.json): the words, the one client module, the Safety Supervisor section and
-// its owner-only saves, the Agents second-check mark and the Consciousness section.
+// The owner's consciousness, places and safety words, read against the contract's shapes
+// (fixtures/consciousness_contract.json): the words, the one client module, the facts Settings says beside the two
+// Safety levels (settings_safety.js) and the Agents second-check mark. The two levels and Your rules as rows and a
+// page are in settings_plain_pages.test.js.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
@@ -12,18 +13,9 @@ import {
     SAFETY_MODEL_KEYS, connectPlace, markRecheckRow, normalizeConsciousness, normalizePlacesResponse, parseRoster,
     recheckFromSettings, saveCheckerSettings, saveSafetyLevel, saveSafetyRules, updatePlace, disconnectPlace,
 } from '../modules/consciousness_api.js';
-import {
-    agentRowHandle, applySafetySettings, bindSafetySettings, checkerSaveEffect, checkerTabsText, checkerText, safetyOwnerDraft,
-    safetySectionHtml, refreshSafetySkipCounter,
-    saveSafetyChecker, saveSafetyOwnerChanges, secondCheckText, takeCheckerChanges,
-} from '../modules/settings_safety.js';
+import { agentRowHandle, refreshSafetySkipCounter, safetyFacts, secondCheckWords } from '../modules/settings_safety.js';
 import { chooseRecheckRow, recheckDraft, recheckMarkHtml, syncRecheckState } from '../modules/safety_recheck.js';
-import {
-    bindConsciousnessSettings, consciousnessModelText, consciousnessSectionHtml,
-} from '../modules/settings_consciousness.js';
 import { parseAvailableSubagentsSetting, buildAvailableSubagentsSetting } from '../modules/subagents_settings.js';
-import { setup, NodeStub } from './dashboard_dom_fixture.js';
-import { APP_SETTINGS_ORIGIN, apiClient } from '../modules/api_client.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
 
@@ -47,8 +39,10 @@ test('the owner names stand with their notes; stored values never change', () =>
     assert.equal(AUTONOMY_LEVELS[2].note, 'Also changes itself: its own code, its settings, connecting new places.');
     assert.deepEqual(PLACE_STATES.map((state) => [state.value, state.label]), [['active', 'Active'], ['silent', 'Silent'], ['paused', 'Paused']]);
     assert.equal(SILENT_CARD, "Writes through this connector's declared tools and delivery queue are blocked. Scripts, browser actions and unintegrated code may still write.");
-    assert.deepEqual(SAFETY_LEVELS.map((level) => level.label), ['Off', 'Light', 'Full']);
-    assert.equal(SAFETY_LEVELS[1].note, 'A second model checks steps that reach other people and services: messages, posts, skills, connectors, starting work. Not shell commands.');
+    // The Safety scale is named by what is read before it runs (owner, 11 Nov 2026); stored off / light / full.
+    assert.deepEqual(SAFETY_LEVELS.map((level) => [level.value, level.label]), [['off', 'Off'], ['light', 'Outgoing'], ['full', '+ Commands']]);
+    assert.equal(SAFETY_LEVELS[1].note, 'Messages, posts, skills, connectors and starting work are read first.');
+    assert.equal(SAFETY_LEVELS[2].note, 'Shell commands and scripts are read first too. File edits are not.');
 });
 
 test('absent money is the dash; a known zero and a known amount are said; durations need both ends', () => {
@@ -124,110 +118,77 @@ test('a refused write says the server\'s words and saves nothing in the browser'
     } finally { stub.restore(); }
 });
 
-test('Safety Supervisor: two rows of Off · Light · Full, the short copy, the rules and the honesty lines', () => {
-    const html = safetySectionHtml();
-    assert.match(html, /A second model judges a step before it runs\. Your work: what you asked for\. Consciousness: what it does on its own, places included\./);
-    assert.match(html, /<label>Your work<\/label>\s*<input id="s-safety-mode" type="hidden"/);
-    assert.match(html, /<label>Consciousness<\/label>\s*<input id="s-consciousness-safety-mode" type="hidden"/);
-    const order = [...html.matchAll(/data-effort-value="(\w+)"/g)].map((match) => match[1]);
-    assert.deepEqual(order, ['off', 'light', 'full', 'off', 'light', 'full']);
-    assert.match(html, /data-policy-state="supervisor_consciousness"/);
-    assert.match(html, />Check consciousness fully</);
-    assert.match(html, /Not measured yet: no replay of real checks exists\./);
-    assert.match(html, /Ouroboros and the Safety Supervisor read these in every task and check\. Rules for one place live in that place's notes\./);
-    assert.match(html, /outside Cyber Pro, Ouroboros cannot lower its own checks/);
-    assert.match(html, /id="s-safety-skip-counter"/);
-});
-
-test('the checker and second-check lines name what really checks', () => {
+test('the facts beside the two levels name what really checks and who re-checks', () => {
     const settings = FIXTURE.settings;
-    assert.equal(checkerText(settings), 'Checked by: the Light model');
-    assert.equal(checkerText({ ...settings, OUROBOROS_MODEL_SAFETY: 'anthropic::claude-opus-5.5' }), 'Checked by: claude-opus-5.5');
+    assert.equal(safetyFacts(settings).supervisor, 'The Light model');
+    assert.equal(safetyFacts({ ...settings, OUROBOROS_MODEL_SAFETY: 'anthropic::claude-opus-5.5' }).supervisor, 'claude-opus-5.5');
+    // A local Safety Supervisor model is its ` (local)` label; no Local flag of its own is read or written.
+    assert.equal(safetyFacts({ OUROBOROS_MODEL_SAFETY: 'qwen3-8b (local)' }).supervisor, 'qwen3-8b (local)');
+    for (const name of ['settings_safety.js', 'consciousness_api.js']) {
+        assert.doesNotMatch(fs.readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8'), /USE_LOCAL_SAFETY/);
+    }
     const recheck = recheckFromSettings(settings);
     assert.equal(agentRowHandle('packet_checker', settings), 'gpt-5.6');
-    assert.equal(secondCheckText(recheck, settings), 'Second check: gpt-5.6 re-checks flagged actions');
+    assert.equal(secondCheckWords(recheck, settings), 'gpt-5.6 re-checks flagged actions');
+    assert.equal(safetyFacts(settings).secondCheck, 'gpt-5.6 re-checks flagged actions');
     const unmarked = { enabled: true, items: settings.OUROBOROS_SUBAGENTS.items.map((item) => ({ ...item, rechecks_flags: false })) };
-    assert.equal(secondCheckText(recheckFromSettings({ OUROBOROS_SUBAGENTS: unmarked }), settings), 'Second check: Off');
-    assert.match(secondCheckText(recheckFromSettings({ OUROBOROS_SUBAGENTS: { enabled: true, items: [] } }), settings), /^Second check: Off\. No Agents row can re-check yet/);
-    assert.equal(secondCheckText(recheckFromSettings({}), settings), 'Second check: Off', 'an unreadable roster says nothing more');
+    assert.equal(secondCheckWords(recheckFromSettings({ OUROBOROS_SUBAGENTS: unmarked }), settings), 'Off');
+    assert.match(secondCheckWords(recheckFromSettings({ OUROBOROS_SUBAGENTS: { enabled: true, items: [] } }), settings), /^Off\. No agent can re-check yet/);
+    assert.equal(secondCheckWords(recheckFromSettings({}), settings), 'Off', 'an unreadable roster says nothing more');
     const disabled = { enabled: true, items: settings.OUROBOROS_SUBAGENTS.items.map((item) => ({ ...item, enabled: false })) };
-    assert.equal(secondCheckText(recheckFromSettings({ OUROBOROS_SUBAGENTS: disabled }), settings), 'Second check: Off (the marked row is disabled)');
+    assert.equal(secondCheckWords(recheckFromSettings({ OUROBOROS_SUBAGENTS: disabled }), settings), 'Off: the marked agent is disabled');
     const delegationOff = { ...settings.OUROBOROS_SUBAGENTS, enabled: false };
-    assert.equal(secondCheckText(recheckFromSettings({ OUROBOROS_SUBAGENTS: delegationOff }), settings), 'Second check: Off (Delegation is off in Agents)');
+    assert.equal(secondCheckWords(recheckFromSettings({ OUROBOROS_SUBAGENTS: delegationOff }), settings), 'Off: Delegation is off in Agents');
 });
 
-/** A Safety Supervisor section with only the nodes `applySafetySettings` paints. */
-function sectionRoot() {
-    const nodes = new Map();
-    const painted = ['#s-safety-mode', '#s-consciousness-safety-mode', '#s-safety-rules', '[data-safety-checker]', '[data-safety-second-check]',
-        '[data-safety-unmeasured]', '[data-safety-check-fully-line]', '[data-policy-state="supervisor_consciousness"]'];
-    const node = (selector) => {
-        if (!nodes.has(selector)) nodes.set(selector, { value: '', hidden: true, disabled: false, innerHTML: '', textContent: '' });
-        return nodes.get(selector);
-    };
-    return { querySelector: (selector) => (painted.includes(selector) ? node(selector) : null), querySelectorAll: () => [] };
-}
-
-test('«Not measured yet» is said wherever the second check is offered, the default Off included', () => {
+test('«not measured yet» is a fact wherever the second check is offered, the default Off included', () => {
     const unmarked = { enabled: true, items: FIXTURE.settings.OUROBOROS_SUBAGENTS.items.map((item) => ({ ...item, rechecks_flags: false })) };
     for (const roster of [unmarked, FIXTURE.settings.OUROBOROS_SUBAGENTS]) {
-        const root = sectionRoot();
-        applySafetySettings(root, { ...FIXTURE.settings, OUROBOROS_SUBAGENTS: roster });
-        assert.equal(root.querySelector('[data-safety-unmeasured]').hidden, false);
+        assert.equal(safetyFacts({ ...FIXTURE.settings, OUROBOROS_SUBAGENTS: roster }).unmeasured, true);
     }
-    const root = sectionRoot();
-    applySafetySettings(root, { ...FIXTURE.settings, OUROBOROS_SUBAGENTS: 'not a roster' });
-    assert.equal(root.querySelector('[data-safety-unmeasured]').hidden, true, 'no readable roster, no second check offered');
+    assert.equal(safetyFacts({ ...FIXTURE.settings, OUROBOROS_SUBAGENTS: 'not a roster' }).unmeasured, false, 'no readable roster, no second check offered');
 });
 
-function draftRoot(values) {
-    const node = (value) => ({ value });
-    return { querySelector: (selector) => ({ '#s-safety-mode': node(values.yourWork), '#s-consciousness-safety-mode': node(values.consciousness),
-        '#s-safety-rules': node(values.rules) }[selector] || null) };
-}
-
-test('Save writes only what changed: the checker first, the levels and rules after; lowering asks first', async () => {
-    const settings = { ...FIXTURE.settings, OUROBOROS_SAFETY_MODE: 'full', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'full' };
-    syncRecheckState(recheckFromSettings(settings), null);
-    const stub = stubFetch(() => ({ ok: true }));
-    const asked = [];
-    let result;
-    try {
-        const body = { OUROBOROS_MODEL_SAFETY: 'anthropic::claude-opus-5.5' };
-        const draft = safetyOwnerDraft(draftRoot({ yourWork: 'light', consciousness: 'full', rules: settings.OUROBOROS_SAFETY_OWNER_RULES }), body, settings);
-        assert.deepEqual(body, {}, 'the changed checker key left the generic body');
-        assert.equal(await saveSafetyChecker(draft), true);
-        result = await saveSafetyOwnerChanges(draft, settings, { askOwner: async (dialog) => { asked.push(dialog.title); return true; } });
-    } finally { stub.restore(); }
-    assert.deepEqual(asked, ['Lower a safety level']);
-    assert.deepEqual(stub.calls.map(({ url, body }) => [url, body]), [
-        ['/api/owner/safety-model', { settings: { OUROBOROS_MODEL_SAFETY: 'anthropic::claude-opus-5.5' } }],
-        ['/api/owner/safety-mode', { mode: 'light' }],
-    ]);
-    assert.equal(result.error, '');
-    assert.equal(result.saved, 'Safety Supervisor model saved as claude-opus-5.5. Safety for your work saved as Light.');
-    // Settings declares itself on every owner write, so the server records the change without a row in Main.
-    assert.ok(stub.calls.every(({ headers }) => headers['X-Ouroboros-Surface'] === 'app' && headers['X-Ouroboros-Actor'] === 'owner'));
+test('an organization\'s Supervisor is said, with what it closes, and offers nothing to change', () => {
+    const managed = { ...FIXTURE.settings, _meta: { policy_state: { deployment: {
+        checker: { model: 'anthropic::claude-opus-5.5' }, organization_rules: true, allowed_exits: ['repeat_after_dangerous'] } } } };
+    const facts = safetyFacts(managed);
+    assert.equal(facts.fixed, true);
+    assert.equal(facts.supervisor, 'claude-opus-5.5 · Set by your organization');
+    assert.equal(facts.secondCheck, 'None. Your organization’s Supervisor decides alone.');
+    assert.equal(facts.organizationRules, true);
+    assert.match(facts.exits, /^Set by your organization: your approval cannot override a DANGEROUS refusal; /);
+    assert.deepEqual([safetyFacts(FIXTURE.settings).fixed, safetyFacts(FIXTURE.settings).exits, safetyFacts(FIXTURE.settings).organizationRules],
+        [false, '', false], 'outside a deployment none of it is said');
 });
 
-test('the let-through counter says 24 h only when the events it read cover a day', async () => {
+test('the let-through counter and the spare-model line say 24 h only when the events they read cover a day', async () => {
     const now = Date.parse('2026-11-06T12:00:00Z');
     const at = (hoursAgo) => new Date(now - hoursAgo * 3600 * 1000).toISOString();
+    const walk = (hoursAgo, model) => ({ type: 'safety_route_fallback', ts: at(hoursAgo), answered: model ? { model, role: 'fallback:0' } : null });
     const reads = [];
     const counter = async (entries) => {
-        const el = { textContent: '' };
-        await refreshSafetySkipCounter({ querySelector: () => el }, { now, logsTail: async (...read) => { reads.push(read); return { entries }; } });
-        return el.textContent;
+        // One node per line, as the page draws them (settings_ui.js): each selector answers with its own.
+        const nodes = { '[data-safety-skips]': { textContent: '' }, '[data-safety-spares]': { textContent: '' } };
+        await refreshSafetySkipCounter({ querySelector: (selector) => nodes[selector] ?? null },
+            { now, logsTail: async (...read) => { reads.push(read); return { entries }; } });
+        return Object.values(nodes).map((node) => node.textContent);
     };
-    // A short log reaches past the day: it is the whole day.
-    assert.equal(await counter([{ type: 'safety_mode_skip', ts: at(2) }, { type: 'task_done', ts: at(30) }]),
-        '1 safety check let through in the last 24 h.');
+    // A short log reaches past the day: it is the whole day, and what is older than the day is not counted.
+    assert.deepEqual(await counter([{ type: 'safety_mode_skip', ts: at(2) }, walk(3, 'openai::gpt-6-luna'), walk(5, null),
+        { type: 'safety_verdict', ts: at(4) }, walk(25, 'openai::gpt-6-luna'), { type: 'safety_verdict', ts: at(26) },
+        { type: 'task_done', ts: at(30) }]), ['1 safety check let through in the last 24 h.',
+        '1 safety check was answered by a spare model in the last 24 h, because the Supervisor\'s own model gave no answer:'
+            + ' gpt-6-luna ×1. 1 check went to the spare models and got no answer. 1 check with a recorded verdict in the same span.']);
     // A full tail of 2,000 events from the last three hours never claims the day it did not read.
-    const busy = Array.from({ length: 2000 }, (_, i) => ({ type: i ? 'llm_round' : 'safety_mode_skip', ts: at(3 - i / 1000) }));
-    const said = await counter(busy);
+    const busy = Array.from({ length: 2000 }, (_, i) => (i === 1 ? walk(3 - i / 1000, 'openai::gpt-6-luna')
+        : { type: i ? 'llm_round' : 'safety_mode_skip', ts: at(3 - i / 1000) }));
+    const [said, spares] = await counter(busy);
     assert.match(said, /^1 safety check let through since \d\d:\d\d \(the latest 2,000 events\)\.$/);
-    assert.doesNotMatch(said, /24 h/);
-    // It reads only each event's type and time: the compact view, never 2,000 whole rows.
+    assert.match(spares, /^1 safety check was answered by a spare model since (\d\d:\d\d) \(the latest 2,000 events\), because the Supervisor's own model gave no answer: gpt-6-luna ×1\. 0 checks with a recorded verdict in the same span\.$/);
+    assert.equal(spares.match(/since (\d\d:\d\d)/)[1], said.match(/since (\d\d:\d\d)/)[1], 'one span for both lines');
+    assert.doesNotMatch(said + spares, /24 h/);
+    // It reads each event's type and time, and a walk's answering model: the compact view, never 2,000 whole rows.
     assert.deepEqual(reads, [['events', 2000, 'compact'], ['events', 2000, 'compact']]);
 });
 
@@ -241,33 +202,7 @@ test('the shared safety helpers declare no origin unless their caller does', asy
     assert.deepEqual(stub.calls.map(({ headers }) => headers), Array(3).fill({ 'Content-Type': 'application/json' }));
 });
 
-test('a refused lowering keeps the level and still saves the rest; an unknown server key is never written', async () => {
-    const settings = { OUROBOROS_SAFETY_MODE: 'full', OUROBOROS_SAFETY_OWNER_RULES: '' };
-    const stub = stubFetch(() => ({ ok: true }));
-    let result;
-    try {
-        const draft = { yourWork: 'off', consciousness: 'off', rules: 'Ask before paying.', checker: null };
-        result = await saveSafetyOwnerChanges(draft, settings, { askOwner: async () => false });
-    } finally { stub.restore(); }
-    // No OUROBOROS_CONSCIOUSNESS_SAFETY_MODE in the document: that row is not written.
-    assert.deepEqual(stub.calls.map(({ url }) => url), ['/api/owner/safety-rules']);
-    assert.equal(stub.calls[0].headers['X-Ouroboros-Surface'], 'app');
-    assert.match(result.error, /Safety for your work was not changed: The change was not confirmed\./);
-    assert.equal(result.unknown, false);
-});
-
-test('Check consciousness fully declares the app on its owner write', async () => {
-    const root = new NodeStub();
-    root.innerHTML = safetySectionHtml();
-    const saves = [];
-    const dispose = bindSafetySettings(root, { save: async (...args) => { saves.push(args); } });
-    const section = root.querySelector('[data-safety-consciousness-row]')?.closest('.form-section') || root;
-    await section.fire('click', { target: root.querySelector('[data-safety-check-fully]') });
-    dispose();
-    assert.deepEqual(saves, [['full', 'consciousness', { headers: APP_SETTINGS_ORIGIN }]]);
-});
-
-test('the second-check mark shows only on eligible rows, one row at a time, and saves as the owner chose', async () => {
+test('the second-check mark shows only on eligible rows, one row at a time, and marks the roster as the owner chose', () => {
     const packet = (id, marked = false) => ({ subagent_id: id, route: { kind: 'api_model', target_id: 'openai::gpt-5.6' }, delivery: 'packet', rechecks_flags: marked });
     const roster = { enabled: true, items: [packet('a', true), packet('b')] };
     syncRecheckState(recheckFromSettings({ OUROBOROS_SUBAGENTS: roster }), null);
@@ -282,184 +217,19 @@ test('the second-check mark shows only on eligible rows, one row at a time, and 
     assert.doesNotMatch(recheckMarkHtml({ subagent_id: 'a' }, 1), /checked>/, 'one row at a time');
     chooseRecheckRow('b', false, null);
     assert.equal(recheckDraft(), '', 'unticked: no row re-checks');
-    const stub = stubFetch(() => ({ ok: true }));
-    try {
-        // The Agents editor did not load: the mark goes into the saved roster.
-        const draft = safetyOwnerDraft(draftRoot({ yourWork: 'full', consciousness: 'full', rules: null }), {}, { OUROBOROS_SUBAGENTS: roster });
-        await saveSafetyChecker(draft);
-        const result = await saveSafetyOwnerChanges(draft, { OUROBOROS_SUBAGENTS: roster });
-        assert.equal(result.saved, 'Second check turned off.');
-    } finally { stub.restore(); }
-    assert.deepEqual(stub.calls.map(({ url, body }) => [url, body]), [['/api/owner/safety-model', { settings: { OUROBOROS_SUBAGENTS: {
-        enabled: true, items: [packet('a'), packet('b')] } } }]]);
+    // The roster carries the owner's choice as one mark at most.
+    assert.deepEqual(markRecheckRow(roster, recheckDraft()), { enabled: true, items: [packet('a'), packet('b')] });
+    assert.deepEqual(markRecheckRow(roster, 'b').items.map((item) => item.rechecks_flags), [false, true]);
     // A marked row that cannot run now keeps its mark in view, so the owner can untick it.
     syncRecheckState(recheckFromSettings({ OUROBOROS_SUBAGENTS: { enabled: true, items: [{ ...packet('a', true), enabled: false }, packet('b')] } }), null);
     assert.match(recheckMarkHtml({ subagent_id: 'a' }, 1), /data-recheck-row="a"><input[^>]*checked> Re-checks flagged actions/);
     assert.match(recheckMarkHtml({ subagent_id: 'b' }, 2), /data-recheck-row="b"><input/);
 });
 
-// ---- Save: the checker's keys travel through the owner transaction, before the generic save -----------------
-
-const ROSTER = () => buildAvailableSubagentsSetting(parseAvailableSubagentsSetting(FIXTURE.settings.OUROBOROS_SUBAGENTS).setting);
-// The settings document as GET /api/settings answers it on a default install (empty Safety Supervisor slot)...
-const LOADED = {
-    ...FIXTURE.settings,
-    OUROBOROS_MODEL: 'anthropic/claude-opus-5.5', USE_LOCAL_LIGHT: 'false', USE_LOCAL_MAIN: false,
-    OUROBOROS_MODEL_ACCOUNTS: '{"main": "acct-1"}', OUROBOROS_MODEL_CONTEXT_WINDOWS: { main: 200000 },
-    OUROBOROS_SUBAGENTS: JSON.stringify(FIXTURE.settings.OUROBOROS_SUBAGENTS), OUROBOROS_TOOL_TIMEOUT_SEC: 120,
-};
-// ...and the body Save collects from it, untouched: the same values in the editors' own spellings.
-const collected = () => ({
-    OUROBOROS_MODEL_SAFETY: '', OUROBOROS_MODEL_LIGHT: 'anthropic/claude-sonnet-5.5', OUROBOROS_MODEL: 'anthropic/claude-opus-5.5',
-    USE_LOCAL_LIGHT: false, USE_LOCAL_MAIN: false, OUROBOROS_MODEL_ACCOUNTS: { main: 'acct-1' },
-    OUROBOROS_MODEL_CONTEXT_WINDOWS: { main: 200000 }, OUROBOROS_SUBAGENTS: ROSTER(), OUROBOROS_TOOL_TIMEOUT_SEC: 120,
-});
-const ownerRoot = () => draftRoot({ yourWork: LOADED.OUROBOROS_SAFETY_MODE, consciousness: LOADED.OUROBOROS_CONSCIOUSNESS_SAFETY_MODE,
-    rules: LOADED.OUROBOROS_SAFETY_OWNER_RULES });
-
-/** The checker a settings document resolves, as `safety_config.safety_configuration` reads it: the Safety
- *  Supervisor slot, else Light, else Main, with that slot's Local flag; the maps' `safety` entries; the marked row. */
-function resolvedChecker(doc) {
-    const json = (value) => (typeof value === 'string' ? JSON.parse(value || '{}') : value || {});
-    const slot = String(doc.OUROBOROS_MODEL_SAFETY || '').trim() ? 'SAFETY' : String(doc.OUROBOROS_MODEL_LIGHT || '').trim() ? 'LIGHT' : 'MAIN';
-    const model = String(doc[{ SAFETY: 'OUROBOROS_MODEL_SAFETY', LIGHT: 'OUROBOROS_MODEL_LIGHT', MAIN: 'OUROBOROS_MODEL' }[slot]] || '').trim();
-    const local = model.endsWith(' (local)') || /^(true|1|yes|on)$/i.test(String(doc[`USE_LOCAL_${slot}`] ?? ''));
-    const options = ['OUROBOROS_MODEL_ACCOUNTS', 'OUROBOROS_MODEL_CONTEXT_WINDOWS', 'OUROBOROS_MODEL_PROCESSING_PREFERENCES'].map((key) => json(doc[key]).safety ?? '');
-    const roster = json(doc.OUROBOROS_SUBAGENTS);
-    const marked = (roster.items || []).filter((item) => item.rechecks_flags).map((item) => [item.subagent_id, item.route, item.enabled !== false, roster.enabled]);
-    return JSON.stringify([model.replace(/ \(local\)$/, ''), local, options, marked]);
-}
-
-/** A gateway outside Cyber Pro: the generic save refuses a change to the resolved checker; the owner transaction
- *  writes its keys. */
-function settingsServer(stored) {
-    const state = { ...stored };
-    const stub = stubFetch((url, body) => {
-        if (url === '/api/owner/safety-model') {
-            // The endpoint's own judgement: a roster with no Reviewer row saves only with the owner's confirmation.
-            const roster = body.settings.OUROBOROS_SUBAGENTS;
-            if (roster && !roster.items.some((item) => item.review_eligible) && body.allow_empty_review_pool !== true) {
-                return { status: 400, json: { saved: false, code: 'empty_review_pool', error: 'No row is marked Reviewer.' } };
-            }
-            Object.assign(state, body.settings);
-            return { ok: true };
-        }
-        if (url === '/api/settings' && resolvedChecker({ ...state, ...body }) !== resolvedChecker(state)) {
-            return { status: 400, json: { saved: false, error: 'The resolved Safety Supervisor is owner-controlled; use /api/owner/safety-model.' } };
-        }
-        if (url === '/api/settings') { Object.assign(state, body); return { json: { status: 'saved' } }; }
-        return { ok: true };
-    });
-    return { state, ...stub };
-}
-
 test('the checker keys mirror the gateway\'s owner transaction', () => {
     const server = fs.readFileSync(new URL('../../ouroboros/gateway/safety_settings.py', import.meta.url), 'utf8');
     const block = server.match(/SAFETY_MODEL_KEYS = frozenset\(\{([\s\S]*?)\}\)/)?.[1] || '';
     assert.deepEqual([...SAFETY_MODEL_KEYS].sort(), [...block.matchAll(/"([A-Z_]+)"/g)].map((match) => match[1]).sort());
-});
-
-test('an unchanged checker key is not sent: it stays in the generic body as collected', () => {
-    syncRecheckState(recheckFromSettings(LOADED), null);
-    const body = collected();
-    assert.equal(takeCheckerChanges(body, LOADED), null);
-    assert.deepEqual(body, collected());
-    const local = { ...collected(), USE_LOCAL_LIGHT: true };
-    assert.deepEqual(takeCheckerChanges(local, LOADED).settings, { USE_LOCAL_LIGHT: true }, "Light's Local box is a checker key too");
-    assert.equal('USE_LOCAL_LIGHT' in local, false);
-});
-
-test('Models: a Light change outside Cyber Pro saves; only the changed key goes first, through the owner transaction', async () => {
-    syncRecheckState(recheckFromSettings(LOADED), null);
-    const server = settingsServer(LOADED);
-    let result;
-    try {
-        // What B1 was: the same change in the generic body is refused.
-        await assert.rejects(apiClient.saveSettings({ ...collected(), OUROBOROS_MODEL_LIGHT: 'openai::gpt-5.6-mini' }), /owner-controlled/);
-        server.calls.length = 0;
-        const body = { ...collected(), OUROBOROS_MODEL_LIGHT: 'openai::gpt-5.6-mini', OUROBOROS_TOOL_TIMEOUT_SEC: 300 };
-        const draft = safetyOwnerDraft(ownerRoot(), body, LOADED);
-        assert.equal(await saveSafetyChecker(draft), true);
-        assert.equal((await apiClient.saveSettings(body)).status, 'saved');
-        result = await saveSafetyOwnerChanges(draft, LOADED);
-        assert.equal(checkerTabsText(draft), 'Models');
-        // The checker's model is read live: it applies at the next check, not from the next task.
-        assert.deepEqual(checkerSaveEffect({ status: 'saved', no_changes: true }, draft), { status: 'saved', no_changes: false, immediate_changed: true });
-        assert.equal(checkerSaveEffect({ status: 'saved' }, { checker: { settings: { OUROBOROS_SUBAGENTS: '{}' } } }).next_task_changed, true);
-    } finally { server.restore(); }
-    const { OUROBOROS_MODEL_LIGHT: _light, ...rest } = collected();
-    assert.deepEqual(server.calls.map(({ url, body }) => [url, body]), [
-        ['/api/owner/safety-model', { settings: { OUROBOROS_MODEL_LIGHT: 'openai::gpt-5.6-mini' } }],
-        ['/api/settings', { ...rest, OUROBOROS_TOOL_TIMEOUT_SEC: 300 }],
-    ]);
-    assert.equal(server.state.OUROBOROS_MODEL_LIGHT, 'openai::gpt-5.6-mini');
-    assert.equal(server.state.OUROBOROS_TOOL_TIMEOUT_SEC, 300);
-    assert.deepEqual(result, { saved: '', error: '', unknown: false });
-    assert.equal(checkerSaveEffect({ status: 'saved' }, { checker: null }).next_task_changed, undefined, 'no checker change, the answer as it is');
-});
-
-test('the Agents roster still saves, with the second-check mark in the same one write', async () => {
-    syncRecheckState(recheckFromSettings(LOADED), null);
-    const server = settingsServer(LOADED);
-    const reader = { subagent_id: 'reader', recommended_use: 'Reads.', route: { kind: 'api_model', target_id: 'openai::gpt-5.6' }, delivery: 'packet' };
-    const edited = { ...ROSTER(), items: [...ROSTER().items, reader] };
-    let result;
-    try {
-        chooseRecheckRow('reader', true, null);
-        const body = { ...collected(), OUROBOROS_SUBAGENTS: edited, allow_empty_review_pool: true };
-        const draft = safetyOwnerDraft(ownerRoot(), body, LOADED);
-        assert.equal('OUROBOROS_SUBAGENTS' in body, false);
-        assert.equal('allow_empty_review_pool' in body, false, "the roster's own save flag leaves with it");
-        assert.equal(checkerTabsText(draft), 'Agents');
-        await saveSafetyChecker(draft);
-        await apiClient.saveSettings(body);
-        result = await saveSafetyOwnerChanges(draft, LOADED);
-    } finally { server.restore(); }
-    assert.deepEqual(server.calls.map(({ url }) => url), ['/api/owner/safety-model', '/api/settings']);
-    assert.deepEqual(server.calls[0].body, { settings: { OUROBOROS_SUBAGENTS: markRecheckRow(edited, 'reader') },
-        allow_empty_review_pool: true }, "the roster's own confirmation travels with it");
-    assert.deepEqual(server.state.OUROBOROS_SUBAGENTS.items.map((item) => [item.subagent_id, item.rechecks_flags]),
-        [['packet_checker', false], ['reader', true]], 'the new row is kept and carries the mark');
-    assert.equal(result.saved, 'Second check saved.');
-});
-
-test('«Save without reviewers»: the owner\'s tick reaches the owner transaction, and without it the server refuses', async () => {
-    syncRecheckState(recheckFromSettings(LOADED), null);
-    const unmarked = { ...ROSTER(), items: ROSTER().items.map((item) => ({ ...item, review_eligible: false })) };
-    for (const ticked of [true, false]) {
-        const server = settingsServer(LOADED);
-        try {
-            const body = { ...collected(), OUROBOROS_SUBAGENTS: unmarked, ...(ticked ? { allow_empty_review_pool: true } : {}) };
-            const draft = safetyOwnerDraft(ownerRoot(), body, LOADED);
-            assert.equal('allow_empty_review_pool' in body, false);
-            if (ticked) {
-                assert.equal(await saveSafetyChecker(draft), true);
-                assert.equal(server.calls[0].body.allow_empty_review_pool, true);
-                assert.deepEqual(server.state.OUROBOROS_SUBAGENTS.items.map((item) => item.review_eligible), [false]);
-            } else {
-                await assert.rejects(saveSafetyChecker(draft), /No row is marked Reviewer/);
-                assert.equal('allow_empty_review_pool' in server.calls[0].body, false);
-            }
-        } finally { server.restore(); }
-    }
-});
-
-test('a refused checker save shows the server\'s sentence; the generic save is not reached', async () => {
-    syncRecheckState(recheckFromSettings(LOADED), null);
-    const stub = stubFetch(() => ({ status: 400, json: { saved: false, error: 'OUROBOROS_MODEL_LIGHT must be a model string' } }));
-    try {
-        const draft = safetyOwnerDraft(ownerRoot(), { ...collected(), OUROBOROS_MODEL_LIGHT: 'x', OUROBOROS_MODEL: 'y' }, LOADED);
-        assert.equal(checkerTabsText(draft), 'Models');
-        await assert.rejects(saveSafetyChecker(draft), (error) => error.message === 'OUROBOROS_MODEL_LIGHT must be a model string' && error.body.saved === false);
-    } finally { stub.restore(); }
-    assert.deepEqual(stub.calls.map(({ url, body }) => [url, body]), [['/api/owner/safety-model', { settings: { OUROBOROS_MODEL_LIGHT: 'x', OUROBOROS_MODEL: 'y' } }]]);
-});
-
-test('a local Safety Supervisor model is its ` (local)` label; no Local flag of its own is read or written', () => {
-    for (const name of ['settings_safety.js', 'consciousness_api.js']) {
-        assert.doesNotMatch(fs.readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8'), /USE_LOCAL_SAFETY/);
-    }
-    assert.equal(checkerText({ OUROBOROS_MODEL_SAFETY: 'qwen3-8b (local)' }), 'Checked by: qwen3-8b (local)');
 });
 
 test('the roster keeps the owner\'s second-check mark exactly as loaded and refuses a malformed one', () => {
@@ -470,63 +240,4 @@ test('the roster keeps the owner\'s second-check mark exactly as loaded and refu
     assert.equal('rechecks_flags' in buildAvailableSubagentsSetting(unmarked.setting).items[0], false, 'an unmarked row writes no new key');
     const bad = parseAvailableSubagentsSetting({ enabled: true, items: [{ ...FIXTURE.settings.OUROBOROS_SUBAGENTS.items[0], rechecks_flags: 'yes' }] });
     assert.match(bad.error, /second-check mark must be true or false/);
-});
-
-test('Consciousness: Advises · Acts · Evolves with notes and task copy; the allowance is a door to Costs, the moved fields keep their ids', () => {
-    const html = consciousnessSectionHtml();
-    assert.match(html, /What Ouroboros does when nobody asked: on its own clock, and in the places you connected\./);
-    assert.deepEqual([...html.matchAll(/data-effort-value="(\w+)">(\w+)</g)].map((m) => [m[1], m[2]]), [['observe', 'Advises'], ['act', 'Acts'], ['full', 'Evolves']]);
-    assert.match(html, /<strong>Acts<\/strong> &mdash; Also acts on its own/);
-    // The allowance has one editor, Costs: no field here, only the door to it.
-    assert.doesNotMatch(html, /Daily allowance|s-consciousness-daily-usd|OUROBOROS_CONSCIOUSNESS_DAILY_USD/);
-    // In the allowance's former cell: its name and the door to its one editor.
-    assert.match(html, /<label id="s-consciousness-allowance-label">Spending limit over 24 hours<\/label>/);
-    assert.match(html, /aria-labelledby="s-consciousness-allowance-label"[^>]*>\s*<span>Set beside what it spent in<\/span> <button[^>]*data-costs-open>Costs ›<\/button>/);
-    assert.ok(html.indexOf('data-costs-open') < html.indexOf('s-consciousness-max-tasks'), 'the cell the allowance had, before the task limit');
-    assert.match(html, />Max concurrent tasks</);
-    assert.match(html, /How many of its own tasks may run at once\. Work you asked for never counts\./);
-    for (const id of ['s-consciousness-autonomy', 's-consciousness-max-tasks', 's-bg-wakeup-min', 's-bg-wakeup-max', 's-presence-max-active']) {
-        assert.equal(html.split(`id="${id}"`).length, 2, `${id} is rendered once`);
-    }
-    assert.match(html, /<details class="consciousness-more"[^>]*>\s*<summary>.*More<\/summary>/s);
-    assert.match(html, />Concurrent conversations</);
-    assert.match(html, /The places it lives in, their words and their circles: <button[^>]*data-circles-open>Circles ›<\/button>/);
-    assert.doesNotMatch(html, /Connect a place|data-place-list|data-place-open/, 'the places are listed once, on Circles');
-    assert.equal(consciousnessModelText({}), 'Uses Main');
-    assert.equal(consciousnessModelText({ OUROBOROS_MODEL_CONSCIOUSNESS: 'openai::gpt-5.6' }), 'gpt-5.6');
-});
-
-test('Settings › Consciousness lists no places: its one link opens Circles and nothing is read', async (t) => {
-    const { window } = setup(t);
-    const root = new NodeStub();
-    root.innerHTML = consciousnessSectionHtml();
-    root.dataset.activeSettingsTab = 'behavior';
-    const opened = [];
-    window.addEventListener('ouro:open-circles', (event) => opened.push(event.detail));
-    const dispose = bindConsciousnessSettings(root);
-    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
-    window.dispatchEvent(new CustomEvent('ouro:places-changed'));
-    await new Promise((resolve) => setImmediate(resolve));
-    const link = root.querySelector('[data-circles-open]');
-    const section = link.closest('.form-section') || root.querySelector('[data-consciousness-places]');  // where the listener is
-    await section.fire('click', { target: link });
-    assert.deepEqual(opened, [{}], 'the Circles page is asked to show itself');
-    dispose();
-    await section.fire('click', { target: link });
-    assert.equal(opened.length, 1, 'the disposer unbinds the link');
-});
-
-test('Settings › Consciousness opens Costs for its allowance, reading and writing nothing', async (t) => {
-    setup(t);
-    const root = new NodeStub();
-    root.innerHTML = consciousnessSectionHtml();
-    const tabs = [];
-    const dispose = bindConsciousnessSettings(root, { openDashboardTab: async (tab) => { tabs.push(tab); } });
-    const link = root.querySelector('[data-costs-open]');
-    const section = link.closest('.form-section') || root.querySelector('[data-consciousness-costs]');
-    await section.fire('click', { target: link });
-    assert.deepEqual(tabs, ['costs'], 'Dashboard › Costs, the one editor of the allowance');
-    dispose();
-    await section.fire('click', { target: link });
-    assert.deepEqual(tabs, ['costs'], 'the disposer unbinds it too');
 });

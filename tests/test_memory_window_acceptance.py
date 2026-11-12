@@ -1,10 +1,12 @@
 """Owner acceptance: incident shape, both density classes, chosen reads and authored boundaries."""
 import dataclasses
 import json
+import math
 from types import SimpleNamespace
 
 import pytest
 from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv, capability_evidence as ce
+from ouroboros import usage_accounting as ua
 from ouroboros.context_budget import ContextReclaimRequest, WHOLE_CATEGORY
 from ouroboros import context_compaction as cc
 from ouroboros.context_source_view import emergency_address_view
@@ -15,6 +17,9 @@ from ouroboros.tools.compact_context import record_context_view, _compact_contex
 from ouroboros.loop_round_limits import _run_round_compaction
 from tests.test_context_view_tool import _context
 from tests.test_main_authored_context import main_loop as main_loop, call
+from tests.test_memory_low_start import sent as sent
+from tests.test_memory_max_room import _crowded_window
+from tests.system_e2e.harness import MOCK_SLUG, ScriptedStubModel
 
 
 @pytest.mark.parametrize('role', ['integrator', 'consciousness', 'child'])
@@ -180,27 +185,132 @@ def test_core_without_memory_reserves_one_eighth_for_roots_and_direct_turns(monk
         assert plan.projection("low").calibrated_tokens + plan.output_reserve_tokens + 128_000 // 8 <= 128_000
 
 
-@pytest.mark.parametrize("replies,mode", [(2_400, "max"), (400, "max"), (24, "max")])
-def test_owner_max_is_judged_on_the_completed_start_view_with_the_real_catalog(main_loop, monkeypatch, replies, mode):
+def _installation(tmp_path, monkeypatch):
+    """A small installation with the repository's own composed books (``tests/_live_world.py``), as its data root."""
+    from ouroboros import config
+    from tests._live_world import _own_installation
+
+    env, memory, _rooms = _own_installation(tmp_path, books=True)
+    monkeypatch.setattr(config, "DATA_DIR", env.drive_root)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(env.drive_root))
+    return env, memory
+
+
+def _replies(core, count):
+    """``core`` with the start's only synthetic part: one room of ``count`` short replies without a gist, in the real
+    start's own work room (a root task keeps two eighths: ``memory_view.start_room``)."""
+    levels = mv.snapshot_from_json(core.memory_view_json).spec.work_room_levels
+    snap = syn.snapshot(role="integrator", story=syn.pages(2, 200),
+        room_facts=syn.room(lane1=[syn.spoken(i, "ouroboros", 400) for i in range(count)], lane2=2))
+    snap = dataclasses.replace(snap, spec=dataclasses.replace(snap.spec, work_room_levels=levels))
+    return dataclasses.replace(core, memory_view_json=mv.snapshot_json(snap))
+
+
+def _owner_start(env, core, window, schemas):
+    return cf.build_context_fit_plan(env, core, {"id": "authored-main", "type": "task"}, preferred_mode="max",
+        tool_schemas=schemas, route_resolver=lambda *_a, **_kw: ({"provider": "openai", "model": "openai/test-model"},
+            ce.CapabilityEvidence(window, "confirmed", "metadata", "start-hosts")))
+
+
+def _tipping_window(held):
+    """A window whose Max frame holds the books, core, reply reserve, work room and this memory, and only half of the
+    tool schemas: the schemas alone take the books' room."""
+    fixed = sum(tokens for _name, tokens in held["parts"]) + held["story"] + held["room"]
+    return math.ceil((fixed + held["schemas"] / 2 + held["reserve"]) / (1 - held["levels"] / 8))
+
+
+@pytest.mark.parametrize("replies,window_of,start", [
+    (24, "crowded", ("max", "")), (400, "crowded", ("max", "")),
+    (2_400, "crowded", ("low", "memory")), (24, "tipping", ("low", "window"))])
+def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop, sent, tmp_path, monkeypatch,
+                                                                       replies, window_of, start):
+    """Audit item 23(a): a start succeeds when it holds the selected mode or records the reason the person then
+    reads. The repository's own books, core and tool catalog, the Main loop to its first send; memory is the only
+    synthetic part. Each window comes from a held start's own measure, so book growth moves the window, never the
+    verdict: no fixed window the books must fit. A reason is proven by its twin, never by the code that names it:
+    memory crowds a start that a small memory holds at the same window; tool schemas tip a start that holds without
+    them. The person reads it on the Context capsule (the request's recorded context), on the task card's start
+    row and, for memory, in one Main line."""
+    from ouroboros.context import _capture_context_core
+
     f = main_loop
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
-    snap = syn.snapshot(role="integrator", story=syn.pages(2, 200),
-        room_facts=syn.room(lane1=[syn.spoken(i, "ouroboros", 400) for i in range(replies)], lane2=2))
-    snap = dataclasses.replace(snap, spec=dataclasses.replace(snap.spec, work_room_levels=1))
-    core = cf.ContextCore("Required core", "Constitution", "b" * 600_000, "", "Identity", "f" * 1_000,
-        '"Assignment"', False, memory_view_json=mv.snapshot_json(snap))
-    plan = cf.build_context_fit_plan(None, core, {"id": "authored-main", "type": "task"}, preferred_mode="max",
-        tool_schemas=f.registry.schemas(), route_resolver=lambda *_a, **_kw: (
-            {"provider": "openai", "model": "openai/test-model"},
-            ce.CapabilityEvidence(400_000, "confirmed", "metadata", "start-hosts")))
+    env, memory = _installation(tmp_path / "world", monkeypatch)
+    real = _capture_context_core(env, memory, {"id": "authored-main", "type": "task", "text": "Assignment"}, None, None)
+    schemas, core = f.registry.schemas(), _replies(real, replies)
+    if window_of == "crowded":  # half of a 2,400-reply memory's ordinary forms fit beside the books
+        held = _owner_start(env, _replies(real, 2_400), 2_000_000, schemas)
+        window = _crowded_window(held.projection("max").memory_facts["max_room"])
+        twin = _owner_start(env, _replies(real, 24), window, schemas)
+    else:
+        held = _owner_start(env, core, 2_000_000, schemas)
+        window = _tipping_window(held.projection("max").memory_facts["max_room"])
+        twin = _owner_start(env, core, window, [])
+    plan = _owner_start(env, core, window, schemas)
+    assert held.start == ("max", "") and plan.preferred_mode == "max" and plan.start == start
+    assert twin.start == ("max", "")  # what the reason names is all that lowers this start
     f.ctx.context_fit_plan, f.messages = plan, plan.messages_for(plan.initial_mode)
+    ua.adopt_physical_attempt_capture(None)  # a fresh task: the fixture's attempt ids repeat from test to test
     assert f.run([{"content": "done"}])[0] == "done"
-    sent = cf.estimate_context_prompt_tokens(f.inputs[0]["messages"], f.inputs[0]["tools"], provider="openai")
-    assert plan.initial_mode == mode
-    if replies == 2400:
-        assert plan.projection(mode).memory_facts['floor']['steps']['F7a'] == 1
-    assert (core.architecture_md in json.dumps(f.inputs[0]["messages"])) is (mode == "max")
-    assert sent + plan.output_reserve_tokens + 400_000 // 8 <= 400_000
+    first = f.inputs[0]
+    text = "".join(part["text"] for row in first["messages"] if row["role"] == "system" for part in row["content"])
+    assert (core.architecture_md in text) is (start[0] == "max")  # the whole book iff Max
+    tokens = cf.estimate_context_prompt_tokens(first["messages"], first["tools"], provider="openai")
+    room = held.projection("max").memory_facts["max_room"]["levels"] * -(-window // 8)
+    assert tokens + plan.output_reserve_tokens + room <= window  # the reply reserve and the start's work room stay
+    if start[0] == "max":  # the Max measure prices what is sent: an over-count would move every derived window unseen
+        fact = plan.projection("max").memory_facts["max_room"]
+        assert fact["need"] - fact["reserve"] - fact["work"] <= tokens + -(-window // 100)
+    events = [f.events.get_nowait() for _ in range(f.events.qsize())]
+    sends = [event["context_attempt"] for event in events if "context_attempt" in event]  # the census the capsule reads
+    assert sends and {(send["preferred_at_send"], send["applied"], send["cause"]) for send in sends} == {
+        ("max", *start)}
+    rows = [event["data"] for event in events if event["type"] == "log_event"
+            and event["data"].get("checkpoint_kind") == "context_fit_physical_mode"]
+    assert [row["cause"] for row in rows] == ([start[1]] if start[1] else [])  # the task card's start row
+    assert [event["system_type"] for _root, event in sent] == (["low_start_notice"] if start[1] == "memory" else [])
+
+
+@pytest.mark.parametrize("window", [40_000, 200_000, 1_000_000])
+def test_an_environment_only_install_starts_in_its_factory_max_or_records_why(tmp_path, monkeypatch, window):
+    """Audit item 23(g): no settings document, the provider, its key and the model from the environment alone (a
+    Docker unit's shape), the production start with its own route probe against a free model stub. The selected
+    mode is the factory Max; the outcome is that mode or a recorded reason. The probe must have read the stub's
+    window: a failed route keeps Max, so an unread window would pass as a held start. At 1M the books leave Max
+    ample room; at 200k they cannot fit beside the core (``route``); 40k is not pinned beyond a recorded reason or
+    the named refusal, so book growth never turns it red."""
+    from ouroboros import config, context
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+    from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS
+    from ouroboros.tools.tool_context import ToolContext
+    from ouroboros.tools.registry import ToolRegistry
+
+    env, memory = _installation(tmp_path / "world", monkeypatch)
+    monkeypatch.setattr(config, "SETTINGS_PATH", env.drive_root / "absent" / "settings.json")
+    for key in (*ALL_PROVIDER_CREDENTIAL_KEYS, "OUROBOROS_CONTEXT_MODE", "OUROBOROS_MODEL_CONTEXT_WINDOWS"):
+        monkeypatch.delenv(key, raising=False)
+    task, ctx = {"id": "env-only", "type": "task", "text": "Say hello."}, ToolContext(env.repo_dir, env.drive_root)
+    schemas = ToolRegistry(env.repo_dir, env.drive_root).schemas()
+    with ScriptedStubModel() as stub:
+        stub.window_tokens = window
+        for key, value in (("OPENAI_COMPATIBLE_BASE_URL", stub.base_url), ("OUROBOROS_MODEL", MOCK_SLUG),
+                           ("OPENAI_COMPATIBLE_API_KEY", "stub-key-not-a-credential"),
+                           ("OUROBOROS_MODEL_LIGHT", MOCK_SLUG)):
+            monkeypatch.setenv(key, value)
+        try:
+            context.build_llm_messages(env, memory, task, ctx=ctx, tool_schemas=schemas)
+        except cf.MinimumViewUnfit as refusal:  # the named refusal the work's result carries
+            assert window == 40_000 and _context_capacity_terminal(refusal)[1]["reason_code"] == "context_capacity"
+            return
+    plan = ctx.context_fit_plan
+    assert plan.preferred_mode == config.get_context_mode() == "max" and plan.provider == "openai-compatible"
+    assert plan.status == "confirmed" and plan.window_record.boundary == window  # the stub's own window was read
+    mode, cause = plan.start
+    assert (mode == "max") is (not cause)  # never a lower start without its recorded reason
+    if window == 1_000_000:
+        assert plan.start == ("max", "")  # ample room beside the books: the selected mode holds
+    elif window == 200_000:
+        assert mode != "max" and cause == "route"  # the books cannot fit beside the core on this route
 
 
 @pytest.mark.parametrize("refused", [True, False])

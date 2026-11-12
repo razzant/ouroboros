@@ -161,15 +161,6 @@
  * @property {Object|null=} candidate
  * @property {boolean=} automatic The read's own unsaved catalog, following Main and access.
  */
-/** @typedef {Object} SettingsMeta
- * @property {string[]=} custom_secret_keys
- * @property {Object=} setup_contract
- * @property {AvailableSubagentsSettingsMeta=} available_subagents
- * @property {import('./client_contract_types.js').SettingsPolicyState=} policy_state
- * @property {{restart_required:boolean,restart_keys:string[],restart_source_unknown_keys:string[],unknown_keys:string[],local_model:Object,summary:string}=} restart_state Component application and source uncertainty.
- * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
- * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
- */
 /**
  * The wizard payload plus two DECLARATIONS about the onboarding run. Settings
  * keys ride through unchanged (open shape); neither flag is authority — the
@@ -211,14 +202,7 @@
  * @property {OnboardingPresetProjection} preset
  */
 /** @typedef {import('./client_contract_types.js').OnboardingAttemptResponse} OnboardingAttemptResponse */
-/**
- * 500 AFTER settings landed: retry the named later step, never re-save (settings/onboarding writes).
- * @typedef {Object} SettingsPostCommitFailureResponse
- * @property {string} error
- * @property {string} status  // saved_with_post_commit_error
- * @property {boolean} saved  // always true
- * @property {string} post_commit_failed
- */
+/** @typedef {import('./client_contract_types.js').SettingsPostCommitFailureResponse} SettingsPostCommitFailureResponse */
 /**
  * 503 settings_save_timeout: the server writer still runs; saved=null is unknown. Reload to check status before retrying.
  * @typedef {Object} SettingsSaveTimeoutResponse
@@ -888,11 +872,13 @@
 /**
  * `POST /api/settings` success; `restart_keys` apply only after a restart.
  * @typedef {Object} SettingsSaveResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {string=} status
  * @property {boolean=} no_changes
  * @property {boolean=} restart_required
  * @property {string[]=} restart_keys
- * @property {Object=} restart_state
+ * @property {import('./client_contract_types.js').SettingsRestartState=} restart_state
  * @property {boolean=} immediate_changed
  * @property {boolean=} next_task_changed
  * @property {string[]=} warnings
@@ -901,16 +887,22 @@
  * @property {Object[]=} connection_references Rows naming a connection that cannot serve them: {setting, entry?, route, connection, reason}.
  */
 /** @typedef {Object} OwnerRuntimeModeResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} runtime_mode
  * @property {boolean} restart_required
  */
 /** @typedef {Object} OwnerAutoGrantResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {boolean} enabled
  */
 
 /** @typedef {Object} OwnerContextModeResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} context_mode
  * @property {string} project_id
@@ -951,6 +943,8 @@
 
 /**
  * @typedef {Object} OwnerSafetyModeResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} safety_mode  // full | light | off (v6.54.3)
  */
@@ -1226,7 +1220,7 @@
  * @property {Array<{adoption_id:string, outcome:'adopted'|'not_applied'|'superseded'|'unconfirmed', commit_sha:string, previous_sha:string, branch:string, note:string, settled_at:string, revision:number, commits?:string[], commits_complete?:boolean, commits_omitted?:number}>=} body_adoptions
  *   Every adoption this task authorized, as boot settled them; `commits` (previous..candidate, newest first, bounded;
  *   a cut range counts the rest in `commits_omitted`) only when adopted.
- * @property {{count:number, latest:{at:string, reason:string, task_id:string, text:string}}=} review_overrides  // a root's decisions Blocking would have stopped (review_overrides.py)
+ * @property {{count?:number, latest?:{at:string, reason:string, task_id:string, text:string}, continued?:{count:number, latest:{at:string, disposition:string, rationale:string, reason:string, record_id:string}}, landed?:{count:number, latest:{sha:string, at:string}}}=} review_overrides  // a root's reviews that returned FAIL or no verdict, the author's continuations over one, the commits landed over one (review_overrides.py)
  * @property {string=} error
  * @property {ContinuationOffer=} continuation_offer
  */

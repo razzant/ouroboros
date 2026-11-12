@@ -1,34 +1,41 @@
-// Settings/onboarding editor of the one subagent catalog; a row marked Reviewer is in the review pool.
+// The one agents catalog; a row marked Reviewer is in the review pool. A card is a head and a form: setup draws both
+// for every row and saves them with its Finish; Settings draws the heads as a list and one form on an agent's page,
+// where every change is one write of the roster (settings_controls.js writeEntry).
 
-import { apiFetch } from './api_client.js';
+import { APP_SETTINGS_ORIGIN, apiClient, apiFetch } from './api_client.js';
 import {
     FACET_ACCOUNTS, FACET_CATALOG, FACET_QUOTA, READ_OK, accountRows,
     bindStatusSurface, boundedStatusRefresh, claudexorStatus,
 } from './claudexor_status_store.js';
-import { renderSegmentedField } from './page_header.js';
+import { markRecheckRow, recheckFromSettings, saveCheckerSettings } from './consciousness_api.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import {
     EFFORT_CHOICES, ROUTE_KIND_AGENT_SESSION, ROUTE_KIND_API_MODEL,
     compoundSessionEffort, compoundSessionEffortConflict, apiConnections, configuredApiProviders, changeRouteChoice, routeModelFields,
     routeModelInputHtml, routeTargetFromModel, routeSupportsAccount, effortSelectHtml,
     encodeRouteChoice, indexProfilesByHarness, mintStableId, profileOptionsFor,
-    routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, updateRouteControlOptions,
+    routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, subagentHandle, updateRouteControlOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
-} from './route_editor_primitives.js';
+    tierPriced } from './route_editor_primitives.js';
 import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
-import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog } from './settings_catalog.js';
+import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
 import {
     harnessMap, lastReviewRunText, reviewCostText, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun,
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
-import { recheckMarkHtml } from './safety_recheck.js';
-import { settingsSection } from './settings_controls.js';
+import { bindRecheckMarks, recheckMarkHtml, syncRecheckState } from './safety_recheck.js';
+import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, setButtonBusy, settingsRow, writeEntry } from './settings_controls.js';
+import { registerSettingsPage } from './settings_pages.js';
+import { rowById, rowsOf } from './settings_rows.js';
 import { revealNewRow } from './ui_helpers.js';
+import { setResult } from './ui_primitives.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { currentLanguage } from './i18n.js';
 
 export const MAX_AVAILABLE_SUBAGENTS = 26;
+const KEY = 'OUROBOROS_SUBAGENTS';
 export const SUBAGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 export const ALLOW_EMPTY_REVIEW_POOL = 'allow_empty_review_pool';
 const MINTED_FROM = { review_lane: 'From a former review lane', factory_default: 'Factory reviewer' };
@@ -45,10 +52,7 @@ function ownUnknownKeys(value, allowed) {
 }
 
 function canonicalRow(row) {
-    const route = serializeRouteSpec(row?.route || {}, {
-        apiKind: ROUTE_KIND_API_MODEL,
-        credentialField: 'credential_profile_id',
-    });
+    const route = serializeRouteSpec(row?.route || {}, { apiKind: ROUTE_KIND_API_MODEL, credentialField: 'credential_profile_id' });
     route.target_id = String(route.target_id || '').trim();
     if (route.credential_profile_id !== undefined) {
         route.credential_profile_id = String(route.credential_profile_id || '').trim();
@@ -78,9 +82,7 @@ function canonicalRow(row) {
 }
 
 function attachUiKeys(setting, previousItems = []) {
-    const previous = new Map((previousItems || []).map(
-        (row) => [String(row.subagent_id || ''), row._uiKey],
-    ));
+    const previous = new Map((previousItems || []).map((row) => [String(row.subagent_id || ''), row._uiKey]));
     const taken = new Set();
     setting.items = setting.items.map((row) => {
         let key = previous.get(String(row.subagent_id || '')) || '';
@@ -130,42 +132,26 @@ function rowParseError(row, index) {
 
 /** Parse without replacing malformed saved bytes with an empty list. */
 export function parseAvailableSubagentsSetting(value) {
-    if (value === undefined || value === null || value === '') {
-        return { setting: null, error: 'Available subagents configuration was not loaded' };
-    }
+    if (value === undefined || value === null || value === '') return { setting: null, error: 'Available subagents configuration was not loaded' };
     let input = value;
+    const refuse = (error) => ({ setting: null, error });
     if (typeof input === 'string') {
-        try {
-            input = JSON.parse(input);
-        } catch (error) {
-            return { setting: null, error: `saved value is not valid JSON: ${error.message || error}` };
-        }
+        try { input = JSON.parse(input); } catch (error) { return refuse(`saved value is not valid JSON: ${error.message || error}`); }
     }
-    if (!input || typeof input !== 'object' || Array.isArray(input)) {
-        return { setting: null, error: 'saved value must be an object' };
-    }
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return refuse('saved value must be an object');
     const settingUnknown = ownUnknownKeys(input, SETTING_KEYS);
-    if (settingUnknown.length) {
-        return { setting: null, error: `saved value has unknown field: ${settingUnknown[0]}` };
-    }
-    if (typeof input.enabled !== 'boolean' || !Array.isArray(input.items)) {
-        return { setting: null, error: 'saved value needs a boolean enabled flag and an items list' };
-    }
-    if (input.items.length > MAX_AVAILABLE_SUBAGENTS) {
-        return { setting: null, error: `saved value has more than ${MAX_AVAILABLE_SUBAGENTS} rows` };
-    }
+    if (settingUnknown.length) return refuse(`saved value has unknown field: ${settingUnknown[0]}`);
+    if (typeof input.enabled !== 'boolean' || !Array.isArray(input.items)) return refuse('saved value needs a boolean enabled flag and an items list');
+    if (input.items.length > MAX_AVAILABLE_SUBAGENTS) return refuse(`saved value has more than ${MAX_AVAILABLE_SUBAGENTS} rows`);
     const canonicalItems = [];
     for (const [index, row] of input.items.entries()) {
         const rowError = rowParseError(row, index);
-        if (rowError) return { setting: null, error: rowError };
-        canonicalItems.push(canonicalRow({
-            ...row,
-            route: { ...row.route, kind: row.route.kind.trim().toLowerCase() },
-        }));
+        if (rowError) return refuse(rowError);
+        canonicalItems.push(canonicalRow({ ...row, route: { ...row.route, kind: row.route.kind.trim().toLowerCase() } }));
     }
     const setting = { enabled: input.enabled, items: canonicalItems };
     const errors = validateAvailableSubagentsSetting(setting);
-    if (errors.length) return { setting: null, error: `saved value is invalid: ${errors[0]}` };
+    if (errors.length) return refuse(`saved value is invalid: ${errors[0]}`);
     return { setting, error: '' };
 }
 
@@ -188,16 +174,10 @@ function rowErrors(row, index, ids, rows = null, inherited = '') {
     } else if (row?.access !== undefined && route.kind !== ROUTE_KIND_AGENT_SESSION) {
         errors.push('can select access only with an Agent session.');
     }
-    if (![ROUTE_KIND_API_MODEL, ROUTE_KIND_AGENT_SESSION].includes(route.kind)) {
-        errors.push('must use API model or Agent session.');
-    }
+    if (![ROUTE_KIND_API_MODEL, ROUTE_KIND_AGENT_SESSION].includes(route.kind)) errors.push('must use API model or Agent session.');
     if (!routeModelFields(route).model.trim() && route.kind !== ROUTE_KIND_AGENT_SESSION
-        || !String(route.target_id || '').trim()) {
-        errors.push('needs a model or agent-session route.');
-    }
-    if (!routeSupportsAccount(route) && route.credential_profile_id) {
-        errors.push('can pin an account only for a subscription model or Agent session.');
-    }
+        || !String(route.target_id || '').trim()) errors.push('needs a model or agent-session route.');
+    if (!routeSupportsAccount(route) && route.credential_profile_id) errors.push('can pin an account only for a subscription model or Agent session.');
     if (route.kind === ROUTE_KIND_AGENT_SESSION) {
         const target = String(route.target_id || '');
         const parts = target.split('=');
@@ -207,17 +187,13 @@ function rowErrors(row, index, ids, rows = null, inherited = '') {
             errors.push('needs its agent-session target as harness or harness=model, without whitespace or legacy :effort.');
         }
     }
-    if (row?.effort && !EFFORT_CHOICES.includes(String(row.effort))) {
-        errors.push('has an unsupported reasoning effort.');
-    }
+    if (row?.effort && !EFFORT_CHOICES.includes(String(row.effort))) errors.push('has an unsupported reasoning effort.');
     if (row?.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push('needs Standard, Fast, Economy or inherited processing.');
     // A session slug's level refuses a contradicting pin, as the server does. An API-wrapped
     // `claudexor::cursor=…` row keeps a stored pin readable: the name wins when it runs.
     const encodedEffort = route.kind === ROUTE_KIND_AGENT_SESSION
         ? compoundSessionEffortConflict(route.target_id, row?.effort) : '';
-    if (encodedEffort) {
-        errors.push(`effort “${row.effort}” conflicts with compound route effort “${encodedEffort}”.`);
-    }
+    if (encodedEffort) errors.push(`effort “${row.effort}” conflicts with compound route effort “${encodedEffort}”.`);
     const twin = rows && String(route.target_id || '').trim() ? sameEngineAs(rows, index, inherited) : -1;
     if (twin >= 0 && !reviewTwinAllowed(rows[twin], row)) {
         errors.push(`runs the same engine as Subagent ${twin + 1} — change its model, effort, access, account or processing, mark both as Reviewer for a repeated review, or remove it.`);
@@ -225,10 +201,8 @@ function rowErrors(row, index, ids, rows = null, inherited = '') {
     return errors.map((text) => `Subagent ${index + 1} ${text}`);
 }
 
-function listLevelErrors(setting) {
-    return setting.items.length > MAX_AVAILABLE_SUBAGENTS
-        ? [`Available subagents supports at most ${MAX_AVAILABLE_SUBAGENTS} rows.`] : [];
-}
+const listLevelErrors = (setting) => (setting.items.length > MAX_AVAILABLE_SUBAGENTS
+    ? [`Available subagents supports at most ${MAX_AVAILABLE_SUBAGENTS} rows.`] : []);
 
 /** The rows that review: marked Reviewer and switched on, in catalog order. */
 export function reviewPoolRows(setting) {
@@ -356,7 +330,7 @@ function credentialsNote(payload) {
     return `No credentials in this install for ${missing.join(', ')}: those seats cannot answer.`;
 }
 
-function reviewPoolSummary(state) {
+function reviewPoolSummary(state, settings = false) {
     const items = state.setting?.items || [];
     const pool = reviewPoolRows(state.setting).length;
     const marked = items.filter((row) => row?.review_eligible === true).length;
@@ -372,13 +346,15 @@ function reviewPoolSummary(state) {
     return {
         count: `Reviewers: ${pool}`,
         // Said when it matters: Delegation off leaves review on for the marked rows.
-        stays: marked && !state.setting?.enabled ? 'Delegation is off; rows marked Reviewer still review.' : '',
-        empty, confirm: Boolean(items.length && !pool), note, history: migration.history,
+        stays: !marked || state.setting?.enabled ? '' : settings ? 'Helpers are off; agents marked Reviewer still review.'
+            : 'Delegation is off; rows marked Reviewer still review.',
+        // Settings asks in a dialog when the server refuses (writeEntry); setup ticks the box before its Finish.
+        empty, confirm: Boolean(items.length && !pool) && !settings, note, history: migration.history,
         copies: reviewCopiesText(groups, pool),
     };
 }
 
-// Saved/draft intent is ONE editor fact (docs/DESIGN.md §6): the cards carry availability only.
+// Saved/draft intent is ONE editor fact of setup (docs/DESIGN.md §6): the cards carry availability only.
 // Its slot stays in the toolbar in every state, so the first edit never re-wraps what sits above the rows.
 const INTENT = {
     draft: { label: 'Unsaved changes', tone: 'neutral' },
@@ -387,10 +363,8 @@ const INTENT = {
     saved: { label: 'Saved', tone: 'ok' },
 };
 
-function editorIntent(state, hasPageDirtyIndicator) {
-    // Nothing loaded claims no intent. Settings already names the dirty draft in its Save bar; keep
-    // this slot empty there. The wizard has no page indicator and still needs the editor's word.
-    if (!state.loaded || (state.dirty && hasPageDirtyIndicator)) return { label: '', title: '', tone: 'neutral' };
+function editorIntent(state) {
+    if (!state.loaded) return { label: '', title: '', tone: 'neutral' };  // nothing loaded claims no intent
     // The read says what is unsaved: an undecided candidate, or its own catalog following Main (`automatic`).
     const word = state.dirty ? 'draft'
         : state.source === 'undecided' ? 'generated' : state.automatic ? 'automatic' : state.baseline;
@@ -411,26 +385,14 @@ function reviewDeliveryHtml(row, state, index) {
 }
 
 export function validateAvailableSubagentsSetting(setting, { uniqueEngines = false, processingPreference = '' } = {}) {
-    if (!setting || typeof setting.enabled !== 'boolean' || !Array.isArray(setting.items)) {
-        return ['Available subagents configuration is not loaded.'];
-    }
+    if (!setting || typeof setting.enabled !== 'boolean' || !Array.isArray(setting.items)) return ['Available subagents configuration is not loaded.'];
     const ids = new Set();
     const rows = uniqueEngines ? setting.items : null;
     return [...listLevelErrors(setting), ...setting.items.flatMap((row, index) => rowErrors(row, index, ids, rows, processingPreference))];
 }
 
 export function buildAvailableSubagentsSetting(setting) {
-    return {
-        enabled: Boolean(setting?.enabled),
-        items: (setting?.items || []).map(canonicalRow),
-    };
-}
-
-export function subagentSettingsFingerprint(value) {
-    const parsed = parseAvailableSubagentsSetting(value);
-    return parsed.setting
-        ? JSON.stringify(buildAvailableSubagentsSetting(parsed.setting))
-        : JSON.stringify(value ?? null);
+    return { enabled: Boolean(setting?.enabled), items: (setting?.items || []).map(canonicalRow) };
 }
 
 export function availableSubagentsSavePayload({ loaded = false, parseError = '', setting, allowEmptyReviewPool = false } = {}) {
@@ -441,43 +403,23 @@ export function availableSubagentsSavePayload({ loaded = false, parseError = '',
     return { OUROBOROS_SUBAGENTS: built, ...(allowEmptyReviewPool && emptyPool ? { [ALLOW_EMPTY_REVIEW_POOL]: true } : {}) };
 }
 
-/** Preview the current Settings draft without turning its generated actor rows into owner input. */
-export function availableSubagentsPreviewPayload(settingsDraft, subscriptionsConnected) {
-    const { OUROBOROS_SUBAGENTS: _roster, ...draft } = settingsDraft || {};
-    return { ...draft, subscriptionsConnected: Boolean(subscriptionsConnected) };
+export function generatedPreviewCanReplace({ dirty = false, parsedSetting = null } = {}) {
+    return !dirty && Boolean(parsedSetting);
 }
 
-export function generatedPreviewCanReplace({
-    dirty = false, outerDraftClean = true, parsedSetting = null,
-} = {}) {
-    return !dirty && outerDraftClean && Boolean(parsedSetting);
-}
-
+// Every sentence of a diagnostics value, however it is nested; a coded one leads with its code.
 function diagnosticsText(diagnostics, out = []) {
-    if (!diagnostics) return out;
-    if (typeof diagnostics === 'string') {
-        if (diagnostics.trim()) out.push(diagnostics.trim());
-        return out;
-    }
-    if (Array.isArray(diagnostics)) {
-        diagnostics.forEach((item) => diagnosticsText(item, out));
-        return out;
-    }
-    if (typeof diagnostics !== 'object') return out;
-    const message = diagnostics.message || diagnostics.detail || diagnostics.error;
-    if (message) {
-        const code = String(diagnostics.code || '').trim();
-        out.push(`${code ? `${code}: ` : ''}${String(message)}`);
-        return out;
-    }
-    Object.values(diagnostics).forEach((item) => diagnosticsText(item, out));
+    if (typeof diagnostics === 'string') { if (diagnostics.trim()) out.push(diagnostics.trim()); return out; }
+    if (!diagnostics || typeof diagnostics !== 'object') return out;
+    const message = Array.isArray(diagnostics) ? '' : diagnostics.message || diagnostics.detail || diagnostics.error;
+    const code = String(diagnostics.code || '').trim();
+    if (message) out.push(`${code ? `${code}: ` : ''}${String(message)}`);
+    else Object.values(diagnostics).forEach((item) => diagnosticsText(item, out));
     return out;
 }
 
 function connectedHarnessIds(snapshot) {
-    return new Set(accountRows(snapshot)
-        .filter((row) => row?.enabled !== false
-            && String(row?.status?.verification || '') === 'passed')
+    return new Set(accountRows(snapshot).filter((row) => row?.enabled !== false && String(row?.status?.verification || '') === 'passed')
         .map((row) => String(row.harness || '')));
 }
 
@@ -490,12 +432,10 @@ function focusSnapshot(host, doc) {
     if (!active || !host?.contains?.(active)) return null;
     const row = active.closest?.('[data-subagent-row]');
     return {
-        rowId: row?.dataset?.subagentRow || '',
-        field: active.dataset?.subagentField || '',
+        rowId: row?.dataset?.subagentRow || '', field: active.dataset?.subagentField || '',
         summary: active.tagName === 'SUMMARY' ? disclosureKind(active.parentElement) : '',
         start: typeof active.selectionStart === 'number' ? active.selectionStart : null,
         end: typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
-        scrollTop: host.scrollTop,
     };
 }
 
@@ -504,26 +444,13 @@ function restoreFocus(host, saved) {
     const rows = host.querySelectorAll?.('[data-subagent-row]') || [];
     const row = [...rows].find((item) => item.dataset?.subagentRow === saved.rowId);
     const field = saved.field ? row?.querySelector?.(`[data-subagent-field="${saved.field}"]`)
-        : saved.summary ? row?.querySelector?.(`[${DISCLOSURES[saved.summary]}] > summary`) : null;
+        : saved.summary ? row?.querySelector?.(`[${DISCLOSURES[saved.summary]}] > summary`) : row?.querySelector?.('[data-editor-save]');
     if (field?.focus) field.focus({ preventScroll: true });
-    if (saved.start !== null && field?.setSelectionRange) {
-        field.setSelectionRange(saved.start, saved.end);
-    }
-    host.scrollTop = saved.scrollTop;
-}
-
-// Account evidence for a saved model's availability qualifier: only a confirmed
-// Accounts read narrows the catalog's carriers; the catalog read still labels it.
-function verifiedAccountSnapshot(state) {
-    return state.accountsKnown ? state.snapshot : null;
+    if (saved.start !== null && field?.setSelectionRange) field.setSelectionRange(saved.start, saved.end);
 }
 
 // Session access choices; one list, so a further native profile lands in one place.
-const ACCESS_CHOICES = [
-    { value: 'full', label: 'Full system access' },
-    { value: 'workspace_write', label: 'Working files' },
-    { value: 'readonly', label: 'Read only' },
-];
+const ACCESS_CHOICES = [{ value: 'full', label: 'Full system access' }, { value: 'workspace_write', label: 'Working files' }, { value: 'readonly', label: 'Read only' }];
 const ACCESS_HELP = 'Full system access (the default) can reach outside the working folder. The selected agent must support it. Explicit task restrictions still apply.';
 
 // History, provenance and the row's secondary facts, behind one explicit disclosure
@@ -548,49 +475,50 @@ function rowDetailsHtml(row, state, rowKey) {
             </details>`;
 }
 
-export function availableSubagentRowMarkup(row, state, index = 0) {
+const chip = (text, tone = 'neutral') => `<span class="ui-chip settings-chip agent-chip" data-tone="${tone}">${escapeHtml(text)}</span>`;
+// An on/off that writes at once is the shared switch; one that is a field of a form with its own Save is a checkbox.
+function toggleHtml(field, label, checked, live, recheckId = '') {
+    const attrs = `type="checkbox" data-subagent-field="${field}"${recheckId ? ` data-recheck-mark="${escapeHtml(recheckId)}"` : ''} aria-label="${escapeHtml(label)}"${checked ? ' checked' : ''}`;
+    return live ? `<label class="ui-switch"><input ${attrs} role="switch" aria-checked="${checked}"${field === 'enabled' ? ' data-entry-switch' : ''}><span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>`
+        : `<input class="ui-checkbox" ${attrs}>`;
+}
+
+/** An agent's name where rows carry no number: its model in short, then the facets its handle spells (effort, access, pin). */
+export function agentName(row, state = {}) {
+    const target = String(row?.route?.target_id || '').trim();
+    const model = String(routeModelFields(row?.route || {}, state.modelSources).model || '').trim();
+    const short = model.slice(model.lastIndexOf('/') + 1) || (row?.route?.kind === ROUTE_KIND_AGENT_SESSION ? target : '');
+    return short ? short + subagentHandle(row, state.processingPreference).slice(target.length) : 'New agent';
+}
+// Sentences number the cards of setup ("Subagent 2"); a page of Settings has no numbers and names the agent instead.
+const namedRows = (text, state) => String(text || '').replace(/Subagents? (\d+(?:(?:, | and )\d+)*)/g,
+    (_all, list) => list.replace(/\d+/g, (n) => agentName(state.setting.items[n - 1], state)));
+
+/** A card's head. In Settings' list it is the whole entry: the mark of its source, the name that opens the agent's
+ *  page with what it is for under it, and the switch. In setup it leads the form below it. */
+function subagentHeadHtml(row, state, index, list = false) {
     const ordinal = index + 1;
-    const rowKey = row._uiKey || row.subagent_id;
-    const headingId = `available-subagent-${rowKey}-heading`;
-    const session = row.route.kind === ROUTE_KIND_AGENT_SESSION;
-    const split = routeModelFields(row.route, state.modelSources);
-    const harnesses = harnessMap(state.snapshot);
-    const routeGroups = routeChoiceGroups({
-        harnesses: state.catalogKnown ? (state.snapshot?.harnesses || []) : [],
-        modelSources: state.modelSources, providers: state.providers, connections: state.connections,
-        providerProfiles: state.providerProfiles, currentChoice: encodeRouteChoice(row),
-        catalogKnown: state.catalogKnown, accountsKnown: state.accountsKnown,
-    });
-    const modelOptions = sessionModelOptions(accountScopedModelCatalog(harnesses[split.harness], row.route.credential_profile_id), split.model, {
-        catalogKnown: state.catalogKnown, snapshot: verifiedAccountSnapshot(state), pin: row.route.credential_profile_id,
-    });
-    const profileOptions = profileOptionsFor(
-        (indexProfilesByHarness(state.snapshot)[split.harness]) || [],
-        row.route.credential_profile_id || '',
-        { accountsKnown: state.accountsKnown && Boolean(split.harness), labelled: true },
-    );
     const status = rowStatus(row, state);
-    const reason = rowStatusReason(status);
-    const exception = reviewException(row);
-    const repeat = reviewRepeat(row, state, index);
-    const errors = rowErrors(row, index, new Set());
-    const meta = rowMeta(row, state, errors);
-    const invalid = Boolean(row._uiAttempted) && errors.length > 0;
     const identity = rowIdentity(row, state);
-    const routeIdentity = harnessIdentityMarkup(identity.harnessId, {
-        label: identity.label, channel: identity.channel,
-        className: 'available-subagent-route-identity',
-    });
-    const field = (label, control) => `<label class="ui-field available-subagent-field">${label} ${control}</label>`;
-    // Head: the title side wraps within itself; the Reviewer mark and the actions own
+    const mark = harnessIdentityMarkup(identity.harnessId, { label: identity.label, channel: identity.channel, className: 'available-subagent-route-identity' });
+    if (list) {
+        const name = agentName(row, state);
+        return `<span class="settings-head-glyph" aria-hidden="true">${mark}</span>
+            <button type="button" class="settings-head-open ui-hit-area" data-subagent-field="open">
+                <span class="ui-row-title">${escapeHtml(name)}${row.review_eligible === true ? chip('Reviewer') : ''}${status.tone === 'warn' ? chip(status.label, 'warn') : ''}</span>
+                <span class="ui-row-meta">${escapeHtml([identity.label, row.recommended_use.trim()].filter(Boolean).join(' · '))}</span>
+            </button>
+            <div class="ui-row-actions">${toggleHtml('enabled', `Available: ${name}`, row.enabled !== false, true)}${doorSign()}</div>`;
+    }
+    const rowKey = row._uiKey || row.subagent_id;
+    const reason = rowStatusReason(status);
+    // The title side wraps within itself; the Reviewer mark and the actions own
     // the end slot, so no fact of any length moves them (docs/DESIGN.md §6).
-    return `
-        <article class="available-subagent-row" data-subagent-row="${escapeHtml(rowKey)}" aria-labelledby="${escapeHtml(headingId)}"${invalid ? ' data-invalid' : ''}>
-            <div class="available-subagent-head">
+    return `<div class="available-subagent-head">
                 <div class="available-subagent-title">
                     <label class="available-subagent-enable" title="Owner switch: a switched-off subagent keeps its configuration and stays editable; no new delegation selects it and it does not review."><input class="ui-checkbox" type="checkbox" data-subagent-field="enabled" aria-label="Subagent ${ordinal} enabled for new work"${row.enabled === false ? '' : ' checked'}></label>
-                    <h4 class="available-subagent-heading" id="${escapeHtml(headingId)}">Subagent ${ordinal}</h4>
-                    <div class="available-subagent-route-identity-wrap">${routeIdentity}</div>
+                    <h4 class="available-subagent-heading" id="available-subagent-${escapeHtml(rowKey)}-heading">Subagent ${ordinal}</h4>
+                    <div class="available-subagent-route-identity-wrap">${mark}</div>
                     <span class="settings-inline-status" data-subagent-status data-tone="${escapeHtml(status.tone)}" title="${escapeHtml(status.text)}">${escapeHtml(status.label)}</span>
                 </div>
                 <div class="available-subagent-actions">
@@ -600,109 +528,182 @@ export function availableSubagentRowMarkup(row, state, index = 0) {
                 </div>
             </div>
             <div class="available-subagent-status-reason" data-subagent-status-reason${reason ? '' : ' hidden'}>${escapeHtml(reason)}</div>
-            <div class="available-subagent-status-reason" data-subagent-review-exception${exception ? '' : ' hidden'}>${escapeHtml(exception)}</div>
-            <div class="available-subagent-meta" data-subagent-review-notes${repeat ? '' : ' hidden'}>${escapeHtml(repeat)}</div>
-            <div class="available-subagent-route">
+            ${reviewLinesHtml(row, state, index)}`;
+}
+
+// What the marks mean for this row now: a marked row switched off, a marked twin's repeat.
+function reviewLinesHtml(row, state, index) {
+    const exception = reviewException(row);
+    const repeat = reviewRepeat(row, state, index);
+    return `<div class="available-subagent-status-reason" data-subagent-review-exception${exception ? '' : ' hidden'}>${escapeHtml(exception)}</div>
+            <div class="available-subagent-meta" data-subagent-review-notes${repeat ? '' : ' hidden'}>${escapeHtml(repeat)}</div>`;
+}
+
+/** A card's form, in parts: how the agent runs, what it is for, its one meta line, then Processing and Details. Setup
+ *  stacks them under the head; an agent's page in Settings lays the same parts out in its cards. */
+function subagentFormParts(row, state, index) {
+    const ordinal = index + 1;
+    const rowKey = row._uiKey || row.subagent_id;
+    const session = row.route.kind === ROUTE_KIND_AGENT_SESSION;
+    const split = routeModelFields(row.route, state.modelSources);
+    const harnesses = harnessMap(state.snapshot);
+    const routeGroups = routeChoiceGroups({
+        harnesses: state.catalogKnown ? (state.snapshot?.harnesses || []) : [],
+        modelSources: state.modelSources, providers: state.providers, connections: state.connections,
+        providerProfiles: state.providerProfiles, currentChoice: encodeRouteChoice(row),
+        catalogKnown: state.catalogKnown, accountsKnown: state.accountsKnown,
+    });
+    // Only a confirmed Accounts read narrows the catalog's carriers; the catalog read still labels the model.
+    const modelOptions = sessionModelOptions(accountScopedModelCatalog(harnesses[split.harness], row.route.credential_profile_id), split.model,
+        { catalogKnown: state.catalogKnown, snapshot: state.accountsKnown ? state.snapshot : null, pin: row.route.credential_profile_id });
+    const profileOptions = profileOptionsFor((indexProfilesByHarness(state.snapshot)[split.harness]) || [], row.route.credential_profile_id || '',
+        { accountsKnown: state.accountsKnown && Boolean(split.harness), labelled: true });
+    const meta = rowMeta(row, state, rowErrors(row, index, new Set()));
+    const field = (label, control) => `<label class="ui-field available-subagent-field">${label} ${control}</label>`;
+    return {
+        route: `<div class="available-subagent-route">
                 ${field('Source', selectHtml(`data-subagent-field="route" aria-label="Source for Subagent ${ordinal}"`, routeGroups, encodeRouteChoice(row)))}
                 <div class="ui-field available-subagent-field available-subagent-field-model">Model ${session
                     ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
-                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
+                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, tierPriced(row.processing_preference || state.processingPreference)
+                        ? state.apiModels.map((item) => ({ ...item, price: null })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
                 ${field('Reasoning effort', `<span class="available-subagent-effort-facet" data-subagent-effort-facet data-named="${escapeHtml(namedRowEffort(row))}">${effortFacetHtml(row, ordinal)}</span>`)}
                 ${session ? field('Access', selectHtml(`id="actor-${escapeHtml(rowKey)}-access" data-subagent-field="access" aria-label="Access for Subagent ${ordinal}"`, [{ label: '', options: ACCESS_CHOICES }], row.access || 'full')) : ''}
                 ${reviewDeliveryHtml(row, state, index)}
-            </div>
-            <label class="available-subagent-purpose ui-field">Description
+            </div>`,
+        purpose: (label) => `<label class="available-subagent-purpose ui-field">${label}
                 <textarea class="ui-control" data-subagent-field="recommended_use" rows="1" aria-label="Description for Subagent ${ordinal}" placeholder="When should Ouroboros choose this subagent?">${escapeHtml(row.recommended_use)}</textarea>
-            </label>
-            <div id="actor-${escapeHtml(rowKey)}-meta" class="available-subagent-meta ui-field-help" data-subagent-meta${meta.qualifier ? ' data-availability-qualifier' : ''}${meta.tone ? ` data-tone="${escapeHtml(meta.tone)}"` : ''}${meta.text ? '' : ' hidden'}>${escapeHtml(meta.text)}</div>
-            ${processingDetailsHtml(`data-subagent-field="processing_preference" aria-label="Processing for Subagent ${ordinal}"`, row.processing_preference, state.processingPreference)}
-            ${rowDetailsHtml(row, state, rowKey)}
+            </label>`,
+        meta: `<div id="actor-${escapeHtml(rowKey)}-meta" class="available-subagent-meta ui-field-help" data-subagent-meta${meta.qualifier ? ' data-availability-qualifier' : ''}${meta.tone ? ` data-tone="${escapeHtml(meta.tone)}"` : ''}${meta.text ? '' : ' hidden'}>${escapeHtml(meta.text)}</div>`,
+        more: `${processingDetailsHtml(`data-subagent-field="processing_preference" aria-label="Processing for Subagent ${ordinal}"`, row.processing_preference, state.processingPreference)}
+            ${rowDetailsHtml(row, state, rowKey)}`,
+    };
+}
+
+/** Setup's card: the head, then the form. */
+export function availableSubagentRowMarkup(row, state, index = 0) {
+    const rowKey = row._uiKey || row.subagent_id;
+    const invalid = Boolean(row._uiAttempted) && rowErrors(row, index, new Set()).length > 0;
+    const form = subagentFormParts(row, state, index);
+    return `
+        <article class="available-subagent-row" data-subagent-row="${escapeHtml(rowKey)}" aria-labelledby="available-subagent-${escapeHtml(rowKey)}-heading"${invalid ? ' data-invalid' : ''}>
+            ${subagentHeadHtml(row, state, index)}
+            ${form.route}
+            ${form.purpose('Description')}
+            ${form.meta}
+            ${form.more}
         </article>`;
+}
+
+/** One agent's page in Settings: what is switched at once, what it is for, how it runs with the form's Save, and its
+ *  removal. `live` is a saved agent; in an unsaved one the on/off and the mark are fields of the form. */
+function agentPageHtml(row, state, index, live) {
+    const form = subagentFormParts(row, state, index);
+    const status = rowStatus(row, state);
+    const saved = state.loadedItems.find((item) => item.subagent_id === row.subagent_id);
+    const recheck = saved?.rechecks_flags === true
+        || (saved?.route.kind === ROUTE_KIND_API_MODEL && saved.delivery === 'packet' && saved.enabled !== false);
+    const use = (field, title, meta, checked) => `<div class="ui-row settings-row agent-use" data-kind="switch"><p class="ui-row-title">${title}</p>
+        <p class="ui-row-meta"><span>${escapeHtml(meta)}</span></p><div class="ui-row-actions">${toggleHtml(field, title, checked, live, field === 'rechecks_flags' ? row.subagent_id : '')}</div></div>`;
+    const card = (title, body, lead = '') => `<section class="ui-card settings-card"><h3 class="settings-card-title agents-card-title">${title}</h3>
+        ${lead ? `<p class="settings-card-lead">${lead}</p>` : ''}${body}</section>`;
+    return `<p class="settings-page-lead">${escapeHtml(rowIdentity(row, state).label)}</p>
+        <div class="settings-stack agent-page" data-subagent-row="${escapeHtml(row._uiKey || row.subagent_id)}" data-entry-id="${escapeHtml(row.subagent_id)}">
+            ${card('In use', `<div class="settings-rows">
+                ${use('enabled', 'Available', 'Off keeps the agent and its notes; Ouroboros does not call it.', row.enabled !== false)}
+                ${use('review_eligible', 'Reviewer', state.tickCaption, row.review_eligible === true)}
+                ${live && recheck ? use('rechecks_flags', 'Re-checks flagged actions', 'The second look at a step the Safety Supervisor flags. One agent holds it.', saved.rechecks_flags === true) : ''}
+            </div>
+            <p class="ui-status agent-status" data-subagent-status data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.text)}</p>
+            ${reviewLinesHtml(row, state, index)}`)}
+            ${card('What it is good at', form.purpose(''), 'Ouroboros reads this when it chooses a helper.')}
+            ${card('Runs on', `${form.route}${form.meta}${form.more}
+            <div data-subagents-validation class="available-subagents-diagnostics" data-tone="error" hidden></div>
+            <div class="ui-action-row"><button type="button" class="btn btn-save" data-editor-save>Save</button>
+                ${live ? `<button type="button" class="btn btn-default" data-editor-discard${state.dirty ? '' : ' hidden'}>Discard changes</button>` : ''}
+                <span class="ui-result" data-editor-result role="status" aria-live="polite"></span></div>`)}
+            <div class="ui-action-row settings-foot">${live ? '<button type="button" class="btn btn-default" data-subagent-duplicate>Duplicate</button>' : ''}
+                <button type="button" class="btn ${live ? 'btn-danger' : 'btn-default'}" data-subagent-remove data-editor-remove>${live ? 'Remove' : 'Discard'}</button></div>
+        </div>`;
 }
 
 export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
     return JSON.stringify([
-        state.loaded,
-        state.parseError,
-        state.setting,
-        state.saveAttempted,
-        state.baseline,
-        state.automatic,
-        state.source,
-        diagnosticsText(state.diagnostics),
-        state.statusError,
-        state.catalogKnown,
-        state.accountsKnown,
-        state.quotaKnown,
-        state.snapshot?.harnesses || [],
-        accountRows(state.snapshot),
-        state.snapshot?.quota || [],
+        state.loaded, state.parseError, state.setting, state.saveAttempted, state.baseline, state.automatic, state.source,
+        diagnosticsText(state.diagnostics), state.statusError, state.catalogKnown, state.accountsKnown, state.quotaKnown,
+        state.snapshot?.harnesses || [], accountRows(state.snapshot), state.snapshot?.quota || [],
         state.snapshot?.subagent_last_delegation || null,
         (state.setting?.items || []).map((row) => row?.route?.kind === ROUTE_KIND_AGENT_SESSION
             ? sessionRouteVerdict(row, state, nowMs).text : ''),
         state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
+        state.filter, state.tickCaption, state.unsavedId,
+        currentLanguage(),  // the suggestions' prices are composed words: another language is another paint
     ]);
 }
 
-/** One isolated editor instance; Settings keeps a singleton wrapper below. */
+// Settings keeps these while the app is open: an agent page's unsaved form, each agent's name for its page title,
+// the copy Duplicate hands to the page it opens, and the agent just added, which the list then shows and focuses.
+const DRAFTS = new Map();
+const NAMES = new Map();
+let seed = null;
+let reveal = '';
+const GONE = new Error('The agent is no longer on the list.');
+const LIVE_FLAGS = ['enabled', 'review_eligible', 'rechecks_flags'];
+const landed = (outcome) => outcome.state === 'saved' || outcome.state === 'saved_then_failed';
+const FILTERS = [['all', 'All'], ['reviewers', 'Reviewers'], ['off', 'Off'], ['unavailable', 'Unavailable']];
+const inFilter = (row, state, key) => key === 'all' || (key === 'reviewers' ? row.review_eligible === true
+    : key === 'off' ? row.enabled === false : rowStatus(row, state).tone === 'warn');
+
+/** What a roster write says, in the one wording of every row; a list that changed elsewhere says so. */
+export function rosterResult(outcome) {
+    if (outcome?.state === 'changed_elsewhere') return { text: 'The list changed elsewhere. This is how it stands now.', tone: 'warn' };
+    const line = outcomeLine({ control: { kind: 'switch' }, writer: 'checker' }, { ...outcome, token: '' });
+    return line ? { text: [line.text, line.note].filter(Boolean).join('. '), tone: line.tone, details: line.details } : {};
+}
+
+/** One editor instance. Setup draws every card (head and form) and saves with its Finish; with `page` (Settings:
+ *  `{ entry, ctx, reload }`) it draws the list of heads (`entry` '') or one agent's page ('new', or its id). */
 export function createAvailableSubagentsEditor({
     hostId = 'available-subagents-editor',
     doc = () => (typeof document === 'undefined' ? null : document),
     win = () => (typeof window === 'undefined' ? null : window),
     store = claudexorStatus,
     onChange = () => {},
-    onDirtyChange = () => {},
-    onJudged = () => {},
-    isOuterDraftClean = () => true,
-    onGeneratedApply = () => {},
-    allowUnloadedOmission = false,
     previewGenerated = null,
     baseline = 'saved',
-    hasPageDirtyIndicator = false,
+    page = null,
 } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const getWin = typeof win === 'function' ? win : () => win;
     let disposeChoosers = () => {};
     const state = {
-        loaded: false,
-        destroyed: false,
-        parseError: '',
-        unloadedOmissionAllowed: false,
-        setting: { enabled: true, items: [] },
-        source: '',
-        diagnostics: [],
-        dirty: false,
-        saveAttempted: false,
-        baseline: baseline === 'generated' ? 'generated' : 'saved',
-        automatic: false,
-        statusError: '',
-        catalogKnown: false,
-        accountsKnown: false,
-        quotaKnown: false,
-        snapshot: null,
+        loaded: false, destroyed: false, parseError: '', setting: { enabled: true, items: [] }, source: '', diagnostics: [],
+        dirty: false, saveAttempted: false, baseline: baseline === 'generated' ? 'generated' : 'saved', automatic: false,
+        statusError: '', catalogKnown: false, accountsKnown: false, quotaKnown: false, snapshot: null,
         apiModels: [], modelSources: [], modelCatalogNote: '', processingPreference: '',
         // Sources with a stored key, and every connection for a saved one's label (setSourceContext).
         providers: [], connections: [], providerProfiles: {},
-        signature: '',
-        statusDisposer: null,
-        catalogDisposer: null,
-        previewSignature: '',
-        previewGeneration: 0,
+        signature: '', statusDisposer: null, catalogDisposer: null, previewSignature: '', previewGeneration: 0,
         // GET /api/review-pool facts about the SAVED catalog; prices are keyed by
         // the loaded route so an edited row never shows its old route's price.
-        reviewPool: null, reviewCosts: new Map(), loadedItems: [], loadedFingerprint: '',
-        allowEmptyReviewPool: false,
+        reviewPool: null, reviewCosts: new Map(), loadedItems: [], loadedFingerprint: '', allowEmptyReviewPool: false,
         // `${_uiKey}:${kind}` of each open row disclosure: a repaint or a reload re-opens it.
         openDisclosures: new Set(),
+        // Settings: the list's filter, the Reviewer caption of the saved strictness, the agent this page edits (an
+        // unsaved one by `unsavedId`), and the last write's result, which stays through a repaint.
+        filter: 'all', tickCaption: '', entryId: '', unsavedId: '', result: null,
     };
+    const listView = Boolean(page) && !page.entry;
+    const current = () => state.setting.items.find((row) => row.subagent_id === state.entryId) || null;
+    // In Settings a saved agent's on/off and marks write at once; an unsaved one keeps them as fields of its form.
+    const live = (row) => Boolean(page) && row.subagent_id !== state.unsavedId;
+    const said = (text) => (page ? namedRows(text, state) : text);
 
-    function host() {
-        return getDoc()?.getElementById?.(hostId) || null;
-    }
+    const host = () => getDoc()?.getElementById?.(hostId) || null;
 
     function adoptStatus() {
         state.statusError = store?.error || '';
@@ -715,13 +716,8 @@ export function createAvailableSubagentsEditor({
     }
 
     function validationErrors() {
-        if (!state.loaded) {
-            // Only an omitted response field may stay out of an unrelated save;
-            // malformed saved bytes or an explicit repair candidate must report errors.
-            if (state.unloadedOmissionAllowed) return [];
-            return [state.parseError
-                || 'Available subagents draft is still loading. Retry the preview before finishing.'];
-        }
+        // Malformed saved bytes and a preview that has not arrived are both said, never saved over.
+        if (!state.loaded) return [state.parseError || 'Available subagents draft is still loading. Retry the preview before finishing.'];
         if (state.parseError) return [state.parseError];
         return [
             ...validateAvailableSubagentsSetting(state.setting, { uniqueEngines: state.dirty, processingPreference: state.processingPreference }),
@@ -729,36 +725,28 @@ export function createAvailableSubagentsEditor({
         ];
     }
 
-    // Judged like the server: a generated draft, or one that differs from what was loaded.
+    // Judged like the server: a generated draft, or one that differs from what was loaded. A write of Settings is
+    // judged by the server itself, whose refusal asks (writeEntry).
     function poolErrors() {
+        if (page) return [];
         const judged = state.baseline === 'generated'
             || JSON.stringify(buildAvailableSubagentsSetting(state.setting)) !== state.loadedFingerprint;
         return reviewPoolErrors(state.setting, { judged, allowEmpty: state.allowEmptyReviewPool });
     }
 
     function renderPoolSummary(container) {
-        const summary = reviewPoolSummary(state);
-        const count = container.querySelector('[data-review-pool-count]');
-        if (count) count.textContent = summary.count;
-        const stays = container.querySelector('[data-review-pool-stays]');
-        if (stays) Object.assign(stays, { textContent: summary.stays, hidden: !summary.stays });
-        const empty = container.querySelector('[data-review-pool-empty]');
-        if (empty) empty.hidden = !summary.empty;
-        const emptyText = container.querySelector('[data-review-pool-empty-text]');
-        if (emptyText) emptyText.textContent = summary.empty;
-        const confirm = container.querySelector('[data-review-pool-confirm]');
-        if (confirm) confirm.hidden = !summary.confirm;
-        const copies = container.querySelector('[data-review-pool-copies]');
-        if (copies) copies.hidden = !summary.copies;
-        const copiesText = container.querySelector('[data-review-pool-copies-text]');
-        if (copiesText) copiesText.textContent = summary.copies;
-        const note = container.querySelector('[data-review-pool-note]');
-        if (note) Object.assign(note, { textContent: summary.note, hidden: !summary.note });
-        const history = container.querySelector('[data-review-pool-history]');
-        if (history) history.hidden = !summary.history;
-        const historyText = container.querySelector('[data-review-pool-history-text]');
-        if (historyText) historyText.textContent = summary.history;
-        const intent = editorIntent(state, hasPageDirtyIndicator);
+        const summary = reviewPoolSummary(state, Boolean(page));
+        const intent = editorIntent(state);
+        // Each line of the pool: its words where it has any, and whether it shows.
+        for (const [name, text, shown] of [['count', summary.count], ['stays', summary.stays, summary.stays],
+            ['empty', null, summary.empty], ['empty-text', summary.empty], ['confirm', null, summary.confirm],
+            ['copies', null, summary.copies], ['copies-text', said(summary.copies)], ['note', summary.note, summary.note],
+            ['history', null, summary.history], ['history-text', summary.history]]) {
+            const node = container.querySelector(`[data-review-pool-${name}]`);
+            if (!node) continue;
+            if (text !== null) node.textContent = text;
+            if (shown !== undefined) node.hidden = !shown;
+        }
         const intentEl = container.querySelector('[data-subagents-intent]');
         if (intentEl) {
             Object.assign(intentEl, { textContent: intent.label, title: intent.title });
@@ -772,9 +760,7 @@ export function createAvailableSubagentsEditor({
     // keeps its caret and any open Details; a rebuilt select is bound like the first one.
     function bindEffortFacet(rowElement, row) {
         rowElement.querySelector('[data-subagent-effort-facet] [data-subagent-field="effort"]')?.addEventListener?.('change', (event) => {
-            const value = String(event.target.value || '');
-            if (value) row.effort = value;
-            else delete row.effort;
+            if (event.target.value) row.effort = String(event.target.value); else delete row.effort;
             markDirty();
         });
     }
@@ -789,18 +775,18 @@ export function createAvailableSubagentsEditor({
             return;
         }
         facet.innerHTML = effortFacetHtml(row, index + 1);
-        if (named) facet.dataset.named = named;
-        else delete facet.dataset.named;
-        if (!named) bindEffortFacet(el, row);
+        if (named) facet.dataset.named = named; else { delete facet.dataset.named; bindEffortFacet(el, row); }
     }
 
+    /** Patch every verdict in place; answers how many errors it shows. */
     function renderValidation() {
         const container = host();
-        if (!container) return;
+        if (!container) return 0;
         const structural = !state.loaded || Boolean(state.parseError);
         const shown = structural ? validationErrors()
             : (state.saveAttempted ? [...listLevelErrors(state.setting), ...poolErrors()] : []);
         renderPoolSummary(container);
+        if (listView) return shown.length;  // a head holds no form: its facts are drawn with it
         const ids = new Set();
         state.setting.items.forEach((row, index) => {
             const rowErrs = state.loaded ? rowErrors(row, index, ids, state.dirty ? state.setting.items : null, state.processingPreference) : [];
@@ -819,7 +805,8 @@ export function createAvailableSubagentsEditor({
             const status = rowStatus(row, state);
             const statusEl = el.querySelector('[data-subagent-status]');
             if (statusEl) {
-                Object.assign(statusEl, { textContent: status.label, title: status.text });
+                // A page of Settings has room for the sentence; a card's head keeps the word, the sentence its title.
+                Object.assign(statusEl, page ? { textContent: status.text } : { textContent: status.label, title: status.text });
                 statusEl.dataset.tone = status.tone;
             }
             // Every line below the head is patched in place: a Reviewer or row switch never rebuilds the card.
@@ -829,7 +816,7 @@ export function createAvailableSubagentsEditor({
             };
             show('[data-subagent-status-reason]', rowStatusReason(status));
             show('[data-subagent-review-exception]', reviewException(row));
-            show('[data-subagent-review-notes]', reviewRepeat(row, state, index));
+            show('[data-subagent-review-notes]', said(reviewRepeat(row, state, index)));
             const delivery = el.querySelector('[data-subagent-delivery-field]');
             if (delivery) delivery.hidden = row.review_eligible !== true;
             const cost = reviewCost(row, state);
@@ -850,15 +837,14 @@ export function createAvailableSubagentsEditor({
             const meta = rowMeta(row, state, rowErrs);
             const metaEl = el.querySelector('[data-subagent-meta]');
             if (!metaEl) return;
-            Object.assign(metaEl, { hidden: !meta.text, textContent: meta.text });
+            Object.assign(metaEl, { hidden: !meta.text, textContent: said(meta.text) });
             metaEl.toggleAttribute('data-availability-qualifier', Boolean(meta.qualifier));
             if (meta.tone) metaEl.dataset.tone = meta.tone;
             else delete metaEl.dataset.tone;
         });
         const box = container.querySelector('[data-subagents-validation]');
-        if (box) Object.assign(box, { hidden: !shown.length, textContent: shown[0] || '' });
-        // The host mirrors this verdict in whatever it said about the roster.
-        if (state.saveAttempted) onJudged(!shown.length);
+        if (box) Object.assign(box, { hidden: !shown.length, textContent: said(shown[0] || '') });
+        return shown.length;
     }
 
     function noteSaveAttempt() {
@@ -869,12 +855,11 @@ export function createAvailableSubagentsEditor({
     }
 
     function markDirty({ structural = false } = {}) {
-        if (!state.dirty) {
-            state.dirty = true;
-            onDirtyChange(true);
-        }
+        state.dirty = true;
         // Text and fixed choices hold their draft; status keeps the same nodes.
         state.signature = structural ? '' : availableSubagentsRenderSignature(state);
+        showResult(null);  // an edit starts a new subject: the last result goes
+        host()?.querySelector?.('[data-editor-discard]')?.removeAttribute('hidden');  // an agent's page says it holds unsaved text
         renderValidation();
         onChange(buildAvailableSubagentsSetting(state.setting));
     }
@@ -885,29 +870,81 @@ export function createAvailableSubagentsEditor({
         _uiKey: mintStableId('actor_row', state.setting.items.map((item) => item._uiKey)),
     });
 
+    function showResult(outcome) {
+        state.result = outcome ? rosterResult(outcome) : null;
+        setResult(host()?.querySelector?.('[data-entry-result], [data-editor-result]'), state.result || {});
+    }
+
+    // Settings: one write of the roster. A fresh read, the one entry changed, and the same body again after the
+    // last-reviewer question (writeEntry); every write is the checker's transaction, and `edit` changes what no
+    // single entry holds (the roster's own switch, the one re-check mark, the copies). A list never saved is written
+    // as shown, without this page's unsaved form. The page then shows what the server holds.
+    async function write(id, change, { edit = null, name = '', busy = null, settle = null, quiet = false } = {}) {
+        const doc = getDoc();
+        const held = busy && doc?.activeElement === busy ? focusSnapshot(host(), doc) || busy : null;  // disabling drops its focus
+        setButtonBusy(busy, true);
+        if (!quiet) showResult(null);  // a new write is a new subject: its result, when it comes, is seen to come
+        let outcome;
+        try {
+            outcome = await writeEntry(KEY, id, change, { name, ask: page.ctx.ask,
+                shown: page.entry ? JSON.parse(state.loadedFingerprint || 'null') : buildAvailableSubagentsSetting(state.setting),
+                checker: ({ body }) => saveCheckerSettings({ [KEY]: edit ? edit(body[KEY]) : body[KEY] }, {
+                    allowEmptyReviewPool: body[ALLOW_EMPTY_REVIEW_POOL] === true, ifUnchanged: body.if_unchanged, headers: APP_SETTINGS_ORIGIN }) });
+        } catch (error) { if (error !== GONE) throw error; outcome = { state: 'changed_elsewhere' }; }
+        if (landed(outcome)) settle?.();
+        state.html = '';  // drawn again from what the server holds: a refused or declined switch returns to its stored value
+        await page.reload();
+        setButtonBusy(busy, false);
+        if (held && doc.activeElement === doc.body) { if (held === busy) busy.focus?.(); else restoreFocus(host(), held); }
+        if (!quiet) showResult(outcome);
+        return outcome;
+    }
+
+    // An agent page's Save: the form goes into its own entry of the list read afresh. A saved agent keeps the on/off
+    // and the marks the server holds (its switches write those); a new one brings its own.
+    async function saveEntry(button) {
+        const row = current();
+        state.saveAttempted = row._uiAttempted = true;
+        if (renderValidation()) return;
+        const fresh = !live(row);
+        const outcome = await write(row.subagent_id, (before) => {
+            if (Boolean(before) === fresh) throw GONE;  // removed elsewhere, or its new id was taken: nothing is put back
+            const next = canonicalRow(row);
+            if (before) for (const flag of LIVE_FLAGS) { delete next[flag]; if (before[flag] !== undefined) next[flag] = before[flag]; }
+            return next;
+        }, { busy: button, settle: () => { state.dirty = false; } });
+        if (!fresh || !landed(outcome)) return;
+        state.dirty = false;  // the new agent is on the list now: this page keeps no form, and the list shows it
+        reveal = row.subagent_id;
+        page.ctx.openSettings('agents');
+    }
+
     function bindRows(container) {
         container.querySelectorAll?.('[data-subagent-row]').forEach((rowElement) => {
-            const row = state.setting.items.find(
-                (item) => (item._uiKey || item.subagent_id) === rowElement.dataset.subagentRow,
-            );
+            const row = state.setting.items.find((item) => (item._uiKey || item.subagent_id) === rowElement.dataset.subagentRow);
             if (!row) return;
+            const open = () => page.ctx.openSettings(`agents/${row.subagent_id}`);
+            rowElement.querySelector('[data-subagent-field="open"]')?.addEventListener('click', open);
+            if (listView) rowElement.addEventListener('click', (event) => { if (!event.target.closest?.('button, .ui-switch')) open(); });
             rowElement.querySelector('[data-subagent-field="recommended_use"]')?.addEventListener('input', (event) => {
                 row.recommended_use = String(event.target.value || '');
                 markDirty();
             });
-            // Held as a draft like every other field: the section's Save is the
-            // one writer, and `false` is stored only while the box is cleared.
-            rowElement.querySelector('[data-subagent-field="enabled"]')?.addEventListener('change', (event) => {
-                if (event.target.checked) delete row.enabled;
-                else row.enabled = false;
-                markDirty();
-            });
-            // A mark is patched in place like the row switch (its delivery field, effort default,
-            // review lines and its twins' repeat notes): rebuilding would move the box under the pointer.
-            rowElement.querySelector('[data-subagent-field="review_eligible"]')?.addEventListener('change', (event) => {
-                if (event.target.checked) row.review_eligible = true;
-                else delete row.review_eligible;
-                markDirty();
+            // The switch and the Reviewer mark: setup holds each as a draft like every other field (stored only when it
+            // is not the default) and patches its lines in place; in Settings a saved agent's is one write of that
+            // entry, never of an open form.
+            for (const [field, base] of [['enabled', true], ['review_eligible', false]]) {
+                rowElement.querySelector(`[data-subagent-field="${field}"]`)?.addEventListener('change', (event) => {
+                    const on = Boolean(event.target.checked);
+                    if (live(row)) return void write(row.subagent_id, { [field]: on }, { busy: event.target });
+                    if (on === base) delete row[field];
+                    else row[field] = on;
+                    return markDirty();
+                });
+            }
+            rowElement.querySelector('[data-subagent-field="rechecks_flags"]')?.addEventListener('change', (event) => {
+                const mark = event.target.checked ? row.subagent_id : '';
+                void write(row.subagent_id, {}, { busy: event.target, edit: (roster) => markRecheckRow(roster, mark) });
             });
             rowElement.querySelectorAll('details').forEach((details) => {
                 const kind = disclosureKind(details);
@@ -919,11 +956,6 @@ export function createAvailableSubagentsEditor({
                     else state.openDisclosures.delete(key);
                 });
             });
-            rowElement.querySelector('[data-subagent-field="delivery"]')?.addEventListener('change', (event) => {
-                if (event.target.value === 'packet') row.delivery = 'packet';
-                else delete row.delivery;
-                markDirty();
-            });
             rowElement.querySelector('[data-subagent-field="route"]')?.addEventListener('change', (event) => {
                 row.route = changeRouteChoice(row.route, event.target.value);
                 if (row.route.kind !== ROUTE_KIND_AGENT_SESSION) delete row.access;
@@ -931,18 +963,15 @@ export function createAvailableSubagentsEditor({
                 markDirty({ structural: true });
                 paint();
             });
-            rowElement.querySelector('[data-subagent-field="model"]')?.addEventListener(
-                'input',
-                (event) => {
-                    const previous = encodeRouteChoice(row);
-                    row.route.target_id = routeTargetFromModel(row.route, event.target.value);
-                    if (namedRowEffort(row)) delete row.effort;  // the owner's pick of a named model retires the pin
-                    const structural = previous !== encodeRouteChoice(row);
-                    if (structural) delete row.route.credential_profile_id;
-                    markDirty({ structural });
-                    if (structural) paint(); else renderValidation(); // keeps the disclosed id current, caret intact
-                },
-            );
+            rowElement.querySelector('[data-subagent-field="model"]')?.addEventListener('input', (event) => {
+                const previous = encodeRouteChoice(row);
+                row.route.target_id = routeTargetFromModel(row.route, event.target.value);
+                if (namedRowEffort(row)) delete row.effort;  // the owner's pick of a named model retires the pin
+                const structural = previous !== encodeRouteChoice(row);
+                if (structural) delete row.route.credential_profile_id;
+                markDirty({ structural });
+                if (structural) paint(); else renderValidation(); // keeps the disclosed id current, caret intact
+            });
             rowElement.querySelector('[data-subagent-field="account"]')?.addEventListener('change', (event) => {
                 const pin = String(event.target.value || '');
                 if (pin) row.route.credential_profile_id = pin;
@@ -950,12 +979,14 @@ export function createAvailableSubagentsEditor({
                 markDirty({ structural: true });
                 paint();
             });
-            for (const field of ['processing_preference', 'access']) {
+            // Processing, Access and Delivery: a plain choice, stored unless it is the default (inherit; Reads the work itself).
+            for (const field of ['processing_preference', 'access', 'delivery']) {
                 rowElement.querySelector(`[data-subagent-field="${field}"]`)?.addEventListener('change', (event) => {
                     const value = String(event.target.value || '');
-                    if (value) row[field] = value;
+                    if (value && value !== 'native') row[field] = value;
                     else delete row[field];
                     markDirty();
+                    if (field === 'processing_preference') paint();  // its suggestions' prices follow the tier
                 });
             }
             bindEffortFacet(rowElement, row);
@@ -966,12 +997,22 @@ export function createAvailableSubagentsEditor({
                 // copy, so it carries no factory or migration origin.
                 const { minted_from: _origin, ...source } = canonicalRow(row);
                 const copy = { ...source, ...mintRowKeys(), _uiAttempted: true };
+                if (page) { seed = copy; page.ctx.openSettings('agents/new'); return; }  // an unsaved agent's own page
                 state.setting.items.splice(state.setting.items.indexOf(row) + 1, 0, copy);
                 markDirty({ structural: true });
                 paint();
                 revealRow(copy._uiKey);
             });
-            rowElement.querySelector('[data-subagent-remove]')?.addEventListener('click', () => {
+            rowElement.querySelector('[data-subagent-remove]')?.addEventListener('click', async (event) => {
+                if (page) {  // Settings asks first (writeEntry), removes at once and returns to the list
+                    const beside = [1, -1].map((step) => state.setting.items[state.setting.items.indexOf(row) + step]).find(Boolean);
+                    const next = live(row) ? beside || { subagent_id: '+' } : null;
+                    if (next && !landed(await write(row.subagent_id, null, { name: agentName(row, state), busy: event.target }))) return;
+                    state.dirty = false;
+                    reveal = next?.subagent_id || '';  // the caret goes to the agent now in its place, else to Add
+                    page.ctx.openSettings('agents');
+                    return;
+                }
                 const index = state.setting.items.indexOf(row);
                 if (index >= 0) state.setting.items.splice(index, 1);
                 markDirty({ structural: true });
@@ -988,14 +1029,14 @@ export function createAvailableSubagentsEditor({
         const container = host();
         if (!container || state.destroyed) return false;
         const nextSignature = availableSubagentsRenderSignature(state);
-        if (nextSignature === state.signature) return false;
+        if (nextSignature === state.signature || (page && !state.loaded && !state.parseError)) return false;  // Settings draws once it has read
         const focused = focusSnapshot(container, getDoc());
         state.signature = nextSignature;
         const errors = validationErrors();
         const diagnostics = diagnosticsText(state.diagnostics);
         const readProblem = [state.statusError
             ? 'Live agent availability could not be read. Saved rows remain unchanged.' : '', state.modelCatalogNote].filter(Boolean).join(' ');
-        if (discoveryOnly && container.querySelector('.available-subagents-list')) {
+        if (discoveryOnly && container.querySelector('.agent-page, .available-subagents-toolbar')) {
             state.setting.items.forEach((row, index) => {
                 const el = container.querySelector(`[data-subagent-row="${row._uiKey || row.subagent_id}"]`);
                 if (!el) return;
@@ -1003,7 +1044,8 @@ export function createAvailableSubagentsEditor({
                 template.innerHTML = availableSubagentRowMarkup(row, state, index);
                 const desired = template.content.firstElementChild;
                 updateRouteControlOptions(el, desired);
-                el.querySelector('.available-subagent-route-identity-wrap').innerHTML = desired.querySelector('.available-subagent-route-identity-wrap').innerHTML;
+                const identity = el.querySelector('.available-subagent-route-identity-wrap');
+                if (identity) identity.innerHTML = desired.querySelector('.available-subagent-route-identity-wrap').innerHTML;
             });
             Object.assign(container.querySelector('[data-subagents-read-problem]'), { textContent: readProblem, hidden: !readProblem });
             Object.assign(container.querySelector('[data-subagents-diagnostics]'), { textContent: diagnostics.join(' · '), hidden: !diagnostics.length });
@@ -1011,43 +1053,82 @@ export function createAvailableSubagentsEditor({
             return true;
         }
         disposeChoosers();
-        const pool = reviewPoolSummary(state);
-        const intent = editorIntent(state, hasPageDirtyIndicator);
+        const scroller = container.closest?.('.settings-page'), top = scroller?.scrollTop;  // Settings scrolls in the level: a redraw keeps the place
+        const pool = reviewPoolSummary(state, Boolean(page));
+        const intent = editorIntent(state);
+        const items = state.setting.items;
+        const full = !state.loaded || items.length >= MAX_AVAILABLE_SUBAGENTS;
+        const unloaded = '<div class="available-subagents-empty">The saved configuration could not be loaded, so this editor will not replace it.</div>';
+        const facts = `<div class="available-subagents-source" data-subagents-read-problem ${readProblem ? '' : 'hidden'}>${escapeHtml(readProblem)}</div>
+            <div data-subagents-diagnostics class="available-subagents-diagnostics" ${diagnostics.length ? '' : 'hidden'}>${escapeHtml(diagnostics.join(' · '))}</div>`;
+        const above = `<div class="available-subagents-source" data-review-pool-stays ${pool.stays ? '' : 'hidden'}>${escapeHtml(pool.stays)}</div>
+            <div class="available-subagents-diagnostics" data-review-pool-note ${pool.note ? '' : 'hidden'}>${escapeHtml(pool.note)}</div>
+            <details class="model-role-details ui-disclosure" data-review-pool-history ${pool.history ? '' : 'hidden'}><summary>Reviewer origin</summary>
+                <div class="available-subagents-source" data-review-pool-history-text>${escapeHtml(pool.history)}</div></details>
+            ${facts}`;
         // Lines a row edit can toggle (the empty pool, the validation summary) sit below the rows:
         // a conditional line never moves the control that caused it (docs/DESIGN.md §6).
-        container.innerHTML = `
+        const below = `<div class="available-subagents-review-empty" data-review-pool-empty data-tone="warn" ${pool.empty ? '' : 'hidden'}>
+                <span data-review-pool-empty-text>${escapeHtml(pool.empty)}</span>
+                <label class="local-toggle ui-field-inline" data-review-pool-confirm ${pool.confirm ? '' : 'hidden'}><input class="ui-checkbox" type="checkbox" data-review-pool-allow-empty ${state.allowEmptyReviewPool ? 'checked' : ''}> Save without reviewers</label>
+            </div>
+            <div class="available-subagents-review-copies" data-review-pool-copies data-tone="warn" ${pool.copies ? '' : 'hidden'}>
+                <span data-review-pool-copies-text>${escapeHtml(said(pool.copies))}</span>
+                <button type="button" class="btn btn-default" data-review-pool-keep-one>Keep one per model</button>
+            </div>
+            <div data-subagents-validation class="available-subagents-diagnostics" data-tone="error" ${errors.length ? '' : 'hidden'}>${escapeHtml(errors[0] || '')}</div>`;
+        if (page?.entry) {
+            const row = current();
+            container.innerHTML = !state.loaded ? unloaded : !row ? '<p class="available-subagents-empty">This agent is no longer on the list.</p>'
+                : `${agentPageHtml(row, state, items.indexOf(row), live(row))}${facts}`;
+            container.querySelector('[data-editor-save]')?.addEventListener('click', (event) => void saveEntry(event.target));
+            container.querySelector('[data-editor-discard]')?.addEventListener('click', () => { state.dirty = false; void page.reload(); });
+        } else if (page) {
+            const count = (key) => items.filter((row) => inFilter(row, state, key)).length;
+            const heads = items.map((row, index) => (inFilter(row, state, state.filter)
+                ? `<div class="ui-row settings-head" data-subagent-row="${escapeHtml(row._uiKey)}" data-entry-id="${escapeHtml(row.subagent_id)}">${subagentHeadHtml(row, state, index, true)}</div>` : '')).join('');
+            const html = `<section class="ui-card settings-card">
+                <div class="settings-card-head"><h3 class="settings-card-title agents-card-title">${items.length} agent${items.length === 1 ? '' : 's'}</h3>
+                    <span class="ui-result" data-entry-result role="status" aria-live="polite"></span>
+                    <div class="ui-section-actions"><button type="button" class="btn btn-default btn-sm" data-subagent-add ${full ? 'disabled' : ''}>Add agent</button></div></div>
+                <div class="agents-filters">${FILTERS.filter(([key]) => key === 'all' || key === state.filter || count(key)).map(([key, label]) =>
+                    `<button type="button" class="filter-chip${key === state.filter ? ' active' : ''}" data-agents-filter="${key}" aria-pressed="${key === state.filter}">${label} ${count(key)}</button>`).join('')}</div>
+                ${state.source === 'undecided' || state.automatic ? `<p class="available-subagents-source" data-agents-automatic>Automatic: this list follows your Main model and accounts. Your first change here saves it as yours.</p>` : ''}
+                ${above}
+                <div class="settings-rows">${!state.loaded ? unloaded : heads || `<p class="available-subagents-empty">${items.length ? 'No agent here.'
+                    : 'No agents yet, so the main model is the one agent. Add one to choose others.'}</p>`}</div>
+                ${below}
+                <p class="available-subagents-source">A change applies to new tasks: a task that is already running keeps the reviewers it started with.${
+                    items.length >= MAX_AVAILABLE_SUBAGENTS ? ` The list holds at most ${MAX_AVAILABLE_SUBAGENTS} agents.` : ''}</p>
+            </section>`;
+            if (html === state.html) return true;  // nothing in view changed (a status tick, the pool read): focus and listeners stay
+            container.innerHTML = state.html = html;
+            container.querySelectorAll('[data-agents-filter]').forEach((button) => button.addEventListener('click', () => {
+                Object.assign(state, { filter: button.dataset.agentsFilter, signature: '' });
+                paint();
+                host()?.querySelector(`[data-agents-filter="${state.filter}"]`)?.focus({ preventScroll: true });
+            }));
+        } else {
+            container.innerHTML = `
             <div class="available-subagents-toolbar">
                 <label class="local-toggle ui-field ui-field-inline" title="Off: new tasks do not delegate to these rows; rows marked Reviewer still review.">
                     <input class="ui-checkbox" type="checkbox" data-subagents-enabled aria-label="Delegation to these subagents" ${state.setting.enabled ? 'checked' : ''} ${state.loaded ? '' : 'disabled'}>
                     Delegation
                 </label>
-                <span class="available-subagents-count">${state.setting.items.length}/${MAX_AVAILABLE_SUBAGENTS}</span>
+                <span class="available-subagents-count">${items.length}/${MAX_AVAILABLE_SUBAGENTS}</span>
                 <span class="available-subagents-count" data-review-pool-count>${escapeHtml(pool.count)}</span>
                 <span class="settings-inline-status available-subagents-intent" data-subagents-intent data-tone="${intent.tone}" title="${escapeHtml(intent.title)}">${intent.label}</span>
-                <button type="button" class="btn btn-default" data-subagent-add
-                    ${!state.loaded || state.setting.items.length >= MAX_AVAILABLE_SUBAGENTS ? 'disabled' : ''}>Add subagent</button>
+                <button type="button" class="btn btn-default" data-subagent-add ${full ? 'disabled' : ''}>Add subagent</button>
             </div>
-            <div class="available-subagents-source" data-review-pool-stays ${pool.stays ? '' : 'hidden'}>${escapeHtml(pool.stays)}</div>
-            <div class="available-subagents-diagnostics" data-review-pool-note ${pool.note ? '' : 'hidden'}>${escapeHtml(pool.note)}</div>
-            <details class="model-role-details ui-disclosure" data-review-pool-history ${pool.history ? '' : 'hidden'}><summary>Reviewer origin</summary>
-                <div class="available-subagents-source" data-review-pool-history-text>${escapeHtml(pool.history)}</div></details>
-            <div class="available-subagents-source" data-subagents-read-problem ${readProblem ? '' : 'hidden'}>${escapeHtml(readProblem)}</div>
-            <div data-subagents-diagnostics class="available-subagents-diagnostics" ${diagnostics.length ? '' : 'hidden'}>${escapeHtml(diagnostics.join(' · '))}</div>
+            ${above}
             <div class="available-subagents-list">
                 ${state.loaded
-                    ? state.setting.items.map((row, index) => availableSubagentRowMarkup(row, state, index)).join('')
+                    ? items.map((row, index) => availableSubagentRowMarkup(row, state, index)).join('')
                         || '<div class="available-subagents-empty">No subagents configured, so the main model is the one agent. Add one to choose others.</div>'
-                    : '<div class="available-subagents-empty">The saved configuration could not be loaded, so this editor will not replace it.</div>'}
+                    : unloaded}
             </div>
-            <div class="available-subagents-review-empty" data-review-pool-empty data-tone="warn" ${pool.empty ? '' : 'hidden'}>
-                <span data-review-pool-empty-text>${escapeHtml(pool.empty)}</span>
-                <label class="local-toggle ui-field-inline" data-review-pool-confirm ${pool.confirm ? '' : 'hidden'}><input class="ui-checkbox" type="checkbox" data-review-pool-allow-empty ${state.allowEmptyReviewPool ? 'checked' : ''}> Save without reviewers</label>
-            </div>
-            <div class="available-subagents-review-copies" data-review-pool-copies data-tone="warn" ${pool.copies ? '' : 'hidden'}>
-                <span data-review-pool-copies-text>${escapeHtml(pool.copies)}</span>
-                <button type="button" class="btn btn-default" data-review-pool-keep-one>Keep one per model</button>
-            </div>
-            <div data-subagents-validation class="available-subagents-diagnostics" data-tone="error" ${errors.length ? '' : 'hidden'}>${escapeHtml(errors[0] || '')}</div>`;
+            ${below}`;
+        }
         container.querySelector('[data-subagents-enabled]')?.addEventListener('change', (event) => {
             state.setting.enabled = Boolean(event.target.checked);
             markDirty();
@@ -1058,60 +1139,89 @@ export function createAvailableSubagentsEditor({
             renderValidation();
             onChange(buildAvailableSubagentsSetting(state.setting));
         });
-        // The owner's click edits the draft only: the copies leave it, the first row of each model stays.
-        container.querySelector('[data-review-pool-keep-one]')?.addEventListener('click', () => {
-            const copies = new Set(reviewPoolCopies(state.setting, state.processingPreference).flatMap((group) => group.copies));
+        // The copies leave the list, the first row of each model stays: a draft edit in setup; in Settings it asks,
+        // then removes at once the copies of the list the server holds then.
+        container.querySelector('[data-review-pool-keep-one]')?.addEventListener('click', async (event) => {
+            const copiesOf = (roster) => new Set(reviewPoolCopies(roster, state.processingPreference).flatMap((group) => group.copies));
+            const copies = copiesOf(state.setting);
             if (!copies.size) return;
-            state.setting.items = state.setting.items.filter((_row, index) => !copies.has(index));
+            const without = (roster, gone) => ({ ...roster, items: roster.items.filter((_row, index) => !gone.has(index)) });
+            if (page) {
+                const button = event.target;
+                if (await CONFIRMS.removeEntry({ name: copies.size === 1 ? '1 copy' : `${copies.size} copies` }, null, null, page.ctx.ask)) {
+                    void write('', () => null, { busy: button, edit: (roster) => without(roster, copiesOf(roster)) });
+                }
+                return;
+            }
+            state.setting.items = without(state.setting, copies).items;
             markDirty({ structural: true });
             paint();
         });
         container.querySelector('[data-subagent-add]')?.addEventListener('click', () => {
-            if (state.setting.items.length >= MAX_AVAILABLE_SUBAGENTS) return;
+            if (items.length >= MAX_AVAILABLE_SUBAGENTS) return;
+            if (page) { page.ctx.openSettings('agents/new'); return; }
             const row = { recommended_use: '', route: { kind: ROUTE_KIND_API_MODEL, target_id: '' }, ...mintRowKeys() };
             state.setting.items.push(row);
             markDirty({ structural: true });
             paint();
             revealRow(row._uiKey);
         });
+        if (scroller) scroller.scrollTop = top;
         bindRows(container);
         disposeChoosers = bindModelChoosers(container);
         restoreFocus(container, focused);
         renderValidation();
+        setResult(container.querySelector('[data-entry-result], [data-editor-result]'), state.result || {});
+        const added = listView && reveal ? items.find((row) => row.subagent_id === reveal) : null;
+        if (added) { reveal = ''; revealRow(added._uiKey); }
+        else if (listView && reveal === '+' && state.loaded && !items.length) { reveal = ''; container.querySelector('[data-subagent-add]')?.focus(); }
         return true;
     }
 
     // Reveal the new row after the painter restores previous focus.
     function revealRow(uiKey) {
         const row = host()?.querySelector?.(`[data-subagent-row="${uiKey}"]`);
-        revealNewRow(row, row?.querySelector?.('[data-subagent-field="recommended_use"]'));
+        revealNewRow(row, row?.querySelector?.('[data-subagent-field="recommended_use"], [data-subagent-field="open"]'));
     }
 
-    function load(value, { source = '', diagnostics = [], allowOmission = false, automatic = false } = {}) {
+    // An agent's page over the list just read: its unsaved form stays (this page's, or the one kept when it was left),
+    // while a saved agent's on/off and marks are the stored ones. A new agent takes keys the list does not hold.
+    function openEntry(draft) {
+        const items = state.setting.items;
+        if (page.entry === 'new') {
+            const { subagent_id: _id, _uiKey: _key, ...form } = seed || draft || { recommended_use: '', route: { kind: ROUTE_KIND_API_MODEL, target_id: '' } };
+            seed = null;
+            items.push({ ...form, ...mintRowKeys() });
+            Object.assign(state, { entryId: items.at(-1).subagent_id, unsavedId: items.at(-1).subagent_id, dirty: true });
+            return;
+        }
+        state.entryId = page.entry;
+        const at = items.findIndex((row) => row.subagent_id === page.entry);
+        if (at < 0 || !draft) return;
+        const stored = Object.fromEntries(LIVE_FLAGS.filter((flag) => items[at][flag] !== undefined).map((flag) => [flag, items[at][flag]]));
+        const { enabled: _on, review_eligible: _mark, rechecks_flags: _recheck, ...form } = draft;
+        items[at] = { ...form, ...stored, _uiKey: items[at]._uiKey };
+        state.dirty = true;
+    }
+
+    function load(value, { source = '', diagnostics = [], automatic = false } = {}) {
         // Invalidate a preview launched for the previous settings document.
         // A late response must never overwrite a freshly loaded configured row.
         state.previewGeneration += 1;
         state.previewSignature = '';
+        const draft = page?.entry && state.dirty ? current() : null;
         const parsed = parseAvailableSubagentsSetting(value);
         state.loaded = Boolean(parsed.setting);
         state.parseError = parsed.error;
-        state.unloadedOmissionAllowed = Boolean(
-            allowUnloadedOmission && allowOmission && !parsed.setting,
-        );
         if (parsed.setting) state.setting = attachUiKeys(parsed.setting, state.setting.items);
         const loadedSetting = parsed.setting ? buildAvailableSubagentsSetting(parsed.setting) : null;
-        state.loadedItems = loadedSetting?.items || [];
-        state.loadedFingerprint = loadedSetting ? JSON.stringify(loadedSetting) : '';
-        state.reviewPool = null;
-        state.reviewCosts = new Map();
-        state.allowEmptyReviewPool = false;
-        state.source = String(source || '');
-        state.automatic = automatic === true;
-        state.diagnostics = diagnostics;
-        state.dirty = false;
-        state.saveAttempted = false;
-        state.signature = '';
-        onDirtyChange(false);
+        Object.assign(state, {
+            loadedItems: loadedSetting?.items || [], loadedFingerprint: loadedSetting ? JSON.stringify(loadedSetting) : '',
+            reviewPool: null, reviewCosts: new Map(), allowEmptyReviewPool: false, source: String(source || ''),
+            automatic: automatic === true, diagnostics, dirty: false, saveAttempted: false, signature: '',
+        });
+        if (page) state.setting.items.forEach((row) => NAMES.set(row.subagent_id, agentName(row, state)));
+        if (page?.entry && state.loaded) { openEntry(draft || DRAFTS.get(page.entry)); DRAFTS.delete(page.entry); }  // the form lives in this page now
         paint();
         return { loaded: state.loaded, error: state.parseError };
     }
@@ -1120,46 +1230,23 @@ export function createAvailableSubagentsEditor({
         const parsed = parseAvailableSubagentsSetting(response?.available_subagents);
         state.source = String(response?.source || state.source || 'onboarding_default');
         state.diagnostics = response?.diagnostics || [];
-        let outerDraftClean = false;
-        try {
-            outerDraftClean = Boolean(isOuterDraftClean());
-        } catch (error) {
-            outerDraftClean = false;
-        }
-        const canApply = generatedPreviewCanReplace({
-            dirty: state.dirty,
-            outerDraftClean,
-            parsedSetting: parsed.setting,
-        });
+        const canApply = generatedPreviewCanReplace({ dirty: state.dirty, parsedSetting: parsed.setting });
         const sameAssignment = parsed.setting && state.loaded
             && JSON.stringify(buildAvailableSubagentsSetting(parsed.setting)) === JSON.stringify(buildAvailableSubagentsSetting(state.setting));
         if (canApply) {
-            state.loaded = true;
-            state.parseError = '';
-            state.saveAttempted = false;
+            Object.assign(state, { loaded: true, parseError: '', saveAttempted: false });
             if (!sameAssignment) state.setting = attachUiKeys(parsed.setting, state.setting.items);
-            onDirtyChange(false);
-            onGeneratedApply(buildAvailableSubagentsSetting(state.setting));
-        } else if (!parsed.setting && !state.loaded) {
-            state.parseError = parsed.error;
-        }
+        } else if (!parsed.setting && !state.loaded) state.parseError = parsed.error;
         state.signature = '';
         paint({ discoveryOnly: state.loaded && (!canApply || sameAssignment) });
         return { applied: canApply, error: parsed.error };
     }
 
     function setPreviewFailure(error) {
-        const message = String(
-            error?.body?.detail || error?.body?.error || error?.message || error,
-        );
+        const message = String(error?.body?.detail || error?.body?.error || error?.message || error);
         const code = String(error?.body?.code || '').trim();
-        state.diagnostics = [
-            `${code ? `${code}: ` : ''}${message}`,
-            ...diagnosticsText(error?.body?.diagnostics),
-        ];
-        if (!state.loaded) {
-            state.parseError = `Available subagents preview failed: ${state.diagnostics.join(' · ')}`;
-        }
+        state.diagnostics = [`${code ? `${code}: ` : ''}${message}`, ...diagnosticsText(error?.body?.diagnostics)];
+        if (!state.loaded) state.parseError = `Available subagents preview failed: ${state.diagnostics.join(' · ')}`;
         state.signature = '';
         paint({ discoveryOnly: state.loaded });
     }
@@ -1174,27 +1261,14 @@ export function createAvailableSubagentsEditor({
     }
 
     async function maybeRefreshGeneratedPreview({ force = false } = {}) {
-        if (typeof previewGenerated !== 'function' || state.source !== 'undecided' || state.dirty) {
-            return false;
-        }
-        let outerDraftClean = false;
-        try {
-            outerDraftClean = Boolean(isOuterDraftClean());
-        } catch (error) {
-            outerDraftClean = false;
-        }
-        if (!outerDraftClean) return false;
-        const connected = state.accountsKnown
-            ? [...connectedHarnessIds(state.snapshot)].sort()
-            : [];
+        if (typeof previewGenerated !== 'function' || state.source !== 'undecided' || state.dirty) return false;
+        const connected = state.accountsKnown ? [...connectedHarnessIds(state.snapshot)].sort() : [];
         const signature = JSON.stringify([state.accountsKnown, connected]);
         if (!force && signature === state.previewSignature) return false;
         state.previewSignature = signature;
         const generation = ++state.previewGeneration;
         try {
-            const response = await previewGenerated({
-                subscriptionsConnected: state.accountsKnown && connected.length > 0,
-            });
+            const response = await previewGenerated({ subscriptionsConnected: state.accountsKnown && connected.length > 0 });
             if (generation !== state.previewGeneration) return false;
             // Retain migration provenance for later clean refreshes; onboarding keeps the endpoint source.
             const result = applyGeneratedPreview({ ...response, source: state.source });
@@ -1217,20 +1291,19 @@ export function createAvailableSubagentsEditor({
         paint({discoveryOnly: true});
     }
 
+    // The suggestions' prices are composed words the overlay leaves alone: a language change paints them again.
+    const onLanguageChanged = () => { if (!state.destroyed) paint(); };
+
     function mount({ bindStatus = true } = {}) {
+        getWin()?.addEventListener?.('ouro:language-changed', onLanguageChanged);
         adoptStatus();
         if (bindStatus && !state.statusDisposer) {
-            state.statusDisposer = bindStatusSurface(store, {
-                elementId: hostId,
-                includeModels: true,
-                doc: getDoc,
-                win: getWin,
+            state.statusDisposer = bindStatusSurface(store, { elementId: hostId, includeModels: true, doc: getDoc, win: getWin,
                 listener: () => {
                     adoptStatus();
                     paint({ discoveryOnly: true });
                     void maybeRefreshGeneratedPreview();
-                },
-            });
+                } });
         }
         if (!state.catalogDisposer) {
             const target = getDoc();
@@ -1243,13 +1316,19 @@ export function createAvailableSubagentsEditor({
     }
 
     function destroy() {
-        state.destroyed = true;
-        state.previewGeneration += 1;
+        // An agent page that is left keeps its unsaved form for the next opening; a clean one keeps nothing.
+        if (page?.entry) { if (state.dirty && current()) DRAFTS.set(page.entry, current()); else DRAFTS.delete(page.entry); }
+        Object.assign(state, { destroyed: true, previewGeneration: state.previewGeneration + 1 });
+        getWin()?.removeEventListener?.('ouro:language-changed', onLanguageChanged);
         disposeChoosers();
-        state.statusDisposer?.();
-        state.catalogDisposer?.();
-        state.statusDisposer = null;
-        state.catalogDisposer = null;
+        for (const disposer of ['statusDisposer', 'catalogDisposer']) { state[disposer]?.(); state[disposer] = null; }
+    }
+
+    function setSourceContext({ settings = {}, providerProfiles = {} } = {}) {
+        state.providerProfiles = providerProfiles || {};
+        state.connections = apiConnections(settings, state.providerProfiles);
+        state.providers = configuredApiProviders(settings, state.providerProfiles);
+        paint({ discoveryOnly: true });
     }
 
     return {
@@ -1257,6 +1336,7 @@ export function createAvailableSubagentsEditor({
         destroy,
         load,
         paint,
+        write,
         reloadStatus,
         refreshGeneratedPreview: maybeRefreshGeneratedPreview,
         applyGeneratedPreview,
@@ -1267,11 +1347,18 @@ export function createAvailableSubagentsEditor({
             markDirty({ structural: true }); paint();
             return { applied: true, error: '' };
         },
+        /** Settings: the document just read. A never-saved roster shows the candidate the server proposes. */
+        adopt(settings) {
+            const meta = settings?._meta?.available_subagents || {};
+            state.processingPreference = String(settings?.[PROCESSING_PREFERENCE_KEY] || '');
+            state.tickCaption = reviewerTickCaption(settings?.OUROBOROS_REVIEW_ENFORCEMENT, settings?.OUROBOROS_RUNTIME_MODE);
+            setSourceContext({ settings, providerProfiles: settings?._meta?.setup_contract?.providerProfiles });
+            return load(availableSubagentsLoadValue(settings), {
+                source: String(meta.source || 'configured'), diagnostics: meta.diagnostics || meta.diagnostic || [], automatic: meta.automatic === true });
+        },
         setPreviewFailure, adoptCatalog,
         validate: validationErrors,
         noteSaveAttempt,
-        // An untouched generated draft is no owner choice: Save leaves it unsaved (only an edit here authors it).
-        collect: () => (state.source === 'undecided' && !state.dirty ? {} : availableSubagentsSavePayload(state)),
         /** Adopt GET /api/review-pool for the catalog loaded last. */
         setReviewPool(payload) {
             state.reviewPool = payload && typeof payload === 'object' ? payload : null;
@@ -1287,109 +1374,23 @@ export function createAvailableSubagentsEditor({
         get dirty() { return state.dirty; },
         get parseError() { return state.parseError; },
         setProcessingPreference(value) { state.processingPreference = String(value || ''); paint({ discoveryOnly: true }); },
-        setSourceContext({ settings = {}, providerProfiles = {} } = {}) {
-            state.providerProfiles = providerProfiles || {};
-            state.connections = apiConnections(settings, state.providerProfiles);
-            state.providers = configuredApiProviders(settings, state.providerProfiles);
-            paint({ discoveryOnly: true });
-        },
+        setSourceContext,
     };
 }
 
 export function availableSubagentsEditorHost(hostId = 'available-subagents-editor') {
-    return `<div id="${escapeHtml(hostId)}" class="available-subagents-editor">
-        <div class="available-subagents-empty">Loading Available subagents…</div>
-    </div>`;
+    return `<div id="${escapeHtml(hostId)}" class="available-subagents-editor"><div class="available-subagents-empty">Loading Available subagents…</div></div>`;
 }
 
 // What the Reviewer tick means under the SAVED strictness, one line each (IMPL_SPEC §5). Cyber Pro
 // Access outranks the enforcement it keeps but never enforces (review_helpers.review_enforcement_blocks).
 export const REVIEWER_TICK_CAPTIONS = Object.freeze({
     blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
-    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all ticked reviewers and writes why; it never skips a check that is owed.',
+    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 });
 export const reviewerTickCaption = (enforcement, access) => REVIEWER_TICK_CAPTIONS[String(access || '').trim().toLowerCase() === 'cyber_pro'
     ? 'cyber_pro' : String(enforcement || '').trim().toLowerCase() === 'blocking' ? 'blocking' : 'advisory'];
-
-export function renderSubagentsSection() {
-    return settingsSection({
-        title: 'Available subagents',
-        id: 'subagents-section',
-        lead: 'Which agents Ouroboros may hand work to, and which of them review it.',
-        details: `Configure the subagents and reviewers Ouroboros works with. Subscriptions and
-            API keys are in Accounts; global model roles are in Models.
-            Describe when Ouroboros should choose each numbered subagent, then select how it runs.
-            Clearing a subagent's checkbox keeps its configuration and stops new tasks and reviews
-            from choosing it. Internal references stay stable automatically. A route that is unavailable stays saved
-            and returns an explicit refusal instead of silently changing actor or model. An unpinned
-            session row may rotate among compatible healthy accounts for that same route.
-            Rows marked Reviewer form the review pool; an unmarked row Ouroboros asks is an adviser, heard but never counted.
-            Saved reviewer changes apply from the next task: a task that is already running keeps the
-            reviewers it started with. A reviewer on a subscription waits for capacity rather than
-            silently falling back to API spend.`,
-        body: `<div class="settings-inline-note" data-reviewer-tick-caption hidden></div>
-            ${availableSubagentsEditorHost()}
-            <div class="settings-effort-card">
-                <label>Allow mutative subagents</label>
-                <input id="s-allow-mutative-subagents" type="hidden" value="on">
-                ${renderSegmentedField({
-                    target: 's-allow-mutative-subagents',
-                    title: 'Applies on the next task; no restart required.',
-                    options: [
-                        { value: 'off', label: 'Off' },
-                        { value: 'auto', label: 'Auto' },
-                        { value: 'on', label: 'On' },
-                    ],
-                })}
-                <div class="settings-inline-note">
-                    Whether a subagent may write in an isolated worktree, external workspace, or
-                    from-scratch project. Read-only subagents remain available. Auto follows runtime
-                    mode; this applies to new child tasks without a restart.
-                </div>
-            </div>
-            <div class="form-grid two">
-                <div class="form-field ui-field">
-                    <label for="s-active-subagents">Active subagents per root</label>
-                    <input class="ui-control" id="s-active-subagents" type="number" min="1" max="500" value="6">
-                    <div class="settings-inline-note">How many children one root task may run at once.</div>
-                </div>
-                <div class="form-field ui-field">
-                    <label for="s-subagent-depth">Subagent depth</label>
-                    <input class="ui-control" id="s-subagent-depth" type="number" min="0" max="10" value="3">
-                    <div class="settings-inline-note">How deep the chain may nest. <code>0</code> turns delegation off entirely.</div>
-                </div>
-            </div>
-            <details class="settings-subsection ui-disclosure" id="delegation-advanced">
-                <summary>Advanced — where subagents check out their work</summary>
-                <div class="settings-subsection-body">
-                    <div class="form-grid two">
-                        <div class="form-field ui-field">
-                            <label for="s-subagent-worktree-root">Subagent worktree root</label>
-                            <input class="ui-control" id="s-subagent-worktree-root" type="text" placeholder="~/Ouroboros/subagent_worktrees">
-                        </div>
-                        <div class="form-field ui-field">
-                            <label for="s-subagent-projects-root">Subagent projects root (genesis)</label>
-                            <input class="ui-control" id="s-subagent-projects-root" type="text" placeholder="~/Ouroboros/projects">
-                        </div>
-                    </div>
-                    <div class="settings-inline-note">
-                        Leave either root blank for its default under <code>~/Ouroboros/</code>.
-                        Genesis projects are durable; worktrees follow the GC retention setting.
-                    </div>
-                </div>
-            </details>`,
-    });
-}
-
-let settingsEditor = null;
-
-function settingsSource(settings) {
-    return String(settings?._meta?.available_subagents?.source
-        || settings?._meta?.available_subagents_source
-        || settings?.OUROBOROS_SUBAGENTS_SOURCE
-        || 'configured');
-}
 
 export function availableSubagentsLoadValue(settings) {
     const raw = settings?.OUROBOROS_SUBAGENTS;
@@ -1397,81 +1398,90 @@ export function availableSubagentsLoadValue(settings) {
     return settings?._meta?.available_subagents?.candidate ?? raw;
 }
 
-/** Whether this response carries owner or repair bytes that must be fixed in-place. */
-export function availableSubagentsHasExplicitDraft(settings) {
-    const meta = settings?._meta?.available_subagents;
-    return [settings?.OUROBOROS_SUBAGENTS,
-        meta != null && Object.prototype.hasOwnProperty.call(meta, 'candidate')
-            ? meta.candidate : undefined,
-    ].some(value => value !== undefined && value !== null && value !== '');
-}
-
-export function initSubagentsSection({
-    onChange,
-    hasPageDirtyIndicator = false,
-    onJudged,
-    isOuterDraftClean,
-    onGeneratedApply,
-    previewGenerated = null,
-    store = claudexorStatus,
-} = {}) {
-    destroySubagentsSection();
-    settingsEditor = createAvailableSubagentsEditor({
-        store,
-        hasPageDirtyIndicator,
-        onChange: typeof onChange === 'function' ? onChange : () => {},
-        onJudged: typeof onJudged === 'function' ? onJudged : () => {},
-        isOuterDraftClean: typeof isOuterDraftClean === 'function' ? isOuterDraftClean : () => true,
-        onGeneratedApply: typeof onGeneratedApply === 'function' ? onGeneratedApply : () => {},
-        allowUnloadedOmission: true,
-        previewGenerated,
-    });
-    settingsEditor.mount();
-}
-
-export function applySubagentsSettings(settings, doc = globalThis.document) {
-    // The caption follows the saved document Settings loads after every save, never the draft selects.
-    const caption = doc?.querySelector?.('#subagents-section [data-reviewer-tick-caption]');
-    if (caption) Object.assign(caption, { textContent: reviewerTickCaption(settings?.OUROBOROS_REVIEW_ENFORCEMENT, settings?.OUROBOROS_RUNTIME_MODE), hidden: false });
-    if (!settingsEditor) return;
-    const meta = settings?._meta?.available_subagents || {};
-    settingsEditor.setProcessingPreference(settings?.[PROCESSING_PREFERENCE_KEY]);
-    settingsEditor.load(availableSubagentsLoadValue(settings), {
-        source: settingsSource(settings),
-        diagnostics: meta.diagnostics || meta.diagnostic || [],
-        allowOmission: !availableSubagentsHasExplicitDraft(settings),
-        automatic: meta.automatic === true,
-    });
-}
-
-export async function reloadSubagentsSection() { await settingsEditor?.reloadStatus(); }
-
 /** Price, last-run and pool facts for the saved catalog; a failed read is said, never guessed. */
-export async function reloadReviewPool({ isCurrent = () => true } = {}) {
-    let payload;
+export async function readReviewPool() {
     try {
         const resp = await apiFetch('/api/review-pool', { cache: 'no-store' });
-        payload = await resp.json().catch(() => ({}));
+        const payload = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(payload.error || `HTTP ${resp.status}`);
-    } catch (error) {
-        payload = { load_error: `Review pool facts could not be read: ${error.message || error}` };
-    }
-    if (isCurrent()) settingsEditor?.setReviewPool(payload);
+        return payload;
+    } catch (error) { return { load_error: `Review pool facts could not be read: ${error.message || error}` }; }
 }
 
-export function destroySubagentsSection() {
-    settingsEditor?.destroy();
-    settingsEditor = null;
+// The last-reviewer question of every roster write, in the owner's words (the server's sentence names a request flag).
+CONFIRMS.emptyReviewPool = (row, refused, current, ask) => ask({ title: 'Save without reviewers?', confirmLabel: 'Save without reviewers',
+    danger: true, body: 'No agent marked Reviewer would be on, so the main model reviews alone: one model, no second opinion.' });
+// Helpers may change files: stored as 'true', 'false' or nothing (Auto follows Access: config.py
+// get_allow_mutative_subagents). An older spelling of yes or no reads as the same choice.
+CODECS.helperMutation = { read(settings, row) {
+    const text = String(settings?.[row.keys[0]] ?? '').trim().toLowerCase();
+    return !settings ? undefined : /^(1|true|yes|on)$/.test(text) ? 'true' : /^(0|false|no|off)$/.test(text) ? 'false' : '';
+} };
+
+let roots = 0;
+/** Settings › Agents (settings_pages.js): the list (`agents`), or one agent's page (`agents/<id>`, `agents/new`). It
+ *  reads when it is opened and whenever the shell says it is shown again; an unsaved form survives each read. */
+function mountAgents(container, { path, ctx }) {
+    const entry = path.split('/')[1] || '';
+    const hostId = `agents-root-${++roots}`;
+    const root = `<div id="${hostId}" class="settings-stack agents-root"></div>`;
+    container.innerHTML = entry ? root : `<p class="settings-page-lead">Helpers Ouroboros may hand work to, and reviewers whose word counts.</p>
+        <section class="ui-card settings-card">${settingsRow({ ...rowById(KEY), control: { kind: 'switch' } })}</section>
+        ${root}
+        <section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold>
+            <summary>More: limits for helpers and their folders</summary>
+            <div class="settings-rows" data-agents-fold></div>
+        </details></section>`;
+    const unbindRechecks = bindRecheckMarks(container);
+    const foldRows = container.querySelector('[data-agents-fold]');
+    let fold = null;
+    const roster = container.querySelector(`[data-setting-row="${KEY}"]`);
+    const delegation = roster?.querySelector('[data-setting-control]');
+    let reading = null;
+    const read = async () => {
+        let settings;
+        // A failed read keeps what the page showed (the next showing reads again); with nothing shown yet it says so.
+        try { settings = await ctx.readSettings(); } catch { if (!editor.loaded) editor.load(undefined); return; }
+        syncRecheckState(recheckFromSettings(settings), container);
+        editor.adopt(settings);
+        // The fold's rows are drawn once their values are read: a row the page was opened for takes the focus filled.
+        if (foldRows && !fold) foldRows.innerHTML = rowsOf('agents', { fold: true }).map((row) => settingsRow(row)).join('');
+        fold = fold || (foldRows ? bindSettingRows(foldRows) : null);
+        fold?.paint();
+        if (delegation) Object.assign(delegation, { checked: editor.setting.enabled, disabled: !editor.loaded }).setAttribute('aria-checked', String(editor.setting.enabled));
+        void readReviewPool().then((payload) => editor.setReviewPool(payload));
+        void editor.reloadStatus().then(() => accountCatalog?.arm());
+    };
+    // One read at a time: opening a page and the shell's "shown" for it are one read.
+    const reload = () => (reading ||= read().finally(() => { reading = null; }));
+    const editor = createAvailableSubagentsEditor({
+        hostId, page: { entry, ctx, reload },
+        previewGenerated: entry ? null : ({ subscriptionsConnected }) => apiClient.previewOnboardingSubagents({ subscriptionsConnected }),
+    });
+    delegation?.addEventListener('change', async () => {
+        const enabled = delegation.checked;
+        const outcome = await editor.write('', () => null, { busy: delegation, quiet: true, edit: (roster) => ({ ...roster, enabled }) });
+        setResult(roster.querySelector('[data-setting-result]'), rosterResult(outcome));
+    });
+    // The model chooser of an agent's form: its catalogue is read when the form opens and whenever it is shown again.
+    let catching = null;
+    const catchUp = () => { if (entry) catching ||= refreshModelCatalog().finally(() => { catching = null; }); };
+    const onShown = (event) => { if (event.detail?.path === path) { void reload(); catchUp(); } };
+    globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
+    editor.mount();
+    // A sign-in that settles while an agent's form is open renews its model list, as on a role's page. The watch is
+    // armed by the form's first account read, so the answer the form opened with is not a change.
+    const accountCatalog = entry ? watchAccountModelCatalog() : null;
+    void reload();
+    catchUp();
+    return { unmount() {
+        globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
+        accountCatalog?.dispose();
+        unbindRechecks(); fold?.dispose(); editor.destroy();
+    } };
 }
 
-export function collectSubagentsSettings() { return settingsEditor?.collect() || {}; }
-export function setSubagentsProcessingPreference(value) { settingsEditor?.setProcessingPreference(value); }
-/** The providers the roster picker may offer, from the loaded settings document. */
-export function setSubagentsSourceContext(settings, providerProfiles) { settingsEditor?.setSourceContext({ settings, providerProfiles }); }
-
-export function validateSubagentsDraft() { return settingsEditor?.validate() || ['Available subagents editor is not loaded.']; }
-
-/** Settings' Save button: the draft's own errors become visible from here on. */
-export function noteSubagentsSaveAttempt() { settingsEditor?.noteSaveAttempt(); }
-// Compatibility name for callers of the actor-list signature.
-export const renderSignature = availableSubagentsRenderSignature;
+registerSettingsPage('agents', {
+    title: (path) => { const id = path.split('/')[1]; return !id ? 'Agents' : id === 'new' ? 'New agent' : NAMES.get(id) || 'Agent'; },
+    mount: mountAgents,
+});

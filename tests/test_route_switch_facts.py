@@ -18,6 +18,7 @@ import pytest
 from ouroboros import claudexor_daemon, llm_probe, pricing
 from ouroboros import usage_accounting as ua
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
+from ouroboros.primary_route_observation import _SPARE_CLOSING
 from tests import test_unknown_fallback_first as fallback_fixtures
 from tests.test_completion_selection import finish
 from tests.test_llm_claudexor import setup as gateway_fixture
@@ -696,3 +697,256 @@ def test_an_empty_answer_names_its_own_attempt_and_no_earlier_status(data_root, 
     assert (f"after {PRIMARY} failed with {failed[-1]['failure_code']} at {failed[-1]['ts']}. "
             f"Recorded error text: {json.dumps(failed[-1]['error'], ensure_ascii=False)}.") in facts
     assert "503" not in facts and "overloaded" not in facts
+
+
+# -- a provider's content refusal: the round's facts reach whoever acts next, primary included (12.11) --------
+
+REFUSED = "This request was blocked as it seems to violate the provider's terms."
+CONTENT_FILTER = "the provider's content filter stopping this request (no content returned)"
+
+
+def _refusal(upstream: str = "Anthropic") -> tuple:
+    """A provider's empty reply ended by its content filter, its own sentence in ``refusal``; no usage chunk."""
+    return ({"role": "assistant", "content": "", "refusal": REFUSED},
+            {"response_finish_reason": "content_filter", "response_provider": upstream, "provider": "openrouter"})
+
+
+def _refused_ask(model: str) -> str:
+    return (rf"{re.escape(model)}, 1 ask: {re.escape(CONTENT_FILTER)} once \(at \S+; upstream \"Anthropic\"\); "
+            r"its failed asks: cost unknown, billing basis not reported")
+
+
+FACTS_ONLY = "Facts, not an instruction."
+OPENS = "[ROUTE FACTS] This round's asks from its first provider content refusal on: "
+
+
+def test_a_spares_row_carries_its_rounds_content_refusal_once(data_root, tmp_path, quiet_primary):
+    """The primary refuses, the walk's spare answers: the spare's next own request carries today's switch row and,
+    joined to it, the round's facts from the refusal on: the provider's words quoted once with its category not
+    given, the refused ask's unknown money as unknown. The spare's means are told once, in today's row. The walking
+    request carries none; no later one adds."""
+    llm = _Routes(data_root, **{PRIMARY: [_refusal()],
+                                FALLBACK: [(_tools(), SOL), (_tools(), dict(SOL)), (finish("done"), dict(SOL))]})
+    text, usage, _trace, _registry = _run(tmp_path, llm)
+    assert text == "done" and [model for model, _ in llm.sent] == [PRIMARY] + [FALLBACK] * 3
+    assert _facts(llm.sent[1][1]) == []  # nothing enters a request that is still walking
+    [switch, refused] = _facts(llm.sent[2][1])
+    assert _facts(llm.sent[3][1]) == [switch, refused]  # one row per round: the next request adds none
+    assert f"answered this round after {PRIMARY} failed with content_filter" in switch and switch.endswith(_SPARE_CLOSING)
+    assert re.fullmatch(rf"{re.escape(OPENS)}{_refused_ask(PRIMARY)}\. {FALLBACK}, 1 ask: answered once\. "
+                        rf"The provider said: \"{re.escape(REFUSED)}\" Its category: not given on this connection\. "
+                        rf"{re.escape(FACTS_ONLY)}", refused), refused
+    assert (switch + refused).count(REFUSED) == 1 and "$0.0000" not in refused
+    assert "_round_refusals" not in usage  # told once: the round's record went with its row
+
+
+def test_the_primary_reads_its_rounds_refusal_in_a_short_row_never_told_to_return(data_root, tmp_path, quiet_primary):
+    """An adopted spare refuses and the walk's primary answers: today no row reached the primary. Now its next own
+    request carries one short row with the same facts, closed "Facts, not an instruction." with no return or wait
+    told to the primary; the walking request carries none."""
+    llm = _Routes(data_root, **{PRIMARY: [(_tools(), CODEX), _death, (_tools(), dict(CODEX)), (finish("done"), dict(CODEX))],
+                                FALLBACK: [(_tools(), SOL), _refusal()]})
+    text, _usage, _trace, _registry = _run(tmp_path, llm)
+    assert text == "done" and [model for model, _ in llm.sent] == [PRIMARY, PRIMARY, FALLBACK, FALLBACK, PRIMARY, PRIMARY]
+    before = _facts(llm.sent[4][1])  # the walk's primary ask: only the earlier switch's row, from the transcript
+    assert len(before) == 1 and CONTENT_FILTER not in before[0]
+    [short] = _facts(llm.sent[5][1])[len(before):]
+    assert re.fullmatch(rf"{re.escape(OPENS)}{_refused_ask(FALLBACK)}\. {re.escape(PRIMARY)}, 1 ask: answered once\. "
+                        rf"The provider said: \"{re.escape(REFUSED)}\" Its category: not given on this connection\. "
+                        rf"{re.escape(FACTS_ONLY)}", short), short
+    assert "switch_model" not in short and "stay on this route" not in short
+
+
+def _rows_written_at(monkeypatch, llm, sends: int, write):
+    """At the round boundary after ``sends`` requests, ``write`` sets this work's pending route row there, as a
+    Settings change (``route_choice.note_settings_change``) or the owner's model card (``owner_model.apply_current``)
+    does at that boundary."""
+    import ouroboros.loop as loop_mod
+
+    bind, written = loop_mod.bind_round_route, []
+
+    def bound(tools, *args, **kwargs):
+        route = bind(tools, *args, **kwargs)
+        if len(llm.sent) == sends and not written:
+            written.append(write(tools._ctx) or True)
+        return route
+
+    monkeypatch.setattr(loop_mod, "bind_round_route", bound)
+    return written
+
+
+def test_an_owner_row_written_over_the_spares_switch_row_keeps_the_refusal_facts(
+        data_root, tmp_path, quiet_primary, monkeypatch):
+    """The primary refuses and the walk's spare answers; before the spare's next request the owner's model card writes
+    its row over the pending switch row. That request still carries the round's refusal facts, joined to the owner's
+    row and closed for the spare (before: they were inside the overwritten switch row, and lost)."""
+    mine = f"[ROUTE FACTS] My human requested waiting for this work's primary: {PRIMARY}."
+    llm = _Routes(data_root, **{PRIMARY: [_refusal()],
+                                FALLBACK: [(_tools(), SOL), (_tools(), dict(SOL)), (finish("done"), dict(SOL))]})
+    written = _rows_written_at(monkeypatch, llm, 2, lambda owner: setattr(owner, "_route_facts_pending", mine))
+    text, usage, _trace, _registry = _run(tmp_path, llm)
+    assert written and text == "done" and [model for model, _ in llm.sent] == [PRIMARY] + [FALLBACK] * 3
+    assert _facts(llm.sent[2][1]) == _facts(llm.sent[3][1]) == [mine, _facts(llm.sent[2][1])[1]]
+    refused = _facts(llm.sent[2][1])[1]
+    assert re.match(rf"{re.escape(OPENS)}{_refused_ask(PRIMARY)}\. {FALLBACK}, 1 ask: answered once\.", refused), refused
+    assert refused.endswith(_SPARE_CLOSING) and refused.count(REFUSED) == 1 and "_round_refusals" not in usage
+
+
+def test_a_settings_row_pending_after_an_answered_refused_round_keeps_both(data_root, tmp_path, quiet_primary, monkeypatch):
+    """An adopted spare refuses and the walk's primary answers (no switch row for it); before the primary's next
+    request a Settings change writes its row. That request carries the Settings row and the round's refusal facts,
+    closed for the primary (before: the pending row hid them, and their record waited to be told as a later round's)."""
+    from ouroboros import route_choice
+
+    llm = _Routes(data_root, **{PRIMARY: [(_tools(), CODEX), _death, (_tools(), dict(CODEX)), (finish("done"), dict(CODEX))],
+                                FALLBACK: [(_tools(), SOL), _refusal()]})
+    written = _rows_written_at(monkeypatch, llm, 5, lambda owner: route_choice.note_settings_change(
+        owner, "earlier/main", PRIMARY, "main"))
+    text, usage, _trace, _registry = _run(tmp_path, llm)
+    assert written and text == "done" and [model for model, _ in llm.sent] == [PRIMARY, PRIMARY, FALLBACK, FALLBACK,
+                                                                                PRIMARY, PRIMARY]
+    before = _facts(llm.sent[4][1])
+    settings, refused = _facts(llm.sent[5][1])[len(before):]
+    assert settings.startswith(f"[ROUTE FACTS] Main changed in Settings: earlier/main → {PRIMARY}.")
+    assert re.fullmatch(rf"{re.escape(OPENS)}{_refused_ask(FALLBACK)}\. {re.escape(PRIMARY)}, 1 ask: answered once\. "
+                        rf"The provider said: \"{re.escape(REFUSED)}\" Its category: not given on this connection\. "
+                        rf"{re.escape(FACTS_ONLY)}", refused), refused
+    assert "_round_refusals" not in usage
+
+
+def _answered_refusal(round_idx: int = 3) -> dict:
+    """Round ``round_idx``: the primary's content refusal, then the spare's answer."""
+    from ouroboros.primary_route_observation import note_content_refusal
+
+    meta = {"llm_call_id": "r", "round": round_idx, "ts": "t-r", "model": PRIMARY, "use_local": False, "provider": "claudexor"}
+    usage = {"llm_call_refs": [meta], "_last_llm_call_meta": meta}
+    note_content_refusal(usage, {}, {"refusal": REFUSED})
+    meta["failure_code"] = "content_filter"
+    usage["llm_call_refs"].append({"llm_call_id": "a", "round": round_idx, "model": FALLBACK, "use_local": False})
+    return usage
+
+
+@pytest.mark.parametrize("reader", ["spare", "wait-card primary", "spare on Main's model, another account"])
+def test_the_refusal_rows_reader_is_judged_by_binding(monkeypatch, tmp_path, reader):
+    """The reader is the acting route's binding under the owner's wait-card choices, compared as
+    ``observe_primary_route`` compares it, never by model name: a spare reads its means; the effective primary (the
+    wait card's model for its role) is never told to return to itself; a configured spare on Main's model with another
+    account is a spare."""
+    from types import SimpleNamespace
+
+    from ouroboros import model_wait
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
+    from ouroboros.primary_route_observation import with_refusal_facts
+    from tests._shared import saved_settings
+
+    saved_settings(monkeypatch, tmp_path, **{MODEL_ACCOUNTS_KEY: json.dumps({"main": "", "fallback": ["account-b"]})})
+    model, role, overrides, closing = {
+        "spare": (FALLBACK, "fallback:0", None, _SPARE_CLOSING),
+        "wait-card primary": ("override/primary", "main", {"main": {"model": "override/primary", "use_local": False}},
+                              FACTS_ONLY),
+        "spare on Main's model, another account": (PRIMARY, "fallback:0", None, _SPARE_CLOSING)}[reader]
+    monkeypatch.setattr(model_wait, "current_model_wait", lambda: SimpleNamespace(overrides=overrides) if overrides else None)
+    owner = SimpleNamespace(primary_route={"model": PRIMARY, "use_local": False, "role": "main"}, task_metadata={})
+    ctx = SimpleNamespace(accumulated_usage=_answered_refusal(), round_idx=4, tools=SimpleNamespace(_ctx=owner),
+                          active_model=model, active_use_local=False, context_fit_plan=SimpleNamespace(model_role=role))
+    row = with_refusal_facts(ctx, "")
+    assert row.startswith(OPENS) and row.endswith(f"Its category: not given on this connection. {closing}"), row
+    assert row.count(_SPARE_CLOSING) == (closing == _SPARE_CLOSING) and "_round_refusals" not in ctx.accumulated_usage
+
+
+def test_refused_asks_money_reads_as_stated_unknown_never_as_zero():
+    """A route's failed asks' money in ``_call_money``'s words: the stated amounts summed (estimated when any one was),
+    the asks that stated none counted as unknown, never as $0 (an estimate from no reported tokens is none). The facts
+    wait while their round still asks and are told once at a later round's request; an earlier round that ended
+    unanswered is dropped there, untold."""
+    from ouroboros.primary_route_observation import note_content_refusal, refusal_facts
+
+    total = {"llm_call_refs": []}
+
+    def ask(call_id, usage=None, round_idx=3):
+        meta = {"llm_call_id": call_id, "round": round_idx, "ts": f"t-{call_id}", "model": FALLBACK, "use_local": False,
+                "provider": "openrouter"}
+        total["llm_call_refs"].append(meta)
+        total["_last_llm_call_meta"] = meta
+        if usage is not None:
+            note_content_refusal(total, usage, {})
+            meta["failure_code"] = "content_filter"
+
+    ask("a", {"cost": 1.25, "cost_final": True, "prompt_tokens": 800})
+    ask("b", {"cost": 0.5, "cost_final": False, "cost_estimated": True, "prompt_tokens": 800})
+    ask("c", {"cost": 0.0, "cost_final": False, "cost_estimated": True})  # no usage chunk: nothing reported
+    assert refusal_facts(total, 3) == "" and len(total["_round_refusals"]) == 3  # its own round is still asking
+    ask("d")
+    facts = refusal_facts(total, 4)
+    assert (f"{FALLBACK}, 4 asks: {CONTENT_FILTER} 3 times (first at t-a, last at t-c; upstream not named), answered "
+            "once; its failed asks: cost $1.7500 estimated, billing basis not reported; 1 cost unknown.") in facts, facts
+    assert "$0.0000" not in facts and facts.endswith(
+        "The refusal carried no sentence on this connection. Its category: not given on this connection.")
+    assert refusal_facts(total, 5) == "" and "_round_refusals" not in total
+    ask("e", {"cost": 0.25, "cost_final": True, "prompt_tokens": 9}, round_idx=5)  # a round that ends unanswered
+    assert refusal_facts(total, 5) == "" and len(total["_round_refusals"]) == 1
+    assert refusal_facts(total, 6) == "" and "_round_refusals" not in total  # dropped at the next round, never told
+
+
+def test_a_long_waits_refusals_collapse_into_a_short_row():
+    """A spare refused 41 times between 40 primary asks that never reached the provider, then answered: each route's
+    equal endings are counted, its refusals' first and last time given, its failed asks' money summed with the unknown
+    ones counted, the provider's words quoted once. The row stays short (before: one clause per ask, ~9.5 KB)."""
+    from ouroboros.primary_route_observation import note_content_refusal, refusal_facts
+
+    total = {"llm_call_refs": []}
+    for index in range(41):
+        if index:
+            total["llm_call_refs"].append({"llm_call_id": f"p{index}", "round": 7, "model": "primary/model",
+                                           "use_local": False, "failure_code": "transport_unavailable"})
+        meta = {"llm_call_id": f"s{index}", "round": 7, "ts": f"t{index}", "model": FALLBACK, "use_local": False,
+                "provider": "openrouter"}
+        total["llm_call_refs"].append(meta)
+        total["_last_llm_call_meta"] = meta
+        priced = {"cost": 0.001, "cost_final": True, "prompt_tokens": 10} if index % 4 else {}
+        note_content_refusal(total, {**priced, "response_provider": "Anthropic"}, {"refusal": REFUSED})
+        meta["failure_code"] = "content_filter"
+    total["llm_call_refs"].append({"llm_call_id": "answer", "round": 7, "model": FALLBACK, "use_local": False})
+    facts = refusal_facts(total, 8)
+    assert facts == (
+        f"This round's asks from its first provider content refusal on: {FALLBACK}, 42 asks: {CONTENT_FILTER} 41 times "
+        '(first at t0, last at t40; upstream "Anthropic"), answered once; its failed asks: cost $0.0300 reported, billing '
+        "basis not reported; 11 cost unknown. primary/model, 40 asks: a request that never reached the provider 40 "
+        f'times; its failed asks: cost not kept in this record. The provider said: "{REFUSED}" Its category: not given on this '
+        "connection."), facts
+    assert len(facts) < 800
+
+
+def test_a_local_routes_failed_asks_and_a_row_that_keeps_no_cost_say_so():
+    """A local route's failed asks read "local route, no provider charge" whatever its refusals stated and whichever of
+    its rows comes first, never a sum or "cost unknown"; a failed ask whose row keeps no cost (only a kept refusal
+    states its money) reads "cost not kept in this record"; "cost unknown" stays for a refusal whose provider reported none.
+    Never $0 (before: the local route read "cost $0.0000 estimated …; 2 cost unknown")."""
+    from ouroboros.loop_transport import _failure_words
+    from ouroboros.primary_route_observation import note_content_refusal, refusal_facts
+
+    total = {"llm_call_refs": []}
+
+    def ask(call_id, model, local, refusal=None, failure="content_filter"):
+        row = {"llm_call_id": call_id, "round": 2, "ts": f"t-{call_id}", "model": model, "use_local": local,
+               **({"provider": "local" if local else "openrouter"} if refusal is not None else {})}  # an exception's: none
+        total["llm_call_refs"].append(row)
+        total["_last_llm_call_meta"] = row
+        if refusal is not None:
+            note_content_refusal(total, refusal, {})
+        if failure:
+            row["failure_code"] = failure
+
+    ask("s1", FALLBACK, False, {})  # a refusal whose provider reported no cost
+    ask("l1", "local/model", True, failure="provider_error")  # an exception's row: no provider, no cost
+    ask("l2", "local/model", True, {"cost": 0.0, "prompt_tokens": 12})  # a local refusal that stated $0
+    ask("l3", "local/model", True, {})
+    ask("s2", FALLBACK, False, failure="transport_unavailable")
+    ask("s3", FALLBACK, False, failure=None)  # the answer
+    assert refusal_facts(total, 3) == (
+        f"This round's asks from its first provider content refusal on: {FALLBACK}, 3 asks: {CONTENT_FILTER} once (at "
+        f"t-s1; upstream not named), {_failure_words('transport_unavailable')} once, answered once; its failed asks: "
+        "cost unknown, billing basis not reported; 1 with cost not kept in this record. local/model (local), 3 asks: "
+        f"{_failure_words('provider_error')} once, {CONTENT_FILTER} 2 times (first at t-l2, last at t-l3; upstream not "
+        "named); its failed asks: local route, no provider charge. The refusal carried no sentence on this connection. "
+        "Its category: not given on this connection.")

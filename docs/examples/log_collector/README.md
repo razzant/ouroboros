@@ -24,6 +24,13 @@ passport). The collector follows it:
 - `archive/{events,tools,supervisor}_*.jsonl`, so that generations rotated while Vector was stopped are
   still read; a generation Vector already read keeps its inode and checkpoint. `ignore_older_secs`
   (one day) keeps the tail off older history: to ship that, run a one-time backfill over the archive.
+  On macOS Ouroboros compresses a closed generation in place once the server run that closed it has
+  ended (the `record_compression` maintenance job): its name, bytes, size and modification time stay,
+  but the file is a new inode. A collector that identifies files by `device_and_inode` then reads such a
+  generation again from its start if it is still younger than `ignore_older_secs`, so its rows arrive
+  twice; a fingerprint taken from the content (Vector's `checksum` strategy) does not depend on the
+  inode. Windows compresses under the same inode; on Linux, in Docker and Colab (the Compose deployment
+  this example assumes) generations are not compressed.
 - `state/headless_tasks/*/data/logs/events.jsonl`: the model rounds and task starts of subagents and
   forked-memory tasks are written there, not to the main `events.jsonl`; their model errors reach both, and
   `ouroboros_api_error_once` keeps one copy of each. These drives are deleted once the task is finished and

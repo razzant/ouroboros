@@ -36,10 +36,11 @@ def test_note_labels_and_aggregate_keep_readers_and_do_not_change_other_rooms():
     level = mf.level_with(snap, mv.FULL_VIEW, ['F8:' + note['id'] for note in snap.room['notes']])
     rendered = mv.render_room(snap, level)
     first = snap.room['notes'][0]
-    assert (f"note {first['id']} by root on 2026-09-02: Label 0.; memory_read(node_id='{first['id']}')") in rendered
+    assert (f"note {first['id']} by root on 2026-09-02: Label 0. (record opening, no lead); memory_read(node_id='{first['id']}')") in rendered
     long_line = mv._note_pointer(snap.room['notes'][1])
     label = long_line.split(': ', 1)[1].split('; memory_read')[0]
-    assert len(label) <= 160 and label.endswith('…') and '\n' not in long_line
+    assert label.startswith(snap.room['notes'][1]['text'].split('\n')[0]) and '\n' not in long_line
+    assert 'Second sentence' not in label
     aggregate = mf.level_with(snap, level, ['F8a:1'])
     text = mv.render_room(snap, aggregate)
     assert '6 notes not yet sealed, 2026-09-02 → 2026-09-03, by child, root; ids:' in text
@@ -114,6 +115,22 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
         assert words in section(wake_c, "## Other conversations") and words not in section(main_c, "## This room (Main)")
     assert "memory_read(room_id=" in section(wake_c, "## Other conversations")
     assert section(main_c, "## This room (Main)") in main_c.split("## Other conversations", 1)[0]  # the room first
+
+
+def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch):
+    """A' and B are bytes of their sources alone (DEVELOPMENT "Cache-friendliness invariant"): another task, another
+    owner message and ``time.time`` three days on, at one state of memory, change only C. A paid route writes its
+    whole start again whenever these bytes move, so a capture fact in them is paid by every task that follows.
+    A stamp taken through ``datetime.now`` is not moved here (WORLD's dated measured block is such a line)."""
+    import time
+
+    env, memory, _rooms = world(tmp_path)
+    first = blocks(env, memory, MAIN)
+    later = time.time() + 3 * 86_400
+    monkeypatch.setattr(time, "time", lambda: later)
+    second = blocks(env, memory, {"id": "another-task", "chat_id": 1, "text": "a different owner message, much later"})
+    assert second[0] == first[0] and second[1] == first[1]
+    assert second[2] != first[2]  # the changing context is the capture's own
 
 
 def test_full_roles_share_the_first_block_and_only_eligible_tasks_get_the_handbook(tmp_path):
@@ -453,8 +470,8 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     floor = section(built.messages_for("nano")[0]["content"][-1]["text"], "### Physical floor")
     sent = select_tool_schemas(schemas, context_mode="nano").chosen
     assert "memory_read" not in sent and ("enable_tools" in floor) == ("enable_tools" in sent), (sent, floor)
-    # Sealing is offered only to a request that can call chronicle_write (sent, or loaded by enable_tools).
-    assert ("chronicle_write kind=page" in floor) == bool({"chronicle_write", "enable_tools"} & set(sent)), floor
+    # This receipt explains the reader path; it does not invite a sealing act.
+    assert "chronicle_write kind=page" not in floor
     if actor == "child_without_selector":
         assert sent == ("compact_context", "list_available_tools")
         assert floor.rstrip().endswith("list_available_tools shows what this task can call, and my parent task can "

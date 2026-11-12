@@ -69,7 +69,7 @@ const state = {
     mainSeenRevision: null,
     mainSeenLoaded: false,
     activePage: 'chat',
-    settingsActiveSubtab: 'providers',
+    settingsPath: '',
     dashboardActiveSubtab: 'logs',
     beforePageLeave: null,
     // Project-thread isolation SSOT for the live WS fan-out. Initialized to an
@@ -223,20 +223,18 @@ async function showPage(name, options = {}) {
     return true;
 }
 
-async function openSettingsTab(tabName) {
-    if (!await showPage('settings')) return false;
-    if (settingsControls && typeof settingsControls.activateTab === 'function') {
-        settingsControls.activateTab(tabName);
-    }
-    return true;
+async function openSettings(path = '', options = {}) {
+    return settingsControls ? settingsControls.open(path, options) : showPage('settings');
 }
 
-async function openDashboardTab(tabName) {
+async function openDashboardTab(tabName, options = {}) {
     if (!await showPage('dashboard')) return false;
     if (dashboardControls && typeof dashboardControls.activateTab === 'function') {
-        dashboardControls.activateTab(tabName);
+        dashboardControls.activateTab(tabName, options);
     }
 }
+// A line elsewhere that points at a Dashboard tab (a quiet place's sheet at Consciousness) asks for it by this event.
+window.addEventListener('ouro:open-dashboard', (event) => { void openDashboardTab(String(event.detail?.tab || 'activity')); });
 
 // Main's unread standalone messages, the count a Project's revision gives; unknown counts none.
 function mainUnreadCount() {
@@ -573,8 +571,7 @@ const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generati
         ? projectListableCount : null;
     if (Array.isArray(data.projects)) state.projectMessagesRevision = data.project_messages_revision ?? null;
     const chatIds = heldProjectChatIds(data, state);  // null or absent keeps a complete set the page holds
-    projectActivityIndex = buildProjectActivityIndex(projectRooms, chatIds
-        ?? (data.projects || lastProjectRows).map((project) => project?.chat_id));
+    projectActivityIndex = buildProjectActivityIndex(projectRooms, chatIds, data.projects || lastProjectRows);
     renderProjectsNav(data.projects || lastProjectRows, chatIds, projectActivityIndex,
         Array.isArray(data.projects) ? generation : 0);
     if (data.task_bindings) applyTaskBindings(data.task_bindings);  // null: unchanged, never filled here
@@ -593,7 +590,7 @@ const ctx = {
     state,
     showPage,
     onReadingLatest: () => void acknowledgeMainAfterPaint(),
-    openSettingsTab,
+    openSettings,
     openDashboardTab,
     isProjectOpening: () => projectPanelOpeningSince > 0,
     stateSnapshots,
@@ -658,7 +655,7 @@ const visibleDraft = draftPort(() => projectInstances.get(navState.activeProject
 bridgeContributedActions({ store: contributions, draft: visibleDraft });
 registerMessageShare();
 startVoice({ hosts: startHostModules({ store: contributions, draft: visibleDraft }) });
-startConversations({ hosts: startHostModules(), openSettings: openSettingsTab, roomOptions: projectRoomOptions({ rows: () => lastProjectRows, nav: navState, state, title: projectPanelTitle, freshProjectRow, openProjectPanel, showPage, putAway: (pid) => rooms.putAway(pid) }) });
+startConversations({ hosts: startHostModules(), openSettings, roomOptions: projectRoomOptions({ rows: () => lastProjectRows, nav: navState, state, title: projectPanelTitle, freshProjectRow, openProjectPanel, showPage, putAway: (pid) => rooms.putAway(pid) }) });
 // The starts the previous page did not outlive are named in the chat that owns each item (holds.js, POST /api/ui/holds).
 reportFoundHolds(getHolds(), (payload) => apiClient.reportUiHolds(payload));
 
@@ -1018,7 +1015,7 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
 // the marker explicitly unknown rather than quietly showing stale liveness.
 function markProjectActivityUnknown() {
     projectRooms = reconcileProjectRooms(projectRooms).rooms;
-    projectActivityIndex = buildProjectActivityIndex(projectRooms, [...state.projectChatIds]);
+    projectActivityIndex = buildProjectActivityIndex(projectRooms, [...state.projectChatIds], lastProjectRows);
     patchProjectActivityMarkers(projectActivityIndex);
 }
 
@@ -1028,7 +1025,7 @@ function markProjectActivityUnknown() {
 // focus and menus stay.
 function patchProjectActivityMarkers(activityIndex = projectActivityIndex) {
     const aggregate = activityIndex.aggregate;
-    paintStatusMark(navProjectsFacts?.querySelector('.nav-mark'), markView({ mark: aggregate.mark, owner: aggregate.owner }));
+    paintStatusMark(navProjectsFacts?.querySelector('.nav-mark'), markView({ mark: aggregate.owner ? 'none' : aggregate.mark, owner: aggregate.owner }));
     const unread = navProjectsCount?.title;
     setActivityOwnerName(navProjectsToggle, unread ? `Projects · ${unread}` : 'Projects', aggregate.label);
     projectsNav.patch(activityIndex);
@@ -1345,8 +1342,8 @@ ws.on('projects_changed', (msg) => {
 // The page's state read: every 3 s while a room is on screen (Main or a Project) in a shown page, every 20 s anyway.
 setInterval(function pollShownRoomState() { if (state.activePage === 'chat' && !document.hidden) refreshProjectsNav(false); }, 3000);
 setInterval(() => refreshProjectsNav(false), 20000);
-settingsControls = initSettings(ctx);
-dashboardControls = initDashboard(ctx);
+settingsControls = initSettings({ ...ctx, layers });
+dashboardControls = initDashboard({ ...ctx, layers });
 initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs') });
 evolution = initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution') });
 initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates') });

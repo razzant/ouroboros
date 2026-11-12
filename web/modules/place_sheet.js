@@ -10,6 +10,8 @@ import { tr, fmt } from './i18n.js';
 import { fetchJson } from './api_client.js';
 import { catalogPrograms } from './model_program.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
+import { priceWords } from './route_editor_primitives.js';
+import { modelCatalog } from './model_catalog_store.js';
 import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
 import {
@@ -25,6 +27,11 @@ export function openSkillsFor(detail) {
 /** Ask the Circles page to show itself: `{}`, or `{circle, edit}` to land on one circle, in its edit state. */
 export function openCircles(detail = {}) {
     globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-circles', { detail }));
+}
+
+/** Ask the app for one Dashboard tab (`{tab}`): the page that holds what a line here only points at. */
+export function openDashboard(detail = {}) {
+    globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-dashboard', { detail }));
 }
 
 const OWNER_VOICE = new Set(['owner', 'migration']);
@@ -107,7 +114,7 @@ function stateHtml(place, ui) {
     const state = placeStateOf(place.state);
     const silent = place.state === 'silent';
     const options = PLACE_STATES.map(({ value, label }) => ({ value, label }));
-    const group = renderSegmentedField({ target: `place-state-${place.id}`, options, modifier: 'data-place-state', title: 'Changes at once' });
+    const group = renderSegmentedField({ target: `place-state-${place.id}`, options, modifier: 'data-place-state' });
     // What the chosen state does: a quiet note in the tray; what Silent guarantees is a host fact in the
     // System voice, under the tray (fills never stack). While consciousness is off it only hears (the host's
     // `only_hears`), whatever the stored choice says it would do.
@@ -138,7 +145,8 @@ function wakesHtml(place, ui) {
     return `<p class="place-sheet-note">${fmt('A checked kind calls it here at once, when {service} reports it.', { service })}</p>
         <ul class="place-wake-list">${items}</ul>
         ${vocabulary.includes('from_bot') ? `<p class="place-sheet-note">${tr('places.wake.bots', 'Bot messages need this check; once checked, they can wake it without another checked kind.')}</p>` : ''}
-        ${place.onlyHears ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}</p>`
+        ${place.onlyHears ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}
+            <button type="button" class="consciousness-inline-link ui-hit-area" data-place-act="open-consciousness">${tr('places.consciousness.door', 'Consciousness ›')}</button></p>`
         : place.state === 'silent' ? `<p class="place-sheet-note">${tr('places.wake.silent', 'Silent: these still wake it to read and think; what it would say or change here is held.')}</p>` : ''}
         ${place.state === 'paused' ? `<p class="place-sheet-note">${tr('places.wake.paused', 'While this place is Paused, nothing here wakes it.')}</p>` : ''}
         <p class="place-sheet-note">${tr('places.wake.honesty', 'Everything else here it sees at its next own wake and decides what to read.')}</p>`;
@@ -353,10 +361,13 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
 }
 
 /** What one `/api/model-catalog` answer suggests for a place's or a circle's Model field. Both store a route string,
- *  and the local model has none (its row says `use_local`), so that row is left out. Throws for an unread catalog. */
-export function modelSuggestions(data) {
+ *  and the local model has none (its row says `use_local`), so that row is left out. Throws for an unread catalog.
+ *  Each model's catalog price stands beside its name (`meta`, never part of the route) unless `tierPriced`
+ *  (model_catalog_store.js): the model runs as a lead, and on a Fast or Economy tier that price is not the one paid. */
+export function modelSuggestions(data, { tierPriced = true } = {}) {
     if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error('The model catalog could not be read.');
-    return data.items.filter((item) => !item?.use_local);
+    return data.items.filter((item) => !item?.use_local)
+        .map((item) => (item?.price && !tierPriced ? { ...item, meta: priceWords(item.price) } : item));
 }
 
 /** The one write a press on the sheet asks for, as the contract's change; null when it needs no write. */
@@ -434,7 +445,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
     function onCatalog(event) {
         const data = event.detail;
         if (sheet.closed) return;
-        ui.models = modelSuggestions(data);
+        ui.models = modelSuggestions(data, { tierPriced: modelCatalog.tierPriced('lead') });
         ui.catalog = data;
         updateModelChooser(body.querySelector('[data-model-chooser]'), ui.models, catalogPrograms(data, {sources: data.model_sources}));
     }
@@ -609,7 +620,8 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         if (!ui.moreOpen || modelsRead) return;
         modelsRead = true;
         try {
-            const data = await readModels({ cache: 'no-store', signal: abort.signal });
+            // The window's settings document says the tier the place's lead pays, read once (model_catalog_store.js).
+            const [data] = await Promise.all([readModels({ cache: 'no-store', signal: abort.signal }), modelCatalog.readConnections()]);
             onCatalog({detail: data});
         } catch { ui.status.more = { text: tr('places.models.unavailable', 'Model suggestions could not be read; your model is kept.'), tone: 'warn' }; paint(); }
     }, true);
@@ -632,6 +644,8 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         if (act === 'add-mine') { ui.adding = true; paint(); body.querySelector('[data-place-draft="actorId"]')?.focus(); return; }
         if (act === 'cancel-add') { ui.adding = false; paint(); return; }
         if (act === 'open-connector') { sheet.close(); openSkillsFor({ skill: current.connector }); return; }
+        // Its Start stands with the daily limit it spends under: the door goes there, it starts nothing itself.
+        if (act === 'open-consciousness') { sheet.close(); openDashboard({ tab: 'consciousness' }); return; }
         if (act === 'edit-circle') { const id = current.circle?.id || ''; sheet.close(); openCircles({ circle: id, edit: Boolean(id) }); return; }
         if (act === 'open-latest') { const latest = recentRooms(ui.roomIndex?.rooms)[0]; if (latest) openRoom(latest); return; }
         if (act === 'all-rooms') { ui.allRooms = true; paint(); return; }

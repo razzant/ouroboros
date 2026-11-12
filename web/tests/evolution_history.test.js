@@ -152,14 +152,14 @@ test('the campaign paints from the state while the history is still being read, 
         assert.equal(env.doc.getElementById('evo-campaign-chip').textContent, 'Off');
         assert.equal(env.doc.getElementById('evo-start').disabled, false);
         assert.match(env.doc.body.querySelector('.evo-story-body').innerHTML, /Reading the saved history/);
-        assert.deepEqual(asked, ['/api/state', '/api/evolution-data']);
+        assert.deepEqual(asked, ['/api/settings', '/api/state', '/api/evolution-data'], 'the cycles card reads its rows');
         dispose();
         dispose();
         assert.equal(ws.listeners.open.size, 0);
         ws.emit('open');
         env.doc.defaultView.emit('ouro:dashboard-subtab-shown', { detail: { tab: 'evolution' } });
         await flush();
-        assert.equal(asked.length, 2, 'a disposed panel asks nothing');
+        assert.equal(asked.length, 3, 'a disposed panel asks nothing');
     } finally {
         globalThis.fetch = savedFetch;
         env.restore();

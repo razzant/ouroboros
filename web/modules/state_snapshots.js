@@ -1,4 +1,5 @@
 import { readState } from './api_client.js';
+import { carryOpenQuestions } from './question_presentation.js';
 
 /**
  * The page's state reads: one request/apply clock for every /api/state consumer
@@ -36,12 +37,23 @@ import { readState } from './api_client.js';
  * A map sent with an empty revision (a failed read) reaches no consumer: what they show stays, and
  * the next read asks for the whole map. A body with no revision field (an older server) applies.
  */
+// A feed the server could not read (`project_listable_count: null`, its `projects` then empty) is unknown, never
+// empty: the page keeps the rows it showed and the message revision they were read at, so a room that is the owner's
+// turn keeps its row, until a read names them.
+const heldFeed = (prior, data) => (data?.project_listable_count === null && Array.isArray(data.projects)
+    && Array.isArray(prior?.projects) ? { ...data, projects: prior.projects,
+        project_messages_revision: prior.project_messages_revision ?? null } : data);
+
 export function createStateSnapshotSequencer(onApply, now = () => Date.now(), onUnavailable = () => {}) {
     let requestedGeneration = 0;
     let appliedGeneration = 0;
     // Newest applied body until a failed read or retire() clears it (late-mount seed).
     let latest = null;
     let held = null;  // {revision, bindings}: the last full task_bindings map this page applied
+    // The rooms (and the feed rows) of the last body that carried them: an open question its successor does not
+    // vouch against stays in its room, with its row, for every reader (question_presentation.carryOpenQuestions),
+    // across a failed read or a retire too, as Main's pill keeps it.
+    let asked = null;
     let inflight = null;
     let cancelInflight = null;  // aborts the signal of the read in flight
     let settled = null;
@@ -94,7 +106,12 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
                 const generation = Number(request?.generation) || 0;
                 if (!generation || generation <= appliedGeneration) return false;
                 appliedGeneration = generation;
-                latest = data = withBindings(data);
+                latest = data = carryOpenQuestions(asked, heldFeed(asked, withBindings(data)));
+                if (data?.rooms && Array.isArray(data.works)) {
+                    const fed = Array.isArray(data.projects);
+                    asked = { rooms: data.rooms, projects: fed ? data.projects : asked?.projects,
+                        project_messages_revision: fed ? data.project_messages_revision : asked?.project_messages_revision };
+                }
                 onApply(data, request.requestedAt, generation);
                 return true;
             } finally { settle(request); }

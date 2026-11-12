@@ -36,6 +36,7 @@ from ouroboros.gateway.history_deliveries import delivery_fields
 from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.history_retention import retention_summary
+from ouroboros.gateway.completion_gist import short_gist
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES, ROUTING_RECEIPT_FIELDS, historical_terminal_projection
 from ouroboros.room_appearances import frame_project, room_project
@@ -1545,7 +1546,7 @@ def _assemble_history_response(
         window["complete"] = False
         window["truncated_by"] = window["truncated_by"] or ["quota"]
     payload = {
-        "messages": messages,
+        "messages": [short_gist(message) for message in messages],
         "window": {**window, **arrival},
         "coverage": history_page_coverage(page, stream_gaps),
         **tokens,
@@ -1588,6 +1589,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
             reason = (exc.reason if isinstance(exc, HistoryCursorError) else
                       "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
             return Response(content=json.dumps({"messages": [], "error": reason, "reason_code": reason,
+                                                **({"detail": str(exc)} if type(exc) is StoreError else {}),
                                                 "next_cursor": cursor, "has_more": True,
                                                 "window": {"complete": False, "truncated_by": [reason]}}),
                             status_code=exc.status if isinstance(exc, HistoryCursorError) else 503,

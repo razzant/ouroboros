@@ -50,8 +50,7 @@ test('the row names the effective limits in Settings and Costs words, unticked, 
         + 'Between your requests it continues topics that interest it and you, notices opportunities and brings you suggestions. '
         + 'Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself. '
         + 'Up to $20.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own tasks at once. '
-        + 'Change the allowance in Dashboard › Costs and the rest in Settings › Behavior › Consciousness. '
-        + 'Stop or start it any time in Dashboard › Consciousness.');
+        + 'Change the allowance in Dashboard › Costs. Its other settings, and Stop and Start, are in Dashboard › Consciousness.');
     assert.deepEqual(limitPhrases(normalizeOffer({ ...DEFAULTS, autonomy: 'observe', dailyUsd: 5, maxTasks: 0 })), [
         'Autonomy: Advises. On its own it studies, keeps its memory and tells you; it changes nothing outside.',
         'Up to $5.00 a day in recorded spending. Subscription quota is separate.', 'It starts no tasks of its own.']);

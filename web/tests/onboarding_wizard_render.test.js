@@ -177,7 +177,7 @@ test('the setup contract renders Cyber Pro beside the independent Blocking choic
 // IMPL_SPEC §5, verbatim: what a Reviewer tick means per strictness (Cyber Pro outranks enforcement).
 const TICK = {
     blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
-    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all ticked reviewers and writes why; it never skips a check that is owed.',
+    advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 };
 
@@ -268,6 +268,9 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
             input.fire('input');
         }
         doc.getElementById('next-btn').fire('click');   // Models → review mode.
+        const access = doc.getElementById('root').innerHTML;  // the access step in a person's words
+        assert.match(access, /How far Ouroboros reaches into its own code and this computer\./);
+        assert.match(access, /Folder of your own skills \(optional\)/);
         doc.getElementById('next-btn').fire('click');   // Review mode → budget.
         for (const [id, value] of [['total-budget', '15.5'], ['per-task-budget', '5.25']]) {
             const input = doc.getElementById(id);
@@ -276,6 +279,7 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
         }
         doc.getElementById('next-btn').fire('click');   // Budget → summary.
         assert.match(doc.getElementById('root').innerHTML, /Start Ouroboros/);
+        assert.match(doc.getElementById('root').innerHTML, />Access level</, 'the summary names the access level as the step does');
         doc.getElementById('next-btn').fire('click');
         await submitted;
         assert.equal(requests.length, 1);
@@ -315,7 +319,7 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
 // was saved before: exactly the answer that used to confirm a save it knew nothing about. A call for which
 // `server.hold(call)` is true waits for `server.release(prefix)`, and is answered as things stand then.
 const SAVE_TIMEOUT = { status: 503, body: { code: 'settings_save_timeout', saved: null,
-    error: 'the settings save is still running in the server after 60s and was left to finish on its own; reload Settings to see what landed' } };
+    error: 'the settings save is still running in the server after 60s and was left to finish on its own; open Settings again to see what landed' } };
 const receipt = (runtimeMode, restartRequired) => ({ ok: true, status: 'saved', runtime_mode: runtimeMode,
     restart_required: restartRequired, preset: { applied: false, reason: 'not_requested', harnesses: [], receipt: {} } });
 const SUMMARY_FIRST = {
@@ -368,7 +372,7 @@ test('an unknown save keeps the draft; Check status reads back THIS attempt, whi
         assert.match(server.sent[0], /^[0-9a-f]{32}$/, 'the attempt id is made before sending');
         let html = doc.getElementById('root').innerHTML;
         assert.match(html, /The save result is unknown\. Your draft has not been discarded\. Use &quot;Check status&quot; to read the result of this save\./);
-        assert.match(html, /class="footer-copy">The last save did not return a confirmed result\.</);
+        assert.match(html, /class="footer-copy footer-warning">The last save did not return a confirmed result\.</);
         assert.doesNotMatch(html, /Saving\.\.\./, 'the wizard is not stuck on Saving...');
         // "Check status" is the ONE primary action while the outcome is unknown; the re-submit stays offered,
         // as an explicit secondary "Retry save" (rc.15 review MINOR 3).
@@ -431,11 +435,12 @@ test('a confirmed restart comes from the attempt\'s own receipt, never from a gu
         const html = doc.getElementById('root').innerHTML;
         assert.match(html, /Setup saved — restart to apply it/);
         assert.match(html, /Pro access applies from the next start/);
+        assert.match(html, />Open Ouroboros now</);
     }, { fetch: server.fetch, location: server.location });
 });
 
 test('a framed wizard tells its host the chosen access level by its label as well as its id', async () => {
-    // The browser twin of the restart screen (onboarding_overlay.js) prints the label; without it a person reads a stored id.
+    // The browser twin of the restart screen (onboarding_overlay.js) prints the label; without it a person reads only "The chosen access…".
     const server = completionServer();
     await withWizard(SUMMARY_FIRST, 'save=framed-restart', async ({ doc }) => {
         const posted = [];
@@ -460,6 +465,11 @@ test('the API section is badged by what is entered: a key or a local model reads
     assert.equal(await badge('badge=nothing', {}), 'Optional');
     assert.equal(await badge('badge=key', { openrouterKey: 'sk-or-v1-abcdefghijklmnop' }), 'Configured');
     assert.equal(await badge('badge=local', { localSource: '/models/local-test.gguf' }), 'Configured');
+    // What is entered is shown on load: a local-only setup opens the section as a key does.
+    let html = '';
+    await withWizard({ ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, localSource: '/models/local-test.gguf' } },
+        'badge=local-open', ({ doc }) => { html = doc.getElementById('root').innerHTML; });
+    assert.match(html, /data-collapse="api-access"\s+open>/);
 });
 
 test('an answer that never arrives is unknown, and a failure recorded for the attempt reads like its reply', async () => {

@@ -15,7 +15,6 @@
         "min": "0.01",
         "note": "Spending limits use known spend only: confirmed and estimated prices count toward the applicable limit; known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay without a price and are not counted as $0: they add nothing to known spend, so unpriced spending alone never triggers a limit. Open reservations and unresolved charges are not counted as spending. The Total Budget covers all work: once known spend reaches it, new paid calls are refused, API calls with an unknown price included, while known $0 calls and subscription or local calls on a route that has charged nothing continue. The Per-task Cost Cap covers one task's whole tree, subagents included: once that tree's known spend reaches it, every new model call of the tree is refused, known $0 and unpriced calls included. A resumable task pauses with its work saved; without a continuation it ends budget-exhausted. Calls already in flight settle normally and can overshoot the limit. Raising the cap does not resume a paused task; it must be resumed explicitly.",
         "settingKey": "TOTAL_BUDGET",
-        "settingsInputId": "s-total-budget",
         "stateKey": "totalBudget",
         "step": "any",
         "title": "Total budget"
@@ -27,7 +26,6 @@
         "min": "0.01",
         "note": "Spending limits use known spend only: confirmed and estimated prices count toward the applicable limit; known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay without a price and are not counted as $0: they add nothing to known spend, so unpriced spending alone never triggers a limit. Open reservations and unresolved charges are not counted as spending. The Total Budget covers all work: once known spend reaches it, new paid calls are refused, API calls with an unknown price included, while known $0 calls and subscription or local calls on a route that has charged nothing continue. The Per-task Cost Cap covers one task's whole tree, subagents included: once that tree's known spend reaches it, every new model call of the tree is refused, known $0 and unpriced calls included. A resumable task pauses with its work saved; without a continuation it ends budget-exhausted. Calls already in flight settle normally and can overshoot the limit. Raising the cap does not resume a paused task; it must be resumed explicitly.",
         "settingKey": "OUROBOROS_PER_TASK_COST_USD",
-        "settingsInputId": "s-settings-per-task-cost",
         "stateKey": "perTaskCostUsd",
         "step": "any",
         "title": "Per-task cost cap"
@@ -383,7 +381,7 @@
       },
       {
         "className": "pro",
-        "copy": "May change its protected core. Every change goes through review.",
+        "copy": "May change its protected core. Reviews work as you set them.",
         "label": "Pro",
         "tone": "Power",
         "value": "pro"
@@ -399,7 +397,7 @@
     "steps": [
       {
         "copy": "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.",
-        "footer": "Add more subscriptions or API access later in Settings \u2192 Accounts.",
+        "footer": "Add more subscriptions or API access later in Settings \u2192 Accounts and keys.",
         "id": "accounts",
         "railCopy": "Subscriptions + API",
         "title": "Connect your accounts"
@@ -475,7 +473,7 @@
     "legacyCompatibleBaseUrl": "",
     "lightModel": "openai/gpt-6-luna",
     "localChatFormat": "",
-    "localContextLength": 16384,
+    "localContextLength": 65536,
     "localFilename": "",
     "localGpuLayers": -1,
     "localPreset": "",
@@ -502,26 +500,26 @@
     "zaiPlan": ""
   },
   "localPresets": {
-    "qwen25-7b": {
+    "qwen35-9b": {
       "chatFormat": "",
-      "contextLength": 16384,
-      "filename": "qwen2.5-7b-instruct-q3_k_m.gguf",
-      "label": "Qwen2.5-7B Instruct Q3_K_M",
-      "source": "Qwen/Qwen2.5-7B-Instruct-GGUF"
+      "contextLength": 65536,
+      "filename": "Qwen3.5-9B-Q4_K_M.gguf",
+      "label": "Qwen3.5-9B Q4_K_M (5.7 GB file)",
+      "source": "unsloth/Qwen3.5-9B-GGUF"
     },
-    "qwen3-14b": {
+    "qwen36-35b-a3b": {
       "chatFormat": "",
-      "contextLength": 16384,
-      "filename": "Qwen3-14B-Q4_K_M.gguf",
-      "label": "Qwen3-14B Instruct Q4_K_M",
-      "source": "Qwen/Qwen3-14B-GGUF"
+      "contextLength": 65536,
+      "filename": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "label": "Qwen3.6-35B-A3B Q4_K_M (22 GB file)",
+      "source": "unsloth/Qwen3.6-35B-A3B-GGUF"
     },
-    "qwen3-32b": {
+    "qwen38-27b": {
       "chatFormat": "",
-      "contextLength": 32768,
-      "filename": "Qwen3-32B-Q4_K_M.gguf",
-      "label": "Qwen3-32B Instruct Q4_K_M",
-      "source": "Qwen/Qwen3-32B-GGUF"
+      "contextLength": 65536,
+      "filename": "Qwen3.8-27B-UD-Q4_K_M.gguf",
+      "label": "Qwen3.8-27B Q4_K_M (16.6 GB file)",
+      "source": "unsloth/Qwen3.8-27B-GGUF"
     }
   },
   "modelDefaults": {

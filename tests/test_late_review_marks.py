@@ -1072,6 +1072,16 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
     assert outcome_words(advised("failed")) == "PASS, no findings, 1 adviser answer missing"
     assert not clean_pass(advised("failed")) and not clean_pass(advised("custody_lost"))
     assert clean_pass(advised("responded")) and clean_pass(advised("failed", additional=False))
+    # An adviser asked both questions counts each unreadable answer: a readable change answer beside a coupling
+    # matrix it left unanswered or broken (its critical rows kept only as discarded diagnostics) is no clean PASS.
+    def asked_of(change, coupling):
+        return outcome_facts({**_settled("PASS"), "rows": [{"seat_id": "s1", "status": "responded"}, {
+            "seat_id": "adv", "status": "responded", "additional": True, "parts": ["change", "coupling"],
+            "answers": {"change": {"status": change}, "coupling": {"status": coupling}}}]})
+    half = asked_of("responded", "unanswered")
+    assert outcome_words(half) == "PASS, no findings, 1 adviser answer missing" and not clean_pass(half)
+    assert outcome_words(asked_of("unanswered", "unanswered")) == "PASS, no findings, 2 adviser answers missing"
+    assert clean_pass(asked_of("responded", "responded"))
     assert outcome_facts(None) is None and not clean_pass(None), "no record says nothing, never a verdict"
     earlier = {name: value for name, value in clean.items() if name != "unheard"}  # kept before advisers were counted
     assert not clean_pass(earlier), "an unknown number of unheard advisers is not zero"
@@ -1119,9 +1129,10 @@ def test_a_marks_outcome_is_a_clean_pass_only_when_its_record_holds_nothing_else
 
 
 def test_a_late_commit_review_tells_what_is_recorded_of_the_change_it_read(tmp_path):
-    """The list says what became of a late commit review's change as it reads now: the commit under this review,
-    else the pull request its task merged, else that neither is recorded. The head counts the PASS commit
-    reviews with neither, and an unread fact is never told as nothing landed."""
+    """The list says what became of a late commit review's change as it reads now: the commit under this review
+    and its tree's relation to the reviewed one, else the pull request a receipt of its task records as merged,
+    else its latest receipt with that receipt's outcome, else that neither is recorded. The head counts the PASS
+    commit reviews with no commit and no merged receipt; an unread fact is told as unread, never as nothing landed."""
     from ouroboros.late_review_marks import landing_words, mark_landing, outcome_facts
     from ouroboros.review_ledger import ledger_dir, record_path
 
@@ -1130,9 +1141,10 @@ def test_a_late_commit_review_tells_what_is_recorded_of_the_change_it_read(tmp_p
     sha = "ab" * 20
 
     def late(task, *, surface="commit_gate", verdict="PASS", landings=(), receipts=None):
-        record_id = f"rl-20261017T000000-{'abcd'[len(_late_marks(tmp_path))] * 12}"
+        record_id = f"rl-20261017T000000-{'abcdef'[len(_late_marks(tmp_path))] * 12}"
         record_path(tmp_path, record_id).write_text(json.dumps({
-            **_settled(verdict), "commit_landings": [{"commit_sha": commit} for commit in landings]}), encoding="utf-8")
+            **_settled(verdict), "commit_landings": [{"commit_sha": commit, "reviewed_subject": tree}
+                                                     for commit, tree in landings]}), encoding="utf-8")
         if receipts is not None:
             seed_result(tmp_path, task, {"status": "completed", "chat_id": 1, "merge_receipts": receipts})
         published = {**_record(tmp_path, task, 1, "late words"), "surface": surface,
@@ -1140,37 +1152,84 @@ def test_a_late_commit_review_tells_what_is_recorded_of_the_change_it_read(tmp_p
         assert publish_late_review(tmp_path, published).status == "saved"
         return next(m for m in _late_marks(tmp_path) if m["review"]["task_id"] == task), record_id
 
-    committed, _ = late("main1", landings=[sha])
+    committed, _ = late("main1", landings=[(sha, "same")])
+    changed, _ = late("main2", landings=[(sha, "different")])
     pull = "https://github.com/example/body/pull/3104"
     merged, _ = late("bound", receipts=[{"number": 7, "outcome": {"status": "queued"}},
                                         {"number": 3104, "repo": {"url": pull}, "outcome": {"status": "merged"}}])
-    idle, idle_record = late("beta1", receipts=[{"number": 8, "outcome": {"status": "queued"}}])
+    asked, asked_record = late("beta1", receipts=[{"number": 8, "outcome": {"status": "unknown"}}])
     failed, _ = late("pres1", verdict="FAIL", receipts=[])
-    assert mark_landing(committed, tmp_path) == {"commit": sha}
-    assert landing_words({"commit": sha}) == "committed as abababababab under this review"
+    nothing, _ = late("pres2", receipts=[])
+    assert mark_landing(committed, tmp_path) == {"commit": sha, "tree": "same"}
+    assert landing_words(mark_landing(committed, tmp_path)) == "committed as abababababab under this review"
+    assert landing_words(mark_landing(changed, tmp_path)) == ("committed as abababababab under this review; its tree "
+                                                              "differs from the reviewed one")
+    assert landing_words({"commit": sha, "tree": "unknown"}).endswith("; its relation to the reviewed tree is unknown")
     assert mark_landing(merged, tmp_path) == {"pr": pull}
     assert landing_words({"pr": pull}) == f"a receipt of its task records {pull} as merged"
-    assert mark_landing(idle, tmp_path) == {} == mark_landing(failed, tmp_path)
+    assert mark_landing(asked, tmp_path) == {"pr": "PR #8", "status": "unknown"}
+    assert landing_words(mark_landing(asked, tmp_path)) == "a receipt of its task records PR #8 as unknown"
+    assert mark_landing(failed, tmp_path) == {} == mark_landing(nothing, tmp_path)
     assert landing_words({}) == "no commit under this review, no merged receipt of its task"
 
     listed = _memory_read(_ctx(tmp_path, "reader"), room_id="late_reviews")
-    assert listed.splitlines()[0].endswith("; 3 PASS with no findings; 1 PASS commit reviews with no commit under that "
+    assert listed.splitlines()[0].endswith("; 5 PASS with no findings; 2 PASS commit reviews with no commit under that "
                                            "review and no merged receipt of their task")
     for task, words in (("main1", "PASS, no findings; committed as abababababab under this review"),
+                        ("main2", "PASS, no findings; committed as abababababab under this review; its tree differs"),
                         ("bound", f"PASS, no findings; a receipt of its task records {pull} as merged"),
-                        ("beta1", "PASS, no findings; no commit under this review, no merged receipt of its task"),
-                        ("pres1", "FAIL, no findings; no commit under this review, no merged receipt of its task")):
-        assert f"commit review of task {task}; {words}; memory_read(node_id='late-review-" in listed, task
+                        ("beta1", "PASS, no findings; a receipt of its task records PR #8 as unknown"),
+                        ("pres1", "FAIL, no findings; no commit under this review, no merged receipt of its task"),
+                        ("pres2", "PASS, no findings; no commit under this review, no merged receipt of its task")):
+        assert f"commit review of task {task}; {words}" in listed, task
 
-    # What cannot be read, and every other kind of review, says nothing about landing: never "nothing landed".
-    other = {"review": {**idle["review"], "surface": "result"}}
-    unknown_task = {"review": {**idle["review"], "task_id": "no-such-task"}}
-    assert mark_landing(other, tmp_path) is None and mark_landing(unknown_task, tmp_path) is None
-    record_path(tmp_path, idle_record).write_text("{broken", encoding="utf-8")
-    assert mark_landing(idle, tmp_path) is None
-    record_path(tmp_path, idle_record).unlink()
-    assert mark_landing(idle, tmp_path) is None and landing_words(None) == ""
+    # What cannot be read says so, and every other kind of review says nothing about landing.
+    other = {"review": {**asked["review"], "surface": "result"}}
+    unknown_task = {"review": {**asked["review"], "task_id": "no-such-task"}}
+    assert mark_landing(other, tmp_path) is None and landing_words(None) == ""
+    assert mark_landing(unknown_task, tmp_path) == {"unread": True}
+    assert landing_words({"unread": True}) == "what landed could not be read"
+    record_path(tmp_path, asked_record).write_text("{broken", encoding="utf-8")
+    assert mark_landing(asked, tmp_path) == {"unread": True}
+    record_path(tmp_path, asked_record).unlink()
+    assert mark_landing(asked, tmp_path) == {"unread": True}
     again = _memory_read(_ctx(tmp_path, "reader"), room_id="late_reviews")
-    assert "commit review of task beta1; PASS, no findings; memory_read(node_id='late-review-" in again
-    assert again.splitlines()[0].endswith("; 0 PASS commit reviews with no commit under that review and no merged receipt "
+    assert "commit review of task beta1; PASS, no findings; what landed could not be read; memory_read(" in again
+    assert again.splitlines()[0].endswith("; 1 PASS commit reviews with no commit under that review and no merged receipt "
                                           "of their task")
+
+
+def test_a_queued_receipt_names_its_later_readback_and_an_unknown_tree_relation_is_said(tmp_path):
+    """A queued merge whose pull request reads otherwise since says so in the owner module's words
+    (``merge_receipts.queued_earlier_note``); a landing whose tree relation is not known to be the same says it is
+    unknown; a receipt told as merged is counted as merged by the list's head as by its words."""
+    from ouroboros.late_review_marks import landing_words, mark_landing, outcome_facts
+    from ouroboros.memory_waiting import listing
+    from ouroboros.merge_receipts import queued_earlier_note
+    from ouroboros.review_ledger import ledger_dir, record_path
+
+    shared.world(tmp_path)
+    ledger_dir(tmp_path, create=True)
+    record_id = "rl-20261017T000000-" + "a" * 12
+    record_path(tmp_path, record_id).write_text(json.dumps(_settled("PASS")), encoding="utf-8")
+    receipt = {"number": 9, "outcome": {"status": "queued"}, "observed_after": {"state": "CLOSED", "auto_merge": False},
+               "effect": {"ok": True}}
+    seed_result(tmp_path, "queue1", {"status": "completed", "chat_id": 1, "merge_receipts": [receipt]})
+    published = {**_record(tmp_path, "queue1", 1, "late words"), "surface": "commit_gate",
+                 "outcome": outcome_facts(_settled("PASS")), "subject": {"record_id": record_id}}
+    assert publish_late_review(tmp_path, published).status == "saved"
+    mark = next(m for m in _late_marks(tmp_path) if m["review"]["task_id"] == "queue1")
+    note = queued_earlier_note(receipt)
+    assert note.startswith("earlier; PR now CLOSED")
+    assert mark_landing(mark, tmp_path) == {"pr": "PR #9", "status": "queued", "note": note}
+    assert landing_words(mark_landing(mark, tmp_path)) == f"a receipt of its task records PR #9 as queued ({note})"
+    still_open = {**receipt, "observed_after": {"state": "OPEN", "auto_merge": True}}
+    assert queued_earlier_note(still_open) == "", "a queue the readback still shows needs no note"
+    assert landing_words({"pr": "PR #9", "status": "queued"}) == "a receipt of its task records PR #9 as queued"
+    for tree in (None, "", "weird", "unknown"):
+        assert landing_words({"commit": "ab" * 20, "tree": tree}) == (
+            "committed as abababababab under this review; its relation to the reviewed tree is unknown"), tree
+    assert landing_words({"commit": "ab" * 20, "tree": "same"}) == "committed as abababababab under this review"
+    heads = [listing("late_reviews", [mark], {}, landing=lambda _m, became=became: became)[0]
+             for became in ({"pr": "PR #9"}, {"pr": "PR #9", "status": "merged"}, {"pr": "PR #9", "status": "queued"})]
+    assert heads[0] == heads[1] != heads[2], heads

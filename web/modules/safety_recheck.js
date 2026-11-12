@@ -1,8 +1,7 @@
 // The second check's one control: a row-level mark «Re-checks flagged actions» on the Agents rows that can
 // re-check (an enabled API model row with Packet delivery, read from the saved roster), and on the row already
-// marked even when it cannot run now, so the owner can untick it. At most one row carries it. The mark is a
-// draft like the other Settings fields; Save writes it in the roster through the owner checker transaction
-// (settings_safety.js → /api/owner/safety-model), never through a generic save.
+// marked even when it cannot run now, so the owner can untick it. At most one row carries it. A press writes the
+// roster at once (subagents_settings.js → /api/owner/safety-model); the pressed mark shows until the next read.
 
 const state = { eligible: new Set(), saved: '', draft: null, known: false };
 
@@ -48,7 +47,7 @@ export function chooseRecheckRow(rowId, checked, root = globalThis.document) {
 }
 
 /** Delegated binding for the marks the Agents editor renders and re-renders. Capture: the one-mark rule is
- * applied before the page's own change listener takes its draft snapshot. */
+ * applied before the page's own change listener writes. */
 export function bindRecheckMarks(root) {
     const onChange = (event) => {
         const box = event.target?.closest?.('[data-recheck-mark]');

@@ -156,8 +156,8 @@ def test_vision_settings_defaults_and_setup_contract(monkeypatch):
     assert slots["vision"]["settingKey"] == "OUROBOROS_MODEL_VISION"
     assert slots["vision"]["settingsToggleId"] == ""
     import pathlib
-    settings_ui = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
-    assert "modelRolesHost('settings-model-roles')" in settings_ui
+    model_roles = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "model_roles.js").read_text(encoding="utf-8")
+    assert "modelRolesHost(hostId)" in model_roles  # a role's page in Settings draws the shared editor
     assert slots["vision"]["settingsInputId"] == "s-model-vision"
 
 

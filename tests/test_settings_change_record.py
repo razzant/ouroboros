@@ -197,7 +197,7 @@ def test_a_failed_record_or_row_never_unsaves_the_settings(client, monkeypatch):
     monkeypatch.setattr(bus, "send_with_budget", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no chat")))
     assert save(test_client, "generic", 40).json()["status"] == "saved"
     monkeypatch.setattr(owner_settings, "_withheld", lambda *a: (_ for _ in ()).throw(ValueError("projection")))
-    assert test_client.post("/api/owner/safety-model", json={"settings": {"OUROBOROS_MODEL": "openrouter/x"}}).json() == {"ok": True}
+    assert test_client.post("/api/owner/safety-model", json={"settings": {"OUROBOROS_MODEL": "openrouter/x"}}).json() == {"ok": True, "receipt": "unavailable"}
     stored = json.loads(install.read_text(encoding="utf-8"))
     assert (stored[ALLOWANCE], stored["OUROBOROS_MODEL"]) == (40.0, "openrouter/x")
 

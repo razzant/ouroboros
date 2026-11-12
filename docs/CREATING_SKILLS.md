@@ -902,7 +902,7 @@ enter it; a transport must not offer a reply as an answer to it.
 Some settings keys are protected: the provider, GitHub and network keys of `FORBIDDEN_SKILL_SETTINGS`
 (`ouroboros/contracts/plugin_api.py`) and `TELEGRAM_BOT_TOKEN`. These keys are NEVER
 forwarded to a skill by default, even when listed in
-`env_from_settings`. Custom secret keys stored in Settings → Secrets
+`env_from_settings`. Custom secret keys stored in Settings → Accounts and keys
 are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
 until the owner grants it, while the skill keeps its other approvals for the same release. A granted key is read as currently saved: each
 `api.get_settings` call, script run, out-of-process call and companion start sees a
@@ -919,7 +919,7 @@ approved (the tool returns `SKILL_TOGGLE_ERROR` with `code: "grants"` and the se
 do not authorize grants or enablement. Automatic grants and first enablement
 follow the setting below; an explicitly authorized task toggle remains separate.
 
-`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Behavior → Skills
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Permissions and checks
 (native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
 release digest. Executability follows the selected enforcement and current author/reviewer authority, not the verdict
 label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
@@ -984,7 +984,7 @@ contributes:
 ```
 
 - `effect` is one fact with three consumers: Advises (autonomy) refuses everything but a declared read; a Silent or
-  Paused place refuses all but reads aimed at it; the Safety Supervisor skips declared reads at Light/Full and
+  Paused place refuses all but reads aimed at it; the Safety Supervisor skips declared reads at Outgoing and + Commands and
   reads `message` as words (a flagged call of any tool returns to the mind once; an identical call from a later step
   lets a SUSPICIOUS one through, and a DANGEROUS one in Cyber Pro, recorded; elsewhere a DANGEROUS one waits for your
   human's card holding the words and destination, and with no verdict words wait in every mode). A tool that reads
@@ -1916,7 +1916,8 @@ def register(api):
         },
     )
 
-    # Settings sub-section on the Settings page.
+    # A settings section: its own page, opened from the skill's card and listed
+    # in Settings as "Skill settings".
     # Settings sections use a narrow declarative subset: form/action for
     # configuration writes and markdown/json for explanatory diagnostics.
     # Rich widget-only components (media, stream, map, kanban, module JS)
@@ -2765,7 +2766,7 @@ headless first start installs the selected built-ins before fetching git sources
 
 ### Publishing
 
-Finish the local payload and configure `GITHUB_TOKEN` in Settings → Secrets;
+Finish the local payload and configure `GITHUB_TOKEN` in Settings → Accounts and keys;
 publication uses HTTPS directly and needs no `gh` CLI. Choose **Publish** on
 the skill or ask Ouroboros in chat
 (`submit_skill_to_hub`). The destination is where the skill came from, else the

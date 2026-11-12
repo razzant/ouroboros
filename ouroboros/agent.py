@@ -139,11 +139,11 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
             env.drive_root, str(task.get("id") or ""), STATUS_FAILED,
             _field_projector=(lambda current, incoming: None if current.get("status") in _TRULY_TERMINAL_STATUSES
                               else incoming) if keep_terminal else None,
-            _terminal_observed=True, result=text, reason_code="task_exception", loop_outcome=loop_outcome,
+            _terminal_observed=True, result=text, reason_code="task_exception", loop_outcome={k: v for k, v in loop_outcome.items() if k != "trace_refs"},
             outcome_axes=loop_outcome.get("outcome_axes") or infra_failed_axes(
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),
-            trace_refs=loop_outcome.get("trace_refs") or collect_trace_refs(usage, llm_trace),
+            trace_refs=loop_outcome.get("trace_refs") or collect_trace_refs(usage, llm_trace),  # the one stored copy: the saved ``loop_outcome`` carries none
             **effort_result_fields(task), **terminal_result_fields(usage, title=task.get("title"), metadata=task.get("metadata"), task_contract=task.get("task_contract")),
         )
     except Exception:
@@ -843,6 +843,7 @@ class OuroborosAgent:
         from ouroboros.config import get_context_mode
         from ouroboros.tool_policy import initial_tool_schemas  # the schemas count in the memory view's floor
         from ouroboros.context_timing import collector_rests, measured_sections
+        from ouroboros.context_fit import RouteQuestion
 
         with collector_rests(), measured_sections():  # each section's wall and CPU time rides on the build's context_memory_view receipt
             messages, cap_info = build_llm_messages(
@@ -852,7 +853,8 @@ class OuroborosAgent:
                 review_context_builder=lambda: build_review_context(review_env),
                 ctx=ctx,
                 tool_schemas=initial_tool_schemas(self.tools, context_mode=get_context_mode()), tool_registry=self.tools,
-                **({"route_resolver": self._realtime_turn.resolve_route} if getattr(self, "_realtime_turn", None) is not None else {}),
+                route_resolver=(self._realtime_turn.resolve_route if getattr(self, "_realtime_turn", None) is not None
+                                else RouteQuestion(task)),  # the fit's own route question, asked beside the build
             )
         # A reduction reaches the durable record, this dispatch's context, then [SUBTASK_OUTCOME].
         # Append after building: the composed child text was frozen at enqueue time.

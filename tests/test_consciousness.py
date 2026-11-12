@@ -320,49 +320,46 @@ def test_an_accepted_wake_advances_the_observation_boundary_and_a_refused_one_do
 def test_a_refused_wake_consumes_no_transition_and_the_admitted_one_persists_observed_identities(clock):
     """The accepted boundary carries the task-result transition state beside the chat position:
     a child that settles with no chat row is reported by the next ADMITTED wake, not lost to a
-    refused one. The complete inventory lives in the exact wake source."""
+    refused one. The complete inventory lives in the accepted transition chain."""
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness_transitions import read_chain
 
     (clock.root / "task_results").mkdir()
     row = {"task_id": "kid", "status": "running", "ts": _iso(T0 - 100), "updated_at": _iso(T0 - 100),
            "_schema_version": 1, "metadata": {}, "description": "child work"}
     seed_result(clock.root, "kid", row)
     assert clock.clock.tick(T0 + FLOOR + 1) == "launched"
-    accepted = clock.launches[-1]["task"]["metadata"]["wake_observation"]["accepted_boundary"]["transitions"]
-    from ouroboros.artifacts import read_actor_source_bytes
-    source = accepted['source_ref']
-    header = json.loads(read_actor_source_bytes(clock.root, source['task_id'], source).splitlines()[0])
-    inventory = header['boundary']['transitions']
+    accepted = clock.launches[-1]["task"]["metadata"]["wake_observation"]["accepted_boundary"]["transition_chain"]
+    inventory = read_chain(clock.root, accepted).state
     assert inventory["inventory"] == {"kid": []} and inventory["scan_at"] == _iso(T0 + FLOOR + 1)
     seed_result(clock.root, "kid", {**row, "status": "failed", "updated_at": _iso(T0 + FLOOR + 50)})  # the orphan sweep
     clock.finish("wake0001", True)
-    assert clock.store[OBSERVATION_STATE_KEY]["transitions"] == accepted  # the terminal carried the accepted identities
+    assert clock.store[OBSERVATION_STATE_KEY]["transition_chain"] == accepted  # the terminal carried the accepted identities
     clock.receipt.update({"admitted": False, "task_id": "", "reason": "budget_exhausted"})
     clock.clock._next_wake_at = T0 + 2 * FLOOR
     assert clock.clock.tick(T0 + 2 * FLOOR) == "rejected:budget_exhausted"
-    assert clock.store[OBSERVATION_STATE_KEY]["transitions"] == accepted
+    assert clock.store[OBSERVATION_STATE_KEY]["transition_chain"] == accepted
     clock.receipt.update({"admitted": True, "task_id": "wake0002", "reason": ""})
     clock.clock._next_wake_at = T0 + 3 * FLOOR
     assert clock.clock.tick(T0 + 3 * FLOOR) == "launched"
     assert "- task kid Failed, completion time not recorded" in clock.launches[-1]["text"]
     clock.finish("wake0002", True)
-    source = clock.store[OBSERVATION_STATE_KEY]["transitions"]['source_ref']
-    header = json.loads(read_actor_source_bytes(clock.root, source['task_id'], source).splitlines()[0])
     # The carried wake's own terminal row is a transition like any task's.
-    assert set(header['boundary']['transitions']["inventory"]) == {"kid", "wake0001"}
+    chain = read_chain(clock.root, clock.store[OBSERVATION_STATE_KEY]["transition_chain"])
+    assert set(chain.state["inventory"]) == {"kid", "wake0001"}
 
 
 @pytest.mark.parametrize('failure', ['write', 'corrupt_previous', 'missing_previous'])
 def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkeypatch, failure):
     from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness_transitions import CHAIN_REL
 
     _chat_row(root=clock.root, ts=_iso(T0 + 1), direction='in', chat_id=1, source='web', text='first')
     assert clock.clock.tick(T0 + FLOOR + 1) == 'launched'
     clock.finish('wake0001', True)
     accepted = clock.store[OBSERVATION_STATE_KEY]
-    source = accepted['transitions']['source_ref']
-    path = artifacts.task_artifact_dir_path(clock.root, source['task_id']) / source['path']
+    path = clock.root / CHAIN_REL / f"{accepted['transition_chain']['link']}.json"
     original = path.read_bytes()
     _chat_row(root=clock.root, ts=_iso(T0 - 100), direction='in', chat_id=1, source='web', text='late old row')
     clock.receipt['task_id'] = 'wake0002'
@@ -394,11 +391,12 @@ def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkey
 
 
 @pytest.mark.parametrize('version', [1, 2])
-def test_inline_inventory_migrates_to_the_source_bound_transitions(clock, version):
-    """A v1 inline inventory migrates to the v2 source-bound record (a late-review wake of a
-    closed task left with the acceptance machine; the migration stays)."""
+def test_inline_inventory_migrates_to_a_base_of_the_transition_chain(clock, version):
+    """An inline inventory (v1, a late-review wake of a closed task left with the acceptance
+    machine; or v2) migrates to a base of the transition chain the boundary names; the migration stays."""
     from ouroboros import consciousness_wake as wake
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness_transitions import read_chain
     from tests.test_consciousness_wake import _write
 
     _write(clock.root, 'old', status='completed', ts=_iso(T0 - 86400))
@@ -409,14 +407,16 @@ def test_inline_inventory_migrates_to_the_source_bound_transitions(clock, versio
     assert clock.clock.tick(T0 + FLOOR + 1) == 'launched'
     assert ('task old Done' in clock.launches[-1]['text']) is (version == 1)
     clock.finish('wake0001', True)
-    accepted = clock.store[OBSERVATION_STATE_KEY]['transitions']
-    assert set(accepted) == {'version', 'source_ref'} and accepted['version'] == 2
+    accepted = clock.store[OBSERVATION_STATE_KEY]
+    chain = read_chain(clock.root, accepted['transition_chain'])
+    assert 'transitions' not in accepted and accepted['transition_chain']['version'] == 3
+    assert len(chain.names) == 1 and set(chain.state['inventory']) == {'old'}  # one base, the whole state
 
 
 @pytest.mark.parametrize(("restart", "failure"), [(False, 'readback'), (True, 'write'), (True, 'bootstrap_write')])
 def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, failure, restart):
     from ouroboros import artifacts, chat_chain
-    from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness import OBSERVATION_BOOTSTRAP_STATE_KEY, OBSERVATION_STATE_KEY
     from tests.test_consciousness_wake import _write
 
     _chat_row(root=clock.root, ts=_iso(T0 - 1), direction='in', chat_id=1, source='web', text='before bootstrap')
@@ -427,7 +427,6 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
             fault.setattr(artifacts, 'read_actor_source_bytes', lambda *a, **kw: b'bad readback')
         if failure == 'bootstrap_write':
             from supervisor import state
-            from ouroboros.consciousness import OBSERVATION_BOOTSTRAP_STATE_KEY
 
             update = state.update_state
 
@@ -447,6 +446,7 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
     monkeypatch.setattr(clock_module.time, 'time', lambda: finish_at)
     clock.finish('wake0001', not restart)
     assert not clock.store.get(OBSERVATION_STATE_KEY)  # the failed source rode no accepted boundary to the clock
+    assert clock.store[OBSERVATION_BOOTSTRAP_STATE_KEY] == T0  # nothing accepted: the bootstrap stays
     alarm = BackgroundConsciousness(clock.root, clock.root / 'repo', lambda: 7, now=finish_at + 1) if restart else clock.clock
     clock.receipt['task_id'] = 'wake0002'
     assert alarm.tick(alarm.next_wake_at) == 'launched'
@@ -455,6 +455,9 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
     assert 'before bootstrap' not in _observed(clock)
     clock.finish('wake0002', True, alarm=alarm)
     assert clock.store[OBSERVATION_STATE_KEY]
+    # An accepted boundary moves the bootstrap to its capture: a body without the chain reader starts there.
+    captured = clock_module.parse_deadline_ts(clock.store[OBSERVATION_STATE_KEY]['captured_at']).timestamp()
+    assert clock.store[OBSERVATION_BOOTSTRAP_STATE_KEY] == captured == alarm._observation_bootstrap_since > T0
     clock.receipt['task_id'] = 'wake0003'
     assert alarm.tick(alarm.next_wake_at + DEFAULT) == 'launched'
     assert 'during first wake' not in _observed(clock)
@@ -462,8 +465,8 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
 
 
 def test_full_inventory_moves_out_of_hot_state_without_forgetting_closed_tasks(clock):
-    from ouroboros import artifacts
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
+    from ouroboros.consciousness_transitions import read_chain
     from ouroboros.task_results import write_task_result
 
     for index in range(160):
@@ -472,9 +475,7 @@ def test_full_inventory_moves_out_of_hot_state_without_forgetting_closed_tasks(c
     clock.finish('wake0001', True)
     accepted = clock.store[OBSERVATION_STATE_KEY]
     assert len(json.dumps(accepted)) < 1800
-    source = accepted['transitions']['source_ref']
-    header = json.loads(artifacts.read_actor_source_bytes(clock.root, source['task_id'], source).splitlines()[0])
-    assert len(header['boundary']['transitions']['inventory']) == 160
+    assert len(read_chain(clock.root, accepted['transition_chain']).state['inventory']) == 160
     write_task_result(clock.root, 'new-old', 'completed', ts=_iso(T0 - 86400))
     clock.receipt['task_id'] = 'wake0002'
     clock.clock._next_wake_at = T0 + 2 * FLOOR
@@ -1179,7 +1180,7 @@ def test_status_snapshot_carries_the_alarm_facts(clock):
         "last_wake_outcome", "last_error", "spent_24h_usd", "daily_usd", "allowance_resets_at",
         "tasks_running", "max_tasks", "live_wake_task_id", "unknown_unmetered", "integrity_degraded",
         "spend_by_cause", "counted_roots", "places_brief", "appointment_at", "live_wake_held",
-        "live_wake_hold", "allowance_status", "allowance_open_rows", "allowance_room_after",
+        "live_wake_hold", "allowance_status", "allowance_open_rows", "allowance_room_after", "model_route",
     }
     assert snapshot["enabled"] is True and snapshot["level"] == "act"
     assert snapshot["unknown_unmetered"] == 0 and snapshot["integrity_degraded"] is False
@@ -1189,6 +1190,31 @@ def test_status_snapshot_carries_the_alarm_facts(clock):
     # The current window's own verdict; no held wake, so no hold; an absent count stays absent, never 0.
     assert snapshot["allowance_status"] == "available" and snapshot["live_wake_hold"] is None
     assert snapshot["allowance_open_rows"] is None and snapshot["allowance_room_after"] == ""
+
+
+def test_status_snapshot_names_the_model_its_next_wake_thinks_with(clock, monkeypatch):
+    """``model_route``: the route the next wake takes, with its local flag; ``layer`` ``consciousness`` when its own
+    slot decides it (``route_choice.model_role_slot_override``), else ``main``; a route that cannot be read is null,
+    never a guess."""
+    from ouroboros import route_choice
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-6-astra")
+    monkeypatch.setenv("USE_LOCAL_MAIN", "false")
+    monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "anthropic/claude-opus-5-5")
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "")
+    route = lambda: clock.clock.status_snapshot()["model_route"]  # noqa: E731
+    assert route() == {"value": "anthropic/claude-opus-5-5", "layer": "consciousness", "local": False}
+    monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "")
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": False}
+    # An empty slot's own box, checked under a cloud Main, decides the route: Main's model, run locally.
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "true")
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "consciousness", "local": True}
+    monkeypatch.setenv("USE_LOCAL_MAIN", "true")  # equal flags: Main's own route, local
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": True}
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "false")  # an unchecked box follows a local Main (owner, #3272)
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": True}
+    monkeypatch.setattr(route_choice, "following_route", lambda *_a, **_k: (_ for _ in ()).throw(OSError("unreadable")))
+    assert route() is None
 
 
 def test_the_status_view_may_ride_a_snapshot_and_a_wake_admission_never_does(clock, monkeypatch):

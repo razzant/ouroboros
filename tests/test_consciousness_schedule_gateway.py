@@ -160,6 +160,25 @@ def _gateway(tmp_path):
     return TestClient(app)
 
 
+@pytest.mark.parametrize("line,notice,expected", [
+    ("Проверка завершена.", False, "Проверка завершена."),
+    ("Проверка завершена.\n42 строки в /tmp/result.csv. Следующий шаг за владельцем.", False, "Проверка завершена."),
+    ("Host cause. Keep its detail.", True, "Host cause. Keep its detail."),
+    ("", False, ""),
+])
+def test_schedule_ui_projects_the_opening_without_shortening_the_next_runs_cache(tmp_path, monkeypatch, line, notice, expected):
+    _bind(monkeypatch, tmp_path)
+    row = _skill_row()
+    row.update(last_task_id="previous", last_outcome={"task_id": "previous", "state": "completed",
+                                                   "notice": notice, "line": line})
+    _write(tmp_path, [row])
+    response = _gateway(tmp_path).get("/api/schedules")
+    assert response.status_code == 200
+    assert response.json()["tasks"][0]["last_outcome"]["line"] == expected
+    assert response.json()["tasks"][0]["outcome"]["line"] == expected
+    assert _rows(tmp_path)[0]["last_outcome"]["line"] == line
+
+
 def test_the_gateway_action_and_the_agent_tool_mean_the_same_thing(tmp_path, monkeypatch):
     _bind(monkeypatch, tmp_path)
     _ready(monkeypatch)

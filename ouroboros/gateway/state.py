@@ -279,7 +279,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     from ouroboros.gateway.work_projection import works_snapshot
     publication_roots = set()
     works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"],
-                           bindings=task_bindings, publication_roots=publication_roots)
+                           bindings=task_bindings, publication_roots=publication_roots,
+                           questions=decisions["current_questions"])
     # Registered-project facts (never raise): the compact sidebar list, and the
     # COMPLETE (uncapped, all-status) project chat_ids for the live WS fan-out
     # isolation SSOT — distinct from the capped/filtered sidebar list, so
@@ -290,7 +291,11 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
 
         listable = list_sidebar_projects(root := request_drive_root(request))  # one read: the feed and its count
         messages_revision = project_revision(root, listable)  # read before the feed: a later move reads the list again
-        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable, by_message=True)
+        # A listed room that is the owner's turn always has its row: the Projects header's amber stands for a row the
+        # owner can reach, however long ago its work ended (after the recent slice, in the same message order).
+        waiting = {int(chat) for chat, room in (works.get("rooms") or {}).items()
+                   if room.get("amber") and str(chat).isdigit()}
+        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable, by_message=True, keep=waiting)
         project_listable_count = len(listable)
     except Exception:
         projects, messages_revision = [], None
@@ -302,6 +307,10 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         project_chat_ids = None if rooms is None else sorted(rooms)
     except Exception:  # unknown, never "no Projects": a reader keeps the set it holds
         project_chat_ids = None
+    if project_chat_ids is None:
+        # The same registry counts the feed and names the bound tasks' Projects: while it vouches for no room,
+        # the count is unknown too (never "none listed"), and the bindings map below carries no revision.
+        project_listable_count = None
     from ouroboros.gateway.ui_preferences import main_room_revision
 
     main_visible_revision = main_room_revision(request_drive_root(request))
@@ -334,8 +343,10 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "project_chat_ids": project_chat_ids,
         "main_visible_revision": main_visible_revision,
         "task_bindings": task_bindings,
-        # The map names its own revision (a digest of what a reader receives); a failed read has none.
-        "task_bindings_revision": map_revision(task_bindings) if bindings_complete else "",
+        # The map names its own revision (a digest of what a reader receives); a failed read has none, and so has a
+        # map whose Project names an unknown registry could not vouch for (a reader keeps the map it holds).
+        "task_bindings_revision": (map_revision(task_bindings) if bindings_complete and project_chat_ids is not None
+                                   else ""),
         # A carried Presence turn is a census row of its own kind (CLIENT_CONTRACT), never the owner's direct turn.
         "active_direct_turns": [row for row in direct_turns if row.get("kind") != "presence"],
         "active_chat_activities": activities,

@@ -1,6 +1,9 @@
 // Provider-card markup shared by Settings and the builtin wizard. Assets resolve beside this module.
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
+/** A provider's own mark (its icon beside this module), or '' when it has none. */
+export const providerIconHtml = (card) => (card?.icon ? `<img src="${new URL(card.icon, import.meta.url).href}" alt="" class="settings-provider-icon">` : '');
+
 // A provider card: its head is the card's disclosure plus its own Add key (docs/DESIGN.md §6: a
 // section-level action belongs in its group's header), its body the provider's key rows.
 function providerCard(card, body) {
@@ -11,7 +14,7 @@ function providerCard(card, body) {
             <div class="settings-provider-head">
                 <button type="button" class="settings-provider-toggle" data-provider-toggle aria-expanded="${card.open ? 'true' : 'false'}" aria-controls="${bodyId}">
                     <span class="settings-provider-title" id="${titleId}">
-                        ${card.icon ? `<img src="${new URL(card.icon, import.meta.url).href}" alt="" class="settings-provider-icon">` : ''}
+                        ${providerIconHtml(card)}
                         <span>${card.title}</span>
                     </span>
                     <span class="settings-provider-hint">${card.hint || ''}</span>
@@ -121,6 +124,21 @@ function connectionFieldHtml(card, field, { stem, value, builtin, keyName }) {
         </div>`;
 }
 
+const text = (value) => (value === undefined || value === null ? '' : String(value));
+
+/** A key's form, the same in setup's card and on the key's own page in Settings: its name (an added key) and the
+ *  fields of its kind. Without `row.uid` it is the card's built-in key ("Default"). */
+export function connectionFieldsHtml(card, row = {}) {
+    const builtin = !row.uid;
+    const stem = builtin ? `s-${card.id}-default` : `conn-${row.uid}`;
+    const keyName = builtin ? '' : String(row.label || row.name || '');
+    const values = row.values || {};
+    return [
+        builtin ? '' : `<div class="form-field ui-field"><label for="${stem}-label">Name</label><input id="${stem}-label" class="ui-control" type="text" data-connection-label value="${escapeHtml(text(row.label))}" placeholder="e.g. Claude credits" aria-label="${escapeHtml(`${card.title} key name`)}" autocomplete="off" spellcheck="false"></div>`,
+        ...card.fields.map((field) => connectionFieldHtml(card, field, { stem, value: text(values[field.rowField]), builtin, keyName })),
+    ].join('');
+}
+
 /**
  * One API key row (docs/DESIGN.md §6 account-row anatomy): name and status, the meta line, Test /
  * Disable / Remove docked right, then the key's own fields and its quiet result lines. Without `row.uid` it
@@ -129,14 +147,8 @@ function connectionFieldHtml(card, field, { stem, value, builtin, keyName }) {
  */
 export function connectionRowHtml(card, row = {}) {
     const builtin = !row.uid;
-    const stem = builtin ? `s-${card.id}-default` : `conn-${row.uid}`;
     const keyName = builtin ? '' : String(row.label || row.name || '');
-    const values = row.values || {};
-    const text = (value) => (value === undefined || value === null ? '' : String(value));
-    const fields = [
-        builtin ? '' : `<div class="form-field ui-field"><label for="${stem}-label">Name</label><input id="${stem}-label" class="ui-control" type="text" data-connection-label value="${escapeHtml(text(row.label))}" placeholder="e.g. Claude credits" aria-label="${escapeHtml(`${card.title} key name`)}" autocomplete="off" spellcheck="false"></div>`,
-        ...card.fields.map((field) => connectionFieldHtml(card, field, { stem, value: text(values[field.rowField]), builtin, keyName })),
-    ].join('');
+    const fields = connectionFieldsHtml(card, row);
     const identity = builtin ? ' data-builtin="1"'
         : ` data-uid="${escapeHtml(row.uid)}" data-name="${escapeHtml(text(row.name))}"${row.draft ? ' data-draft="1"' : ''}`;
     return `

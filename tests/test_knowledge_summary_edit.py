@@ -10,6 +10,7 @@ Every test writes only a synthetic data root.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import threading
@@ -18,6 +19,7 @@ import pytest
 
 from ouroboros import context
 from ouroboros import knowledge as store
+from ouroboros import knowledge_versions as versions
 from ouroboros.memory import Memory
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
@@ -164,7 +166,7 @@ def test_legacy_calls_and_an_empty_summary_publish_identical_bytes(tmp_path, mod
 
 
 REFUSALS = [
-    ({"mode": "overwrite", "content": "Body.", "summary": NEW}, "used only with mode=edit or mode=append, not mode=overwrite"),
+    ({"mode": "restore", "summary": NEW}, "used only with mode=overwrite, append or edit, not mode=restore"),
     ({"mode": "edit", "summary": "   "}, "is not summary text"),
     ({"mode": "edit", "summary": 7}, "is not summary text"),
     ({"mode": "edit", "summary": NEW, "content": "Orphan replacement."}, "has no old_str to replace"),
@@ -302,7 +304,7 @@ def test_the_backlog_summary_is_an_ordinary_revision_checked_edit(tmp_path):
     """The backlog has no merge writer of its own: its summary changes like any note's."""
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="summary-edit")
     item = "- Trim the index preview.\n"
-    assert tools._knowledge_write(ctx, tools.BACKLOG_TOPIC, item, mode="overwrite", summary=NEW).startswith(
+    assert tools._knowledge_write(ctx, tools.BACKLOG_TOPIC, mode="restore", summary=NEW).startswith(
         "⚠️ TOOL_ARG_ERROR")
     assert not (tmp_path / "memory").exists()
     _receipt(tools._knowledge_write(ctx, tools.BACKLOG_TOPIC, item))
@@ -322,9 +324,10 @@ def test_schema_adds_summary_without_breaking_older_calls(tmp_path):
     schema = next(entry.schema for entry in tools.get_tools() if entry.name == "knowledge_write")
     props = schema["parameters"]["properties"]
     assert schema["parameters"]["required"] == ["topic"]
-    assert props["summary"]["type"] == "string" and "mode=edit or append" in props["summary"]["description"]
+    assert props["summary"]["type"] == "string" and "when to open this note" in props["summary"]["description"]
+    assert "overwrite, append or edit" in props["summary"]["description"]
     assert {"topic", "scope", "content", "mode", "old_str", "expected_revision"} < set(props)
-    assert props["mode"]["enum"] == ["overwrite", "append", "edit", "archive", "restore"]
+    assert props["mode"]["enum"] == ["overwrite", "append", "edit", "revert", "archive", "restore"]
     assert set(props) == set(inspect.signature(tools._knowledge_write).parameters) - {"ctx"}
     assert "body text never replaces it" in schema["description"]
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
@@ -334,3 +337,55 @@ def test_schema_adds_summary_without_breaking_older_calls(tmp_path):
     # Omitted content is the handler's typed refusal, not a signature-binding failure.
     assert "mode=overwrite requires content" in registry.execute("knowledge_write", {"topic": "no-content"})
     assert not store.resolve_knowledge_address(tmp_path, "no-content", "global").path.exists()
+
+
+def test_an_overwrite_takes_its_summary_after_its_own_merge(tmp_path):
+    ctx, address, original = _setup(tmp_path)
+    content = "---\nsummary: From the content.\n---\n# Ada\n\nRewritten.\n"
+    assert "revision_required" in tools._knowledge_write(ctx, "people/ada", content, scope="global", summary=NEW)
+    assert store.read_knowledge_note(address).raw == original.raw
+    receipt = _receipt(tools._knowledge_write(ctx, "people/ada", content, scope="global", summary=NEW,
+                                              expected_revision=original.revision))
+    current = store.read_knowledge_note(address)
+    assert current.summary == NEW  # the parameter wins over the content's own frontmatter
+    assert {key: current.metadata[key] for key in ("type", "title", "custom")} == {
+        key: original.metadata[key] for key in ("type", "title", "custom")}
+    assert _body(current) == b"# Ada\n\nRewritten.\n" and receipt["knowledge_delta"]["summary_changed"] is True
+    assert (_history(address)[-1]["mode"], _history(address)[-1]["summary"]) == ("overwrite", NEW)
+    plain = _receipt(tools._knowledge_write(ctx, "people/ada", content, scope="global",
+                                            expected_revision=current.revision))
+    assert store.read_knowledge_note(address).summary == "From the content." and plain["knowledge_delta"]["summary_changed"]
+
+
+def test_a_bare_append_is_answered_with_the_outline_and_says_earlier_text_stood(tmp_path):
+    ctx, address, _original = _setup(tmp_path)
+    reply = tools._knowledge_write(ctx, "people/ada", "\n## Later\nNew fact.\n", mode="append", scope="global")
+    assert reply.count("\n") == 1  # the meta holds this outline: nothing follows the JSON line
+    receipt = _receipt(reply)
+    assert receipt["knowledge_note"] == "Earlier text was not revised by this write."
+    assert receipt["knowledge_outline"].startswith("Outline of 'people/ada' (global)")
+    assert "# Ada — line 8" in receipt["knowledge_outline"] and "## Later — line" in receipt["knowledge_outline"]
+    assert "New fact." not in json.dumps(receipt, ensure_ascii=False)  # the appended text is not echoed
+    assert "revision_required" in tools._knowledge_write(ctx, "people/ada", "More.", mode="append", scope="global",
+                                                         summary=NEW)
+    current = store.read_knowledge_note(address)
+    revised = _receipt(tools._knowledge_write(ctx, "people/ada", "More.", mode="append", scope="global", summary=NEW,
+                                              expected_revision=current.revision))
+    assert "knowledge_outline" not in revised and "knowledge_note" not in revised
+
+
+def test_a_bare_append_whose_outline_the_receipt_cannot_hold_carries_it_after_the_json_line(tmp_path):
+    raw = "---\ntype: note\n---\n# Журнал\n\n" + "".join(f"## Запись номер {i:03d}\n\nТекст.\n\n" for i in range(120))
+    ctx, address, _original = _setup(tmp_path, "journal/long", raw)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ctx)
+    reply = tools._knowledge_write(ctx, "journal/long", "\n## Позже\n\nНовое.\n", mode="append", scope="global")
+    line, _, carried = reply.split("\n", 1)[1].partition("\n\n")
+    receipt = json.loads(line)
+    assert receipt["knowledge_outline"]["omitted"] is True  # the meta cannot hold it ...
+    assert carried == versions.render_outline(store.read_knowledge_note(address))  # ... so it follows, whole
+    assert receipt["knowledge_outline"]["sha256"] == hashlib.sha256(carried.encode("utf-8")).hexdigest()
+    assert "## Позже — line" in carried and receipt["knowledge_note"] == "Earlier text was not revised by this write."
+    assert receipt["knowledge_delta"]["added_headings"] == ["## Позже"]  # the outline gave way first, as the largest
+    pointer = receipt["knowledge_outline"]["read"]
+    assert registry.execute(pointer["tool"], pointer["arguments"]).endswith(carried)  # the meta's pointer reads it too

@@ -37,6 +37,12 @@ def resource_release_supported(operations: List[Dict[str, Any]]) -> bool:
 class ClaudexorUploadGateway:
     """No upload store, retry or source policy lives in transport."""
 
+    def _upload_request(self, step: str, method: str, path: str, **request: Any) -> Any:
+        """One control request of an upload, its wall time named on the measuring receipt (``daemon.upload.<step>``)."""
+        from ouroboros.context_timing import timed
+
+        return timed(f"daemon.upload.{step}", self._request, method, path, **request)
+
     def import_upload(self, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
         """POST /v2/uploads/imports with the caller's saved key and exact body."""
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -49,8 +55,8 @@ class ClaudexorUploadGateway:
 
     def put_upload_bytes(self, upload_id: str, data: bytes) -> Dict[str, Any]:
         """PUT /v2/uploads/:id/bytes: exactly the declared bytes, hashed by the engine."""
-        body = self._request("PUT", f"/v2/uploads/{quote(str(upload_id), safe='')}/bytes", content_body=bytes(data),
-                             headers={"Content-Type": "application/octet-stream"})
+        body = self._upload_request("bytes", "PUT", f"/v2/uploads/{quote(str(upload_id), safe='')}/bytes",
+                                    content_body=bytes(data), headers={"Content-Type": "application/octet-stream"})
         return body if isinstance(body, dict) else {}
 
     def cancel_upload(self, upload_id: str) -> Dict[str, Any]:

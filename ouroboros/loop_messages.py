@@ -399,9 +399,9 @@ def owner_authority_kinds(entries: List[Dict[str, Any]]) -> List[str]:
     return kinds
 
 
-def _pending_owner_input_kinds(ctx: Any) -> List[str]:
-    """Unread owner-authority input a source acknowledgement must not hide: a
-    peek over a COPY of the seen-set (the round top performs the real drain)."""
+def _pending_owner_input_kinds(ctx: Any, *, ids: bool = False) -> List[str]:
+    """Unread owner-authority input a source acknowledgement must not hide (``ids``: the entries' ids instead of their
+    kinds): a peek over a COPY of the seen-set (the round top performs the real drain)."""
     from ouroboros.owner_mailbox import drain_owner_entries
 
     incoming = getattr(ctx, "_acceptance_observation_incoming", None)
@@ -409,10 +409,10 @@ def _pending_owner_input_kinds(ctx: Any) -> List[str]:
     drive_root, task_id = getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or "")
     if drive_root is None or not task_id:
         return kinds
-    return kinds + owner_authority_kinds(drain_owner_entries(
-        pathlib.Path(drive_root), task_id, set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()),
-        getattr(ctx, "task_attempt", None) or 1,
-    ))
+    entries = drain_owner_entries(pathlib.Path(drive_root), task_id, set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()),
+                                  getattr(ctx, "task_attempt", None) or 1)
+    return kinds + ([str(entry.get("msg_id") or "") for entry in entries if owner_authority_kinds([entry])] if ids
+                    else owner_authority_kinds(entries))
 
 
 def capture_acceptance_observation(

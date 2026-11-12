@@ -266,7 +266,8 @@ class ChatHistoryResponse(TypedDict, total=False):
     """``GET /api/chat/history``: conversation rows oldest first; replay evidence may follow them
     regardless of timestamp and recur across pages. An error answer (400 history_cursor_invalid or
     history_around_invalid, 409 history_view_changed or history_delta_reset, 503 history_source_unavailable
-    or migrating) keeps this shape with no rows, ``has_more`` true and the cursor that was sent as ``next_cursor``."""
+    or migrating) keeps this shape with no rows, ``has_more`` true and the cursor that was sent as ``next_cursor``;
+    a 503 history_source_unavailable may name the store's cause in ``detail``."""
 
     messages: Required[List[ChatHistoryMessage]]
     has_more: Required[bool]
@@ -279,6 +280,7 @@ class ChatHistoryResponse(TypedDict, total=False):
     error: str
     anchor: ChatHistoryAnchor  # an ``around`` read only
     reason_code: str
+    detail: str  # a 503 history_source_unavailable: the store's cause, when it has one
 
 
 __all__ = [

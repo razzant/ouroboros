@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.ui_browser]
 
 SAVE_TIMEOUT = {"code": "settings_save_timeout", "saved": None, "error": (
     "the settings save is still running in the server after 60s and was left to finish on its own; "
-    "reload Settings to see what landed")}
+    "open Settings again to see what landed")}
 UNKNOWN = "The save result is unknown. Your draft has not been discarded."
 NOT_CONFIRMED = "This save is not confirmed. Your draft remains here. You can check again or choose Retry save."
 STORED = "This save is stored. Setup completion and restart requirements are not yet confirmed."

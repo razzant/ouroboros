@@ -44,6 +44,8 @@ owner | web/style.css | @media (hover: hover) » .update-pill:is(.has-local, [da
 owner | web/style.css | .chat-budget-pill[data-attention="1"] | background
 owner | web/style.css | .chat-question-nav:hover | background
 owner | web/style.css | @media (hover: hover) » .chat-budget-pill[data-attention="1"]:hover | background
+owner | web/settings.css | .accounts-bar[data-state="need"] > b | background
+owner | web/settings.css | .agent-family-accounts .harness-account-row[data-tone="warn"] | background
 owner | web/model_wait.css | .model-wait-row[data-owner="1"] | background, border-color
 owner | web/room_work.css | .rw-row .rw-pill-question | background, color
 owner | web/room_work.css | .rw-row[data-tone="wait"] .rw-state | color
@@ -53,7 +55,6 @@ owner | web/room_work.css | .rw-row .rw-pill-question:not(:disabled):hover | bac
 # work, Logs events, widget tones, account quota and spent windows, unsaved settings and file drafts, and a work that
 # went to a fallback route by itself (`.model-fallback`: its card's model fact and its word in the Main sheet).
 warning | web/ui.css | .settings-inline-status[data-tone="warn"] | color
-warning | web/ui.css | .settings-test-result[data-tone="warn"] | color
 warning | web/ui.css | .ui-chip[data-tone="warn"] | background, color
 warning | web/ui.css | .ui-status[data-tone="warn"] | color
 warning | web/ui.css | .ui-result[data-tone="warn"] | color
@@ -73,7 +74,6 @@ warning | web/style.css | .message-share-status[data-tone="warn"] | color
 warning | web/style.css | .model-fallback | color
 warning | web/style.css | .msg-attachment-outcome | color
 warning | web/style.css | .new-project-trust-note | background, color
-warning | web/style.css | .settings-lan-hint[data-tone="warn"] | color
 warning | web/style.css | .skills-skip-glyph | color
 warning | web/style.css | .toast-warn | border-color, color
 warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
@@ -86,7 +86,9 @@ warning | web/settings.css | .local-toggle[data-warning="1"] | color
 warning | web/settings.css | .mcp-server-status-warn | background, color
 warning | web/settings.css | .resource-message[data-tone="warn"] | background, color
 warning | web/settings.css | .resource-window[data-spent="true"] .resource-fill | background
+warning | web/settings.css | .settings-choice[aria-checked="true"] .settings-choice-mark | background, color
 warning | web/settings.css | .settings-inline-note[data-tone="warn"] | color
+warning | web/settings.css | .settings-row-value[data-tone="warn"] | color
 warning | web/onboarding.css | .agent-family-status[data-tone="warn"] | color
 warning | web/onboarding.css | .agent-service-note[data-tone="warn"] | color
 warning | web/onboarding.css | .available-subagent-status-reason | color

@@ -14,6 +14,7 @@ import {
     LADDER_FOOTNOTE,
     MALFORMED_RECEIPT_CODE,
     VALUE_LADDER,
+    accessRowState,
     agentsOnlyAccess,
     agentsOutcomeText,
     agentsStepHtml,
@@ -193,6 +194,34 @@ test('agent-only subscriptions are told what they run and what Main needs; an un
         assert.match(mainSourceReason(connected, sources), /^Could not confirm that a connected account can run .*Retry model discovery,/);
     }
     assert.equal(agentsOnlyAccess([], codex), false, 'nothing connected is not an agents-only install');
+});
+
+test('the access row never offers what Continue refuses, and calls the API section Optional only when it is', () => {
+    const codex = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
+    const row = (facts) => accessRowState({ sources: codex, ...facts });
+    // A preview that failed while Continue is blocked asks for a Retry alone; with Continue open it offers both.
+    assert.match(row({ connected: ['claude'], previewError: 'Down.', continueBlocked: true }).note, /prepared: Down\. Retry\.$/);
+    assert.match(row({ connected: ['codex'], previewError: 'Down.' }).note, /Retry, or Continue to choose models yourself\.$/);
+    // Agents-only accounts: no badge; nothing connected, an unread or a failed list: one of the ways forward the
+    // reason names, so Optional; a known model account: Optional; entered access: Configured.
+    assert.equal(row({ connected: [] }).badge, 'Optional');
+    assert.equal(row({ connected: ['claude'] }).badge, '');
+    assert.equal(row({ connected: ['claude'], sources: [], read: 'not_read' }).badge, 'Optional');
+    assert.equal(row({ connected: ['codex'], sources: [], read: 'failed' }).badge, 'Optional');
+    assert.equal(row({ connected: ['codex'] }).badge, 'Optional');
+    assert.equal(row({ connected: ['claude'], configured: true }).badge, 'Configured');
+    // Retry: hidden with nothing connected and after a healthy agents-only read; a failed preview brings it back.
+    assert.equal(row({ connected: [] }).retryHidden, true);
+    assert.equal(row({ connected: ['claude'] }).retryHidden, true);
+    assert.equal(row({ connected: ['claude'], previewError: 'Down.' }).retryHidden, false);
+    assert.equal(row({ connected: ['codex'] }).retryHidden, false, 'a healthy read can still be read again');
+    // The read state in a person's words, never its internal name ("failed", "transport").
+    for (const [read, words] of [['failed', 'could not be read'], ['transport', 'could not be read'],
+        ['partial', 'is incomplete'], ['stale', 'is out of date'], ['not_read', 'is not available yet']]) {
+        assert.equal(row({ connected: ['codex'], sources: [], read, readErrors: 'Offline.' }).note,
+            `The model list ${words}. Offline. Your choices are kept.`, read);
+    }
+    assert.equal(row({ connected: ['codex'], checking: true }).note, 'Checking model sources…');
 });
 
 test('the limits warning stands under the rows in every state, before any connection', () => {
@@ -944,15 +973,16 @@ test('pagehide binds to Window, preserves bfcache, and detaches late work synchr
 
     assert.equal(dom.documentListeners.some(([event]) => event === 'pagehide'), false,
         'Document is not the pagehide target');
-    assert.equal(dom.windowListeners.length, 3,
-        'pagehide plus the shared status surface activation hooks are bounded');
+    assert.equal(dom.windowListeners.length, 4,
+        'pagehide, the shared status surface activation hooks and the Agents list language listener are bounded');
+    assert.ok(dom.windowListeners.some(([type]) => type === 'ouro:language-changed'), 'the Agents list says its prices again on a language change');
     const [type, onPageHide] = dom.windowListeners[0];
     assert.equal(type, 'pagehide');
     handlers[handlers.length - 1]();
     await flush();
 
     onPageHide({ persisted: true });
-    assert.equal(dom.windowListeners.length, 3, 'bfcache keeps the live step mounted');
+    assert.equal(dom.windowListeners.length, 4, 'bfcache keeps the live step mounted');
 
     const lifecycleBefore = calls.filter(([url]) => url.startsWith('/api/claudexor/login')).length;
     onPageHide({ persisted: false });

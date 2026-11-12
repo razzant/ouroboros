@@ -28,14 +28,17 @@ def _read(rel: str) -> str:
 
 
 def test_settings_secrets_are_generic_and_integrations_tab_removed():
-    ui = _read("web/modules/settings_ui.js")
-    settings = _read("web/modules/settings.js")
-    assert "Integrations" not in ui
-    assert "TELEGRAM_" not in ui
-    assert "TELEGRAM_" not in settings
-    assert "skill-requested-secrets" in ui
-    assert "custom-secrets-list" in ui
-    assert "Source Control" in ui
+    # Stored keys are drawn from data (what installed skills asked for, the owner's own keys), never from a
+    # skill's name written into the core UI.
+    for name in ("settings_ui.js", "settings.js", "settings_home.js", "settings_accounts.js", "settings_rows.js"):
+        text = _read(f"web/modules/{name}")
+        assert "Integrations" not in text, name
+        assert "TELEGRAM_" not in text, name
+    accounts = _read("web/modules/settings_accounts.js")
+    assert "requested_keys" in accounts
+    assert "custom_secret_keys" in accounts
+    # The old section's name still finds the GitHub rows in search.
+    assert "'Source Control'" in _read("web/modules/settings_rows.js")
 
 
 def test_onboarding_compact_access_step_keeps_default_width_two_column():
@@ -62,7 +65,6 @@ def test_server_navigation_and_chat_static_contracts():
     chat_source = _read("web/modules/chat.js")
     css = _read("web/style.css")
     ui = _read("web/modules/settings_ui.js")
-    settings = _read("web/modules/settings.js")
     costs = _read("web/modules/costs.js")
 
     assert "def _describe_bg_consciousness_state(requested_enabled: bool | None) -> dict:" in server_source
@@ -107,24 +109,20 @@ def test_server_navigation_and_chat_static_contracts():
     assert "send(msg, options = {})" in _read("web/modules/ws.js")
     assert "options.queue === false" in _read("web/modules/ws.js")
     assert ".chat-attachment-preview" in css and "flex-wrap" in css
-    assert 'id="s-total-budget"' in ui
-    assert 'id="s-settings-per-task-cost"' in ui
-    assert "setupContract.budgetFields" in settings
-    # Model defaults come from the shared setup contract, not duplicate model
-    # literals in Settings. Source qualification belongs to the shared editor.
-    assert "setupContract.modelSlots" in settings
-    assert "modelRoles.load(s" in settings
-    assert "inputId: slot.settingsInputId" in settings
+    # The two budgets have one editor, the Costs rows: Settings draws no second field for them.
+    assert "s-total-budget" not in ui and "s-settings-per-task-cost" not in ui
+    # Source qualification belongs to the shared model editor, not duplicate model literals in Settings.
     model_roles = _read("web/modules/model_roles.js")
     assert "composeModelSource" in model_roles
     assert "route_editor_primitives.js" in model_roles
-    assert "currentSettings?.[field.settingKey]" in settings
-    assert "window.addEventListener('ouro:settings-updated'" in settings
-    assert "source: 'settings'" in settings
-    assert "Budget values must be at least 0.01." in costs
-    assert "COST_BUDGET_INPUTS" in costs
-    assert "s?._meta?.setup_contract?.budgetFields" in costs
-    assert "const MIN_BUDGET_VALUE" not in costs
-    assert "new CustomEvent('ouro:settings-updated'" in costs
-    assert "source: 'costs'" in costs
-    assert "event.detail?.source === 'costs'" in costs
+    # Costs' limits are setting rows: their floor comes from the setup contract through the row helper (the one
+    # writer of a setting), which tells the other pages a row saved; Costs keeps no bound and no save of its own.
+    controls = _read("web/modules/settings_controls.js")
+    rows = _read("web/modules/settings_rows.js")
+    assert "from: 'setup:totalBudget'" in rows and "from: 'setup:perTaskCostUsd'" in rows
+    assert "lastSettings?._meta?.setup_contract" in controls
+    assert "settings?._meta?.setup_contract?.budgetFields" in costs  # the note of how the limits count
+    assert "const MIN_BUDGET_VALUE" not in costs and "Budget values must be at least 0.01." not in costs
+    assert "new CustomEvent('ouro:settings-updated'" in controls and "source: 'settings-row'" in controls
+    assert "new CustomEvent('ouro:settings-updated'" not in costs
+    assert "source !== 'settings-row' || home !== LIMITS_PAGE" in costs

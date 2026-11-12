@@ -94,6 +94,23 @@ def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).isoformat() if ts else ""
 
 
+def model_route() -> Optional[Dict[str, Any]]:
+    """The model the next wake thinks with, read from the settings as they are now (no network, no store), with
+    the route's local flag: ``layer`` ``consciousness`` when its own slot decides the route (a model of its own, or
+    Main's run locally when its box is checked under a cloud Main: ``route_choice.model_role_slot_override``), else
+    ``main``, the route a wake follows (``following_route``). ``None`` when it cannot be read."""
+    from ouroboros.route_choice import following_route, model_role_slot_override
+
+    try:
+        slot = model_role_slot_override({"model_role": "consciousness"})
+        model, local = slot or following_route("consciousness")
+    except Exception:  # every status read asks again; the unknown is the null itself, so the log stays quiet
+        log.debug("The consciousness model route could not be read from the settings", exc_info=True)
+        return None
+    model, layer = str(model or "").strip(), "main" if slot is None else "consciousness"
+    return {"value": model, "layer": layer, "local": bool(local)} if model else None
+
+
 def allowance_fact(window: Dict[str, Any]) -> Dict[str, Any]:
     """The one projection of the allowance window a wake decision met: a wake's preparation and a skip's
     record carry the same keys (known spend, unmetered calls, the limit, spend by cause, the reset time);
@@ -584,6 +601,12 @@ class BackgroundConsciousness:
             accepted = bound.get("accepted_boundary") if isinstance(bound, dict) else None
             if isinstance(accepted, dict) and accepted.get("task_id") == task_id:
                 self._set_state(OBSERVATION_STATE_KEY, accepted)
+                # Every time bootstrap starts at this capture, never at the installation's first start: a body that cannot
+                # read the boundary's transition chain, and a chat window re-read by time after a chat position that no
+                # longer matches (docs/PERSISTENCE.md). Persisted with the settlement below.
+                captured = parse_deadline_ts(accepted.get("captured_at"))
+                if captured is not None:
+                    self._observation_bootstrap_since = captured.timestamp()
             if ok:
                 pause = (row or {}).get("budget_pause") or {}
                 owner_pause = (row or {}).get("owner_pause") or {}
@@ -621,9 +644,11 @@ class BackgroundConsciousness:
                     CONTINUITY_STATE_KEY: dict(self._continuity)}))
             except Exception:
                 log.debug("consciousness: wake completion not persisted", exc_info=True)
-        if (row or {}).get("wake_summary"):
+        if (row or {}).get("wake_summary") and not row.get("title"):
             from supervisor.worker_chat_lane import _broadcast_task_named
-            _broadcast_task_named({"type": "task_named", "task_id": task_id, "suggested_name": row["wake_summary"]})
+            from ouroboros.text_sentences import first_sentence
+            _broadcast_task_named({"type": "task_named", "task_id": task_id,
+                                   "suggested_name": first_sentence(row["wake_summary"])})
 
     def start(self, source: str = OWNER_STOP) -> str:
         """Turn on by ``source``'s right (the owner's doors; ``AGENT_STOP`` for the mind's tool). A stop this process
@@ -730,6 +755,7 @@ class BackgroundConsciousness:
                 "allowance_status": str(window.get("status") or ""),
                 "allowance_open_rows": window.get("accounting_open_rows"),
                 "allowance_room_after": str(window.get("room_after") or ""),
+                "model_route": model_route(),
                 "places_brief": [{key: place.get(key) for key in ("place_id", "label", "state", "unanswered")}
                                  for place in places] if places is not None else None}
 

@@ -29,8 +29,9 @@ from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
 from ouroboros.observability import new_execution_id
+from ouroboros.primary_route_observation import unasked_refusal_row, with_refusal_facts
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.transcript_prefix import rewrite_epoch, rewrite_view
+from ouroboros.transcript_prefix import forget_attempt_prefix, remember_attempt_prefix, rewrite_epoch, rewrite_view, with_attempt_prefix
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
 
 
@@ -374,6 +375,8 @@ def _run_cross_model_fallback_chain(
     if tried and not adopted:  # this last attempt's own result, before any wait or re-aim; each earlier one opened the next attempt's row
         emit_progress(f"⚡ Fallback: the last attempt, on {previous_model}{' (local)' if previous_use_local else ''}"
                       f"{fallback_last_attempt_words(accumulated_usage, previous_model, fresh=fresh)}")
+    elif not tried and (unasked := unasked_refusal_row(accumulated_usage, active_model, active_use_local)):
+        emit_progress(unasked)  # every configured route was passed over: the refusal's own row, no attempt claimed
     fenced = msg is None and _walk_fenced(tools._ctx, accumulated_usage)
     if msg is None and tried and not fenced and str(accumulated_usage.get("_last_llm_error_kind") or "") != "llm_output_exhausted":
         accumulated_usage["_acting_route_failure"] = entry_failure  # its own failure decides its salvage; the last row stays the walk's
@@ -485,6 +488,8 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
             usage["_last_llm_error_kind"] = "provider_outcome_unknown" if outstanding else kind
             if outstanding:
                 usage["_pending_transport_outcome"] = outstanding
+    elif msg is None and (unasked := unasked_refusal_row(usage, model, use_local)):  # no configured route is asked
+        emit_progress(unasked)
     return msg, model, use_local, context_fit_plan, active_context_mode, reconcile(episode, after_walk=True)
 
 
@@ -513,6 +518,7 @@ def _rebind_context_fit_plan(
     model_route: Optional[Dict[str, Any]] = None,
     credential_profile_id: Optional[str] = None,
     start_mode: Optional[str] = None,  # the task's mode: a new route may lower it; a return to the primary resumes its held view
+    route_is_preference: bool = False,  # ``model_route`` is the account a send will prefer (a restore), not one observed serving
 ) -> Tuple[Any, str]:
     if plan is None or not all(
         hasattr(plan, name) for name in ("max_projection", "low_projection", "core_sha256")
@@ -521,6 +527,7 @@ def _rebind_context_fit_plan(
             "CONTEXT_FIT_REBUILD_FAILED: immutable context core is unavailable for route switch"
         )
     from ouroboros.context import _context_fit_route
+    from ouroboros.context_timing import timed
     from ouroboros.primary_route_observation import held_primary_view
     from ouroboros.capability_evidence import evidence_model_route
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
@@ -537,10 +544,10 @@ def _rebind_context_fit_plan(
         "delegation_role": metadata.get("delegation_role"),
         "model_role": role,
         "model_route": model_route if model_route is not None else getattr(plan, "model_route", {}),
-        "credential_profile_id": credential_profile_id,
+        "credential_profile_id": credential_profile_id, **({"model_route_preferred": True} if route_is_preference else {}),
     }
     try:
-        route, evidence = _context_fit_route(task, allow_fetch=True)
+        route, evidence = timed("rebind.route", _context_fit_route, task, allow_fetch=True)
     except Exception:
         log.debug("Route-switch capability probe failed; preserving unknown Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)
@@ -575,7 +582,7 @@ def _rebind_context_fit_plan(
         model_route=evidence_model_route(evidence, str(route.get("model") or model)) if route.get("provider") == "claudexor" else {},
         evidence_source=str(getattr(evidence, "source", "") or ""),
         **route_window_kwargs(evidence), window_record=window, window_tokens=window_tokens,  # with its own frame
-        window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""),
+        window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
     ).reproject_for_route(  # the shown view kept while it fits this route's window, else narrowed
         window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried,
         output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages)
@@ -630,11 +637,14 @@ def _adopt_view_facts(tool_ctx: Any, plan: Any, mode: str) -> None:
 
 
 def _emit_physical_mode(event_queue: Any, task_id: str, drive_logs: Any, plan: Any, mode: str) -> None:
-    """The known window lowered this plan's starting mode (no shorter view fit): one owner-visible checkpoint.
+    """The known window lowered this plan's starting mode (no shorter view fit): one owner-visible checkpoint, with
+    the recorded reason the Context capsule reads (``cause``: ``context_measurement.mode_cause``, never recomputed).
 
     The sent projection's own fact says so (``mode_switch``); a lower mode a task kept from before
     (task-local Low after an overflow, an earlier route's choice) is not this window's doing.
     """
+    from ouroboros.context_measurement import mode_cause
+
     projection = plan.projection(mode) if hasattr(plan, "projection") else None
     switch = ((getattr(projection, "memory_facts", None) or {}).get("floor") or {}).get("mode_switch")
     if not switch or mode != str(getattr(plan, "initial_mode", "") or ""):
@@ -644,6 +654,7 @@ def _emit_physical_mode(event_queue: Any, task_id: str, drive_logs: Any, plan: A
         "route_fp": str(getattr(plan, "route_fp", "") or ""),
         "preferred_mode": str(switch.get("from") or ""),
         "effective_mode": mode,
+        "cause": mode_cause(plan, mode),
         "window_tokens": int(getattr(plan, "window_tokens", 0) or 0),
         "owner_visible": True,
     })
@@ -749,6 +760,7 @@ def _remember_main_fit(ctx: _RoundModelCallContext, disposition: Any) -> None:
     usage["_context_predicted_capacity_miss"] = disposition.predicted_capacity_miss
     for name in ("anchor_input_tokens", "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "window", "required_book_tokens"):
         usage[f"_context_{name}"] = getattr(measurement, name)  # the estimate's provenance and the window floor
+    remember_attempt_prefix(ctx)  # what this candidate does to its route's cached start, for its ledger row
 
 
 def _measure_round_main_fit(
@@ -758,7 +770,7 @@ def _measure_round_main_fit(
 ) -> Any:
     plan = ctx.context_fit_plan
     if plan is None or str(ctx.active_model or "") != str(getattr(plan, "model", "") or ""):
-        return None
+        return forget_attempt_prefix(ctx)  # unmeasured: no fact, and no earlier candidate waits for this answer
     from ouroboros.context_fit import measure_main_fit
 
     rendered_mode = str(ctx.active_context_mode) if str(ctx.active_context_mode) in {"max", "low", "nano"} else "max"
@@ -847,6 +859,7 @@ def _dispatch_round_model(
     max_tokens: Optional[int] = None,  # the strict-shrink retry's ceiling: the failed attempt's sent allowance
 ) -> Tuple[Any, float]:
     from ouroboros.model_wait import current_model_wait
+    from ouroboros.loop_messages import _pending_owner_input_kinds
     from ouroboros.loop_transport import emit_model_substitution, transport_repeat_stop_requested
     from ouroboros.owner_mailbox import OwnerMailboxPeek
     from ouroboros.send_clock import main_clock_policy
@@ -899,8 +912,9 @@ def _dispatch_round_model(
             transport_reserve_sec=task_pacing.get_finalization_grace_sec(),
             attempt_cap=attempt_cap,
             stop_retry_check=(lambda: transport_repeat_stop_requested(ctx.tools._ctx, mailbox_peek=mailbox_peek)) if attempt_cap is None else None,
+            owner_input_check=(lambda: sorted(_pending_owner_input_kinds(ctx.tools._ctx, ids=True))) if attempt_cap is None else None,
             allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
-            physical_context=(_physical_context_for_fit(disposition) if disposition is not None else None),
+            physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage) if disposition is not None else None),
             candidate_predicate=candidate_predicate, physical_fit_predicate=admit, model_role=role, model_account_override=account,
             processing_preference=task_processing_preference(
                 {"task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})}, model_role=role),
@@ -1038,7 +1052,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
                                          and not use_local and provider_for_model(model) != "claudexor")
     if provider_for_model(model) == "claudexor":
         kwargs["bypass_response_cache"] = False
-    physical = _physical_context_for_fit(disposition) if disposition else None
+    physical = with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage) if disposition else None
     if physical is not None:  # the remaining attempts of this call send under the new route's measurement
         ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = physical
     return PreparedModelCall(kwargs, physical, current_physical_attempt_predicate())
@@ -1312,7 +1326,7 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     if observation:
         _loop()._append_or_merge_user_message(ctx.messages, observation)
     facts = getattr(ctx.tools._ctx, "_route_facts_pending", "")
-    if facts and ctx.defer_resource_wait is None:  # the acting route's first own round after a switch
+    if ctx.defer_resource_wait is None and (facts := with_refusal_facts(ctx, facts)):  # first own round after a switch or a refusal
         ctx.tools._ctx._route_facts_pending = ""
         _loop()._append_or_merge_user_message(ctx.messages, facts)
     _fit_route_tool_ceiling(ctx)
