@@ -156,7 +156,8 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     assert page.evaluate("() => window.__ouroSettings.open('old/advanced')") is True
     page.locator(f'{HOME} [data-settings-result="door:skill"]').wait_for(state="visible")
     assert page.locator("#settings-search").input_value() == "advanced"
-    # The door among the results opens the list of skill forms; Back returns to the home with the words still there.
+    # The door among the results opens the list of skill forms. Words the shell searched are spent by that press:
+    # Back returns to the home's own rows, never to results nobody asked for again.
     page.locator(f'{HOME} [data-settings-result="door:skill"]').click()
     forms = settings_page(page, "skill")
     forms.wait_for(state="visible")
@@ -164,7 +165,16 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     forms.locator("[data-skill-forms]").wait_for(state="visible")
     assert "No installed skill has settings." in forms.inner_text()
     assert go_back(page) == ""
+    assert page.locator("#settings-search").input_value() == ""
+    page.locator(f'{HOME} [data-settings-open="models"]').wait_for(state="visible")
+    assert page.locator(f"{HOME} [data-settings-result]").count() == 0
+    # Words the owner typed are the owner's: they stay through a press and the return.
+    page.locator("#settings-search").fill("advanced")
+    page.locator(f'{HOME} [data-settings-result="door:skill"]').click()
+    settings_page(page, "skill").wait_for(state="visible")
+    assert go_back(page) == ""
     assert page.locator("#settings-search").input_value() == "advanced"
+    assert page.locator(f'{HOME} [data-settings-result="door:skill"]').is_visible()
     page.close()
 
 
