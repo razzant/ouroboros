@@ -39,8 +39,11 @@ const QUESTIONS = new Set(['question', 'open_question']);
 /** The state one chat instance shows before its first body: an idle room and no works. */
 export function emptyWorkState() {
     return { room: IDLE_ROOM, works: [], episodes: new Map(), members: new Set(), attempts: new Map(), complete: false,
-        main: null, leads: new Map() };
+        main: null, leads: new Map(), questions: new Map() };
 }
+
+// One question's key across the turn, the census rows and the work list: its task and its quiz.
+const questionKey = (item) => `${item.task_id}:${item.quiz_id || ''}`;
 
 // What an incomplete body did not list again: still shown, never as confirmed work and never with controls or a line;
 // its mark is the ring of unconfirmed state.
@@ -53,7 +56,10 @@ const unconfirmedWork = (work) => ({ ...work, activity: 'unknown', transition: '
  * portal's work runs in its Project) and `members` holds every member id; `attempts` is each census row's attempt,
  * so a control opened for one attempt of an episode is not pressed on the next. `main` is Main's route as the body
  * says it (the last one said, when this body does not) and `leads` the model fact of each activity row that
- * publishes one, for a direct turn's card (CLIENT_CONTRACT §5). Only a complete supervisor-ready
+ * publishes one, for a direct turn's card (CLIENT_CONTRACT §5). `questions` holds the current-question row of each
+ * `open_question` in this room's turn (by `task_id:quiz_id`), from the same body, else the row an earlier body carried
+ * while the turn still lists it: a question's row says its own words for exactly as long as its item makes the row.
+ * Only a complete supervisor-ready
  * body read over an open socket proves absence; an incomplete one keeps the works it omitted, unconfirmed. A body
  * without the projection, or a failed read (null), changes nothing.
  */
@@ -81,7 +87,14 @@ export function reconcileWorkState(prior, data, chatId, connected = true) {
     const leads = new Map(rows.filter((row) => row.lead && typeof row.lead === 'object')
         .map((row) => [String(row.activity_id), row.lead]));
     const main = data.main_route && typeof data.main_route === 'object' ? data.main_route : before.main || null;
-    return { room, works: [...listed, ...kept], episodes, members, attempts, complete, main, leads };
+    const carried = new Map(list(data.current_questions).filter((row) => row?.task_id).map((row) => [questionKey(row), row]));
+    const questions = new Map();
+    for (const item of list(room.turn)) {
+        if (item?.kind !== 'open_question' || !item.task_id) continue;
+        const said = carried.get(questionKey(item)) || before.questions?.get(questionKey(item));
+        if (said) questions.set(questionKey(item), said);
+    }
+    return { room, works: [...listed, ...kept], episodes, members, attempts, complete, main, leads, questions };
 }
 
 /** A work's or a room's one short word, from its activity, transition and exact call (the cards' chip words). */

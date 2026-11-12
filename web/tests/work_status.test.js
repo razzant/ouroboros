@@ -582,6 +582,23 @@ test('an incomplete body keeps what it omitted, unconfirmed and without controls
     assert.equal(roomStatusView(reconcileWorkState(emptyWorkState(), { works: [], works_complete: false }, 42)).text, 'Online');
 });
 
+test('a question row\'s facts live in the reconciled state with the turn item that makes the row', () => {
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const row = { task_id: 't', quiz_id: 'q', quiz_state: 'open', question: 'Which format?' };
+    const read = (turn, questions) => ({ supervisor_ready: true, works: [], works_complete: true,
+        rooms: { 42: { ...room('idle'), turn, amber: turn.length > 0 } }, current_questions: questions });
+    const first = reconcileWorkState(emptyWorkState(), read([item], [row, { task_id: 'other', quiz_id: 'q' }]), 42);
+    assert.deepEqual([...first.questions], [['t:q', row]], 'only the rows of this room\'s open questions');
+    // Listed again without its row: the row it came with stays; a failed read changes nothing.
+    const kept = reconcileWorkState(first, read([item], []), 42);
+    assert.equal(kept.questions.get('t:q'), row);
+    assert.equal(reconcileWorkState(kept, null, 42).questions.get('t:q'), row);
+    const answered = { ...row, quiz_state: 'answered' };
+    assert.equal(reconcileWorkState(kept, read([item], [answered]), 42).questions.get('t:q'), answered);
+    // Its item gone, its row goes too.
+    assert.equal(reconcileWorkState(kept, read([], [row]), 42).questions.size, 0);
+});
+
 test('a room reads only its own works; every room feeds the card index and the member ids', () => {
     const merged = { supervisor_ready: true, works_complete: true,
         works: [...CASES.held_continue.works, ...CASES.direct_question.works],

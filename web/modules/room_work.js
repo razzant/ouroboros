@@ -306,12 +306,12 @@ export function createRoomWork({
         }
         // A question of this room that no listed work holds (its work ended) still waits for the owner: its own row
         // leads to it, as a work's row leads to its question.
-        const asked = current ? listOf(stateSnapshots?.latest?.()?.current_questions) : [];
         for (const entry of current ? listOf(state.room?.turn) : []) {
             if (entry?.kind !== 'open_question' || entry.work_id || !entry.task_id) continue;
             const ask = { taskId: String(entry.task_id), quizId: String(entry.quiz_id || '') };
-            // The question's own row of the same body: its card's words say its state here too, never new ones.
-            const said = asked.find((row) => String(row?.task_id) === ask.taskId && String(row?.quiz_id || '') === ask.quizId);
+            // The question's own row, held with its item (work_status.reconcileWorkState): its card's words say its
+            // state here too, never new ones.
+            const said = state.questions?.get?.(`${ask.taskId}:${ask.quizId}`);
             items.push({ id: `question:${ask.taskId}:${ask.quizId}`, kind: 'question', work: null, record: null,
                 confirmed: true, online: true, cmid: '', startedAt: 0, episode: ask.taskId, attempt: null,
                 activity: 'waiting', ask, said,

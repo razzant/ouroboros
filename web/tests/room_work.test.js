@@ -203,6 +203,42 @@ test('View question reaches the asking task of a work, not its first root', asyn
     }
 });
 
+test('a question row says its own words as long as its turn item makes the row, read or no read', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade = null;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge', node('div', 'app-page-actions ui-chrome-group', header));
+        const messages = node('div', 'chat-messages', page);
+        const item = { kind: 'open_question', task_id: 't-ended', quiz_id: 'format' };
+        const asked = { task_id: 't-ended', quiz_id: 'format', quiz_state: 'open', question: 'Which output format?' };
+        const read = (turn, questions) => ({ supervisor_ready: true, works: [], works_complete: true,
+            rooms: { 1: room('idle', { turn }) }, current_questions: questions });
+        let state = reconcileWorkState(emptyWorkState(), read([item], [asked]), 1);
+        // The page's newest body is gone (a retire or a failed read): the row's words never came from it.
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { cancel() {}, scroll() {} }, works: () => state, stateSnapshots: { latest: () => null },
+            liveCardRecords: new Map(), pendingSubmissions: new Map() });
+        titleRow.children.find((el) => el.classList.contains('rw-trigger')).click();
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const names = () => list.children.filter((el) => el.dataset.id?.startsWith('question:'))
+            .map((el) => el.querySelector('.rw-name').textContent);
+        assert.deepEqual(names(), ['Which output format?']);
+        // A body that still lists the item but did not carry its row keeps the row the item came with.
+        state = reconcileWorkState(state, read([item], []), 1);
+        shade.update();
+        assert.deepEqual(names(), ['Which output format?']);
+        // The item gone, its words go with it: nothing holds a row for a question the turn no longer lists.
+        state = reconcileWorkState(state, read([], []), 1);
+        assert.equal(state.questions.size, 0);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
 // A progress card can be painted before the slow projection lists the work that answers the same send.
 test('a pending send keeps its slot until its work is listed; the work takes the same node, never a ghost', () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
