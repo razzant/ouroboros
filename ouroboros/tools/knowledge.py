@@ -184,15 +184,19 @@ def _omitted(text: str) -> dict:
 _DELTA_LISTS = ("removed_headings", "added_headings", "removed_sections")
 
 
-def _bound_delta_meta(meta: dict) -> None:
-    """Keep the tool receipt inside its existing metadata limit; history holds the full delta.
+def _bound_delta_meta(meta: dict) -> dict:
+    """Keep the tool receipt inside its existing metadata limit and return the host meta; history holds the full delta.
 
     Over the limit, the largest of what can give way goes first, until the receipt fits: a delta
-    list (``_DELTA_LISTS``; an empty one has nothing to give) becomes its count, an omission flag,
-    its sha256 and the read that shows it (``view='history'``); the bare append's outline and the
-    replaced version's reason become their size, sha256 and the read that shows them. A transport
-    bound on the receipt, never a judgment of what matters: a small list is not dropped while a
-    larger one overflows.
+    list (``_DELTA_LISTS``; an empty one has nothing to give) becomes its count, an omission flag and
+    its sha256, and one ``omitted_read`` names for them all the ``view='history'`` read of the note
+    ``knowledge_source`` names; the bare append's outline and the replaced version's reason become
+    their size, sha256 and the read that shows them. A transport bound on the receipt, never a
+    judgment of what matters: a small list is not dropped while a larger one overflows. Still over
+    with nothing left to give (each call repeats the topic, 6 bytes a character outside ASCII), the
+    host meta keeps only the write's reason, state and revision, the captured previous source of an
+    archive or restore, and the receipt's size and sha256: a saved write's reply carries the receipt
+    as its JSON line, so a landed write is never reported as failed.
     """
     arguments = ((meta.get("knowledge_source") or {}).get("read") or {}).get("arguments", {})
 
@@ -208,7 +212,10 @@ def _bound_delta_meta(meta: dict) -> None:
         if isinstance(previous, dict) and isinstance(previous.get("reason"), str):
             options.append(("reason", previous["reason"]))
         if not options:
-            return
+            return {**{key: meta[key] for key in ("knowledge_write_reason", "knowledge_state",
+                                                  "knowledge_previous_source") if key in meta},
+                    "knowledge_revision": (meta.get("knowledge_source") or {}).get("revision"),
+                    "knowledge_receipt": _omitted(json.dumps(meta, ensure_ascii=False, sort_keys=True))}
         field, value = max(options, key=lambda option: len(json.dumps(option[1], ensure_ascii=True)))
         if field == "outline":
             meta["knowledge_outline"] = {**_omitted(value), "read": read("outline")}
@@ -218,7 +225,8 @@ def _bound_delta_meta(meta: dict) -> None:
             meta["knowledge_delta"] = {**delta, field: [], f"{field}_count": len(value), f"{field}_omitted": True,
                                        f"{field}_sha256": hashlib.sha256(
                                            json.dumps(value, ensure_ascii=False).encode("utf-8")).hexdigest(),
-                                       f"{field}_read": read("history")}
+                                       "omitted_read": {"tool": "knowledge_read", "view": "history"}}
+    return meta
 
 
 def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -> str:
@@ -393,13 +401,13 @@ def _knowledge_write(
                 meta["knowledge_outline"] = knowledge_versions.render_outline(result.current)
                 meta["knowledge_note"] = "Earlier text was not revised by this write."
         outline = meta.get("knowledge_outline")
-        _bound_delta_meta(meta)
+        published = _bound_delta_meta(meta)
         text = f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True)
         if isinstance(outline, str) and not isinstance(meta["knowledge_outline"], str):
             # The bare appender's only look at the note: an outline the meta cannot hold follows
             # the JSON line whole; the meta keeps its pointer (size, sha256, the read).
             text += "\n\n" + outline
-        return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text, meta=meta))
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text, meta=published))
     text = f"⚠️ TOOL_ERROR: Knowledge write not completed: {result.reason}."
     changes = None
     if result.reason == "revision_conflict" and result.held is not None and result.current is not None:
@@ -424,9 +432,8 @@ def _knowledge_write(
             # retry or another model deciding whether the stale write was safe.
             text += "\n\n" + view
             meta["knowledge_body_start"] = len(text) - len(result.current.text)
-    _bound_delta_meta(meta)
     return _publish_tool_result(ctx, ToolResult(
-        status="error", code="TOOL_REPORTED_FAILURE", text=text, meta=meta))
+        status="error", code="TOOL_REPORTED_FAILURE", text=text, meta=_bound_delta_meta(meta)))
 
 
 @completed_local_read

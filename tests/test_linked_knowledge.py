@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import pytest
 
 from ouroboros import knowledge as store
+from ouroboros import knowledge_versions
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._knowledge_history_shared import applied_blocks, replaced
@@ -253,28 +254,101 @@ def test_large_removed_heading_delta_keeps_tool_receipt_and_full_history(tmp_pat
     assert reported["old_chars"] == len(original.text)
 
 
+HISTORY_READ = {"tool": "knowledge_read", "view": "history"}  # of the note knowledge_source names
+
+
+def _long_topic(length):
+    """``length`` Cyrillic letters in path components of at most 100 (a file name holds 255 bytes, 2 a letter)."""
+    letters = "".join("абвгдежзийклмнопрстуфхцчшщэюя"[index % 29] for index in range(length))
+    return "/".join(letters[start:start + 100] for start in range(0, length, 100))
+
+
+def _landed(result, target):
+    """A landed write's reply: ✅, its receipt (the JSON line) names the note's new revision, and the host meta is that
+    receipt byte for byte or, when even the bounded receipt is over the meta limit, only the write's reason, state
+    and revision and the receipt's size and sha256. Returns the receipt and whether the host meta was reduced."""
+    assert result.text.startswith("✅"), result.text[:300]
+    line = result.text.split("\n", 2)[1]
+    receipt, revision = json.loads(line), store.read_knowledge_note(target).revision
+    assert receipt["knowledge_source"]["revision"] == revision, line[:300]
+    reduced = {"knowledge_write_reason": "saved", "knowledge_state": "active", "knowledge_revision": revision,
+               "knowledge_receipt": {"omitted": True, "chars": len(line),
+                                     "sha256": hashlib.sha256(line.encode("utf-8")).hexdigest()}}
+    published = json.dumps(dict(result.meta), ensure_ascii=False, sort_keys=True)
+    assert published == line or dict(result.meta) == reduced, published[:600]
+    return receipt, published != line
+
+
 def test_an_omitted_delta_list_names_the_history_read_that_shows_it(tmp_path):
-    """A receipt that cannot hold a delta list keeps its count and sha256 and names the read that shows the list, as
-    the omitted outline and previous reason do. Folding a 40-section Cyrillic note: the receipt's JSON escapes each
-    Cyrillic character to 6 bytes, so the removed sections give way; view='history' lists them."""
+    """A receipt that cannot hold a delta list keeps its count and sha256, and one pointer for every omitted list,
+    omitted_read, names the read that shows them: view='history' of the note knowledge_source names, its topic and
+    scope not repeated. Folding a 40-section Cyrillic note: the receipt's JSON escapes each Cyrillic character to 6
+    bytes, so the removed sections give way; view='history' lists them; the host meta is the receipt, byte for byte.
+    Each call in a receipt repeats its topic, so swapping 300 headings for 300 others under a 130-character Cyrillic
+    topic after a 16,000-character reason, or a 205-character one with none, landed and answered TOOL_ERROR."""
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="fold"))
     sections = "".join(f"## Раздел {index:02d}\n\n{'Первая строка раздела про реку и старый мост. ' * 3}\n\n"
                        for index in range(40))
 
-    def write(**arguments):
-        return registry.execute("knowledge_write", {"topic": "folds/река", "scope": "global", **arguments})
+    def write(topic, **arguments):
+        return registry.execute_result("knowledge_write", {"topic": topic, "scope": "global", **arguments})
 
-    _meta(write(content="# Река\n\n" + sections))
-    revision = store.read_knowledge_note(address(tmp_path, "folds/река")).revision
-    delta = _meta(write(content="# Река\n\nСвёрнуто: сорок разделов в одном.\n", expected_revision=revision))["knowledge_delta"]
-    read = {"tool": "knowledge_read", "arguments": {"topic": "folds/река", "scope": "global", "view": "history"}}
-    assert delta["removed_sections"] == [] and delta["removed_sections_count"] == 40, delta
-    omitted = [field for field in ("removed_sections", "removed_headings", "added_headings") if delta.get(f"{field}_omitted")]
-    assert "removed_sections" in omitted and all(delta[f"{field}_read"] == read for field in omitted), delta
-    listing = registry.execute(read["tool"], read["arguments"])
+    target = address(tmp_path, "folds/река")
+    _landed(write("folds/река", content="# Река\n\n" + sections), target)
+    receipt, reduced = _landed(write("folds/река", content="# Река\n\nСвёрнуто: сорок разделов в одном.\n",
+                                     expected_revision=store.read_knowledge_note(target).revision), target)
+    delta = receipt["knowledge_delta"]
+    assert not reduced and delta["removed_sections"] == [] and delta["removed_sections_count"] == 40, delta
+    assert delta["removed_sections_omitted"] and delta["omitted_read"] == HISTORY_READ, delta
+    assert [key for key in delta if key.endswith("_read")] == ["omitted_read"], delta
+    source = receipt["knowledge_source"]["read"]
+    listing = registry.execute(source["tool"], {**source["arguments"], "view": "history"})
     folded = next(line for line in listing.splitlines() if line.startswith("- "))  # newest first: the fold's row
     assert all(f"## Раздел {index:02d} (" in folded for index in range(40)), folded
+    for length, reason in ((130, {"reason": "причина " * 2000}), (205, {})):
+        topic = _long_topic(length)
+        target = address(tmp_path, topic)
+        _landed(write(topic, content="".join(f"## Старый {index:03d}\n" for index in range(300)), **reason), target)
+        receipt, _reduced = _landed(write(topic, content="".join(f"## Новый {index:03d}\n" for index in range(300)),
+                                          expected_revision=store.read_knowledge_note(target).revision), target)
+        delta = receipt["knowledge_delta"]
+        assert all(delta[f"{field}_count"] == 300 and delta[f"{field}_omitted"]
+                   for field in ("removed_headings", "added_headings", "removed_sections")), delta
+        assert delta["omitted_read"] == HISTORY_READ and receipt["knowledge_revert"]["arguments"]["topic"] == topic
+        assert (receipt["knowledge_previous"]["reason"]["omitted"] if reason
+                else receipt["knowledge_previous"]["reason"] == "unknown"), receipt["knowledge_previous"]
+
+
+@pytest.mark.parametrize("length", [200, 320])
+def test_a_fold_and_a_bare_append_under_a_long_cyrillic_topic_answer_with_their_receipt(tmp_path, length):
+    """A fold of 60 sections and a bare append of 60 headings under a long Cyrillic topic: each lands and answers ✅
+    with its omission markers and its new revision. At 320 characters nothing left to give fits the receipt in the
+    meta limit, so the host meta keeps the write's facts and the reply text carries the receipt whole."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="long"))
+    topic = _long_topic(length)
+    target = address(tmp_path, topic)
+
+    def write(**arguments):
+        return registry.execute_result("knowledge_write", {"topic": topic, "scope": "global", **arguments})
+
+    sections = "".join(f"## Раздел {index:02d}\n\n{'Первая строка раздела про реку. ' * 3}\n\n" for index in range(60))
+    _landed(write(content="# Река\n\n" + sections), target)
+    folded, fold_reduced = _landed(write(content="# Река\n\nСвёрнуто.\n",
+                                         expected_revision=store.read_knowledge_note(target).revision), target)
+    delta = folded["knowledge_delta"]
+    assert delta["removed_sections_count"] == 60 and delta["removed_sections_omitted"], delta
+    assert delta["omitted_read"] == HISTORY_READ, delta
+    entries = "".join(f"## Запись {index:02d}\n\nТекст.\n\n" for index in range(60))
+    appended = write(mode="append", content="\n" + entries)
+    receipt, append_reduced = _landed(appended, target)
+    assert receipt["knowledge_outline"]["omitted"] and receipt["knowledge_delta"]["added_headings_omitted"], receipt
+    outline = knowledge_versions.render_outline(store.read_knowledge_note(target))
+    assert appended.text.split("\n\n", 1)[1] == outline  # the bare appender's outline follows the JSON line, whole
+    assert receipt["knowledge_revert"]["arguments"]["expected_revision"] == store.read_knowledge_note(target).revision
+    if length == 320:
+        assert fold_reduced and append_reduced
 
 
 def test_edit_preserves_crlf_and_multibyte_surroundings(tmp_path):
