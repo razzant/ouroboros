@@ -763,7 +763,7 @@ function mountModels(container, { path, ctx }) {
     const foldHost = container.querySelector('[data-models-fold]');
     const entryResult = container.querySelector('[data-entry-result]');
     let fold = null;
-    let shown = '';   // the fallbacks as drawn: a press acts on these, never on a list that changed meanwhile
+    let shown = '', drawnFallbacks = '';   // the fallbacks as drawn: a press acts on these, never on a list that changed meanwhile
     // A row's value at its end, before its chevron: made once, then only its words change.
     const say = (id, text, follows = false) => {
         const node = container.querySelector(`[data-setting-row="${id}"]`);
@@ -790,7 +790,7 @@ function mountModels(container, { path, ctx }) {
         const list = fallbackEntries(settings);
         shown = list.map((entry) => entry.value).join(',');
         const localFallback = truthy(settings.USE_LOCAL_FALLBACK);
-        container.querySelector('[data-models-fallbacks]').innerHTML = list.map((entry, index) => {
+        const fallbackHtml = list.map((entry, index) => {
             const words = routeWords(entry.value, { account: entry.account, local: localFallback });
             return `<div class="ui-row settings-head" data-entry-id="fallback/${index + 1}" data-actions>
                 <span class="settings-head-glyph settings-head-order" aria-hidden="true">${index + 1}</span>
@@ -799,6 +799,7 @@ function mountModels(container, { path, ctx }) {
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-move="1" aria-label="Move fallback ${index + 1} down" ${index < list.length - 1 ? '' : 'disabled'}>↓</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-remove>Remove</button>${doorSign()}</div></div>`;
         }).join('') || '<p class="settings-card-lead">No fallback yet.</p>';
+        if (fallbackHtml !== drawnFallbacks) container.querySelector('[data-models-fallbacks]').innerHTML = drawnFallbacks = fallbackHtml;
         for (const slot of ROLE_ORDER) {
             const words = route(slot, slot === 'safety' ? 'Light' : 'Main');
             say(`models:${slot}`, words.name, words.follows);

@@ -234,7 +234,7 @@ function mountList(container, { ctx = {} }) {
         if (!settings) return;
         const next = otherKeyRows(settings, skills);
         const keep = new Set(next.map((row) => row.id));
-        const before = [...otherRows.values()];
+        const before = [...otherEl.children].map((node) => otherRows.get(node.firstElementChild.dataset.settingRow));
         const focused = before.findIndex(({ node }) => node.contains(container.ownerDocument.activeElement));
         for (const [id, mounted] of otherRows) {
             if (keep.has(id)) continue;

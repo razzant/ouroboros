@@ -606,6 +606,8 @@ def test_settings_has_no_effort_row_and_this_computer_says_one_plain_startup_not
 
 @pytest.mark.parametrize("width", [1360, 390])
 def test_agents_rows_say_auto_or_the_level_in_the_model_name(role_ui, tmp_path, width):
+    from playwright.sync_api import expect
+
     ui = role_ui
     roles.configure_mixed(ui)
     items = ui["settings"]["OUROBOROS_SUBAGENTS"]["items"]
@@ -613,18 +615,21 @@ def test_agents_rows_say_auto_or_the_level_in_the_model_name(role_ui, tmp_path, 
     items[2]["route"] = {"kind": "agent_session", "target_id": "cursor=gpt-5.6-sol-high-fast", "credential_profile_id": "personal"}
     ui["page"].set_viewport_size({"width": width, "height": 900})
     page = roles.open_agents(ui)
-    rows = page.locator("[data-subagent-row]")
-    plain, api_named, session_named = rows.nth(0), rows.nth(1), rows.nth(2)
-    assert plain.locator('[data-subagent-field="effort"] option[value=""]').inner_text() == "Auto (reviews at the top of the chat range)"
-    plain.locator('[data-subagent-field="review_eligible"]').uncheck()
-    assert plain.locator('[data-subagent-field="effort"] option[value=""]').inner_text() == "Auto (chat range)"
-    for row, expected in ((api_named, "X-High · in the model name"), (session_named, "High · in the model name")):
-        assert row.locator("[data-subagent-effort-named]").inner_text() == expected
-        assert row.locator('[data-subagent-field="effort"]').count() == 0, "a named row offers no select"
+    plain = roles.open_agent(ui, "native", fresh=False)
+    expect(plain.locator('[data-subagent-field="effort"] option[value=""]')).to_have_text("Auto (reviews at the top of the chat range)")
+    reviewer = plain.locator('[data-subagent-field="review_eligible"]')
+    expect(reviewer).to_be_checked()
+    reviewer.press("Space")
+    expect(reviewer).not_to_be_checked()
+    expect(plain.locator('[data-subagent-field="effort"] option[value=""]')).to_have_text("Auto (chat range)")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    _shot(page, tmp_path, f"settings-agents-effort-{width}")
-    session_named.locator("[data-subagent-effort-named]").scroll_into_view_if_needed()
-    _shot(page, tmp_path, f"settings-agents-effort-named-{width}")
+    _shot(page, tmp_path, f"settings-agents-effort-auto-{width}")
+    for agent_id, expected in (("direct", "X-High · in the model name"), ("agent", "High · in the model name")):
+        row = roles.open_agent(ui, agent_id, fresh=False)
+        expect(row.locator("[data-subagent-effort-named]")).to_have_text(expected)
+        assert row.locator('[data-subagent-field="effort"]').count() == 0, "a named row offers no select"
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        _shot(page, tmp_path, f"settings-agents-effort-{agent_id}-{width}")
 
 
 @pytest.mark.parametrize("engine,touch", [("chromium", False), ("webkit", True)])

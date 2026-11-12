@@ -421,12 +421,14 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
         browser = getattr(pw, engine).launch()
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.add_init_script("""window.removalFocus = []; document.addEventListener('focusin', event => {
+                window.removalFocus.push(event.target.outerHTML.slice(0, 400));
+            }, true);""")
             def delayed_settings(route):
                 import time
 
                 response = route.fetch()
-                if route.request.method == "POST":
-                    time.sleep(0.15)  # Transport delay, never an assertion wait.
+                time.sleep(0.15)  # Transport delay, never an assertion wait.
                 route.fulfill(response=response)
 
             page.route("**/api/settings", delayed_settings)
@@ -506,5 +508,9 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
                               else '[data-setting-row="GITHUB_REPO"] [data-setting-control]')
                     expect(level.locator(target)).to_be_focused()
             capture(page, f"list-editor-remove-focus-{surface}-{engine}")
+        except AssertionError:
+            print("Removal focus:", page.evaluate("""() => ({active: document.activeElement.outerHTML.slice(0, 500),
+                history: window.removalFocus.slice(-12)})"""))
+            raise
         finally:
             browser.close()
