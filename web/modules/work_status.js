@@ -31,7 +31,11 @@ const IDLE_ROOM = Object.freeze({ activity: 'idle', transition: 'none', call: ''
     confirmed: true, works: [] });
 const CALL_WORDS = { preparing: 'preparing', sending: 'sending', thinking: 'thinking' };
 const list = (value) => (Array.isArray(value) ? value : []);
+// `question`: a task waits for the owner's answer (the work's own word says so). `open_question`: a question that is
+// still unanswered while its work goes on or after it ended: the owner's turn, never the work's word.
 const asked = (state) => list(state?.turn).some((item) => item?.kind === 'question');
+const QUESTIONS = new Set(['question', 'open_question']);
+const questioned = (state) => list(state?.turn).some((item) => QUESTIONS.has(item?.kind));
 
 /** The state one chat instance shows before its first body: an idle room and no works. */
 export function emptyWorkState() {
@@ -233,7 +237,7 @@ export function roomSpeaker(room, works = [], word = activityWord(room)) {
 
 /** What waits for the owner in a room ('question' | 'action'), '' when nothing does or its own word says so. */
 export const roomAmber = (room) => (!room?.amber || (room.activity === 'waiting' && asked(room)) ? ''
-    : asked(room) ? 'question' : 'action');
+    : questioned(room) ? 'question' : 'action');
 
 /** The amber mark said in words, for the room's accessible name: the colour is never the only way it is told. */
 export const amberNote = (kind) => (kind === 'question' ? tr('work.amber.question', 'A question waits for your answer')
@@ -280,7 +284,8 @@ export function roomStatusView(state, {
     case 'waiting': return view('online', activityWord(room), asked(room) ? 'wait' : 'held', mark, turn);
     case 'paused': return view('online', activityWord(room), 'held', mark, turn);
     case 'unknown': return view('online', activityWord(room), 'unknown', mark, turn);  // a listed turn still waits
-    default: return ready ? view('online', 'Online', 'online', mark)
+    // A room at rest keeps the owner's turn: a question of an ended work still waits there.
+    default: return ready ? view('online', 'Online', 'online', mark, turn)
         : { ...view('starting', 'Starting…', 'starting', 'none'), ...startingStatus(boot) };
     }
 }
@@ -325,7 +330,7 @@ export function workRowView(work = {}, { stopping = '' } = {}) {
 
 /** The question a row's View question goes to: the first question in the work's turn, by its exact quiz id. */
 export function workQuestion(work) {
-    const question = list(work?.turn).find((item) => item?.kind === 'question' && item.quiz_id && item.task_id);
+    const question = list(work?.turn).find((item) => QUESTIONS.has(item?.kind) && item.quiz_id && item.task_id);
     return question ? { taskId: String(question.task_id), quizId: String(question.quiz_id) } : null;
 }
 

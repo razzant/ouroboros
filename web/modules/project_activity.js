@@ -34,7 +34,13 @@ export const MARK_RANK = Object.freeze(['moving', 'still', 'pause', 'ring', 'non
  * room that is not at rest with a shape this client does not know is drawn unconfirmed, never as something it is not.
  */
 export function summarizeRoom(room, works = []) {
-    if (!room || typeof room !== 'object' || room.activity === 'idle') return IDLE_SUMMARY;
+    if (!room || typeof room !== 'object') return IDLE_SUMMARY;
+    if (room.activity === 'idle') {
+        // A room at rest shows nothing, unless a question of it still waits for the owner: then only the owner's mark.
+        if (!room.amber) return IDLE_SUMMARY;
+        const waits = amberNote(roomAmber(room));
+        return { mark: 'none', owner: true, word: '', note: waits, label: waits };
+    }
     const mark = MARK_RANK.includes(room.mark) ? room.mark : 'ring';
     const word = activityWord(room);
     const speaker = roomSpeaker(room, works, word);

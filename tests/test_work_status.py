@@ -407,6 +407,50 @@ def test_room_finalizing_only_says_finalizing_and_empty_rooms_are_idle_or_unknow
     assert unconfirmed["confirmed"] is False and unconfirmed["mark"] == "ring"
 
 
+def _question(task_id, quiz_id="q1", *, state="open", project=None, **extra):
+    asked = {"task_id": task_id, "quiz_id": quiz_id, "quiz_state": state, "chat_id": 1, **extra}
+    return {**asked, "project_id": project[0], "project_chat_id": project[1]} if project else {**asked, "native": True}
+
+
+def test_a_current_question_is_its_rooms_turn_as_mains_pill_counts_it():
+    """The owner's turn is one set: what Main's pill counts in a room is that room's amber, whether the asking task
+    still waits, goes on with an assumption or has ended; a question that waits for nobody lights nothing."""
+    project = ("p1", 42)
+    live = {**_work("working", work_id="w"), "room": 42, "release": "self", "members": {"ids": ["w", "helper"]}}
+    asleep = {**_work("waiting", work_id="s"), "room": 42, "release": "self", "members": {"ids": ["s"]}}
+    waits = {**_work("waiting", work_id="b", turn=[{"kind": "question", "task_id": "b"}]), "room": 42,
+             "release": "owner", "members": {"ids": ["b"]}}
+    works = [live, asleep, waits]
+    loose = ws.place_questions(works, [
+        _question("helper", project=project),                                  # a helper asked and went on
+        _question("s", "q2", project=project),                                 # its task sleeps on something else
+        _question("b", "q3", project=project),                                 # the member's own wait already says it
+        _question("ended", "q4", state="expired_terminal", project=project),   # its task ended: no work holds it
+        _question("main-ended", "q5"),                                         # Main's own
+        _question("answered", "q6", state="answered", project=project),        # settled: waits for nobody
+        _question("elsewhere", "q7", project=("p2", 77)),                      # a Project with no work at all
+    ])
+    assert live["turn"] == [{"kind": "open_question", "task_id": "helper", "quiz_id": "q1"}]
+    assert asleep["turn"] == [{"kind": "open_question", "task_id": "s", "quiz_id": "q2"}]
+    assert waits["turn"] == [{"kind": "question", "task_id": "b"}]  # said once, as the wait its task holds
+    # The works keep their word and who moves them: an open question is the owner's turn, never the work's state.
+    assert [(work["activity"], work["release"]) for work in works] == [
+        ("working", "self"), ("waiting", "self"), ("waiting", "owner")]
+    assert loose == {"42": [{"kind": "open_question", "task_id": "ended", "quiz_id": "q4"}],
+                     "1": [{"kind": "open_question", "task_id": "main-ended", "quiz_id": "q5"}],
+                     "77": [{"kind": "open_question", "task_id": "elsewhere", "quiz_id": "q7"}]}
+    room = ws.roll_up_room(works, questions=loose["42"])
+    assert room["amber"] is True and room["activity"] == "working"
+    assert [item["task_id"] for item in room["turn"]] == ["helper", "s", "b", "ended"]
+    assert room["turn"][0]["work_id"] == "w" and "work_id" not in room["turn"][-1]
+    # A room at rest with an open question is the owner's turn too; without one it stays quiet.
+    rest = ws.roll_up_room([], questions=loose["77"])
+    assert (rest["activity"], rest["mark"], rest["amber"]) == ("idle", "none", True)
+    assert ws.roll_up_room([])["amber"] is False and ws.place_questions([{**live, "turn": []}], []) == {}
+    # The tray's count: each work with a turn once, and each question no work holds.
+    assert ws.roll_up_summary({"42": room, "77": rest}, works)["turn"] == 3 + 2
+
+
 # ---- the server adapter ------------------------------------------------------------------------------
 
 _REAL_OPEN_RUNS = wp._open_runs  # the custody reader itself, before a fixture fakes it

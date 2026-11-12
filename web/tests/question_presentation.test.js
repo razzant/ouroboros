@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { questionMark, questionPresentation, unknownDeliveryRemovable, waitFacts } from '../modules/question_presentation.js';
+import { questionMark, questionPresentation, questionWaits, unknownDeliveryRemovable, waitFacts } from '../modules/question_presentation.js';
 
 // Each fixture row is the pointer row the Python producer emits for that case
 // (tests/test_project_question_pointer.py pins the emission); the browser must read the
@@ -9,6 +9,14 @@ import { questionMark, questionPresentation, unknownDeliveryRemovable, waitFacts
 const cases = JSON.parse(readFileSync(new URL('./fixtures/question_presentation_parity.json', import.meta.url)));
 for (const row of cases) test(`question status parity: ${row.case}`, () => {
     assert.deepEqual(questionPresentation(row.row), { status: row.status });
+});
+
+test('whether a question still waits on the owner is one rule on both sides', () => {
+    // The pointer rows are a Project's; the server reads the same rows by main_decisions.question_waits.
+    for (const row of cases) assert.equal(questionWaits({ ...row.row, project_id: 'p' }), row.waits, row.case);
+    // An undelivered answer is the owner's to remove in its Project only: Main's own question has no such row.
+    const lost = cases.find((row) => row.row.question_delivery?.reason_code === 'late_answer_delivery_unknown' && row.waits).row;
+    assert.equal(questionWaits(lost), false);
 });
 
 test('the head mark beside each word: amber only while the task waits for the answer', () => {

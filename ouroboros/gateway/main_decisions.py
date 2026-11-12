@@ -110,6 +110,19 @@ def owner_actions(activity: dict) -> tuple[dict, bool]:
                    and view["resumable"] and activity.get("can_resume") is True)
 
 
+def question_waits(row: dict) -> bool:
+    """Whether a current question still waits on the owner: it is unanswered, whether its task waits, went on with
+    an assumption or has ended, or its Project answer was left undelivered by a restart, which only the owner can
+    remove. Main's pill counts by this rule and every room's turn follows it (``work_status.place_questions``), so a
+    room is the owner's turn exactly while the pill counts something of that room. Browser twin:
+    question_presentation.js ``questionWaits`` (web/tests/fixtures/question_presentation_parity.json pins both)."""
+    if row.get("quiz_state") in {"open", "expired_terminal"}:
+        return True
+    delivery = row.get("question_delivery") if isinstance(row.get("question_delivery"), dict) else {}
+    return bool(row.get("project_id") and row.get("quiz_state") == "answered" and delivery.get("state") == "owed"
+                and delivery.get("reason_code") == "late_answer_delivery_unknown" and delivery.get("dismissed") is not True)
+
+
 def _question_sources(drive_root: Any, candidates: dict) -> dict:
     """Read the existing display views in one batch, retaining strict member gaps."""
     from ouroboros.task_results import _admit_stored, load_task_result, validate_task_id

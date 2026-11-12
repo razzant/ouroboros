@@ -9,7 +9,7 @@ import { createTaskResumeButton, openTaskControlMenu, requestStop, hurryTaskActi
     resumeTaskAction, ACTION_RESUME, ACTION_HURRY, TASK_CONTROL_TRIGGER_LABEL } from './task_control_menu.js';
 import { syncParkedPhase } from './task_phase_chip.js';
 import { memberState, resumeAttemptWords, workOfEpisode } from './work_status.js';
-import { unknownDeliveryRemovable } from './question_presentation.js';
+import { ANSWERABLE_QUIZ_STATES, questionWaits, unknownDeliveryRemovable } from './question_presentation.js';
 import { createSystemMessageActions } from './ui_helpers.js';
 import { showToast } from './toast.js';
 import { fmt, tx } from './i18n.js';
@@ -19,10 +19,9 @@ const ARROW = '<svg class="chat-question-nav-arrow" width="12" height="12" viewB
 // An unanswered question stays current after its author ends (until answered or closed). A late
 // answer whose delivery a restart left unknown waits on the owner too: only they can remove it
 // from pending, and its card offers that.
-const UNANSWERED = ['open', 'expired_terminal'];
 const SETTLED = ['answered', 'closed', 'superseded'];
-const waitsAnswer = row => UNANSWERED.includes(row.quiz_state);
-const waitsOwner = row => waitsAnswer(row) || (Boolean(row.project_id) && unknownDeliveryRemovable(row));
+const waitsAnswer = row => ANSWERABLE_QUIZ_STATES.includes(row.quiz_state);
+const waitsOwner = questionWaits;  // the one rule the rooms' amber follows too (question_presentation.js)
 const rowKey = row => `${row.task_id}:${row.quiz_id}`;
 // What a census read vouches for: complete, everything; incomplete, every question its gaps do
 // not name (a gap names a task, or a task and its quiz). A gap naming no task (index, registry or

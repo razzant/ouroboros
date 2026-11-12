@@ -21,8 +21,9 @@ import { createStartFailure, startFailureCause } from './host_starting_status.js
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
 import { fmt, tr } from './i18n.js';
+import { questionPresentation } from './question_presentation.js';
 import { taskCancelPending } from './log_events.js';
-import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js';
+import { chipWord, desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
 import { closeTaskControlMenu, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
 import {
@@ -262,6 +263,13 @@ export function createRoomWork({
         const said = clean(bubble?.querySelector?.('.message')?.textContent);
         if (said) return { text: fmt('Reply to “{text}”', { text: clip(said, REPLY_CHARS) }),
             full: fmt('Reply to “{text}”', { text: said }), source: 'owner_message' };
+        if (item.kind === 'question') {
+            // The question's own words name its row; a row that carries none (Main's own question) keeps a plain name.
+            // Its opening words, plain and bounded: the card it leads to holds the whole question.
+            const words = clip(clean(item.said?.question).replace(/\*\*|__|`/g, ''), REPLY_CHARS);
+            return words ? { text: words, full: words, source: 'question' }
+                : named(tr('room_work.name.question', 'Question'), 'neutral');
+        }
         const when = clock(item.startedAt);
         if (item.kind === 'task') return named(when ? fmt('Task started {time}', { time: when }) : tr('room_work.name.task', 'Task'), 'neutral');
         // A turn with no owner message of its own (a consciousness wake-up) is not a reply.
@@ -296,6 +304,20 @@ export function createRoomWork({
                 view: { word: tr('room_work.sending', 'Sending…'), secondary: '', tone: 'live', mark: 'moving', owner: false,
                     outcome: '', focus: '' } });
         }
+        // A question of this room that no listed work holds (its work ended) still waits for the owner: its own row
+        // leads to it, as a work's row leads to its question.
+        const asked = current ? listOf(stateSnapshots?.latest?.()?.current_questions) : [];
+        for (const entry of current ? listOf(state.room?.turn) : []) {
+            if (entry?.kind !== 'open_question' || entry.work_id || !entry.task_id) continue;
+            const ask = { taskId: String(entry.task_id), quizId: String(entry.quiz_id || '') };
+            // The question's own row of the same body: its card's words say its state here too, never new ones.
+            const said = asked.find((row) => String(row?.task_id) === ask.taskId && String(row?.quiz_id || '') === ask.quizId);
+            items.push({ id: `question:${ask.taskId}:${ask.quizId}`, kind: 'question', work: null, record: null,
+                confirmed: true, online: true, cmid: '', startedAt: 0, episode: ask.taskId, attempt: null,
+                activity: 'waiting', ask, said,
+                view: { word: said ? questionPresentation(said).status : chipWord('ownerWait'), secondary: '', tone: 'held',
+                    mark: 'none', owner: true, outcome: '', focus: '' } });
+        }
         // A Project with nothing else keeps its way to the latest represented root card.
         if (asPanel && !items.length) {
             const latest = latestRepresentedRoot([...records.values()]);
@@ -327,7 +349,7 @@ export function createRoomWork({
             card: Boolean(card), target: card || bubble, loaded: Boolean(card || bubble),
             startedAt: item.startedAt, cmid: item.cmid, controls,
             canMenu: Boolean(controls && workMenuActions(controls).length), resume: controls?.resume || '',
-            question: item.confirmed ? workQuestion(work) : null, tone: view.tone,
+            question: item.confirmed ? item.ask || workQuestion(work) : null, tone: view.tone,
         };
     }
 

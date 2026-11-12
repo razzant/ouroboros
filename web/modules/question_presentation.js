@@ -44,6 +44,11 @@ const deliveryOwed = row => ['answered', 'closed'].includes(row.quiz_state || ro
 export const questionDeliveryPending = row => deliveryOwed(row) && row.question_delivery?.dismissed !== true;
 export const unknownDeliveryRemovable = row => questionDeliveryPending(row)
     && (row.quiz_state || row.state) === 'answered' && row.question_delivery?.reason_code === 'late_answer_delivery_unknown';
+// Whether a current question still waits on the owner: unanswered (its task may wait, go on or have ended), or a
+// Project's answer a restart left undelivered, which only the owner can remove. Main's pill counts by this rule; the
+// server's rooms follow its twin (ouroboros/gateway/main_decisions.py question_waits; the parity fixture pins both).
+export const questionWaits = row => ANSWERABLE_QUIZ_STATES.includes(row.quiz_state)
+    || (Boolean(row.project_id) && unknownDeliveryRemovable(row));
 
 // The lifecycle code of one row: a settled state names itself; an open one says whether the task waits.
 function lifecycleKey(row) {
