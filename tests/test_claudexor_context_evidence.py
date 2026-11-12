@@ -854,3 +854,44 @@ def test_an_output_limit_dated_earlier_replaces_a_failed_read_never_a_later_stat
     _probe(tmp_path)
     fp = response_limits._response_fingerprint(provider="claudexor", model=MODEL, options=exact)
     assert ce._read(tmp_path)["response_limits"][fp]["max_output_tokens"] == (16_384 if held == "failed-read" else 32_000)
+
+
+@pytest.mark.parametrize("relogin", ["sibling-model", "unprobeable-11-minutes", "none"])
+def test_a_silent_engine_keeps_a_pins_record_only_while_its_account_is_the_newest_observed(tmp_path, monkeypatch, relogin):
+    """Fix round 2 (Carbon B2): the account behind a pinned profile is the newest one observed on any model of its
+    source, and an observation naming it outlives its ten-minute retry throttle (kept for the confirmed lifetime), so a
+    silent engine never plans by an account the host saw replaced: unknown window, Max, as the target. Without a
+    relogin the pin keeps its own fresh record."""
+    import datetime
+    from ouroboros import context_fit as cf
+    from ouroboros.llm import LLMClient
+
+    start = ce.utc_now()
+    clock = {"now": start}
+    monkeypatch.setattr(ce, "utc_now", lambda: clock["now"])
+    monkeypatch.setattr(ce, "utc_now_iso", lambda: clock["now"].isoformat())
+
+    def answers(fingerprint, window, model="exact-model"):
+        value = {**_catalog("account-a", fingerprint, window), "observedAt": clock["now"].isoformat()}
+        value["models"] = [{**value["models"][0], "id": model, "contextWindow": window}] if window else []
+        monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda *_a, **_kw: copy.deepcopy(value)))
+
+    pinned = {"source_id": "test-source", "credential_profile_id": "account-a"}
+    answers("identity-a", 70_000)
+    _probe(tmp_path, options=pinned)  # the pinned profile holds identity-a: its record, 70K
+    clock["now"] = start + datetime.timedelta(minutes=1)
+    if relogin == "sibling-model":  # identity-b observed behind the profile, on another model of the source
+        answers("identity-b", 1_000_000, model="sibling-model")
+        ce.probe(tmp_path, provider="claudexor", model="claudexor::test-source=sibling-model", options=pinned)
+    elif relogin == "unprobeable-11-minutes":  # identity-b observed with no window stated; the engine falls silent later
+        answers("identity-b", 0)
+        _probe(tmp_path, options={**pinned, "account_fingerprint": "identity-b"})
+        clock["now"] = start + datetime.timedelta(minutes=12)
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+        lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+    plan, _spans = _built(monkeypatch, tmp_path, lambda _task: cf.resolve_context_fit_route,
+                          task={**TASK, "credential_profile_id": "account-a"})
+    if relogin == "none":
+        assert (plan.window_tokens, plan.model_route.get("accountFingerprint")) == (70_000, "identity-a")
+    else:
+        assert (plan.window_tokens, plan.initial_mode, plan.window_witness_bound) == (0, "max", False)

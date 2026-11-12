@@ -364,7 +364,10 @@ def _drop_expired_probes(data: Dict[str, Any]) -> None:
     """Write-side expiry for the ``probes`` namespace (CPL4-C8).
 
     Failed/unprobeable records are pure retry throttles: past
-    ``_FAILED_TTL_SEC`` the reader ignores them, so the write drops them.
+    ``_FAILED_TTL_SEC`` the reader ignores them, so the write drops them; an
+    unprobeable record that names an account fingerprint is also the last
+    observation of its profile's account (``_pinned_record``), so it stays as
+    long as the confirmed records it outranks can be used (``_CONFIRMED_TTL_SEC``).
     Confirmed records outlive their read TTL as provider-blip evidence
     (``probe`` deliberately keeps a stale prior CONFIRMED across an outage)
     and drop only past the unified GC retention — a route unprobed for that
@@ -391,7 +394,8 @@ def _drop_expired_probes(data: Dict[str, Any]) -> None:
         if status == STATUS_CONFIRMED:
             if age > confirmed_max_age_sec:
                 probes.pop(fp, None)
-        elif status in (STATUS_FAILED, STATUS_UNPROBEABLE) and age > _FAILED_TTL_SEC:
+        elif status in (STATUS_FAILED, STATUS_UNPROBEABLE) and age > (
+                _CONFIRMED_TTL_SEC if status == STATUS_UNPROBEABLE and record.get("account_fingerprint") else _FAILED_TTL_SEC):
             probes.pop(fp, None)
 
 
@@ -1125,15 +1129,16 @@ def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, 
 
 def _pinned_record(drive_root: Any, route: Dict[str, Any], fingerprint: str = "") -> Optional[CapabilityEvidence]:
     """A pinned route whose catalog read failed: the fresh statement of the same profile AND the same account
-    fingerprint, as that account's own record (its own date; nothing stored). The fingerprint is the route's
-    identity when it carries one, else the newest one observed behind that profile: a profile name alone proves no
-    account, so a statement of another fingerprint, a stale one, or Auto leave the window unknown."""
+    fingerprint for this model, as that account's own record (its own date; nothing stored). The fingerprint is the
+    route's identity when it carries one, else the newest one observed behind that profile on any model of its source:
+    a profile name alone proves no account, so a statement of another fingerprint, a stale one, or Auto leave the
+    window unknown."""
     options = route.get("options") or {}
     profile = options.get("credential_profile_id")
     if route.get("provider") != "claudexor" or not profile:
         return None
     rows = [(fp, row) for fp, row in (_read(drive_root).get("probes") or {}).items() if isinstance(row, dict)
-            and row.get("provider") == "claudexor" and row.get("model") == route.get("model")
+            and row.get("provider") == "claudexor"
             and row.get("source_id") == options.get("source_id") and row.get("credential_profile_id") == profile
             and row.get("account_fingerprint") and _age_seconds(str(row.get("ts") or "")) <= _CONFIRMED_TTL_SEC]
 
@@ -1142,7 +1147,7 @@ def _pinned_record(drive_root: Any, route: Dict[str, Any], fingerprint: str = ""
 
     fingerprint = fingerprint or options.get("account_fingerprint") or (min(rows, key=age)[1]["account_fingerprint"]
                                                                          if rows else "")
-    stated = [pair for pair in rows if pair[1]["account_fingerprint"] == fingerprint
+    stated = [pair for pair in rows if pair[1]["account_fingerprint"] == fingerprint and pair[1].get("model") == route.get("model")
               and pair[1].get("status") == STATUS_CONFIRMED and int(pair[1].get("window_tokens") or 0) > 0]
     if not stated:
         return None
