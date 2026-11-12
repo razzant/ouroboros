@@ -194,6 +194,7 @@ HOST_ROW_CLASSES = {
     "settings_changed": ("runtime_state", 1),  # a saved change the app did not declare (owner, 2026-11-03)
     "skill_lifecycle": ("card_row", 2),
     "skill_lifecycle_pointer": ("owner_act_receipt", 1),
+    "safety_notice": ("signed_words", 1),  # the Supervisor's own row when a re-issue goes ahead over an owner-marked flag
     "skill_notice": ("signed_words", 1),
     "skill_repair": ("owner_act_receipt", 1),  # the owner's Repair; marketplace auto-repair is retired
     "startup_notice": ("runtime_state", 3),  # the boot notice, the storage switch, a fault boot's no-turn row

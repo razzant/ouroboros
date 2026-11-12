@@ -151,8 +151,14 @@ def test_short_view_rejects_source_selector_before_io(tmp_path, monkeypatch):
                         lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("source I/O reached")))
     text = results._get_task_result(ctx, "child", view="answer", include_authority=True)
     assert "TOOL_ARG_ERROR" in text and "incompatible with authority/source selectors" in text
+    # The refusal names the selector that was sent and both repairs: either request is a real one.
+    assert "(sent: include_authority)" in text and "omit view or send view=full" in text
+    assert "drop include_authority to get the answer view" in text
     ranged = results._get_task_result(ctx, "child", view="summary", source_start_char=0)
     assert "TOOL_ARG_ERROR" in ranged and "incompatible with authority/source selectors" in ranged
+    assert "(sent: source_start_char)" in ranged  # a zero offset is still a sent selector
+    both = results._get_task_result(ctx, "child", view="evidence", authority_fields=[], source_only=True)
+    assert "(sent: authority_fields, source_only)" in both
 
 
 def test_presence_evidence_recipes_retain_the_authorized_scope(tmp_path, monkeypatch):

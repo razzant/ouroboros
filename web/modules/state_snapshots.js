@@ -31,7 +31,10 @@ import { readState } from './api_client.js';
  * Each request names its `path`: once a full `task_bindings` map arrived with its revision, the
  * next read asks `bindings_since=<revision>`, and a body answering `task_bindings_unchanged` is
  * filled with that held map for that exact revision only; any other answer drops the held map,
- * so the read after it asks for the whole map again.
+ * so the read after it asks for the whole map again. The revision is the map's own digest, so the
+ * held map outlives `retire()`: whether it still stands is the server's answer to the next read.
+ * A map sent with an empty revision (a failed read) reaches no consumer: what they show stays, and
+ * the next read asks for the whole map. A body with no revision field (an older server) applies.
  */
 export function createStateSnapshotSequencer(onApply, now = () => Date.now(), onUnavailable = () => {}) {
     let requestedGeneration = 0;
@@ -54,7 +57,8 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
         }
         held = revision && data.task_bindings && typeof data.task_bindings === 'object'
             ? { revision, bindings: data.task_bindings } : null;
-        return data;
+        // A present empty revision is a failed bindings read: its map is unknown, never applied as empty.
+        return data.task_bindings_revision === '' ? { ...data, task_bindings: null } : data;
     };
     const open = () => {
         const reading = new AbortController();
@@ -74,7 +78,7 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
     return {
         begin,
         retire() {
-            appliedGeneration = begin().generation; latest = null; held = null;
+            appliedGeneration = begin().generation; latest = null;
             const cancel = cancelInflight;
             settle(inflight);
             cancel?.();
@@ -110,6 +114,20 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
         },
         latest: () => latest,
     };
+}
+
+/**
+ * The complete Project room set a state body leaves the page holding (`page.projectChatIds`). A body's
+ * `project_chat_ids` replaces it; one whose field is null (the registry could not be read) or absent keeps a
+ * complete set the page holds, never an empty set or the capped `projects` rows in its place (#3067). A page that
+ * never held a complete set answers undefined while the body has rows: the caller falls back to those rows.
+ */
+export function heldProjectChatIds(data, page) {
+    if (Array.isArray(data?.project_chat_ids)) {
+        page.projectChatIdsComplete = true;
+        return data.project_chat_ids;
+    }
+    return page.projectChatIdsComplete || !data?.projects ? Array.from(page.projectChatIds || []) : undefined;
 }
 
 /**

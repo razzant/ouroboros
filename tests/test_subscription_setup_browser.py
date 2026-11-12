@@ -279,8 +279,10 @@ def test_cursor_login_and_catalog_are_not_execution_readiness(subscription_ui):
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_function("() => document.querySelector('#agents-outcome')?.textContent.includes('Signed in to Cursor')")
     outcome = page.locator("#agents-outcome").inner_text()
-    assert "Main still needs" in outcome
     assert "Sign-in does not verify main-chat support or agent execution" in outcome
+    # What Main still needs is said once, beside the disabled Continue.
+    page.wait_for_function("() => document.querySelector('.wizard-error').textContent.includes('Ouroboros itself still needs a model')")
+    assert "still needs" not in outcome
     capture(page, "cursor-auth-only-onboarding")
     assert not ui["posts"] or all(path == "/api/onboarding/subagents/preview" for path, _ in ui["posts"])
 
@@ -489,7 +491,8 @@ def test_cursor_only_does_not_claim_model_access_and_api_only_finishes(subscript
     page.wait_for_function("() => document.querySelector('[data-agent-family=cursor]').textContent.includes('Signed in')")
     assert page.locator('#quick-start-btn').is_hidden()
     assert page.locator('#next-btn').is_disabled()
-    assert 'Main still needs Codex' in page.locator('#agents-outcome').inner_text()
+    page.wait_for_function("() => document.querySelector('.wizard-error').textContent.startsWith('Cursor can run agents; Ouroboros itself still needs a model.')")
+    assert 'still needs' not in page.locator('#agents-outcome').inner_text()
     # Removing the optional agent gives the API-only path the same five steps.
     ui['fixture']['status']['profiles']['profiles'] = []
     ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
@@ -509,6 +512,58 @@ def test_cursor_only_does_not_claim_model_access_and_api_only_finishes(subscript
     assert body['OPENAI_API_KEY'] == 'fixture-api-credential'
     assert body['OUROBOROS_MODEL'].startswith('openai::')
     assert not body['subscriptionsConnected']
+
+
+@pytest.mark.parametrize('sources_read', [True, False])
+def test_an_agent_only_subscription_reads_what_it_runs_and_retry_stays_wherever_it_can_help(subscription_ui, sources_read):
+    """Only agent subscriptions connected. Once the engine has named its model sources and none of them is connected,
+    the reason beside Continue says what the subscriptions can run and what Ouroboros itself still needs; a healthy
+    read leaves discovery nothing to retry, so there is no Retry and no "Optional" on the way forward. Retry stays
+    wherever it can help: while the source list is unread, after a later read fails, and once a key makes the
+    button the catalog's manual refresh again."""
+    ui, page = subscription_ui, subscription_ui['page']
+    ui['fixture']['status']['profiles']['profiles'] = [{
+        'profile': {'profile_id': f'{harness}-only', 'harness_id': harness, 'enabled': True},
+        'status': {'verification': 'passed'},
+    } for harness in ('claude', 'cursor')]
+    if not sources_read:
+        ui['backend'].update(catalog_status=500, catalog_response={'error': 'Raw model service unavailable.'})
+    page.goto(ui['url'] + '/onboarding')
+    page.wait_for_function("() => document.querySelector('[data-agent-family=cursor]').textContent.includes('Signed in')")
+    reason = page.locator('.wizard-error')
+    retry = page.locator('#onboarding-access-retry')
+    optional = page.locator('[data-collapse="api-access"] > summary .selection-badge')
+    if not sources_read:
+        page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Raw model service unavailable')")
+        assert reason.inner_text().startswith('Could not confirm that a connected account can run')
+        assert 'Retry model discovery' in reason.inner_text() and retry.is_visible()
+        assert optional.is_visible() and optional.inner_text() == 'Optional'
+        assert page.locator('#next-btn').is_disabled()
+        return
+    page.wait_for_function("() => document.querySelector('.wizard-error').textContent.includes('still needs a model')")
+    text = reason.inner_text()
+    assert text == ('Claude Code and Cursor can run agents; Ouroboros itself still needs a model. '
+                    'Connect Codex, add an API key, or choose a local model.')
+    assert retry.is_hidden() and optional.is_hidden()
+    assert page.locator('#next-btn').is_disabled() and page.locator('#quick-start-btn').is_hidden()
+    capture(page, 'agent-only-sources-read')
+    # A later read that fails is named, and named failures keep their Retry.
+    ui['backend'].update(catalog_status=500, catalog_response={'error': 'Raw model service unavailable.'})
+    ui['fixture']['status']['profiles']['profiles'].pop()  # Cursor disconnects: the connected set changes, the catalog is read again
+    page.evaluate("async () => (await import('/onboarding/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+    page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Raw model service unavailable')")
+    assert retry.is_visible() and reason.inner_text().startswith('Claude Code can run agents;')
+    ui['backend'].pop('catalog_status'), ui['backend'].pop('catalog_response')
+    with page.expect_response('**/api/model-catalog'):
+        retry.click()
+    page.wait_for_function("() => document.querySelector('#onboarding-access-retry').hidden")
+    # A key is another way to Main: Continue opens, and the button is the catalog's manual refresh again.
+    page.locator('[data-collapse="api-access"] > summary').click()
+    page.locator('#openai-key').fill('fixture-api-credential')
+    page.wait_for_selector('#next-btn:not([disabled])')
+    assert retry.is_visible() and reason.inner_text() == ''
+    assert optional.is_visible() and optional.inner_text() == 'Configured', 'the badge follows what is entered'
+    assert not any(path == '/api/onboarding/complete' for path, _ in ui['posts'])
 
 
 @pytest.mark.parametrize('edit_after_recovery', [False, True, 'main'])

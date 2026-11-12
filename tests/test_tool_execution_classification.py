@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from ouroboros.loop_tool_execution import _extract_result_metadata, _is_tool_execution_failure
@@ -321,12 +323,12 @@ def test_loop_keeps_legacy_process_status_and_error_buckets(
         ),
         (
             ToolResult(
-                status="blocked",
+                status="ok",
                 code="ARTIFACT_OUTPUT_UNDECLARED",
-                text="⚠️ ARTIFACT_OUTPUT_UNDECLARED: declare outputs. exit_code=0",
+                text="exit_code=0\nSTDOUT:\nok\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files.",
                 meta={"exit_code": 0},
             ),
-            True,
+            False,  # a note on a finished command: no error, its own bucket kept
             "artifact_output_undeclared",
         ),
         (
@@ -394,6 +396,11 @@ def test_loop_keeps_legacy_process_status_and_error_buckets(
 
         assert row["is_error"] is expected_error
         assert row["result_meta"]["status"] == expected_status
+        # The journal row names the coarse bucket AND the exact published code (audit 08-11.11 item 6).
+        journal = json.loads((drive_logs / "tools.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        assert (journal["type"], journal["status"], journal["tool_result_code"]) == (
+            "tool_call", expected_status, typed.code)
+        assert journal["is_error"] is expected_error
         for key in (
             "exit_code",
             "signal",

@@ -817,12 +817,12 @@ class StateResponse(WorkStateFields):
     projects: list
     project_messages_revision: Optional[str]  # moves with any Project's last_message_at; null until history is dated
     project_listable_count: Optional[int]  # active/deleting Projects the sidebar can list; null when unavailable
-    project_chat_ids: list  # COMPLETE (uncapped) registered chat_ids; the live WS fan-out isolation SSOT
+    project_chat_ids: Optional[list]  # COMPLETE (uncapped) registered chat_ids, the live WS fan-out isolation SSOT; null: unknown
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.
     main_visible_revision: NotRequired[Optional[int]]
     # Task->project bindings ({task_id: {project_id, chat_id, project_name}}): a bound card hides the stray
     # "turn into project" button (v6.33.0 P2) and opens its project (v6.33.0 F4). Null only when
-    # ``?bindings_since`` named the current opaque ``task_bindings_revision`` ("" after a failed read).
+    # ``?bindings_since`` named the current opaque ``task_bindings_revision`` (the map's digest; "" after a failed read).
     task_bindings: Optional[dict]
     task_bindings_revision: str
     task_bindings_unchanged: bool

@@ -144,6 +144,19 @@ def test_generated_public_files_match_source():
         assert (SITE / "public" / name).read_bytes() == (DOCS / name).read_bytes()
 
 
+def test_readme_and_install_page_name_the_factory_spending_limits():
+    """What a newcomer reads before installing is the factory limits themselves, in one paragraph on every surface."""
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS as defaults
+
+    total, task, daily = (int(defaults[key]) for key in (
+        "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "OUROBOROS_CONSCIOUSNESS_DAILY_USD"))
+    paragraph = (f"out of the box, new paid work stops once known spend reaches ${total} in total, or ${task} for one "
+                 "task and its helpers; charges already in flight can pass a limit. Background consciousness stays off "
+                 f"until you start it, and then has ${daily} for each 24 hours. Settings changes all three.")
+    for path in (REPO / "README.md", SITE / "install" / "index.html", DOCS / "install" / "index.html"):
+        assert paragraph in path.read_text(encoding="utf-8"), path.relative_to(REPO)
+
+
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     page = (SITE / "benchmarks" / "index.html").read_text(encoding="utf-8")

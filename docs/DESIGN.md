@@ -1120,7 +1120,11 @@ signature line, `Reminder · Ouroboros · written <when> · for <when>` (plus
 never rewritten, summarized or re-timed; the next turn reads the row as a host
 fact (`📋 [reminder]`), so Ouroboros knows what the owner was shown. A skill
 holding the owner's `notify_owner` grant speaks the same way in its own name: a
-`skill_notice` System row signed `Notice · <skill>`.
+`skill_notice` System row signed `Notice · <skill>`. The Safety Supervisor does too, once
+per work and destination: when Ouroboros's identical re-issue goes ahead over a flag whose
+final reading marked the act as one the owner would stop, a `safety_notice` System row
+signed `Safety Supervisor · not Ouroboros's words` names the call, the flag's reason and
+quote, the work and the owner's brakes, and claims no delivery.
 
 Formatting is asymmetric: assistant text always uses the sanitized chat markdown
 renderer regardless of `markdown`; ordinary System text is escaped unless
@@ -2821,10 +2825,12 @@ preserve the edited value, focus, selection and scroll position. Returning to a
 reviewer's previous source restores that source's model/account draft; a new
 source starts without another source's pin.
 
-The five wizard steps are Accounts, Models, Review, Budget, Summary. Codex is the
+The five wizard steps are Accounts, Models, Review and access, Budget, Summary. Codex is the
 recommended start without an API key; other connections name their capability.
 Signed in reports authentication, not execution, independently of model-source and suggestion reads. Accounts names pending, failed or partial reads and offers a
-contextual Retry that keeps the fields. A known model source allows
+contextual Retry that keeps the fields. Connected accounts the engine names as agents only read
+what they can run and what Ouroboros itself still needs beside Continue, and a healthy read then has
+no Retry. A known model source allows
 Continue and manual model entry even when its inventory or automatic suggestions
 cannot be read; an unknown source explains why not. New
 subscription-only installs clear only untouched shipped API suggestions without
@@ -2865,8 +2871,11 @@ stops clear of them.
 
 - Step title `--type-page`; card titles `--type-section`; field labels and
   notes `--type-meta`. No display size above `--type-page`.
-- Short-viewport adaptation hides explanatory copy, never shrinks type: shaving
-  pixels off a title buys nothing and costs the scale.
+- A short or narrow window drops ornament (the slogan, the rail's sub-labels), never
+  the words a choice or a field is made by and never the size of type. The footer's
+  aside leaves only a narrow window, where the pinned footer would take the step's
+  lines. A line that changes no choice is deleted, not hidden; a taller step scrolls
+  under the pinned footer.
 - Field labels are sentence case at meta ink: a step shows a dozen at once to
   get one value typed, not to present a grid of headings.
 
@@ -2951,7 +2960,7 @@ exceptions.
 | A question or decision is waiting | required | a confirmed lifecycle fact: the question carries a positive wait |
 | A task finished or stopped | required | a positive typed terminal fact on a ROOT task |
 | Messages Ouroboros sends while working | LLM-first | Ouroboros chose to speak outside the turn's answer (a proactive message in its room or as a Main notice, or an optional question) |
-| A note Ouroboros left for this moment, or a granted skill's notice (same toggle) | LLM-first; owner grant | when it wrote the note, Ouroboros chose to leave these words for this time; a skill speaks only under the owner's `notify_owner` grant; the host only shows the signed `reminder`/`skill_notice` row |
+| A note Ouroboros left for this moment, a granted skill's notice, or the Safety Supervisor's notice (same toggle) | LLM-first; owner grant | when it wrote the note, Ouroboros chose to leave these words for this time; a skill speaks only under the owner's `notify_owner` grant; the Supervisor speaks only when a re-issue goes ahead over a flag it marked as one the owner would stop; the host only shows the signed `reminder`/`skill_notice`/`safety_notice` row |
 | Ordinary replies in Main | separate toggle | an ordinary finished reply in the Main thread |
 
 *Required* means the application asks for delivery from its own state rather

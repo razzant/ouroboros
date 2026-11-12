@@ -22,7 +22,7 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     # so a call could be an honest error while every bucket of the honest breakdown
     # stayed empty. Each is homed by its nearest existing analogue (owner batch #4).
     "artifact_output_error",
-    "artifact_output_undeclared",
+    "artifact_output_undeclared",  # old records only: the note on a finished command is no error now
     "blocked",
     "cwd_blocked",
     "data_blocked",
@@ -114,10 +114,11 @@ _RECOVERY_TOOL_NAMES = frozenset({
 # telemetry: left standing, the open card names it (below). `unavailable` moved buckets in v7
 # (owner decision, spec §1.15): see its entry below.
 _POLICY_DENIAL_STATUSES = frozenset({
-    # v6.90.x (submarine unwind): the three confinement surfaces that leaked past
-    # the partition as generic errors are now typed — the user_files path block on
-    # READ tools, and the exit_code=0 undeclared-outputs NUDGE (split from the real
-    # artifact_output_error registration failure, which stays a genuine failure).
+    # v6.90.x (submarine unwind): the confinement surfaces that leaked past the
+    # partition as generic errors are typed — the user_files path block on READ
+    # tools. The exit_code=0 undeclared-outputs note sat here while it was a refusal;
+    # it is a non-error now, so only records written before that reach this walk
+    # (the real artifact_output_error registration failure stays a genuine failure).
     "artifact_output_undeclared",
     "blocked",
     "cwd_blocked",
@@ -228,7 +229,10 @@ _ROOT_WRITE_TOOLS = frozenset({"write_file", "edit_text", "apply_patch", "edit_b
 # `untyped` is the ok-status a dynamic provider body carries when nothing typed
 # it; leaving it out would disqualify a successful extension call from crediting
 # a recovery, which is not what "we could not type it" means.
-_OK_TOOL_STATUSES = frozenset({"", "ok", "ok_autocorrected", "untyped"})
+# `artifact_output_undeclared` is a finished command carrying a note about files nobody declared:
+# the command itself succeeded, so it credits a recovery and counts as an effect like any other
+# (a record written while the note was a refusal carries `is_error` and never reaches these reads).
+_OK_TOOL_STATUSES = frozenset({"", "ok", "ok_autocorrected", "untyped", "artifact_output_undeclared"})
 # Typed ok answers that applied nothing and say what they returned instead, for the
 # caller to inspect and decide with a later call (an apply that answered with its
 # fresh capture, #1969): never a failure, never an effect, and never in a partition
