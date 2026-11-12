@@ -513,6 +513,7 @@ def _rebind_context_fit_plan(
     model_route: Optional[Dict[str, Any]] = None,
     credential_profile_id: Optional[str] = None,
     start_mode: Optional[str] = None,  # the task's mode: a new route may lower it; a return to the primary resumes its held view
+    route_is_preference: bool = False,  # ``model_route`` is the account a send will prefer (a restore), not one observed serving
 ) -> Tuple[Any, str]:
     if plan is None or not all(
         hasattr(plan, name) for name in ("max_projection", "low_projection", "core_sha256")
@@ -538,7 +539,7 @@ def _rebind_context_fit_plan(
         "delegation_role": metadata.get("delegation_role"),
         "model_role": role,
         "model_route": model_route if model_route is not None else getattr(plan, "model_route", {}),
-        "credential_profile_id": credential_profile_id,
+        "credential_profile_id": credential_profile_id, **({"model_route_preferred": True} if route_is_preference else {}),
     }
     try:
         route, evidence = timed("rebind.route", _context_fit_route, task, allow_fetch=True)

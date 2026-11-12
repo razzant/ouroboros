@@ -223,15 +223,17 @@ def test_a_failed_auto_catalog_read_plans_by_the_pools_smallest_fresh_statement(
     assert _probe(fresh, allow_fetch=False).window_tokens == 0  # not probed: unknown, no pool
 
 
-def _resolve(monkeypatch, root, *, model_route=None, pin=None):
-    """The fit's and every rebind's route question, through the production route builder."""
+def _resolve(monkeypatch, root, *, model_route=None, pin=None, preferred=False):
+    """The fit's and every rebind's route question, through the production route builder. ``preferred``: the carried
+    route is the account a restore's send will prefer, not one a receipt observed serving."""
     from ouroboros import config, context_fit as cf, server_runtime
 
     monkeypatch.setattr(config, "runtime_settings", lambda: {"OUROBOROS_MODEL": MODEL})
     monkeypatch.setattr(config, "DATA_DIR", root)
     monkeypatch.setattr(server_runtime, "apply_runtime_provider_defaults", lambda s: (s, False, []))
     return cf.resolve_context_fit_route({"model": MODEL, "model_role": "main", "task_metadata": {},
-                                         "model_route": model_route or {}, "credential_profile_id": pin}, allow_fetch=True)
+                                         "model_route": model_route or {}, "credential_profile_id": pin,
+                                         **({"model_route_preferred": True} if preferred else {})}, allow_fetch=True)
 
 
 def _answered(route):
@@ -255,7 +257,7 @@ def test_a_resumed_turn_reads_the_conversations_fresh_record_and_asks_only_its_o
 
     def resumed(route):
         identity = _conversation_account(ctx, _answered(route), "main", pin)
-        return _resolve(monkeypatch, tmp_path, model_route=identity, pin=pin)[1]
+        return _resolve(monkeypatch, tmp_path, model_route=identity, pin=pin, preferred=True)[1]
 
     same = resumed({**_binding(seeded), "credentialProfileId": "account-a"})
     assert len(catalog["calls"]) == 1 and same.to_json() == seeded.to_json()  # fresh record: no question
@@ -267,6 +269,36 @@ def test_a_resumed_turn_reads_the_conversations_fresh_record_and_asks_only_its_o
     catalog["value"]["observedAt"] = later.isoformat()
     expired = resumed(_binding(seeded))
     assert catalog["calls"][2:] == [("test-source", pin, "exact-model")] and not expired.stale  # expired: exactly one
+
+
+@pytest.mark.parametrize("record", ["none", "stale", "fresh"])
+def test_a_receipt_rebind_reads_the_account_that_served_and_settles_on_it(tmp_path, monkeypatch, catalog, record):
+    """Fix round 1 (Opus B1): a receipt names the account that just answered an Auto request: an observation, no
+    preference. Without its fresh record the rebind reads that account's own catalog (one question, its fingerprint
+    checked) and plans on it, so the next round, answered by it again, binds the same route and rebinds no more; with
+    a fresh record it asks nothing. The engine's Auto pick (another account here) never sizes that plan."""
+    import datetime
+    from ouroboros.llm import LLMClient
+
+    served = {"source": "test-source", "model": "exact-model", "credentialProfileId": "account-a",
+              "accountFingerprint": "identity-a"}
+    if record != "none":  # a statement of account-a read earlier: 30 h ago, or a minute ago
+        hours = 30 if record == "stale" else 0
+        catalog["value"]["observedAt"] = (ce.utc_now() - datetime.timedelta(hours=hours, minutes=1)).isoformat()
+        _resolve(monkeypatch, tmp_path, pin="account-a")
+        catalog["value"]["observedAt"] = ce.utc_now_iso()
+    calls = []
+
+    def fetch(source, credential_profile_id=None, *, requested_model=None):
+        calls.append(credential_profile_id)
+        return (_catalog("account-b", "identity-b", 400_000) if not credential_profile_id
+                else _catalog(credential_profile_id, "identity-a", 1_000_000))
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(fetch))
+    for _round in range(2):  # each round answered by account-a: its receipt rebinds the plan
+        route, evidence = _resolve(monkeypatch, tmp_path, model_route=served)
+        assert ce.evidence_model_route(evidence, MODEL) == served  # the plan binds the served account: settled
+    assert calls == ([] if record == "fresh" else ["account-a"])  # one read of the served account, never Auto's pick
+    assert evidence.window_tokens == (872_000 if record == "fresh" else 1_000_000)
 
 
 def test_the_rebind_after_tool_reconciliation_reuses_the_first_answer(tmp_path, monkeypatch, catalog):
@@ -283,7 +315,8 @@ def test_the_rebind_after_tool_reconciliation_reuses_the_first_answer(tmp_path, 
 
     def rebind(plan, _tools, _messages, **route):
         calls.append(route["model_route"])
-        evidence = _resolve(monkeypatch, tmp_path, model_route=route["model_route"])[1]
+        assert route["route_is_preference"] is True  # both restore rebinds bind an account a send will prefer
+        evidence = _resolve(monkeypatch, tmp_path, model_route=route["model_route"], preferred=True)[1]
         return SimpleNamespace(model_route=_binding(evidence) if evidence.account_fingerprint else {}), "max"
 
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", rebind)
