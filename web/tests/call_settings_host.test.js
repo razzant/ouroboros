@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderExtensionSettingsSections } from '../modules/settings.js';
+import { renderExtensionSettingsSections } from '../modules/settings_extension_forms.js';
 
 test('only a successful extension form Save announces changed settings', async () => {
     const prior = { fetch: globalThis.fetch, window: globalThis.window };

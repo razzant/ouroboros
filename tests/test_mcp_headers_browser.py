@@ -11,11 +11,14 @@ import json
 import os
 import pathlib
 import re
+import time
+from urllib.parse import quote
 
 import pytest
 
 from tests.test_mcp_headers_loopback import loopback  # noqa: F401
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
+from tests.settings_browser_helpers import open_settings, open_entry, press_editor_save, commit_row, setting_row, top_path
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -31,46 +34,99 @@ def _capture(page, name):
         page.screenshot(path=str(pathlib.Path(root) / f"{getattr(page, '_evidence_engine', 'chromium')}-{name}.png"), animations="disabled", full_page=False)
 
 
+def _settings_ready(page, action):
+    """Wait for the mount and shown-event settings reads, never for a held MCP status reply."""
+    pending = set()
+    def started(request):
+        if request.url.endswith('/api/settings') and request.method == 'GET':
+            pending.add(request)
+    def finished(request):
+        pending.discard(request)
+    page.on('request', started)
+    page.on('requestfinished', finished)
+    page.on('requestfailed', finished)
+    try:
+        result = action()
+        deadline = time.monotonic() + 30
+        while True:
+            while pending:
+                assert time.monotonic() < deadline, 'Settings reads did not finish'
+                page.wait_for_timeout(20)
+            page.evaluate('() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))')
+            if not pending:
+                return result
+    finally:
+        page.remove_listener('request', started)
+        page.remove_listener('requestfinished', finished)
+        page.remove_listener('requestfailed', finished)
+
+
 def _open_mcp(page, url):
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-    page.click('[data-nav-page="settings"]')
-    page.locator('[data-settings-tab="advanced"]').click()
-    page.locator("#btn-mcp-import").wait_for(state="visible", timeout=15_000)
-    page.locator("#btn-save-settings").wait_for(state="visible", timeout=15_000)
-    page.wait_for_function("() => !document.getElementById('btn-save-settings').disabled", timeout=20_000)
+    return _list(page)
+
+
+def _list(page):
+    return _settings_ready(page, lambda: open_settings(page, 'tools', 'tools:import', timeout=30_000))
+
+
+def _card(page, identity):
+    level = _settings_ready(page, lambda: open_settings(page, 'tools/' + quote(identity, safe=''), timeout=30_000))
+    card = level.locator('[data-mcp-card]')
+    card.wait_for(state='visible')
+    return card
 
 
 def _save(page):
-    """Save a draft that changes something; an honest no-op is asserted where it happens."""
-    expected_ids = page.locator('[data-mcp-field="id"]').evaluate_all('els => els.map(e => e.value)')
-    with page.expect_response(lambda response: response.url.endswith('/api/settings')
-                              and response.request.method == 'POST', timeout=20_000) as saved:
-        page.click("#btn-save-settings")
-    response = saved.value
-    answer = response.json()
-    assert response.ok and answer.get('status') == 'saved' and not answer.get('no_changes'), answer
-    posted_ids = [s.get('id') for s in response.request.post_data_json['MCP_SERVERS']]
-    assert posted_ids == expected_ids, ('save omitted visible draft rows', expected_ids, posted_ids)
-    page.wait_for_function(
-        "() => (document.getElementById('settings-status')?.textContent || '').startsWith('Settings saved')",
-        timeout=20_000)
-    loaded = page.evaluate("async () => (await fetch('/api/settings', {cache: 'no-store'})).json()")
-    assert [s.get('id') for s in loaded['MCP_SERVERS']] == expected_ids
+    """Write this server's form; an Add returns to the list, a saved entry stays on its page."""
+    from playwright.sync_api import expect
+    adding = top_path(page) == 'tools/new'
+    identity = page.locator('[data-mcp-field="id"]').input_value()
+    if adding:
+        with page.expect_response(lambda r: r.url.endswith('/api/settings') and r.request.method == 'POST') as saved:
+            page.locator('[data-editor-save]').click()
+        assert saved.value.ok, saved.value.text()
+        expect(page.locator('[data-settings-page="tools"] [data-entry-result]')).to_contain_text('Added')
+        _card(page, identity)
+    else:
+        assert press_editor_save(page).startswith('Saved')
 
 
 def _edit(card):
-    """Open a saved server's form as the owner does: a saved server is a row whose form is behind Edit, and
-    every load, a confirmed Save's included, brings it back closed."""
-    from playwright.sync_api import expect
+    """The server's secondary fields are in its own More disclosure."""
+    more = card.locator('[data-mcp-more]')
+    if not more.evaluate('node => node.open'):
+        more.locator(':scope > summary').click()
 
-    edit = card.locator('[data-mcp-edit]')
-    assert not edit.evaluate('details => details.open'), 'a saved server is a closed row'
-    edit.locator(':scope > summary').click()
-    expect(edit).to_have_attribute('open', '')
+
+def _apply_import(dialog):
+    from playwright.sync_api import expect
+    page = dialog.page
+    with page.expect_response(lambda r: r.url.endswith('/api/settings') and r.request.method == 'POST') as saved:
+        dialog.locator('[data-mcp-import-apply]').click()
+    assert saved.value.ok, saved.value.text()
+    expect(dialog).to_have_count(0)
+    result = setting_row(page, 'tools:import').locator('[data-setting-result]')
+    if saved.value.json().get('no_changes'):
+        expect(result).to_have_text('')
+    else:
+        expect(result).to_contain_text('Imported.')
+
+
+def _enable(page, identity):
+    from playwright.sync_api import expect
+    card = _card(page, identity)
+    control = card.locator('[data-entry-switch]')
+    if not control.is_checked():
+        with page.expect_response(lambda r: r.url.endswith('/api/settings') and r.request.method == 'POST'):
+            control.locator('xpath=..').click()
+        expect(card.locator('[data-entry-switch]')).to_be_checked()
+        expect(card.locator('[data-entry-switch]')).to_be_enabled()
+    return card
 
 
 def _facts(card):
-    """The exact stamps and the engine's words of a server, behind its Details: {name: value}."""
+    """The exact stamps and the engine's words on a server's page: {name: value}."""
     return card.locator('[data-mcp-facts]').evaluate(
         "dl => Object.fromEntries([...dl.children].map((fact) => [fact.querySelector('dt').textContent,"
         " fact.querySelector('dd').textContent]))")
@@ -101,23 +157,26 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
         page._evidence_engine = engine
         try:
             _open_mcp(page, url)
-            page.check("#s-mcp-enabled")
-            page.click("#btn-mcp-import")
+            control = setting_row(page, 'MCP_ENABLED').locator('[data-setting-control]')
+            if not control.is_checked():
+                with page.expect_response(lambda r: r.url.endswith('/api/settings') and r.request.method == 'POST'):
+                    control.locator('xpath=..').click()
+            _list(page)
+            page.locator('[data-tools-action="tools:import"]').click()
             dialog = page.locator(".mcp-import-dialog")
             dialog.locator("#mcp-import-text").fill(json.dumps(document, indent=2))
             dialog.locator("[data-mcp-import-preview-btn]").click()
             dialog.locator(".mcp-import-entry").nth(2).wait_for(timeout=15_000)
             preview_text = dialog.inner_text()
-            assert preview_text.count("Add (disabled)") == 3 and "Not imported: autoApprove" in preview_text
+            assert preview_text.count("Add (off)") == 3 and "Not imported: autoApprove" in preview_text
             assert "Headers: Authorization, X-Api-Key" in preview_text
             for secret in (BEARER, BASIC, CUSTOM):
                 assert secret not in preview_text
             _capture(page, "mcp-import-preview")
-            dialog.locator("[data-mcp-import-apply]").click()
-            assert dialog.count() == 0
-            cards = page.locator("[data-mcp-card]")
-            assert cards.count() == 3
-            first = cards.nth(0)
+            _apply_import(dialog)
+            assert page.locator('[data-settings-page="tools"] [data-entry-id]').count() == 3
+            first = _card(page, 'docs_http')
+            _edit(first)
             assert first.locator('[data-mcp-header-field="name"]').evaluate_all("els => els.map(e => e.value)") == [
                 "Authorization", "X-Api-Key"]
             # A repeated name is a field error at Save, never a silent object collapse.
@@ -125,16 +184,18 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
             first = page.locator("[data-mcp-card]").nth(0)
             first.locator('[data-mcp-header-row="2"] [data-mcp-header-field="name"]').fill("x-api-key")
             first.locator('[data-mcp-header-row="2"] [data-mcp-header-field="value"]').fill("other")
-            page.click("#btn-save-settings")
-            error = page.locator("#mcp-0-header-2-name-error")
-            error.wait_for(state="visible", timeout=10_000)
+            page.locator("[data-editor-save]").click()
+            error = first.locator('[data-editor-result]')
+            expect(error).to_contain_text('repeats header X-Api-Key', timeout=10_000)
+            expect(first.locator('[data-mcp-header-row="2"] [data-mcp-header-field="name"]')).to_be_focused()
             assert "repeats header X-Api-Key" in error.inner_text()
             first.locator('[data-mcp-header-row="2"]').scroll_into_view_if_needed()
             _capture(page, "mcp-header-duplicate-refused")
             first.locator('[data-mcp-header-row="2"] [data-mcp-header-remove]').click()
-            page.locator("[data-mcp-card]").nth(0).locator('[data-mcp-field="enabled"]').check()
-            page.locator("[data-mcp-card]").nth(1).locator('[data-mcp-field="enabled"]').check()
-            page.locator("[data-mcp-card]").nth(1).locator('[data-mcp-field="allowed_tools"]').fill("echo")
+            _enable(page, 'docs_http')
+            sse_card = _enable(page, 'docs_sse')
+            _edit(sse_card)
+            sse_card.locator('[data-mcp-field="allowed_tools"]').fill('echo')
             _save(page)
 
             saved = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
@@ -151,8 +212,7 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
             for secret in (BEARER, BASIC, CUSTOM):
                 assert secret not in served
             # Showing Settings loads it once more and redraws every row: open the form on the settled one.
-            expect(page.locator("#settings-status")).to_have_text("Settings refreshed", timeout=30_000)
-            card = page.locator("[data-mcp-card]").nth(0)
+            card = _card(page, 'docs_http')
             _edit(card)
             value = card.locator('[data-mcp-header-row="0"] [data-mcp-header-field="value"]')
             assert value.input_value() == "***set***"
@@ -164,10 +224,10 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
             card.locator('[data-mcp-header-row="0"] [data-mcp-header-toggle]').click()
 
             card.locator("[data-mcp-refresh]").click()
-            card.locator("[data-mcp-message]").filter(has_text="Saved catalog refreshed").wait_for(timeout=20_000)
-            sse_card = page.locator("[data-mcp-card]").nth(1)
+            card.locator("[data-mcp-message]").filter(has_text="Listed again.").wait_for(timeout=20_000)
+            sse_card = _card(page, 'docs_sse')
             sse_card.locator("[data-mcp-test]").click()
-            sse_card.locator("[data-mcp-message]").filter(has_text="Draft connection OK").wait_for(timeout=20_000)
+            sse_card.locator("[data-mcp-message]").filter(has_text="The connection works.").wait_for(timeout=20_000)
             assert "No tool was called" in sse_card.locator("[data-mcp-message]").inner_text()
             sse_card.locator("[data-mcp-message]").scroll_into_view_if_needed()
             _capture(page, "mcp-refresh-and-test-draft")
@@ -185,7 +245,8 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
                 "Local files": {"command": "python3", "args": ["-m", "synthetic_server_v2"]},
                 "Docs HTTP": {"type": "sse", "url": http_url},
             }}
-            page.click("#btn-mcp-import")
+            _list(page)
+            page.locator('[data-tools-action="tools:import"]').click()
             dialog.locator("#mcp-import-text").fill(json.dumps(update))
             dialog.locator("[data-mcp-import-preview-btn]").click()
             dialog.locator(".mcp-import-entry").nth(2).wait_for(timeout=15_000)
@@ -193,8 +254,7 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
             assert preview_text.count("Update") == 2 and "Not applied" in preview_text
             assert "remove that server first" in preview_text
             _capture(page, "mcp-import-update-preview")
-            dialog.locator("[data-mcp-import-apply]").click()
-            _save(page)
+            _apply_import(dialog)
             updated = {entry["id"]: entry for entry in json.loads(
                 (data_dir / "settings.json").read_text(encoding="utf-8"))["MCP_SERVERS"]}
             assert updated["docs_sse"]["headers"] == {"Authorization": BASIC, "X-Api-Key": CUSTOM}
@@ -204,16 +264,18 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
             assert updated["docs_http"] == servers["docs_http"]  # the refused entry changed nothing
 
             # The ordinary form is a separate input path, not just an import renderer.
-            page.click('#btn-mcp-add-server')
-            manual = page.locator('[data-mcp-card]').nth(3)
+            _list(page)
+            page.click('[data-tools-add]')
+            manual = page.locator('[data-mcp-card]')
             manual.locator('[data-mcp-field="id"]').fill('manual_docs')
             manual.locator('[data-mcp-field="url"]').fill(http_url)
+            _edit(manual)
             for number, (name, literal) in enumerate({'Authorization': BEARER, 'X-Api-Key': CUSTOM}.items()):
                 manual.locator('[data-mcp-header-add]').click()
-                manual = page.locator('[data-mcp-card]').nth(3)
+                manual = page.locator('[data-mcp-card]')
                 manual.locator(f'[data-mcp-header-row="{number}"] [data-mcp-header-field="name"]').fill(name)
                 manual.locator(f'[data-mcp-header-row="{number}"] [data-mcp-header-field="value"]').fill(literal)
-            manual.locator('[data-mcp-field="enabled"]').check()
+            manual.locator('[data-mcp-field="enabled"]').locator('xpath=..').click()
             _save(page)
             saved_from_form = json.loads((data_dir / 'settings.json').read_text(encoding='utf-8'))
             assert saved_from_form['MCP_SERVERS'][3]['headers'] == {'Authorization': BEARER, 'X-Api-Key': CUSTOM}
@@ -235,14 +297,13 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 @pytest.mark.parametrize('saved_headers', [False, True])
-@pytest.mark.parametrize('reload_pending', [False, True])
-def test_header_switch_stdio(direct_server_with_data, engine, saved_headers, reload_pending):  # noqa: F811
+def test_header_switch_stdio(direct_server_with_data, engine, saved_headers):  # noqa: F811
     """Retain draft headers on transport change until explicitly removed, then Save.
 
     Cover both a draft-only row and an edited previously saved map: the latter
     must not be resurrected from header row state after Remove unsupported.
     """
-    from playwright.sync_api import expect, sync_playwright
+    from playwright.sync_api import sync_playwright
 
     url, data_dir = direct_server_with_data['url'], direct_server_with_data['data_dir']
     with sync_playwright() as pw:
@@ -251,27 +312,11 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers, rel
         page._evidence_engine = engine
         try:
             _open_mcp(page, url)
-            pending = []
-            def hold_reload(route):
-                if route.request.method == 'GET' and not pending:
-                    pending.append(route)
-                else:
-                    route.continue_()
-            def start_reload():
-                # The page's own load on showing Settings must settle first: held, it is not the
-                # owner's reload, and landing later its status replaces the reload's own sentence.
-                expect(page.locator('#settings-status')).to_have_text('Settings refreshed', timeout=30_000)
-                page.route('**/api/settings', hold_reload)
-                with page.expect_request(lambda request: request.url.endswith('/api/settings')
-                                         and request.method == 'GET'):
-                    page.click('#btn-reload-settings')
-                assert len(pending) == 1
-            if reload_pending and not saved_headers:
-                start_reload()
-            page.click('#btn-mcp-add-server')
+            page.click('[data-tools-add]')
             card = page.locator('[data-mcp-card]').last
             card.locator('[data-mcp-field="id"]').fill('switch_headers')
             card.locator('[data-mcp-field="url"]').fill('https://example.com/mcp')
+            _edit(card)
             card.locator('[data-mcp-header-add]').click()
             card = page.locator('[data-mcp-card]').last
             card.locator('[data-mcp-header-field="name"]').fill('X-Api-Key')
@@ -280,11 +325,7 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers, rel
                 _save(page)
                 page.reload(wait_until='domcontentloaded')
                 _open_mcp(page, url)
-                if reload_pending:
-                    start_reload()
-                else:
-                    expect(page.locator('#settings-status')).to_have_text('Settings refreshed', timeout=30_000)
-                card = page.locator('[data-mcp-card]').last
+                card = _card(page, 'switch_headers')
                 _edit(card)
                 assert card.locator('[data-mcp-header-field="value"]').input_value() == '***set***'
                 card.locator('[data-mcp-header-field="value"]').fill('synthetic-edited-key')
@@ -293,17 +334,12 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers, rel
             card.locator('[data-mcp-field="command"]').fill('python3')
             remove = card.locator('[data-mcp-clear-unsupported]')
             assert remove.is_visible(), 'Draft-only header must have an explicit removal control'
-            assert 'headers' in card.locator('.ui-action-row:has([data-mcp-clear-unsupported]) .muted').inner_text()
+            assert 'headers' in card.locator('[data-mcp-unsupported]').inner_text()
             assert CUSTOM not in card.inner_text() and 'synthetic-edited-key' not in card.inner_text()
             _capture(page, f'mcp-stdio-retained-{saved_headers}')
             remove.click()
             card = page.locator('[data-mcp-card]').last
             assert card.locator('[data-mcp-clear-unsupported]').count() == 0
-            if reload_pending:
-                pending[0].fulfill(response=pending[0].fetch())
-                page.unroute('**/api/settings', hold_reload)
-                page.wait_for_function("() => (document.getElementById('settings-status')?.textContent || '').includes('Your edits are kept')")
-                assert page.locator('[data-mcp-card]').last.locator('[data-mcp-field="id"]').input_value() == 'switch_headers'
             _save(page)
             saved = json.loads((data_dir / 'settings.json').read_text(encoding='utf-8'))
             server = next(s for s in saved['MCP_SERVERS'] if s['id'] == 'switch_headers')
@@ -340,7 +376,7 @@ def test_late_status_keeps_typed_field(direct_server_with_data, loopback, engine
             saved = page.locator('[data-mcp-card]').first
             with page.expect_request(lambda request: request.url.endswith('/api/mcp/status'), timeout=20_000):
                 saved.locator('[data-mcp-refresh]').click()
-            page.click('#btn-mcp-add-server')
+            open_settings(page, 'tools/new')
             card = page.locator('[data-mcp-card]').last
             card.locator('[data-mcp-field="id"]').fill('typed_draft')
             card.locator('[data-mcp-field="transport"]').select_option('stdio')
@@ -351,9 +387,6 @@ def test_late_status_keeps_typed_field(direct_server_with_data, loopback, engine
             for route in held:
                 route.fulfill(response=route.fetch())
             held.clear()
-            expect(saved.locator('.mcp-server-status')).to_have_text(re.compile(r'^1 tool · listed .+$'), timeout=20_000)
-            expect(saved.locator('[data-mcp-message]')).to_contain_text('Saved catalog refreshed')
-            assert 'echo' in saved.locator('.mcp-tools-disclosure').text_content()
             page.keyboard.insert_text('on3')
             assert page.evaluate('() => document.activeElement === window.__typedField'
                                  ' && window.__typedField.isConnected'), 'the status answer replaced the typed field'
@@ -363,6 +396,9 @@ def test_late_status_keeps_typed_field(direct_server_with_data, loopback, engine
             page.unroute('**/api/mcp/status')
             _save(page)
             assert _disk(data_dir)['typed_draft']['command'] == 'python3'
+            saved = _card(page, 'late_status')
+            expect(saved.locator('[data-mcp-state]')).to_have_text(re.compile(r'^1 tool · listed .+$'))
+            assert 'echo' in saved.locator('.mcp-tools-disclosure').text_content()
         finally:
             browser.close()
 
@@ -388,14 +424,14 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
             _seed(page, url, [{'id': 'tools_focus', 'enabled': True, 'transport': 'streamable_http',
                                'url': http_url, 'headers': {'X-Api-Key': CUSTOM}}])
             card = page.locator('[data-mcp-card]').first
-            message, badge = card.locator('[data-mcp-message]'), card.locator('.mcp-server-status')
+            message, badge = card.locator('[data-mcp-message]'), card.locator('[data-mcp-state]')
 
-            def answer(change=None, focused=False, expected='Saved catalog refreshed'):
+            def answer(change=None, focused=False, expected='Listed again.'):
                 """Refresh without moving focus, then answer its held status read, changed or not."""
                 with page.expect_request(lambda request: request.url.endswith('/api/mcp/status'), timeout=20_000):
                     button = card.locator('[data-mcp-refresh]')
                     button.evaluate('button => button.click()') if focused else button.click()
-                expect(message).to_contain_text('Refreshing tools')
+                expect(message).to_contain_text('Listing its tools again...')
                 for route in held:
                     response = route.fetch()
                     data = response.json()
@@ -451,11 +487,10 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
             expect(badge).to_have_text(re.compile(r'^0 tools · listed [^·]+$'))
             assert card.locator('.mcp-tools-disclosure').count() == 0
 
-            # The chip says the state with a relative age; the exact stamps and the engine's text are behind Details.
+            # The chip says the state with a relative age; the server page has the exact stamps and engine's text.
             def stamp(iso):
                 return page.evaluate("async (iso) => (await import('/static/modules/utils.js')).absoluteTime(iso)", iso)
 
-            card.locator('.mcp-server-details > summary').click()
             expect(card.locator('[data-mcp-facts]')).to_be_visible()
             answer(lambda entry: entry.update(last_error='offline', latest_attempt={
                 'at': '2026-10-21T10:00:00+00:00', 'ok': False, 'error': 'offline', 'partial': False}))
@@ -487,7 +522,7 @@ def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, e
             answer(lambda entry: entry.update(publication_error='disk full'), expected='Refresh failed: disk full')
             expect(badge).to_have_text(re.compile(r'^1 tool · listed [^·]+ · catalog not published$'))
             assert _facts(card)['Catalog publication'] == 'disk full', _facts(card)
-            assert 'Saved catalog refreshed' not in message.inner_text()
+            assert 'Listed again.' not in message.inner_text()
             page.unroute('**/api/mcp/refresh')
             page.route('**/api/mcp/refresh', lambda route: route.fulfill(json={'ok': False, 'error': 'offline'}))
             answer(lambda entry: entry.update(latest_attempt={'at': '2026-10-21T11:00:00+00:00',
@@ -529,10 +564,10 @@ def test_edited_legacy_token_stays_removed_on_stdio(direct_server_with_data, eng
             card.locator('[data-mcp-field="transport"]').select_option('stdio')
             card = page.locator('[data-mcp-card]').last
             card.locator('[data-mcp-field="command"]').fill('python3')
-            notice = card.locator('.ui-action-row:has([data-mcp-clear-unsupported]) .muted').inner_text()
+            notice = card.locator('[data-mcp-unsupported]').inner_text()
             card.locator('[data-mcp-clear-unsupported]').click()
             card = page.locator('[data-mcp-card]').last
-            remaining = card.locator('.ui-action-row:has([data-mcp-clear-unsupported]) .muted').all_inner_texts()
+            remaining = card.locator('[data-mcp-unsupported]').all_inner_texts()
             _capture(page, f'mcp-legacy-stdio-removed-{legacy_header}')
             _save(page)
             entry = _disk(data_dir)['legacy_switch']
@@ -542,7 +577,7 @@ def test_edited_legacy_token_stays_removed_on_stdio(direct_server_with_data, eng
             assert (entry['transport'], entry['command'], entry.get('auth_token', ''),
                     entry.get('auth_header', 'Authorization'), 'headers' in entry) == (
                 'stdio', 'python3', '', 'Authorization', False)
-            assert notice == 'Fields retained but not applied: url, headers', notice
+            assert notice == 'Fields kept but not used: url, headers', notice
             assert remaining == [], remaining
             _edit(page.locator('[data-mcp-card]').last)
             page.locator('[data-mcp-card]').last.locator('[data-mcp-field="transport"]').select_option('streamable_http')
@@ -558,7 +593,6 @@ BETA = "synthetic-browser-beta-0005"
 
 def _seed(page, url, servers):
     """Write through the real Settings writer, then load the page from it and let its loads settle."""
-    from playwright.sync_api import expect
 
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     status = page.evaluate("""async (servers) => {
@@ -568,9 +602,8 @@ def _seed(page, url, servers):
     }""", servers)
     assert status[0] == 200, status
     _open_mcp(page, url)
-    # Showing Settings reloads it once more; that late load replaces every card and
-    # drops a pending Refresh or Test message, so act only on the settled draft.
-    expect(page.locator("#settings-status")).to_have_text("Settings refreshed", timeout=30_000)
+    first = page.locator('[data-settings-page="tools"] [data-entry-id]').first
+    _settings_ready(page, lambda: open_entry(page, first.get_attribute('data-entry-id')))
 
 
 def _rows(card):
@@ -608,31 +641,33 @@ def test_stdio_task_session_choice(direct_server_with_data):  # noqa: F811
         page._evidence_engine = 'chromium'
         try:
             _seed(page, url, servers)
-            cards = page.locator('[data-mcp-card]')
-            choice = cards.nth(0).locator('[data-mcp-field="task_session"]')
+            card = _card(page, 'local_browser')
+            choice = card.locator('[data-mcp-field="task_session"]')
             expect(choice).not_to_be_checked()
-            _edit(cards.nth(0))
+            _edit(card)
             choice.scroll_into_view_if_needed()
             _capture(page, 'mcp-task-session-off')
             choice.check()
             expect(choice).to_be_focused()
-            expect(cards.nth(0).locator('[data-mcp-lifetime]')).to_contain_text('One server process serves every call in a task')
+            expect(card.locator('[data-mcp-lifetime]')).to_contain_text('One server process serves every call in a task')
             _capture(page, 'mcp-task-session-on')
             _save(page)
             assert _disk(data_dir)['local_browser']['task_session'] is True
             _open_mcp(page, url)
-            expect(page.locator('#settings-status')).to_have_text('Settings refreshed')
+            card = _card(page, 'local_browser')
             expect(choice).to_be_checked()
-            _edit(cards.nth(0))
+            _edit(card)
             choice.uncheck()
             _save(page)
             assert _disk(data_dir)['local_browser']['task_session'] is False
-            guarded = cards.nth(1).locator('[data-mcp-field="task_session"]')
+            card = _card(page, 'guarded_browser')
+            _edit(card)
+            guarded = card.locator('[data-mcp-field="task_session"]')
             expect(guarded).to_be_checked()
             expect(guarded).to_be_disabled()
-            expect(cards.nth(1).locator('[data-mcp-lifetime]')).to_contain_text('requires a task session')
+            expect(card.locator('[data-mcp-lifetime]')).to_contain_text('requires a task session')
             assert _disk(data_dir)['guarded_browser']['browser_policy'] is True
-            assert cards.nth(2).locator('[data-mcp-field="task_session"]').count() == 0
+            assert _card(page, 'remote').locator('[data-mcp-field="task_session"]').count() == 0
         finally:
             browser.close()
 
@@ -666,8 +701,7 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
             tests = []
             page.on("request", lambda request: tests.append(request.post_data_json)
                     if request.url.endswith("/api/mcp/test") else None)
-            cards = page.locator("[data-mcp-card]")
-            legacy, pair, named = cards.nth(0), cards.nth(1), cards.nth(2)
+            legacy = _card(page, 'legacy_docs')
             # The legacy pair is one ordinary row with its own prefix mask; no second editor.
             assert _rows(legacy) == [("Authorization", BEARER[:8] + "..."), ("X-Tenant", "***set***")]
             assert page.locator('[data-mcp-field="auth_token"], [data-mcp-field="auth_header"]').count() == 0
@@ -678,11 +712,10 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
             expect(legacy.locator('[data-mcp-header-row="0"] .settings-secret-value')).to_have_text(BEARER)
             legacy.locator('[data-mcp-header-row="0"] [data-mcp-header-toggle]').click()
 
-            # An unrelated Save rewrites no credential: the legacy fields go back with their mask.
-            page.fill("#s-mcp-tool-timeout", "45")
-            _save(page)
-            legacy_post = next(s for s in posts[-1]["MCP_SERVERS"] if s.get("id") == "legacy_docs")
-            assert legacy_post["auth_header"] == "Authorization" and legacy_post["auth_token"] == BEARER[:8] + "..."
+            # A row's unrelated commit sends no servers or credentials.
+            open_settings(page, 'tools', 'MCP_TOOL_TIMEOUT_SEC')
+            assert commit_row(page, 'MCP_TOOL_TIMEOUT_SEC', 45).startswith('Saved')
+            assert posts[-1] == {'MCP_TOOL_TIMEOUT_SEC': 45}
             disk = _disk(data_dir)
             assert {key: disk["legacy_docs"][key] for key in ("auth_header", "auth_token", "headers")} == {
                 "auth_header": "Authorization", "auth_token": BEARER, "headers": {"X-Tenant": TENANT}}
@@ -690,44 +723,51 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
             assert disk["Name Only"]["headers"] == {"X-Api-Key": CUSTOM}
 
             # A server known by its name alone: Test and Refresh use that saved identity.
+            named = _card(page, "name_only")
             named.locator("[data-mcp-test]").click()
-            expect(named.locator("[data-mcp-message]")).to_contain_text("Draft connection OK", timeout=20_000)
+            expect(named.locator("[data-mcp-message]")).to_contain_text("The connection works.", timeout=20_000)
             assert tests[-1]["server_id"] == "Name Only" and tests[-1]["server"]["headers"] == {"X-Api-Key": "***set***"}
             named.locator("[data-mcp-refresh]").click()
-            expect(named.locator("[data-mcp-message]")).to_contain_text("Saved catalog refreshed", timeout=20_000)
+            expect(named.locator("[data-mcp-message]")).to_contain_text("Listed again.", timeout=20_000)
 
+            # Save this entry once to materialize its form defaults; unrelated row saves never do that.
+            legacy = _card(page, "legacy_docs")
+            _save(page)
             # Another spelling of the same canonical server ID keeps every saved value for Test and Save.
             _edit(legacy)
             legacy.locator('[data-mcp-field="id"]').fill("Legacy Docs")
             legacy.locator("[data-mcp-test]").click()
-            expect(legacy.locator("[data-mcp-message]")).to_contain_text("Draft connection OK", timeout=20_000)
+            expect(legacy.locator("[data-mcp-message]")).to_contain_text("The connection works.", timeout=20_000)
             assert tests[-1]["server_id"] == "legacy_docs" and tests[-1]["server"]["id"] == "Legacy Docs"
-            assert page.locator('[id^="mcp-0-header-"][id$="-error"]:visible').count() == 0
+            assert legacy.locator('[data-editor-result]').get_attribute('data-tone') != 'danger'
             saved_before = (data_dir / "settings.json").read_text(encoding="utf-8")
             with page.expect_response(lambda response: response.url.endswith('/api/settings')
                                       and response.request.method == 'POST', timeout=20_000) as renamed_save:
-                page.click("#btn-save-settings")
+                page.locator("[data-editor-save]").click()
             # Both spellings are one canonical ID, so this Save is an honest no-op that changes nothing on disk.
             answer = renamed_save.value.json()
             assert renamed_save.value.ok and answer["status"] == "saved" and answer.get("no_changes") is True, answer
             assert renamed_save.value.request.post_data_json["MCP_SERVERS"][0]["id"] == "Legacy Docs"
-            page.wait_for_function(
-                "() => (document.getElementById('settings-status')?.textContent || '').startsWith('No changes detected')",
-                timeout=20_000)
+            expect(legacy.locator('[data-editor-save]')).to_be_enabled()
+            expect(legacy.locator('[data-editor-result]')).to_have_text('')  # unchanged is quiet
             assert json.loads((data_dir / "settings.json").read_text(encoding="utf-8")) == json.loads(saved_before)
             disk = _disk(data_dir)
             assert disk["legacy_docs"]["auth_token"] == BEARER and disk["legacy_docs"]["headers"] == {"X-Tenant": TENANT}
+            _open_mcp(page, url)
+            legacy = _card(page, "legacy_docs")
             expect(legacy.locator('[data-mcp-field="id"]')).to_have_value("legacy_docs")
             assert _rows(legacy) == [("Authorization", BEARER[:8] + "..."), ("X-Tenant", "***set***")]
 
             # Saved A and B: remove B, rename masked A to B. Nothing substitutes B's value.
+            pair = _card(page, "pair")
             _edit(pair)
             pair.locator('[data-mcp-header-row="1"] [data-mcp-header-remove]').click()
             pair.locator('[data-mcp-header-row="0"] [data-mcp-header-field="name"]').fill("X-B")
             before = len(posts)
-            page.click("#btn-save-settings")
-            error = page.locator("#mcp-1-header-0-value-error")
+            page.locator("[data-editor-save]").click()
+            error = pair.locator('[data-editor-result]')
             expect(error).to_contain_text("belongs to header X-A", timeout=10_000)
+            expect(pair.locator('[data-mcp-header-row="0"] [data-mcp-header-field="value"]')).to_be_focused()
             assert len(posts) == before, "a refused draft must not be posted"
             tested = len(tests)
             pair.locator("[data-mcp-test]").click()
@@ -748,51 +788,29 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
             pair.locator('[data-mcp-header-row="1"] [data-mcp-header-field="name"]').fill("X-Dup")
             _save(page)
             assert _disk(data_dir)["pair"]["headers"] == {"x-a": ALPHA, "X-Dup": ""}
-            indicator = page.locator("#settings-status")
-            expect(indicator).not_to_have_text("Unsaved changes")
             _edit(pair)
             pair.locator("[data-mcp-header-add]").click()
             pair.locator('[data-mcp-header-row="2"] [data-mcp-header-field="name"]').fill("X-Dup")
-            expect(indicator).to_have_text("Unsaved changes")
-            page.click("#btn-save-settings")
-            expect(page.locator("#mcp-1-header-2-name-error")).to_contain_text("repeats header X-Dup")
+            page.locator("[data-editor-save]").click()
+            expect(pair.locator('[data-editor-result]')).to_contain_text("repeats header X-Dup")
             pair.locator('[data-mcp-header-row="2"] [data-mcp-header-remove]').click()
-            expect(indicator).not_to_have_text("Unsaved changes")
 
-            # Re-typing the mask is an edit: a preview taken before it is stale, the page is dirty,
-            # leaving asks first, and Save refuses the reserved marker instead of keeping the old value.
-            page.click("#btn-mcp-import")
-            dialog = page.locator(".mcp-import-dialog")
-            dialog.locator("#mcp-import-text").fill(json.dumps({"mcpServers": {"pair": {
-                "type": "http", "url": "https://pair.example/mcp"}}}))
-            dialog.locator("[data-mcp-import-preview-btn]").click()
-            dialog.locator(".mcp-import-entry").first.wait_for(timeout=15_000)
-            page.evaluate("""() => {
-                const input = document.querySelector('[data-mcp-index="1"] [data-mcp-header-row="0"] [data-mcp-header-field="value"]');
-                for (const value of ['synthetic-other', '***set***']) {
-                    input.value = value;
-                    input.dispatchEvent(new Event('input', {bubbles: true}));
-                }
-            }""")
-            dialog.locator("[data-mcp-import-apply]").click()
-            expect(dialog.locator("[data-mcp-import-status]")).to_contain_text("changed after this preview")
-            dialog.locator("[data-mcp-import-cancel]").first.click()
-            assert pair.locator('[data-mcp-header-row="0"] [data-mcp-header-field="value"]').input_value() == "***set***"
-            expect(indicator).to_have_text("Unsaved changes")
-            page.click("#btn-reload-settings")
-            confirm = page.get_by_role("button", name="Stay")
-            confirm.wait_for(timeout=10_000)
-            assert "You have unsaved settings changes" in page.locator("body").inner_text()
-            confirm.click()
-            expect(indicator).to_have_text("Unsaved changes")
+            # Re-typing the mask is an edit. The server's form keeps it across navigation and refuses it.
+            pair.locator('[data-mcp-header-row="0"] [data-mcp-header-field="value"]').fill('synthetic-other')
+            pair.locator('[data-mcp-header-row="0"] [data-mcp-header-field="value"]').fill('***set***')
+            _list(page)
+            pair = _card(page, 'pair')
+            _edit(pair)
+            assert pair.locator('[data-mcp-header-row="0"] [data-mcp-header-field="value"]').input_value() == '***set***'
             before = len(posts)
-            page.click("#btn-save-settings")
-            expect(page.locator("#mcp-1-header-0-value-error")).to_contain_text("reserved for keeping a saved value")
+            page.locator("[data-editor-save]").click()
+            expect(pair.locator('[data-editor-result]')).to_contain_text("reserved for keeping a saved value")
             assert len(posts) == before
             pair.locator('[data-mcp-header-row="0"]').scroll_into_view_if_needed()
             _capture(page, "mcp-retyped-mask-refused")
 
             # A deliberate address change keeps disclosed values: origins only, never path or query.
+            legacy = _card(page, "legacy_docs")
             _edit(legacy)
             endpoint = legacy.locator('[data-mcp-field="url"]')
             endpoint.fill("https://moved.example:8443/v2/mcp?token=synthetic-query")
@@ -808,11 +826,12 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
             expect(notice).to_be_hidden()
 
             # A result never certifies a later draft, and a pending one never lands on another card.
+            named = _card(page, "name_only")
             held = []
             page.route("**/api/mcp/test", lambda route: held.append(route))
             named.locator("[data-mcp-test]").click()
             page.wait_for_function("() => true")
-            expect(named.locator("[data-mcp-message]")).to_contain_text("Testing connection")
+            expect(named.locator("[data-mcp-message]")).to_contain_text("Testing the connection...")
             _edit(named)
             named.locator('[data-mcp-field="allowed_tools"]').fill("echo")
             page.wait_for_timeout(200)
@@ -821,16 +840,18 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
             page.unroute("**/api/mcp/test")
             held.clear()
             page.route("**/api/mcp/refresh", lambda route: held.append(route))
+            legacy = _card(page, "legacy_docs")
             legacy.locator("[data-mcp-refresh]").click()
             page.wait_for_timeout(200)
             assert len(held) == 1
-            legacy.locator("[data-mcp-remove]").click()
+            legacy.locator("[data-editor-remove]").click()
+            page.locator(".confirm-dialog-backdrop").get_by_role("button", name="Remove", exact=True).click()
             with page.expect_response(lambda response: response.url.endswith("/api/mcp/status")):
                 held[0].fulfill(response=held[0].fetch())
             page.wait_for_timeout(300)
-            assert page.locator("[data-mcp-card]").count() == 2
-            for card in page.locator("[data-mcp-card]").all():
-                assert "Saved catalog refreshed" not in card.locator("[data-mcp-message]").inner_text()
+            expect(page.locator('[data-settings-page="tools"] [data-entry-id]')).to_have_count(2)
+            named = _card(page, 'name_only')
+            assert 'Listed again.' not in named.locator('[data-mcp-message]').inner_text()
             page.unroute("**/api/mcp/refresh")
         finally:
             browser.close()
@@ -840,7 +861,7 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_mcp_import_replaces_legacy_ui(direct_server_with_data, loopback, engine):  # noqa: F811
-    """A file's headers replace the whole list, the saved single token included; Apply selects; Save writes."""
+    """A file's headers replace the whole list, the saved single token included; Apply saves the selected entries."""
     from playwright.sync_api import expect, sync_playwright
 
     url, data_dir = direct_server_with_data["url"], direct_server_with_data["data_dir"]
@@ -863,10 +884,12 @@ def test_mcp_import_replaces_legacy_ui(direct_server_with_data, loopback, engine
         page._evidence_engine = engine
         try:
             _seed(page, url, seed)
+            unselected_before = _disk(data_dir)["keep_me"]
             previews = []
             page.on("request", lambda request: previews.append(request.post_data_json)
                     if request.url.endswith("/api/mcp/import/preview") else None)
-            page.click("#btn-mcp-import")
+            _list(page)
+            page.locator('[data-tools-action="tools:import"]').click()
             dialog = page.locator(".mcp-import-dialog")
             dialog.locator("#mcp-import-text").fill(json.dumps(document, indent=2))
             dialog.locator("[data-mcp-import-preview-btn]").click()
@@ -887,53 +910,45 @@ def test_mcp_import_replaces_legacy_ui(direct_server_with_data, loopback, engine
             assert all(value not in sent for value in (http_url, "keep.example", "***set***", BEARER[:8]))
             _capture(page, "mcp-import-replace-preview")
             dialog.locator('[data-mcp-import-select="1"]').uncheck()  # keep_me stays as saved
-            expect(dialog.locator("[data-mcp-import-apply]")).to_have_text("Apply 2 to draft")
-            dialog.locator("[data-mcp-import-apply]").click()
-            assert dialog.count() == 0
-            cards = page.locator("[data-mcp-card]")
-            assert cards.count() == 3
-            focused = page.evaluate("() => [document.activeElement?.dataset?.mcpField,"
-                                    " document.activeElement?.closest('[data-mcp-card]')?.dataset?.mcpIndex]")
-            assert focused == ["id", "2"], focused  # the new card takes the caret
-            assert _rows(cards.nth(0)) == [("Authorization", BASIC), ("X-Api-Key", CUSTOM)]
-            assert _rows(cards.nth(1)) == [("X-Keep", "***set***")]
-            _save(page)
+            expect(dialog.locator("[data-mcp-import-apply]")).to_have_text("Apply 2")
+            _apply_import(dialog)
+            assert page.locator('[data-settings-page="tools"] [data-entry-id]').count() == 3
+            assert _rows(_card(page, 'legacy_docs')) == [('Authorization', '***set***'), ('X-Api-Key', '***set***')]
+            assert _rows(_card(page, 'keep_me')) == [('X-Keep', '***set***')]
             disk = _disk(data_dir)
             assert disk["legacy_docs"]["headers"] == {"Authorization": BASIC, "X-Api-Key": CUSTOM}
             assert disk["legacy_docs"]["auth_token"] == "" and disk["legacy_docs"]["enabled"] is True
-            assert disk["keep_me"] == {**seed[1], "id": "keep_me", "name": "", "command": "", "args": [],
-                                       "auth_header": "Authorization", "auth_token": "", "allowed_tools": [],
-                                       "schemas_at_start": False}  # #2351: Save writes the per-server pin
+            # The settings reader materializes an absent legacy token as empty (secret_rows.py).
+            assert disk['keep_me'] == {**unselected_before, 'auth_token': ''}
             assert disk["fresh"]["enabled"] is False and disk["fresh"]["url"].endswith("?k=synthetic-query")
+            card = _card(page, 'legacy_docs')
             seen_before = len(http_app.seen)
-            cards.nth(0).locator("[data-mcp-refresh]").click()
-            expect(cards.nth(0).locator("[data-mcp-message]")).to_contain_text("Saved catalog refreshed", timeout=20_000)
-            _edit(cards.nth(0))
+            card.locator("[data-mcp-refresh]").click()
+            expect(card.locator("[data-mcp-message]")).to_contain_text("Listed again.", timeout=20_000)
+            _edit(card)
             for theme in ("light", "dark"):
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 page.evaluate("(theme) => window.ouroTheme.set(theme)", theme)
                 page.locator(f'html[data-theme="{theme}"]').wait_for(state="attached")
-                cards.nth(0).scroll_into_view_if_needed()
+                card.scroll_into_view_if_needed()
                 _capture(page, f"mcp-headers-{theme}")
                 page.set_viewport_size({"width": 390, "height": 844})
-                cards.nth(0).locator('[data-mcp-header-row="1"]').scroll_into_view_if_needed()
-                row = cards.nth(0).locator('[data-mcp-header-row="1"]').bounding_box()
+                card.locator('[data-mcp-header-row="1"]').scroll_into_view_if_needed()
+                row = card.locator('[data-mcp-header-row="1"]').bounding_box()
                 assert row["x"] >= 0 and row["x"] + row["width"] <= 390, row
                 _capture(page, f"mcp-headers-{theme}-narrow")
         finally:
             browser.close()
-    # Before Save the old single token was still the saved credential; after it, only the file's values.
+    # Before Apply the old single token was still the saved credential; after it, only the file's values.
     assert http_app.seen[seen_before:] and {headers["authorization"] for headers in http_app.seen[seen_before:]} == {BASIC}
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 @pytest.mark.parametrize('imported', ['empty', 'map', 'absent'])
 def test_removed_legacy_then_import(direct_server_with_data, loopback, engine, imported):  # noqa: F811
-    """Remove the saved single token without saving, then import the same server: Apply, Test and Save keep it gone.
+    """Save removal of the single token, then import the same server: Import and Test keep it gone.
 
-    The removed row lives only in the editor, while the server object still holds
-    the saved token's mask; a file's ``headers`` clears that pair in its own patch.
-    A file without ``headers`` keeps the draft list as edited, removal included.
+    Import writes from a fresh saved list. Each server form saves its own changes before that list action.
     """
     from playwright.sync_api import expect, sync_playwright
 
@@ -955,31 +970,32 @@ def test_removed_legacy_then_import(direct_server_with_data, loopback, engine, i
             assert _rows(card) == [("Authorization", BEARER[:8] + "..."), ("X-Tenant", "***set***")]
             _edit(card)
             card.locator('[data-mcp-header-row="0"] [data-mcp-header-remove]').click()
-            page.click("#btn-mcp-import")
+            _save(page)
+            _list(page)
+            page.locator('[data-tools-action="tools:import"]').click()
             dialog = page.locator(".mcp-import-dialog")
             dialog.locator("#mcp-import-text").fill(json.dumps({"mcpServers": {"legacy_docs": entry}}))
             dialog.locator("[data-mcp-import-preview-btn]").click()
             dialog.locator(".mcp-import-entry").first.wait_for(timeout=15_000)
             assert "Update" in dialog.inner_text() and "Authorization" not in dialog.inner_text()
-            dialog.locator("[data-mcp-import-apply]").click()
-            assert dialog.count() == 0
-            card = page.locator("[data-mcp-card]").first
-            rows = [(name, "***set***" if imported == "absent" else value) for name, value in expected.items()]
+            _apply_import(dialog)
+            card = _card(page, 'legacy_docs')
+            _edit(card)
+            rows = [(name, "***set***") for name, value in expected.items()]
             assert _rows(card) == rows, _rows(card)
             card.locator('[data-mcp-header-row="0"]' if rows else '[data-mcp-test]').scroll_into_view_if_needed()
             _capture(page, f"mcp-removed-legacy-import-{imported}")
             seen = len(http_app.seen)
             card.locator("[data-mcp-test]").click()
-            expect(card.locator("[data-mcp-message]")).to_contain_text("Draft connection OK", timeout=20_000)
+            expect(card.locator("[data-mcp-message]")).to_contain_text("The connection works.", timeout=20_000)
             assert tests[-1]["server"].get("auth_token", "") == ""
             assert http_app.seen[seen:] and all("authorization" not in headers for headers in http_app.seen[seen:])
-            _save(page)
             disk = _disk(data_dir)["legacy_docs"]
             assert (disk.get("auth_token", ""), disk["headers"]) == ("", expected)
             assert BEARER not in json.dumps(disk)
             page.reload(wait_until="domcontentloaded")
             _open_mcp(page, url)
-            assert _rows(page.locator("[data-mcp-card]").first) == [(name, "***set***") for name in expected]
+            assert _rows(_card(page, "legacy_docs")) == [(name, "***set***") for name in expected]
         finally:
             browser.close()
 
@@ -1007,8 +1023,9 @@ def test_retyped_legacy_mask_cannot_replace_saved_token(direct_server_with_data,
                 page.on('request', handler)
                 field.fill('synthetic-other')
                 field.fill(mask)
-                page.click('#btn-save-settings')
-                expect(page.locator('#mcp-0-header-0-value-error')).to_contain_text("saved token's mask")
+                page.locator('[data-editor-save]').click()
+                expect(page.locator('[data-editor-result]')).to_contain_text("saved token's mask")
+                expect(field).to_be_focused()
                 assert posts == []
                 assert _disk(data_dir)['legacy_mask']['auth_token'] == token
                 field.fill('synthetic-new-credential')

@@ -151,7 +151,7 @@ def test_the_initiating_writer_returns_within_the_same_bound(monkeypatch):
     assert payload["code"] == "settings_save_timeout"
     assert "saved" in payload and payload["saved"] is None
     assert "still running" in payload["error"]
-    assert "reload Settings" in payload["error"]
+    assert "open Settings again" in payload["error"]
 
 
 def test_the_typed_busy_refusal_still_wins_under_the_bound(monkeypatch):

@@ -6,6 +6,7 @@ The window covers instrumented observations, never the unobserved installation.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -15,7 +16,7 @@ import os
 import pathlib
 
 from ouroboros import store
-from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.utils import append_jsonl, assert_test_data_path, jsonl_append_lock_path, replace_atomic, utc_now_iso
 
 log = logging.getLogger(__name__)
 EVENT = "subagent_measurement"
@@ -89,6 +90,11 @@ def fold(prior, event, previous=None):
 # larger event stays whole. Only the child consumes an unbounded backlog.
 BATCH_BYTES = 256 * 1024
 JOB = "subagent_metrics"
+# The fold a held store refused, as an empty file every process sees. A publisher leaves ``OWED``.
+# The job renames it ``TAKEN`` before it reads the journal's end and drops ``TAKEN`` once its outcome
+# is recorded, so a refusal after the rename leaves a new ``OWED`` and no file time is compared.
+OWED = "state/subagent_metrics.owed"
+TAKEN = "state/subagent_metrics.taken"
 
 
 def _projection(root, events):
@@ -142,6 +148,90 @@ def _projection(root, events):
     return updates, observed, tasks
 
 
+@contextlib.contextmanager
+def _journal_lock(root):
+    """One hold of the journal's append lock, with ``append_jsonl``'s own wait; yields whether it is held."""
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    lock_path = jsonl_append_lock_path(pathlib.Path(root) / "logs/events.jsonl")
+    lock = acquire_exclusive_file_lock(lock_path, timeout_sec=2.0, stale_sec=10.0, poll_sec=0.01,
+                                       owner_aware_stale=True)
+    try:
+        yield lock is not None
+    finally:
+        release_exclusive_file_lock(lock_path, lock)
+
+
+def _mark(root):
+    """Leave ``OWED``: the held store refused a write this root's fold waits on, and the mark keeps the
+    job due at a look in any process. No store is read. A file error is one warning and never fails
+    the publication, whose event in the journal matters more."""
+    from ouroboros.maintenance import child
+
+    path = pathlib.Path(root) / OWED
+    try:
+        assert_test_data_path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    except OSError as exc:
+        log.warning("subagent measurement fold mark not written: %s", exc)
+    child.request()
+
+
+def _append_marked(root, event):
+    """The append whose wake the held store refused: the mark, then the event, under one hold of the
+    journal's append lock. The job takes the mark under the same lock (``_take``), so a mark it holds
+    never names an event still to be appended. Past the lock's wait both land unlocked, as
+    ``append_jsonl`` appends, and the mark is left again after the event."""
+    with _journal_lock(root) as held:
+        _mark(root)
+        written = append_jsonl(pathlib.Path(root) / "logs/events.jsonl", event, lock_held=held, lock_timeout_sec=0)
+        if not held:
+            _mark(root)  # an unlocked append may land after a capture: the mark is left again
+        return written
+
+
+def _marked(root):
+    """Whether a fold the held store refused still waits: ``OWED``, or ``TAKEN`` while a pass holds it
+    and after one that recorded no outcome. One ``stat`` per name and no store; ``None`` when a mark
+    cannot be read."""
+    for name in (OWED, TAKEN):
+        try:
+            os.stat(pathlib.Path(root) / name)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        return True
+    return False
+
+
+def _take(root):
+    """The job's capture, before it reads the journal's end: ``OWED`` becomes ``TAKEN`` under the
+    journal's append lock, so the event of a mark taken here is in the journal this pass folds. A
+    ``TAKEN`` an earlier pass left stays taken. Without the lock nothing is taken: ``OWED`` stands
+    and the job stays due."""
+    owed = pathlib.Path(root) / OWED
+    if not os.path.exists(owed):
+        return
+    with _journal_lock(root) as held:
+        if held:
+            with contextlib.suppress(FileNotFoundError):
+                replace_atomic(owed, pathlib.Path(root) / TAKEN)
+
+
+def _drop_taken(root):
+    """The pass recorded its outcome (``done``, or a ``failed`` that rests on its source): the mark it
+    took goes. An ``OWED`` left since the capture stands."""
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(pathlib.Path(root) / TAKEN)
+
+
+def _deferred(coverage):
+    """The coverage of a fold that waits: what ``_defer`` records and what a reader shows beside a mark."""
+    return {**coverage, "state": "unknown", "stream": "pending", "history_before_window": "unknown"}
+
+
 def _defer(root):
     from ouroboros import maintenance_jobs
     from ouroboros.maintenance import child
@@ -149,8 +239,7 @@ def _defer(root):
     source = _source_stamp(root)
     with store.open_store(root, write=True) as txn:
         cursor = txn.meta(CURSOR) or {}
-        coverage = {**cursor.get("coverage", {}), "state": "unknown", "stream": "pending",
-                    "history_before_window": "unknown"}
+        coverage = _deferred(cursor.get("coverage", {}))
         if cursor.get("coverage") != coverage:
             txn.set_meta(CURSOR, {**cursor, "coverage": coverage})
         job = txn.meta("job:" + JOB) or {}
@@ -251,6 +340,8 @@ def catch_up(root, *, should_stop=None):
                 return through == source.upper
         _defer(root)
         return False
+    except store.StoreBusy:
+        raise  # contention keeps the job due; a held store is not written again to say so
     except Exception:
         with store.open_store(root, write=True) as txn:
             old = txn.meta(CURSOR) or {}
@@ -277,14 +368,19 @@ def job_due(root, row, facts, child):
     if row.get("state") in {"pending", "running"}:
         return True
     if row.get("state") == "failed":
-        return row.get("source") != _source_stamp(root)  # changed failed source, including a repaired torn tail
-    return bool(row.get("publication_owed")) or not row.get("state") and any(_source_stamp(root))
+        # A changed failed source, including a repaired torn tail. A mark wakes no failed row:
+        # a torn tail would then wake the child at every look.
+        return row.get("source") != _source_stamp(root)
+    # A mark keeps a done row due: the held store took no wake for an event the journal holds.
+    return (bool(row.get("publication_owed")) or not row.get("state") and any(_source_stamp(root))
+            or bool(_marked(root)))
 
 
 def run_job(root, should_stop):
     from ouroboros import maintenance_jobs
     from ouroboros.jsonl_tail import JsonlChainSnapshot
 
+    _take(root)  # before ``catch_up`` reads the journal's end: the event of a mark taken here is inside that fold
     # The recorded job request is fenced too: a publisher racing the last fold
     # keeps the job pending. A torn line rests until a publication requests it.
     source = _source_stamp(root)
@@ -292,10 +388,15 @@ def run_job(root, should_stop):
         request = txn.meta("job:" + JOB)
     try:
         complete = catch_up(root, should_stop=should_stop)
+    except store.StoreBusy:
+        raise  # as in ``catch_up``: the job's row and the mark this pass took stand, and the job stays due
     except Exception as exc:
         with store.open_store(root, write=True) as txn:
-            if txn.meta("job:" + JOB) == request:
+            failed = txn.meta("job:" + JOB) == request
+            if failed:
                 maintenance_jobs.record_in(txn, JOB, state="failed", error=type(exc).__name__, source=source)
+        if failed:
+            _drop_taken(root)
         raise
     upper = JsonlChainSnapshot(root / "logs/events.jsonl").upper
     state = "pending"
@@ -309,6 +410,8 @@ def run_job(root, should_stop):
             maintenance_jobs.record_in(txn, JOB, state=state, through=cursor.get("through"),
                                        coverage=cursor.get("coverage"), source=source,
                                        publication_owed=None if state == "done" else (request or {}).get("publication_owed"))
+    if state != "pending":
+        _drop_taken(root)
     return {"state": state, "items": 0}
 
 
@@ -334,12 +437,16 @@ def publish(root, event):
             event["ts"] = event.get("ts") or previous.get("ts") or utc_now_iso()
             from ouroboros import maintenance_jobs
             publication = identity_key(event)
+            refused = False
             try:
                 with store.open_store(root, write=True) as txn:
                     maintenance_jobs.record_in(txn, JOB, state="pending", publication_owed=publication)
+            except store.StoreBusy:
+                refused = True  # the wake is the mark, left with the event under one hold of the journal's lock
             except Exception:
                 log.debug("Measurement wake awaits the next publisher or explicit catch-up", exc_info=True)
-            if not append_jsonl(pathlib.Path(root) / "logs/events.jsonl", event):
+            if not (_append_marked(root, event) if refused
+                    else append_jsonl(pathlib.Path(root) / "logs/events.jsonl", event)):
                 with store.open_store(root, write=True) as txn:
                     cursor = txn.meta(CURSOR) or {}
                     missing = sorted(set(cursor.get("missing_producers") or ()) | {event["producer_id"]})
@@ -348,13 +455,31 @@ def publish(root, event):
                 raise OSError("measurement journal append failed")
         try:
             _publish_suffix(root, before, publication)
+        except store.StoreBusy:
+            _mark(root)  # the event is in the journal; the held store is not written again to say so
+            log.warning("subagent measurement projection deferred: store busy (task=%s producer=%s)",
+                        event.get("task_id"), event.get("producer_id"))
+            return
         except Exception:
-            _defer(root)  # failed projection is unknown even when the old prefix was complete
+            try:
+                _defer(root)  # failed projection is unknown even when the old prefix was complete
+            except store.StoreBusy:
+                _mark(root)  # the held store took no deferral either
             raise
         from ouroboros.swarm_receipt import refresh_for_task
         refresh_for_task(root, event.get("task_id"))
     except Exception:
-        log.warning("subagent measurement projection unavailable", exc_info=True)
+        log.warning("subagent measurement projection unavailable (task=%s producer=%s)",
+                    event.get("task_id"), event.get("producer_id"), exc_info=True)
+
+
+def _shown(root, coverage):
+    """The coverage a reader shows. A fold the held store refused waits whatever the store's row says
+    (``_marked``); a mark that cannot be read takes only the row's ``complete``."""
+    marked = _marked(root)
+    if marked or marked is None and coverage.get("stream") == "complete":
+        return _deferred(coverage)
+    return coverage
 
 
 def read(root, row_id, *, row_identity=None, purpose=None):
@@ -368,6 +493,7 @@ def read(root, row_id, *, row_identity=None, purpose=None):
                 rows = [txn.get_row(set_name("subagent_metrics", row_id), identity_key(row_identity) + ":" + p) for p in purposes]
             else:
                 rows = list(txn.set_rows(set_name("subagent_metrics", row_id)).values())
+        coverage = _shown(root, coverage)
         return {"coverage": coverage, "rows": [{**row, "coverage": coverage} for row in rows
                                                 if row and (not purpose or row["purpose"] == purpose)]}
     except Exception:
@@ -377,8 +503,8 @@ def read(root, row_id, *, row_identity=None, purpose=None):
 def seat_facts(root, seats):
     """Each review seat's measured answers, silences and mean seconds per surface (``review``, ``plan``; a
     session row's plan-mode runs count under ``plan`` too) on its current target (``seats`` = ``(row_id,
-    target)`` pairs), for ``## Review seat activity``, with the store's coverage: one display read for the pool
-    (the usage display wait, then unknown); ``"unknown"`` without an observation, never a zero."""
+    target)`` pairs), for ``## Review seat activity``, with the coverage a reader shows (``_shown``): one display
+    read for the pool (the usage display wait, then unknown); ``"unknown"`` without an observation, never a zero."""
     from ouroboros.runtime_limits import USAGE_DISPLAY_LOCK_TIMEOUT_SEC
 
     found, coverage = [{} for _ in seats], {"state": "unknown", "stream": "unavailable"}
@@ -394,6 +520,7 @@ def seat_facts(root, seats):
                                     no_answer=seat["no_answer"] + int(row.get("no_answer") or 0),
                                     n=seat["n"] + int(samples.get("count") or 0),
                                     sec=seat["sec"] + float(samples.get("sum_sec") or 0.0))
+        coverage = _shown(root, coverage)
     except Exception:
         log.debug("review seat measurements unavailable", exc_info=True)
         found, coverage = [{} for _ in seats], {"state": "unknown", "stream": "unavailable"}

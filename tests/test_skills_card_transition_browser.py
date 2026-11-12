@@ -103,7 +103,7 @@ def test_virtual_install_becomes_operable_without_reload(skills_browser, browser
             return {"ok": True}
 
         skills.answers["/api/skills/calendar/toggle"] = toggle
-        card.locator('label.skills-switch').click()
+        card.locator('label.ui-switch').click()
         skills.wait_for_count(('POST', '/api/skills/calendar/toggle'), 1)
         page.wait_for_function("document.querySelector('.skills-card[data-skill=calendar] .skills-toggle').checked && !document.querySelector('.skills-card[data-skill=calendar] .skills-toggle').disabled")
         assert skills.posted('/api/skills/calendar/toggle') == [{"enabled": True}]

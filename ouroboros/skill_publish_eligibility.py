@@ -74,7 +74,7 @@ def submit_hub_eligibility(
             "task_start_allowed": False,
             "disabled": True,
             "state": "hard_block",
-            "reason": "Configure GITHUB_TOKEN in Settings → Secrets",
+            "reason": "Configure GITHUB_TOKEN in Settings → Accounts and keys",
         }
     if cyber:
         reason = "Open Publish to inspect current bytes; review and scanner findings are advisory in Cyber Pro"
