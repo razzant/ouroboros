@@ -280,6 +280,7 @@ def render_outline(note: Any, label: str = "") -> str:
     spans = [_own_section(heading) or heading.span for heading in headings]
     chars = _char_offsets(note.raw, {edge for span in spans for edge in (span.start_byte, span.end_byte)})
     lines.append("Headings (each heading line as written, its line, section range as start_char..end_char, size). "
+                 "The ranges are of the note itself, read with the default view. "
                  "A section runs to the next heading of its level or higher, so a parent's range contains its children's:")
     for heading, span in zip(headings, spans):
         start, end = chars[span.start_byte], chars[span.end_byte]

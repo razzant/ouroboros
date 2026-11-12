@@ -37,7 +37,9 @@ def test_outline_ranges_read_back_exactly_their_sections(tmp_path):
     note = store.write_knowledge_note(address(tmp_path), RIVER).current
     outline = tools._knowledge_read(ctx, TOPIC, view="outline")
     for fact in ("Summary: When the river matters.", f"Revision: {note.revision}", "State: active",
-                 f"Total: {len(note.text)} characters", "a parent's range contains its children's"):
+                 f"Total: {len(note.text)} characters", "a parent's range contains its children's",
+                 # A range passed with view='outline' pages the outline's own text; the printed ranges are the note's.
+                 "size). The ranges are of the note itself, read with the default view. A section runs"):
         assert fact in outline
     ranges, bytes_differ = {}, False
     for heading in note.source.headings:  # the parser's sections, whose spans are UTF-8 byte offsets
