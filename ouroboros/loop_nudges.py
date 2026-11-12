@@ -379,8 +379,8 @@ def _zero_run_closed(ctx: Any, receipt_rows: List[Dict[str, Any]]) -> bool:
 
 def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
                          receipt_rows: List[Dict[str, Any]]) -> str:
-    """The one finish-door notice (audit 11.11, item 18; the owner 12.11: «Проверку и пушбэк такой как раз же
-    нужен напомнить... и сделать приёмку и качество точнее»): the facts the host holds before the first ordinary
+    """The one finish-door notice (audit 11.11, item 18; owner 12.11: keep the pushback at the exit and make
+    acceptance and quality more precise): the facts the host holds before the first ordinary
     delivery, never a gate. It names what applies: a result nothing examined since it last changed
     (``outcomes.result_unexamined``; not where Required's floor reviews it at delivery), direct children still
     running, this task's own delegated runs still open. Typed facts only, never parsed prose (P5); a red check,
@@ -389,7 +389,7 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
 
     lines: List[str] = []
     # A declaration that nothing is machine-checkable does not skip it: an early formal record must not buy the
-    # door back (consilium R5, Р2 (i): opus, fable; grok for skipping). The notice states the declaration.
+    # door back (owner 12.11: such a record no longer counts as a check). The notice states the declaration.
     if (result_unexamined(llm_trace) and not required_root_wave(tools._ctx)
             and not _zero_run_closed(tools._ctx, receipt_rows)):
         lines += [
