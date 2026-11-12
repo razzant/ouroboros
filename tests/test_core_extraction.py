@@ -174,8 +174,11 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # keeps the work alive with what it holds, until when, and what the default does; nothing else changed
     # (8892c8af... before).
     # Presence clarification keeps the question notice private and names the requested wait's boundary.
+    # Rolled for the one release of words (#3257): escalate's first sentence asks by authority (BIBLE P0),
+    # its wait clause names work that cannot go on without the answer, and "with an explanation" leaves
+    # the closing sentence; nothing else changed (76a2871b... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "76a2871bb599a0ae52b1d5442c26db7cbe21e83c4990e273a6a39e25d42a4a80"
+        "4da8992f58a5e0db0c4cf195a08673488961777dafc9801f36ccc18419b462b1"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
