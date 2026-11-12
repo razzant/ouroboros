@@ -2,6 +2,7 @@
 
 The sending task, not a relay's recipient, owns its speech. A work's last reply
 stays whole after its intermediate replies have yielded to its recorded gist.
+A relay that quotes my human's words belongs to no work: no gist stands for them.
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ def row_reader(room_id=None):
 
 
 def speech_facts(row, author):
-    from ouroboros.dialogue_provenance import dialogue_speaker
+    """A spoken row's author facts; ``owner_quoted``: a relay that quotes my human's words (``relay_quotes``)."""
+    from ouroboros.dialogue_provenance import dialogue_speaker, relay_quotes
     transport = row.get("transport") or {}
     relay = row.get("relay") or {}
     task = ((relay.get("sender") or {}).get("task_id") if row.get("type") == "relay_entry" else
@@ -32,7 +34,8 @@ def speech_facts(row, author):
     return {"task_id": str(task or ""), "via": author.get("via", ""),
             "speaker": [str(transport.get(k) or "") for k in ("provider", "account_id")] + [dialogue_speaker(row)],
             "text": str(row.get("text") or ""), "reply_to": (row.get("reply_to") or {}).get("address", ""),
-            "author": author.get("label", ""), "relay_summary": str(relay.get("summary") or "")}
+            "author": author.get("label", ""), "relay_summary": str(relay.get("summary") or ""),
+            **({"owner_quoted": True} if relay_quotes(row) else {})}
 
 
 def gists(by_room, format_address, *other_sources):
@@ -53,6 +56,9 @@ def bind(room, groups, summaries):
     for item in rooms:
         for word in item.get("lane1", item.get("words", ())):
             if word.get("kind") != "ouroboros":
+                continue
+            if word.get("owner_quoted"):  # my human's quoted words stand whole: no gist of mine stands for them
+                word["work_id"] = "relay:" + word["address"]
                 continue
             gist = summaries.get(word.get("task_id"))
             if word.get("relay_summary"):

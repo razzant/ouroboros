@@ -654,6 +654,67 @@ def test_work_key_is_the_author_not_a_relay_recipient(row, author, task):
     assert work.speech_facts(row, author)["task_id"] == task
 
 
+OWNER_LIMIT = "Do not touch the invoices until Friday; only the March batch may move."
+
+
+def _relayed_limit(root, *, quoted):
+    """My human speaks in Main and that row is sealed by a page; the mind then relays a note into a Project's
+    running work with a one-line summary, quoting those words or not. The Project root's captured view."""
+    import dataclasses
+    import json
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.chronicle import _chronicle_write
+    from tests import _memory_inventory_shared as shared
+    from tests.test_late_review_marks import _ctx
+    shared.world(root)
+    beta = create_project(root, "beta", name="Beta")
+    write_task_result(root, "recipient", "running", chat_id=1, title="recipient")
+    bind_task_to_project(root, "recipient", beta["id"], beta["chat_id"], origin={"absent": "system"})
+    owner = {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:01:00Z", "client_message_id": "owner-limit",
+             "text": OWNER_LIMIT}
+    ds.append(root, "chat", owner)
+    relay = {"chat_id": beta["chat_id"], "direction": "out", "type": "relay_entry", "task_id": "recipient",
+             "ts": "2026-10-01T00:02:00Z", "client_message_id": "relay:limit:recipient",
+             "text": "A limit from my human for this work. " + "Context of the note. " * 40,
+             "relay": {**relay_envelope("limit", [owner_quote(root, owner)] if quoted else [], chat_id=1,
+                                        summary="Passed on a limit about invoices."), "sender": {"task_id": "teller"}}}
+    ds.append(root, "chat", relay)
+    ds.append(root, "chat", {"chat_id": beta["chat_id"], "direction": "out", "task_id": "recipient",
+                             "root_task_id": "recipient", "delegation_role": "root", "ts": "2026-10-01T00:05:00Z",
+                             "text": "Working on the batch now. " + "More. " * 60})
+    sealed = json.loads(_chronicle_write(_ctx(root, "root0001"), kind="page", room_id="1",
+                                         text="The owner set a limit for the Beta work. Details in the rows.",
+                                         covers={"to": format_address(row_address(owner))}))
+    assert sealed["ok"], sealed
+    snap = mv.capture_memory_view(root, {"id": "recipient", "chat_id": beta["chat_id"]}, dataclasses.replace(
+        mv.ROLE_DEFAULTS["integrator"], room_id=str(beta["chat_id"])))
+    return snap, next(r for r in snap.room["lane1"] if r["address"] == format_address(row_address(relay)))
+
+
+@pytest.mark.parametrize("quoted", [True, False], ids=["owner-quoted", "note-only"])
+def test_a_relay_quoting_my_humans_words_keeps_them_whole_at_every_ordinary_stage(tmp_path, quoted):
+    """rev_fable REV2 F1: a relay's summary became the gist of the row that also holds my human's quoted words, so a
+    clean start replaced them by the relay summary when their own row was sealed. Such a relay belongs to no work and
+    stands whole through the ordinary stages; it yields only in counted emergencies. A note quoting nobody still folds
+    into its own summary."""
+    snap, row = _relayed_limit(tmp_path, quoted=quoted)
+    ordinary = mf.ordinary_level(snap)
+    text = mv.render_story(snap, ordinary) + "\n" + mv.render_room(snap, ordinary)
+    assert text.count(OWNER_LIMIT) == int(quoted) and text.count(row["address"]) >= 1
+    assert text.count("«Passed on a limit about invoices.»") == int(not quoted)
+    assert ("owner_quoted" in row, "gist" in row) == (quoted, not quoted)
+    if quoted:
+        assert not mf.form_counts(snap, ordinary)["emergency"] and row["line"] in text
+        assert {forms.stage_of(snap, "F2", ident) for ident in (row["address"], "bare:" + row["address"])} == {
+            "room_emergency", "physical_rows"}
+    else:
+        assert mf.form_counts(snap, ordinary)["retold"]["works"]["sources"] == 1 and row["line"] not in text
+
+
 def test_two_finished_threads_keep_their_gists_and_unread_fold_owner_lines():
     from ouroboros import memory_view_conversations as conv
     groups = [syn.conversation(i, words=2, word_chars=2000) for i in (1, 2)]
