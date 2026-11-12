@@ -126,7 +126,8 @@ def test_action_results_reflow_before_their_text_is_squeezed(role_ui, theme):
     row = button.locator('..')
     expect(button).to_be_visible()
     def refuse(route):
-        route.fulfill(status=503, json={'error': 'Roster temporarily unavailable'})
+        # A refusal as the server words one (`saved: false`); an answer without it is an unknown outcome.
+        route.fulfill(status=503, json={'error': 'Roster temporarily unavailable', 'saved': False})
     page.route('**/api/owner/safety-model', refuse)
     button.click()
     status = row.locator('.ui-result')
