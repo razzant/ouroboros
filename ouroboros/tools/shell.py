@@ -22,7 +22,7 @@ from typing import Dict, List  # noqa: F401
 
 from ouroboros.owner_pause import OwnerPauseRefused
 from ouroboros.tool_capabilities import RESULT_VIEW_PARAMS
-from ouroboros.tools.tool_result import launch_refusal_result, _publish_tool_result
+from ouroboros.tools.tool_result import ToolResult, launch_refusal_result, _publish_tool_result, _published_tool_result
 from ouroboros.platform_layer import bootstrap_process_path
 from ouroboros.process_interpreters import (
     active_node_resolution,
@@ -45,13 +45,14 @@ from ouroboros.tools.registry import (
 from ouroboros.tools import shell_audit as _shell_audit
 from ouroboros.tools.deliverables_shell import lexical_user_files_block_reason  # noqa: F401
 from ouroboros.tools.shell_audit import (
-    _UNDECLARED_OUTPUTS_MARKER,
     _disclose_output_audit_failure,
     _masked_green_disclosure,
+    _UNDECLARED_OUTPUTS_MARKER,  # noqa: F401
     _mentioned_user_file_outputs_without_declaration,
     _presence_allows_user_output,  # noqa: F401
     _allowed_output_roots,  # noqa: F401
 )
+from ouroboros.tools.shell_audit import REGISTER_OUTPUT_ADVICE, undeclared_outputs_meta, undeclared_outputs_note  # used here, not re-exported
 from ouroboros.tools.shell_process import (  # noqa: F401
     _RUN_SHELL_DEFAULT_TIMEOUT_SEC,
     CommandStopped,
@@ -139,16 +140,6 @@ from ouroboros.tools.shell_process import (  # noqa: E402
     _publish_unfinished_process_facts,
 )
 
-
-
-# v6.90.x (submarine unwind) — the DECLARATION-NUDGE marker, deliberately typed
-# APART from the real ``ARTIFACT_OUTPUT_ERROR`` registration failure above. The
-# command SUCCEEDED (exit_code=0) and this only asks for ``outputs=[...]`` to be
-# declared, so its status lands in the v6.57.0 POLICY-DENIAL partition
-# (``_outcome_tool_errors._POLICY_DENIAL_STATUSES``) instead of degrading execution
-# to ``tool_failure``. The submarine wave-3 incident was exactly this: a moot nudge
-# on an already-registered artifact fed the failure record. SSOT for both
-# ``run_command`` and ``run_script`` so the two nudges cannot drift apart.
 
 
 _SHELL_BUILTINS = frozenset([
@@ -387,7 +378,7 @@ def _run_shell(
             )
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
-    # Bounded snapshot makes the user_files artifact nudge effect-based.
+    # Bounded snapshot makes the user_files cwd note effect-based.
     before_listing = (
         _shallow_listing(pathlib.Path(work_dir))
         if (cwd_root == "user_files" and repo_root is None and not outputs)
@@ -460,26 +451,16 @@ def _run_shell(
             )
         audit_error = ""
         try:
+            # A script's argv names its temporary file, not what it writes: run_script hands its body here.
             undeclared_user_outputs = _mentioned_user_file_outputs_without_declaration(
-                ctx, cmd, outputs, scratch_abs=scratch_abs,
+                ctx, kwargs.get("_audit_cmd") or cmd, outputs, scratch_abs=scratch_abs,
                 command_start_ts=_command_start_epoch, cwd=work_dir,
             )
         except Exception as exc:
             # The child already finished. This observational failure must not
             # reach the spawn-error handler and overwrite its measured facts.
             undeclared_user_outputs, audit_error = [], type(exc).__name__
-        if undeclared_user_outputs:
-            # Declaration NUDGE, not a failure — see _UNDECLARED_OUTPUTS_MARKER.
-            text = (
-                autocorrect_note
-                + f"{_UNDECLARED_OUTPUTS_MARKER}: command appears to write user_files outputs "
-                "without declaring outputs=[...]. Declare generated user-visible files so "
-                "they are copied into the task artifact store before claiming completion. "
-                f"Paths: {', '.join(undeclared_user_outputs[:5])}.\n\n"
-                + f"{_describe_returncode(0, cwd=work_dir, binding=binding)}\n"
-                + _format_process_output(res.stdout or "", res.stderr or "")
-            )
-            return _masked_green_disclosure(ctx, _publish_process_result(ctx, "ARTIFACT_OUTPUT_UNDECLARED", text, exit_code=0, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta), cmd)
+        undeclared_note = undeclared_outputs_note(undeclared_user_outputs)
         artifact_note, artifact_failed, artifact_registered = _register_process_outputs(
             ctx,
             outputs,
@@ -492,7 +473,7 @@ def _run_shell(
         )
         artifact_note += f"\n- output baseline unavailable before the run ({baseline_problem}): a registered output may predate it" if baseline_problem and artifact_note else ""
         audit_note = ""
-        if cwd_root == "user_files" and not outputs:
+        if cwd_root == "user_files" and not outputs and not undeclared_note:  # one note about one fact
             # Remove scratch effects without hiding a simultaneous real deliverable.
             _after_for_audit = after_changed
             if scratch_abs and repo_root is not None:
@@ -507,9 +488,8 @@ def _run_shell(
                     _after_for_audit = [p for p in (after_changed or []) if p not in _scratch_rel]
             if _user_files_run_had_effect(before_changed, _after_for_audit, before_listing, pathlib.Path(work_dir)):
                 audit_note = (
-                    "\n\n⚠️ ARTIFACT_AUDIT_GAP: command modified files in a user_files cwd without "
-                    "outputs=[...]. If it created a deliverable, rerun/register the file "
-                    "with outputs or write_file(root=artifact_store) before claiming it."
+                    "\n\n⚠️ ARTIFACT_AUDIT_GAP: files changed in this user_files cwd and no outputs=[...] "
+                    f"were declared. {REGISTER_OUTPUT_ADVICE}"
                 )
         scratch_note = ""
         _scratch_remaining = [str(p) for p in scratch_abs if p.exists()]
@@ -531,7 +511,9 @@ def _run_shell(
             result = _masked_green_disclosure(ctx, _publish_process_result(ctx, "ARTIFACT_OUTPUT_ERROR", text, exit_code=0, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta), cmd)
             return _disclose_output_audit_failure(ctx, result, audit_error)
         text = autocorrect_note + f"{_describe_returncode(0, cwd=work_dir, binding=binding)}\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{audit_note}{scratch_note}{executor_note}"
-        result = _masked_green_disclosure(ctx, _publish_process_result(ctx, "SHELL_REGEX_AUTO_CORRECTED" if regex_autocorrected else "OK", text, exit_code=0, artifact_registered=bool(artifact_registered and not artifact_failed), shell_regex_auto_corrected=regex_autocorrected, meta=process_meta), cmd)
+        text += f"\n\n{undeclared_note}" if undeclared_note else ""  # after its output and other notes: a cut view keeps a result's tail
+        code = "ARTIFACT_OUTPUT_UNDECLARED" if undeclared_note else "SHELL_REGEX_AUTO_CORRECTED" if regex_autocorrected else "OK"
+        result = _masked_green_disclosure(ctx, _publish_process_result(ctx, code, text, exit_code=0, artifact_registered=bool(artifact_registered and not artifact_failed), shell_regex_auto_corrected=regex_autocorrected, meta={**process_meta, **undeclared_outputs_meta(undeclared_user_outputs)}), cmd)
         return _disclose_output_audit_failure(ctx, result, audit_error)
     except OwnerPauseRefused as exc:
         return _publish_tool_result(ctx, launch_refusal_result(exc))
@@ -646,6 +628,7 @@ def _run_script(
             ctx, argv, cwd=cwd, outputs=outputs, scratch=scratch,
             _resolved_binding=binding, timeout_sec=timeout_sec, timeout=timeout,
             env_from_settings=kwargs.get("env_from_settings"), _tool="run_script",
+            _audit_cmd=[interp, "-c", body, *argv[2:]],  # the body, then the arguments the argv audit read before
         )
     except (OSError, ValueError) as exc:
         if shell_entered:
@@ -667,28 +650,23 @@ def _run_script(
                 pass
     if pathlib.PurePath(interp).name in {"sh", "bash"}:
         result = _masked_green_disclosure(ctx, result, [interp, "-c", body])
-    # POST-exec body audit: stat-confirmed user_files writes performed by the script
-    # body itself. Runs on EVERY exit path (parity with _record_scratch_fingerprints):
-    # a script that writes an undeclared deliverable and then FAILS (raise/SystemExit/
-    # timeout) still leaves that file on disk, so a `⚠️` result does NOT mean "no
-    # deliverable to declare" — surface both the error and the output-guard note.
-    audit_error = ""
-    try:
-        undeclared_user_outputs = _mentioned_user_file_outputs_without_declaration(
-            ctx, [interp, "-c", body], outputs, scratch_abs=_scratch_abs_body,
-            command_start_ts=_body_start_epoch, cwd=resolved_workdir,
-        )
-    except Exception as exc:
-        undeclared_user_outputs, audit_error = [], type(exc).__name__
-    audit_note = ""
-    if undeclared_user_outputs:
-        # Same declaration NUDGE class as run_command's — see _UNDECLARED_OUTPUTS_MARKER.
-        audit_note = (
-            f"{_UNDECLARED_OUTPUTS_MARKER}: run_script wrote user_files without declaring outputs: "
-            + ", ".join(undeclared_user_outputs)
-            + ". Re-run with outputs=[...] or write the canonical deliverable via root=artifact_store."
-        )
-    result = wrap_script_result(ctx, result, audit_note, script_path)
+    # The shell audits the script BODY itself on a green exit (``_audit_cmd``), so that run carries
+    # at most one note. A script that wrote an undeclared deliverable and then FAILED (raise /
+    # SystemExit / timeout) still left that file on disk and the shell returned before its audit:
+    # a `⚠️` result does NOT mean "no deliverable to declare", so that path is audited here and the
+    # note follows the failure.
+    audit_error, undeclared_user_outputs = "", []
+    settled = _published_tool_result(ctx, None)
+    if not (isinstance(settled, ToolResult) and settled.text == result and settled.meta.get("exit_code") == 0):
+        try:
+            undeclared_user_outputs = _mentioned_user_file_outputs_without_declaration(
+                ctx, [interp, "-c", body], outputs, scratch_abs=_scratch_abs_body,
+                command_start_ts=_body_start_epoch, cwd=resolved_workdir,
+            )
+        except Exception as exc:
+            audit_error = type(exc).__name__
+    audit_note = undeclared_outputs_note(undeclared_user_outputs)
+    result = wrap_script_result(ctx, result, audit_note, script_path, undeclared_outputs_meta(undeclared_user_outputs))
     return _disclose_output_audit_failure(ctx, result, audit_error)
 
 

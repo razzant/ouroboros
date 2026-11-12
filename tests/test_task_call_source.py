@@ -221,12 +221,16 @@ def test_source_range_errors_are_typed_and_raw_only_legacy_manifest_is_unavailab
         ],
     })
     ctx = _ctx(tmp_path)
-    invalid, _data = _call(
-        ctx, task_id=task_id, call_id="visible",
-        manifest_sha256=visible["manifest_ref"]["sha256"], source_start_char=0, source_end_char=10_000,
-    )
+    selector = {"task_id": task_id, "call_id": "visible", "manifest_sha256": visible["manifest_ref"]["sha256"]}
+    # A start past the source refuses and names the length to fit a range into. An end past it reads to
+    # the source's end and names both ranges, like every reader of the shared range projection.
+    invalid, _data = _call(ctx, **selector, source_start_char=10_000, source_end_char=10_001)
     assert invalid["status"] == "error" and invalid["code"] == "TOOL_ARG_ERROR"
     assert "complete_chars" in invalid["message"] and "text" not in _data["source"]
+    whole, data = _call(ctx, **selector, source_start_char=0, source_end_char=10_000)
+    source = data["source"]
+    assert whole["status"] == "ok" and source["requested_range"] == [0, 10_000], whole["message"]
+    assert source["end_char"] == source["complete_chars"] == len(source["text"])
 
     unavailable, _data = _call(
         ctx, task_id=task_id, call_id="raw_only",

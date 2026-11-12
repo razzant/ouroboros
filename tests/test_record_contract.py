@@ -225,6 +225,29 @@ def test_tool_rows_from_the_real_loop_carry_the_guaranteed_fields_in_both_planes
         _assert_row(row)
 
 
+def test_the_named_outcome_fields_of_a_settlement_come_from_the_real_loop(tmp_path):
+    """The exact result code and a control's reason are optional metadata of a settlement (owner,
+    12.11.2026): the passport names them, the real loop writes them where they apply and omits them
+    where they do not, and the guaranteed fields hold on both paths."""
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    named, anchor = {"tool_result_code", "control_reason"}, rc.ANCHOR_BY_TYPE["tool_call"]
+    assert named <= anchor.optional and named <= anchor.metadata and not named & anchor.guaranteed
+
+    ok = _Registry(tmp_path / "ok", lambda *_: ToolResult(status="ok", code="OK", text="contents"))
+    settled = _rows(_call(ok, tmp_path / "ok")[1] / "tools.jsonl")[-1]
+    assert settled["tool_result_code"] == "OK" and "control_reason" not in settled
+
+    def paused(_name, _args):
+        raise ModelWaitInterrupted("owner_pause")
+
+    with pytest.raises(ModelWaitInterrupted):
+        _call(_Registry(tmp_path / "paused", paused), tmp_path / "paused")
+    [cut] = [row for row in _rows(tmp_path / "paused" / "child" / "logs" / "tools.jsonl") if row["type"] == "tool_call"]
+    assert (cut["status"], cut["control_reason"]) == ("interrupted", "owner_pause") and "tool_result_code" not in cut
+    _assert_row(cut)
+
+
 def test_a_timed_out_tool_writes_the_wait_end_and_then_its_settlement(tmp_path):
     release = threading.Event()
 
