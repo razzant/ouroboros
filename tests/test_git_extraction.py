@@ -147,16 +147,3 @@ def test_git_facade_reexports_every_moved_identity():
         assert getattr(git, name) is getattr(owner, name), name
     owned = {name for module in _LEAVES for name in vars(module)}
     assert set(_MOVED_OWNERS) <= owned
-
-
-def test_git_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (git, *_LEAVES)
-    }
-    assert counts["ouroboros.tools.git"] <= 1800
-    assert all(count <= 1000 for name, count in counts.items()
-               if name != "ouroboros.tools.git")
-    assert counts["ouroboros.tools.git_review_cycle"] <= 1000

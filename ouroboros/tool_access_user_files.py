@@ -111,6 +111,30 @@ def _delegated_capture_read_hint(ctx: Any, resolved: pathlib.Path) -> str:
         return ""
 
 
+def runtime_owned_roots(ctx: Any) -> list[pathlib.Path]:
+    """The drives and checkouts Ouroboros itself owns for this task, in every runtime mode.
+
+    The system repo (or the bound body candidate), the serving checkout, the parent data
+    drive (``ctx.drive_root``) and any child or budget drive carried in ``task_metadata``.
+    A fact of ownership, not an access rule: the caller decides what it permits."""
+    values: list[Any] = [
+        getattr(ctx, "drive_root", None),
+        getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir", None),
+        getattr(ctx, "serving_repo_dir", None),  # a bound body candidate never unprotects the running checkout
+    ]
+    meta = getattr(ctx, "task_metadata", {})
+    if isinstance(meta, dict):
+        values.extend(meta[key] for key in ("drive_root", "child_drive_root", "headless_child_drive_root",
+                                            "budget_drive_root") if meta.get(key))
+    roots: list[pathlib.Path] = []
+    for value in values:
+        try:
+            roots.append(pathlib.Path(value).resolve(strict=False))
+        except (OSError, TypeError, ValueError):
+            continue
+    return roots
+
+
 def user_files_path_block_reason(
     ctx: Any,
     candidate: pathlib.Path,
@@ -139,30 +163,13 @@ def user_files_path_block_reason(
     home = _tool_access()._user_files_root()
     outside_home = not _tool_access().path_is_relative_to(resolved, home) and not _tool_access()._path_is_relative_to_casefold(resolved, home)
 
-    # The Ouroboros runtime/control surface is the system repo PLUS every data
-    # drive the task touches: the parent drive (ctx.drive_root) and any child /
-    # budget drive carried in task_metadata. External-workspace mode lifts home
-    # confinement, so these must be enumerated explicitly here — otherwise a
-    # child-drive control path (e.g. <child_drive>/memory) would slip through.
-    protected_values: list[Any] = [
-        getattr(ctx, "drive_root", None),
-        getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir", None),
-        getattr(ctx, "serving_repo_dir", None),  # a bound body candidate never unprotects the running checkout
-    ]
-    meta = getattr(ctx, "task_metadata", {})
-    if isinstance(meta, dict):
-        for key in ("drive_root", "child_drive_root", "headless_child_drive_root", "budget_drive_root"):
-            if meta.get(key):
-                protected_values.append(meta.get(key))
+    # External-workspace mode lifts home confinement, so the runtime's own roots are
+    # enumerated explicitly here — otherwise a child-drive control path (e.g.
+    # <child_drive>/memory) would slip through.
+    hard_protected_roots = runtime_owned_roots(ctx)  # the data/repo/budget drives THEMSELVES
     protected_roots: list[pathlib.Path] = []
-    hard_protected_roots: list[pathlib.Path] = []  # the data/repo/budget drives THEMSELVES
-    for value in protected_values:
-        try:
-            root = pathlib.Path(value).resolve(strict=False)
-        except (OSError, TypeError, ValueError):
-            continue
+    for root in hard_protected_roots:
         protected_roots.append(root)
-        hard_protected_roots.append(root)
         parent = root.parent.resolve(strict=False)
         if root.name in {"repo", "data"} and _tool_access().path_is_relative_to(parent, home):
             # The workspace PARENT is a SOFT boundary (keeps user_files out of ~/Ouroboros at large);

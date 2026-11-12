@@ -265,7 +265,7 @@ def test_recovery_offset_uses_the_effective_measurement_basis(basis):
 
 @pytest.mark.parametrize("density", [None, DENSITY])
 def test_address_sizing_measures_candidates_at_the_refusal_density(tmp_path, monkeypatch, density):
-    from ouroboros import context_compaction
+    from ouroboros import context_source_view
 
     ctx = _round(tmp_path, _real_plan(), words=40_000)
     ctx.refused_density = density
@@ -277,7 +277,7 @@ def test_address_sizing_measures_candidates_at_the_refusal_density(tmp_path, mon
         return messages, SimpleNamespace(status="no_eligible", reclaimed_tokens=0, checkpoint_ref=None,
                                          selected_unit_ids=())
 
-    monkeypatch.setattr(context_compaction, "emergency_address_view", view)
+    monkeypatch.setattr(context_source_view, "emergency_address_view", view)
     loop_round_limits._run_emergency_address_pass(ctx, fit, rung="unseen_bodies", goal_tokens=10_000)
     assert seen["density"] == (density or 1.0) and seen["usable"] == LIMIT - REPLY  # the window, in provider tokens
     assert seen["candidate"] == math.ceil(fit.measurement.raw_input_tokens * (density or 1.0))

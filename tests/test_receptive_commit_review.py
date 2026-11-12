@@ -874,8 +874,10 @@ def test_a_left_wave_that_settles_after_its_author_ended_stays_in_its_room_once(
     [mark] = until(lambda: _late_marks(a.data))
     assert mark["room_id"] == "1" and mark["review"]["surface"] == "commit_gate"
     text = mark["text"]
-    assert text.startswith(f"Late commit review of task {TASK}.") and "Its record now reads PASS" in text
-    assert "No panel verdict was formed" not in text and "nothing was committed or applied" in text
+    assert text.startswith(f"Late commit review of task {TASK}.") and "Its record now reads PASS, no findings;" in text
+    assert "No panel verdict was formed" not in text and "the review call itself committed or applied nothing" in text
+    assert "nothing was committed or applied" not in text, "the task may have merged under another record"
+    assert mark["review"]["outcome"]["verdict"] == "PASS" and mark["review"]["outcome"]["critical"] == 0
     assert "kept here because its author's task ended" in text and "has settled" not in text
     settled = review_ledger.load_record(a.data, wait["record_id"])
     assert settled["state"] == "settled" and settled["verdict"]["aggregate"] == "PASS"

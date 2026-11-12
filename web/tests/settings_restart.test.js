@@ -37,6 +37,9 @@ test('Restart now confirm-and-send sends exactly one non-queueable /restart', as
     const facts = seenOptions[0].details.rows.map((row) => `${row.label}: ${row.value}`).join('\n');
     assert.match(facts, /Running tasks: They stop, then eligible saved work resumes after the restart/);
     assert.match(facts, /already paused stay paused/);
+    // What this door does that an Update does not: a sleeping task is held, and the tasks' own engine runs end.
+    assert.match(facts, /Running tasks: [^\n]*Sleeping tasks wait for Resume\./);
+    assert.match(facts, /Running tasks: [^\n]*Runs they started in Claudexor end\./);
     assert.match(facts, /Queued tasks: Runnable ones return to the queue/);
     assert.match(facts, /Existing holds and limits still apply/);
     // Live routing: resumed work that follows a role takes its current model; an explicit choice stays.

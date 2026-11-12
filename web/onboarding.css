@@ -1280,22 +1280,12 @@ textarea::placeholder {
     gap: 10px;
   }
 
-  /* Title shrinks dropped with the one-off sizes they adjusted; hiding the
-     copy below reclaims far more height. */
+  /* A short or narrow window drops ornament only: the slogan, the rail's sub-labels and the rotation artwork
+     (its text stands beside it). The words a choice or a field is made by stay: a step's sentence, a card's
+     meaning, a field's note, and the footer's aside wherever it fits beside the buttons (the narrow rule
+     below). A taller step scrolls under the pinned footer (DESIGN.md §7). */
   .wizard-subtitle,
   .wizard-step-copy,
-  .step-copy,
-  .panel-card p,
-  .field-note:not(.compatible-load-status):not(.budget-shared-note),
-  .footer-copy {
-    display: none;
-  }
-
-  /* Agents step: the ARTWORK is what a short viewport drops, never the ladder.
-     Everything the diagram draws is stated in the text beside it, so hiding it
-     costs nothing and buys back ~180px. The login card's own sentences are
-     re-exempted from the blanket `.panel-card p` rule above: they are the live
-     sign-in instructions, not explanatory prose. */
   .agents-rotation-figure {
     display: none;
   }
@@ -1321,10 +1311,6 @@ textarea::placeholder {
   .agent-ladder-note,
   .agent-outcome {
     margin-top: 8px;
-  }
-
-  .harness-login-card p {
-    display: block;
   }
 
   .wizard-steps {
@@ -1354,6 +1340,13 @@ textarea::placeholder {
 
   .wizard-footer {
     justify-content: flex-end;
+  }
+}
+
+/* A narrow window: the footer is pinned over the step, so its aside would take the step's own lines. */
+@media (max-width: 900px) {
+  .footer-copy {
+    display: none;
   }
 }
 

@@ -487,7 +487,8 @@ above the row like the hint and never move the composer**: Main, the recents, th
 that can lead a work (those Settings offers the Main role, never agent sessions). With one source, its models stand
 under its own name without a source step; when Main has a row above, its model is omitted from this section.
 A recent may also appear under its source. A row is one model through one source, however many accounts list it, never an account: the source, whether
-it is a subscription or paid by key, its window when known (an unknown window is omitted), `Unavailable` when no
+it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one:
+`OpenRouter · $4 in / $20 out`), its window when known (an unknown window is omitted), `Unavailable` when no
 account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
 and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps
 Settings' "(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings ›
@@ -672,7 +673,7 @@ runtime; known queued, active or finalizing work keeps its own factual label. A
 durably accepted incoming message likewise proves acceptance, not that its task
 has begun or a model has read it.
 
-The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close.
+The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
 
 Status, owner action, and urgent notification are separate product concepts:
 
@@ -2746,8 +2747,9 @@ Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
-confirming sheet says it before it writes Main; it forecasts no tokens
-or cost. The account is a property of that role: Auto
+confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
+published price per 1M tokens where it states one (`$4 in / $20 out`), which never sorts or filters the list;
+nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
@@ -2825,10 +2827,12 @@ preserve the edited value, focus, selection and scroll position. Returning to a
 reviewer's previous source restores that source's model/account draft; a new
 source starts without another source's pin.
 
-The five wizard steps are Accounts, Models, Review, Budget, Summary. Codex is the
+The five wizard steps are Accounts, Models, Review and access, Budget, Summary. Codex is the
 recommended start without an API key; other connections name their capability.
 Signed in reports authentication, not execution, independently of model-source and suggestion reads. Accounts names pending, failed or partial reads and offers a
-contextual Retry that keeps the fields. A known model source allows
+contextual Retry that keeps the fields. Connected accounts the engine names as agents only read
+what they can run and what Ouroboros itself still needs beside Continue, and a healthy read then has
+no Retry. A known model source allows
 Continue and manual model entry even when its inventory or automatic suggestions
 cannot be read; an unknown source explains why not. New
 subscription-only installs clear only untouched shipped API suggestions without
@@ -2869,8 +2873,11 @@ stops clear of them.
 
 - Step title `--type-page`; card titles `--type-section`; field labels and
   notes `--type-meta`. No display size above `--type-page`.
-- Short-viewport adaptation hides explanatory copy, never shrinks type: shaving
-  pixels off a title buys nothing and costs the scale.
+- A short or narrow window drops ornament (the slogan, the rail's sub-labels), never
+  the words a choice or a field is made by and never the size of type. The footer's
+  aside leaves only a narrow window, where the pinned footer would take the step's
+  lines. A line that changes no choice is deleted, not hidden; a taller step scrolls
+  under the pinned footer.
 - Field labels are sentence case at meta ink: a step shows a dozen at once to
   get one value typed, not to present a grid of headings.
 
