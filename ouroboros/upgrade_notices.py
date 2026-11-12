@@ -137,7 +137,7 @@ def review_enforcement_notice(document: Optional[Mapping[str, Any]], environ: Ma
     Read the value the install ran with, before the read seam drops the retired key: the raw document's
     non-empty value (a saved choice outranked the environment), else the process environment (an exported
     variable of a Docker unit, a Colab cell or a benchmark adapter). Only ``blocking``, whatever its case or
-    spaces, owes it; another value, absence or no document is silent.
+    spaces, owes it; another value, or no value in either place, is silent.
     """
     saved = document.get(_REVIEW_ENFORCEMENT_KEY) if isinstance(document, Mapping) else None
     value = saved if str(saved if saved is not None else "").strip() else environ.get(_REVIEW_ENFORCEMENT_KEY)

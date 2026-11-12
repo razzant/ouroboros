@@ -442,7 +442,7 @@ BLOCKING_GONE = (
     ("document", "blocking", None, True), ("document", " Blocking ", None, True), ("absent", None, "blocking", True),
     ("document", "", "blocking", True), ("document", "advisory", None, False), ("absent", None, "advisory", False),
     ("document", "advisory", "blocking", False), ("document", "strictest", None, False), ("absent", None, None, False),
-    ("no_document", None, None, False),
+    ("no_document", None, None, False), ("no_document", None, "blocking", True),
 ])
 def test_an_install_that_had_blocking_hears_once_that_it_is_gone(notice_world, monkeypatch, where, value, environment,
                                                                  owed):
