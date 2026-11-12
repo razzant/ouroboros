@@ -714,15 +714,17 @@ const serverForTest = (server) => (looksMasked(server.auth_token) ? { ...server,
 function drawEditor() {
     const view = editorView;
     if (!view) return;
-    const doc = view.host.ownerDocument;
+    const doc = view.host.ownerDocument, more = view.host.querySelector('[data-mcp-more]');
     const at = doc && view.host.contains?.(doc.activeElement) ? doc.activeElement : null;
     const mark = !at ? '' : at.dataset?.mcpField ? `[data-mcp-field="${at.dataset.mcpField}"]`
-        : ['data-entry-switch', 'data-editor-save', 'data-mcp-test', 'data-mcp-refresh'].map((name) => (at.hasAttribute(name) ? `[${name}]` : '')).find(Boolean) || '';
+        : at.hasAttribute('data-mcp-header-remove') ? `[data-mcp-header-row="${at.closest('[data-mcp-header-row]').dataset.mcpHeaderRow}"] [data-mcp-header-remove]`
+        : ['data-entry-switch', 'data-editor-save', 'data-mcp-test', 'data-mcp-refresh', 'data-mcp-header-add'].map((name) => (at.hasAttribute(name) ? `[${name}]` : '')).find(Boolean) || '';
     resetSecretReveals(view.host);
     if (!view.server) {
         view.host.innerHTML = loaded ? '<p class="settings-page-lead">This server is no longer on the list.</p>' : '';
         return;
     }
+    if (more) moreOpen[more.open ? 'add' : 'delete'](view.server);
     view.host.innerHTML = editorHtml(view.server);
     view.host.querySelectorAll('[data-mcp-card]').forEach((card) => bindCardEvents(card, view.server));
     if (mark) view.host.querySelector(mark)?.focus?.({ preventScroll: true });
