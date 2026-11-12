@@ -183,6 +183,24 @@ def completed_room():
     return syn.snapshot(room_facts=room, conversations=[group]), gist
 
 
+def test_a_told_word_yielding_under_its_task_line_is_counted_as_my_telling():
+    """rev_fable REV2 7: a told word of another conversation that yielded under its work's task line, whose sentence
+    stands in the same block, was in no bin of the floor note ("my telling: none; host facts: none; emergency…:
+    none"). It is my telling, counted once; a word whose gist has no task line here keeps the work-gist count."""
+    snap, gist = completed_room()
+    level = mf.fit_memory_view(snap, frame(size(snap) - 1))
+    assert [step for step, _ids in level.addressed] == ["F6w"] and len(dict(level.addressed)["F6w"]) == 1
+    counts = forms.form_counts(snap, level)
+    assert counts["retold"] == {"task gists": {"lines": 1, "sources": 1}} and not counts["emergency"]
+    assert work.first_sentence(gist["summary"]) in mv.render_room(snap, level)
+    note = mf.floor_note(level, window_tokens=size(snap), mode="max", snapshot=snap)
+    assert "my telling: task gists: 1 lines/1 sources;" in note
+    other, _gist = completed_room()
+    other.conversations[0]["rooms"][0]["tasks"] = []  # no task line carries the gist: its gist line tells the word
+    counts = forms.form_counts(other, mf.fit_memory_view(other, frame(size(other) - 1)))
+    assert "task gists" not in counts["retold"] and counts["retold"]["work gists"] == {"lines": 1, "sources": 1}
+
+
 @pytest.mark.parametrize("replies", [False, True])
 def test_remote_gist_addresses_its_replies_here_or_its_telling_when_none(replies):
     from ouroboros import memory_view_conversation_forms as conv

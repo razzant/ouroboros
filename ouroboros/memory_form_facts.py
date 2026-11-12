@@ -145,6 +145,11 @@ def _group_counts(group, data, sources, state, aggregate_unread):
     elif not count and data["gists"]:
         n = len(_visible_gists(group, data, words))
         add("retold", "work gists", n, n)
+        # Told words that yielded under their work's task line here: that line's sentence is their telling.
+        lined = {t.get("task") for r in group["rooms"] for t in r["tasks"] if t.get("gist")}
+        under = [w for w in data["words"] if w["id"] in words and data["kinds"][w["id"]] == "told"
+                 and (w.get("work_id") or w.get("task_id")) in lined]
+        add("retold", "task gists", len({w.get("work_id") or w.get("task_id") for w in under}), len(under))
     for remote in group["rooms"]:
         unread, owner, rest = sources[remote["room_id"]]
         if count:
