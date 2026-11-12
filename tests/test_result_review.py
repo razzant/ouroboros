@@ -215,6 +215,9 @@ def test_a_required_root_result_is_reviewed_through_a_real_session_seat(tmp_path
 
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True
     assert "three findings" in shown[0], shown
+    # The author's revision: the earlier version's findings are put before it once more, then it delivers.
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True
+    assert "An earlier version of your result was reviewed" in shown[-1] and "not reviewed again unless you ask" in shown[-1]
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False, "the author's revision"
     starts = [body for gateway in FakeGateway.instances for body in gateway.start_requests]
     assert len(starts) == 1 and all(body["outputSchema"]["required"] == ["findings"] for body in starts), starts

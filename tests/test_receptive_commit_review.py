@@ -458,7 +458,7 @@ def test_the_outcome_returns_while_the_author_hears_mail_in_every_access(author,
     _join(thread)
     result = outcome["result"]
     assert _commit_count(a) == 1 and not a.pushes, result
-    assert result.startswith("Review outcome returned before commit."), result
+    assert result.startswith("Review outcome returned before commit"), result
     # The returned outcome: the notice only while this task runs, the record always, collection by this task or its
     # recorded Continue successor (``review_collection.resolve_reference``).
     for fact in ("while this task runs", "stays in its record", "recorded Continue successor"):
