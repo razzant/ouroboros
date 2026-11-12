@@ -574,8 +574,7 @@ const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generati
     state.projectListableCount = Number.isSafeInteger(projectListableCount) && projectListableCount >= 0
         ? projectListableCount : null;
     if (Array.isArray(data.projects)) state.projectMessagesRevision = data.project_messages_revision ?? null;
-    projectActivityIndex = buildProjectActivityIndex(projectRooms, data.project_chat_ids
-        ?? (data.projects || lastProjectRows).map((project) => project?.chat_id));
+    projectActivityIndex = buildProjectActivityIndex(projectRooms, data.project_chat_ids, data.projects || lastProjectRows);
     renderProjectsNav(data.projects || lastProjectRows,
         data.project_chat_ids ?? (data.projects ? undefined : Array.from(state.projectChatIds)), projectActivityIndex,
         Array.isArray(data.projects) ? generation : 0);
@@ -1020,7 +1019,7 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
 // the marker explicitly unknown rather than quietly showing stale liveness.
 function markProjectActivityUnknown() {
     projectRooms = reconcileProjectRooms(projectRooms).rooms;
-    projectActivityIndex = buildProjectActivityIndex(projectRooms, [...state.projectChatIds]);
+    projectActivityIndex = buildProjectActivityIndex(projectRooms, [...state.projectChatIds], lastProjectRows);
     patchProjectActivityMarkers(projectActivityIndex);
 }
 

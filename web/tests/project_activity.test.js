@@ -185,6 +185,19 @@ test('the index reads Project rooms only; the header\'s one mark is the stronges
     assert.equal(buildProjectActivityIndex().aggregate, IDLE_SUMMARY);
 });
 
+test('an amber Projects header always has an amber row: what waits counts only the rooms the feed can show', () => {
+    const rooms = new Map([['42', summary('held_continue')], ['43', summary('spending_limit')]]);
+    // The room that waits has its row: the header is the owner's turn.
+    const fed = buildProjectActivityIndex(rooms, [42, 43], [{ chat_id: 42 }, { chat_id: 43 }]);
+    assert.deepEqual([fed.aggregate.mark, fed.aggregate.owner], ['moving', true]);
+    // It has none: the work part still stands for every room, the owner part does not.
+    const unfed = buildProjectActivityIndex(rooms, [42, 43], [{ chat_id: 42 }]);
+    assert.deepEqual([unfed.aggregate.mark, unfed.aggregate.owner, unfed.aggregate.note], ['moving', false, '']);
+    assert.equal(unfed.byChat.get('43').owner, true, 'the room itself still says it');
+    // Without the reserved ids, the rows name the rooms.
+    assert.deepEqual([...buildProjectActivityIndex(rooms, undefined, [{ chat_id: 43 }]).byChat.keys()], ['43']);
+});
+
 test('a mark\'s words: its place\'s label and new messages, in one phrase', () => {
     assert.equal(markWords(summary('paused_by_owner')), `Paused · You paused it · ${PRESSED}`);
     assert.equal(markWords(summary('paused_by_owner'), true), `Paused · You paused it · ${PRESSED} · new messages`);

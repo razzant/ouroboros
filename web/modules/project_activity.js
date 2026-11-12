@@ -75,12 +75,15 @@ export function reconcileProjectRooms(previous = new Map(), data = {}) {
 }
 
 /**
- * Index the Project rooms by chat id. The Projects header's one mark stands for all of them: the strongest shape,
- * and whether any waits for the owner; its label joins their distinct words and what waits for the owner.
+ * Index the Project rooms by chat id (`chatIds`, every reserved room; without them, the rows'). The Projects header's
+ * one mark stands for all of them: the strongest shape, and whether any waits for the owner; its label joins their
+ * distinct words and what waits for the owner. What waits counts only the rooms the feed's `rows` can show, so an
+ * amber header always has an amber row to reach; without rows, every room.
  */
-export function buildProjectActivityIndex(rooms = new Map(), chatIds = []) {
+export function buildProjectActivityIndex(rooms = new Map(), chatIds = null, rows = null) {
     const byChat = new Map();
-    for (const chat of chatIds) {
+    const shown = Array.isArray(rows) ? new Set(rows.map((row) => String(row?.chat_id))) : null;
+    for (const chat of Array.isArray(chatIds) ? chatIds : (rows || []).map((row) => row?.chat_id)) {
         const summary = rooms instanceof Map ? rooms.get(String(chat)) : null;
         if (summary) byChat.set(String(chat), summary);
     }
@@ -88,11 +91,12 @@ export function buildProjectActivityIndex(rooms = new Map(), chatIds = []) {
     if (!summaries.length) return { byChat, aggregate: IDLE_SUMMARY };
     const mark = summaries.map((summary) => summary.mark)
         .sort((a, b) => MARK_RANK.indexOf(a) - MARK_RANK.indexOf(b))[0];
-    const distinct = (key) => [...new Set(summaries.map((summary) => summary[key]).filter(Boolean))];
-    const [words, notes] = [distinct('word'), distinct('note')];
+    const reachable = shown ? [...byChat].filter(([chat]) => shown.has(chat)).map(([, summary]) => summary) : summaries;
+    const distinct = (key, from = summaries) => [...new Set(from.map((summary) => summary[key]).filter(Boolean))];
+    const [words, notes] = [distinct('word'), distinct('note', reachable)];
     return {
         byChat,
-        aggregate: { mark, owner: summaries.some((summary) => summary.owner), word: words[0] || '',
+        aggregate: { mark, owner: reachable.some((summary) => summary.owner), word: words[0] || '',
             note: notes.join(' · '), label: [...words, ...notes].join(' · ') },
     };
 }
