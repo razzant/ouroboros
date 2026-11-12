@@ -210,7 +210,8 @@ async function mainRole(settings = {}) {
     host.id = 'roles';
     doc.body.append(host);
     Object.defineProperty(host, 'innerHTML', { set(html) { host.replaceChildren(); appendHtml(host, html); }, get: () => '' });
-    const editor = createModelRolesEditor({ hostId: 'roles', doc, showContext: false, store: { snapshot: {}, accountsKnown: false },
+    const store = { snapshot: {}, accountsKnown: false, subscribe: () => () => {}, refresh: async () => {}, read: async () => {} };
+    const editor = createModelRolesEditor({ hostId: 'roles', doc, showContext: false, store,
         catalogFetch: async () => ({ items: [], model_sources: [] }) });
     editor.load({ OPENROUTER_API_KEY: 'k', OUROBOROS_MODEL: OPUS.value, ...settings }, contract);
     editor.adoptCatalog({ model_sources: [], items: [OPUS] });
@@ -219,7 +220,7 @@ async function mainRole(settings = {}) {
     const input = host.querySelector('[data-model-role-group="main"] [data-model-role-model]');
     input.emit('click');  // opens the chooser without changing the role: it paints its suggestions
     const suggestions = doc.getElementById(input.getAttribute('aria-controls')).innerHTML;
-    return { editor, status, suggestions, input };
+    return { editor, status, suggestions, input, host };
 }
 
 test('a role on Fast or Economy shows no catalog price: its tier is priced by its own endpoint', async () => {
@@ -254,6 +255,66 @@ test('in the composer list the price follows the language of each paint, not of 
     } finally {
         applyPayload({ language: '', english: true, revision: 42, entries: {} });
     }
+});
+
+test('a circle or a room chooses its model with the same price beside the name', async () => {
+    const { modelSuggestions } = await import('../modules/place_sheet.js');
+    const direct = { provider_id: 'openai', id: 'gpt-6', value: 'openai::gpt-6', name: 'gpt-6' };
+    const [priced, plain] = modelSuggestions({ items: [OPUS, direct, { id: 'local', use_local: true }] });
+    assert.equal(priced.meta, '$4 in / $20 out');
+    assert.equal(plain.meta, undefined, 'a model without a catalog price reads as before');
+    assert.match(modelChooserHtml('aria-label="Model"', '', 'room-models', [priced, plain]), /ui-model-option-meta" data-i18n-skip>\$4 in \/ \$20 out</);
+});
+
+test('the capsule strip and the Change Main sheet say the price where "paid by key" stood', async () => {
+    const { routeFacts } = await import('../modules/model_list.js');
+    const index = buildModelIndex({ catalog: { items: [OPUS, { provider_id: 'openrouter', id: 'z-ai/glm-5.3', value: 'z-ai/glm-5.3' }] } });
+    const said = describeRoute(index, { model: OPUS.value });
+    assert.equal(routeFacts(said), 'OpenRouter · $4 in / $20 out');
+    assert.equal(said.facts, 'OpenRouter · $4 in / $20 out');
+    assert.equal(routeFacts(describeRoute(index, { model: 'z-ai/glm-5.3' })), 'OpenRouter · paid by key');
+});
+
+test('a stale account pin left from a subscription never hides an OpenRouter role price', async () => {
+    const { editor, status } = await mainRole({ OUROBOROS_MODEL_ACCOUNTS: '{"main":"old-codex-account"}' });
+    assert.equal(status.textContent, '$4 in / $20 out per 1M tokens');
+    editor.destroy();
+});
+
+test('a language change says the price under a role again, in the new language', async () => {
+    const previous = globalThis.window;
+    globalThis.window = new EventTarget();
+    try {
+        const { editor, host } = await mainRole();
+        editor.mount();  // paints the editor anew
+        await new Promise((resolve) => setImmediate(resolve));
+        const line = () => host.querySelector('[data-model-role-group="main"] [data-model-role-status]').textContent;
+        assert.equal(line(), '$4 in / $20 out per 1M tokens');
+        applyPayload({ language: 'ru', english: false, revision: 51, entries: {
+            '{input} in / {output} out per 1M tokens': { text: '{input} вход / {output} выход за 1 млн токенов' } } });
+        globalThis.window.dispatchEvent(new Event('ouro:language-changed'));
+        assert.equal(line(), '$4 вход / $20 выход за 1 млн токенов');
+        editor.destroy();
+        applyPayload({ language: '', english: true, revision: 53, entries: {} });
+        globalThis.window.dispatchEvent(new Event('ouro:language-changed'));
+        assert.equal(line(), '$4 вход / $20 выход за 1 млн токенов', 'a destroyed editor no longer listens');
+    } finally {
+        applyPayload({ language: '', english: true, revision: 52, entries: {} });
+        globalThis.window = previous;
+    }
+});
+
+test('the Agents editor paints again for another language: its prices are composed words', async () => {
+    const { availableSubagentsRenderSignature } = await import('../modules/subagents_settings.js');
+    const state = { loaded: true, setting: { items: [] } };
+    const english = availableSubagentsRenderSignature(state, 0);
+    applyPayload({ language: 'ru', english: false, revision: 61, entries: {} });
+    try {
+        assert.notEqual(availableSubagentsRenderSignature(state, 0), english);
+    } finally {
+        applyPayload({ language: '', english: true, revision: 62, entries: {} });
+    }
+    assert.equal(availableSubagentsRenderSignature(state, 0), english);
 });
 
 test('while Main is on Fast or Economy the composer list names no catalog price; on Standard it does', async () => {

@@ -227,8 +227,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     const tieredProcessing = (row) => tierPriced(row.processing_preference || processingPreference);
     function currentItem(row) {
         const model = row.source === 'inherit' ? inheritedRow(row)?.model : row.model;
+        // An account pins a subscription's rows; an API source's rows name none, so a stale pin never hides them.
         const matches = itemsFor(row).filter((item) => (parseModelSource(item.value || item.id).model === model
-            || item.id === model) && (!row.account || item.credential_profile_id === row.account));
+            || item.id === model) && (!row.account || !sourceId(row) || item.credential_profile_id === row.account));
         return matches.length === 1 ? matches[0] : undefined;
     }
 
@@ -558,6 +559,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         },
         mount() {
             getDoc()?.addEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
+            // The prices are composed words the overlay leaves alone: a language change says them again.
+            globalThis.window?.addEventListener?.('ouro:language-changed', updateCatalogViews);
             if (!disposeStatus) disposeStatus = bindStatusSurface(store, { elementId: hostId, doc: getDoc,
                 listener: updateCatalogViews });
             render();
@@ -578,6 +581,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         },
         destroy() {
             getDoc()?.removeEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
+            globalThis.window?.removeEventListener?.('ouro:language-changed', updateCatalogViews);
             destroyed = true; disposeStatus?.(); disposeStatus = null;
             disposeChoosers();
             for (const request of requests.values()) request.controller.abort();

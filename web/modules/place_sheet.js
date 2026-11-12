@@ -10,6 +10,7 @@ import { tr, fmt } from './i18n.js';
 import { fetchJson } from './api_client.js';
 import { catalogPrograms } from './model_program.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
+import { priceWords } from './route_editor_primitives.js';
 import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
 import {
@@ -356,7 +357,8 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
  *  and the local model has none (its row says `use_local`), so that row is left out. Throws for an unread catalog. */
 export function modelSuggestions(data) {
     if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error('The model catalog could not be read.');
-    return data.items.filter((item) => !item?.use_local);
+    // Each model's catalog price beside its name, as in Settings (`meta`); never part of the stored route.
+    return data.items.filter((item) => !item?.use_local).map((item) => (item?.price ? { ...item, meta: priceWords(item.price) } : item));
 }
 
 /** The one write a press on the sheet asks for, as the contract's change; null when it needs no write. */

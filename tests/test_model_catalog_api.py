@@ -507,6 +507,10 @@ def test_an_openrouter_row_carries_the_price_its_catalog_states(pricing, expecte
     # Free by tokens, yet the call is charged for something else: "free" would be false.
     {"prompt": "0", "completion": "0", "image": "0.04"}, {"prompt": "0", "completion": "0", "web_search": "0.004"},
     {"prompt": "0", "completion": "0", "image": "0.04", "overrides": [{"min_prompt_tokens": 1000, "prompt": "0", "completion": "0"}]},
+    # A flag is no price, and a tier with its own per-request fee is not a plain input-length tier.
+    {"prompt": False, "completion": False},
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [
+        {"min_prompt_tokens": 1000, "prompt": "0.000004", "completion": "0.00002", "request": "0.01"}]},
     # A tier that also names an hour window is not a plain input-length tier.
     {"prompt": "0.000002", "completion": "0.00001", "overrides": [
         {"min_prompt_tokens": 1000, "utc_start": 1500, "utc_end": 100, "prompt": "0.000004"}]},

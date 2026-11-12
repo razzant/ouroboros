@@ -146,9 +146,12 @@ def openrouter_catalog_price(model: Any) -> Optional[Dict[str, Any]]:
         if pricing.get("request") is not None and float(pricing["request"]) != 0:
             return None
         if not isinstance(overrides, list) or not all(
-                isinstance(tier, dict) and int(tier.get("min_prompt_tokens") or 0) > 0
+                isinstance(tier, dict) and int(tier.get("min_prompt_tokens") or 0) > 0 and float(tier.get("request") or 0) == 0
                 and not any(str(key).startswith("utc_") for key in tier) for tier in overrides):
             return None
+        stated = (pricing.get("prompt"), pricing.get("completion"), *(tier.get(key) for tier in overrides for key in ("prompt", "completion")))
+        if any(isinstance(value, bool) for value in stated):
+            return None  # a flag is no price, though float() would read it as 0 or 1
         reasoning = pricing.get("internal_reasoning")
         if reasoning is not None and float(reasoning) not in (0, float(pricing.get("completion"))):
             return None  # reasoning tokens billed at their own rate: the output figure is not the output price

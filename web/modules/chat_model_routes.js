@@ -211,13 +211,14 @@ export function describeRoute(index, raw) {
         ? harnessPresentation(id.slice(SUBSCRIPTION.length)).label : apiProviderLabel(id, {}, index?.connections || []));
     const sourceLabel = cannotSend ? `${base} (${unavailableConnectionState(id, index.connections)})` : base;
     const window = windowWords(listed?.window);
+    const price = priceWords(listed?.price);
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
-        sourceLabel, pay: PAY_WORDS[lane], price: priceWords(listed?.price), window, listed: Boolean(listed),
+        sourceLabel, pay: PAY_WORDS[lane], price, window, listed: Boolean(listed),
         available: listed?.available ?? null,
         harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
         kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),
-        facts: [sourceLabel, PAY_WORDS[lane], window ? `${window} window` : ''].filter(Boolean).join(' · '),
+        facts: [sourceLabel, price || PAY_WORDS[lane], window ? `${window} window` : ''].filter(Boolean).join(' · '),
     };
 }
 

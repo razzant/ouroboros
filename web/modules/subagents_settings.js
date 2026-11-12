@@ -27,6 +27,7 @@ import { settingsSection } from './settings_controls.js';
 import { revealNewRow } from './ui_helpers.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { currentLanguage } from './i18n.js';
 
 export const MAX_AVAILABLE_SUBAGENTS = 26;
 export const SUBAGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
@@ -646,6 +647,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
             ? sessionRouteVerdict(row, state, nowMs).text : ''),
         state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
+        currentLanguage(),  // the suggestions' prices are composed words: another language is another paint
     ]);
 }
 
@@ -1219,7 +1221,11 @@ export function createAvailableSubagentsEditor({
         paint({discoveryOnly: true});
     }
 
+    // The suggestions' prices are composed words the overlay leaves alone: a language change paints them again.
+    const onLanguageChanged = () => { if (!state.destroyed) paint(); };
+
     function mount({ bindStatus = true } = {}) {
+        getWin()?.addEventListener?.('ouro:language-changed', onLanguageChanged);
         adoptStatus();
         if (bindStatus && !state.statusDisposer) {
             state.statusDisposer = bindStatusSurface(store, {
@@ -1246,6 +1252,7 @@ export function createAvailableSubagentsEditor({
 
     function destroy() {
         state.destroyed = true;
+        getWin()?.removeEventListener?.('ouro:language-changed', onLanguageChanged);
         state.previewGeneration += 1;
         disposeChoosers();
         state.statusDisposer?.();

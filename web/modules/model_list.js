@@ -19,7 +19,7 @@ const payWords = (said) => tr(`model.pay.${said.lane}`, said.pay);
 
 /** A route's facts in the owner's words: its source, how that source is paid, its window when one is known. */
 export function routeFacts(said) {
-    return [said.sourceLabel, payWords(said), said.window ? fmt('{window} window', { window: said.window }) : '']
+    return [said.sourceLabel, said.price || payWords(said), said.window ? fmt('{window} window', { window: said.window }) : '']
         .filter(Boolean).join(' · ');
 }
 
