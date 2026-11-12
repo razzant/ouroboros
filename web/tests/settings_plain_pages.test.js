@@ -23,7 +23,8 @@ const EFFECTS = { OUROBOROS_RUNTIME_MODE: 'restart', OUROBOROS_SERVER_HOST: 'res
     OUROBOROS_SAFETY_OWNER_RULES: 'next_task', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'now', OUROBOROS_UI_DIR: 'restart',
     OUROBOROS_MAX_WORKERS: 'now', OUROBOROS_EXTRA_CA_BUNDLE: 'next_task' };
 
-/** A settings server: the document, the owner endpoints with their receipts, and what a read derives from them. */
+/** A settings server: the document (the password masked, as the server masks it), the owner endpoints with their
+ *  receipts (a secret's withheld), what a read derives from them, and Show's read of the stored password. */
 function fakeServer(routes, values = {}) {
     const server = { posts: [], refuse: new Map(), running: { OUROBOROS_RUNTIME_MODE: 'pro', OUROBOROS_SERVER_HOST: '127.0.0.1', OUROBOROS_UI_DIR: '' },
         values: { OUROBOROS_RUNTIME_MODE: 'pro', OUROBOROS_SAFETY_MODE: 'full', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'light',
@@ -33,14 +34,19 @@ function fakeServer(routes, values = {}) {
     server.document = () => {
         const { values: now, running } = server;
         const pending = Object.keys(running).filter((key) => String(now[key]) !== String(running[key])).sort();
-        return { ...structuredClone(now), _meta: { effects: EFFECTS, bind_host: running.OUROBOROS_SERVER_HOST, reachability: 'loopback_only',
+        return { ...structuredClone(now), OUROBOROS_NETWORK_PASSWORD: now.OUROBOROS_NETWORK_PASSWORD ? '***set***' : '',
+            _meta: { effects: EFFECTS, bind_host: running.OUROBOROS_SERVER_HOST, reachability: 'loopback_only',
             policy_state: { access: { configured: now.OUROBOROS_RUNTIME_MODE, current_process: running.OUROBOROS_RUNTIME_MODE,
                 effective: running.OUROBOROS_RUNTIME_MODE, restart_required: now.OUROBOROS_RUNTIME_MODE !== running.OUROBOROS_RUNTIME_MODE },
             review: { configured: now.OUROBOROS_REVIEW_ENFORCEMENT, next_task: now.OUROBOROS_REVIEW_ENFORCEMENT } },
             restart_state: { restart_keys: pending, running: Object.fromEntries(pending.map((key) => [key, running[key]])) } } };
     };
     const write = (changed) => Object.fromEntries(Object.entries(changed).filter(([key, value]) => String(server.values[key]) !== String(value))
-        .map(([key, value]) => { const old = server.values[key]; server.values[key] = value; return [key, { old, new: value }]; }));
+        .map(([key, value]) => {
+            const old = server.values[key];
+            server.values[key] = value;
+            return [key, key === 'OUROBOROS_NETWORK_PASSWORD' ? { withheld: 'secret' } : { old, new: value }];
+        }));
     const route = (path, answer) => routes.set(path, async (_url, init = {}) => {
         if (init.method !== 'POST') return response(server.document());
         const body = JSON.parse(init.body);
@@ -54,6 +60,11 @@ function fakeServer(routes, values = {}) {
         changes: write({ [kind === 'consciousness' ? 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE' : 'OUROBOROS_SAFETY_MODE']: mode }) }));
     route('/api/owner/safety-rules', ({ rules }) => ({ ok: true, rules, changes: write({ OUROBOROS_SAFETY_OWNER_RULES: rules }) }));
     route('/api/owner/auto-grant', ({ enabled }) => ({ ok: true, enabled, changes: write({ OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: String(enabled) }) }));
+    server.revealed = [];
+    routes.set('/api/settings/secret', async (_url, init) => {
+        server.revealed.push(JSON.parse(init.body));
+        return response({ value: server.values[JSON.parse(init.body).key] });
+    });
     routes.set('/api/logs/events?limit=2000&view=compact', response({ entries: [] }));
     routes.set('/api/desktop/autostart', response({ state: 'on' }));
     routes.set('/api/desktop/background', response({ state: 'off' }));
@@ -392,7 +403,8 @@ test('This computer: the host\'s two switches, who can reach it with the passwor
     assert.deepEqual(hostWrites, [{ OUROBOROS_SERVER_HOST: '0.0.0.0', OUROBOROS_NETWORK_PASSWORD: 'correct horse battery' }]);
     assert.equal(page.meta('OUROBOROS_SERVER_HOST'), 'Running: Only here · after restart: My network');
     assert.equal(page.line('OUROBOROS_SERVER_HOST'), 'Saved · applies after restart');
-    assert.match(page.meta('OUROBOROS_NETWORK_PASSWORD'), /^Set\./);
+    assert.equal(page.meta('OUROBOROS_NETWORK_PASSWORD'), 'Asked on every other device.');
+    assert.equal(page.row('OUROBOROS_NETWORK_PASSWORD').querySelector('[data-secret-state]').textContent, 'Saved');
     // Closing it again asks nothing and carries no password.
     page.asked.length = 0;
     await page.press(page.option('OUROBOROS_SERVER_HOST', '127.0.0.1'));
@@ -402,6 +414,55 @@ test('This computer: the host\'s two switches, who can reach it with the passwor
         await page.press(page.row(id));
         assert.equal(page.opened.at(-1), to);
     }
+});
+
+test('a stored network password is a stored key\'s row: Replace, Show the stored value, Remove asked first; a refusal is said', async (t) => {
+    const page = await open(t, 'computer', { values: { OUROBOROS_NETWORK_PASSWORD: 'old horse' } });
+    const part = (hook, at = page) => at.row('OUROBOROS_NETWORK_PASSWORD').querySelector(hook);
+    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').textContent], ['Saved', 'Replace']);
+    assert.equal(part('[data-secret-field]').hidden, true);
+    assert.equal(part('[data-setting-control]').value, '', 'the stored value is never put into the field');
+    // Replace opens the field: Show and Remove stand beside it. Show reads the stored value on the press.
+    await page.press(part('[data-secret-open]'));
+    assert.equal(part('[data-secret-field]').hidden, false);
+    assert.deepEqual([part('[data-secret-show]').hidden, part('[data-secret-remove]').hidden], [false, false]);
+    await part('[data-secret-show]').fire('click', {});
+    await settle();
+    assert.deepEqual(page.server.revealed, [{ key: 'OUROBOROS_NETWORK_PASSWORD' }]);
+    assert.equal(part('.settings-secret-value').textContent, 'old horse');
+    // A typed new one replaces it, says Saved alone, offers no Undo, and puts the field away.
+    const field = part('[data-setting-control]');
+    field.value = 'new horse';
+    await page.container.fire('input', { target: field });
+    await page.container.fire('change', { target: field });
+    await settle();
+    assert.deepEqual(page.server.writes('/api/settings'), [{ OUROBOROS_NETWORK_PASSWORD: 'new horse' }]);
+    assert.equal(page.server.values.OUROBOROS_NETWORK_PASSWORD, 'new horse');
+    assert.equal(page.line('OUROBOROS_NETWORK_PASSWORD'), 'Saved');
+    assert.equal(part('[data-setting-undo]'), null);
+    assert.equal(part('[data-secret-field]').hidden, true);
+
+    // Remove asks first; declined, nothing is sent.
+    const declined = await open(t, 'computer', { values: { OUROBOROS_NETWORK_PASSWORD: 'new horse' }, answer: false });
+    await declined.press(part('[data-secret-open]', declined));
+    await declined.press(part('[data-secret-remove]', declined));
+    assert.deepEqual(declined.asked.map((dialog) => dialog.title), ['Remove Password?']);
+    assert.deepEqual(declined.server.posts, []);
+    // Still open to the network, the server refuses to clear it: its sentence is the row's line, and the password stays.
+    const shut = await open(t, 'computer', { values: { OUROBOROS_NETWORK_PASSWORD: 'new horse' } });
+    const refusal = 'Cannot clear Network Password while the running server is still bound to a non-localhost interface.';
+    await shut.press(part('[data-secret-open]', shut));
+    shut.server.refuse.set('/api/settings', [{ saved: false, error: refusal }, 400]);
+    await shut.press(part('[data-secret-remove]', shut));
+    assert.deepEqual(shut.server.writes('/api/settings'), [{ OUROBOROS_NETWORK_PASSWORD: '' }], 'Remove writes the empty value');
+    assert.equal(shut.line('OUROBOROS_NETWORK_PASSWORD'), `Not saved. ${refusal}`);
+    assert.equal(shut.server.values.OUROBOROS_NETWORK_PASSWORD, 'new horse');
+    // Accepted, it is cleared, and the row offers Add.
+    await shut.press(part('[data-secret-remove]', shut));
+    assert.equal(shut.server.values.OUROBOROS_NETWORK_PASSWORD, '');
+    assert.equal(shut.line('OUROBOROS_NETWORK_PASSWORD'), 'Saved');
+    assert.deepEqual([part('[data-secret-open]', shut).textContent, part('[data-secret-remove]', shut).hidden], ['Add', true]);
+    assert.match(shut.meta('OUROBOROS_NETWORK_PASSWORD'), /^Not set\./);
 });
 
 test('Advanced holds what an installation rarely changes, and About the reset in its fold, asked first', async (t) => {

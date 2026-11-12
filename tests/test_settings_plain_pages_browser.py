@@ -5,7 +5,8 @@ Each page is opened by its path, at the owner's window (1087 x 740) and at a pho
 nothing scrolls sideways and every strip fits its row or wraps inside it. Then the rows that ask first and the ones
 that say two values: raising Access asks and then says the level in force beside the saved one; lowering a Safety
 level asks and raising one does not; Your rules keeps the text when the server refuses it; opening to the network
-asks and carries the typed password in the same write.
+asks and carries the typed password in the same write; a stored password is shown, replaced and removed like any
+stored key.
 
 The settings server is this file's own fake, shaped like the server's answer: it keeps a document, answers a write
 with its receipt (`changes`: old, new and the installed value's token) and a read with what the server derives
@@ -258,6 +259,9 @@ def test_opening_to_the_network_asks_and_carries_the_typed_password(subscription
     row = setting_row(page, "OUROBOROS_SERVER_HOST")
     assert row.locator(".ui-segment").all_inner_texts() == ["Only here", "My network"]
     assert not level.locator('[data-setting-row="computer:address"]').is_visible(), "no address while only this computer reaches it"
+    password = setting_row(page, "OUROBOROS_NETWORK_PASSWORD")
+    assert password.locator("[data-secret-open]").inner_text() == "Add", "no password is set: its field opens on Add"
+    password.locator("[data-secret-open]").click()
     level.locator('[id="setting-OUROBOROS_NETWORK_PASSWORD"]').type("correct horse battery")
     row.locator('[data-setting-value="0.0.0.0"]').click()
     dialog = page.locator("dialog[open], .confirm-dialog").last
@@ -272,9 +276,9 @@ def test_opening_to_the_network_asks_and_carries_the_typed_password(subscription
     assert server.values["OUROBOROS_NETWORK_PASSWORD"] == "correct horse battery"
     assert row.locator("[data-setting-result]").inner_text() == "Saved · applies after restart · Undo"
     # A secret says it is saved and nothing of its value; it offers no Undo.
-    password = setting_row(page, "OUROBOROS_NETWORK_PASSWORD")
     assert password.locator("[data-setting-result]").inner_text() == "Saved"
-    assert password.locator("[data-setting-meta]").inner_text().startswith("Set.")
+    assert password.locator("[data-secret-state]").inner_text() == "Saved"
+    assert password.locator("[data-setting-undo]").count() == 0
     setup_browser.capture(page, "c2-computer-restart-waits-1087x740-dark")
     # Undo puts the address back with the token of the value this write installed.
     row.locator("[data-setting-undo]").click()
@@ -282,6 +286,61 @@ def test_opening_to_the_network_asks_and_carries_the_typed_password(subscription
                            "[data-setting-meta]').textContent === 'Only this computer.'")
     assert server.writes("/api/settings")[-1] == {"OUROBOROS_SERVER_HOST": "127.0.0.1",
                                                   "if_unchanged": {"OUROBOROS_SERVER_HOST": "OUROBOROS_SERVER_HOST#1"}}
+
+
+def test_a_stored_network_password_is_shown_replaced_and_removed_like_a_stored_key(subscription_ui):
+    page, server = _page(subscription_ui, 1087, 740, OUROBOROS_NETWORK_PASSWORD="old horse")
+    revealed = []
+
+    def reveal(route):
+        body = route.request.post_data_json or {}
+        revealed.append(body)
+        route.fulfill(content_type="application/json", body=json.dumps({"value": server.values[body["key"]]}))
+
+    page.route("**/api/settings/secret", reveal)
+    level = open_settings(page, "computer")
+    _settled(page, "computer")
+    password = setting_row(page, "OUROBOROS_NETWORK_PASSWORD")
+    opener, show, remove = (password.locator(hook) for hook in ("[data-secret-open]", "[data-secret-show]", "[data-secret-remove]"))
+    page.wait_for_function("() => document.querySelector('[data-setting-row=\"OUROBOROS_NETWORK_PASSWORD\"] "
+                           "[data-secret-state]')?.textContent === 'Saved'")
+    assert opener.inner_text() == "Replace" and not show.is_visible(), "at rest the row says only that one is saved"
+    # Replace opens its field: Show and Remove stand beside it; Show reads the stored value on the press.
+    opener.click()
+    assert show.is_visible() and remove.is_visible()
+    show.click()
+    shown = password.locator(".settings-secret-value")
+    shown.wait_for(state="visible")
+    assert shown.inner_text() == "old horse" and revealed == [{"key": "OUROBOROS_NETWORK_PASSWORD"}]
+    setup_browser.capture(page, "c2-computer-password-shown-1087x740-dark")
+    # A typed new one replaces it: Saved alone, no Undo, and the field is put away.
+    show.click()
+    assert commit_row(page, "OUROBOROS_NETWORK_PASSWORD", "new horse") == "Saved"
+    assert server.values["OUROBOROS_NETWORK_PASSWORD"] == "new horse"
+    assert password.locator("[data-setting-undo]").count() == 0
+    password.locator("[data-secret-field]").wait_for(state="hidden")
+    # Remove asks first. Still open to the network, the server refuses: its sentence is the row's line.
+    refusal = "Cannot clear Network Password while the running server is still bound to a non-localhost interface."
+    server.refuse["/api/settings"] = (400, {"error": refusal, "saved": False})
+    opener.click()
+    remove.click()
+    dialog = page.locator("dialog[open], .confirm-dialog").last
+    dialog.wait_for(state="visible")
+    assert "Remove Password?" in dialog.inner_text()
+    dialog.get_by_role("button", name="Remove").click()
+    page.wait_for_function("() => /^Not saved/.test(document.querySelector('[data-setting-row=\"OUROBOROS_NETWORK_PASSWORD\"] "
+                           "[data-setting-result]').textContent)")
+    assert password.locator("[data-setting-result]").inner_text() == f"Not saved. {refusal}"
+    assert server.values["OUROBOROS_NETWORK_PASSWORD"] == "new horse"
+    # Accepted, it is cleared through the row's own write, and the row offers Add.
+    remove.click()
+    page.locator("dialog[open], .confirm-dialog").last.get_by_role("button", name="Remove").click()
+    page.wait_for_function("() => document.querySelector('[data-setting-row=\"OUROBOROS_NETWORK_PASSWORD\"] "
+                           "[data-secret-open]').textContent === 'Add'")
+    assert server.writes("/api/settings")[-2:] == [{"OUROBOROS_NETWORK_PASSWORD": ""}] * 2
+    assert server.values["OUROBOROS_NETWORK_PASSWORD"] == ""
+    assert password.locator("[data-setting-result]").inner_text() == "Saved"
+    assert not remove.is_visible()
 
 
 def test_voice_and_calls_says_the_saved_choices_and_opens_the_form_of_the_skill_that_registered_a_call(subscription_ui, monkeypatch):

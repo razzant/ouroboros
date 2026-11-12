@@ -19,6 +19,7 @@ import { registerSettingsPage } from './settings_pages.js';
 import { applyPolicyToRows } from './settings_policy.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { mountRulesPage, refreshSafetySkipCounter, safetyFacts } from './settings_safety.js';
+import { bindSecretRows, secretRowHtml } from './settings_secrets.js';
 import { getSpeech } from './speech_providers.js';
 import { showToast } from './toast.js';
 import { copyTextWithToast } from './ui_helpers.js';
@@ -316,8 +317,9 @@ export function lanAddress(meta) {
 }
 HIDDEN_WHEN.noLanAddress = (settings) => !lanAddress(settings?._meta);
 
-/** The network rows as a read leaves them (pure): the password row says whether one is set, and a listener the way
- *  Ouroboros was started decides is said in place of what each choice would mean. */
+/** The network rows as a read leaves them (pure): the password row says what an unset one means (a set one says Saved
+ *  in its place, settings_secrets.js), and a listener the way Ouroboros was started decides is said in place of what
+ *  each choice would mean. */
 export function tuneComputerRows(rows, settings, row = (id) => rows.find((each) => each.id === id)) {
     const host = row(HOST_KEY);
     const password = row(PASSWORD_KEY);
@@ -330,8 +332,8 @@ export function tuneComputerRows(rows, settings, row = (id) => rows.find((each) 
     host.control = { ...base.control, options: base.control.options.map((option) => (outside
         ? { ...option, note: `It listens on ${meta.bind_host} now: the way Ouroboros was started sets that, not this choice.` } : { ...option })) };
     host.meta = settings && !base.control.options.some((option) => option.value === saved) ? `Listens on ${saved}: set outside Settings.` : '';
-    password.meta = !settings ? rowById(PASSWORD_KEY).meta : settings[PASSWORD_KEY]
-        ? 'Set. Asked on every other device. Type a new one to change it.' : 'Not set. Other devices are asked for it: set it before you open to your network.';
+    password.meta = !settings || settings[PASSWORD_KEY] ? rowById(PASSWORD_KEY).meta
+        : 'Not set. Other devices are asked for it: set it before you open to your network.';
     const address = lanAddress(meta);
     row('computer:address').meta = address?.note || rowById('computer:address').meta;
     // The version the sidebar already shows (one health read, utils.js loadVersion).
@@ -360,20 +362,22 @@ export function paintNetworkHint(host, meta) {
         : `<span class="settings-row-value">${url}</span>`);
 }
 
+// The password is a stored key's row (settings_secrets.js): Replace, Show, and Remove that asks first.
+const passwordRows = new WeakMap();  // the page's container -> its bound password row
 const mountComputer = rowsPage('computer', {
     ids: () => rowsOf('computer').map((row) => row.id),
     tune: tuneComputerRows,
     draw: (row) => {
         const custom = (each) => (each.id === 'computer:address' ? '<span class="settings-row-end" data-lan-address></span>'
             : switchHtml(each, each.id === 'computer:autostart' ? 'data-autostart-toggle' : 'data-background-toggle'));
-        const rows = (...ids) => ids.map((id) => settingsRow(row(id), { custom })).join('');
+        const rows = (...ids) => ids.map((id) => (id === PASSWORD_KEY ? secretRowHtml(row(id)) : settingsRow(row(id), { custom }))).join('');
         return lead('The computer Ouroboros runs on.')
             + card({ title: 'Start and background', attrs: 'data-autostart-settings hidden', rows: rows('computer:autostart', 'OUROBOROS_DESKTOP_KEEP_RUNNING'),
                 after: note('id="settings-autostart-note" data-autostart-shared-note role="status" aria-live="polite" hidden') })
             + card({ title: 'Who can reach it', rows: rows(HOST_KEY, PASSWORD_KEY, 'computer:address') })
             + card({ rows: rows('computer:advanced', 'computer:about') });
     },
-    bind: (container) => {
+    bind: (container, ctx) => {
         // The host's two switches are settings_autostart.js's: it reads the host, paints and writes them. Each says
         // its state in its own row's line; a host that offers neither says why once, under both.
         hook(container, 'computer:autostart', '[data-setting-result]', 'data-autostart-status');
@@ -383,14 +387,22 @@ const mountComputer = rowsPage('computer', {
         // Heard before the row helper takes the change and empties the field it saved.
         const onTyped = (event) => { if (event.target?.id === `setting-${PASSWORD_KEY}` && event.target.value) typedPassword = event.target.value; };
         container.addEventListener('change', onTyped, true);
+        // A password write that landed puts its field away (Remove writes '' through the row's own queue).
+        const password = bindSecretRows(container, { rowOf: rowById, ask: ctx.ask });
+        passwordRows.set(container, password);
+        const onSaved = (event) => { if (event.detail?.row === PASSWORD_KEY) password.close(PASSWORD_KEY); };
+        globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
         const disposers = [bindAutostartControl(container), bindNetworkHintCopy(container)];
         return () => {
             typedPassword = '';
             container.removeEventListener('change', onTyped, true);
+            globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
+            password.dispose();
             disposers.forEach((dispose) => dispose());
         };
     },
     paint: (container, settings) => {
+        passwordRows.get(container)?.paint(settings);
         paintNetworkHint(container.querySelector('[data-lan-address]'), settings?._meta);
         // The server's warning about the open address (no password, for one) stands in that row's line, as a warning.
         const warning = lanAddress(settings?._meta)?.warning || '';

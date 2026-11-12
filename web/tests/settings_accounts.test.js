@@ -18,14 +18,6 @@ import { secretRowHtml, storedKeyRow } from '../modules/settings_secrets.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 import { Stub } from './helpers/settings_dom.js';
 
-// What a browser's element has and the fixture's lacks: a node put right after another (the revealed value takes the
-// masked field's place), and the labels of a field.
-NodeStub.prototype.after ??= function after(node) {
-    const siblings = this.parentElement.children;
-    node.remove();
-    node.parentElement = this.parentElement;
-    siblings.splice(siblings.indexOf(this) + 1, 0, node);
-};
 // A field's value starts as its `value` attribute, as a browser's does.
 Object.defineProperty(NodeStub.prototype, 'value', { configurable: true,
     get() { return this.typed ?? this.attrs.value ?? ''; }, set(text) { this.typed = String(text); } });

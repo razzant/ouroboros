@@ -77,6 +77,7 @@ export class NodeStub {
         return node;
     }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
+    after(node) { this.parentElement.insertBefore(node, this.nextElementSibling); }
     remove() {
         if (this.parentElement) this.parentElement.children.splice(this.parentElement.children.indexOf(this), 1);
         this.parentElement = null;
