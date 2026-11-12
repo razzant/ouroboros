@@ -5,10 +5,6 @@ capability-evidence SSOT.  It does not own routing, provider retries, or global
 context-mode state; callers supply the captured context core and exact-route
 resolver so ``ouroboros.context`` remains the public compatibility surface. It owns
 only the handle of the fit's own route question (``RouteQuestion``), asked beside the build.
-
-The start walk: lowering prices the completed view and receipt; only physical need
-outlines indexes/registry, pricing memory forms and receipt before uncovered owner
-words; held frames credit their book/reserve savings, and slack alone buys no outline.
 """
 
 from __future__ import annotations
