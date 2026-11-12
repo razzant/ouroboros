@@ -370,10 +370,15 @@ def _remember_route_send(slot: Any, messages: Sequence[Mapping[str, Any]], diges
     setattr(slot, ORIGINS_ATTR, [])  # the answered request carried every seam named so far
     if not isinstance(pending, Mapping) or not pending.get("route"):
         return
+    record = _route_record(messages, tools_identity, digests)
+    waited = pending.get("messages") or []
+    if (pending.get("tools") != record["tools"] or pending.get("blocks") != record["blocks"]
+            or record["messages"][:len(waited)] != waited):
+        return  # another send's answer (a helper on this slot): the candidate that waited was never answered
     route = str(pending["route"])
     kept = getattr(slot, ROUTE_SENDS_ATTR, None)
     routes = {key: value for key, value in (kept if isinstance(kept, Mapping) else {}).items() if key != route}
-    routes[route] = {**_route_record(messages, tools_identity, digests), "at": pending.get("at")}
+    routes[route] = {**record, "at": pending.get("at")}
     for stale in [name for name, held in routes.items() if "messages" in held][:-_ROUTES_KEPT]:
         routes[stale] = {"dropped": True}  # its name stays: a later request on it has no base, and says so
     setattr(slot, ROUTE_SENDS_ATTR, routes)
@@ -434,7 +439,8 @@ def attempt_prefix_fact(slot: Any, messages: Sequence[Mapping[str, Any]], tools:
         fact["from_route"] = str(last)
     if isinstance(base, Mapping) and isinstance(base.get("at"), (int, float)):
         fact["since_s"] = round(max(0.0, now - float(base["at"])), 1)
-    setattr(slot, PENDING_ROUTE_ATTR, {"route": route, "at": now})
+    # The answered request starts with this candidate (the send may add its own later rows, as its clock line).
+    setattr(slot, PENDING_ROUTE_ATTR, {"route": route, "at": now, **record})
     return fact
 
 
@@ -468,22 +474,38 @@ def prefix_class(fact: Any, ttl: Any = "") -> tuple[str, str]:
     return ("returned_to_model", str(fact["from_route"])) if fact.get("from_route") else ("append", "")
 
 
-def remember_attempt_prefix(ctx: Any) -> None:
-    """Main's fit measurement leaves the candidate's prefix fact for the dispatch that binds its physical context."""
+def remember_attempt_prefix(ctx: Any, messages: Any = None) -> None:
+    """Main's fit measurement leaves the candidate's prefix fact for the dispatch that binds its physical context;
+    ``messages`` is the measured input when it is not ``ctx.messages`` (the forced final)."""
     slot = getattr(getattr(ctx, "tools", None), "_ctx", None)
     usage = getattr(ctx, "accumulated_usage", None)
     if slot is None or not isinstance(usage, dict):
         return
     try:
         route = str(getattr(ctx, "active_model", "") or "") + (" (local)" if getattr(ctx, "active_use_local", False) else "")
-        usage[ATTEMPT_PREFIX_KEY] = attempt_prefix_fact(slot, ctx.messages, getattr(ctx, "tool_schemas", None), route)
+        usage[ATTEMPT_PREFIX_KEY] = attempt_prefix_fact(slot, ctx.messages if messages is None else messages,
+                                                        getattr(ctx, "tool_schemas", None), route)
     except Exception:  # a record of the send, never a condition of it
         usage.pop(ATTEMPT_PREFIX_KEY, None)
         log.debug("attempt prefix fact unavailable", exc_info=True)
 
 
-def with_attempt_prefix(physical: Any, usage: Any) -> Any:
-    """The physical context carrying the candidate's prefix fact into its ledger row (``PhysicalAttemptContext.prefix``)."""
+def forget_attempt_prefix(ctx: Any) -> None:
+    """A candidate that is not measured carries no fact and waits for no answer: the request of an unmeasured
+    route is never recorded as the last measured route's."""
+    usage = getattr(ctx, "accumulated_usage", None)
+    if isinstance(usage, dict):
+        usage.pop(ATTEMPT_PREFIX_KEY, None)
+    slot = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    if slot is not None:
+        setattr(slot, PENDING_ROUTE_ATTR, None)
+
+
+def with_attempt_prefix(physical: Any, usage: Any, ctx: Any = None, messages: Any = None) -> Any:
+    """The physical context carrying the candidate's prefix fact into its ledger row (``PhysicalAttemptContext.prefix``).
+    With ``ctx`` and ``messages`` the fact is taken for that measured input first (``remember_attempt_prefix``)."""
+    if ctx is not None and messages is not None and physical is not None:
+        remember_attempt_prefix(ctx, messages)
     fact = usage.get(ATTEMPT_PREFIX_KEY) if isinstance(usage, Mapping) else None
     if physical is None or not isinstance(fact, Mapping) or not fact:
         return physical

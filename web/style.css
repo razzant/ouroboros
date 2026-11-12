@@ -6090,8 +6090,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     }
 }
 /* Costs "By period" (cost_period.js): a period's cost per model as one thin bar of four classes with their amounts
-   listed under it (identity is never colour alone), then the cache writes by what they followed. The four hues are
-   the chart series in fixed order; none is a verdict, and the card has no state of alarm. */
+   listed under it (identity is never colour alone), then the cache writes by what they followed. Neither the
+   crimson nor the amber series is used, so no class reads as an alarm or a warning: cache is the blue series (what
+   was written in full, what was read in its tint), output the green one, uncached input the neutral ink. */
 .costs-period { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
 .costs-period-choice { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .costs-period-status:empty, .costs-period-models:empty, .costs-period-writes-host:empty, .costs-period-note:empty { display: none; }
@@ -6109,10 +6110,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-period-parts dt > i { flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--class-hue); }
 .costs-period-parts dd { margin: 0 0 0 auto; color: var(--text-primary); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .costs-period-subtitle { margin: var(--space-2) 0 0; color: var(--text-primary); font-size: var(--type-body); font-weight: 600; }
-[data-cost-class="cache_write"] { --class-hue: var(--chart-series-1); }
-[data-cost-class="cache_read"] { --class-hue: var(--chart-series-2); }
+[data-cost-class="cache_write"] { --class-hue: var(--chart-series-2); }
+[data-cost-class="cache_read"] { --class-hue: color-mix(in srgb, var(--chart-series-2) 42%, transparent); }
 [data-cost-class="output"] { --class-hue: var(--chart-series-3); }
-[data-cost-class="uncached_input"] { --class-hue: var(--chart-series-4); }
+[data-cost-class="uncached_input"] { --class-hue: var(--text-meta); }
 .costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }
 .cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cost-table .cost-cell-right { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }

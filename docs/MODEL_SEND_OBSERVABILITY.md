@@ -255,7 +255,11 @@ day at the 14,000 rounds a busy install made on 09.11).
 ## 9. What a request did to its route's cached start
 
 A provider keeps one cache per model and reads it in the wire order tools, system
-blocks, messages. Before a Main candidate is dispatched, the host compares it with
+blocks, messages. A cache mark closes a reuse scope: the shared blocks (tool schemas,
+governance A′, the handbook D, resident memory B) are reused across captures and so
+are bytes of their sources alone; the changing context C and the transcript are
+reused within one captured view (DEVELOPMENT "Cache-friendliness invariant"). Before
+a Main candidate is dispatched, the host compares it with
 the last ANSWERED request of the same route in this task and writes the result on
 the attempt's ledger row (`transcript_prefix.attempt_prefix_fact` →
 `PhysicalAttemptContext.prefix` → `attempts.extra.physical_context.prefix`). It is an
@@ -265,19 +269,23 @@ verdict: the row's measured `cached_tokens` and `cache_write_tokens` are that fa
 and an `append` beside a large write is not a contradiction this record resolves.
 
 - `departs`: `first` (no answered request on the slot yet), `route` (answered
-  requests, none on this route), `tools`, `system` (with `index`, `of` and the
-  block's name as the round facts name it), `messages` (with `index`, `of`),
+  requests, none on this route), `tools`, `system` (with `index`, `of` and `block`,
+  the block's name as the round facts name it), `messages` (with `index`, `of`),
   `append` (the candidate only extends that request) or `unrecorded` (a slot
-  restored from before the record, or a route whose record a checkpoint no longer
-  carries: four full records are kept, an older route keeps its name alone).
+  restored from before the record, or a route whose full record was let go: the
+  slot keeps four, in memory and in a checkpoint alike, and an older route keeps
+  its name alone).
 - `origins`: every seam that rewrote the view since the last answered request, in
   order (compaction, a restored continuation, a route or tool change, …).
 - `from_route`: the route of the last answered request when it was another one.
 - `since_s`: seconds from the start of this route's last answered request to this
   candidate's start (a cache lifetime runs from a request's start).
 
-A candidate that is never answered moves no base. Sends outside Main's loop
-(helpers, reviews) carry no fact. The routes' records ride the continuation
+A candidate that is never answered moves no base: the answer that is recorded must
+start with the candidate that waited for it (a send adds its own later rows, as its
+clock line), and a route that is sent unmeasured ends the wait. Sends outside Main's
+loop (helpers, reviews) carry no fact; the forced final takes its fact from the
+input it measured. The routes' records ride the continuation
 checkpoint with the observer's other state (`OBSERVER_STATE_ATTRS`).
 
 One reader names the class (`transcript_prefix.prefix_class`), in the provider's
@@ -296,6 +304,10 @@ each call's RECORDED cost among cache writes, cache reads, output and uncached
 input by what the route's tariff charges for that call's own tokens. Only price
 ratios enter; the parts and the cost that could not be shared (no tariff, no token
 counts, a write at a lifetime the row does not name) add up to the recorded cost.
+`write_price_in_reads` is how many read tokens one written token costs at
+`write_price_lifetime`, the lifetime most of the model's tokens were written at.
+Delegated subscription sessions and unmetered dispatches carry no reservation time
+and are not in a period.
 The tariff is read without a fetch: what the process holds, else the install's
 dated catalogue record (`state/openrouter_models.json`), whose date the view
 names. Cache writes are listed by `prefix_class`. Nothing is stored and no

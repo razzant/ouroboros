@@ -30,7 +30,7 @@ from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDID
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
 from ouroboros.observability import new_execution_id
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.transcript_prefix import remember_attempt_prefix, rewrite_epoch, rewrite_view, with_attempt_prefix
+from ouroboros.transcript_prefix import forget_attempt_prefix, remember_attempt_prefix, rewrite_epoch, rewrite_view, with_attempt_prefix
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
 
 
@@ -759,7 +759,7 @@ def _measure_round_main_fit(
 ) -> Any:
     plan = ctx.context_fit_plan
     if plan is None or str(ctx.active_model or "") != str(getattr(plan, "model", "") or ""):
-        return None
+        return forget_attempt_prefix(ctx)  # unmeasured: no fact, and no earlier candidate waits for this answer
     from ouroboros.context_fit import measure_main_fit
 
     rendered_mode = str(ctx.active_context_mode) if str(ctx.active_context_mode) in {"max", "low", "nano"} else "max"

@@ -74,12 +74,16 @@ def test_the_classes_share_the_recorded_cost_and_add_up_to_it(root):
     assert sum(model["by_class"].values()) == pytest.approx(1.10)
     assert model["by_class"]["cache_write"] == pytest.approx(1.10 * 0.80 / 1.02, abs=1e-6)  # amounts keep six decimals
     assert model["by_class"]["cache_read"] == pytest.approx(1.10 * 0.18 / 1.02, abs=1e-6)
-    assert model["write_price_in_reads"] == 40.0  # one written token costs forty read ones at this lifetime
+    assert (model["write_price_in_reads"], model["write_price_lifetime"]) == (40.0, "1h")  # the ratio names its lifetime
     # The same tokens at the 5-minute lifetime weigh the write at 5, not 8, dollars a million.
     _call(root, prompt=1_000_000, read=900_000, write=100_000, output=2_000, cost=1.0, ttl="5m")
     both, = cost_period.cost_period(root, "24h")["models"]
     assert both["cost"] == pytest.approx(2.10) and sum(both["by_class"].values()) == pytest.approx(2.10)
     assert both["by_class"]["cache_write"] == pytest.approx(1.10 * 0.80 / 1.02 + 1.0 * 0.50 / 0.72, abs=1e-6)
+    # The price ratio is the one of the lifetime most tokens were written at, and names it: 300k more at five minutes.
+    _call(root, prompt=400_000, read=100_000, write=300_000, output=10, cost=1.7, ttl="5m")
+    mostly_short, = cost_period.cost_period(root, "24h")["models"]
+    assert (mostly_short["write_price_in_reads"], mostly_short["write_price_lifetime"]) == (25.0, "5m")
 
 
 def test_a_model_the_catalog_does_not_price_keeps_its_tokens_and_gets_no_split(root):
@@ -89,7 +93,7 @@ def test_a_model_the_catalog_does_not_price_keeps_its_tokens_and_gets_no_split(r
     unlisted = by_model[UNLISTED]
     assert unlisted["by_class"] is None and unlisted["unshared_cost"] == 0.4 and unlisted["cost"] == 0.4
     assert unlisted["tokens"] == {"cache_write": 50, "cache_read": 100, "output": 7, "uncached_input": 350}
-    assert unlisted["write_price_in_reads"] is None
+    assert (unlisted["write_price_in_reads"], unlisted["write_price_lifetime"]) == (None, "")
     assert (by_model[OPUS]["calls"], by_model[OPUS]["cost"], by_model[OPUS]["open_rows"]) == (1, 0.0, 1)
 
 
@@ -99,9 +103,18 @@ def test_a_period_holds_the_calls_started_in_it_whatever_the_order_of_rows(root)
     start = time.time()
     time.sleep(0.05)
     _call(root, prompt=20, write=7, cost=0.25)
+    # Rows that carry no reservation time (an unmetered dispatch, a delegated session) stand in the same tail: they
+    # are not model calls of the ledger, are never counted here and never mislead the search for the period's start.
+    ua.record_unmetered_external_dispatch("external-call", drive_root=root, provider="external-skill", task_id="external",
+                                          root_task_id="root", category="skill", source="test.external")
     view = cost_period.cost_period(root, "24h", now=_day_after(start))
     assert [(row["calls"], row["cost"]) for row in view["models"]] == [(1, 0.25)]
     assert [cause["write_tokens"] for cause in view["cache_writes"]] == [7]
+    with usage_store.read(root) as txn:  # the view equals the plain filter over every row
+        plain = txn.conn.execute("SELECT COUNT(*), SUM(CAST(cost_usd AS REAL)) FROM attempts WHERE COALESCE(kind, 'attempt')='attempt' "
+                                 "AND ts_reserved>=?", (view["since"],)).fetchone()
+        stampless = txn.conn.execute("SELECT COUNT(*) FROM attempts WHERE ts_reserved IS NULL").fetchone()[0]
+    assert tuple(plain) == (1, 0.25) and stampless >= 1
     assert cost_period.cost_period(root, "24h", now=_day_after(time.time() + 1))["models"] == []
     # A row that stands before the period's first row but was reserved inside the period still counts:
     # position only decides where the read starts.
@@ -247,3 +260,27 @@ def test_the_serving_upstream_and_the_write_split_reach_the_settled_row(root):
     with usage_store.read(root) as txn:
         row = txn.attempt(attempt.attempt_id)
     assert row["response_provider"] == "Claude Platform on AWS" and row["cache_write_tokens_by_ttl"] == {"5m": 10, "1h": 20}
+
+
+def test_a_busy_ledger_is_asked_again_and_a_ledger_that_stays_busy_is_said_to_be_unreadable(root, monkeypatch):
+    """A display read gives way to the ledger's writers; one chunk refused must not lose a whole period."""
+    import contextlib
+
+    from ouroboros.usage_ledger import UsageLockUnavailable
+
+    _call(root, prompt=100, write=30, cost=0.25)
+    real, refusals = usage_store.read, {"left": 3}
+
+    @contextlib.contextmanager
+    def read(path, **kwargs):
+        if refusals["left"] > 0:
+            refusals["left"] -= 1
+            raise UsageLockUnavailable("the ledger's writer holds the store")
+        with real(path, **kwargs) as txn:
+            yield txn
+
+    monkeypatch.setattr(usage_store, "read", read)
+    assert cost_period.cost_period(root, "24h")["models"][0]["cost"] == 0.25 and refusals["left"] == 0
+    refusals["left"] = 10 ** 6
+    with pytest.raises(UsageLockUnavailable):
+        cost_period.cost_period(root, "24h")

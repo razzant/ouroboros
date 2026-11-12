@@ -10,7 +10,8 @@ const VIEW = {
     models: [
         { model: 'anthropic/claude-opus-5.5', calls: 10741, cost: 6055.13, open_rows: 14, unpriced_rows: 165, unshared_cost: 0,
             tokens: { cache_write: 538_000_000, cache_read: 5_500_000_000, output: 26_400_000, uncached_input: 29_800_000 },
-            by_class: { cache_write: 4306.97, cache_read: 1101.77, output: 527.36, uncached_input: 119.03 }, write_price_in_reads: 40 },
+            by_class: { cache_write: 4306.97, cache_read: 1101.77, output: 527.36, uncached_input: 119.03 }, write_price_in_reads: 40,
+            write_price_lifetime: '1h' },
         { model: 'claudexor::codex=gpt-6-astra', calls: 56724, cost: 0, open_rows: 0, unpriced_rows: 0, unshared_cost: 0,
             tokens: { cache_write: 0, cache_read: 34_500_000_000, output: 210_000_000, uncached_input: 2_900_000_000 },
             by_class: null, write_price_in_reads: null },
@@ -21,7 +22,7 @@ const VIEW = {
     cache_writes: [
         { class: 'entered_model', detail: 'gpt-6-astra', calls: 204, write_tokens: 149_000_000, write_cost: 1250.93, unshared_calls: 0 },
         { class: 'history_rewritten', detail: 'compaction, low_retry', calls: 444, write_tokens: 146_000_000, write_cost: 1189.29, unshared_calls: 0 },
-        { class: 'system_changed', detail: 'my story and identity', calls: 9, write_tokens: 1_200_000, write_cost: 9.6, unshared_calls: 0 },
+        { class: 'system_changed', detail: 'my story and identity', calls: 9, write_tokens: 1_200_000, write_cost: 9.6, unshared_calls: 2 },
         { class: 'not_recorded', detail: '', calls: 5, write_tokens: 700, write_cost: 0, unshared_calls: 5 },
     ],
 };
@@ -36,16 +37,19 @@ test('a period shows each model\'s recorded cost by class, and tokens alone wher
     assert.deepEqual(opus.parts.map((part) => part.text), [
         '$4,306.97 · 71% · 538M tokens', '$1,101.77 · 18% · 5.5B tokens', '$527.36 · 9% · 26.4M tokens', '$119.03 · 2% · 29.8M tokens']);
     assert.ok(Math.abs(opus.parts.reduce((sum, part) => sum + part.share, 0) - 1) < 1e-9);  // the bar is the whole shared cost
-    assert.deepEqual(opus.notes, ['14 calls are still open.', '165 ended without a price.', 'One written token costs 40 read tokens here.']);
-    // A subscription model has no cost to share: its tokens by class are the fact shown, with no bar and no money.
-    assert.equal(codex.split, false);
-    assert.deepEqual(codex.parts.map((part) => part.text), ['0 tokens', '34.5B tokens', '210M tokens', '2.9B tokens']);
-    assert.deepEqual(codex.notes, []);
+    assert.deepEqual(opus.notes, ['14 calls are still open.', '165 ended without a price.', 'One token written for 1 hour costs 40 read tokens here.']);
+    // A subscription model has no cost to share: its tokens by class are the fact shown, and its bar is by tokens and says so.
+    assert.deepEqual([codex.split, codex.bar], [false, true]);
+    assert.deepEqual(codex.parts.map((part) => part.text), ['0 tokens · 0%', '34.5B tokens · 92%', '210M tokens · 1%', '2.9B tokens · 8%']);
+    assert.deepEqual(codex.notes, ['The bar is by tokens: there is no recorded cost to split.']);
+    assert.ok(Math.abs(codex.parts.reduce((sum, part) => sum + part.share, 0) - 1) < 1e-9);
     // A priced call with no price list at hand: the amount stands, the split is said to be absent, never invented.
-    assert.equal(unlisted.split, false);
-    assert.deepEqual(unlisted.notes, ['Not split by class: no price list for this model is at hand.']);
+    assert.deepEqual([unlisted.split, unlisted.bar], [false, true]);
+    assert.deepEqual(unlisted.notes, ['Not split by class: these calls have no price list, token counts or named cache lifetime at hand.',
+        'The bar is by tokens: there is no recorded cost to split.']);
     assert.match(shown.note, /share of the recorded cost, not the provider’s invoice lines/);
     assert.match(shown.note, /as recorded on 2026-11-12/);
+    assert.match(shown.note, /delegated subscription sessions are not listed here/);
 });
 
 test('cache writes read by what they followed, in the fact\'s own words', () => {
@@ -57,7 +61,7 @@ test('cache writes read by what they followed, in the fact\'s own words', () => 
         'Not recorded',
     ]);
     assert.deepEqual(writes.map((row) => [row.calls, row.tokens, row.cost]), [
-        ['204', '149M', '$1,250.93'], ['444', '146M', '$1,189.29'], ['9', '1.2M', '$9.60'], ['5', '700', '—']]);
+        ['204', '149M', '$1,250.93'], ['444', '146M', '$1,189.29'], ['9', '1.2M', '$9.60 · 2 not split'], ['5', '700', '—']]);
 });
 
 test('an unavailable or empty period says so and invents nothing', () => {

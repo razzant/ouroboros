@@ -118,8 +118,9 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
 
 def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch):
     """A' and B are bytes of their sources alone (DEVELOPMENT "Cache-friendliness invariant"): another task, another
-    owner message and a wall clock three days on, at one state of memory, change only C. A paid route writes its
-    whole start again whenever these bytes move, so a capture fact in them is paid by every task that follows."""
+    owner message and ``time.time`` three days on, at one state of memory, change only C. A paid route writes its
+    whole start again whenever these bytes move, so a capture fact in them is paid by every task that follows.
+    A stamp taken through ``datetime.now`` is not moved here (WORLD's dated measured block is such a line)."""
     import time
 
     env, memory, _rooms = world(tmp_path)

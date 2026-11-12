@@ -227,3 +227,47 @@ def test_one_reader_names_the_class_in_the_providers_own_order():
     assert name({"departs": "append", "since_s": 301.0, "from_route": CODEX}, "5m") == ("paused", "")
     assert name({"departs": "append", "since_s": 12.0, "from_route": CODEX}, "1h") == ("returned_to_model", CODEX)
     assert name({"departs": "append", "since_s": 12.0}, "1h") == ("append", "")
+
+
+def test_another_sends_answer_never_records_a_candidate_that_was_not_answered():
+    slot = SimpleNamespace()
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    prefix.attempt_prefix_fact(slot, start + turn(1), TOOLS, OPUS, now=5.0)  # measured, and its send failed
+    helper = [{"role": "system", "content": "a helper's own view"}, {"role": "user", "content": "summarise this"}]
+    prefix.observe_send(slot, helper, round_idx=2, tools=TOOLS)  # a helper's answer is observed on the same slot
+    held = getattr(slot, prefix.ROUTE_SENDS_ATTR)[OPUS]
+    assert (held["at"], len(held["messages"])) == (0.0, 1)  # still the request that was answered
+    assert prefix.attempt_prefix_fact(slot, start + turn(1), TOOLS, OPUS, now=9.0) == {"departs": "append", "since_s": 9.0}
+
+
+def test_the_forced_final_takes_its_fact_from_the_input_it_measured():
+    slot = SimpleNamespace()
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    working = [system(rules="a working view the forced send does not carry"), start[1]]
+    ctx = SimpleNamespace(tools=SimpleNamespace(_ctx=slot), accumulated_usage={}, tool_schemas=TOOLS, messages=working,
+                          active_model=OPUS, active_use_local=False)
+    forced = [*start, *turn(1), {"role": "user", "content": "finish with what you have"}]
+    bound = prefix.with_attempt_prefix(_physical(), ctx.accumulated_usage, ctx, forced)
+    assert bound.prefix["departs"] == "append"  # the measured input extends the route's last request; ``ctx.messages`` would say "system"
+    assert prefix.with_attempt_prefix(None, ctx.accumulated_usage, ctx, working) is None  # no context, nothing taken
+    prefix.observe_send(slot, forced, round_idx=2, tools=TOOLS)  # and its answer is the route's record
+    assert len(getattr(slot, prefix.ROUTE_SENDS_ATTR)[OPUS]["messages"]) == len(forced) - 1
+
+
+def test_an_unmeasured_candidate_ends_the_wait_of_the_measured_one():
+    """A route with no fit plan is sent unmeasured: its answer must never become the measured route's record."""
+    slot = SimpleNamespace()
+    start = [system(), {"role": "user", "content": "task"}]
+    send(slot, start, OPUS, now=0.0)
+    ctx = SimpleNamespace(tools=SimpleNamespace(_ctx=slot), accumulated_usage={}, tool_schemas=TOOLS, messages=start + turn(1),
+                          active_model=OPUS, active_use_local=False)
+    prefix.remember_attempt_prefix(ctx)  # measured for this route; its send fails
+    assert ctx.accumulated_usage[prefix.ATTEMPT_PREFIX_KEY]["departs"] == "append"
+    assert prefix.forget_attempt_prefix(ctx) is None  # the next route is not measured
+    assert prefix.ATTEMPT_PREFIX_KEY not in ctx.accumulated_usage
+    assert prefix.with_attempt_prefix(_physical(), ctx.accumulated_usage).prefix is None
+    prefix.observe_send(slot, start + turn(1), round_idx=2, tools=TOOLS)  # the very same rows, answered by that other route
+    held = getattr(slot, prefix.ROUTE_SENDS_ATTR)[OPUS]
+    assert (held["at"], len(held["messages"])) == (0.0, 1)

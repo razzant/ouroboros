@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 PERIODS = {"24h": 24 * 3600, "7d": 7 * 24 * 3600, "30d": 30 * 24 * 3600}
 _CHUNK_ROWS = 20_000  # one short read per chunk of the ledger's tail
+_BUSY_TRIES = 8  # a display read gives way to the ledger's writers after its short wait; a chunk asks again this often
 _CLASSES = ("cache_write", "cache_read", "output", "uncached_input")
 
 
@@ -55,9 +56,22 @@ def _write_price_in_reads(tariff: Optional[tuple], ttl: str) -> Optional[float]:
     return round(unit["cache_write"] / unit["cache_read"], 1) if unit and unit["cache_read"] > 0 else None
 
 
+def _read(data_dir: pathlib.Path, take: Any) -> Any:
+    """One short display read of the ledger; a writer in the way is waited out a bounded number of times."""
+    from ouroboros import usage_store
+    from ouroboros.usage_ledger import UsageLockUnavailable
+
+    for attempt in range(_BUSY_TRIES):
+        try:
+            with usage_store.read(data_dir, allow_stale=True) as txn:
+                return take(txn)
+        except UsageLockUnavailable:
+            if attempt == _BUSY_TRIES - 1:
+                raise
+
+
 def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = None) -> Dict[str, Any]:
     """The period's models (cost, calls, tokens and money by class) and its cache writes by what they followed."""
-    from ouroboros import usage_store
     from ouroboros.pricing import display_tariffs
     from ouroboros.provider_models import normalize_model_identity, provider_for_model
     from ouroboros.transcript_prefix import prefix_class
@@ -65,8 +79,7 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
     until = time.time() if now is None else float(now)
     since = until - PERIODS[period]
     since_iso = _dt.datetime.fromtimestamp(since, _dt.timezone.utc).isoformat()
-    with usage_store.read(data_dir, allow_stale=True) as txn:
-        first, end = txn.period_bounds(since)
+    first, end = _read(data_dir, lambda txn: txn.period_bounds(since))
     catalogs: Dict[str, Tuple[Dict[str, tuple], str]] = {}
     models: Dict[str, Dict[str, Any]] = {}
     causes: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -80,15 +93,14 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
     def entry(model: str) -> Dict[str, Any]:
         return models.setdefault(model or "unattributed", {
             "calls": 0, "cost": 0.0, "open_rows": 0, "unpriced_rows": 0, "shared_cost": 0.0,
-            "tokens": dict.fromkeys(_CLASSES, 0), "by_class": dict.fromkeys(_CLASSES, 0.0),
-            "write_price_in_reads": None, "_ratio_writes": -1})
+            "tokens": dict.fromkeys(_CLASSES, 0), "by_class": dict.fromkeys(_CLASSES, 0.0), "_written": {}})
 
     for start in range(first, end, _CHUNK_ROWS):
         stop = min(end, start + _CHUNK_ROWS)
-        with usage_store.read(data_dir, allow_stale=True) as txn:  # one short read; the ledger's writers go between
-            groups = txn.period_models(start, stop, since_iso)
-            priced = sorted({row["model"] for row in groups if tariff(row["model"], row["provider"])})
-            calls = txn.period_priced_calls(start, stop, since_iso, priced)
+        # Two short reads; the ledger's writers go between them, and the tariffs are read outside both.
+        groups = _read(data_dir, lambda txn: txn.period_models(start, stop, since_iso))
+        priced = sorted({row["model"] for row in groups if tariff(row["model"], row["provider"])})
+        calls = _read(data_dir, lambda txn: txn.period_priced_calls(start, stop, since_iso, priced))
         for row in groups:
             model = entry(row["model"])
             model["calls"] += int(row["calls"] or 0)
@@ -108,8 +120,9 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
             written = int(row.get("cache_write_tokens") or 0)
             if written <= 0:
                 continue
-            if route_tariff is not None and written > model["_ratio_writes"]:
-                model["write_price_in_reads"], model["_ratio_writes"] = _write_price_in_reads(route_tariff, row["prompt_cache_ttl"]), written
+            if route_tariff is not None:  # written tokens by lifetime, for the price ratio of the lifetime most were written at
+                held = model["_written"].setdefault(row["prompt_cache_ttl"], [0, route_tariff])
+                held[0] += written
             try:
                 fact = json.loads(row["prefix"]) if row.get("prefix") else None
             except (TypeError, ValueError):
@@ -125,13 +138,16 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
                 cause["write_cost"] += float(row["usd"]) * shares["cache_write"]
     rows: List[Dict[str, Any]] = []
     for name, model in models.items():
-        model.pop("_ratio_writes")
+        lifetimes = sorted(model.pop("_written").items(), key=lambda item: (-item[1][0], item[0]))
+        ratios = [(ttl, _write_price_in_reads(held[1], ttl)) for ttl, held in lifetimes]
+        lifetime, ratio = next(((ttl, value) for ttl, value in ratios if value), ("", None))
+        model.update(write_price_in_reads=ratio, write_price_lifetime=lifetime)
         shared = model.pop("shared_cost")
         rows.append({"model": name, **model, "cost": round(model["cost"], 6),
                      # What no tariff or token count could share out stays one disclosed amount, never spread.
                      "unshared_cost": round(max(0.0, model["cost"] - shared), 6),
                      "by_class": {key: round(value, 6) for key, value in model["by_class"].items()} if shared > 0 else None})
-    rows.sort(key=lambda row: (-row["cost"], row["model"]))
+    rows.sort(key=lambda row: (-row["cost"], -sum(row["tokens"].values()), row["model"]))  # unpriced models by their tokens
     writes = sorted(causes.values(), key=lambda cause: (-cause["write_cost"], -cause["write_tokens"], cause["class"], cause["detail"]))
     for cause in writes:
         cause["write_cost"] = round(cause["write_cost"], 6)

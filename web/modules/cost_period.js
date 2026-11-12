@@ -45,21 +45,29 @@ export function costPeriodPresentation(view) {
         const split = row.by_class ? CLASS_WORDS.map(([key, label]) => ({ key, label, usd: Number(row.by_class[key]) || 0 })) : null;
         const shared = split ? split.reduce((sum, part) => sum + part.usd, 0) : 0;
         const notes = [];  // one line under the parts: what the amounts leave out, then the price ratio
-        if (!split && Number(row.cost) > 0) notes.push('Not split by class: no price list for this model is at hand.');
+        if (!split && Number(row.cost) > 0) notes.push('Not split by class: these calls have no price list, token counts or named cache lifetime at hand.');
         else if (Number(row.unshared_cost) >= 0.005) notes.push(`${formatUsd(row.unshared_cost)} is not split (no price list, token counts or named cache lifetime for those calls).`);
         if (row.open_rows) notes.push(`${number(row.open_rows)} ${row.open_rows === 1 ? 'call is' : 'calls are'} still open.`);
         if (row.unpriced_rows) notes.push(`${number(row.unpriced_rows)} ended without a price.`);
-        if (row.write_price_in_reads) notes.push(`One written token costs ${number(row.write_price_in_reads)} read tokens here.`);
+        if (row.write_price_in_reads) {
+            const lifetime = { '5m': ' for 5 minutes', '1h': ' for 1 hour' }[row.write_price_lifetime] || '';
+            notes.push(`One token written${lifetime} costs ${number(row.write_price_in_reads)} read tokens here.`);
+        }
+        // Where no cost can be shared (a subscription model, a call without a price list) the bar is by tokens, and says so.
+        const counts = CLASS_WORDS.map(([key]) => Math.max(0, Number(row.tokens?.[key]) || 0));
+        const counted = counts.reduce((sum, count) => sum + count, 0);
+        const byMoney = Boolean(split && shared > 0);
+        if (!byMoney && counted > 0) notes.push('The bar is by tokens: there is no recorded cost to split.');
         return {
             name: row.model,
             sum: `${formatUsd(row.cost)} · ${number(row.calls)} ${row.calls === 1 ? 'call' : 'calls'}`,
             parts: CLASS_WORDS.map(([key, label], index) => {
-                const usd = split ? split[index].usd : null;
-                const share = shared > 0 && usd !== null ? usd / shared : 0;
-                const tokens = `${compactTokens(row.tokens?.[key])} tokens`;
-                return { key, label, share, text: usd === null ? tokens : `${formatUsd(usd)} · ${percent(share)} · ${tokens}` };
+                const share = byMoney ? split[index].usd / shared : counted > 0 ? counts[index] / counted : 0;
+                const tokens = `${compactTokens(counts[index])} tokens`;
+                return { key, label, share, text: byMoney ? `${formatUsd(split[index].usd)} · ${percent(share)} · ${tokens}` : `${tokens} · ${percent(share)}` };
             }),
-            split: Boolean(split && shared > 0),
+            split: byMoney,
+            bar: byMoney || counted > 0,
             notes,
         };
     });
@@ -67,7 +75,9 @@ export function costPeriodPresentation(view) {
         label: `${WRITE_WORDS[row.class] || row.class}${writeDetail(row.class, row.detail)}`,
         calls: number(row.calls),
         tokens: compactTokens(row.write_tokens),
-        cost: row.unshared_calls >= row.calls ? '—' : formatUsd(row.write_cost),
+        // A row only partly split says how many of its calls the amount leaves out.
+        cost: row.unshared_calls >= row.calls ? '—'
+            : `${formatUsd(row.write_cost)}${row.unshared_calls > 0 ? ` · ${number(row.unshared_calls)} not split` : ''}`,
     }));
     const observed = String(view.tariff_observed_at || '').slice(0, 10);
     return {
@@ -76,14 +86,15 @@ export function costPeriodPresentation(view) {
         writes,
         note: models.length
             ? `Each call’s recorded cost is shared among the four classes by the model’s price list${observed ? ` (as recorded on ${observed})` : ''}: `
-                + 'a share of the recorded cost, not the provider’s invoice lines. A period holds the calls started in it.'
+                + 'a share of the recorded cost, not the provider’s invoice lines. A period holds the model calls started in it; '
+                + 'delegated subscription sessions are not listed here.'
             : 'No model calls started in this period.',
     };
 }
 
 const modelHtml = (model) => `<article class="costs-period-model">
         <div class="costs-period-head"><span class="costs-period-name">${escapeHtmlAttr(model.name)}</span><span class="costs-period-sum">${escapeHtmlAttr(model.sum)}</span></div>
-        ${model.split ? `<div class="costs-period-bar" role="img" aria-label="${escapeHtmlAttr(model.parts.map((part) => `${part.label} ${percent(part.share)}`).join(', '))}">${
+        ${model.bar ? `<div class="costs-period-bar" role="img" aria-label="${escapeHtmlAttr(model.parts.map((part) => `${part.label} ${percent(part.share)}`).join(', '))}">${
         model.parts.filter((part) => part.share > 0).map((part) => `<i data-cost-class="${part.key}" style="--share:${(part.share * 100).toFixed(2)}"></i>`).join('')}</div>` : ''}
         <dl class="costs-period-parts">${model.parts.map((part) => `<div><dt><i data-cost-class="${part.key}"></i>${part.label}</dt><dd>${escapeHtmlAttr(part.text)}</dd></div>`).join('')}</dl>
         ${model.notes.length ? `<p class="costs-copy">${escapeHtmlAttr(model.notes.join(' '))}</p>` : ''}
@@ -103,7 +114,7 @@ async function fetchPeriod(period) {
 export function mountCostPeriod(host, { load = fetchPeriod, period = '24h' } = {}) {
     host.innerHTML = `<section class="ui-card costs-period" aria-labelledby="costs-period-title">
         <h3 class="dashboard-card-title" id="costs-period-title">By period</h3>
-        <p class="costs-table-note">Where the money of a period went: cache writes, cache reads, output and uncached input, per model.</p>
+        <p class="costs-table-note">Where the money of a period’s model calls went: cache writes, cache reads, output and uncached input, per model.</p>
         <div class="costs-period-choice" role="group" aria-label="Period">${COST_PERIODS.map(([key, label]) =>
         `<button type="button" class="ui-segment" data-cost-period="${key}" aria-pressed="false">${label}</button>`).join('')}</div>
         <p class="ui-status costs-period-status" role="status" aria-live="polite"></p>
