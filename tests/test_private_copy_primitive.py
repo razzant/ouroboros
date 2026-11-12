@@ -340,7 +340,7 @@ def test_the_startup_import_alone_reads_the_legacy_registry_and_keeps_its_bytes(
 
         def no_folder_sync(fd, real=os.fsync):
             if stat.S_ISDIR(os.fstat(fd).st_mode):
-                raise OSError("this folder cannot be synced")
+                raise OSError(errno.EIO, "this folder could not be synced")
             synced.add(os.fstat(fd).st_ino)
             real(fd)
 
@@ -350,7 +350,7 @@ def test_the_startup_import_alone_reads_the_legacy_registry_and_keeps_its_bytes(
             sw.import_legacy_registry(data)
         assert legacy.read_bytes() == again and (data / second["kept"]).stat().st_ino in synced
 
-        def unsupported(fd, real=os.fsync):  # exFAT, SMB, some FUSE mounts: no folder can be synced at all
+        def unsupported(fd, real=os.fsync):  # a filesystem that cannot sync a folder at all
             if stat.S_ISDIR(os.fstat(fd).st_mode):
                 raise OSError(errno.ENOTSUP, "folder sync not supported")
             real(fd)
@@ -415,15 +415,15 @@ def test_the_startup_door_imports_the_registry_a_7_8_0_body_wrote(tmp_path, monk
     assert time.monotonic() - began < 60, "a start never waits out a busy import lock"
     assert prepare_startup_state(data)["private_copies"]["moved"] == 0, "the next start finishes it"
 
-    legacy.write_bytes(raw)  # ... and when no lock can be taken at all (a records folder this process cannot write)
+    legacy.write_bytes(raw)  # ... and when the helper takes no lock for a reason other than another import holding it
 
-    def refused(*_args, outcome=None, **_kwargs):
-        outcome.update(reason="permission")
+    def refused(*_args, outcome=None, **_kwargs):  # e.g. a records folder this process cannot write: "unknown" today (#3229)
+        outcome.update(reason="unknown")
         return None
 
     with monkeypatch.context() as patch:
         patch.setattr(sw, "acquire_exclusive_file_lock", refused)
-        assert prepare_startup_state(data)["private_copies"] == {"error": "lock_permission"} and legacy.read_bytes() == raw
+        assert prepare_startup_state(data)["private_copies"] == {"error": "lock_unknown"} and legacy.read_bytes() == raw
     assert prepare_startup_state(data)["private_copies"]["moved"] == 0, "and the next start finishes it"
 
     legacy.write_bytes(raw)  # ... and once more, and this start cannot write its receipt

@@ -273,8 +273,8 @@ def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str,
         receipt = {"at": utc_now_iso(), "rows": rows, "moved": moved, "legacy_sha256": digest,
                    "kept": kept.relative_to(root).as_posix()}
         atomic_write_json(_records_dir(data_dir) / ".legacy-import.json", receipt, trailing_newline=True, fsync=True)
-        for folder in (kept.parent, _records_dir(data_dir), legacy.parent, root):  # the new names too: a failure
-            fsync_folder(folder)  # keeps the original
+        for folder in (kept.parent, _records_dir(data_dir), legacy.parent, root):  # the new names too; a failure keeps
+            fsync_folder(folder)  # the original (where no folder can be synced, file-level durability is the limit)
         legacy.unlink()
         return receipt
     finally:
