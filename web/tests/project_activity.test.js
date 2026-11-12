@@ -198,7 +198,7 @@ test('an amber Projects header always has an amber row: what waits counts only t
     assert.deepEqual([...buildProjectActivityIndex(rooms, undefined, [{ chat_id: 43 }]).byChat.keys()], ['43']);
 });
 
-test('a carried amber room keeps its feed row and the header its amber; a complete read or a deleted Project drops them', () => {
+test('a carried amber room keeps its feed row and the header its amber; a complete read, or a room set that no longer names the room, drops them', () => {
     // The page as app.js applies each body: the rooms, then the index over the feed's rows.
     let rooms = new Map();
     let index = buildProjectActivityIndex();
@@ -223,7 +223,8 @@ test('a carried amber room keeps its feed row and the header its amber; a comple
     const gap = { current_questions_gaps: [{ task_id: 't' }] };
     apply(read(gap));
     assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, index.byChat.get('42')?.owner], [['recent', 'old'], true, true]);
-    // The Project deleted meanwhile (its chat id no longer named): its row is never brought back.
+    // A complete room set that no longer names the room: its row is not brought back. (A deleted Project's tombstone
+    // stays named, so its row can return until a read vouches against its question.)
     apply(read({ ...gap, project_chat_ids: [41] }));
     assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['recent'], false]);
     // The complete read that drops the question drops both.

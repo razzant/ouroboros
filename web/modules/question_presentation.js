@@ -75,7 +75,8 @@ const sameAddress = (one, other) => String(one?.task_id) === String(other?.task_
  * the owner's turn; a read never invents an item and a read that vouches against one, a complete one included,
  * removes it. A room kept so keeps its feed row too: the row `prior.projects` held for it stays after this body's
  * `projects` when they no longer hold it (the server kept it only while it could read the question), unless the
- * body's `project_chat_ids` no longer name the room (a deleted Project is never brought back). A body without the
+ * body's `project_chat_ids` no longer name the room. A deleted Project's tombstone stays named there, so its row can
+ * come back for as long as reads cannot vouch against its question. A body without the
  * work projection is returned as it is.
  */
 export function carryOpenQuestions(prior, data) {

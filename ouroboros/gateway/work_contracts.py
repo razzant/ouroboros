@@ -128,6 +128,7 @@ class WorkTurn(TypedDict):
     restart left unknown. In a room's ``turn`` an item a work holds names its ``work_id``; one no work holds has none."""
 
     kind: str  # question | open_question | action
+    work_id: NotRequired[str]  # in a room's turn: the work that holds it
     task_id: str
     quiz_id: NotRequired[str]
     wait_id: NotRequired[str]
