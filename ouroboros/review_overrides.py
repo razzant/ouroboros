@@ -2,26 +2,28 @@
 commits that landed over it (BIBLE P3 "Selected enforcement").
 
 ``record_override`` counts the outcome wherever the gate lets work go on past one (critical findings, an unparseable
-answer, a failed check, a quorum or infrastructure failure, every other reason ``tools/review.py`` names): the
-``review_advisory_override`` event, the counter ``state/advisory_overrides.json`` (read by ``review_status``) and the
-work's card fact ``review_overrides`` on its root task's document, a count and the latest, never a row per decision.
+answer, a failed check, a quorum or infrastructure failure, every other reason ``tools/review.py`` names), once per
+outcome: the ``review_advisory_override`` event, the counter ``state/advisory_overrides.json`` (read by
+``review_status``) and the work's card fact ``review_overrides`` on its root task's document, a count and the latest,
+never a row per decision. A wave still open is no outcome yet; the call that collects it counts how it ended.
 ``note_author_continuation`` adds its ``continued`` part and ``note_override_landing`` its ``landed`` part. The card
 shows each part only when recorded (absent is unknown, not zero), in the app (``web/modules/review_gate_card.js``,
 live from the event) and in its Telegram completion message (``card_line``).
 
 Advisory and Cyber Pro hand every outcome back before Git, so a commit usually lands from a later call naming the
-reviewed attempt, which keeps the reason (``review_override_reason``). After Git recorded the commit,
+reviewed attempt, which keeps the reason (``review_override_reason``); a wave handed back still open stands at what
+its review record holds when the author goes on (nothing once it passed). After Git recorded the commit,
 ``note_override_landing`` adds it to the counter's ``landed`` list (the newest 64, under the install's data root, with
-the author's disposition when it continued) when this call or that attempt met such an outcome. ``landed_line`` names
-those commits in a restart's or an adoption's notice ("running" only on an adoption record's word), and
-``landed_outcome`` one in an evolution cycle's notice. These rows know only FAIL or no verdict: none says PASS.
+the author's disposition when it continued) when that attempt or this call met such an outcome. ``landed_line`` names those commits in a restart's or
+an adoption's notice ("running" only on an adoption record's word), and ``landed_outcome`` one in an evolution cycle's
+notice. These rows know only FAIL or no verdict: none says PASS.
 """
 from __future__ import annotations
 
 import logging
 import pathlib
 import subprocess
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, read_json_dict, update_json_locked, utc_now_iso
 
@@ -33,12 +35,14 @@ LANDED_KEPT = 64
 QUOTED = 80  # the head of an author's reason a card line or a notice quotes (``QUOTED`` in review_gate_card.js)
 _FAIL_REASONS = frozenset({"critical_findings", "parse_failure"})  # the panel's critical answers, unparseable ones too
 _CHECK_REASONS = frozenset({"preflight", "tests_preflight_blocked"})  # the free checks ahead of the panel
+_OPEN = "review_late_result_pending"  # a wave still open: no outcome yet (``review_ledger.reduce_verdict``)
+_SPACE = " \t\n\r\f\v"  # the cut drops only these, as ``headOf`` does in the app
 
 
 def _head(text: Any, limit: int = 300) -> str:
     """At most ``limit`` characters, a cut head ending in an ellipsis that says so (``headOf`` in the app)."""
     text = str(text or "")
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+    return text if len(text) <= limit else text[:limit - 1].rstrip(_SPACE) + "…"
 
 
 def _more(part: Any, latest: Dict[str, Any]) -> Dict[str, Any]:
@@ -91,18 +95,23 @@ def _keep_on_work(ctx: Any, change: Callable[[Dict[str, Any]], Dict[str, Any]]) 
 
 
 def record_override(ctx: Any, blocked_msg: str) -> None:
-    """One review outcome, FAIL or no verdict, the gate let the work go on past. Each record is best effort and
-    independent: an unwritable store loses that copy, never the others or the decision."""
+    """One review outcome, FAIL or no verdict, the gate let the work go on past. A wave still open counts nothing yet,
+    and the earlier attempt this call collects counted its outcome when it met it; a commit this call lands goes over
+    either all the same. Each record is best effort and independent: an unwritable store loses that copy, never the
+    others or the decision."""
     from ouroboros.config import get_review_enforcement
     from ouroboros.tools.review_helpers import review_enforcement_blocks
 
     reason, message = str(getattr(ctx, "_last_review_block_reason", "") or "unknown"), str(blocked_msg or "")
     task_id, at = str(getattr(ctx, "task_id", "") or ""), utc_now_iso()
+    collected = str(getattr(getattr(ctx, "_pending_review_attempt", None), "review_override_reason", "") or "")
     try:
         ctx._review_override_this_call = reason  # a commit this same call lands goes over it
-        _keep_on_attempt(ctx, reason)  # so does a later continuation naming this attempt
+        _keep_on_attempt(ctx, reason)  # the reason a later continuation's attempt keeps, when its record cannot say
     except Exception:
         log.warning("A later landing over this decision cannot be joined to it", exc_info=True)
+    if reason in (_OPEN, collected):
+        return
     latest = {"at": at, "reason": reason, "task_id": task_id, "text": _head(message)}  # a cut head says it is one
     work, fact = _keep_on_work(ctx, lambda prior: {**prior, **_more(prior, latest)})
     try:
@@ -124,12 +133,34 @@ def record_override(ctx: Any, blocked_msg: str) -> None:
         log.warning("Failed to persist advisory override visibility", exc_info=True)
 
 
+def _went_on_over(ctx: Any, source: Any) -> str:
+    """What the reviewed attempt ``source`` stands at as its author goes on over it, as a reason ("" when it met no
+    FAIL or no verdict): the reason the gate kept on it, except that a wave the gate handed back still open stands at
+    what its review record holds now, nothing once it passed (the kept reason while no record answers)."""
+    kept, record_id = (str(getattr(source, name, "") or "") for name in ("review_override_reason", "review_record_id"))
+    if kept != _OPEN or not record_id:
+        return kept
+    try:
+        from ouroboros.review_ledger import ledger_root, load_record
+
+        verdict = (load_record(ledger_root(ctx), record_id) or {}).get("verdict")
+    except Exception:  # unreadable: the wave is as open as the gate last saw it
+        log.debug("The review record %s cannot be read", record_id, exc_info=True)
+        return kept
+    if not (isinstance(verdict, dict) and verdict.get("aggregate")):
+        return kept
+    if verdict["aggregate"] == "PASS":
+        return ""
+    reason = str(verdict.get("reason") or "")
+    return reason.partition("gate_block:")[2] or reason or kept
+
+
 def note_author_continuation(ctx: Any, decision: Any) -> None:
     """The author's explicit continuation over the reviewed attempt its validated reference resolved to, when that
-    attempt met a FAIL or no verdict: the work's ``continued`` part, with the disposition and the head of its reason.
-    Best effort like every record here (``_keep_on_work`` logs a failed write); it never changes the gate."""
+    attempt stands at a FAIL or no verdict: the work's ``continued`` part, with the disposition and the head of its
+    reason. Best effort like every record here (``_keep_on_work`` logs a failed write); it never changes the gate."""
     source = getattr(ctx, "_author_commit_source", None)
-    reason = str(getattr(source, "review_override_reason", "") or "")
+    reason = _went_on_over(ctx, source)
     if reason:
         decision = decision if isinstance(decision, dict) else {}
         latest = {"at": utc_now_iso(), "disposition": str(decision.get("disposition") or ""),
@@ -139,14 +170,14 @@ def note_author_continuation(ctx: Any, decision: Any) -> None:
 
 
 def note_override_landing(ctx: Any, commit_sha: str) -> None:
-    """After Git recorded ``commit_sha``: keep it in ``landed`` and count it on the work's card when this call, or the
-    reviewed attempt its author continuation's validated reference resolved to, met a FAIL or no verdict. Git
-    already succeeded: nothing here may fail it."""
+    """After Git recorded ``commit_sha``: keep it in ``landed`` and count it on the work's card when the reviewed
+    attempt its author continuation's validated reference resolved to stands at a FAIL or no verdict, or this call
+    met one. Git already succeeded: nothing here may fail it."""
     try:
         from ouroboros.tool_access import canonical_data_root
 
         source = getattr(ctx, "_author_commit_source", None)  # the durable attempt, resolved afresh by each call
-        reason = getattr(ctx, "_review_override_this_call", "") or getattr(source, "review_override_reason", "")
+        reason = _went_on_over(ctx, source) or getattr(ctx, "_review_override_this_call", "")
         if not (reason and commit_sha):
             return
         author, at = getattr(ctx, "_author_commit_record", None), utc_now_iso()  # this call's continuation, if any
@@ -180,7 +211,8 @@ def _decision(latest: Any) -> str:
 
 
 def card_line(fact: Any) -> str:
-    """The work card's compact field, twin of ``reviewGateLine`` in the app: each recorded part, "" without one."""
+    """The work card's compact field, twin of ``reviewGateLine`` in the app: each recorded part, "" without one. A part
+    the work's own outcome count does not precede names what it went on over itself."""
     fact = fact if isinstance(fact, dict) else {}
     latest, continued = (fact.get(key) if isinstance(fact.get(key), dict) else {} for key in ("latest", "continued"))
     parts = []
@@ -188,10 +220,13 @@ def card_line(fact: Any) -> str:
         reason = str(latest.get("reason") or "unknown").replace("_", " ")
         parts.append(f"FAIL or no verdict {fact['count']}× (latest: {reason})")
     if _counted(continued):
-        said = _decision(continued.get("latest"))
-        parts.append(f"author continued {continued['count']}×" + (f" (latest: {said})" if said else ""))
+        last = continued.get("latest") if isinstance(continued.get("latest"), dict) else {}
+        said, over = _decision(last), "" if parts else str(last.get("reason") or "").replace("_", " ")
+        parts.append(f"author continued {continued['count']}×" + (f" over {over}" if over else "")
+                     + (f" (latest: {said})" if said else ""))
     if landed := _counted(fact.get("landed")):
-        parts.append(f"landed over it: {landed} commit{'' if landed == 1 else 's'}")
+        over = "it" if parts else "a FAIL or no verdict"
+        parts.append(f"landed over {over}: {landed} commit{'' if landed == 1 else 's'}")
     return "Review: " + " · ".join(parts) if parts else ""
 
 
@@ -199,30 +234,38 @@ def _outcome(row: Dict[str, Any]) -> str:
     """How a landed commit's review ended, named by its recorded reason, and the author's word when the row keeps it."""
     reason, said = str(row.get("reason") or "unknown"), _decision(row)
     kind = ("review FAIL" if reason in _FAIL_REASONS else "check FAIL" if reason in _CHECK_REASONS
-            else "no review verdict")
+            else "review outcome" if reason == "unknown" else "no review verdict")
     return f"{kind}: {reason.replace('_', ' ')}" + (f"; author continued: {said}" if said else "")
 
 
-def _landed_rows(data_dir: Any) -> Dict[str, Dict[str, Any]]:
-    """The counter's ``landed`` rows by commit; {} when none is readable."""
+def _landed_rows(data_dir: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    """The counter's ``landed`` rows by commit; {} when it holds none, None when it cannot be read."""
     try:
-        rows = (read_json_dict(pathlib.Path(data_dir) / COUNTER_REL) or {}).get("landed")
+        path = pathlib.Path(data_dir) / COUNTER_REL
+        counter = read_json_dict(path)
+        if counter is None and path.exists():
+            return None  # there, but no counter can be read from it
+        rows = (counter or {}).get("landed")
     except Exception:
         log.debug("Commits landed over a review outcome cannot be read", exc_info=True)
-        return {}
+        return None
     return {str(row.get("sha")): row for row in rows if isinstance(row, dict)} if isinstance(rows, list) else {}
 
 
-def landed_outcome(data_dir: Any, commit_sha: str) -> str:
-    """The review outcome ``commit_sha`` landed over; "" when no landed row names it, so "" never means PASS."""
-    row = _landed_rows(data_dir).get(str(commit_sha)) if commit_sha else None
+def landed_outcome(data_dir: Any, commit_sha: str) -> Optional[str]:
+    """The review outcome ``commit_sha`` landed over; "" when no landed row names it, so "" never means PASS, and None
+    when the rows cannot be read."""
+    rows = _landed_rows(data_dir)
+    if rows is None:
+        return None
+    row = rows.get(str(commit_sha)) if commit_sha else None
     return _outcome(row) if row else ""
 
 
 def landed_line(repo_dir: Any, data_dir: Any, *, base: str, target: str, running: bool) -> str:
-    """The commits of ``base..target`` Git recorded over a review FAIL or no verdict, each with its outcome, as one
-    line ("" when none is known). Only an adoption record's word says running; anything else leaves deployment
-    unconfirmed. A notice never fails over it: an unreadable counter or Git names nothing."""
+    """The commits of ``base..target`` Git recorded over a FAIL or no verdict, each with its outcome, as one line (""
+    when none is known). Only an adoption record's word says running; anything else leaves deployment unconfirmed. A
+    notice never fails over it: an unreadable counter or Git names nothing."""
     landed = _landed_rows(data_dir)
     if not (landed and base and target):
         return ""
@@ -236,5 +279,5 @@ def landed_line(repo_dir: Any, data_dir: Any, *, base: str, target: str, running
              for sha in (listed.stdout.split() if listed.returncode == 0 else []) if sha in landed]
     if not named:
         return ""
-    return (f"{'Now running' if running else 'Committed'} over a review FAIL or no verdict: {', '.join(named)}"
+    return (f"{'Now running' if running else 'Committed'} over a FAIL or no verdict: {', '.join(named)}"
             + ("." if running else "; deployment unconfirmed, as no record yet binds a running process to them."))

@@ -167,7 +167,7 @@ def test_the_owners_restart_reply_names_commits_landed_over_a_review(tmp_path, m
     ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
     server._process_bridge_updates(Bridge([{"chat": {"id": 1}, "from": {"id": 1}, "text": "/restart", "source": "web"}]),
                                    0, ctx)
-    assert ctx.sent == [(1, f"♻️ Restarting.\nCommitted over a review FAIL or no verdict: {landed[:12]} (review FAIL: "
+    assert ctx.sent == [(1, f"♻️ Restarting.\nCommitted over a FAIL or no verdict: {landed[:12]} (review FAIL: "
                             "critical findings); deployment unconfirmed, as no record yet binds a running process to them.")]
 
 

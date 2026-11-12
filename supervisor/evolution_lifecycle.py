@@ -1316,8 +1316,9 @@ def notify_owner_cycle_outcome(campaign: Dict[str, Any], tx: Dict[str, Any]) -> 
             f"🧬 Evolution cycle absorbed (commit {commit_sha[:12]}).\n"
             f"Objective: {obj_short or 'autonomous self-improvement'}\n"
             "The self-modification is now live (restart verified); "
-            + (f"it landed over a review FAIL or no verdict ({review})." if review
-               else "no landing over a review FAIL or missing verdict is recorded for it.")
+            + (f"it landed over a FAIL or no verdict ({review})." if review else
+               "whether it landed over a FAIL or no verdict could not be read." if review is None
+               else "no landing over a FAIL or missing verdict is recorded for it.")
             + " Reply if you want it reverted."
         )
     else:

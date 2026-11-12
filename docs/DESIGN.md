@@ -1640,7 +1640,8 @@ reviews create child tasks or prove execution.
 - A work whose review returned FAIL or no verdict carries one quiet phrase on
   its card's line, `Review: FAIL or no verdict N× (latest: <reason>) · author
   continued M× (latest: <disposition> — "<head>") · landed over it: K
-  commits`, a part only when recorded (unknown is not zero), the first live,
+  commits`, a part only when recorded (unknown is not zero; a part with no
+  count before it names what it went over), the first live,
   all on a page load before Details open, running ones too (a Project work's
   portal in Main shows it live and once its Details open), and one Details
   row, `Review returned FAIL or no verdict`, with the stored heads (300

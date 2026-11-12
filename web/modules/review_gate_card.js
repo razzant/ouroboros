@@ -9,7 +9,7 @@ const QUOTED = 80;  // review_overrides.QUOTED: the head of an author's reason t
 /** Twin of `review_overrides._head`: at most `limit` characters, a cut head ending in an ellipsis that says so. */
 const headOf = (text, limit) => {
     const points = Array.from(String(text || ''));
-    return points.length <= limit ? points.join('') : `${points.slice(0, limit - 1).join('').trimEnd()}…`;
+    return points.length <= limit ? points.join('') : `${points.slice(0, limit - 1).join('').replace(/[ \t\n\r\f\v]+$/, '')}…`;
 };
 const counted = (part) => (Number.isSafeInteger(part?.count) && part.count > 0 ? part.count : 0);
 const reasonWords = (fact) => String(fact?.latest?.reason || 'unknown').replaceAll('_', ' ');
@@ -19,14 +19,16 @@ const decisionWords = (latest, limit = QUOTED) => {
     return [String(latest?.disposition || ''), why ? `"${why}"` : ''].filter(Boolean).join(' — ');
 };
 
-/** Twin of `review_overrides.card_line`: each recorded part, or '' without one. */
+/** Twin of `review_overrides.card_line`: each recorded part, or '' without one; a part the work's own outcome count
+ * does not precede names what it went on over itself. */
 export function reviewGateLine(fact) {
     const continued = fact?.continued, landed = counted(fact?.landed), said = decisionWords(continued?.latest);
-    const parts = [
-        counted(fact) ? `FAIL or no verdict ${fact.count}× (latest: ${reasonWords(fact)})` : '',
-        counted(continued) ? `author continued ${continued.count}×${said ? ` (latest: ${said})` : ''}` : '',
-        landed ? `landed over it: ${landed} commit${landed === 1 ? '' : 's'}` : '',
-    ].filter(Boolean);
+    const parts = counted(fact) ? [`FAIL or no verdict ${fact.count}× (latest: ${reasonWords(fact)})`] : [];
+    const over = parts.length ? '' : String(continued?.latest?.reason || '').replaceAll('_', ' ');
+    if (counted(continued)) {
+        parts.push(`author continued ${continued.count}×${over ? ` over ${over}` : ''}${said ? ` (latest: ${said})` : ''}`);
+    }
+    if (landed) parts.push(`landed over ${parts.length ? 'it' : 'a FAIL or no verdict'}: ${landed} commit${landed === 1 ? '' : 's'}`);
     return parts.length ? `Review: ${parts.join(' · ')}` : '';
 }
 
@@ -45,9 +47,11 @@ export function syncReviewGateItem(record, detail) {
     const body = [
         counted(fact) ? `A review of this work returned FAIL or no verdict ${times(fact.count)}.\nLatest${by}: `
             + `${reasonWords(fact)}${latest.text ? ` — ${latest.text}` : ''}` : '',
-        counted(continued) ? `The author explicitly continued ${times(continued.count)}; latest: `
-            + (decisionWords(continued.latest, Infinity) || 'not recorded') : '',
-        counted(landed) ? `Landed over it: ${landed.count} commit${landed.count === 1 ? '' : 's'}; latest: `
+        counted(continued) ? `The author explicitly continued ${times(continued.count)}`
+            + (!counted(fact) && continued.latest?.reason ? ` over ${String(continued.latest.reason).replaceAll('_', ' ')}` : '')
+            + `; latest: ${decisionWords(continued.latest, Infinity) || 'not recorded'}` : '',
+        counted(landed) ? `Landed over ${counted(fact) || counted(continued) ? 'it' : 'a FAIL or no verdict'}: `
+            + `${landed.count} commit${landed.count === 1 ? '' : 's'}; latest: `
             + (String(landed.latest?.sha || '').slice(0, 12) || 'not recorded') : '',
     ].filter(Boolean).join('\n');
     const at = [latest.at, continued.latest?.at, landed.latest?.at].map((value) => String(value || '')).sort().pop();

@@ -21,8 +21,11 @@ test('the field names each recorded part, twin of review_overrides.card_line', (
         'Review: FAIL or no verdict 3× (latest: critical findings) · author continued 1× (latest: rejected — "the lock '
         + 'order is intended") · landed over it: 2 commits');
     assert.equal(reviewGateLine({ continued: continued(2), landed: landed(1) }),
-        `Review: author continued 2× (latest: rejected — "${Array.from(WHY).slice(0, 79).join('').trimEnd()}…") · `
-        + 'landed over it: 1 commit', 'a part another work counted is absent here, not zero');
+        `Review: author continued 2× over critical findings (latest: rejected — "${Array.from(WHY).slice(0, 79).join('')
+            .trimEnd()}…") · landed over it: 1 commit`, 'a part another work counted is absent here, not zero: the next '
+        + 'part names what it went over');
+    assert.equal(reviewGateLine({ landed: landed(2) }), 'Review: landed over a FAIL or no verdict: 2 commits',
+        'a landing alone names what it went over');
     assert.equal(reviewGateLine({ count: 1, continued: {}, landed: { count: 0 } }),
         'Review: FAIL or no verdict 1× (latest: unknown)', 'an old field shows no zero for a part it never recorded');
     for (const none of [undefined, null, {}, { count: 0 }, { count: '3' }, { continued: { count: 0 } }, 'fact']) {
@@ -54,6 +57,13 @@ test('one Details item and one meta phrase, replaced in place; an older read nev
         "Details quotes the author's stored head whole");
     assert.ok(item.body.endsWith('\nLanded over it: 1 commit; latest: abc123def456'));
     assert.doesNotMatch(item.body, /Blocking|prohibit/);
+    const successor = { groupId: 'work-2', items: [] };  // a Continue successor counts no outcome of its own
+    assert.equal(syncReviewGateItem(successor, { review_overrides: { continued: continued(1), landed: landed(1) } }), true);
+    assert.ok(successor.items[0].body.startsWith('The author explicitly continued once over critical findings; latest: '));
+    assert.ok(successor.items[0].body.endsWith('\nLanded over it: 1 commit; latest: abc123def456'));
+    const alone = { groupId: 'work-3', items: [] };
+    assert.equal(syncReviewGateItem(alone, { review_overrides: { landed: landed(2) } }), true);
+    assert.equal(alone.items[0].body, 'Landed over a FAIL or no verdict: 2 commits; latest: abc123def456');
     const { prior } = installDom();
     try {
         renderLiveCardMeta(record);

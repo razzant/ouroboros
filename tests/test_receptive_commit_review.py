@@ -1282,3 +1282,87 @@ def test_a_late_outcome_is_collected_from_the_exact_staged_bytes_before_a_new_de
         landed = a.git._commit_reviewed(a.ctx, "Change value", paths=["change.py", "maybe.txt"], review_reference=fresh,
                                         author_disposition=decision)
     assert _git(a.repo, "rev-parse", "HEAD") != head and a.reviewer.rounds == rounds, landed
+
+
+_WHY = "I read the finding and choose to continue."
+
+
+def _trace(a):
+    """The work's review trace on its card (``review_overrides``)."""
+    from tests._store_shared import read_result
+
+    return (read_result(a.data, TASK) or {}).get("review_overrides") or {}
+
+
+def _trace_events(a):
+    path = a.ctx.drive_logs() / "events.jsonl"
+    rows = map(json.loads, path.read_text(encoding="utf-8").splitlines()) if path.exists() else []
+    return [row for row in rows if row.get("type") == "review_advisory_override"]
+
+
+@pytest.mark.parametrize("verdict", ["PASS", "FAIL"])
+@pytest.mark.parametrize("flow", ["open", "settled"])
+def test_a_wave_handed_back_open_counts_how_it_ended_and_its_continuation_goes_over_that(author, flow, verdict):
+    """Through the real gate (Advisory, REV6 C1/C2): a call hands back a wave still open; the same call made again
+    collects it, rejoining its attempt while the wave runs or as a new attempt at $0 once it settled; the author's
+    continuation then commits. A PASS is no outcome: the card, the counter, the events and the restart line stay
+    empty. A FAIL counts once, however often it is collected, and the continuation and the commit go over it."""
+    from ouroboros.review_ledger import ledger_root, load_record
+    from ouroboros.review_overrides import COUNTER_REL, card_line, landed_line
+    from ouroboros.utils import read_json_dict
+
+    a, call, task = author, _commit, TASK
+    if verdict == "FAIL":  # the scripted seats answer with one critical finding
+        answer = a.reviewer.chat
+
+        def failing(*args, **kwargs):
+            content, usage = answer(*args, **kwargs)
+            said = json.loads(content["content"]) | {"change_clean": False, "change": [
+                {"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": "wrong value"}]}
+            return {"content": json.dumps(said)}, usage
+        a.reviewer.chat = failing
+    head, first = _git(a.repo, "rev-parse", "HEAD"), {}
+    thread = call(a, first)
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
+    write_owner_message(a.data, "Status?", task)
+    _join(thread)
+    _read_mail(a)
+    assert "reviewers are still running" in first["result"], first["result"]
+    assert _trace(a) == {} and _trace_events(a) == [], "a wave still open is no outcome yet"
+
+    def collect():
+        again = {}
+        if flow == "open" and a.reviewer.launch_m2.is_set() is False:  # rejoin the open wave and collect it
+            waiting = call(a, again)
+            waiting.join(1.0)
+            assert waiting.is_alive(), "the reissue rejoined the open wave"
+            a.reviewer.release()
+            _join(waiting)
+        else:  # the wave settled: the same call collects the settled round at $0
+            a.reviewer.release()
+            until(lambda: len(a.reviewer.read) == 2)
+            until(lambda: _notices(a))
+            _read_mail(a)
+            _join(call(a, again))
+        assert again["result"].startswith("Review outcome returned before commit."), again["result"]
+        return json.loads(again["result"].split("\n", 1)[1])["review_reference"]
+
+    reference = collect()
+    assert (load_record(ledger_root(a.ctx), reference["review_record_id"]) or {})["verdict"]["aggregate"] == verdict
+    if verdict == "FAIL":
+        reference = collect()  # collected once more, the counted FAIL counts nothing new
+    final = {}
+    _join(call(a, final, review_reference=reference, author_disposition={
+        "disposition": "accepted", "rationale": _WHY}))
+    sha = _git(a.repo, "rev-parse", "HEAD")
+    assert sha != head, final["result"]
+    work, line = _trace(a), landed_line(a.repo, a.data, base=head, target=sha, running=False)
+    if verdict == "PASS":
+        assert work == {} and _trace_events(a) == [] and line == "", (work, line)
+        assert "landed" not in (read_json_dict(a.data / COUNTER_REL) or {})
+        return
+    assert card_line(work) == ('Review: FAIL or no verdict 1× (latest: critical findings) · author continued 1× '
+                               f'(latest: accepted — "{_WHY}") · landed over it: 1 commit'), work
+    assert len(_trace_events(a)) == 1 and read_json_dict(a.data / COUNTER_REL)["count"] == 1
+    assert line.startswith(f"Committed over a FAIL or no verdict: {sha[:12]} (review FAIL: critical findings; "
+                           "author continued: "), line
