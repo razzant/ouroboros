@@ -183,11 +183,17 @@ function bodyOf(row, value, only = null) {
     return body;
 }
 
+/** Whether a read shows the value a write sent. An entry of a list or a map is the same when every field is: a field a
+ *  read masks (a key's secret) never equals the value typed, so such a write stays unconfirmed. */
 function sameValue(a, b) {
     if (Array.isArray(a) || Array.isArray(b)) {
         return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, i) => sameValue(value, b[i]));
     }
     if (a === undefined || a === null || b === undefined || b === null) return a === b;
+    if (typeof a === 'object' || typeof b === 'object') {
+        return typeof a === 'object' && typeof b === 'object'
+            && [...new Set([...Object.keys(a), ...Object.keys(b)])].every((key) => sameValue(a[key], b[key]));
+    }
     const [x, y] = [String(a).trim(), String(b).trim()];
     return x === y || (x !== '' && y !== '' && Number(x) === Number(y));
 }

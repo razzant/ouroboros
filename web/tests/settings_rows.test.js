@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { bindSettingRows, commitSetting, forgetSettingRows, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
+import { bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
 import { HAND_WRITTEN, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
@@ -279,6 +279,29 @@ test('an unknown outcome says "Not confirmed yet", reads again before anything e
     server.values.OUROBOROS_CONSCIOUSNESS_DAILY_USD = 14;  // the timed-out save did land
     await readSettings();
     assert.equal(view.line(ALLOWANCE), 'Saved', 'a later read that shows the value says it saved, without a receipt');
+});
+
+test('an unknown outcome of a list or a map is judged field by field: an entry that did not land is never called saved', async (t) => {
+    const LIST = testRow('T_LIST', { kind: 'custom' });
+    const MAP = testRow('T_MAP', { kind: 'custom' });
+    const timedOut = () => response({ error: 'The save did not answer in time.', saved: null }, 504);
+    const { server } = await start(t, [], { values: { T_LIST: [{ name: 'a', url: 'https://old.example' }], T_MAP: { items: [{ id: 'a', on: true }] } } });
+    // The write did not land: the read shows the old entry, so the outcome stays unknown and nothing is sent again.
+    server.answers.push(timedOut);
+    const next = [{ name: 'a', url: 'https://new.example' }];
+    const lost = await commitSetting(LIST, next);
+    assert.equal(lost.state, 'unknown');
+    assert.equal(outcomeLine(LIST, lost).text, 'Not confirmed yet');
+    assert.deepEqual(server.log, ['GET', 'POST', 'GET']);
+    await readSettings();
+    server.answers.push(timedOut);
+    assert.equal((await commitSetting(MAP, { items: [{ id: 'a', on: false }] })).state, 'unknown', 'a map is no different');
+    // The same answer for a write that did land: the read shows every field as sent.
+    server.answers.push((body) => { server.save(body); return timedOut(); });
+    const landed = await commitSetting(LIST, next);
+    assert.equal(landed.state, 'saved');
+    assert.deepEqual(server.values.T_LIST, next);
+    assert.equal(server.posts.filter((body) => 'T_LIST' in body).length, 2, 'one write each time');
 });
 
 test('saved, then a later step failed: the line says both', async (t) => {
