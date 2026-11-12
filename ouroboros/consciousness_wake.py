@@ -709,7 +709,7 @@ class WakeObservation:
 
     def source_bytes(self, chain: Optional[Dict[str, Any]] = None) -> bytes:
         """A header, then one row per event. The header's boundary is the compact one an accepting wake persists: chat
-        position, memory sequence and ``chain`` (the transition link it names, which holds the state)."""
+        position, memory sequence and ``chain`` (the transition link it named; a later wake may remove that file)."""
         boundary = None if self.boundary is None else {
             **{key: value for key, value in self.boundary.items() if key != "transitions"},
             **({"transition_chain": chain} if chain else {})}
