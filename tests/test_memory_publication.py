@@ -149,6 +149,13 @@ def test_a_publication_writes_its_history_row_first_and_nothing_without_it(tmp_p
                                             source_type="test")
     assert saved.ok and path.read_bytes() == b"New.\n"
     assert [step[0] for step in order] == ["row", "file"] and order[0][1] == b"Old.\n"
-    assert order[0][2] == {"ensure_record_boundary": True, "require_lock": True}
+    from ouroboros import knowledge
+
+    writer, real_writer_append = [], knowledge.append_jsonl
+    monkeypatch.setattr(knowledge, "append_jsonl",
+                        lambda *args, **kwargs: writer.append(kwargs) or real_writer_append(*args, **kwargs))
+    assert knowledge.write_knowledge_note(knowledge.resolve_knowledge_address(tmp_path, "pin", "global"), "# Pin\n").ok
+    # Exactly the knowledge writer's own history append: boundary repair, required lock, nothing else.
+    assert order[0][2] == writer[0] == {"ensure_record_boundary": True, "require_lock": True}
     row = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
     assert (row["old_content"], row["new_sha256"]) == ("Old.\n", saved.revision)
