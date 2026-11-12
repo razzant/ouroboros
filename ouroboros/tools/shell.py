@@ -49,11 +49,10 @@ from ouroboros.tools.shell_audit import (
     _masked_green_disclosure,
     _UNDECLARED_OUTPUTS_MARKER,  # noqa: F401
     _mentioned_user_file_outputs_without_declaration,
-    undeclared_outputs_meta,
-    undeclared_outputs_note,
     _presence_allows_user_output,  # noqa: F401
     _allowed_output_roots,  # noqa: F401
 )
+from ouroboros.tools.shell_audit import undeclared_outputs_meta, undeclared_outputs_note  # used here, not re-exported
 from ouroboros.tools.shell_process import (  # noqa: F401
     _RUN_SHELL_DEFAULT_TIMEOUT_SEC,
     CommandStopped,
