@@ -13,7 +13,7 @@ from ouroboros import markdown_source
 from ouroboros import text_change
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests._knowledge_history_shared import applied_blocks
+from tests._knowledge_history_shared import applied_blocks, changed_rows
 
 TOPIC = "notes/река"
 RIVER = ("---\ntype: note\nsummary: When the river matters.\n---\n# Река\n\nБерег 🌊.\n\n## Мост\n\nСтарый мост.\n\n"
@@ -362,3 +362,27 @@ def test_removed_sections_name_heading_size_and_first_line_cut_to_120(tmp_path):
     assert changed.delta["removed_sections"] == [{"heading": "## Gone", "first_line": long_line.strip()[:120],
                                                   "chars": len(f"## Gone\n\n\n{long_line}\nsecond\n")}]
     assert changed.delta["removed_headings"] == ["## Gone"]
+
+
+def test_versions_stored_as_changes_read_back_exactly_and_list_as_stored(tmp_path):
+    """Rows that carry a change against their base read back through the version lookup, the version read and the
+    stale-revision lookup, exactly; the listing counts such a row's text as stored without rebuilding any version."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    bridge = RIVER.replace("Старый мост.", "Новый мост.")
+    texts = [RIVER, bridge, bridge.replace("Две.", "Три.")]
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    changed_rows(journal, texts, TOPIC)
+    target.path.parent.mkdir(parents=True, exist_ok=True)
+    target.path.write_bytes(texts[-1].encode("utf-8"))
+    stored = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert all("change" in row and "new_content" not in row for row in stored[1:])
+    revisions = [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts]
+    for text, revision in zip(texts, revisions):
+        found, row = versions.find_version(target, revision)
+        assert found == text and row["new_sha256"] == revision
+    assert tools._knowledge_read(ctx, TOPIC, version=revisions[1]).endswith(texts[1])
+    held = versions.held_version(journal, target, revisions[1], 1 << 23)
+    assert held["text"] == texts[1] and [item["revision"] for item in held["since"]] == [revisions[2]]
+    listing = versions.render_history(store.read_knowledge_note(target))
+    assert "text not stored" not in listing and [line.split(" · ")[0][2:] for line in listing.splitlines()
+                                                 if line.startswith("- ")] == revisions[::-1]

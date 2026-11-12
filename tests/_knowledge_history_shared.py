@@ -1,5 +1,28 @@
-"""The version a knowledge history row replaced, read the way an extension reads it."""
+"""The version a knowledge history row replaced, read the way an extension reads it; rows that store changes."""
 from __future__ import annotations
+
+
+def changed_rows(journal, texts, topic, scope="global"):
+    """Successive versions of one note appended to ``journal`` as the writer stores them: each row names the
+    previous row as its base and carries its change (``knowledge_rows.encode``, the byte rule deciding whole texts).
+    Returns each row's byte offset."""
+    import json
+
+    from ouroboros import knowledge_rows
+
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    offsets, previous = [], None
+    with journal.open("ab") as stream:
+        for text in texts:
+            offset, old = stream.tell(), "" if previous is None else previous[2]
+            row = {"topic": topic, "address": {"scope": scope, "topic": topic}, "publication": "source_capture",
+                   "mode": "overwrite", "old_sha256": "" if previous is None else knowledge_rows.sha256_text(old),
+                   "new_sha256": knowledge_rows.sha256_text(text),
+                   **knowledge_rows.encode(old, text, None if previous is None else previous[:2])}
+            stream.write((json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
+            offsets.append(offset)
+            previous = (offset, row, text)
+    return offsets
 
 
 def replaced(root, row):

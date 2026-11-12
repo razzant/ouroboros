@@ -5,9 +5,10 @@ writer (``knowledge.write_knowledge_note``) keeps for a shelf. A row belongs to 
 ``topic`` and the scope its ``address`` names. Lines are pre-filtered by the note's topic as the
 writer encodes it in JSON before anything is parsed and are read newest first, in blocks from the
 journal's end, so a large journal is never parsed whole; a line naming the note that is not JSON is
-counted as a gap, never fatal. A version is named by its revision (the sha256 of its exact bytes)
-and its text is returned only after it hashes to that revision. Nothing here writes: no index, no
-cache, no sidecar.
+counted as a gap, never fatal. A version is named by its revision (the sha256 of its exact bytes);
+its text is read through ``knowledge_rows`` (stored whole, or rebuilt from the changes rows carry)
+and returned only after it hashes to that revision. Nothing here writes: no index, no cache, no
+sidecar.
 
 The outline is the one renderer the read, the receipt and the refusal share. It prints each heading
 line as the note spells it; its character ranges are the ``start_char``/``end_char`` of
@@ -16,14 +17,13 @@ included, and a heading the parser gives no section of its own (a setext heading
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-from ouroboros import text_change
+from ouroboros import knowledge_rows, text_change
 from ouroboros.utils import jsonl_window
 
 JOURNAL_NAME = "knowledge_history.jsonl"
@@ -146,51 +146,37 @@ class NoteHistory:
         return out
 
 
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _referenced_text(address: Any, ref: Any) -> str | None:
-    """The ``new_content`` an ``old_content_ref`` names in this same journal, or ``None``."""
-    if not isinstance(ref, dict) or ref.get("journal") != f"knowledge:{address.scope}" or type(ref.get("offset")) is not int:
-        return None
-    try:
-        with journal_path(address).open("rb") as handle:
-            handle.seek(ref["offset"])
-            row = _parse(handle.readline())
-    except OSError:
-        return None
-    text = row.get("new_content") if isinstance(row, dict) else None
-    return text if isinstance(text, str) else None
-
-
 def find_version(address: Any, version: Any) -> tuple[str, dict]:
     """The exact text of one version of this note and the row that wrote it, newest rows first.
 
-    The text is a row's ``new_content`` when its ``new_sha256`` is the version, else a later row's
-    inline ``old_content`` or the text its ``old_content_ref`` names when its ``old_sha256`` is; it
-    is returned only when it hashes to the version. The row is the one that wrote the version, or
-    ``{}`` when none did (an outside edit, or a write before history). ``VersionUnavailable`` says
-    why there is no text and names the gaps among the lines that name this note."""
+    Every row that names the version, as the text it published (``new_sha256``) or replaced
+    (``old_sha256``), is read through ``knowledge_rows.Texts``: stored whole, rebuilt through its
+    base's changes, or, when that path is broken, from the other end of its segment (a whole text or
+    the live note); the text is returned only when it hashes to the version (an empty text is the
+    version sha256(b"")). The row is the one that wrote the version, or ``{}`` when none did (an
+    outside edit, or a write before history). ``VersionUnavailable`` says why there is no text and
+    names the gaps among the lines that name this note."""
     if not isinstance(version, str) or len(version) != 64 or version.strip("0123456789abcdef"):
         raise VersionUnavailable("a version is a revision: the 64 lowercase hex characters of its sha256")
-    why, held = "", None
+    try:
+        live = address.path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        live = None
+    texts, why, held = knowledge_rows.Texts(journal_path(address), live), "", None
     history = NoteHistory(address, version.encode("ascii"))
-    for _offset, row in history:
+    for offset, row in history:
         own = row.get("new_sha256") == version
         if not own and (held is not None or row.get("old_sha256") != version):
             continue
-        text = (row.get("new_content") if own else
-                row["old_content"] if "old_content" in row else _referenced_text(address, row.get("old_content_ref")))
-        verified = isinstance(text, str) and _sha(text) == version  # an empty text is the version sha256(b"")
-        if own and (verified or held is not None):
-            return (text if verified else held), row
-        if verified:
+        texts.rows.setdefault(offset, row)
+        try:
+            text = texts.text(offset, "new" if own else "old")
+        except knowledge_rows.TextUnavailable as exc:
+            text, why = None, why or str(exc)
+        if own and (text is not None or held is not None):
+            return (held if text is None else text), row
+        if text is not None:
             held = text  # a later row's old side: keep looking for the row that wrote it
-        elif isinstance(text, str) and text:
-            why = "the stored text does not hash to the version"
-        else:
-            why = why or "the row that names it holds no text (digest-era)"
     if held is not None:
         return held, {}
     # A torn line may have lost the very version asked for: on a miss, count every line naming this note.
@@ -209,16 +195,20 @@ def row_facts(row: Mapping[str, Any]) -> dict[str, Any]:
             "reason": row.get("reason") or UNKNOWN}
 
 
-def held_version(journal: Path, address: Any, revision: str, tail_bytes: int) -> dict[str, Any] | None:
+def held_version(journal: Path, address: Any, revision: str, tail_bytes: int,
+                 live: str | None = None) -> dict[str, Any] | None:
     """The version a stale write holds, when this note's rows in the writer's tail have it.
 
-    ``{"facts", "text", "since"}``: that row's facts, its verified text and the facts of the rows
-    written after it, oldest first. ``None``: the tail holds no such row, or no text for it."""
-    since = []
-    for _offset, row in tail_rows(journal, address, tail_bytes):
+    ``{"facts", "text", "since"}``: that row's facts, its text read through ``knowledge_rows``
+    (``live``, the note's current text, closes the newest segment) and the facts of the rows written
+    after it, oldest first. ``None``: the tail holds no such row, or no verified text for it."""
+    since, texts = [], knowledge_rows.Texts(journal, live)
+    for offset, row in tail_rows(journal, address, tail_bytes):
+        texts.rows.setdefault(offset, row)
         if row.get("new_sha256") == revision:
-            text = row.get("new_content")
-            if not isinstance(text, str) or _sha(text) != revision:
+            try:
+                text = texts.text(offset, "new")
+            except knowledge_rows.TextUnavailable:
                 return None
             return {"facts": row_facts(row), "text": text, "since": [row_facts(item) for item in reversed(since)]}
         since.append(row)
@@ -330,10 +320,14 @@ def removed_sections(old: Any, new: Any) -> list[dict[str, Any]] | None:
 
 
 def _listed(row: Mapping[str, Any]) -> dict[str, Any]:
-    """The facts a listing line shows, without the row's note texts (a long history is not held whole)."""
+    """The facts a listing line shows, without the row's note texts (a long history is not held whole).
+
+    A row has its text when it holds the whole ``new_content`` or a ``change`` against a ``base``; no
+    version is rebuilt to say so."""
     text = row.get("new_content")
-    stored = isinstance(text, str) and not row.get("content_digested") and bool(
-        text or not row.get("new_sha256") or row.get("new_sha256") == _sha(""))
+    stored = (isinstance(text, str) and not row.get("content_digested") and bool(
+        text or not row.get("new_sha256") or row.get("new_sha256") == knowledge_rows.sha256_text(""))) or (
+        isinstance(row.get("change"), list) and isinstance(row.get("base"), Mapping))
     return {**{key: row.get(key) for key in ("new_sha256", "old_sha256", "ts", "focus", "mode", "reason", "delta",
                                              "old_chars", "new_chars", "reverted_from")}, "text_stored": stored}
 

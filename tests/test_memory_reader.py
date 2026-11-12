@@ -374,6 +374,51 @@ def test_a_note_keeps_its_source_capture_history_and_each_version_reads_whole(me
     assert every(root, "relations", address=address, relation="links")[0] == []  # version two links nothing
 
 
+def test_a_history_row_that_stores_a_change_reads_its_versions_whole_and_its_line_as_stored(tmp_path):
+    """``field`` ``new_content``/``old_content`` of a row that carries a change is that version's text, rebuilt and
+    verified; ``field: []`` is the line as stored; another stored value reads as stored; rows written before changes
+    were stored read exactly as before, their ``old_content_ref`` included."""
+    import json
+
+    from ouroboros import knowledge_rows
+
+    sha = knowledge_rows.sha256_text
+    first, second, third = "# Река\n\nOne.\n", "# Река\n\nOne, two.\n", "# Река\n\nOne, two, three.\n"
+    base = {"topic": "река", "address": {"scope": "global"}, "publication": "source_capture"}
+    head = {**base, "old_sha256": "", "new_sha256": sha(first), "old_content": "", "new_content": first}
+    named = {**base, "old_sha256": sha(first), "new_sha256": sha(second), "new_content": second,
+             "old_content_ref": {"kind": "entry", "journal": "knowledge:global", "offset": 0, "field": ["new_content"]}}
+    lines = [json.dumps(row, ensure_ascii=False) + "\n" for row in (head, named)]
+    named_at = len(lines[0].encode("utf-8"))
+    at = named_at + len(lines[1].encode("utf-8"))
+    changed = {**base, "old_sha256": sha(second), "new_sha256": sha(third),
+               **knowledge_rows.encode(second, third, (named_at, named))}
+    journal = tmp_path / "memory" / "knowledge_history.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("".join(lines) + json.dumps(changed, ensure_ascii=False) + "\n", encoding="utf-8")
+    assert "new_content" not in changed and changed["base"] == {"offset": named_at, "sha256": sha(second)}
+    entry = {"kind": "entry", "journal": "knowledge:global", "offset": at}
+    new = document(tmp_path, {**entry, "field": ["new_content"]})
+    assert new["text"] == third and new["revision"] == sha(third) and new["representation"] == "text"
+    assert document(tmp_path, {**entry, "field": ["old_content"]})["text"] == second
+    line = document(tmp_path, {**entry, "field": []})
+    assert line["text"] == journal.read_bytes()[at:].decode("utf-8").rstrip("\n") and line["representation"] == "line"
+    assert json.loads(document(tmp_path, {**entry, "field": ["change"]})["text"]) == changed["change"]
+    # Rows written before: stored values, as before; the earlier text the reference names; no logical old_content.
+    earlier = {"kind": "entry", "journal": "knowledge:global", "offset": named_at}
+    assert document(tmp_path, {**earlier, "field": ["new_content"]})["text"] == second
+    assert document(tmp_path, named["old_content_ref"])["text"] == first
+    assert document(tmp_path, {**earlier, "field": []})["text"] == lines[1].rstrip("\n")
+    with pytest.raises(MemoryReadError, match="no such field"):
+        document(tmp_path, {**earlier, "field": ["old_content"]})
+    # The base row damaged, and no other stored text reaches the version: a typed miss that names the break.
+    raw = journal.read_bytes()
+    journal.write_bytes(raw[:named_at] + b"#" * (at - 1 - named_at) + raw[at - 1:])
+    with pytest.raises(MemoryReadError) as gap:
+        document(tmp_path, {**entry, "field": ["new_content"]})
+    assert gap.value.code == "not_found" and f"the line at byte offset {named_at} is not a JSON row" in gap.value.message
+
+
 def test_note_links_resolve_present_unwritten_and_external(memory):
     root, _store, _ids = memory
     from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note

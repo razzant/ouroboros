@@ -14,6 +14,7 @@ import pytest
 
 from ouroboros import knowledge_rows as rows
 from ouroboros import text_change
+from tests._knowledge_history_shared import changed_rows
 
 TOPIC = "notes/река"
 
@@ -22,20 +23,9 @@ def sha(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def build(journal, texts, topic=TOPIC):
+def build(journal, texts):
     """Each text a version of one note, written as the writer writes it: its base is the previous row."""
-    offsets, previous = [], None
-    with journal.open("ab") as stream:
-        for text in texts:
-            offset = stream.tell()
-            old = "" if previous is None else previous[2]
-            fields = rows.encode(old, text, None if previous is None else previous[:2])
-            row = {"topic": topic, "address": {"scope": "global"}, "publication": "source_capture",
-                   "old_sha256": "" if previous is None else sha(old), "new_sha256": sha(text), **fields}
-            stream.write((json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
-            offsets.append(offset)
-            previous = (offset, row, text)
-    return offsets
+    return changed_rows(journal, texts, TOPIC)
 
 
 def stored(journal):
