@@ -475,13 +475,12 @@ The full component map, data flow, API surface, storage layout, safety boundary,
 
 ## Philosophy
 
-The 13 Constitution principles — Agency, Continuity, Meta-over-Patch,
-Immune Integrity, Self-Creation, LLM-First, Authenticity & Reality
-Discipline, Minimalism, Becoming, Versioning and Releases, the absorbed
-Iterations / Spiral lineage, and Epistemic Stability — are defined in
-full in [`BIBLE.md`](BIBLE.md). That file is the constitutional SSOT
-(Bible P4 Ship-of-Theseus protection) and this README intentionally does
-not paraphrase it.
+The Constitution's principles P0–P13 — Agency, Continuity, Meta-over-Patch,
+Immune Integrity, Self-Creation, LLM-First, Authenticity & Reality Discipline,
+Minimalism, Becoming, Versioning and Releases, the absorbed Iterations / Spiral
+lineage, Epistemic Stability and Emergence — are defined in full in
+[`BIBLE.md`](BIBLE.md). That file is the constitutional SSOT and this README
+intentionally does not paraphrase it.
 
 ---
 
