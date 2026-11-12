@@ -23,14 +23,16 @@ def test_a_quiet_install_renders_facts_without_ok_lines_or_cost_verdicts(tmp_pat
     env = _make_health_env(tmp_path)
     (tmp_path / "memory" / "identity.md").write_text("I am Ouroboros.", encoding="utf-8")
     text = context_health.build_health_invariants(env)
-    assert "identity.md last updated 0.0 h ago" in text
-    # Windows' coarse clock can read before the write's own timestamp (run 42412859782: "-0.0 h ago").
-    import os
-    import time
+    assert "- identity.md: no update_identity record" in text.splitlines()
+    # A coarse clock (Windows) can read before a record's own stamp (run 42412859782: "-0.0 h ago"): never a negative age.
+    from datetime import datetime, timedelta, timezone
 
-    ahead = time.time() + 1
-    os.utime(tmp_path / "memory" / "identity.md", (ahead, ahead))
-    assert "identity.md last updated 0.0 h ago" in context_health.build_health_invariants(env)
+    from ouroboros.utils import append_jsonl
+
+    ahead = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+    append_jsonl(tmp_path / "memory" / "identity_journal.jsonl", {"ts": ahead, "focus": {"role": "main"}})
+    text = context_health.build_health_invariants(env)
+    assert "- identity.md: last update_identity less than a minute ago (main)" in text.splitlines()
     for gone in ("OK:", "HIGH-COST", "high-cost", "STALE IDENTITY", "THIN IDENTITY", "SCRATCHPAD", "version sync",
                  "budget drift within", "COST ACCOUNTING UNAVAILABLE"):
         assert gone not in text, gone
@@ -38,6 +40,75 @@ def test_a_quiet_install_renders_facts_without_ok_lines_or_cost_verdicts(tmp_pat
     [said] = [part for part in system.split("\n\n") if "Health Invariants" in part]
     # Text is the contract here: the prompt must not promise a stale-memory verdict the block does not render.
     assert "stale" not in said.lower() and "stale" not in text.lower()
+
+
+def test_the_self_lines_state_each_file_s_last_update_record_and_never_its_mtime(tmp_path, monkeypatch):
+    """``identity.md`` and ``WORLD.md`` each get one fact from the journal their tool appends: the newest record
+    of the mind's with its age and the writing focus's role, "no record" when the journal holds none (a host row
+    is not the mind's), "unreadable" when that cannot be told. The file's mtime, fresh here throughout, says nothing.
+    ``identity.md`` alone is compared with the bytes its record published; a difference is said without a cause."""
+    import hashlib
+    from datetime import datetime, timedelta, timezone
+
+    from ouroboros import deadline_utils, memory_publication
+    from ouroboros.utils import append_jsonl
+
+    env = _make_health_env(tmp_path)
+    memory = tmp_path / "memory"
+    now = datetime(2026, 11, 12, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(deadline_utils, "utc_now", lambda: now)
+
+    def said():
+        rows = context_health.build_health_invariants(env).splitlines()
+        return [row[2:] for row in rows if row.startswith(("- identity.md", "- WORLD.md"))]
+
+    def publish(name, journal, role, age):
+        """The tools' own writer with its clock ``age`` before ``now``; the file itself is written at this moment."""
+        monkeypatch.setattr(memory_publication, "utc_now_iso", lambda: (now - age).isoformat())
+        path = memory / name
+        revision = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+        author = {"task_id": "t", "focus": {"role": role, "task_id": "t"}, "route": "test"}
+        assert memory_publication.publish_memory_file(path, revision, lambda _old: f"{name} as of {age}",
+                                                      journal=memory / journal, author=author, source_type="task").ok
+
+    (memory / "identity.md").unlink()  # the shared environment starts with one
+    assert said() == [], "no file: no fact"
+    (memory / "identity.md").write_text("I am Ouroboros.", encoding="utf-8")
+    (memory / "WORLD.md").write_text("my map", encoding="utf-8")
+    assert said() == ["identity.md: no update_identity record", "WORLD.md: no update_world record"], "no journal"
+    (memory / "identity_journal.jsonl").write_bytes(b"")  # as Memory.ensure_files leaves it
+    assert said()[0] == "identity.md: no update_identity record"
+
+    publish("identity.md", "identity_journal.jsonl", "consciousness", timedelta(days=8, hours=3, minutes=20))
+    assert said()[0] == "identity.md: last update_identity 8 d 3 h ago (consciousness)", \
+        "the record, not the fresh mtime; the file is the bytes that record published: nothing more is said"
+    (memory / "identity.md").write_text("restored from a copy", encoding="utf-8")
+    assert said()[0] == "identity.md: last update_identity 8 d 3 h ago (consciousness); the file differs from that record"
+
+    host = {"ts": now.isoformat(), "task_id": "startup", "source_type": "legacy_wrap", "focus": {"role": "host"},
+            "old_content": "my map", "new_content": "my map, fenced"}
+    append_jsonl(memory / "world_journal.jsonl", host)
+    assert said()[1] == "WORLD.md: no update_world record", "the host's first fencing is no update of the mind's"
+    publish("WORLD.md", "world_journal.jsonl", "main", timedelta(hours=5, minutes=12))
+    assert said()[1] == "WORLD.md: last update_world 5 h 12 min ago (main)"
+    (memory / "WORLD.md").write_text("my map, its measured block refreshed by the host", encoding="utf-8")
+    assert said()[1] == "WORLD.md: last update_world 5 h 12 min ago (main)", "the map is never compared with its record"
+    append_jsonl(memory / "world_journal.jsonl", host)
+    assert said()[1] == "WORLD.md: last update_world 5 h 12 min ago (main)", "a later host row hides no record of the mind's"
+
+    journal = memory / "identity_journal.jsonl"
+    append_jsonl(journal, {"ts": (now - timedelta(minutes=7)).isoformat(), "new_content": "no role"})
+    assert said()[0] == "identity.md: last update_identity 7 min ago", \
+        "no role on the record: no parentheses; no hash on it: nothing to compare the changed file with"
+    append_jsonl(journal, {"focus": {"role": "main"}, "new_content": "no date"})
+    assert said()[0] == "identity.md: last update_identity record unreadable", "the newest record has no date"
+    append_jsonl(journal, {"ts": (now - timedelta(minutes=3)).isoformat(), "focus": {"role": "main"}})
+    assert said()[0] == "identity.md: last update_identity 3 min ago (main)"
+    monkeypatch.setattr(context_health, "_SELF_JOURNAL_TAIL_BYTES", 16)
+    assert said() == ["identity.md: last update_identity record unreadable", "WORLD.md: last update_world record unreadable"], \
+        "a record longer than the tail is unknown, never no record"
+    (memory / "identity.md").unlink()
+    assert said() == ["WORLD.md: last update_world record unreadable"]
 
 
 def test_the_drift_line_reads_the_saved_drift_pair_and_never_the_usage_store(tmp_path, monkeypatch):
