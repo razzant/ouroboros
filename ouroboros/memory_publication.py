@@ -2,8 +2,9 @@
 
 Inference happens before this seam. Only the source check, history append and
 atomic replacement share the short per-file lock, like knowledge publication:
-the history row is written first, so a version the file holds is always in its
-journal, and a row that cannot be written leaves the file untouched.
+the history row is written first, so a version this function publishes is in its
+journal before the file holds it, and a row that cannot be written leaves the
+file untouched.
 """
 from __future__ import annotations
 
