@@ -205,17 +205,20 @@ def test_an_open_wave_counts_nothing_yet_and_a_collected_outcome_counts_once(tmp
     assert _fact(ctx.drive_root, "root-1") == {} and _events(ctx) == [] and read_json_dict(ctx.drive_root / COUNTER_REL) is None
     note_override_landing(ctx, "a" * 40)  # Cyber Pro: the same call commits over the open wave
     assert [row["reason"] for row in read_json_dict(ctx.drive_root / COUNTER_REL)["landed"]] == ["review_late_result_pending"]
-    ctx._review_override_this_call = ""
+    assert landed_outcome(ctx.drive_root, "a" * 40) == "no review verdict when it landed: review late result pending"
+    ctx._review_override_this_call, ctx._review_reconcile_only = "", True  # later calls collect that wave
     ctx._pending_review_attempt = SimpleNamespace(review_override_reason="review_late_result_pending")
-    _decide(ctx, "critical_findings")  # a later call collects that wave: it ended in FAIL
+    _decide(ctx, "critical_findings")  # it ended in FAIL
     ctx._pending_review_attempt = SimpleNamespace(review_override_reason="critical_findings")
     _decide(ctx, "critical_findings")  # the same call made again collects the counted FAIL
     fact = _fact(ctx.drive_root, "root-1")
     assert fact["count"] == 1 and fact["latest"]["reason"] == "critical_findings" and len(_events(ctx)) == 1
     assert read_json_dict(ctx.drive_root / COUNTER_REL)["count"] == 1
-    ctx._pending_review_attempt = SimpleNamespace(review_override_reason="critical_findings")
     _decide(ctx, "review_quorum")  # a collected attempt's new outcome is another one
     assert _fact(ctx.drive_root, "root-1")["count"] == 2 and len(_events(ctx)) == 2
+    ctx._review_reconcile_only = False  # a new wave of the task; the collected attempt is only left on the context
+    _decide(ctx, "critical_findings")  # the same reason the left-over attempt keeps
+    assert _fact(ctx.drive_root, "root-1")["count"] == 3 and len(_events(ctx)) == 3, "a left-over attempt silences nothing"
 
 
 def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_says_now(tmp_path, monkeypatch):

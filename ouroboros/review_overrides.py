@@ -104,7 +104,9 @@ def record_override(ctx: Any, blocked_msg: str) -> None:
 
     reason, message = str(getattr(ctx, "_last_review_block_reason", "") or "unknown"), str(blocked_msg or "")
     task_id, at = str(getattr(ctx, "task_id", "") or ""), utc_now_iso()
-    collected = str(getattr(getattr(ctx, "_pending_review_attempt", None), "review_override_reason", "") or "")
+    # Only while this call collects that attempt: the field outlives the call, a later wave of the task is its own.
+    held = getattr(ctx, "_pending_review_attempt", None) if getattr(ctx, "_review_reconcile_only", False) else None
+    collected = str(getattr(held, "review_override_reason", "") or "")
     try:
         ctx._review_override_this_call = reason  # a commit this same call lands goes over it
         _keep_on_attempt(ctx, reason)  # the reason a later continuation's attempt keeps, when its record cannot say
@@ -234,7 +236,8 @@ def _outcome(row: Dict[str, Any]) -> str:
     """How a landed commit's review ended, named by its recorded reason, and the author's word when the row keeps it."""
     reason, said = str(row.get("reason") or "unknown"), _decision(row)
     kind = ("review FAIL" if reason in _FAIL_REASONS else "check FAIL" if reason in _CHECK_REASONS
-            else "review outcome" if reason == "unknown" else "no review verdict")
+            else "review outcome" if reason == "unknown" else "no review verdict when it landed" if reason == _OPEN
+            else "no review verdict")
     return f"{kind}: {reason.replace('_', ' ')}" + (f"; author continued: {said}" if said else "")
 
 

@@ -1300,6 +1300,18 @@ def _trace_events(a):
     return [row for row in rows if row.get("type") == "review_advisory_override"]
 
 
+def _failing_seats(a):
+    """The scripted seats answer with one critical finding."""
+    answer = a.reviewer.chat
+
+    def failing(*args, **kwargs):
+        content, usage = answer(*args, **kwargs)
+        said = json.loads(content["content"]) | {"change_clean": False, "change": [
+            {"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": "wrong value"}]}
+        return {"content": json.dumps(said)}, usage
+    a.reviewer.chat = failing
+
+
 @pytest.mark.parametrize("verdict", ["PASS", "FAIL"])
 @pytest.mark.parametrize("flow", ["open", "settled"])
 def test_a_wave_handed_back_open_counts_how_it_ended_and_its_continuation_goes_over_that(author, flow, verdict):
@@ -1312,15 +1324,8 @@ def test_a_wave_handed_back_open_counts_how_it_ended_and_its_continuation_goes_o
     from ouroboros.utils import read_json_dict
 
     a, call, task = author, _commit, TASK
-    if verdict == "FAIL":  # the scripted seats answer with one critical finding
-        answer = a.reviewer.chat
-
-        def failing(*args, **kwargs):
-            content, usage = answer(*args, **kwargs)
-            said = json.loads(content["content"]) | {"change_clean": False, "change": [
-                {"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": "wrong value"}]}
-            return {"content": json.dumps(said)}, usage
-        a.reviewer.chat = failing
+    if verdict == "FAIL":
+        _failing_seats(a)
     head, first = _git(a.repo, "rev-parse", "HEAD"), {}
     thread = call(a, first)
     assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
@@ -1366,3 +1371,36 @@ def test_a_wave_handed_back_open_counts_how_it_ended_and_its_continuation_goes_o
     assert len(_trace_events(a)) == 1 and read_json_dict(a.data / COUNTER_REL)["count"] == 1
     assert line.startswith(f"Committed over a FAIL or no verdict: {sha[:12]} (review FAIL: critical findings; "
                            "author continued: "), line
+
+
+def test_a_new_failing_review_after_a_collected_fail_counts_on_its_own(author, monkeypatch):
+    """A call that collected an already counted FAIL leaves that attempt on the context; a real review_change that
+    fails afterwards in the same task is a new outcome and counts (REV6K N1): only a collecting call skips."""
+    from ouroboros.review_overrides import COUNTER_REL
+    from ouroboros.utils import read_json_dict
+    from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
+
+    a = author
+    _failing_seats(a)
+    thread = _commit(a, {})
+    assert a.reviewer.sent["m1"].wait(60) and a.reviewer.preparing_m2.wait(60)
+    write_owner_message(a.data, "Status?", TASK)
+    _join(thread)
+    _read_mail(a)
+    a.reviewer.release()
+    until(lambda: len(a.reviewer.read) == 2)
+    until(lambda: _notices(a))
+    _read_mail(a)
+    for _ in range(2):  # the same unchanged call collects the settled FAIL at $0, twice
+        again = {}
+        _join(_commit(a, again))
+        assert again["result"].startswith("Review outcome returned before commit."), again["result"]
+    assert len(_trace_events(a)) == 1 and getattr(a.ctx, "_pending_review_attempt", None) is not None
+    set_review_pool(monkeypatch, pool_roster(pool_seat("first", "test/m1", delivery="native"),
+                                             pool_seat("second", "test/m2", delivery="native")))
+    _git(a.repo, "add", "change.py")
+    out = {}
+    _join(_review_change(a, out))
+    assert _payload(out["result"]).get("aggregate") == "FAIL", out["result"][:300]
+    assert _trace(a)["count"] == 2 and len(_trace_events(a)) == 2, _trace(a)
+    assert read_json_dict(a.data / COUNTER_REL)["count"] == 2
