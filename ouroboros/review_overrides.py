@@ -160,29 +160,35 @@ def _count(ctx: Any, reason: str, message: str, record_id: str = "") -> None:
 
 def _went_on_over(ctx: Any, source: Any) -> str:
     """What the reviewed attempt ``source`` stands at as its author goes on over it, as a reason ("" when it met no
-    FAIL or no verdict): the reason the gate kept on it, except that a wave the gate handed back still open stands at
-    what its review record holds now, nothing once it passed (the kept reason while no record answers)."""
+    FAIL or no verdict): the reason the gate kept on it, except where that reason was kept before the panel's outcome
+    was known (a wave handed back still open, or a failed free check ahead of the panel): then its review record says
+    what it holds now. A panel FAIL on the record, or a counted seat's FAIL on a record still open, is gone over as
+    that FAIL; otherwise a failed check stands, and an open wave stands at its record's outcome (nothing once passed)."""
     kept, record_id = (str(getattr(source, name, "") or "") for name in ("review_override_reason", "review_record_id"))
-    if kept != _OPEN or not record_id:
+    if not record_id or (kept != _OPEN and kept not in _CHECK_REASONS):
         return kept
     try:
         from ouroboros.review_ledger import ledger_root, load_record
 
         record = load_record(ledger_root(ctx), record_id) or {}
-    except Exception:  # unreadable: the wave is as open as the gate last saw it
+    except Exception:  # unreadable: the attempt stands where the gate last saw it
         log.debug("The review record %s cannot be read", record_id, exc_info=True)
         return kept
     verdict = record.get("verdict")
     if not (isinstance(verdict, dict) and verdict.get("aggregate")):
         return kept
-    if verdict["aggregate"] == "PASS":
-        return ""
     reason = str(verdict.get("reason") or "")
     counted = {str(row.get("seat_id") or "") for row in record.get("rows") or []
                if isinstance(row, Mapping) and not row.get("additional")}
     if reason == _OPEN and any(seat in counted and value == "FAIL"
                                for seat, value in (verdict.get("per_row") or {}).items()):
         return "critical_findings"  # still open, yet a counted seat's FAIL is already on the record
+    if verdict["aggregate"] == "FAIL":
+        return reason or "critical_findings"
+    if kept in _CHECK_REASONS:
+        return kept  # the panel passed, gave no verdict or is still open: the failed check is what stands
+    if verdict["aggregate"] == "PASS":
+        return ""
     return reason.partition("gate_block:")[2] or reason or kept
 
 
@@ -194,9 +200,10 @@ def note_author_continuation(ctx: Any, decision: Any) -> None:
     reason = _went_on_over(ctx, source)
     if reason:
         record_id = str(getattr(source, "review_record_id", "") or "")
-        if str(getattr(source, "review_override_reason", "") or "") == _OPEN:
-            # Handed back open, its outcome was never counted (read back later, or gone on over before it settled):
-            # the decision to go on over it counts it, once per record.
+        kept = str(getattr(source, "review_override_reason", "") or "")
+        if kept == _OPEN or reason != kept:
+            # An outcome no call counted (handed back open and read back later or gone on over before it settled, or
+            # a panel FAIL behind a failed check): the decision to go on over it counts it, once per review record.
             _count(ctx, reason, f"The author went on over a review standing at {reason.replace('_', ' ')}.", record_id)
             try:
                 _keep_on_attempt(ctx, reason, row=source)

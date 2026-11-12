@@ -258,7 +258,9 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
             (open_wave, "corrupt", open_wave), (open_wave, "bare", open_wave), (open_wave, "", open_wave),
             ("critical_findings", "pass", "critical_findings"), ("preflight", "pass", "preflight"),
             ("review_quorum", "", "review_quorum"), ("", "fail", ""), ("", "", ""),
-            (open_wave, "open_fail", "critical_findings"), (open_wave, "open_adviser_fail", open_wave)):
+            (open_wave, "open_fail", "critical_findings"), (open_wave, "open_adviser_fail", open_wave),
+            ("preflight", "fail", "critical_findings"), ("preflight", "open_fail", "critical_findings"),
+            ("tests_preflight_blocked", "open", "tests_preflight_blocked"), ("preflight", "corrupt", "preflight")):
         assert _went_on_over(ctx, source(kept, record_id)) == over, (kept, record_id)
     assert _went_on_over(ctx, None) == ""
     ctx._author_commit_source = source("review_late_result_pending", "pass")
@@ -281,6 +283,15 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     ctx._author_commit_source = source("critical_findings", "fail")  # counted when it was handed back
     note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
     assert _fact(ctx.drive_root, "root-1")["count"] == 1 and len(_events(ctx)) == 1
+    records["fail2"] = records["fail"]
+    ctx._author_commit_source = source("preflight", "fail2")  # a panel FAIL behind a failed check, never counted
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    fact = _fact(ctx.drive_root, "root-1")
+    assert (fact["count"], fact["latest"]["reason"], fact["latest"]["record_id"]) == (2, "critical_findings", "fail2")
+    ctx._author_commit_source = source("preflight", "pass")  # the panel passed: the counted check stands alone
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    fact = _fact(ctx.drive_root, "root-1")
+    assert fact["count"] == 2 and fact["continued"]["latest"]["reason"] == "preflight"
 
 
 def test_an_open_wave_never_overwrites_a_reason_its_attempt_keeps(tmp_path, monkeypatch):
