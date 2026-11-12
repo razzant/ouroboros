@@ -270,7 +270,7 @@ export const amberNote = (kind) => (kind === 'question' ? tr('work.amber.questio
  * word's ink (live, queued, wait for the owner's own question, held, unknown, starting, offline, online); `mark` the
  * work's shape after it (the server's room mark under this module's four overlays; the transcript's typing bubble
  * shows while it is `moving`, whatever waits for the owner); `owner` whether something waits for the owner (the room's
- * turn: its amber dot takes the mark's place, the word keeps its ink); `amber` what waits (question | action), said in
+ * turn: status_mark.js draws it amber, the word keeps its ink); `amber` what waits (roomAmber's kinds), said in
  * words where the word does not already say it. `stopping` is the owner's own Stop press on every working work of the
  * room ('finalize' | 'immediate'); until the host is `ready`, an idle room says its start in the words of the host's
  * `boot` phases (host_starting_status.js). A room still preparing names as its `step` the step its speaking work
@@ -322,7 +322,7 @@ export function ownStopPress(state, records) {
 /**
  * One work's row in the room's work list: its word (an outcome beside Finalizing…), its line beside it, the row's tone
  * (the word's ink), its `mark` (the work's shape as the server names it; the owner's own Stop press moves it), `owner`
- * whether something in the work waits for the owner (its turn: the amber dot takes the mark's place; a Pause by the
+ * whether something in the work waits for the owner (its turn: status_mark.js draws it amber; a Pause by the
  * owner or by Ouroboros is not the owner's move) and `outcome`, the known outcome said beside Finalizing… (its dot in
  * the outcome's tone). `stopping` is the owner's own Stop press on the work's card ('finalize' | 'immediate'), said
  * at once as the card says it.

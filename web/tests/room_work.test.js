@@ -276,6 +276,14 @@ test('a question row says its own words as long as its turn item makes the row, 
         // The item gone, its words go with it: nothing holds a row for a question the turn no longer lists.
         state = reconcileWorkState(state, read([], []), 1);
         assert.equal(state.questions.size, 0);
+        // An item that never had its row says what the item itself says: an answer whose delivery is unknown is
+        // not an unanswered question (a carried item across a read with a gap).
+        state = reconcileWorkState(emptyWorkState(), read([{ ...item, quiz_id: 'sent', code: 'delivery_unknown' }, item], []), 1);
+        shade.update();
+        const words = Object.fromEntries(list.children.filter((el) => el.dataset.id?.startsWith('question:'))
+            .map((el) => [el.dataset.id, el.querySelector('.rw-word').textContent]));
+        assert.deepEqual(words, { 'question:t-ended:sent': 'Answer recorded · delivery unknown',
+            'question:t-ended:format': 'Unanswered' });
     } finally { shade?.destroy(); restoreDom(prior); }
 });
 

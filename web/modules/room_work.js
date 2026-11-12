@@ -317,8 +317,12 @@ export function createRoomWork({
             // The question's own row, held with its item (work_status.reconcileWorkState): its card's words say its
             // state here too, never new ones.
             const said = state.questions?.get?.(key);
-            // Without its row, a question its task stands on waits for the answer; any other is plainly unanswered.
-            const fallback = entry.kind === 'question' ? { quiz_state: 'open', wait_for_answer: true } : { quiz_state: 'open' };
+            // Without its row, a question its task stands on waits for the answer and an answer whose delivery is
+            // unknown says so (the item's code); any other is plainly unanswered.
+            const fallback = entry.kind === 'question' ? { quiz_state: 'open', wait_for_answer: true }
+                : entry.code === 'delivery_unknown'
+                    ? { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'late_answer_delivery_unknown' } }
+                    : { quiz_state: 'open' };
             items.push({ id: `question:${key}`, kind: 'question', work: null, record: null,
                 confirmed: true, online: true, cmid: '', startedAt: 0, episode: ask.taskId, attempt: null,
                 activity: 'waiting', ask, said,
