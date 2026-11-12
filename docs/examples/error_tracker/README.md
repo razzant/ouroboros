@@ -35,7 +35,7 @@ binary files, so Ouroboros loads it in process.
    (`pip install sentry-sdk`). Do not declare it as a skill dependency: a declared dependency moves the
    extension into a separate process, where it cannot see these records. The packaged desktop app has
    no supported way to add a package to its interpreter.
-2. Give it a destination. Either save `SENTRY_DSN` in Settings → Secrets and grant it to this extension
+2. Give it a destination. Either save `SENTRY_DSN` in Settings → Accounts and keys and grant it to this extension
    in Skills (each process reads it at load), or set `SENTRY_DSN` in the server's environment, which
    pool workers inherit and the SDK reads itself. Without either it sends nothing.
 3. Copy this directory to `data/skills/external/error_tracker/`, review it (or skip the review as the

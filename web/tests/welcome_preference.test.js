@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_WELCOME_TEXT, mountEmptyChatWelcome, welcomeText } from '../modules/welcome_preference.js';
-import { renderSettingsPage } from '../modules/settings_ui.js';
+import { HAND_WRITTEN, HOME_ROWS, ROWS } from '../modules/settings_rows.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
+
+// Every registered Settings control, including the pages drawn by hand.
+const settingsSections = () => [JSON.stringify(ROWS), JSON.stringify(HAND_WRITTEN)].join('');
 
 test('welcome mode resolves exactly without treating custom text as markup', () => {
     assert.equal(welcomeText({ mode: 'default', text: 'ignored' }), DEFAULT_WELCOME_TEXT);
@@ -13,7 +16,7 @@ test('welcome mode resolves exactly without treating custom text as markup', () 
 });
 
 test('the welcome preference is hidden: Settings renders no control for it', () => {
-    const html = renderSettingsPage();
+    const html = settingsSections() + JSON.stringify(HOME_ROWS);
     assert.doesNotMatch(html, /data-welcome|welcome-mode|welcome-text/i);
     assert.doesNotMatch(html, /greeting/i);
 });

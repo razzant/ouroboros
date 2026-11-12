@@ -217,7 +217,7 @@ async function readCatalog() {
 }
 
 /** Mount the page: its shell now, its data when it is shown. */
-export function initCircles({ state, showPage, openSettingsTab, read = readPlaces, readStatus = readPlaceConnector,
+export function initCircles({ state, showPage, openSettings, read = readPlaces, readStatus = readPlaceConnector,
     openSheet = openPlaceSheet, openConnect = openConnectPlace, askConfirm = openConfirmDialog, readModels = readCatalog,
     writes = { createCircle, updateCircle, deleteCircle }, contributions = getContributions() } = {}) {
     const page = document.createElement('div');
@@ -278,6 +278,8 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
         if (selection && node?.setSelectionRange) node.setSelectionRange(...selection);
     }
 
+    // Settings broadcasts every catalog read, a failed one too: that one leaves the suggestions as they are.
+    const onBroadcast = (event) => { if (Array.isArray(event?.detail?.items) && event.detail.read_state !== 'failed') onCatalog(event); };
     function onCatalog(event) {
         if (destroyed) return;
         const data = event.detail;
@@ -349,7 +351,7 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
 
     function addPlace(circle) {
         openConnect({ returnFocus: current(`[data-circles-act="add-place"][data-circle="${CSS.escape(circle?.id || UNASSIGNED)}"]`),
-            openSettingsTab, circle: circle ? { id: circle.id, name: circle.name } : null });
+            openSettings, circle: circle ? { id: circle.id, name: circle.name } : null });
     }
 
     // The fields stay open while a write is out: `onConflict` hears the circle as it stands now, the facts a resave uses.
@@ -536,7 +538,7 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
     window.addEventListener(PLACES_CHANGED_EVENT, onChanged);
     window.addEventListener('ouro:open-circles', onOpen);
     document.addEventListener('visibilitychange', onVisibility);
-    document.addEventListener('settings-model-catalog:updated', onCatalog);
+    document.addEventListener('settings-model-catalog:updated', onBroadcast);
     paint();
     if (shown()) void refresh();
     return {
@@ -556,7 +558,7 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
             window.removeEventListener(PLACES_CHANGED_EVENT, onChanged);
             window.removeEventListener('ouro:open-circles', onOpen);
             document.removeEventListener('visibilitychange', onVisibility);
-            document.removeEventListener('settings-model-catalog:updated', onCatalog);
+            document.removeEventListener('settings-model-catalog:updated', onBroadcast);
         },
     };
 }

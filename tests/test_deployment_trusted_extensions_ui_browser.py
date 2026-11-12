@@ -149,7 +149,7 @@ def test_delivered_and_untrusted_extensions_in_skills(direct_server_with_data, t
             page = browser.new_page()
             _skills(page, url, "light", 1400)
             delivered = page.locator(f'.skills-card[data-skill="{NOTES}"]')
-            delivered.locator("label.skills-switch").click()
+            delivered.locator("label.ui-switch").click()
             deadline = time.monotonic() + 90
             while not (row := _listing(url)[NOTES]).get("live_loaded"):
                 assert time.monotonic() < deadline, row

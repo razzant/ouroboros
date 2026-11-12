@@ -100,7 +100,7 @@ def optional_bounds_notice(facts: List[Dict[str, Any]]) -> str:
                   if origin.endswith("_invalid") else why.get(origin, origin))
         parts.append(f"{label} = {fact['value']} {unit} ({reason})".replace("  ", " "))
     return ("⚙️ Task limits on this install: " + "; ".join(parts) + ". New installs ship without these "
-            "limits (unlimited); nothing was changed here. Change them in Settings → Advanced → Runtime Limits.")
+            "limits (unlimited); nothing was changed here. Change them in Dashboard → Costs → More.")
 
 
 def command_timeout_notice(document: Optional[Mapping[str, Any]], settings: Mapping[str, Any]) -> str:

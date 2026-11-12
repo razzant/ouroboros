@@ -141,7 +141,7 @@ for _profile_defaults in _MODEL_DEFAULTS.values():
     _profile_defaults.setdefault("safety", "")
 
 _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
-    ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts."),
+    ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts and keys."),
     ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
     ("review_mode", "Choose review and access", "Strictness + reach", "Choose how reviews affect work and how much access Ouroboros gets.", ""),
     ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
@@ -204,7 +204,7 @@ _REVIEW_MODES = _rows(("value", "label", "tone", "className", "copy"), (
 _RUNTIME_MODES = _rows(("value", "label", "tone", "className", "copy"), (
     ("light", "Light", "Safest", "light", "Works on your projects. Never changes its own code."),
     ("advanced", "Advanced", "Default", "advanced", "May grow its own skills and outer layer."),
-    ("pro", "Pro", "Power", "pro", "May change its protected core. Every change goes through review."),
+    ("pro", "Pro", "Power", "pro", "May change its protected core. Reviews work as you set them."),
     ("cyber_pro", "Cyber Pro", "Maximum power", "cyber-pro", "Full say over itself and this computer. Reviews advise, it decides."),
 ))
 
@@ -236,7 +236,6 @@ _BUDGET_FIELDS = [
         "stateKey": "totalBudget",
         "settingKey": "TOTAL_BUDGET",
         "inputId": "total-budget",
-        "settingsInputId": "s-total-budget",
         "title": "Total budget",
         "label": "Total Budget (USD)",
         # Owner 2026-10-03 Q4-A / 2026-10-07: the cap is the limit itself,
@@ -250,7 +249,6 @@ _BUDGET_FIELDS = [
         "stateKey": "perTaskCostUsd",
         "settingKey": "OUROBOROS_PER_TASK_COST_USD",
         "inputId": "per-task-budget",
-        "settingsInputId": "s-settings-per-task-cost",
         "title": "Per-task cost cap",
         "label": "Per-task Cost Cap (USD)",
         "note": _BUDGET_NOTE,

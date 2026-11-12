@@ -113,7 +113,7 @@ test('one unreachable source is partial, not a failed catalog: the API models th
     assert.match(note, /2 API models loaded/, 'the subscription entry is not an API model');
     assert.doesNotMatch(note, /^Model catalog could not be read/);
     assert.match(note, /selection are kept/);
-    assert.match(note, /Refresh model catalog/);
+    assert.match(note, /press Read again in Models/, 'the sentence names the button that exists');
     // One API model reads as one.
     assert.match(catalogReadNote(mergeModelCatalog({}, { items: [{ value: 'openai::only' }],
         errors: [{ error: 'daemon unreachable' }] })), /1 API model loaded/);
@@ -258,7 +258,7 @@ test('accounts sharing one cause are one clause with the profiles named, not one
         + ' The account has an active quota limit; proton4: The selected managed Codex account requires'
         + ' sign-in; gptopro6: The account has no verified current catalog credential.'
         + ' 2 API models loaded. Existing suggestions and your selection are kept.'
-        + ' Refresh model catalog in Models to retry.');
+        + ' To retry, press Read again in Models.');
     // Every cause is still named: only the repeated subjects are counted.
     for (const cause of [QUOTA_LIMIT, 'requires sign-in', 'no verified current catalog credential']) {
         assert.ok(note.includes(cause), cause);

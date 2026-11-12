@@ -12,6 +12,7 @@ from starlette.testclient import TestClient
 from ouroboros.search_routes import SEARCH_BACKENDS, SEARCH_MODELS
 from tests import test_model_route_contribution_browser as routes
 from tests import test_task_settings_snapshot as task_settings
+from tests.settings_browser_helpers import open_settings, press_editor_save, commit_row, top_path
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = routes.subscription_ui
@@ -41,8 +42,8 @@ def test_anthropic_settings_selection_and_untouched_legacy_dispatch(route_ui, mo
                           OUROBOROS_WEBSEARCH_MODEL='claude-opus-4-6')
     page = ui['page']
     page.goto(ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
-    preview = page.locator('#s-websearch-preview')
+    open_settings(page, 'models/role/websearch')
+    preview = page.locator('[data-websearch-preview]')
     expect(preview).to_contain_text(SEARCH_MODELS['anthropic'])
     field = page.locator('#s-websearch-model')
     expect(field).to_have_value('claude-opus-4-6')
@@ -59,10 +60,10 @@ def test_anthropic_settings_selection_and_untouched_legacy_dispatch(route_ui, mo
     if edit == 'model':
         preview.scroll_into_view_if_needed()
         routes.roles.capture(page, 'anthropic-native-edited-preview')
-    with page.expect_response('**/api/settings'):
-        page.locator('#btn-save-settings').click()
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
-    saved = [body for path, body in ui['posts'] if path == '/api/settings'][-1]
+    press_editor_save(page)
+    saved = ui['settings']
+    if edit == 'untouched':
+        assert not [body for path, body in ui['posts'] if path == '/api/settings']
     assert saved['OUROBOROS_WEBSEARCH_BACKEND'] == 'anthropic'
     assert saved['OUROBOROS_WEBSEARCH_MODEL'] == (
         'claude-opus-4-6' if edit == 'untouched' else f'anthropic::{expected}')
@@ -76,7 +77,8 @@ def test_anthropic_settings_selection_and_untouched_legacy_dispatch(route_ui, mo
     monkeypatch.setattr(llm, 'anthropic_web_search_server_tool', server_tool)
     result = json.loads(search._web_search(SimpleNamespace(pending_events=[], task_metadata={}), 'query'))
     assert calls == [expected] and result['model'] == expected
-    page.locator('#btn-reload-settings').click()
+    open_settings(page, 'models')
+    open_settings(page, 'models/role/websearch')
     expect(field).to_have_value(saved['OUROBOROS_WEBSEARCH_MODEL'])
     expect(preview).to_contain_text(f'Anthropic · {expected}')
     if edit == 'model':
@@ -104,8 +106,8 @@ def test_settings_preview_names_why_a_search_source_is_unavailable(route_ui, mon
     monkeypatch.setitem(sys.modules, 'ddgs', types_module('ddgs'))
     page = ui['page']
     page.goto(ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
-    preview = page.locator('#s-websearch-preview')
+    open_settings(page, 'models/role/websearch')
+    preview = page.locator('[data-websearch-preview]')
     expect(preview).to_contain_text(expected)
     # The sources by their option words in the main line; the model and the gaps behind its Details.
     expect(preview).to_contain_text('Uses OpenRouter, then DuckDuckGo.')
@@ -156,17 +158,20 @@ def _open_models(ui, document, *, theme=''):
     if theme:
         page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
     page.goto(ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
-    return page, page.locator('#s-websearch-preview'), page.locator('#s-websearch-model')
+    open_settings(page, 'models/role/websearch')
+    return page, page.locator('[data-websearch-preview]'), page.locator('#s-websearch-model')
 
 
 def _save_and_reload(page):
-    with page.expect_response('**/api/settings') as saved:
-        page.locator('#btn-save-settings').click()
-    assert saved.value.ok, saved.value.text()
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
-    page.locator('#btn-reload-settings').click()
-    page.locator('[data-settings-tab="models"]').click()
+    if top_path(page) == 'models/role/websearch':
+        press_editor_save(page)
+    page.reload()
+    open_settings(page, 'models/role/websearch')
+
+
+def _unrelated_save(page):
+    open_settings(page, 'tools', 'OUROBOROS_TOOL_TIMEOUT_SEC')
+    assert commit_row(page, 'OUROBOROS_TOOL_TIMEOUT_SEC', 601).startswith('Saved')
 
 
 def _on_disk():
@@ -240,11 +245,10 @@ def test_a_blank_search_model_stays_blank_from_the_real_page_to_dispatch(saved_u
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     routes.roles.capture(page, f'search-blank-real-{browser.browser_type.name}-{theme}-narrow')
     page.set_viewport_size({'width': 1360, 'height': 900})
-    page.locator('[data-settings-tab="advanced"]').click()
-    page.locator('#s-gh-repo').fill('owner/repo')  # an unrelated edit on another tab
+    _unrelated_save(page)
     _save_and_reload(page)
     on_disk = _on_disk()
-    assert on_disk.get('GITHUB_REPO') == 'owner/repo' and on_disk.get('OUROBOROS_WEBSEARCH_MODEL', '') == ''
+    assert on_disk.get('OUROBOROS_TOOL_TIMEOUT_SEC') == 601 and on_disk.get('OUROBOROS_WEBSEARCH_MODEL', '') == ''
     expect(field).to_have_value('')
     expect(preview).to_contain_text(f"Anthropic · {SEARCH_MODELS['anthropic']} (recommended)")
 
@@ -295,8 +299,7 @@ def test_a_saved_search_choice_keeps_its_meaning_from_the_real_page_to_dispatch(
         field.blur()
         expect(preview).to_contain_text(reloaded_preview)  # the draft preview already reads as the save will
     else:
-        page.locator('[data-settings-tab="advanced"]').click()
-        page.locator('#s-gh-repo').fill('owner/repo')
+        _unrelated_save(page)
     _save_and_reload(page)
     assert _on_disk().get('OUROBOROS_WEBSEARCH_MODEL', '') == saved
     expect(field).to_have_value(saved)

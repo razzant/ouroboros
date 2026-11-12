@@ -625,7 +625,7 @@ test('any bound surface can keep the poll armed — not only the accounts panel'
 
     // Activation is judged by the same predicate — no tab name anywhere — so the
     // section that is on screen catches up, and the hidden one costs nothing.
-    win.fire('ouro:settings-subtab-shown');
+    win.fire('ouro:settings-page-shown');
     await flush();
     assert.equal(reads, 3, 'reaching the surface reads immediately, without a reload');
 
@@ -638,7 +638,7 @@ test('any bound surface can keep the poll armed — not only the accounts panel'
     releaseAccounts();
     assert.equal(store.subscriberCount, 0, 'the binding disposer released the subscription');
     assert.equal(win.count('ouro:page-shown'), 0, 'and both window listeners');
-    assert.equal(win.count('ouro:settings-subtab-shown'), 0);
+    assert.equal(win.count('ouro:settings-page-shown'), 0);
     store.dispose();
     t.mock.timers.reset();
 });
@@ -666,7 +666,7 @@ test('surface binding delegates a visible activation to its owner action', async
         onActivate: () => { activations += 100; },
     });
 
-    await win.fire('ouro:settings-subtab-shown');
+    await win.fire('ouro:settings-page-shown');
     assert.equal(activations, 1, 'only the visible surface ran its owner action');
 
     releaseHidden();
