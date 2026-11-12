@@ -3098,6 +3098,21 @@ def test_ui_smoke_superseded_input_dialog_resolves_object_result(direct_server_w
         raise
 
 
+def _open_login_provider(page, url):
+    """Mount the provider that owns login; keep unrelated discovery inside the test."""
+    from tests.settings_browser_helpers import open_settings
+
+    page.route("**/api/claudexor/status*", lambda route: route.fulfill(json={
+        "daemon": {"state": "running"}, "harnesses": [{"id": "codex", "display_name": "Codex"}],
+        "profiles": {"profiles": []}, "quota": [],
+        "reads": {"catalog": "ok", "accounts": "ok", "quota": "ok"},
+    }))
+    page.route("**/api/claudexor/maintenance/**", lambda route: route.fulfill(json={"harnesses": []}))
+    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    open_settings(page, "accounts/codex")
+    page.locator('[data-family-login="codex"]').wait_for(state="attached")
+
+
 @pytest.mark.ui_browser
 def test_ui_smoke_login_recovery_reconcile_detach_and_retry_are_explicit(direct_server_with_data):
     """Recovery lifecycle."""
@@ -3154,7 +3169,7 @@ def test_ui_smoke_login_recovery_reconcile_detach_and_retry_are_explicit(direct_
                 page.route("**/api/claudexor/login", handle_create)
                 page.route("**/api/claudexor/login/*", handle_job)
                 page.route("**/api/claudexor/login/*/reconcile", handle_job)
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _open_login_provider(page, url)
 
                 setup_result = page.evaluate(
                     """
@@ -3280,7 +3295,7 @@ def test_ui_smoke_dismiss_overlapping_start_cannot_drop_a_live_job(direct_server
 
                 page.route("**/api/claudexor/login", handle_create)
                 page.route("**/api/claudexor/login/*", handle_cancel)
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _open_login_provider(page, url)
 
                 result = page.evaluate(
                     """
@@ -3375,7 +3390,7 @@ def test_ui_smoke_stale_get_cannot_overwrite_login_terminal_faces(
                 page.route("**/api/claudexor/login", handle_create)
                 page.route("**/api/claudexor/login/*", handle_job)
                 page.route("**/api/claudexor/login/*/reconcile", handle_reconcile)
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _open_login_provider(page, url)
 
                 result = page.evaluate(
                     """
@@ -3535,7 +3550,7 @@ def test_ui_smoke_dismiss_overlapping_settle_never_freezes_the_card(direct_serve
                 page.route("**/api/claudexor/login", handle_create)
                 page.route("**/api/claudexor/login/*", handle_job)
                 page.route("**/api/claudexor/login/*/reconcile", handle_reconcile)
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _open_login_provider(page, url)
 
                 result = page.evaluate(
                     """

@@ -696,8 +696,12 @@ def test_outside_update_then_chooser_open_renews_list_once_at_44_accounts(role_u
     field.fill("choice")
     footer = page.locator("[data-model-footer]:visible")
     expect(footer).to_contain_text("List from Codex 2.0.0")
+    expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
     before = world["catalogs"]
-    field.press("Escape"); field.press("ArrowDown")
+    field.press("Escape")
+    with page.expect_response("**/api/claudexor/maintenance/harnesses?*"):
+        field.press("ArrowDown")
+    expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
     expect(footer).to_contain_text("List from Codex 2.0.0")
     assert world["catalogs"] == before
     field.press("Escape")

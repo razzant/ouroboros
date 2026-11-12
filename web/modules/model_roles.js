@@ -5,7 +5,7 @@ import { apiClient, fetchJson } from './api_client.js';
 import { SAFETY_MODEL_KEYS } from './consciousness_api.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { controlIcon } from './page_icons.js';
-import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, refreshModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
+import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
 import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, webSearchPreviewWords } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { HAND_WRITTEN, rowsOf } from './settings_rows.js';
@@ -910,11 +910,13 @@ function mountRole(container, { path, ctx }, slot, index) {
     globalThis.document?.addEventListener('settings-model-catalog:updated', onCatalog);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     editor.mount();
-    void read().then(() => refreshModelCatalog());  // the catalogue this role's model list comes from
+    const accountCatalog = watchAccountModelCatalog();
+    void read().then(() => { accountCatalog.arm(); return refreshModelCatalog(); });  // the catalogue this role's model list comes from
     return { unmount() {
         container.removeEventListener('click', onClick);
         globalThis.document?.removeEventListener('settings-model-catalog:updated', onCatalog);
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
+        accountCatalog.dispose();
         editor.destroy();
     } };
 }

@@ -211,12 +211,21 @@ def test_raising_access_asks_first_and_then_says_both_values(subscription_ui):
 
 
 def test_lowering_a_safety_level_asks_and_raising_does_not(subscription_ui):
+    from playwright.sync_api import expect
+
     page, server = _page(subscription_ui, 1087, 740)
     open_settings(page, "permissions")
     _settled(page, "permissions")
     row = setting_row(page, "OUROBOROS_SAFETY_MODE")
     assert row.locator(".ui-segment").all_inner_texts() == ["Off", "Outgoing", "+ Commands"]
     assert row.locator("[data-setting-meta]").inner_text() == "Shell commands and scripts are read first too. File edits are not."
+    waiting = []
+
+    def hold_safety(route):
+        waiting.append(route)
+        page.evaluate("window.safetyWriteHeld = true")
+
+    page.route("**/api/owner/safety-mode", hold_safety)
     row.locator('[data-setting-value="light"]').click()
     dialog = page.locator("dialog[open], .confirm-dialog").last
     dialog.wait_for(state="visible")
@@ -224,8 +233,13 @@ def test_lowering_a_safety_level_asks_and_raising_does_not(subscription_ui):
     dialog.get_by_role("button", name="Lower the level").click()
     page.wait_for_function("() => document.querySelector('[data-setting-row=\"OUROBOROS_SAFETY_MODE\"] "
                            "[data-setting-value=\"light\"]').getAttribute('aria-pressed') === 'true'")
+    page.wait_for_function("window.safetyWriteHeld === true")
+    # The selected option is optimistic; a held answer has no saved result yet.
+    expect(row.locator("[data-setting-result]")).to_have_text("")
+    page.unroute("**/api/owner/safety-mode", hold_safety)
+    server.answer(waiting.pop())
+    expect(row.locator("[data-setting-result]")).to_have_text("Saved · applies to new tasks · was + Commands")
     assert server.writes("/api/owner/safety-mode") == [{"mode": "light"}]
-    assert row.locator("[data-setting-result]").inner_text() == "Saved · applies to new tasks · was + Commands"
     # Raising the other level asks nothing.
     assert commit_row(page, "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "full") == "Saved · applies to new tasks · was Outgoing"
     assert server.writes("/api/owner/safety-mode")[-1] == {"mode": "full", "kind": "consciousness"}
