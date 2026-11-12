@@ -291,8 +291,8 @@ def _fidelity_report(settings: dict, args: argparse.Namespace,
     disabled = list(settings.get("CLBENCH_SOLVE_DISABLED_TOOLS") or [])
     applied = dict((patch_probe or {}).get("patches") or {})
     # ONE marker for the env knobs is CORRECT, not a shortcut: the campaign-override
-    # patch adds OUROBOROS_RUNTIME_MODE, OUROBOROS_REVIEW_ENFORCEMENT,
-    # OUROBOROS_SAFETY_MODE and OUROBOROS_SUBAGENTS in one loop/hunk, so they arrive
+    # patch adds OUROBOROS_RUNTIME_MODE, OUROBOROS_SAFETY_MODE and OUROBOROS_SUBAGENTS
+    # (and the retired review-enforcement key) in one loop/hunk, so they arrive
     # together or not at all. The patch probe includes the new key itself as a marker;
     # an older applied copy is conservatively reported as not enforcing actor purity.
     # The host engine boots a real `IsolatedServer`, so the ordinary scalar env knobs remain
@@ -327,10 +327,6 @@ def _fidelity_report(settings: dict, args: argparse.Namespace,
         "checkout")
     (enforced if env_knobs_forwarded else gap)["OUROBOROS_SAFETY_MODE"] = {
         "declared": settings.get("OUROBOROS_SAFETY_MODE"),
-        "status": _env_status,
-    }
-    (enforced if env_knobs_forwarded else gap)["OUROBOROS_REVIEW_ENFORCEMENT"] = {
-        "declared": settings.get("OUROBOROS_REVIEW_ENFORCEMENT"),
         "status": _env_status,
     }
     gap["OUROBOROS_TASK_REVIEW_MODE"] = {
@@ -422,7 +418,6 @@ def _sanitized_child_env(run_dir: pathlib.Path, settings: dict, args: argparse.N
         # Declared-only knobs (see _fidelity_report): effective on the host engine path,
         # forward-channel for a patched adapter on the docker path.
         "OUROBOROS_SAFETY_MODE": str(settings.get("OUROBOROS_SAFETY_MODE") or "light"),
-        "OUROBOROS_REVIEW_ENFORCEMENT": str(settings.get("OUROBOROS_REVIEW_ENFORCEMENT") or "blocking"),
         # Operator patch 2026-07-23: forward review MODE (not just enforcement) and
         # subagent depth so a submittable "review required" / no-swarm run is achievable
         # from the launcher instead of silently living on defaults (auto / depth 2).

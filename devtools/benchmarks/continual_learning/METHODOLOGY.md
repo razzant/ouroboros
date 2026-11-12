@@ -258,6 +258,9 @@ depend on tracked operator patches being applied in the ADAPTER CHECKOUT:
 - `OUROBOROS_REVIEW_ENFORCEMENT=blocking` — same channel, same gap, same
   patch, **same hunk** (one `for _k in (...)` loop, which is why a single
   marker legitimately covers the env knobs including `OUROBOROS_RUNTIME_MODE`).
+  **2026-11-12:** the key is retired on every install and the template no longer
+  sets it; rows after that release are a new methodology (a FAIL is shown to the
+  agent, which decides), never compared with earlier rows.
 - `OUROBOROS_SUBAGENTS` — the rendered profile's canonical one-actor value is
   transported through that same loop on the docker path and materialized by
   `_launcher.v6560.patch` on the host path (where `IsolatedServer` strips

@@ -101,7 +101,7 @@ _ISO_SETTINGS_ALLOW_EXACT = frozenset({
     # Review policy knobs (non-secret): must propagate so settings.json's result-review
     # config is honored by isolated benchmark servers (else it silently
     # falls back to the "auto" default and the end-of-task review never runs).
-    "OUROBOROS_TASK_REVIEW_MODE", "OUROBOROS_REVIEW_ENFORCEMENT",
+    "OUROBOROS_TASK_REVIEW_MODE",
     # Shared paid review-cycle ceiling (non-secret): bench templates pin it to
     # "unlimited" for methodology comparability; a live-settings pin must forward
     # into isolated bench servers the same way the other review knobs do.

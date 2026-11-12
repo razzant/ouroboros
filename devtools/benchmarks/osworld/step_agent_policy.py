@@ -278,7 +278,6 @@ Accessibility tree (may be empty/truncated):
             "OUROBOROS_RUNTIME_MODE": "pro",
             "OUROBOROS_MAX_WORKERS": "4",
             "OUROBOROS_SAFETY_MODE": "light",
-            "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
             "PYTHONUNBUFFERED": "1",
         })
         if self.model:
