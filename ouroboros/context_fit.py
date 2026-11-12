@@ -8,11 +8,13 @@ resolver so ``ouroboros.context`` remains the public compatibility surface.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
 import math
 import pathlib
+import threading
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Iterable, Callable, Dict, List, Mapping, Optional, Tuple
@@ -621,6 +623,82 @@ def resolve_context_fit_route(
     return route, with_role_window(evidence, window)
 
 
+def _route_key(task: Dict[str, Any]) -> Optional[str]:
+    """The route a fit's question asks about (``_context_route``: settings, role, pin and carried account), or None."""
+    try:
+        return json.dumps(_context_route(task)[0], sort_keys=True, default=str)
+    except Exception:
+        return None
+
+
+class RouteQuestion:
+    """The fit's route question, asked when the build starts and answered beside it (W2 H4, owner 12.11.2026).
+
+    The same question through the same resolver (``context._context_fit_route``) and the same evidence, in a thread
+    running in a copy of the starting context: the build's receipt counts its catalog reads, and the account that
+    just failed is only read there. One handle per build: the fit takes its answer only for the route it asked about
+    (``_route_key``), so a changed route asks its own question, and it waits on it as on its own read, with no timer.
+    ``early`` names an answer taken from it, which ``build_context_fit_plan`` asks ``again`` at the usual point when
+    using it would show less memory than the selected view (``narrowed_by_window``).
+    """
+
+    def __init__(self, task: Dict[str, Any], resolver: Optional[Callable[..., Tuple[Dict[str, Any], Any]]] = None):
+        from ouroboros import context
+
+        self.resolver, self.early = resolver or context._context_fit_route, False
+        self.key, self.asked_key, self.answer, self.error = _route_key(task), None, None, None
+        self.asked = threading.Event()
+        if self.key is None:
+            self.asked.set()
+            return
+        copied = contextvars.copy_context()
+        threading.Thread(target=copied.run, args=(self._ask, dict(task)), name="fit-route-question", daemon=True).start()
+
+    def _ask(self, task: Dict[str, Any]) -> None:
+        try:
+            self.asked_key = _route_key(task)
+            self.answer = self.resolver(task, allow_fetch=True)
+        except Exception as error:  # the fit meets it where it would have met its own failed read
+            self.error = error
+        finally:
+            self.asked.set()
+
+    def __call__(self, task: Dict[str, Any], *, allow_fetch: bool) -> Tuple[Dict[str, Any], Any]:
+        key, self.key, self.early = self.key, None, False  # used once: any later call asks its own question
+        if allow_fetch and key is not None and _route_key(task) == key:
+            timed("fit.route_wait", self.asked.wait)
+            if self.asked_key == key:
+                self.early = True
+                if self.error is not None:
+                    raise self.error
+                return self.answer
+        return timed("fit.route", self.resolver, task, allow_fetch=allow_fetch)
+
+    def again(self, task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+        """The same question at the fit's usual point (the horizon guard)."""
+        self.early = False
+        return timed("fit.route", self.resolver, task, allow_fetch=True)
+
+
+def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mode: str, preferred: str,
+                       state: Any, delivered: Mapping[str, Any]) -> bool:
+    """Whether a start shows less memory than the selected view because of its window: a mode below the owner's, a
+    rescued input, host forms or memory cuts the window took (the owner's own mode budget is no narrowing of the
+    window's). An unknown window narrows nothing."""
+    from ouroboros.memory_floor import _ORDINARY
+
+    if not state.known_window:
+        return False
+    if delivered or mode != preferred:
+        return True
+    facts = contents[mode][1] or {}
+    floor = facts.get("floor") or {}
+    target = context_budget.context_mode_limits(preferred, preferred, state.output_reserve)[0]
+    budget = bool(target) and target < state.window_record.total_equivalent
+    cut = any(count for step, count in (floor.get("steps") or {}).items() if step not in _ORDINARY)
+    return bool(cut and not floor.get("by_budget")) or bool(facts.get("host_sections_addressed") and not budget)
+
+
 def _failed_route_evidence(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
     from ouroboros.capability_evidence import route_fingerprint
 
@@ -919,31 +997,7 @@ def build_context_fit_plan(
         preferred = "max"
 
     meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
-    try:  # a child probes its own route too: its parent's warm evidence is no fact about it
-        route, evidence = route_resolver(task, allow_fetch=True)
-    except Exception:
-        log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
-        route, evidence = _failed_route_evidence(task)
-
     user_content = json.loads(core.user_content_json)
-    # Keep the fit projection tied to the physical dispatch contract instead of
-    # duplicating its output reservation.  The lazy import avoids coupling the
-    # data-only fit representation to the high-level model loop.
-
-    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
-    route_facts = getattr(evidence, "route_facts", {}) or {}
-    working_reserve = route_facts.get("working_reserve_tokens")
-    window_basis = str(route_facts.get("basis") or "")
-    reserve = context_budget.context_mode_limits(preferred, preferred, output_reserve,
-                                                working_reserve_tokens=working_reserve)[1]
-    scope = route.get("window_observation_fp", evidence.route_fp)
-    bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
-    window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope)
-    known_window = window_record.usable is not None
-    view_args = dict(
-        preferred=preferred, tool_schemas=tool_schemas, window_tokens=window_record.total_equivalent,
-        known_window=known_window, output_reserve=output_reserve, window_record=window_record,
-        working_reserve_tokens=working_reserve)
     governance = {form: _governance_blocks(env, core, mode=form) for form in ("max", "low")}
     from ouroboros.capability_evidence import evidence_model_route
     from ouroboros.memory_view import start_room, view_role
@@ -954,21 +1008,71 @@ def build_context_fit_plan(
     # Select density before the single start walk, comparing the whole captured request at the size that can be sent.
     rows, schemas, memory_chars = _whole_request(core, governance, preferred, tool_schemas)
     counted("request_forms")
-    sendable = min(max(1, (estimate_context_prompt_tokens(rows, schemas, provider=str(route.get("provider") or ""), chars=True)
-                           + memory_chars + 3) // 4), window_record.usable or math.inf)
-    ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
-        None, str(evidence.route_fp or ""), str(route["model"] or ""), sendable, view_kind=view_kind)
-    levels, delivered = start_room(view_task, role), {}
+    levels, sized = start_room(view_task, role), {}
 
-    def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
-        return _view_projections(core, governance, user_content_json, **view_args, ratio=ratio, work_room_levels=levels)
-    try:
-        contents, initial_mode = fit(core.user_content_json)
-    except MinimumViewUnfit as unfit:
-        # Physical rescue only (owner 2026-10-13, #1527): an exact source replaces the whole input only when no view of
-        # the known window holds it, a wake's bound projection first (``context_input_selection.rescued_start``).
-        from ouroboros.context_input_selection import rescued_start
-        contents, initial_mode, delivered = rescued_start(env, task, core.user_content_json, unfit, preferred, fit)
+    def answer(ask: Callable[[], Tuple[Dict[str, Any], Any]]) -> Tuple[Dict[str, Any], Any]:
+        try:  # a child probes its own route too: its parent's warm evidence is no fact about it
+            return ask()
+        except Exception:
+            log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
+            return _failed_route_evidence(task)
+
+    def frame(route: Dict[str, Any], evidence: Any) -> SimpleNamespace:
+        """What the start walk reads of one route answer: reserves, the window record and the density."""
+        # Keep the fit projection tied to the physical dispatch contract instead of duplicating its output reservation.
+        output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
+        route_facts = getattr(evidence, "route_facts", {}) or {}
+        working_reserve = route_facts.get("working_reserve_tokens")
+        window_basis = str(route_facts.get("basis") or "")
+        reserve = context_budget.context_mode_limits(preferred, preferred, output_reserve,
+                                                    working_reserve_tokens=working_reserve)[1]
+        scope = route.get("window_observation_fp", evidence.route_fp)
+        bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
+        window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope)
+        provider = str(route.get("provider") or "")
+        if provider not in sized:  # the whole request measured once per provider, however many answers are framed
+            sized[provider] = estimate_context_prompt_tokens(rows, schemas, provider=provider, chars=True)
+        sendable = min(max(1, (sized[provider] + memory_chars + 3) // 4), window_record.usable or math.inf)
+        ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
+            None, str(evidence.route_fp or ""), str(route["model"] or ""), sendable, view_kind=view_kind)
+        limits = tuple((limit.tokens, limit.kind) if limit else None for limit in (window_record.input, window_record.total))
+        return SimpleNamespace(route=route, evidence=evidence, output_reserve=output_reserve, working_reserve=working_reserve,
+                               window_basis=window_basis, bound=bound, window_record=window_record, ratio=ratio,
+                               known_window=window_record.usable is not None,
+                               walked=(limits, window_record.usable is not None, output_reserve, working_reserve, ratio))
+
+    def walk(state: SimpleNamespace) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str, Dict[str, Any]]:
+        view_args = dict(
+            preferred=preferred, tool_schemas=tool_schemas, window_tokens=state.window_record.total_equivalent,
+            known_window=state.known_window, output_reserve=state.output_reserve, window_record=state.window_record,
+            working_reserve_tokens=state.working_reserve)
+
+        def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
+            return _view_projections(core, governance, user_content_json, **view_args, ratio=state.ratio,
+                                     work_room_levels=levels)
+        try:
+            return (*fit(core.user_content_json), {})
+        except MinimumViewUnfit as unfit:
+            # Physical rescue only (owner 2026-10-13, #1527): an exact source replaces the whole input only when no view
+            # of the known window holds it, a wake's bound projection first (``context_input_selection.rescued_start``).
+            from ouroboros.context_input_selection import rescued_start
+            return rescued_start(env, task, core.user_content_json, unfit, preferred, fit)
+
+    early = isinstance(route_resolver, RouteQuestion)  # it times its own wait (``fit.route_wait``) and read
+    state = frame(*answer(lambda: route_resolver(task, allow_fetch=True) if early else timed(
+        "fit.route", route_resolver, task, allow_fetch=True)))
+    contents, initial_mode, delivered = walk(state)
+    if early and route_resolver.early and narrowed_by_window(contents, initial_mode, preferred, state, delivered):
+        # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view is asked
+        # again here, at the usual point, and that answer is used; a walk that reads the same frame is not repeated.
+        late = frame(*answer(lambda: route_resolver.again(task)))
+        if late.walked != state.walked:
+            contents, initial_mode, delivered = walk(late)
+        state = late
+    route, evidence, window_record, known_window = state.route, state.evidence, state.window_record, state.known_window
+    output_reserve, working_reserve, window_basis, ratio = (state.output_reserve, state.working_reserve,
+                                                            state.window_basis, state.ratio)
+    bound = state.bound
     estimates = {}  # projections that read alike are one form of the request
 
     @timed_section("fit.projections")

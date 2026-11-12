@@ -320,6 +320,77 @@ def test_a_pinned_route_with_a_silent_engine_keeps_its_window_only_with_the_same
     assert other.window_tokens == 0 and not ce.is_known(other)  # account-a's window is not this profile's any more
 
 
+TASK = {"model": MODEL, "model_role": "main", "task_metadata": {}}
+
+
+def _built(monkeypatch, root, resolver_for, task=TASK):
+    """One start fit of a small core on the production route builder, its receipt window open as in a build; the
+    resolver (``resolver_for(task)``) is made inside that window, as the agent makes its handle."""
+    from ouroboros import config, context_fit as cf, context_timing, server_runtime
+
+    monkeypatch.setattr(config, "runtime_settings", lambda: {"OUROBOROS_MODEL": MODEL})
+    monkeypatch.setattr(config, "DATA_DIR", root)
+    monkeypatch.setattr(server_runtime, "apply_runtime_provider_defaults", lambda s: (s, False, []))
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: root)
+    core = cf.ContextCore("Core governance. " * 4000, "", "", "", "", "", '"Assignment"', False)
+    with context_timing.measured_sections():
+        plan = cf.build_context_fit_plan(None, core, task, preferred_mode="max", route_resolver=resolver_for(task))
+        return plan, context_timing.section_spans()
+
+
+@pytest.mark.parametrize("window", [872_000, 70_000])
+def test_the_fits_route_question_runs_beside_the_build_and_repeats_only_before_a_narrowing(tmp_path, monkeypatch,
+                                                                                         catalog, window):
+    """H4 (W2, 12.11.2026): the fit's route question starts with the build and runs beside it, the same question
+    through the same resolver; with or without that handle the plan is the same. An early answer that would show less
+    than the selected view is asked again at the usual point and that answer is used; one that fits is not repeated."""
+    from ouroboros import context_fit as cf
+
+    catalog["value"]["models"][0].update(contextWindow=window, maxContextWindow=window)
+    plain, _ = _built(monkeypatch, tmp_path / "plain", lambda _task: cf.resolve_context_fit_route)
+    narrowed = plain.initial_mode != "max"
+    assert narrowed is (window == 70_000) and len(catalog["calls"]) == 1
+    early, spans = _built(monkeypatch, tmp_path / "early", lambda task: cf.RouteQuestion(task, cf.resolve_context_fit_route))
+    assert len(catalog["calls"]) == (3 if narrowed else 2)  # the early question, and its repeat only before a narrowing
+    assert spans["work"]["catalog_calls"] == (2 if narrowed else 1)  # counted on the build's own receipt
+    assert ("fit.route_wait" in spans["sections_ms"]) and (("fit.route" in spans["sections_ms"]) is narrowed)
+    for name in ("initial_mode", "window_tokens", "route_fp", "model_route", "start", "core_sha256"):
+        assert getattr(early, name) == getattr(plain, name), name
+    assert early.max_projection.system_content_json == plain.max_projection.system_content_json
+
+
+def test_an_early_answer_that_would_narrow_memory_yields_to_the_usual_points_answer(tmp_path, monkeypatch):
+    """The horizon guard: the pool answered the early question with a smaller account (Low here); the question asked
+    again at the usual point names a larger one, and the plan is that answer's: the mind sees no less than today."""
+    from ouroboros import context_fit as cf
+    from ouroboros.llm import LLMClient
+
+    answers = [_catalog("account-a", "identity-a", 70_000), _catalog("account-b", "identity-b", 872_000)]
+    for value in answers:
+        value["models"][0]["contextWindow"] = value["models"][0]["maxContextWindow"]
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda *_a, **_kw: copy.deepcopy(answers.pop(0))))
+    plan, spans = _built(monkeypatch, tmp_path, lambda task: cf.RouteQuestion(task, cf.resolve_context_fit_route))
+    assert not answers and spans["work"]["catalog_calls"] == 2
+    assert (plan.initial_mode, plan.model_route["credentialProfileId"]) == ("max", "account-b")
+
+
+def test_a_changed_route_voids_the_early_answer_and_asks_its_own_question(tmp_path, monkeypatch, catalog):
+    """One handle per route: the build whose route changed (here the role's pin) after the question started asks its
+    own question; the early answer is never applied to it, and the account that just failed is never spent by it."""
+    from ouroboros import context_fit as cf, llm_substitution
+
+    token = llm_substitution._FAILED_PROFILE.set(("cache", "test-source", "exact-model", "account-a"))
+    try:
+        plan, _ = _built(monkeypatch, tmp_path, lambda task: cf.RouteQuestion(TASK, cf.resolve_context_fit_route),
+                         task={**TASK, "credential_profile_id": "account-a"})
+        assert llm_substitution._FAILED_PROFILE.get() == ("cache", "test-source", "exact-model", "account-a")
+    finally:
+        llm_substitution._FAILED_PROFILE.reset(token)
+    assert sorted(catalog["calls"], key=str) == [("test-source", "account-a", "exact-model"),
+                                                  ("test-source", None, "exact-model")]
+    assert plan.account_pin == "account-a" and plan.model_route["credentialProfileId"] == "account-a"
+
+
 def test_exact_observed_binding_reuses_only_its_cache(tmp_path, catalog):
     first = _probe(tmp_path)
     options = ce.model_account_options(MODEL, model_route=_binding(first))

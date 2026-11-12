@@ -150,8 +150,10 @@ def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
     def build(**_kwargs):
         if realtime:
             assert _kwargs["route_resolver"] is route_resolver
-        else:
-            assert "route_resolver" not in _kwargs
+        else:  # the fit's own route question, asked beside the build from inside its measured scope (W2 H4)
+            from ouroboros.context_fit import RouteQuestion
+            assert isinstance(_kwargs["route_resolver"], RouteQuestion)
+            _kwargs["route_resolver"].asked.wait()  # its question is the fit's; nothing outlives the build here
         seen.append(context_timing._SPANS.get() is not None and not gc.isenabled())
         raise RuntimeError("stop after the context build")
 
