@@ -820,7 +820,11 @@ export function initSkills(ctx = {}) {
         }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
         if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
-        if (action === 'open_secrets') { void ctx.openSettings?.('accounts', { back: skillsBack }); return false; }
+        if (action === 'open_secrets') {
+            // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
+            void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim(), back: skillsBack });
+            return false;
+        }
         if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`, { back: skillsBack }); return false; }
         if (action === 'read_findings') { openFindings(name); return false; }
         if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
