@@ -250,7 +250,7 @@ def test_context_status_and_evidence_read_as_if_the_archive_were_absent(ctx):
     for retired in ("recent_advisory_runs", "foreign_advisory_runs", "advisory_status", "snapshot_hash"):
         assert retired not in archived_evidence and retired not in archived_evidence["current_repo"], retired
     # The modern owed work and the look's stale marker still reach every surface.
-    assert "open_obligations=1" in context and "stale_marker=" in context and "invalidated_by=task task-a" in context
+    assert "tests_affected: add a test" in context and "stale_marker=" in context and "invalidated_by=task task-a" in context
     assert evidence["current_repo"]["stale_task_id"] == "task-a" and evidence["open_obligations"]
     assert status["stale_from_edit"] is True and status["commit_readiness_debts_count"] == 1
 

@@ -30,6 +30,7 @@ class ReviewContinuation:
     block_details: str = ""
     critical_findings: List[Dict[str, Any]] = field(default_factory=list)
     advisory_findings: List[Dict[str, Any]] = field(default_factory=list)
+    # Written by bodies before the obligation layer retired; read only as recorded open work (``open_work_matcher``).
     obligation_ids: List[str] = field(default_factory=list)
     open_obligations: List[Dict[str, Any]] = field(default_factory=list)
     readiness_warnings: List[str] = field(default_factory=list)
@@ -39,6 +40,8 @@ class ReviewContinuation:
     parent_task_id: str = ""
     created_ts: str = ""
     updated_ts: str = ""
+    # The attempt's review ledger record, where every seat's answer stays as written; "" = unknown (an older file).
+    review_record_id: str = ""
 
 
 def continuation_dir(drive_root: Any) -> pathlib.Path:
@@ -179,9 +182,8 @@ def retire_settled_continuations(
 
     Age alone never proves the blocked review work landed. When the caller can
     check, it supplies ``has_open_work(continuation) -> bool``: a settled-and-old
-    continuation whose recorded obligations are STILL open in the review ledger
-    is kept in place — it remains the designed resume pointer for genuinely
-    unresolved work (P1/P3). Only provably-closed records ride the age path.
+    continuation that still records open work is kept in place — it remains the
+    designed resume pointer for genuinely unresolved work (P1/P3).
     """
     retired: List[str] = []
     for path in sorted(continuation_dir(drive_root).glob("*.json")):
@@ -253,6 +255,7 @@ def build_review_continuation(
         warnings=[str(item) for item in warnings if str(item).strip()],
         task_type=str(task.get("type") or ""),
         parent_task_id=str(task.get("parent_task_id") or ""),
+        review_record_id=str(getattr(attempt, "review_record_id", "") or ""),
     )
 
 
@@ -329,6 +332,7 @@ def _continuation_from_dict(data: Dict[str, Any], *, expected_task_id: str = "")
         parent_task_id=str(data.get("parent_task_id", "") or ""),
         created_ts=str(data.get("created_ts", "") or ""),
         updated_ts=str(data.get("updated_ts", "") or ""),
+        review_record_id=str(data.get("review_record_id", "") or ""),
     )
 
 
@@ -389,30 +393,16 @@ def _safe_ts_token(ts: str) -> str:
 
 
 def open_work_matcher(state: Any) -> Any:
-    """Build ``has_open_work(continuation)`` from the ledger's open obligations.
-
-    ``state`` is duck-typed (``get_open_obligations(repo_key=None)``) so this
-    module keeps zero review-state imports. A continuation matches when any of
-    its recorded obligation markers is still open in the ledger.
-    """
-    open_markers = {
-        marker
-        for ob in state.get_open_obligations(repo_key=None)
-        for marker in (
-            str(getattr(ob, "obligation_id", "") or ""),
-            str(getattr(ob, "fingerprint", "") or ""),
-        )
-        if marker
-    }
+    """Build ``has_open_work(continuation)``: a continuation carrying an obligation mark written before the
+    obligation layer retired (``obligation_ids`` or its ``open_obligations`` snapshot) records open work until a
+    commit lands in its repository after it was last written, which is when the layer cleared those obligations.
+    A continuation that holds only findings follows the age rule. ``state`` is duck-typed (``landed_after``) so
+    this module keeps zero review-state imports."""
 
     def _has_open_work(item: Any) -> bool:
-        markers = {str(x) for x in (item.obligation_ids or [])}
-        for entry in item.open_obligations or []:
-            if isinstance(entry, dict):
-                markers.add(str(entry.get("obligation_id") or ""))
-                markers.add(str(entry.get("fingerprint") or ""))
-        markers.discard("")
-        return bool(markers & open_markers)
+        if not (item.obligation_ids or item.open_obligations):
+            return False
+        return not state.landed_after(item.repo_key, item.updated_ts or item.created_ts)
 
     return _has_open_work
 
@@ -423,11 +413,10 @@ def retire_settled_continuations_for_context(
     """Retire aged settled continuations, keeping unresolved review work live.
 
     The Review Continuity preamble of ``build_review_context``: ``state``
-    supplies the open-obligation ledger and ``load_result(task_id)`` the task
+    supplies the review ledger and ``load_result(task_id)`` the task
     result dict — both injected so this module stays free of review-state and
-    task-result imports. A settled continuation recording a still-open ledger
-    obligation is unresolved review work — age must not archive it away
-    (P1/P3); only provably-closed records ride the age path.
+    task-result imports. A settled continuation that still records open work
+    (``open_work_matcher``) is not archived by age (P1/P3).
     """
     from ouroboros.task_status import SETTLED_STATUSES
 

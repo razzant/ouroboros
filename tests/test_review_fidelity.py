@@ -145,15 +145,14 @@ class TestBuildBlockingFindingsJsonSection:
 
 
 # ---------------------------------------------------------------------------
-# Tests: format_status_section — no [:5] on findings, no [:6] on obligations,
-# no [:3] on critical/advisory findings, no [:3] on readiness_warnings
+# Tests: format_status_section — no [:5] on findings, no [:3] on
+# critical/advisory findings, no [:3] on readiness_warnings
 # ---------------------------------------------------------------------------
 
 class TestFormatStatusSection:
     """format_status_section must emit ALL items without ... truncation."""
 
-    def _build_state_with_blocked_attempt(self, n_findings: int, n_warnings: int,
-                                          n_obs: int):
+    def _build_state_with_blocked_attempt(self, n_findings: int, n_warnings: int):
         """Helper: construct minimal AdvisoryReviewState with a blocked commit attempt.
 
         repo_dir=None passed to format_status_section so no real filesystem lookup.
@@ -164,12 +163,9 @@ class TestFormatStatusSection:
                      "reason": f"problem {i}"}
                     for i in range(n_findings)]
         warnings = [f"warning text {i}" for i in range(n_warnings)]
-        obs = [_make_obligation(f"ob{i}") for i in range(n_obs)]
 
         state = AdvisoryReviewState.__new__(AdvisoryReviewState)
         state.advisory_runs = []
-        state.attempts = []
-        state.open_obligations = obs
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
         state.last_stale_repo_key = ""
@@ -179,23 +175,20 @@ class TestFormatStatusSection:
         # Put the attempt in state.attempts so format_status_section renders it.
         state.attempts = [ca]
 
-        return state, findings, warnings, obs
+        return state, findings, warnings
 
     @pytest.mark.parametrize(
-        "case_id,n_findings,n_warnings,n_obs,prefix,count",
+        "case_id,n_findings,n_warnings,prefix,count",
         [
-            ("more_than_five_findings_all_shown", 7, 0, 1, "problem ", 7),
-            ("more_than_three_warnings_all_shown", 1, 5, 1, "warning text ", 5),
-            ("more_than_six_obligations_all_shown", 1, 0, 9, "ob", 9),
+            ("more_than_five_findings_all_shown", 7, 0, "problem ", 7),
+            ("more_than_three_warnings_all_shown", 1, 5, "warning text ", 5),
         ],
     )
-    def test_truncation_caps_removed(self, case_id, n_findings, n_warnings, n_obs, prefix, count):
-        """Old [:3] / [:5] / [:6] caps must be gone — every item appears."""
+    def test_truncation_caps_removed(self, case_id, n_findings, n_warnings, prefix, count):
+        """Old [:3] / [:5] caps must be gone — every item appears."""
         from ouroboros.review_state import format_status_section
 
-        state, *_ = self._build_state_with_blocked_attempt(
-            n_findings=n_findings, n_warnings=n_warnings, n_obs=n_obs,
-        )
+        state, *_ = self._build_state_with_blocked_attempt(n_findings=n_findings, n_warnings=n_warnings)
         output = format_status_section(state, repo_dir=None)
         for i in range(count):
             assert f"{prefix}{i}" in output, f"Missing {prefix}{i} in output"
@@ -221,7 +214,6 @@ class TestFormatStatusSection:
         state = AdvisoryReviewState.__new__(AdvisoryReviewState)
         state.advisory_runs = []
         state.attempts = attempts
-        state.open_obligations = []
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
         state.last_stale_repo_key = ""
@@ -342,7 +334,6 @@ class TestFormatStatusSectionNoFieldSlicing:
         state = AdvisoryReviewState.__new__(AdvisoryReviewState)
         state.advisory_runs = []
         state.attempts = [ca]
-        state.open_obligations = []
         state.last_stale_from_edit_ts = ""
         state.last_stale_reason = ""
         state.last_stale_repo_key = ""

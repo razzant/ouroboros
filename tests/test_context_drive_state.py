@@ -2,8 +2,8 @@
 
 Split verbatim out of ``tests/test_context.py`` by theme. This module owns the typed
 drive-state section and its pointer, the review ledger that caps runs and attempts with
-omission notes, the continuations that retire after their age window, and the one with
-open obligations that must survive that retirement.
+omission notes, the continuations that retire after their age window, and the ones an
+earlier obligation mark keeps until a commit lands in their checkout.
 """
 
 from __future__ import annotations
@@ -151,20 +151,15 @@ def test_settled_continuations_retire_after_age_window(tmp_path):
     assert old.task_id == "oldtask"
 
 
-def test_settled_continuation_with_open_obligations_survives_age_retirement(tmp_path):
-    """A settled FAILED task whose continuation records obligations that are
-    STILL open in the review ledger is genuinely unresolved review work: age
-    must not archive it out of context (P1/P3). A same-age settled sibling with
-    no open markers still retires — the noise-reduction path stays."""
+def test_a_settled_continuation_stays_while_an_earlier_obligation_mark_awaits_a_landing(tmp_path):
+    """Home (step 5): an aged continuation of a settled task stays in context while it carries an obligation mark
+    written before obligations retired (its ids or its snapshot) and no commit has landed in its checkout since it
+    was written. A landing after it, findings alone, or no record of work at all leave it to the age rule, which
+    archives it (durable, disclosed). The rule reads the continuation and the landings, never an obligation table."""
     import json as _json
 
     from ouroboros.agent_task_pipeline import build_review_context
-    from ouroboros.review_state import (
-        AdvisoryReviewState,
-        ObligationItem,
-        make_repo_key,
-        save_state,
-    )
+    from ouroboros.review_state import CommitAttemptRecord, make_repo_key, update_state
     from ouroboros.task_continuation import (
         ReviewContinuation,
         archived_continuation_dir,
@@ -173,59 +168,38 @@ def test_settled_continuation_with_open_obligations_survives_age_retirement(tmp_
     )
 
     class FakeEnv:
-        def drive_path(self, p):
-            return tmp_path / p
+        repo_dir = tmp_path / "repo"
+        drive_root = tmp_path
 
-        def repo_path(self, p):
-            return tmp_path / "repo" / p
-
-        @property
-        def repo_dir(self):
-            return tmp_path / "repo"
-
-        @property
-        def drive_root(self):
-            return tmp_path
-
-    env = FakeEnv()
     (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "repo" / "tracked.py").write_text("print('hi')\n", encoding="utf-8")
     repo_key = make_repo_key(tmp_path / "repo")
+    finding = {"item": "tests_affected", "reason": "Coverage still missing", "severity": "critical", "verdict": "FAIL"}
+    snapshot = [{"obligation_id": "obl-0002", "fingerprint": "finding:tests_affected:abc", "status": "still_open"}]
 
-    def _aged_continuation(task_id, obligation_ids):
+    def _aged(task_id, written, **fields):
         save_review_continuation(tmp_path, ReviewContinuation(
-            task_id=task_id, source="commit_blocked", stage="review",
-            block_reason="critical_findings", obligation_ids=obligation_ids))
+            task_id=task_id, source="blocked_review", stage="blocking_review", repo_key=repo_key, **fields))
         path = continuation_path(tmp_path, task_id)
         data = _json.loads(path.read_text(encoding="utf-8"))
-        data["created_ts"] = data["updated_ts"] = "2026-01-01T00:00:00+00:00"
+        data["created_ts"] = data["updated_ts"] = written
         path.write_text(_json.dumps(data), encoding="utf-8")
+        seed_result(tmp_path, task_id, {"_schema_version": 1, "id": task_id, "status": "failed"})
 
-    _aged_continuation("unresolvedtask", ["obl-open-1"])
-    _aged_continuation("closedtask", ["obl-long-gone"])
-    for tid in ("unresolvedtask", "closedtask"):
-        seed_result(tmp_path, tid, {"_schema_version": 1, "id": tid, "status": "failed"})
+    _aged("findingstask", "2026-01-10T00:00:00+00:00", critical_findings=[finding], review_record_id="rv-1")
+    _aged("idstask", "2026-01-10T00:00:00+00:00", obligation_ids=["obl-0001"])
+    _aged("snapshottask", "2026-01-10T00:00:00+00:00", open_obligations=snapshot)
+    _aged("landedtask", "2026-01-01T00:00:00+00:00", obligation_ids=["obl-0003"], critical_findings=[finding])
+    _aged("emptytask", "2026-01-10T00:00:00+00:00")
+    update_state(tmp_path, lambda state: state.record_attempt(CommitAttemptRecord(  # lands between the two stamps
+        ts="2026-01-05T00:00:00+00:00", finished_ts="2026-01-05T00:00:00+00:00", commit_message="landed",
+        status="succeeded", repo_key=repo_key, task_id="other", attempt=1)))
 
-    state = AdvisoryReviewState(open_obligations=[
-        ObligationItem(
-            obligation_id="obl-open-1",
-            item="tests_affected",
-            severity="critical",
-            reason="Coverage still missing",
-            source_attempt_ts="2026-01-01T00:00:00+00:00",
-            source_attempt_msg="blocked commit",
-            repo_key=repo_key,
-            fingerprint="finding:tests_affected:abc123",
-        )
-    ])
-    save_state(tmp_path, state)
+    dynamic_text = build_review_context(FakeEnv())
 
-    dynamic_text = build_review_context(env)
-
-    # Unresolved work survives the age window and stays in cognitive context.
-    assert continuation_path(tmp_path, "unresolvedtask").exists()
-    assert "task=unresolvedtask" in dynamic_text
-    # The provably-closed sibling still rides the age path (durable, disclosed).
-    assert not continuation_path(tmp_path, "closedtask").exists()
-    assert (archived_continuation_dir(tmp_path) / "closedtask.json").exists()
-    assert "closedtask" in dynamic_text  # transient archive disclosure line
+    for kept in ("idstask", "snapshottask"):
+        assert continuation_path(tmp_path, kept).exists(), kept
+        assert f"task={kept}" in dynamic_text
+    for released in ("findingstask", "landedtask", "emptytask"):
+        assert not continuation_path(tmp_path, released).exists(), released
+        assert (archived_continuation_dir(tmp_path) / f"{released}.json").exists(), released  # durable
+        assert released in dynamic_text and f"task={released}" not in dynamic_text  # the archive line names it

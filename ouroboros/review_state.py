@@ -25,6 +25,9 @@ log = logging.getLogger(__name__)
 
 _STATE_RELPATH = "state/advisory_review.json"
 _LOCK_RELPATH = "locks/advisory_review.lock"
+# What the retired obligation layer stored, in its saved order; kept as an archive under these keys.
+RETIRED_REVIEW_KEYS = ("open_obligations", "next_obligation_seq", "commit_readiness_debts",
+                       "next_commit_readiness_debt_seq")
 
 
 def _obligation_from_dict(d: Dict[str, Any]) -> ObligationItem:
@@ -221,6 +224,9 @@ def _load_state_unlocked(
         last_stale_task_id=str(data.get("last_stale_task_id", "")),
         earlier_stale_markers=_earlier_stale_markers_from(data.get("earlier_stale_markers")),
         archived_advisory_debts=[item for item in raw_debts if _is_archived_advisory_debt(item)],
+        # Empty lists and default counters carry nothing; an earlier body reads their absence as empty.
+        retired_review_rows=({key: data[key] for key in RETIRED_REVIEW_KEYS if key in data}
+                             if data.get("open_obligations") or data.get("commit_readiness_debts") else {}),
     )
 
     state.attempts.sort(key=_attempt_order_key)
@@ -610,10 +616,8 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
     repo_key = make_repo_key(repo_dir) if repo_dir is not None else None
     attempts = state.filter_attempts(repo_key=repo_key) if repo_key is not None else list(state.attempts)
     last_attempt = state.latest_attempt_for(repo_key=repo_key) if repo_key is not None else state.latest_attempt()
-    open_obs = state.get_open_obligations(repo_key=repo_key)
-    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
 
-    if last_attempt is None and not open_obs and not open_debts:
+    if last_attempt is None:
         return "## Advisory Pre-Review Status\n\nNo reviewed attempts recorded yet."
 
     lines = [
@@ -629,17 +633,6 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
     # the count and the recovery path; nothing is silently dropped.
     _LEDGER_ATTEMPT_CAP = 5
     _COMMIT_MSG_CAP = 300
-
-    if open_debts:
-        lines.append(f"\n### Commit-readiness debt ({len(open_debts)})")
-        for debt in open_debts:
-            lines.append(
-                f"- [{debt.debt_id}] [{str(debt.status or '').upper()}] {debt.title}: {debt.summary}"
-            )
-            if debt.source_obligation_ids:
-                lines.append(f"    obligations={', '.join(debt.source_obligation_ids)}")
-            for evidence in list(debt.evidence or []):
-                lines.append(f"    evidence={evidence}")
 
     if attempts:
         lines.append("\n### Recent reviewed attempts")
@@ -704,13 +697,6 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
             _append_finding_lines(lines, critical_findings, "Critical findings")
         elif advisory_findings:
             _append_finding_lines(lines, advisory_findings, "Advisory findings")
-
-    if open_obs:
-        lines.append(f"\n📋 **Open obligations from previous blocking rounds ({len(open_obs)}):**")
-        for ob in open_obs:
-            lines.append(f"   [{ob.obligation_id}] [{ob.severity.upper()}] {ob.item}: {_truncate_review_reason(ob.reason, limit=120)}")
-            lines.append(f"      Source: {ob.source_attempt_ts} — \"{ob.source_attempt_msg}\"")
-        lines.append("   Advisory MUST verify each obligation is resolved before PASS.")
 
     return "\n".join(lines)
 
