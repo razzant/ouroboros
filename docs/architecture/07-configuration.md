@@ -14,7 +14,7 @@ Tasks privately keep their entry Context/Effort, review settings and catalog (`T
 
 `normalize_settings_raw()` runs before defaults in `load_settings`, `_owner_read_settings_raw` and `build_colab_settings`; dropped keys stay dropped. Colab budget/mode: launch > saved Drive > fresh 200/advanced; workers have no default cap. `safety_config.normalize_consciousness_safety` seeds absent coverage from saved owner coverage; explicit choices stay and guards compare the disk-derived value. `review_pool_migration.apply_at_read_seam` maps run seats to roster rows, retaining refused values. Retired keys/comma-lists drop with notice; comma-only/lane-free installs get factory rows. Review env keys are inert (one startup notice). Reads are pure/idempotent. The loader proposes unauthored slots (§2); `apply_runtime_provider_defaults` only respells them, unpersisted. `apply_settings_to_env` marks slot/catalog echoes in internal `OUROBOROS_PROJECTED_PROPOSALS`, inherited by children, distinct from operator variables. Provider Test (minus the search Model) and credential plans (its route legs) share `provider_models.ACTIVE_MODEL_SETTING_KEYS`, including Safety pins; blank inherits.
 
-`OUROBOROS_MAX_WORKERS` migration: unmarked saved 10, or Colab's first-launch 1, reads as empty until the next save writes `_owner_cap_format=1`; other values stay, explicit Colab launch values win. Malformed values fall back to finite 10. Normalization drops retired `OUROBOROS_DELEGATE_WAIT_SEC`/`OUROBOROS_DELEGATE_WAIT_MAX_SEC`; no wait-window setting remains.
+Unmarked saved `OUROBOROS_MAX_WORKERS` 10 (Colab's first-launch 1) and `OUROBOROS_MODEL_MAX_CONCURRENCY` 3 read empty until a save writes `_owner_cap_format=1`/`_model_cap_format=1`; other values stay, explicit Colab launch values win; malformed ones read finite 10/3. Normalization drops retired `OUROBOROS_DELEGATE_WAIT_SEC`/`OUROBOROS_DELEGATE_WAIT_MAX_SEC`; no wait-window setting remains.
 
 `HOST_MEMORY_RESERVE_FRACTION = 0.10` is the shared code constant for process/test memory admission and the test overload stop (DEVELOPMENT §9), not an owner setting.
 
@@ -93,7 +93,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_MODEL_CONSCIOUSNESS | "" | Background-consciousness model (empty inherits) |
 | OUROBOROS_MODEL_FALLBACKS | openai/gpt-5.6-luna | Cross-model fallback chain, Safety's too on outage (not owner-guarded; `fallback_cooldown.py`); blank = none |
 | OUROBOROS_SERVED_MODEL_REDOS | 2 | Redos of a round another model answered, each a new operation (clamped 0-5) |
-| OUROBOROS_MODEL_MAX_CONCURRENCY | 3 | Physical calls in flight per model and provider route (credential, endpoint), installation-wide, one fair queue, owner-awaited turns first; ≤0 = off (Settings › Models › More; live); Claudexor-served routes are the engine's (`model_concurrency.py`) |
+| OUROBOROS_MODEL_MAX_CONCURRENCY | "" | Calls in flight per model route (credential, endpoint), install-wide, one fair queue, awaited turns first; blank: API routes unlimited, local 3; ≤0 = off (Settings › Models › More; live); Claudexor routes: the engine's |
 | OUROBOROS_PROJECT_NAMING_TIMEOUT_SEC | 60 | Project-naming operation ceiling |
 | OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC | 8 | Inline naming bound when a card becomes a project (`gateway/projects.py`) |
 | OUROBOROS_UI_TRANSLATION_TIMEOUT_SEC | 120 | One translation batch, slot wait and call together (`ui_translation.py`) |

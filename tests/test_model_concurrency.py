@@ -462,20 +462,23 @@ def test_a_saved_cap_reaches_work_started_under_the_old_one_and_the_save_says_so
     that started under 3 admits under (the cap is read from the settings document at each call), the save
     reports that as an immediate effect, a saved 0 means no queue at all, and a positive cap still waits
     in line. A cap of 0 OR LESS (a hand-saved -1 included) has always meant no queue and is read
-    exactly as saved. The factory value stays 3."""
+    exactly as saved. The shipped value is blank (not chosen); a document of this release carries the format marker,
+    so the 3 it holds is the owner's."""
     from ouroboros import config
     from ouroboros.gateway.settings import _effect_buckets
     from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
     from ouroboros.utils import atomic_write_json
 
+    from ouroboros.settings_scales import MODEL_CAP_FORMAT_KEY
+
     key = "OUROBOROS_MODEL_MAX_CONCURRENCY"
-    assert config.SETTINGS_DEFAULTS[key] == 3
+    assert config.SETTINGS_DEFAULTS[key] == ""
     snapshot = task_settings_snapshot({key: 3}, {key: "3"})
     settings = isolated_queue / "settings.json"
     with task_settings_scope(snapshot):
         assert mc._cap() == 3, "no saved document: the task's own admitted value"
         for saved in (0, -1, 7, -5, 3):
-            atomic_write_json(settings, {key: saved})
+            atomic_write_json(settings, {key: saved, MODEL_CAP_FORMAT_KEY: 1})
             assert mc._cap() == saved and mc.enabled() is (saved > 0)
             assert _effect_buckets([key]) == ([key], []), "saved as an immediate effect, not 'from the next task'"
         for saved in (0, -1, -5):  # no queue at all, whatever 0-or-less number the document holds
@@ -488,3 +491,63 @@ def test_a_saved_cap_reaches_work_started_under_the_old_one_and_the_save_says_so
             with pytest.raises(mc.ModelSlotTimeout):  # its caller's deadline ends the wait; the queue has no clock
                 with mc.model_call_slot("model", route=ROUTE, deadline_ts=time.time() + 0.3):
                     pytest.fail("a request over the cap was sent anyway")
+
+
+KEY, LOCAL_ROUTE = "OUROBOROS_MODEL_MAX_CONCURRENCY", {"provider": "local", "base_url": "http://127.0.0.1:8766/v1"}
+
+
+@pytest.mark.parametrize("document,api,local", [
+    ({}, 0, 3),                             # a fresh install, or a document without the key: not chosen
+    ({KEY: ""}, 0, 3),                      # the shipped blank
+    ({KEY: 3}, 0, 3),                       # saved while every shipped default was saved: read once as not chosen
+    ({KEY: "3"}, 0, 3),
+    ({KEY: 3, "_model_cap_format": 1}, 3, 3),          # after the format marker a 3 is the owner's
+    ({KEY: 5}, 5, 5),                       # any other number was always a choice
+    ({KEY: 1, "_model_cap_format": 1}, 1, 1),
+    ({KEY: 0}, 0, 0),                       # zero or less: no limit for either, as before
+    ({KEY: -1, "_model_cap_format": 1}, -1, -1),
+    ({KEY: "unlimited", "_model_cap_format": 1}, 0, 3),
+    ({KEY: "three", "_model_cap_format": 1}, 3, 3),    # a typo reads finite, never "no limit"
+    ({KEY: 2.5, "_model_cap_format": 1}, 3, 3),
+])
+def test_a_limit_nobody_chose_leaves_api_routes_free_and_a_local_model_three(monkeypatch, isolated_queue, document,
+                                                                             api, local):
+    """Owner, 13 Nov 2026 (5A, 6A): with no number of the owner's, a route to a provider's API has no limit of the
+    host's and a model served on this computer keeps three; a number limits both; zero or less neither. The 3 every
+    earlier install saved by itself is not a choice: a document without the format marker reads it as blank, once."""
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    atomic_write_json(isolated_queue / "settings.json", document)
+    assert (mc._cap(False), mc._cap(True)) == (api, local)
+    assert (mc.enabled(False), mc.enabled(True)) == (api > 0, local > 0)
+    with mc.model_call_slot("model", route=ROUTE):  # an API route: queued exactly when a limit stands
+        assert len(_records(isolated_queue, "slot")) == (1 if api > 0 else 0)
+    with mc.model_call_slot("model", use_local=True, route=LOCAL_ROUTE):
+        assert len(_records(isolated_queue, "slot")) == (1 if local > 0 else 0)
+
+
+@pytest.mark.parametrize("saved,marked,read", [(3, False, ""), ("3", False, ""), (3, True, 3), (5, False, 5), (0, False, 0)])
+def test_a_saved_shipped_three_reads_blank_once_and_the_next_save_ends_it(tmp_path, monkeypatch, saved, marked, read):
+    """The settings seam's side of 6A: the view carries the format marker, a read stays a read, the first whole save
+    writes the blank and the marker, and a 3 typed after that stays 3. An environment that still carries the earlier
+    projection of 3 does not undo it (a saved choice, blank included, is the owner's)."""
+    import json
+    from ouroboros import config
+    from ouroboros.settings_scales import MODEL_CAP_FORMAT_KEY
+
+    path = tmp_path / "saved.json"
+    path.write_text(json.dumps({KEY: saved, **({MODEL_CAP_FORMAT_KEY: 1} if marked else {})}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    inherited = {}
+    config.apply_settings_to_env({**config.SETTINGS_DEFAULTS, KEY: 3}, environ=inherited)
+    monkeypatch.setenv(KEY, inherited[KEY])  # what a worker started by the earlier release still carries
+    loaded = config.load_settings()
+    assert loaded[KEY] == read and loaded[MODEL_CAP_FORMAT_KEY] == 1
+    assert json.loads(path.read_text(encoding="utf-8")) == {KEY: saved, **({MODEL_CAP_FORMAT_KEY: 1} if marked else {})}
+    assert mc._cap(False) == (read or 0) and mc._cap(True) == (3 if read == "" else read)
+    config.save_settings(loaded)
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored[KEY] == read and stored[MODEL_CAP_FORMAT_KEY] == 1
+    config.save_settings({**config.load_settings(), KEY: 3})  # the owner types 3: from now on it is a choice
+    assert config.load_settings()[KEY] == 3 and mc._cap(False) == 3

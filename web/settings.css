@@ -1289,6 +1289,7 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
 .settings-row-field > .ui-control { height: var(--control-h); padding-block: 0; font-weight: 600; }
 .settings-row-field { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; }
 .settings-row-field > .ui-control { width: 4.5rem; text-align: end; font-variant-numeric: tabular-nums; }
+.settings-row-field > .ui-control[size] { width: auto; min-width: 4.5rem; }  /* a number that names its empty state */
 .settings-row-unit { color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
 .settings-row > .settings-row-more { grid-column: 1 / -1; }
 .settings-row-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }

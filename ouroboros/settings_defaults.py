@@ -134,11 +134,11 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # (finish_reason=null, 429/5xx/overloaded); floored at the caller's base
     # retry budget. Permanent classes fail fast regardless.
     "OUROBOROS_TRANSIENT_RETRY_MAX": 6,
-    # #4 self-DoS guard: max concurrent provider calls per (model, use_local) route; excess
-    # sends wait in line (no clock of their own: a slot, the caller's deadline, Stop or Pause ends
-    # the wait) instead of storming one model's rate limit. <=0 disables. Default-on
-    # (see ouroboros/model_concurrency.py).
-    "OUROBOROS_MODEL_MAX_CONCURRENCY": 3,
+    # The owner's limit on physical calls in flight per model route (``model_concurrency``): excess sends wait in
+    # line (no clock of their own: a slot, the caller's deadline, Stop or Pause ends the wait). "": not chosen, so an
+    # API route has no limit of the host's and a local model keeps three (``settings_scales.MODEL_CAP_KEY``); a
+    # whole number limits both; <=0 limits neither.
+    "OUROBOROS_MODEL_MAX_CONCURRENCY": "",
     # The owner's interface language for this install: a BCP-47 tag ("ru", "pt-BR", "art-x-<slug>"
     # for an invented language); "" = not chosen, the English source renders. Written by
     # POST /api/ui/i18n/language, read live by the SPA and the Telegram skill, by the mind at its
@@ -554,7 +554,7 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
 # ABSENT key leaves the choice to the environment (a deployment's OUROBOROS_UI_DIR=none). A merged write
 # carries every key the read produced, so it must not author an absent key with the value the environment
 # or the default gave it: one unrelated Settings save would otherwise freeze the operator's choice on disk.
-SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR", "OUROBOROS_MAX_WORKERS"})
+SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR", "OUROBOROS_MAX_WORKERS", "OUROBOROS_MODEL_MAX_CONCURRENCY"})
 
 
 def unauthored_saved_choices(prepared, stored, authored=()) -> frozenset:
