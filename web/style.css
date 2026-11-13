@@ -1480,8 +1480,13 @@ html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar butto
     min-height: var(--control-h-float);
     padding-block: 0;
 }
+/* In the bar the tabs wrap and never scroll (DESIGN "Page header"): a strip longer than the bar's start takes a second
+   line of tabs, which grows the bar, instead of hiding tabs behind a fade. */
 html[data-layout="docked"] .app-page-lead .app-tab-strip {
     flex: 1 1 auto;
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+    overflow-x: visible;
     padding: 10px var(--space-1) 26px;
     margin: 0 0 -16px calc(-1 * var(--space-1));
     scroll-padding-inline: var(--space-1);
@@ -1973,7 +1978,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
    stands above the composer's end. */
 .chat-scroll-bottom-btn {
     position: absolute;
-    right: var(--space-2);
+    inset-inline-end: var(--space-2);
     bottom: calc(100% + var(--space-2));
     z-index: 6;
     width: var(--control-h-float);
@@ -2003,7 +2008,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 /* In the pad, centred on the line's last row of capsules. */
 .chat-toolbar-row > .chat-scroll-bottom-btn {
-    right: var(--space-2);
+    inset-inline-end: var(--space-2);
     bottom: calc((var(--composer-control-height) - var(--control-h-float)) / 2);
 }
 @container composer (max-width: 460px) {
@@ -2012,7 +2017,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 /* A phone folds the capsule line into the field's row (it has no height of its own): there ↓ keeps its place above the
    composer's end. */
 html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
-    right: var(--space-2);
+    inset-inline-end: var(--space-2);
     bottom: calc(100% + var(--space-2));
 }
 .chat-scroll-bottom-btn:hover { color: var(--text-primary); }
@@ -6325,7 +6330,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     background: var(--accent-18);
     overflow: hidden;
 }
-.costs-spend-bar > i { display: block; width: var(--spend-share, 0%); min-width: 8px; height: 100%; border-radius: inherit; background: var(--meter-fill); transition: width var(--motion-fade, 180ms) var(--ease-sheet, ease); }
+/* Any spend shows at least a sliver of fill; a zero share (as the figure rounds it) draws none. */
+.costs-spend-bar > i { display: block; width: var(--spend-share, 0%); min-width: min(8px, calc(var(--spend-share, 0%) * 1000)); height: 100%; border-radius: inherit; background: var(--meter-fill); transition: width var(--motion-fade, 180ms) var(--ease-sheet, ease); }
 .costs-spend-bar[data-reached="1"] > i { background: var(--amber); }
 .costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
 /* A table's one-line scope note under its title: what it groups by (costs.js TABLES). */
