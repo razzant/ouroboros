@@ -1,9 +1,9 @@
 """Built-in web search's provider wire, without policy: the sources a provider's search answer cites, and
 DeepSeek's Search API (the query as written, one POST, a typed reading of its answer).
 
-DeepSeek wire facts (api-docs.deepseek.com/guides/search, read 2026-11-11; no live send from this repository):
-``POST {DEEPSEEK_BASE_URL}/tools/search`` with the account's Bearer key. ``query`` holds 1..128 Unicode
-characters (code points here) and is not all whitespace; operators such as ``site:``, ``"..."`` and
+DeepSeek wire facts (api-docs.deepseek.com/guides/search, read 2026-11-11 and 2026-11-13; no live send from
+this repository): ``POST {DEEPSEEK_BASE_URL}/tools/search`` with the account's Bearer key. ``query`` holds 1..128
+Unicode characters (code points here) and is not all whitespace; operators such as ``site:``, ``"..."`` and
 ``-term`` are part of it. ``count`` (10) and ``need_content`` (false) keep the provider's defaults. HTTP 200
 carries ``results``, an empty list when nothing matched; an item has title, url, snippet (for display),
 summary (for a model), content (empty without need_content), site_name, site_icon, date, authority

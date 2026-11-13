@@ -409,8 +409,7 @@ _INVALID_NAME = 'has an invalid connection name; choose its key under Web search
     ('deepseek@gone::', 'DeepSeek · gone (removed)', 'Not available now: DeepSeek connection gone (not configured).'),
     ('deepseek@work', _UNREADABLE, 'The saved DeepSeek choice (deepseek@work) names no key'),
     ('deepseek@Work::', _UNREADABLE, f'The saved DeepSeek choice (deepseek@Work::) {_INVALID_NAME}'),
-    ('deepseek@::', _UNREADABLE, f'The saved DeepSeek choice (deepseek@::) {_INVALID_NAME}'),
-], ids=['off', 'removed', 'misspelt', 'name-case', 'name-empty'])
+], ids=['off', 'removed', 'misspelt', 'name-case'])
 def test_a_saved_deepseek_key_that_cannot_send_stays_chosen_until_the_owner_chooses_another(saved_ui, request, saved, shown,
                                                                                             said):
     """A saved key that is off, removed or misspelt, or whose name the key grammar refuses, is never read as the
@@ -437,6 +436,36 @@ def test_a_saved_deepseek_key_that_cannot_send_stays_chosen_until_the_owner_choo
     assert (_on_disk().get('OUROBOROS_WEBSEARCH_BACKEND'), _on_disk().get('OUROBOROS_WEBSEARCH_MODEL')) == ('deepseek', '')
     expect(key).to_have_value('api:deepseek')
     expect(key.locator('option')).to_have_text(['DeepSeek', 'DeepSeek · Work', _POINTER])
+    assert not ui['errors'].unexpected(), ui['errors'].report()
+
+
+def test_a_held_deepseek_choice_offers_the_keys_added_in_accounts_meanwhile(saved_ui):
+    """The Key select's pointer leads to Accounts while the page holds an unsaved DeepSeek choice. Keys added there
+    meanwhile are offered on return; the held choice stays unsaved and the one now chosen is what Save writes."""
+    from playwright.sync_api import expect
+
+    ui = saved_ui
+    page, preview, _field = _open_models(ui, {'OUROBOROS_WEBSEARCH_BACKEND': 'auto', 'OUROBOROS_WEBSEARCH_MODEL': ''})
+    source, key = page.locator('#s-websearch-source'), page.locator('#s-websearch-key')
+    source.select_option('deepseek')  # no DeepSeek key yet: the built-in one is said to be missing
+    expect(key.locator('option')).to_have_text(['DeepSeek (no key)', _POINTER])
+    open_settings(page, 'accounts')  # the unsaved page is put aside as it was left
+    task_settings.save_owner({**_KEYS, 'OUROBOROS_MODEL': 'openrouter::fixture-main', **_DEEPSEEK_KEYS})
+    open_settings(page, 'models/role/websearch')
+    expect(source).to_have_value('deepseek')
+    expect(page.locator('[data-settings-page="models/role/websearch"] [data-editor-discard]')).to_be_visible()  # unsaved
+    expect(key.locator('option')).to_have_text(['DeepSeek', 'DeepSeek · Work', _POINTER])
+    expect(preview).to_contain_text('DeepSeek · built-in key.')
+    assert _on_disk().get('OUROBOROS_WEBSEARCH_BACKEND', 'auto') == 'auto' and not _on_disk().get('OUROBOROS_WEBSEARCH_MODEL')
+    key.select_option(label='DeepSeek · Work')
+    key.scroll_into_view_if_needed()
+    routes.roles.capture(page, 'search-deepseek-held-choice-new-key')
+    _save_and_reload(page)
+    assert (_on_disk().get('OUROBOROS_WEBSEARCH_BACKEND'), _on_disk().get('OUROBOROS_WEBSEARCH_MODEL')) == ('deepseek', 'deepseek@work::')
+    expect(key).to_have_value('api:deepseek@work')
+    open_settings(page, 'models')  # the same words on the Models page's Web search row
+    expect(page.locator('[data-settings-page="models"]')).to_contain_text('DeepSeek runs only when you choose it.')
+    routes.roles.capture(page, 'models-page-web-search-row')
     assert not ui['errors'].unexpected(), ui['errors'].report()
 
 

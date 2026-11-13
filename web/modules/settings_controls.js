@@ -908,13 +908,15 @@ const CONNECTION_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 /** The DeepSeek key a saved web search Model chooses: `deepseek` (the built-in key) for a blank value or another
  *  source's model (not applied), `deepseek@name` for `deepseek@name::`; null for a misspelt head or a name outside
- *  the key grammar (`deepseek@::`, `deepseek@Work::`), which the resolver refuses too (search_routes) instead of
- *  sending it on another key: the Key select shows it as not readable, never as an off or removed key. */
+ *  the key grammar as written, before `@default` reads as the built-in key (`deepseek@::`, `deepseek@Work::`,
+ *  `deepseek@work@default::`), which the resolver refuses too (search_routes) instead of sending it on another key:
+ *  the Key select shows it as not readable, never as an off or removed key. */
 export function deepseekSearchKey(saved) {
     const text = String(saved || '').trim();
     const { source, model } = parseModelSource(text);
-    const { kind, name } = connectionParts(source);
-    if (text && kind === 'deepseek' && !model) return source === kind || CONNECTION_NAME.test(name) ? source : null;
+    const head = text.includes('::') ? text.slice(0, text.indexOf('::')) : '';
+    const { kind, name } = connectionParts(head);
+    if (kind === 'deepseek' && !model) return head === kind || CONNECTION_NAME.test(name) ? source : null;
     return /^deepseek\s*[@:]/i.test(text) ? null : 'deepseek';
 }
 

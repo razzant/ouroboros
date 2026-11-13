@@ -1010,14 +1010,18 @@ function mountWebSearch(container, { path, ctx }) {
             preview.innerHTML = `${escapeHtml(main)}${details ? ` <details class="ui-disclosure"><summary>Details</summary>${escapeHtml(details)}</details>` : ''}`;
         } catch { if (mine === previews) preview.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     };
-    let asRead = {};  // the choice as read when the typing began: a Save writes only what the owner changed from it
+    let asRead = null;  // the choice as read when the typing began (null before a read): a Save writes only what changed
     const read = async () => {
-        if (dirty) { void showPreview(); return; }  // a typed choice stays; the routes it would take are read again
         let settings;
-        try { settings = await ctx.readSettings(); } catch { return; }
-        source.value = settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto';
-        model.value = String(settings.OUROBOROS_WEBSEARCH_MODEL || '');
-        asRead = { OUROBOROS_WEBSEARCH_BACKEND: source.value, OUROBOROS_WEBSEARCH_MODEL: model.value };
+        try { settings = await ctx.readSettings(); } catch { if (dirty) void showPreview(); return; }
+        // A typed choice stays, one begun while this read was pending too; the routes it would take and the keys of
+        // Accounts (where the Key select's pointer leads) are read again for it. Only the first read fills the fields
+        // under typing, so a Save never writes a Source the owner was not shown.
+        if (!dirty || !asRead) {
+            source.value = settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto';
+            model.value = String(settings.OUROBOROS_WEBSEARCH_MODEL || '');
+            asRead = { OUROBOROS_WEBSEARCH_BACKEND: source.value, OUROBOROS_WEBSEARCH_MODEL: model.value };
+        }
         const profiles = settings?._meta?.setup_contract?.providerProfiles || {};
         searchKeys = { connections: apiConnections(settings, profiles), providers: configuredApiProviders(settings, profiles),
             providerProfiles: profiles };
@@ -1036,7 +1040,7 @@ function mountWebSearch(container, { path, ctx }) {
         try {
             const fresh = await ctx.readSettings();
             const wanted = { OUROBOROS_WEBSEARCH_BACKEND: selection().backend, OUROBOROS_WEBSEARCH_MODEL: selection().model };
-            const body = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => value !== asRead[key]));
+            const body = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => value !== asRead?.[key]));
             outcome = await writeModelKeys('models:websearch', body, fresh, { ask: ctx.ask });
         } catch (error) { outcome = { state: 'refused', effect: 'now', withheld: '', message: error?.message || String(error), code: '' }; }
         setButtonBusy(button, false);

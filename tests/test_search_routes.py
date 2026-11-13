@@ -855,6 +855,7 @@ _HEAD_DIAGNOSES = ('names one', 'invalid connection name', 'names no key')
 @pytest.mark.parametrize('saved,diagnosis', [
     ('deepseek::deepseek-chat', 'names one'), ('deepseek@work::x', 'names one'),
     ('deepseek@Work::', 'invalid connection name'), ('deepseek@::', 'invalid connection name'),
+    ('deepseek@work@default::', 'invalid connection name'),  # @default is the built-in key only as the whole name
     # Typos of a connection head: no ::, one colon, another case, a lane suffix.
     ('deepseek@work', 'names no key'), ('deepseek@work:', 'names no key'), ('DeepSeek@work::', 'names no key'),
     ('deepseek@work:: (local)', 'names no key'),

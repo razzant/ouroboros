@@ -123,9 +123,11 @@ test('a DeepSeek key is chosen from the keys of Accounts and spelled only by the
         'deepseek@k-2_b', `deepseek@${'w'.repeat(32)}`]);
     assert.deepEqual(['deepseek@work', 'deepseek@work:', 'DeepSeek@work::', 'deepseek@work:: (local)', 'deepseek::deepseek-chat']
         .map(deepseekSearchKey), [null, null, null, null, null]);
-    // A name outside the key grammar (provider_models._CONNECTION_NAME), which the resolver refuses as invalid.
+    // A name outside the key grammar (provider_models._CONNECTION_NAME) as written, which the resolver refuses as
+    // invalid: `@default` reads as the built-in key only as the whole name, never after another one.
     assert.deepEqual(['deepseek@::', 'deepseek@Work::', 'deepseek@DEFAULT::', 'deepseek@-work::', 'deepseek@wo rk::',
-        'deepseek@work@x::', `deepseek@${'w'.repeat(33)}::`].map(deepseekSearchKey), [null, null, null, null, null, null, null]);
+        'deepseek@work@x::', `deepseek@${'w'.repeat(33)}::`, 'deepseek@work@default::', 'deepseek@default@work::']
+        .map(deepseekSearchKey), [null, null, null, null, null, null, null, null, null]);
     assert.deepEqual([searchModelForKey('api:deepseek', 'gpt-5.5'), searchModelForKey('api:deepseek@work', ''),
         searchModelForKey('saved', 'deepseek@work')], ['', 'deepseek@work::', 'deepseek@work']);
     // Leaving DeepSeek drops only the spelling written for it; another source's model stays the owner's.
@@ -152,6 +154,7 @@ test('a DeepSeek key is chosen from the keys of Accounts and spelled only by the
         // A name outside the key grammar is not readable: no second "DeepSeek · Work", no nameless key said to be removed.
         ['deepseek@Work::', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
         ['deepseek@::', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+        ['deepseek@work@default::', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
     ]) {
         const { source, field, select } = page(saved);
         syncSearchKey(source, field, select, keys);
