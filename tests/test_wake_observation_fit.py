@@ -53,8 +53,12 @@ def _density(monkeypatch):
     monkeypatch.setattr(capability_evidence, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "fresh_route_usage"))
 
 
-def _ctx(tmp_path, *, window, text=FULL, wake=WAKE, tools=TOOLS, status="confirmed"):
-    plan = replace(_plan(preferred="max", window=window), status=status)
+def _ctx(tmp_path, *, window, text=FULL, wake=WAKE, tools=TOOLS, status="confirmed", holds_reply=True):
+    """``holds_reply``: the stated window is one buffer that holds the reply too (as a local server's, or a total a
+    size refusal confirmed), so the whole reply reserve is charged, which is the geometry these tests are written in;
+    a total nothing has proved is read less the reply floor alone (``test_an_unproved_total_...`` below)."""
+    plan = replace(_plan(preferred="max", window=window), status=status,
+                   evidence_source="local_health" if holds_reply else "metadata")
     messages = [plan.messages_for("max")[0], {"role": "user", "content": text}]
     events = []
     inner = SimpleNamespace(task_id="wake0001", task_metadata={"wake_observation": wake} if wake else {},
@@ -106,6 +110,7 @@ def test_failed_cross_family_fallback_projects_each_actual_candidate(main_call, 
     def capacity(task, **kwargs):
         route, evidence = route_evidence(task, **kwargs)
         evidence.window_tokens = 500_000 if overflow and task['model'] == targets[0] else 120_000
+        evidence.source = "local_health"  # one buffer that holds the reply: the whole reserve is charged
         return route, evidence
     monkeypatch.setattr(context, '_context_fit_route', capacity)
     ctx.messages[:] = [ctx.context_fit_plan.messages_for('max')[0], {'role': 'user', 'content': FULL}]
@@ -175,6 +180,17 @@ def test_a_known_window_that_cannot_hold_it_gets_the_source_overview(tmp_path, m
                        "composition": {"task_terminal": 2500}, "source_sha256": "f" * 64}]
 
 
+def test_an_unproved_total_is_read_favourably_before_the_overview(tmp_path, monkeypatch):
+    """The owner's rule (30 Sep 2026): the host acts before sending only when the request does not fit even on the
+    most favourable reading. A stated total nothing has proved to hold the reply is read less the reply floor, so the
+    whole observation goes out where the same number, proved, gets the overview; a window too small on any reading
+    gets the overview either way."""
+    _record_events(monkeypatch)
+    assert _project_wake_input(_ctx(tmp_path, window=120_000, holds_reply=False)[0]) is False  # ~92K fits 111,808
+    assert _project_wake_input(_ctx(tmp_path, window=120_000)[0]) is True  # proved: 54,464 cannot hold it
+    assert _project_wake_input(_ctx(tmp_path, window=90_000, holds_reply=False)[0]) is True  # 81,808 cannot either
+
+
 def test_the_decision_is_tool_inclusive(tmp_path, monkeypatch):
     _record_events(monkeypatch)
     small = FULL[:120_000]  # ~30K tokens: fits a 100K window beside the 65K reserve without tools
@@ -207,7 +223,7 @@ def test_without_a_stored_source_the_complete_input_is_the_only_delivery(tmp_pat
 def test_the_projected_wake_is_what_is_measured_priced_sealed_and_sent(main_call, monkeypatch):
     """Through the real Main round and the real Claudexor lane: one candidate, one set of bytes."""
     ctx, gateway, _controller, events, _decide, _observations = main_call
-    plan = replace(ctx.context_fit_plan, window_tokens=120_000)
+    plan = replace(ctx.context_fit_plan, window_tokens=120_000, evidence_source="local_health")  # holds the reply
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
     ctx.messages[:] = [plan.messages_for("max")[0], {"role": "user", "content": FULL}]
     ctx.tools._ctx.task_metadata = {"wake_observation": deepcopy(WAKE)}
@@ -279,10 +295,11 @@ def test_waiting_account_repair_reprojects_wake_before_dispatch(main_call, monke
     route_evidence = context._context_fit_route
     def changed_capacity(*args, **kwargs):
         route, evidence = route_evidence(*args, **kwargs)
-        evidence.window_tokens = next_window
+        evidence.window_tokens, evidence.source = next_window, "local_health"  # one buffer that holds the reply
         return route, evidence
     monkeypatch.setattr(context, "_context_fit_route", changed_capacity)
-    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = replace(ctx.context_fit_plan, window_tokens=initial_window)
+    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = replace(
+        ctx.context_fit_plan, window_tokens=initial_window, evidence_source="local_health")
     ctx.messages[:] = [ctx.context_fit_plan.messages_for("max")[0], {"role": "user", "content": FULL}]
     ctx.tools._ctx.task_metadata = {"wake_observation": deepcopy(WAKE)}
     gateway.results = [_failed("subscription_window_exhausted"), result(route=ROUTE_B)]
@@ -335,7 +352,8 @@ def test_a_projected_start_is_what_its_first_round_measures_prices_and_sends(mai
     """Through the real Main round and Claudexor lane from the transcript a projected start leaves: a route that
     cannot hold the whole input sends the projection as one candidate; one that can receives the whole input."""
     ctx, gateway, _controller, events, _decide, _observations = main_call
-    plan = replace(ctx.context_fit_plan, window_tokens=window, user_content_json=json.dumps(FULL))
+    plan = replace(ctx.context_fit_plan, window_tokens=window, user_content_json=json.dumps(FULL),
+                   evidence_source="local_health")  # one buffer that holds the reply
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
     ctx.messages[:] = [plan.messages_for("max")[0], {"role": "user", "content": PROJECTION}]
     ctx.tools._ctx.task_metadata = {"wake_observation": deepcopy(WAKE)}

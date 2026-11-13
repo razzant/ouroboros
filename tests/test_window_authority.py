@@ -66,6 +66,35 @@ def test_output_and_body_errors_keep_precedence(prefix):
     assert classify_llm_exception(error).kind == ("request_too_large" if prefix else "context_overflow")
 
 
+VLLM = ("'max_tokens' or 'max_completion_tokens' is too large: {reply}. This model's maximum context length is {window} "
+        "tokens and your request has {size} input tokens ({reply} > {window} - {size}).")
+
+
+@pytest.mark.parametrize("window,size,kind", [
+    (200_000, 150_000, "context_overflow"),   # the input fits the window it names: the sum is what it refuses
+    (32_768, 1_000, "request_too_large"),     # the reply alone passes that window: an output limit, as before
+])
+def test_a_sentence_that_counts_the_input_under_its_window_is_the_windows_refusal(tmp_path, monkeypatch, window, size, kind):
+    """A server that validates input plus ``max_tokens`` against its window names ``max_tokens`` first (vLLM). Its
+    refusal is the window's own, with the server's count of the request, so the size recovery reads it and the
+    record learns that this total holds the reply; a reply above the window it names stays an output limit."""
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    text = VLLM.format(reply=65_536, window=window, size=size)
+    error = RuntimeError(text)
+    error.status_code = 400
+    error.body = {"error": {"code": 400, "message": text}}
+    assert classify_llm_exception(error).kind == kind
+    assert cb.context_overflow_message(text) is (kind == "context_overflow")
+    assert cb.output_or_body_size_message(text) is (kind == "request_too_large")
+    assert ce._parse_ctx_limit_number(text) == window and ce._parse_ctx_requested(text) == (size, 65_536, 0)
+    # "is too large: N" is the reply only where max_tokens is what is too large; an input worded so states no reply.
+    assert ce._parse_ctx_requested("Input is too large: 250000 tokens. The maximum context length is 200000 tokens.")[1] == 0
+    if kind == "context_overflow":
+        record_refusal({"_last_llm_provider_message": text}, SimpleNamespace(route_fp="route"))
+        record = resolve_window(ce.CapabilityEvidence(window, "confirmed", "metadata", "route"), 65_536, root=tmp_path)
+        assert record.total.source == "refusal" and record.admitted == record.usable == window - 65_536
+
+
 @pytest.mark.parametrize("note,window,retired", [
     ("owner-confirmed via settings save", 1000000, True),
     ("owner-confirmed via settings save", 400000, False),

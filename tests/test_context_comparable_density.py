@@ -105,7 +105,7 @@ def _witness(raw, density=1.56, *, route="route-a", basis=ce.MAIN_DENSITY_BASIS,
 ])
 def test_round_one_uses_only_comparable_same_model_evidence(
         tmp_path, monkeypatch, witness_size, model, basis, observed, expected):
-    plan = _plan(preferred="max", window=1_000_000)
+    plan = _plan(preferred="max", window=900_000)  # admits 891,808: the candidate at 1.56 passes it, at 1.0 fits
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(ce, "_read", lambda root: {"token_density": {
         model: {"pairs": [_witness(witness_size, basis=basis, observed=observed,

@@ -8,6 +8,10 @@ rotation), and a host cap would only shrink an install's parallel work to the ca
 across all its models. Callers bind their deadline with
 ``model_call_scope``; adapters take ``model_call_slot(route=target)`` INSIDE the
 physical sender, so retries, tools, backoff and abandoned logical waits own no slot.
+A waiter has no clock of its own: it keeps its place until a slot frees, its caller's
+deadline passes, or Stop, Pause or the dispatch fence it already polls ends it. The work
+is never sent elsewhere for waiting (``loop_transport.fallback_chain_allowed``); while it
+waits it says so through the note its loop bound (``slot_wait_notes``).
 
 ``state/model_concurrency/<route digest>/`` contains zero-byte ``*.ticket`` and
 ``*.slot`` files: their names carry enqueue ordinal, PID and a random identity.
@@ -17,7 +21,7 @@ background ticket that has not started (a background ordinal carries an offset);
 each kind keeps its arrival order, and a started call keeps its slot.
 A process-local counter avoids contending on that lock
 while this process already fills the cap. Lowering the cap drains existing calls;
-it never replaces the pool or evicts a live holder. Timeout refuses, never bypasses.
+it never replaces the pool or evicts a live holder. A passed deadline refuses, never bypasses.
 
 Release/cancellation removes its file; admission sweeps files whose PID is dead.
 No age expires a live call. Empty route directories remain (one per used route),
@@ -50,6 +54,7 @@ _BACKGROUND = 10 ** 18  # a background ticket's ordinal offset: an awaited turn'
 _LOCK = threading.Lock()
 _LOCAL: dict[tuple[int, str], _LocalRoute] = {}
 _DEADLINE = contextvars.ContextVar("model_slot_deadline", default=None)
+_NOTE = contextvars.ContextVar("model_slot_note", default=None)
 
 
 class ModelSlotUnavailable(ProviderNotDispatched):
@@ -60,7 +65,7 @@ class ModelSlotUnavailable(ProviderNotDispatched):
 
 
 class ModelSlotTimeout(ModelSlotUnavailable, TimeoutError):
-    """The bounded admission wait ended without capacity."""
+    """The caller's deadline passed before a slot freed."""
 
 
 class ModelSlotCancelled(ModelSlotUnavailable):
@@ -69,8 +74,9 @@ class ModelSlotCancelled(ModelSlotUnavailable):
 
 def capacity_refusal(usage: object) -> bool:
     """Whether a turn's latest attempt is this limiter's refusal (no slot, nothing sent), from the
-    per-failure code ``loop_llm_call`` stamps. Words only (``loop_transport``): never a retry,
-    pacing or admission input, and silent about the episode's earlier attempts."""
+    per-failure code ``loop_llm_call`` stamps. It words the outcome and keeps the work on its route: the
+    install's own queue is no failure of the model, so it never opens the fallback list
+    (``loop_transport.fallback_chain_allowed``). Silent about the episode's earlier attempts."""
     return isinstance(usage, dict) and str(usage.get("_last_llm_provider_code") or "") == ModelSlotUnavailable.code
 
 
@@ -88,17 +94,6 @@ class _LocalRoute:
     def __init__(self):
         self.lock = threading.Lock()
         self.active = 0
-
-
-def _max_slot_wait_sec() -> float:
-    from ouroboros.config import SETTINGS_DEFAULTS
-
-    default = SETTINGS_DEFAULTS["OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC"]
-    try:
-        value = float(runtime_setting("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", default))
-        return max(0.0, value) if math.isfinite(value) else float(default)
-    except (TypeError, ValueError):
-        return float(default)
 
 
 def _cap() -> int:
@@ -123,6 +118,18 @@ def _cap() -> int:
 
 def enabled() -> bool:
     return _cap() > 0
+
+
+@contextlib.contextmanager
+def slot_wait_notes(note: Callable[[float, bool], None] | None):
+    """Bind a work's note for a queued send: ``note(waited_sec, False)`` when the send first finds its queue full and
+    at ``NETWORK_WAIT_NOTE_INTERVAL_SEC`` while it waits, ``note(waited_sec, True)`` once when it gets its slot. A send
+    that never queued notes nothing. A note is a record only: it never ends or shortens the wait."""
+    token = _NOTE.set(note)
+    try:
+        yield
+    finally:
+        _NOTE.reset(token)
 
 
 @contextlib.contextmanager
@@ -168,13 +175,12 @@ class _Waiter:
     def __init__(self, model, use_local, deadline_ts, route, cancel_event, check):
         self.check = check
         self.cancel_event = cancel_event
-        timeout, self.bound = _max_slot_wait_sec(), "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC"
-        for deadline in (_DEADLINE.get(), deadline_ts):
-            if deadline is not None and (left := max(0.0, float(deadline) - time.time())) < timeout:
-                timeout, self.bound = left, "the caller's deadline"
+        deadlines = [float(deadline) for deadline in (_DEADLINE.get(), deadline_ts) if deadline is not None]
         self.model = str(model or "")
         self.started = time.monotonic()
-        self.until = self.started + timeout
+        # No clock of its own: only the caller's deadline bounds the wait (None: until a slot, Stop or Pause).
+        self.until = self.started + max(0.0, min(deadlines) - time.time()) if deadlines else None
+        self.queued, self.noted = False, None
         self.directory = _queue_root() / _route_digest(model, use_local, route)
         self.path: Path | None = None
         self.acquired = False
@@ -195,14 +201,31 @@ class _Waiter:
             # has not started provider work, so Pause still cancels admission.
             if self.path is not None and scope_fence():
                 raise _PhysicalSendNotStarted(RAIL_OWNER_PAUSE)
+        if self.until is None:
+            return math.inf
         remaining = self.until - time.monotonic()
         if remaining <= 0:
             # The install's own per-model slot, never a provider: the raw llm_api_error row used to read
             # "Provider capacity" for waits no provider ever saw. Only observed facts: no slot was acquired
-            # within the measured wait, and which bound ended it.
+            # within the measured wait, and the caller's deadline ended it.
             raise ModelSlotTimeout(f"Local model slot wait expired before dispatch{self._subject()}; no slot was acquired "
-                                   f"within {time.monotonic() - self.started:.0f} s ({self.bound}); the request was not sent")
+                                   f"within {time.monotonic() - self.started:.0f} s (the caller's deadline); the request was not sent")
         return remaining
+
+    def note(self, admitted=False):
+        """Tell the bound work that this send waits in line (at once, then at the note interval), and how long it
+        waited when it gets its slot."""
+        from ouroboros.config import NETWORK_WAIT_NOTE_INTERVAL_SEC
+
+        note, now = _NOTE.get(), time.monotonic()
+        if note is None or not self.queued or (
+                not admitted and self.noted is not None and now - self.noted < NETWORK_WAIT_NOTE_INTERVAL_SEC):
+            return
+        self.noted = now
+        try:
+            note(now - self.started, admitted)
+        except Exception:  # a note never ends a wait or a send
+            pass
 
     def _subject(self):
         return f": model {self.model}" if self.model else ""
@@ -236,6 +259,7 @@ class _Waiter:
             # Register EVERY waiter before taking the local fast path; otherwise
             # a new process could repeatedly jump ahead of local waiting threads.
             if self.path is not None and self.local.active >= cap:
+                self.queued = True
                 return False
             lock_path = self.directory / "queue.lock"
             outcome = {}
@@ -259,6 +283,7 @@ class _Waiter:
                 tickets = sorted(path.name for _, path in files if path.suffix == ".ticket")
                 holders = sum(path.suffix == ".slot" for _, path in files)
                 if holders >= cap or tickets[0] != self.path.name:
+                    self.queued = True  # a full queue, not a busy lock: the work may say it waits
                     return False
                 slot = self.path.with_suffix(".slot")
                 self.path.rename(slot)
@@ -294,6 +319,7 @@ def model_call_slot(model: str, use_local: bool = False, deadline_ts: float | No
     try:
         try:
             while not waiter.step():
+                waiter.note()
                 delay = min(_POLL_SEC, waiter.remaining())
                 if cancel_event is not None:
                     cancel_event.wait(delay)
@@ -303,6 +329,7 @@ def model_call_slot(model: str, use_local: bool = False, deadline_ts: float | No
             raise
         except OSError as error:
             raise ModelSlotUnavailable("Local model slot storage unavailable") from error
+        waiter.note(admitted=True)
         yield
     finally:
         waiter.close()
@@ -319,11 +346,13 @@ async def model_call_slot_async(model: str, use_local: bool = False, deadline_ts
     try:
         try:
             while not waiter.step():
+                waiter.note()
                 await asyncio.sleep(min(_POLL_SEC, waiter.remaining()))
         except ModelSlotUnavailable:
             raise
         except OSError as error:
             raise ModelSlotUnavailable("Local model slot storage unavailable") from error
+        waiter.note(admitted=True)
         yield
     finally:
         waiter.close()

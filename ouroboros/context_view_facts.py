@@ -137,8 +137,9 @@ def required_book_fact(usage):
             f"without it the input is ~{max(0, estimate - book):,}{room}. {REQUIRED_BOOK_CHOICES.format(continues)}")
 
 
-def window_projection(record):
-    """Pure sourced projection shared by Main, Settings and terminal failures."""
+def window_projection(record, *, under_way: bool = False):
+    """Pure sourced projection shared by Main, Settings and terminal failures. ``under_way``: the reader is a Main
+    work, whose requests after its start are read at ``admitted``; a single-shot caller sizes by ``usable`` alone."""
     from dataclasses import asdict
 
     limit = record.limiting
@@ -150,6 +151,9 @@ def window_projection(record):
     dated = f"{label} {observed.replace('T', ' ')[:16]}".strip()
     if limit:
         text = f"window {limit.tokens:,} {limit.kind}: {dated}; usable input {record.usable:,}"
+        if under_way and (record.admitted or 0) > record.usable:  # read more favourably than a start is sized
+            text += (f" at a start, {record.admitted:,} for a request under way (the reply is counted outside this "
+                     "total until a size refusal says it is inside)")
     else:
         text = "window unknown"
         if record.accepted:
@@ -165,7 +169,7 @@ def window_projection(record):
         text += f"; old confirmation {record.retired_ack['window_tokens']:,}, {stamp} — not used"
     return dict(tokens=limit.tokens if limit else None, kind=limit.kind if limit else "unknown",
                 reserve=record.reserve, source=source, observed_at=observed, contradiction=contradiction,
-                retired_ack=record.retired_ack, usable=record.usable, text=text)
+                retired_ack=record.retired_ack, usable=record.usable, admitted=record.admitted, text=text)
 
 
 def window_fact(plan, reserve):
@@ -174,4 +178,4 @@ def window_fact(plan, reserve):
     if plan is None:
         return ""
     record = resolve_window(plan, int(reserve or 0), bound=getattr(plan, "window_witness_bound", True))
-    return window_projection(record)["text"]
+    return window_projection(record, under_way=True)["text"]
