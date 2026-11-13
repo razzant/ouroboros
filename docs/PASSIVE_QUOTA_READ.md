@@ -56,6 +56,27 @@ object-list `profiles` (rows need `profile.harness_id` / `profile.profile_id`, a
 unread. Its rows without `accountPools`: `account_model_unsupported`, not malformed.
 An unread roster is never authoritative removal or an empty account set.
 
+Full Accounts adds `profiles.login_capable_harnesses`: manifest-derived IDs, or
+`null` for its existing unread-manifest fail-open. The shared browser retains this
+policy when projecting raw passive rows, independently of catalog membership and
+read completion order. Before the first full policy, raw rows wait; legacy full
+answers retain fail-open behavior. The passive endpoint's envelope stays unchanged.
+
+Confirmed account PATCH/DELETE orders the engine call and its local confirmation
+under one mutation lock. Reads never take that lock or run network work under the
+status-memory lock. A read crossing confirmation omits its old account answer
+(`reads.accounts=not_read`, `unified_accounts=false`), without discarding quota.
+Full status may serve its corrected held roster as stale; passive status keeps
+its existing empty/unread shape. The fence runs after shared-Future consumption
+and again after the HTTP handler's thread await. Its ordering counters are private
+to the serving process: no browser revision persists across a server restart.
+
+Full status remembers each successful facet under its own observation time and
+request order, with catalog memory separate for the models variant. A later
+completion from an earlier read cannot replace a newer held facet. Its stamp is
+the facet's completion, not the slowest diagnostic's completion. These are host
+read times; engine quota/resource observation timestamps remain unchanged.
+
 Quota requires object-list `snapshots`; present `absences` and `resources` must
 also be object lists. Constraint freshness is all-or-none: if any constraint has
 `freshness`, every snapshot has an object-list `constraints` and every constraint
@@ -140,6 +161,18 @@ cadence, not cumulative context cost. Actual emission frequency is unknown;
 token price was not measured.
 
 ## Limits and checks
+
+`POST /api/claudexor/quota/refresh?lazy=1` shares provider work across visible
+clients for the same owned home and exact target (including body-less full).
+Completed results or failures pace lazy attempts for 60 seconds after completion;
+expired entries are pruned on use. `refresh_attempt` carries the host attempt's
+original `started_at`/`completed_at` and per-response `reused` (joined or cached).
+Replays never fence newer passive reads or retire failed reset readback; full
+and exact replies merge per-subject observation clocks and resource-facet clocks.
+Manual refresh joins an identical request still in flight but bypasses completed
+attempts. Full and exact-target requests remain separate: an older engine's full
+success cannot satisfy its unsupported exact-target operation. Reset/receipt
+operations are never cached or retried by this mechanism.
 
 Accounts and quota reads are independent, not one atomic engine snapshot.
 Successful transport does not refresh observations. Display each constraint's

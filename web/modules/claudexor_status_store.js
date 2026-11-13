@@ -65,6 +65,7 @@
 
 import { apiFetch, createAccountReset, getAccountReset, refreshAccountResources } from './api_client.js';
 import { harnessPresentation } from './harness_presentation.js';
+import { createObservationReads } from './claudexor_observation_reads.js';
 
 export const STATUS_ENDPOINT = '/api/claudexor/status';
 export const WAKE_ENDPOINT = '/api/claudexor/wake';
@@ -106,6 +107,21 @@ const quotaTarget = (row) => ({ harness: row?.subject?.harness, profile_id: row?
 const observationTime = values => Math.max(-Infinity, ...values.map(value => Date.parse(value || '')).filter(Number.isFinite));
 const keepObservation = (held, incoming, onTie) => held > incoming || (onTie && held === incoming);
 
+function mergeResourceFacet(held, incoming, onTie) {
+    if (!held) return incoming;
+    if (!incoming) return held;
+    const observed = facet => observationTime([facet.observed_at]);
+    const attempted = facet => observationTime([facet.observed_at, facet.last_attempt_at]);
+    const keepValue = observed(held) > observed(incoming) || (observed(held) === observed(incoming)
+        && keepObservation(attempted(held), attempted(incoming), onTie));
+    const value = keepValue
+        ? held : incoming;
+    const attempt = keepObservation(attempted(held), attempted(incoming), onTie) ? held : incoming;
+    // A failed later check reports its error without redating an older value.
+    return value === attempt ? value : { ...value, freshness: attempt.freshness,
+        last_attempt_at: attempt.last_attempt_at, last_error: attempt.last_error };
+}
+
 export function resourceCapabilitiesRead(payload) {
     return payload?.resource_capabilities_read
         ?? (payload?.resource_capabilities ? READ_OK : READ_NOT_READ);
@@ -122,14 +138,58 @@ const resetReferences = action => [...(action.earlierRequests || []), action];
 const resetReference = ({ request, key, receipt, refreshed }) => ({ request, key, refreshed,
     receipt: receipt ? { ...receipt, resources: null } : undefined });
 
+function refreshReadsReset(envelope, action, automatic) {
+    if (!action.request) return true;
+    const receipt = action.receipt;
+    if (!receipt || receipt.state !== 'completed') return false;
+    const attempt = envelope.refresh_attempt;
+    if (attempt?.reused || (automatic && !attempt)) return false;
+    const boundary = observationTime([receipt.completed_at, receipt.readback?.attempted_at, receipt.created_at]);
+    if (attempt && !(Date.parse(attempt.started_at) >= boundary)) return false;
+    const target = action.request.target;
+    const quotas = envelope.snapshots.filter(row => sameTarget(quotaTarget(row), target));
+    const resets = envelope.resources?.find(row => sameTarget(row.target, target))?.resets;
+    return quotas.length > 0 && quotas.every(row => row.freshness === 'fresh'
+        && Date.parse(row.observed_at) >= boundary)
+        && resets?.freshness === 'fresh' && Date.parse(resets.observed_at) >= boundary;
+}
+
 /** Receipts settle operations; their observations may predate the current display. */
 export function mergeAccountResources(snapshot, envelope, target = null, { preferPreviousOnTie = false } = {}) {
     if (!snapshot || !Array.isArray(envelope?.snapshots) || !Array.isArray(envelope?.absences)) {
         throw new Error('The account resource response could not be understood');
     }
+    if (!target) {
+        // A full reply can replay an older attempt after an exact-account read.
+        // Apply the same per-subject/per-facet clocks as receipt observations.
+        const quotaRows = [...(snapshot.quota || []), ...(snapshot.quota_absences || []),
+            ...envelope.snapshots, ...envelope.absences];
+        const targets = new Map(quotaRows.map(row => [accountTargetKey(quotaTarget(row)), quotaTarget(row)]));
+        for (const row of [...(snapshot.resources || []), ...(envelope.resources || [])]) {
+            targets.set(accountTargetKey(row.target), row.target);
+        }
+        let merged = snapshot;
+        for (const subject of targets.values()) {
+            merged = mergeAccountResources(merged, envelope, subject, { preferPreviousOnTie });
+        }
+        const chosen = [...(merged.quota || []), ...(merged.quota_absences || [])];
+        const held = [...(snapshot.quota || []), ...(snapshot.quota_absences || [])];
+        const incoming = [...envelope.snapshots, ...envelope.absences];
+        const allHeld = chosen.length && chosen.every(row => held.includes(row));
+        const allNew = chosen.every(row => incoming.includes(row));
+        const sameScope = snapshot.availability_scope && envelope.availability_scope
+            && ['model', 'requestKind', 'basis'].every(key => Object.hasOwn(snapshot.availability_scope, key)
+                && Object.hasOwn(envelope.availability_scope, key)
+                && snapshot.availability_scope[key] === envelope.availability_scope[key]);
+        const scope = allHeld ? snapshot.availability_scope
+            : allNew || sameScope ? envelope.availability_scope : undefined;
+        merged = { ...merged };
+        if (scope === undefined) delete merged.availability_scope;
+        else merged.availability_scope = scope;
+        return merged;
+    }
     const addressed = (rows, key) => (rows || []).filter(row => sameTarget(key(row), target));
     const merge = (held, incoming, key) => {
-        if (!target) return incoming;
         const previous = addressed(held, key), next = addressed(incoming, key);
         if (previous.length === next.length && next.every((row, index) => row === previous[index])) return held || [];
         return [...(held || []).filter(row => !sameTarget(key(row), target)), ...next];
@@ -145,8 +205,7 @@ export function mergeAccountResources(snapshot, envelope, target = null, { prefe
         if (held && incoming) {
             const merged = { ...incoming };
             for (const name of ['balances', 'spending', 'resets', 'diagnostics']) {
-                const time = facet => observationTime([facet?.observed_at, facet?.last_attempt_at]);
-                if (keepObservation(time(held[name]), time(incoming[name]), preferPreviousOnTie)) merged[name] = held[name];
+                merged[name] = mergeResourceFacet(held[name], incoming[name], preferPreviousOnTie);
             }
             resources = [Object.keys(merged).filter(name => name !== 'target')
                 .every(name => merged[name] === held[name]) ? held : merged];
@@ -557,26 +616,23 @@ export function createClaudexorStatusStore({
     doc = () => (typeof document === 'undefined' ? null : document),
     pollMs = DEFAULT_POLL_MS,
     storage = () => globalThis.localStorage,
+    discoveryMs = 120000,
+    providerMs = 60000,
 } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const inner = {
         snapshot: null,
         error: '',
+        errorStamp: 0,
         loading: false,
         everSettled: false,
         generation: 0,
-        // Sticky-upgrading: the moment ANY consumer needs per-harness model
-        // discovery every later read keeps carrying it. Downgrading the shared
-        // snapshot would silently empty the model selects of whichever surface
-        // did not happen to trigger the last read.
+        // Full discovery keeps requested models; fast observations leave that facet intact.
         includeModels: false,
         snapshotHasModels: false,
         inFlight: null,
         inFlightModels: false,
-        // The owner-initiated wake (POST /api/claudexor/wake) in flight. A
-        // WRITE the store owns for the same reason it owns the reads: its
-        // answer is a fresh status payload, and a second committer of the
-        // shared snapshot would be a second writer racing the first.
+        // The store orders explicit lifecycle writes against full discovery.
         wakeInFlight: null,
         resourcesInFlight: null,
         resourceActions: new Map(),
@@ -587,6 +643,11 @@ export function createClaudexorStatusStore({
         holds: new Set(),
         visibilityBound: null,
     };
+
+    let lastDiscovery = -Infinity, lastProvider = Date.now();
+    const observations = createObservationReads({ fetchImpl, getSnapshot: () => inner.snapshot,
+        commit: payload => { inner.snapshot = payload; inner.everSettled = true; },
+        changed: () => { inner.generation += 1; notify(); } });
 
     // Retain the exact request through response loss and closing this client window.
     // Only operation references live here; credentials and provider binding stay host-side.
@@ -628,7 +689,7 @@ export function createClaudexorStatusStore({
         // Agent discovery (reads.catalog) is independent of the operations catalog.
         if (held && resourceCapabilitiesRead(payload) !== READ_OK) {
             payload = { ...payload, resource_capabilities_read: resourceCapabilitiesRead(payload),
-                resources: held.resources, resource_capabilities: held.resource_capabilities };
+                resource_capabilities: held.resource_capabilities, resources: payload.resources ?? held.resources };
         }
         inner.snapshot = payload;
     }
@@ -637,7 +698,8 @@ export function createClaudexorStatusStore({
         // The store adds ONE dimension the wire cannot carry: this client has
         // not read yet. Everything else is the pure, payload-level answer.
         if (!inner.everSettled) return READ_UNREAD;
-        return facetReadState(inner.snapshot, name, { transportError: inner.error });
+        return facetReadState(inner.snapshot, name, { transportError:
+            observations.newer(name, inner.errorStamp) ? '' : inner.error });
     }
 
     function reads() {
@@ -673,9 +735,7 @@ export function createClaudexorStatusStore({
         for (const entry of inner.listeners) {
             if (entry.visible && entry.visible()) { surfaceVisible = true; break; }
         }
-        // A hidden page pauses EVERY reason to poll, a held login included:
-        // nothing is on screen to update, and the daemon read is expensive
-        // (it re-probes each agent CLI).
+        // A hidden page pauses even a held login's poll.
         return shouldPollStatus({
             hasSubscribers: inner.listeners.size > 0,
             hidden: Boolean(document_ && document_.hidden),
@@ -698,7 +758,15 @@ export function createClaudexorStatusStore({
         inner.timer = setTimeout(() => {
             inner.timer = 0;
             if (!shouldPoll()) return;
-            refresh();
+            void observations.observe();
+            // Each duty is single-flight on its own; slow work never holds the fast read.
+            if (Date.now() - lastDiscovery >= discoveryMs && !inner.inFlight && !inner.wakeInFlight) void refresh();
+            if (Date.now() - lastProvider >= providerMs && inner.snapshot?.reads?.accounts === READ_OK
+                && !inner.resourcesInFlight && !inner.wakeInFlight) {
+                lastProvider = Date.now();
+                void refreshResources(null, { automatic: true });
+            }
+            armPoll();
         }, pollMs);
     }
 
@@ -711,19 +779,17 @@ export function createClaudexorStatusStore({
             armPoll();
             // Resuming means catching up, not merely re-arming: the snapshot
             // held across a hidden stretch is as old as that stretch.
-            if (!document_.hidden && shouldPoll()) refresh();
+            if (!document_.hidden && shouldPoll()) { void observations.observe(); lazyRefresh(); }
         };
         document_.addEventListener('visibilitychange', inner.visibilityBound);
     }
 
     function startRead(withModels) {
-        // The READ PATH's own disposal guard, not just `refresh()`'s: the
-        // model-upgrade continuation below reaches this function directly, so a
-        // controller disposed while an upgrade was queued used to fan out two
-        // more status reads — each of them four CLI-probing daemon round-trips
-        // — for a surface with zero subscribers and polling off.
+        // Queued model upgrades also enter here: disposal must guard the actual read.
         if (inner.disposed) return Promise.resolve(inner.snapshot);
         inner.loading = true;
+        const stamp = observations.ticket();
+        lastDiscovery = Date.now();
         inner.inFlightModels = withModels;
         // A pre-request repaint only until the first read SETTLES: with
         // anything already said, repainting each tick is churn — and against a
@@ -753,7 +819,7 @@ export function createClaudexorStatusStore({
             inner.loading = false;
             inner.everSettled = true;
             inner.inFlight = null;
-            commitStatus(payload);
+            commitStatus(payload && observations.merge(payload, stamp));
             if (payload) {
                 inner.snapshotHasModels = withModels;
                 inner.error = '';
@@ -762,6 +828,7 @@ export function createClaudexorStatusStore({
                 // it had), but the service state now says nobody could be
                 // asked — so no consumer may read absence as discovery.
                 inner.error = error || 'unreachable';
+                inner.errorStamp = stamp;
             }
             inner.generation += 1;
             notify();
@@ -779,6 +846,13 @@ export function createClaudexorStatusStore({
      * queued follow-up read, shared by every other upgrading caller.
      * `afterCurrent` requests evidence after an event (e.g. program maintenance).
      */
+    function lazyRefresh({ includeModels = false } = {}) {
+        if (Date.now() - lastDiscovery >= discoveryMs || (includeModels && !inner.snapshotHasModels)) {
+            void refresh({ includeModels });
+        }
+        return observations.observe();
+    }
+
     function refresh({ includeModels = false, afterCurrent = false } = {}) {
         if (inner.disposed) return Promise.resolve(inner.snapshot);
         if (includeModels) inner.includeModels = true;
@@ -817,32 +891,11 @@ export function createClaudexorStatusStore({
         return startRead(wantModels);
     }
 
-    /**
-     * OWNER action: ask the backend to start the daemon (`ensure_running`) and
-     * commit the fresh status payload its answer carries. Never called by the
-     * poll — the status GET stays side-effect-free, which is what keeps an
-     * automatic 5-second wake impossible. Single-flighted: a cold runtime
-     * install takes real time, and a second click must not start a second
-     * provisioning.
-     *
-     * SERIALIZATION (the single-writer rule, both orders): a wake pressed
-     * during a read waits that read out before POSTing, so the wake's
-     * daemon-side read causally follows the poll's commit and its commit can
-     * never resurrect an older snapshot; a refresh started during a wake joins
-     * it (see `refresh`). The answer commits through the same snapshot /
-     * error / generation fields as every read — still ONE writer of the view.
-     *
-     * The owner's Restart Claudexor (`restart`) is the same write with a body:
-     * its answer carries the receipt beside the fresh status (`{status, restart}`),
-     * so it commits through this one path and waits out a wake already in flight.
-     *
-     * @returns {Promise<{ok: boolean, error: string, httpStatus?: number, data?: Object}>}
-     *          the outcome; `data` is the answer's own body (a restart's receipt,
-     *          or its typed refusal). A failure
-     *          deliberately does NOT touch the held snapshot or the store
-     *          error: whether and how long to show a refused wake is the
-     *          caller's lifecycle (the accounts panel keeps it until the
-     *          daemon provably answers — `daemonAnswered`).
+    /** Explicit lifecycle act, never polling. Full reads and wake/restart serialize;
+     *  passive observations remain independent and merge by facet ticket.
+     *  A refusal leaves the held snapshot and read error alone. The account panel
+     *  keeps the act's error until the daemon really answers (`daemonAnswered`).
+     *  @returns {Promise<{ok: boolean, error: string, httpStatus?: number, data?: Object}>}
      */
     function wake(restartToken = null) {
         const restarting = restartToken !== null;
@@ -854,6 +907,7 @@ export function createClaudexorStatusStore({
             let outcome;
             try {
                 if (pendingRead) await pendingRead.then(() => {}, () => {});
+                const stamp = observations.ticket();
                 const resp = await fetchImpl(restarting ? RESTART_ENDPOINT : WAKE_ENDPOINT, restarting
                     ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: restartToken }) }
                     : { method: 'POST' });
@@ -863,7 +917,7 @@ export function createClaudexorStatusStore({
                 if (resp && resp.ok && statusPayloadValid(data)) {
                     inner.loading = false;
                     inner.everSettled = true;
-                    commitStatus(data);
+                    commitStatus(observations.merge(data, stamp));
                     // The wake endpoint never carries model discovery
                     // (include_models=False server-side).
                     inner.snapshotHasModels = false;
@@ -905,11 +959,11 @@ export function createClaudexorStatusStore({
 
     // Serialize view writers with existing status/wake reads. This is transport
     // ordering, not provider admission: disabled profiles use the same path.
-    function resourceWrite(work) {
-        const preceding = inner.resourcesInFlight || inner.wakeInFlight || inner.inFlight;
+    function resourceWrite(work, { readBarrier = true } = {}) {
+        const preceding = inner.resourcesInFlight || inner.wakeInFlight || (readBarrier && inner.inFlight);
         const pending = (async () => {
             if (preceding) await preceding.catch(() => {});
-            if (inner.inFlight) await inner.inFlight.catch(() => {});
+            if (readBarrier && inner.inFlight) await inner.inFlight.catch(() => {});
             if (inner.disposed) return null;
             return work();
         })();
@@ -925,7 +979,7 @@ export function createClaudexorStatusStore({
         return inner.resourceActions.get(target ? accountTargetKey(target) : 'all') || {};
     }
 
-    function refreshResources(target = null) {
+    function refreshResources(target = null, { automatic = false } = {}) {
         const key = target ? accountTargetKey(target) : 'all';
         const entry = inner.resourceActions.get(key) || {};
         if (entry.busy) return Promise.resolve(null);
@@ -936,15 +990,22 @@ export function createClaudexorStatusStore({
         notify();
         return resourceWrite(async () => {
             try {
-                const envelope = await refreshAccountResources(target, { fetchImpl });
+                const envelope = await refreshAccountResources(target, { fetchImpl, automatic });
                 if (inner.disposed) return null;
-                inner.snapshot = mergeAccountResources(inner.snapshot, envelope, target);
-                entry.refreshed = true;
-                entry.resourceRead = true;
-                entry.refreshDone = true;
-                for (const action of target ? [entry] : inner.resourceActions.values()) {
-                    for (const request of resetReferences(action)) request.refreshed = true;
-                    action.earlierRequests = (action.earlierRequests || []).filter(retainResetRequest);
+                const replay = envelope.refresh_attempt?.reused === true;
+                const merged = mergeAccountResources(inner.snapshot, envelope, target,
+                    { preferPreviousOnTie: replay });
+                if (!replay) observations.fenceQuota();
+                inner.snapshot = merged;
+                entry.resourceRead = !replay;
+                entry.refreshDone = !replay;
+                if (!replay) {
+                    for (const action of target ? [entry] : inner.resourceActions.values()) {
+                        for (const request of resetReferences(action)) {
+                            if (refreshReadsReset(envelope, request, automatic)) request.refreshed = true;
+                        }
+                        action.earlierRequests = (action.earlierRequests || []).filter(retainResetRequest);
+                    }
                 }
                 inner.generation += 1;
                 saveResetRequests();
@@ -954,7 +1015,7 @@ export function createClaudexorStatusStore({
                 entry.refreshDone = false;
                 return null;
             } finally { entry.busy = false; }
-        });
+        }, { readBarrier: false });
     }
 
     function resetAccount(request, { key = '', recover = false } = {}) {
@@ -998,6 +1059,7 @@ export function createClaudexorStatusStore({
                     const merged = mergeAccountResources(inner.snapshot, receipt.resources, target,
                         { preferPreviousOnTie: recover });
                     if (['quota', 'quota_absences', 'resources'].some(name => merged[name] !== inner.snapshot[name])) {
+                        observations.fenceQuota();
                         inner.snapshot = merged;
                         entry.resourceRead = true;
                         inner.generation += 1;
@@ -1062,6 +1124,7 @@ export function createClaudexorStatusStore({
 
     function dispose() {
         inner.disposed = true;
+        observations.dispose();
         clearTimer();
         const document_ = getDoc();
         if (inner.visibilityBound && document_?.removeEventListener) {
@@ -1124,11 +1187,15 @@ export function createClaudexorStatusStore({
             }
             const daemonError = String(inner.snapshot?.daemon?.last_error || '');
             const own = String(inner.snapshot?.facets?.[name]?.error || '');
-            const detail = inner.error
+            const detail = (observations.newer(name, inner.errorStamp) ? '' : inner.error)
                 || (state === READ_FAILED ? own || daemonError : state === READ_INDETERMINATE ? daemonError : '');
             return statusUnavailableNote(state, { error: detail, facet: name, subject });
         },
         refresh,
+        lazyRefresh,
+        observe: observations.observe,
+        setEnabled: observations.setEnabled,
+        profileAction: observations.action,
         refreshResources,
         resetAccount,
         resourceAction,
@@ -1190,7 +1257,7 @@ export function bindStatusSurface(store, {
         // surface's tab costs nothing and this surface needs no name for its own.
         const activationAction = typeof onActivate === 'function'
             ? onActivate
-            : () => store.refresh({ includeModels });
+            : () => store.lazyRefresh ? store.lazyRefresh({ includeModels }) : store.refresh({ includeModels });
         const onActivated = () => { if (visible()) return activationAction(); };
         for (const name of activationEvents) {
             target.addEventListener(name, onActivated);

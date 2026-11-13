@@ -81,7 +81,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/settings/secret` | |
 | GET | `/api/review-pool` | |
 | GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog evidence (§3); never wakes |
-| POST | `/api/claudexor/quota/refresh` | full or exact account (§3) |
+| POST | `/api/claudexor/quota/refresh` | full/exact; `?lazy=1` coalesces recent attempts (§3) |
 | POST | `/api/claudexor/account-resets` | exact request (§3) |
 | GET | `/api/claudexor/account-resets/{operation_id}` | receipt inspection (§3) |
 | POST | `/api/claudexor/wake` | |

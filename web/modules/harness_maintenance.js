@@ -253,6 +253,8 @@ export function createHarnessMaintenanceController({
             return (running.current || !asksCurrent) && (running.checkLatest || !checkLatest)
                 ? running.promise : running.promise.then(() => refresh({ harness, fresh, checkLatest }));
         }
+        if (asksCurrent) record(key).inspectionAttemptAt = Date.now();
+        if (checkLatest) record(key).latestAttemptAt = Date.now();
         const revisions = new Map([...intents].map(([id, state]) => [id, state.revision]));
         const order = ++asked;
         const older = (slot) => (observed.get(slot) || 0) > order;
@@ -432,6 +434,10 @@ export function createHarnessMaintenanceController({
         },
         poll() {
             if (disposed || !visible()) return;
+            const whole = record(WHOLE_INVENTORY);
+            if (!reads.has(WHOLE_INVENTORY) && (!whole.inspectionAttemptAt || Date.now() - whole.inspectionAttemptAt >= 120000)) {
+                void refresh({ fresh: true, checkLatest: !whole.latestAttemptAt || Date.now() - whole.latestAttemptAt >= 1800000 });
+            }
             for (const [harness, state] of intents) {
                 if (maintenanceOperationPending(state.operation) && !state.operationError && !state.busy) void readOperation(harness);
             }

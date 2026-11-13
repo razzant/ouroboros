@@ -125,8 +125,8 @@ test('opening renews a changed producer once; status subscription exists only fo
     click({target: {closest: () => ({dataset: {programAction: 'latest'}, closest: () => ({dataset: {program: 'test-open'}})})}});
     await flush(); assert.equal(subscriptions, 1);
     receipt = {...receipt, state: 'succeeded', termination: 'confirmed', after: {path, version}};
-    poll({loading: false}); await flush();
-    assert.equal(releases, 1); assert.equal(raw, 3);
+    poll({loading: true}); await flush();
+    assert.equal(releases, 1, 'maintenance settles even while independent full discovery is loading'); assert.equal(raw, 3);
     binding.dispose();
 });
 

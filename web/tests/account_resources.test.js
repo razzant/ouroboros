@@ -396,9 +396,10 @@ for (const heldAbsence of [false, true]) {
             const held = structuredClone(store.snapshot);
             await store.resetAccount(receipt.request, { recover: true });
             assert.deepEqual(store.snapshot, held);
-            assert.equal(store.resourceAction(target).refreshed, true);
+            assert.equal(store.resourceAction(target).refreshed, !heldAbsence);
             assert.equal(store.resourceAction(target).refreshDone, true);
-            assert.equal(resourceReadGap(store.resourceAction(target)), false);
+            assert.equal(resourceReadGap(store.resourceAction(target)), heldAbsence,
+                'an authoritative absence does not establish reset usage/readback');
             // Equivalent instants with different offsets are ties, not new reads.
             receipt.resources = atTime('2026-10-09T15:00:00+03:00', 0.8, 7);
             await store.resetAccount(receipt.request, { recover: true });
@@ -445,7 +446,9 @@ test('receipt observations merge each facet independently using observation and 
     await store.resetAccount(fixture.receipt.request, { key: 'mixed-observations' });
     const resource = store.snapshot.resources[0];
     assert.deepEqual(resource.balances, mixed.resources[0].balances);
-    assert.deepEqual(resource.spending, mixed.resources[0].spending);
+    assert.deepEqual(resource.spending, { ...newer.resources[0].spending, freshness: 'stale',
+        last_attempt_at: mixed.resources[0].spending.last_attempt_at,
+        last_error: mixed.resources[0].spending.last_error });
     assert.deepEqual(resource.resets, newer.resources[0].resets);
     assert.deepEqual(resource.diagnostics, newer.resources[0].diagnostics);
     store.dispose();
@@ -501,7 +504,9 @@ for (const read of ['refresh', 'wake']) {
         assert.equal(store.catalogKnown, true);
         assert.equal(store.quotaKnown, true);
         assert.equal(store.snapshot.quota[0].constraints[0].used_ratio, 0.3);
-        assert.deepEqual(store.snapshot.profiles, payload.profiles);
+        // The full producer's optional manifest policy is additive; the roster
+        // itself must still replace the old account independently of resources.
+        assert.deepEqual(store.snapshot.profiles, { ...payload.profiles, login_capable_harnesses: null });
         assert.deepEqual(store.snapshot.resources, fixture.quota.resources);
         const html = accountResourcesMarkup(row, store.snapshot);
         assert.match(html, /capabilities could not be checked/i);
@@ -533,26 +538,25 @@ test('refill keeps its verb with and without previous operations', async () => {
     }
 });
 
-test('foreground refresh follows pre-existing status read; later poll cannot overwrite its result', async () => {
+test('provider refresh proceeds beside held discovery; its quota survives the older read', async () => {
     const old = deferred(), post = deferred();
     const calls = [];
     const store = createClaudexorStatusStore({ storage: () => null, doc: null, fetchImpl: async (url, init) => {
         calls.push([url, init]);
-        return calls.length === 1 ? old.promise : url.includes('/refresh') ? post.promise : response(snapshot());
+        return calls.length === 2 ? old.promise : url.includes('/refresh') ? post.promise : response(snapshot());
     } });
+    await store.refresh();
     const read = store.refresh();
     const refresh = store.refreshResources(target);
-    assert.equal(calls.length, 1);
-    old.resolve(response(snapshot()));
-    await read;
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(calls[1][0], '/api/claudexor/quota/refresh');
-    const poll = store.refresh();
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 3, 'provider work does not wait for diagnostics');
+    assert.equal(calls[2][0], '/api/claudexor/quota/refresh');
     post.resolve(response(fixture.quota));
     await refresh;
-    await poll;
-    assert.equal(calls.length, 3);
+    const fresh = structuredClone(store.snapshot.quota);
+    old.resolve(response({ ...snapshot(), quota: [] }));
+    await read;
+    assert.deepEqual(store.snapshot.quota, fresh);
+    assert.equal(store.catalogKnown, true);
     store.dispose();
 });
 
@@ -617,3 +621,119 @@ test('a temporary model mark is one escaped line per model, only beside a succes
     assert.equal(capabilityMarkup(row, failed), '');
     assert.equal(capabilityMarksReadFailedAt({ ...failed, reads: { ...failed.reads, accounts: 'failed' } }), '');
 });
+
+const attempt = (envelope, reused = false) => ({ ...envelope, refresh_attempt: {
+    started_at: '2026-10-09T11:00:00Z', completed_at: '2026-10-09T11:01:00Z', reused,
+} });
+
+test('cached full automatic refresh cannot retire failed reset readback, including remount', async () => {
+    const values = new Map();
+    const storage = () => ({ getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) });
+    const old = atTime('2026-10-09T11:00:00Z', 1, 1);
+    const calls = [];
+    let store = createClaudexorStatusStore({ storage, doc: null, fetchImpl: async url => {
+        calls.push(url);
+        return response(url.includes('/status') ? snapshot()
+            : url.includes('/quota/refresh') ? attempt(old, calls.length > 2) : fixture.receipt);
+    } });
+    try {
+        await store.refresh();
+        await store.refreshResources();
+        await store.resetAccount(fixture.receipt.request, { key: 'post-refresh-reset' });
+        assert.equal(resourceReadGap(store.resourceAction(target)), true);
+        await store.refreshResources(null, { automatic: true });
+        assert.equal(resourceReadGap(store.resourceAction(target)), true, 'replay is not a new provider read');
+        assert.equal(JSON.parse(values.get('ouroboros.account-reset-requests'))[0].key, 'post-refresh-reset');
+        store.dispose();
+        store = createClaudexorStatusStore({ storage, doc: null, fetchImpl: async url =>
+            response(url.includes('/status') ? snapshot() : attempt(old, true)) });
+        await store.refresh();
+        await store.refreshResources(null, { automatic: true });
+        assert.equal(resourceReadGap(store.resourceAction(target)), true, 'saved readback duty survives a fresh client');
+    } finally { store.dispose(); }
+});
+
+for (const absent of [false, true]) {
+    test(`cached full refresh retains newer exact-account observations and scope (${absent})`, async () => {
+        const old = atTime('2026-10-09T11:00:00Z', 1, 1);
+        const newer = atTime('2026-10-09T12:00:00Z', 0.2, 0);
+        const scope = { model: 'new-model', requestKind: 'text', basis: 'quota_block' };
+        newer.availability_scope = scope;
+        if (absent) {
+            newer.absences = [{ subject: newer.snapshots[0].subject, observed_at: '2026-10-09T12:00:00Z', reason: 'unavailable' }];
+            newer.snapshots = [];
+        }
+        const store = createClaudexorStatusStore({ doc: null, storage: () => null, fetchImpl: async (url, init) =>
+            response(url.includes('/status') ? snapshot() : JSON.parse(init.body).target ? attempt(newer) : attempt(old, true)) });
+        try {
+            await store.refresh();
+            await store.refreshResources(target);
+            const held = structuredClone(store.snapshot);
+            await store.refreshResources(null, { automatic: true });
+            assert.deepEqual(store.snapshot, held);
+        } finally { store.dispose(); }
+    });
+}
+
+test('cached refresh does not fence a passive observation already in flight', async () => {
+    const held = deferred();
+    const store = createClaudexorStatusStore({ doc: null, storage: () => null, fetchImpl: async url =>
+        url.includes('view=quota') ? held.promise : response(url.includes('/status') ? snapshot() : attempt(fixture.quota, true)) });
+    try {
+        await store.refresh();
+        const reading = store.observe();
+        await store.refreshResources(null, { automatic: true });
+        const incoming = { ...snapshot(), view: 'quota' };
+        incoming.quota[0].observed_at = '2026-10-09T13:00:00Z';
+        incoming.quota[0].constraints[0].used_ratio = 0.1;
+        held.resolve(response(incoming));
+        await reading;
+        assert.equal(store.snapshot.quota[0].constraints[0].used_ratio, 0.1);
+    } finally { store.dispose(); }
+});
+
+test('a new full attempt acknowledges only post-reset fresh observations for the addressed account', async () => {
+    let envelope = attempt(atTime('2026-10-09T11:00:00Z', 1, 1));
+    const store = createClaudexorStatusStore({ doc: null, storage: () => null, fetchImpl: async url =>
+        response(url.includes('/status') ? snapshot() : url.includes('/quota/refresh') ? envelope : fixture.receipt) });
+    try {
+        await store.refresh();
+        await store.resetAccount(fixture.receipt.request, { key: 'clocked-readback' });
+        for (const candidate of [
+            envelope,
+            { ...attempt(atTime('2026-10-09T13:00:00Z', 0.1, 0)), snapshots: [], resources: [], absences: [] },
+            { ...attempt(atTime('2026-10-09T13:00:00Z', 0.1, 0)), snapshots: [] },
+        ]) {
+            envelope = candidate;
+            await store.refreshResources(null, { automatic: true });
+            assert.equal(resourceReadGap(store.resourceAction(target)), true);
+        }
+        envelope = attempt(atTime('2026-10-09T13:00:00Z', 0.1, 0));
+        envelope.refresh_attempt.started_at = '2026-10-09T12:30:00Z';
+        envelope.refresh_attempt.completed_at = '2026-10-09T13:00:00Z';
+        envelope.resources[0].resets.freshness = 'stale';
+        await store.refreshResources(null, { automatic: true });
+        assert.equal(resourceReadGap(store.resourceAction(target)), true, 'quota success does not refresh remaining resets');
+        envelope.resources[0].resets.freshness = 'fresh';
+        await store.refreshResources(null, { automatic: true });
+        assert.equal(resourceReadGap(store.resourceAction(target)), false);
+        assert.equal(store.resourceAction(target).key, 'clocked-readback');
+        assert.equal(store.resourceAction(target).receipt.outcome, 'reset');
+    } finally { store.dispose(); }
+});
+
+for (const exact of [true, false]) {
+    test(`a later failed resource attempt does not promote its older retained value (${exact})`, () => {
+        const held = { ...snapshot(), resources: atTime('2026-10-09T12:00:00Z', 0.2, 0).resources };
+        const incoming = atTime('2026-10-09T11:00:00Z', 0.9, 1);
+        incoming.resources[0].resets.last_attempt_at = '2026-10-09T13:00:00Z';
+        incoming.resources[0].resets.last_error = 'reset_read_failed';
+        incoming.resources[0].resets.freshness = 'stale';
+        const merged = mergeAccountResources(held, incoming, exact ? target : null);
+        assert.equal(merged.resources[0].resets.value[0].available_count, 0);
+        assert.equal(merged.resources[0].resets.observed_at, '2026-10-09T12:00:00Z');
+        assert.equal(merged.resources[0].resets.last_attempt_at, '2026-10-09T13:00:00Z');
+        assert.equal(merged.resources[0].resets.last_error, 'reset_read_failed');
+        assert.equal(merged.resources[0].resets.freshness, 'stale');
+    });
+}

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 
 import httpx
 import pytest
@@ -76,6 +78,115 @@ def _request() -> Request:
         "client": ("127.0.0.1", 1),
         "server": ("127.0.0.1", 8765),
     }, receive)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_refresh_state(monkeypatch):
+    from ouroboros.gateway import claudexor_quota
+
+    monkeypatch.setattr(claudexor_quota, "_REFRESH_FLIGHTS", {})
+    monkeypatch.setattr(claudexor_quota, "_REFRESH_RECENT", {})
+
+
+def test_shared_refresh_joins_live_manual_and_reuses_only_lazy_recent(monkeypatch, tmp_path):
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateway import claudexor_quota as quota
+
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path)
+    entered, release, joined = Event(), Event(), Event()
+    calls = []
+
+    class JoinedFuture(Future):
+        def result(self, timeout=None):
+            if not self.done():
+                joined.set()
+            return super().result(timeout)
+
+    monkeypatch.setattr(quota, "Future", JoinedFuture)
+
+    def refresh(target=None):
+        calls.append(target)
+        entered.set()
+        assert release.wait(10)
+        return _envelope()
+
+    monkeypatch.setattr(quota, "_refresh_quota", refresh)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        first = pool.submit(quota._shared_refresh, lazy=True)
+        try:
+            assert entered.wait(10)
+            second = pool.submit(quota._shared_refresh)
+            assert joined.wait(10)
+            joined.clear()
+            third = pool.submit(quota._shared_refresh, lazy=True)
+            assert joined.wait(10)
+        finally:
+            release.set()
+        answers = [call.result(10) for call in (first, second, third)]
+    assert calls == [None]
+    attempts = [answer.pop("refresh_attempt") for answer in answers]
+    assert [item["reused"] for item in attempts] == [False, True, True]
+    assert attempts[0]["started_at"] == attempts[1]["started_at"] == attempts[2]["started_at"]
+    assert attempts[0]["completed_at"] == attempts[1]["completed_at"] == attempts[2]["completed_at"]
+    assert attempts[0]["started_at"] <= attempts[0]["completed_at"]
+    answers[0]["snapshots"].clear()
+    assert answers[1] == _envelope() and answers[2] == _envelope()
+    replay = quota._shared_refresh(lazy=True)
+    assert replay.pop("refresh_attempt") == attempts[1]
+    assert replay == _envelope() and calls == [None]
+    fresh = quota._shared_refresh()
+    assert fresh.pop("refresh_attempt")["reused"] is False
+    assert fresh == _envelope() and calls == [None, None]
+
+
+def test_lazy_refresh_failure_is_an_attempt_throttle_and_expired_keys_are_pruned(monkeypatch, tmp_path):
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateway import claudexor_quota as quota
+
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path)
+    clock, calls = [100.0], []
+    monkeypatch.setattr(quota.time, "monotonic", lambda: clock[0])
+
+    def refuse(target=None):
+        calls.append(target)
+        raise ClaudexorUnavailable("quota_refresh_paced", "paced", status_code=429)
+
+    monkeypatch.setattr(quota, "_refresh_quota", refuse)
+    targets = [{"harness": "codex", "profile_id": value} for value in ("a", "b")]
+    for _ in range(2):
+        with pytest.raises(ClaudexorUnavailable, match="paced"):
+            quota._shared_refresh(targets[0], lazy=True)
+    assert calls == [targets[0]] and quota._REFRESH_FLIGHTS == {}
+    # Manual ignores completed attempts but never retries an unknown call itself.
+    with pytest.raises(ClaudexorUnavailable):
+        quota._shared_refresh(targets[0])
+    assert len(calls) == 2
+    clock[0] += 61
+    with pytest.raises(ClaudexorUnavailable):
+        quota._shared_refresh(targets[1], lazy=True)
+    assert len(quota._REFRESH_RECENT) == 1, "expired targets/homes must not accumulate forever"
+
+
+def test_lazy_refresh_scopes_do_not_mix_full_exact_accounts_or_homes(monkeypatch, tmp_path):
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateway import claudexor_quota as quota
+
+    home, calls = [tmp_path / "a"], []
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: home[0])
+
+    def refresh(target=None):
+        calls.append((str(home[0]), target))
+        return {"snapshots": [], "target": target}
+
+    monkeypatch.setattr(quota, "_refresh_quota", refresh)
+    a = {"harness": "codex", "profile_id": "a"}
+    b = {"harness": "codex", "profile_id": "b"}
+    for target in (None, a, b, {"profile_id": "a", "harness": "codex"}):
+        assert quota._shared_refresh(target, lazy=True)["target"] == target
+    assert len(calls) == 3, "only the same exact semantic target joins"
+    home[0] = tmp_path / "b"
+    assert quota._shared_refresh(a, lazy=True)["target"] == a
+    assert len(calls) == 4, "a different owned home cannot reuse another daemon's result"
 
 
 def test_gateway_refresh_quota_posts_once_and_keeps_token_host_side(caplog, monkeypatch):
@@ -270,17 +381,21 @@ def test_inbound_refresh_returns_exact_foreground_envelope_via_thread(monkeypatc
         calls.append(("refresh",))
         return envelope
 
-    async def to_thread(function, *args):
-        calls.append(("to_thread", function, args))
-        return function(*args)
+    async def to_thread(function, *args, **kwargs):
+        calls.append(("to_thread", function, args, kwargs))
+        return function(*args, **kwargs)
 
     monkeypatch.setattr(claudexor_quota, "_refresh_quota", refresh)
     monkeypatch.setattr(claudexor_quota.asyncio, "to_thread", to_thread)
 
     response = asyncio.run(claudexor_quota.api_claudexor_quota_refresh(_request()))
     assert response.status_code == 200
-    assert json.loads(response.body) == envelope
-    assert calls == [("to_thread", refresh, ()), ("refresh",)]
+    actual = json.loads(response.body)
+    attempt = actual.pop("refresh_attempt")
+    assert attempt["reused"] is False
+    assert attempt["started_at"] <= attempt["completed_at"]
+    assert actual == envelope
+    assert calls == [("to_thread", claudexor_quota._shared_refresh, (), {"lazy": False}), ("refresh",)]
 
 
 @pytest.mark.parametrize("code", [

@@ -55,6 +55,11 @@ ENGINE_FRESHNESS_QUOTA = {
 def passive_engine(monkeypatch, tmp_path):
     """Real descriptor discovery and gateway transport, no operator daemon."""
     config_dir = tmp_path / "claudexor"
+    from ouroboros.gateway import claudexor_accounts
+
+    monkeypatch.setattr(claudexor_accounts, "_STATUS_IN_FLIGHT", {})
+    monkeypatch.setattr(claudexor_accounts, "_FACET_MEMORY", {})
+    monkeypatch.setattr(claudexor_accounts, "_ACCOUNTS_REVISION", 0)
     monkeypatch.setattr(owned, "owned_config_dir", lambda: config_dir)
     calls = []
     clients = []
@@ -99,6 +104,15 @@ def passive_engine(monkeypatch, tmp_path):
                 "protocolMajor": wire.CLAUDEXOR_PROTOCOL_MAJOR,
                 "engine": {"version": wire.CLAUDEXOR_MIN_VERSION},
             })
+        if path == "/v2/credential-profiles/claude/work-research" and state.get("account_mutations"):
+            roster = deepcopy(state["responses"]["/v2/credential-profiles"])
+            if request.method == "DELETE":
+                roster["profiles"] = []
+            else:
+                assert request.method == "PATCH"
+                roster["profiles"][0]["profile"]["enabled"] = json.loads(request.content)["enabled"]
+            state["responses"]["/v2/credential-profiles"] = roster
+            return httpx.Response(200, json={"ok": True})
         assert request.method == "GET", "passive consumer sent a mutation or handshake"
         assert path in state["responses"], "passive consumer requested a diagnostic dependency"
         return httpx.Response(200, json=deepcopy(state["responses"][path]))
@@ -166,7 +180,7 @@ def test_quota_view_preserves_roster_and_one_quota_epoch_without_diagnostics(pas
                         "enabled": False, "kind": "native_session"},
             "status": {"verification": "passed", "verification_source": "local_store"},
             "identity": {"email": "quota-test@example.invalid", "plan": "pro"},
-        }],
+        }, {"profile": {"profile_id": "api-key", "harness_id": "openrouter", "kind": "api_key"}}],
         "harnessAccounts": [{"harness_id": "claude", "native_login_detected": True,
                              "identity": {"plan": "max"}}],
         "accountPools": [{"harness_id": "codex", "members": ["account-a"]}],
@@ -564,6 +578,58 @@ def _full_status_engine(engine, monkeypatch, *, operations=None):
     })
     monkeypatch.setattr(owned, "get_owned_daemon",
                         lambda: SimpleNamespace(status_dict=lambda: {"state": "running"}))
+
+
+@pytest.mark.parametrize("view", ["", "?view=quota"])
+@pytest.mark.parametrize("method", ["PATCH", "DELETE"])
+def test_confirmed_account_write_fences_another_clients_earlier_read(passive_engine, monkeypatch, view, method):
+    from ouroboros.gateway.claudexor_accounts import api_claudexor_credential_profile
+
+    engine = passive_engine
+    _full_status_engine(engine, monkeypatch)
+    engine.state["responses"]["/v2/credential-profiles"] = {
+        "profiles": [deepcopy(_NAMED)], "accountPools": [_POOL]}
+    engine.state["account_mutations"] = True
+    roster_read, sibling_entered, release = Event(), Event(), Event()
+    original = wire.ClaudexorGateway.credential_profiles
+
+    def read_roster(gateway, **kwargs):
+        result = original(gateway, **kwargs)
+        roster_read.set()
+        return result
+
+    def hold_sibling(_request):
+        sibling_entered.set()
+        assert release.wait(10)
+
+    monkeypatch.setattr(wire.ClaudexorGateway, "credential_profiles", read_roster)
+    delayed_path = "/v2/quota" if view else "/v2/agent-capabilities"
+    engine.state["hooks"][delayed_path] = hold_sibling
+    engine.provision()
+    app = Starlette(routes=[
+        Route("/api/claudexor/status", api_claudexor_status),
+        Route("/api/claudexor/credential-profiles/{harness}/{profile_id}",
+              api_claudexor_credential_profile, methods=["PATCH", "DELETE"]),
+    ])
+    with TestClient(app) as reader, TestClient(app) as writer, ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(reader.get, "/api/claudexor/status" + view)
+        try:
+            assert roster_read.wait(5) and sibling_entered.wait(5)
+            arguments = {"json": {"enabled": False}} if method == "PATCH" else {}
+            confirmed = writer.request(method,
+                "/api/claudexor/credential-profiles/claude/work-research", **arguments)
+            assert confirmed.status_code == 200
+        finally:
+            release.set()
+        late = pending.result(5).json()
+        current = reader.get("/api/claudexor/status" + view).json()
+    assert late["reads"]["accounts"] == "not_read" and late["unified_accounts"] is False
+    assert not any(row["profile"]["enabled"] for row in late["profiles"].get("profiles", []))
+    assert late["reads"]["quota"] == "ok", "account ordering never discards an independent quota read"
+    assert current["reads"]["accounts"] == "ok" and current["unified_accounts"] is True
+    assert current["profiles"]["profiles"] == ([] if method == "DELETE" else [
+        {**_NAMED, "profile": {**_NAMED["profile"], "enabled": False}}])
+    assert "account_revision" not in late and "accountRevision" not in late
 
 
 @pytest.mark.parametrize("body,state,code,unified", [

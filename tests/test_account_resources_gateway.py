@@ -221,7 +221,13 @@ def test_disabled_named_default_refresh_forwards_exact_target_without_wake(engin
     target = WIRE["receipt"]["request"]["target"]
     response = client.post("/api/claudexor/quota/refresh", json={"target": target})
     assert response.status_code == 200
-    assert response.json() == WIRE["quota"]
+    from datetime import datetime
+
+    envelope = response.json()
+    attempt = envelope.pop("refresh_attempt")
+    assert attempt["reused"] is False
+    assert datetime.fromisoformat(attempt["started_at"]) <= datetime.fromisoformat(attempt["completed_at"])
+    assert envelope == WIRE["quota"]
     assert calls[-1] == ("POST", "/v2/quota", {"view": "resources"}, {"target": target}, None)
     assert calls[0][1] == "/v2/handshake"
 
