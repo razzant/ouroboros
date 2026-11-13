@@ -128,7 +128,8 @@ def test_history_lists_versions_newest_first_marks_the_current_one_and_names_gap
     assert [re.search(r" · (replaced [0-9a-f]{64}|created it \(nothing before it\)) · ", row)[1] for row in rows] == [
         f"replaced {second.revision}", f"replaced {second.revision}", f"replaced {first.revision}",
         "created it (nothing before it)"]
-    page = tools._knowledge_read(ctx, TOPIC, view="history", start_char=10, end_char=60)
+    fingerprint = re.search(r'"fingerprint": "([0-9a-f]{16})"', listing)[1]
+    page = tools._knowledge_read(ctx, TOPIC, view="history", start_char=10, end_char=60, fingerprint=fingerprint)
     assert body(page) == body(listing)[10:60] and '"complete_chars": ' in page
     # Undoing the write that made `second` puts back the version its own line names.
     undo = tools._knowledge_write(ctx, TOPIC, mode="revert", version=re.search(r"replaced ([0-9a-f]{64})", rows[2])[1],
@@ -481,3 +482,22 @@ def test_a_version_whose_forward_path_is_damaged_reads_through_the_live_note(tmp
     target.path.unlink()
     with pytest.raises(versions.VersionUnavailable, match=f"the line at byte offset {b_at} is not a JSON row"):
         versions.find_version(target, b.revision)
+
+
+def test_a_history_continuation_is_bound_to_the_list_its_first_page_read(tmp_path):
+    """K6: a later page names its list's fingerprint; after a write and a revert back to the same revision the list
+    differs although the note's revision does not, and the old continuation is refused, never spliced."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    b = store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=a.revision).current
+    first = tools._knowledge_read(ctx, TOPIC, view="history", end_char=120)
+    fingerprint = re.search(r'"fingerprint": "([0-9a-f]{16})"', first)[1]
+    same = tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint=fingerprint)
+    whole = tools._knowledge_read(ctx, TOPIC, view="history")
+    assert body(first) + body(same) == body(whole)  # an unchanged list continues exactly
+    assert "position_mismatch" in tools._knowledge_read(ctx, TOPIC, view="history", start_char=120)  # no list named
+    c = store.write_knowledge_note(target, "# Река\n\nThree.\n", expected_revision=b.revision).current
+    assert store.write_knowledge_note(target, "", "revert", c.revision, version=b.revision).current.revision == b.revision
+    moved = tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint=fingerprint)
+    assert moved.startswith("⚠️ TOOL_ERROR: position_mismatch") and "Two." not in moved, moved
+    assert "fingerprint continues a list of versions" in tools._knowledge_read(ctx, TOPIC, fingerprint=fingerprint)

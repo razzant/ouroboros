@@ -112,10 +112,16 @@ def _rendered_view(view: str, text: str, facts: dict, start_char: int | None, en
                                       "knowledge_body_chars": end - start}
 
 
+class ListChanged(Exception):
+    """A history page's continuation named another list than the one rendered now (a write landed since)."""
+
+
 def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | None,
-               start_char: int | None, end_char: int | None, notes=()) -> tuple[str, dict]:
+               start_char: int | None, end_char: int | None, notes=(), fingerprint: str = "") -> tuple[str, dict]:
     if view not in ("note", "outline", "history"):
         raise ValueError(f"view={view!r}: use note (default), outline or history")
+    if fingerprint and view != "history":
+        raise ValueError("fingerprint continues a list of versions (view='history'), as its first page names it")
     if version is not None and view == "history":
         raise ValueError("version selects one version for view=note or view=outline; view=history lists them all")
     shown, earlier = note, None
@@ -127,15 +133,20 @@ def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | No
         return _source_view(shown, start_char, end_char, earlier, notes)
     facts = {"topic": note.address.topic, "scope": note.address.scope, "revision": shown.revision,
              **({"current_revision": note.revision, "earlier_version": earlier} if earlier else {})}
-    if view == "history":
-        return _rendered_view(view, knowledge_versions.render_history(note), facts, start_char, end_char, notes)
+    if view == "history":  # newest first: a later page continues the list its first page read, by its fingerprint
+        listing = knowledge_versions.render_history(note)
+        digest = hashlib.sha256(listing.encode("utf-8")).hexdigest()[:16]
+        if (start_char or fingerprint) and fingerprint != digest:
+            raise ListChanged("that page belongs to another list of versions (a write landed since, or no fingerprint "
+                              "named the list it continues): read it again from start_char=0")
+        return _rendered_view(view, listing, {**facts, "fingerprint": digest}, start_char, end_char, notes)
     label = f" — an earlier version, not the current note (current revision {note.revision})" if earlier else ""
     return _rendered_view(view, knowledge_versions.render_outline(shown, label), facts, start_char, end_char, notes)
 
 
 def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
                     start_char: int | None = None, end_char: int | None = None,
-                    view: str = "note", version: str | None = None) -> str:
+                    view: str = "note", version: str | None = None, fingerprint: str = "") -> str:
     notes = []  # a value that names the default takes it, said in the header (tools/arg_feedback)
     if view in (None, ""):
         notes.append(ignored_argument_note("view", view, "the default view, the note itself"))
@@ -147,8 +158,15 @@ def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
         sanitized = _sanitize_topic(topic)
         address = _address(ctx, sanitized, scope)
         note = knowledge_store.read_knowledge_note(address)
-        text, meta = (_source_view(note, start_char, end_char, notes=notes) if view == "note" and version is None
-                      else _note_view(note, view, version, start_char, end_char, notes))
+        if fingerprint is not None and not isinstance(fingerprint, str):
+            raise ValueError("fingerprint is the text a history page's header names")
+        text, meta = (_source_view(note, start_char, end_char, notes=notes)
+                      if view == "note" and version is None and not fingerprint
+                      else _note_view(note, view, version, start_char, end_char, notes, fingerprint or ""))
+    except ListChanged as exc:
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: position_mismatch: {exc}",
+            meta={"operation_outcome": "completed_no_effect"}))
     except knowledge_versions.VersionUnavailable as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: version_unavailable: {exc}",
@@ -404,14 +422,16 @@ def get_tools() -> List[ToolEntry]:
                             "and exact source revision. Paths and relative Markdown links survive archival. Read current "
                             "understanding before revising it. view='outline' shows its summary, revision, state, size and "
                             "every heading with its line and the start_char..end_char range of its section; view='history' "
-                            "lists its versions newest first: who wrote each, when, in which mode, why, and what left. "
+                            "lists its versions newest first: who wrote each, when, in which mode, why, and what left; a "
+                            "later page passes the fingerprint its first page names. "
                             "version=<revision> reads that earlier version exactly (verified by its sha256), as the note or "
                             "with view='outline' as its outline."),
             "parameters": {"type": "object", "properties": {"topic": topic, "scope": scope,
                 "start_char": {"type": "integer", "description": "Optional half-open character range start in the exact complete note (omitted = 0). Use ranges to read a large source in parts."},
                 "end_char": {"type": "integer", "description": "Exclusive range end (omitted = the end; a value past the end is lowered to it); complete_chars and revision are returned with every view. Omit both bounds, or pass 0 and 0, for the full note."},
                 "view": {"type": "string", "enum": ["note", "outline", "history"], "description": "note (default): the note itself; outline: its headings with section ranges, to read one section with start_char/end_char; history: its versions, newest first. start_char/end_char page the outline and history text like a note's."},
-                "version": {"type": "string", "description": "The revision of an earlier version of this note (view='history' or a write receipt names it): read that version instead of the current note."}},
+                "version": {"type": "string", "description": "The revision of an earlier version of this note (view='history' or a write receipt names it): read that version instead of the current note."},
+                "fingerprint": {"type": "string", "description": "view='history', a later page: the fingerprint its first page's header names; a changed list is refused."}},
                 "required": ["topic"]},
         }, _knowledge_read),
         ToolEntry("knowledge_write", {

@@ -74,7 +74,7 @@ from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
 from ouroboros.memory_view_account import (quote_line, selection_facts, source_change_lines, told_by, told_map,
                                          told_records)
 from ouroboros.store import StoreError
-from ouroboros.tool_capabilities import tool_result_limit
+from ouroboros.tool_capabilities import result_window, tool_result_limit
 from ouroboros.tool_call_log import chronicle_lead_metadata
 from ouroboros.tools.arg_feedback import with_argument_notes
 from ouroboros.tools.registry import ToolEntry
@@ -809,15 +809,8 @@ def _collect(source: Iterator[Any], render: Callable[[Any], str], limit: int) ->
 
 
 def _window(head: str, text: str, start: int, limit: int, resume: Callable[[int], str]) -> str:
-    """A character window of one document; the second line names ``next_start`` or completeness."""
-    total = len(text)
-    start = min(max(int(start or 0), 0), total)
-    widest = f"chars {total}–{total} of {total}; next_start={total} ({_ORDER}); " + resume(total)
-    room = max(limit - len(head) - len(widest) - 2, 1)  # at least one character a page: ``next_start`` always advances
-    end = min(start + room, total)
-    cont = (f"chars {start}–{end} of {total}; next_start={end} ({_ORDER}); " + resume(end) if end < total
-            else f"chars {start}–{end} of {total}; complete")
-    return head + "\n" + cont + "\n" + text[start:end]
+    """A character window of one record or list, read older to newer (``tool_capabilities.result_window``)."""
+    return result_window(head, text, start, limit, resume, _ORDER)
 
 
 # --- memory_read: modes --------------------------------------------------------------------------

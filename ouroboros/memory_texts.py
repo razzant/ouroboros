@@ -375,17 +375,11 @@ def resolve_source(ctx: Any, address: Any) -> TextSource:
     raise ValueError(f"source={address!r}: a memory text is {SOURCES}")
 
 
-def _page(head: str, text: str, start: int, resume: Any) -> str:
-    """One character window of a document; the second line names the continuation or completeness."""
-    from ouroboros.tool_capabilities import tool_result_limit
+def _page(head: str, text: str, start: int, resume: Any, order: str = "") -> str:
+    """One character window of a version or the list within memory_read's result (``result_window``)."""
+    from ouroboros.tool_capabilities import result_window, tool_result_limit
 
-    total = len(text)
-    start = min(start, total)
-    room = max(tool_result_limit("memory_read") - len(head) - 300, 1)  # the continuation line fits beside it
-    end = min(start + room, total)
-    cont = (f"chars {start}–{end} of {total}; next_start={end}; " + resume(end) if end < total
-            else f"chars {start}–{end} of {total}; complete")
-    return head + "\n" + cont + "\n" + text[start:end]
+    return result_window(head, text, start, tool_result_limit("memory_read"), resume, order)
 
 
 def version_door(ctx: Any, source: Any, version: Any, start: Any, fingerprint: Any,
@@ -475,5 +469,6 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
                                                "versions (a write landed since): read it again from start=0.")
     head = f"[{source.name}: versions newest first; {shown}; fingerprint='{digest}']{note}"
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=_page(
-        head, listing, start, lambda end: f"memory_read(source={source.name!r}, start={end}, fingerprint='{digest}')"),
+        head, listing, start, lambda end: f"memory_read(source={source.name!r}, start={end}, fingerprint='{digest}')",
+        "newest first"),
         meta={"operation_outcome": "completed_no_effect"}))
