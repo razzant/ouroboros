@@ -155,9 +155,9 @@ export function initSettings(ctx = {}) {
     }
 
     // A door out of Settings. Pressed inside Settings (`back`: the path it was pressed on), it gives where it leads a
-    // first-row Back to that path: a Dashboard tab draws it in its panel, a page of its own (Circles, Skills) takes the
-    // same row (dashboard.js settingsReturn) under its header and its tabs, above what scrolls: inside the Dashboard's
-    // shell where the page has one. Leaving that page any other way drops it (onPageShown). A door asked for from
+    // Back to that path (dashboard.js settingsReturn): in the header's Back slot before the page's name (the
+    // Dashboard's band, a page of its own such as Circles or Skills); only a page without that slot takes it as its
+    // first row. Leaving that page any other way drops it (onPageShown). A door asked for from
     // outside Settings (a capsule's `dashboard:costs`) gets no Back: nobody came from Settings. `main:context` shows
     // Main and does nothing else: the Context capsule is the room's.
     const doorBack = settingsReturn({ layers, openSettings: (path) => openFromOutside(path), id: 'settings-door-back' });
