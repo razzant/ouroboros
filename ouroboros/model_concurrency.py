@@ -1,6 +1,7 @@
 """Fair physical-call admission shared by the processes of one installation.
 
-The configured cap (default three, <=0 disables) belongs to one model on a resolved
+The owner's limit (``settings_scales.MODEL_CAP_KEY``: not chosen is no limit for an API route and
+three for a local model; <=0 disables) belongs to one model on a resolved
 provider, credential and endpoint, across roles and every process of the installation.
 Routes the managed Claudexor engine serves are not queued here: that one daemon is
 already the shared admission point for its accounts (quota-aware routing and
@@ -96,28 +97,26 @@ class _LocalRoute:
         self.active = 0
 
 
-def _cap() -> int:
-    from ouroboros.config import SETTINGS_DEFAULTS, SETTINGS_PATH
+def _cap(use_local: bool = False) -> int:
+    from ouroboros.config import SETTINGS_PATH
     from ouroboros.settings_integrity import read_settings_json_verified
+    from ouroboros.settings_scales import MODEL_CAP_KEY, MODEL_CAP_LOCAL, model_cap_value, unchosen_saved_document
 
-    default = SETTINGS_DEFAULTS.get("OUROBOROS_MODEL_MAX_CONCURRENCY", 3)
     # Capacity belongs to the install, not an older task's frozen settings.
-    # Every process observes an owner cap change through the same document; an
-    # unreadable document falls back to the process's own value, never refuses a call.
+    # Every process observes an owner cap change through the same document (read as the settings seam reads it:
+    # a 3 saved before the choice became optional is not a choice); an unreadable document falls back to the
+    # process's own value, never refuses a call.
     try:
-        saved = read_settings_json_verified(SETTINGS_PATH)
+        saved = unchosen_saved_document(read_settings_json_verified(SETTINGS_PATH))
     except (OSError, ValueError):
         saved = None
-    value = (saved or {}).get("OUROBOROS_MODEL_MAX_CONCURRENCY",
-                             runtime_setting("OUROBOROS_MODEL_MAX_CONCURRENCY", default))
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(default)
+    cap = model_cap_value((saved or {}).get(MODEL_CAP_KEY, runtime_setting(MODEL_CAP_KEY, "")))
+    # Not chosen: a provider's API keeps its own limit; a model on this computer computes only what its slots allow.
+    return (MODEL_CAP_LOCAL if use_local else 0) if cap is None else cap
 
 
-def enabled() -> bool:
-    return _cap() > 0
+def enabled(use_local: bool = False) -> bool:
+    return _cap(use_local) > 0
 
 
 @contextlib.contextmanager
@@ -176,7 +175,7 @@ class _Waiter:
         self.check = check
         self.cancel_event = cancel_event
         deadlines = [float(deadline) for deadline in (_DEADLINE.get(), deadline_ts) if deadline is not None]
-        self.model = str(model or "")
+        self.model, self.use_local = str(model or ""), bool(use_local)
         self.started = time.monotonic()
         # No clock of its own: only the caller's deadline bounds the wait (None: until a slot, Stop or Pause).
         self.until = self.started + max(0.0, min(deadlines) - time.time()) if deadlines else None
@@ -252,7 +251,7 @@ class _Waiter:
 
     def step(self):
         self.remaining()
-        cap = _cap()
+        cap = _cap(self.use_local)
         if cap <= 0:
             return True
         with self.local.lock:
@@ -312,7 +311,7 @@ def model_call_slot(model: str, use_local: bool = False, deadline_ts: float | No
     ``route`` is the adapter's resolved target, never a requested model alias.
     The owning sender must exit this context, even if its caller stops waiting.
     """
-    if _managed(route) or not enabled():
+    if _managed(route) or not enabled(use_local):
         yield
         return
     waiter = _Waiter(model, use_local, deadline_ts, route, cancel_event, check)
@@ -339,7 +338,7 @@ def model_call_slot(model: str, use_local: bool = False, deadline_ts: float | No
 async def model_call_slot_async(model: str, use_local: bool = False, deadline_ts: float | None = None,
                                 *, route: dict | None = None, check: Callable | None = None):
     """Same queue with cancellable async waits, with no orphan acquiring thread."""
-    if _managed(route) or not enabled():
+    if _managed(route) or not enabled(use_local):
         yield
         return
     waiter = _Waiter(model, use_local, deadline_ts, route, None, check)
@@ -369,14 +368,15 @@ def limit_physical_send(route: dict, send: Callable) -> Callable:
     from ouroboros.llm_attempt import require_physical_dispatch_window
 
     model = str(route.get("usage_model") or route.get("resolved_model") or "")
+    local = str(route.get("provider") or "") == "local"  # the built-in server: it keeps three while no number is chosen
 
     def dispatch():
-        with model_call_slot(model, route=route, check=require_physical_dispatch_window):
+        with model_call_slot(model, local, route=route, check=require_physical_dispatch_window):
             require_physical_dispatch_window()
             return send()
 
     async def dispatch_async():
-        async with model_call_slot_async(model, route=route, check=require_physical_dispatch_window):
+        async with model_call_slot_async(model, local, route=route, check=require_physical_dispatch_window):
             require_physical_dispatch_window()
             return await send()
 

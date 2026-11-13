@@ -605,6 +605,7 @@ function parseTyped(row, text) {
     const trimmed = String(text ?? '').trim();
     const number = trimmed === '' ? NaN : Number(trimmed);
     if (control.noLimit) return { value: Number.isFinite(number) ? number : trimmed };
+    if (trimmed === '' && control.empty) return { value: '' };  // a number its row names when empty may be left blank
     const [min, max] = [bound(control.min), bound(control.max)];
     if (!Number.isFinite(number) || (control.integer && !Number.isInteger(number)) || (min !== null && number < min) || (max !== null && number > max)) return { refuse: NUMBER_RULE(min, max) };
     return { value: number };
@@ -617,12 +618,14 @@ export const doorSign = (to = '') => `<span class="settings-row-chevron" aria-hi
 function controlHtml(row, control, ctx) {
     const id = rowDomId(row);
     const described = [`${id}-meta`, `${id}-result`, ctx.describedBy?.(row) || ''].filter(Boolean).join(' ');
-    // An empty text field says its state in the row's own word ("None"), as an empty number says "No limit".
-    const emptyWord = control.kind === 'text' && control.empty ? control.empty[0].toUpperCase() + control.empty.slice(1) : '';
+    // An empty text field says its state in the row's own word ("None"), as an empty number says "No limit" or its own word.
+    const emptyWord = (control.kind === 'text' || control.kind === 'number') && control.empty ? control.empty[0].toUpperCase() + control.empty.slice(1) : '';
     const input = (index, label = '') => `<input ${index ? '' : `id="${id}" `}class="ui-control" data-setting-control autocomplete="off"`
         + ` type="${control.kind === 'secret' ? 'password' : 'text'}"`
         + `${control.kind === 'number' || control.kind === 'pair' ? ` inputmode="${control.noLimit ? 'numeric' : 'decimal'}"` : ''}`
-        + `${control.noLimit ? ' placeholder="No limit"' : emptyWord ? ` placeholder="${escapeHtmlAttr(emptyWord)}"` : ''}${label ? ` aria-label="${escapeHtmlAttr(label)}"` : ''} aria-describedby="${described}">`;
+        + `${control.noLimit ? ' placeholder="No limit"' : emptyWord ? ` placeholder="${escapeHtmlAttr(emptyWord)}"` : ''}`
+        + `${control.kind === 'number' && emptyWord && !control.noLimit ? ` size="${emptyWord.length + 1}"` : ''}`  // room for its own word
+        + `${label ? ` aria-label="${escapeHtmlAttr(label)}"` : ''} aria-describedby="${described}">`;
     const unit = control.unit ? `<span class="settings-row-unit">${escapeHtmlAttr(control.unit)}</span>` : '';
     const field = (body) => `<span class="settings-row-field">${control.unit === '$' ? unit + body : body + unit}</span>`;
     const named = `aria-labelledby="${id}-name" aria-describedby="${described}"`;
