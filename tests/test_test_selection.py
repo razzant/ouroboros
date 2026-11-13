@@ -305,11 +305,32 @@ def test_a_change_an_inventory_reads_as_data_runs_its_pin_and_stays_selected():
     left the target red while the selection of its merge never named the pin. The pin runs for every change
     now, and these changes still select nothing else and never escalate to full."""
     root = Path(__file__).resolve().parents[1]
+    witnesses = {path.relative_to(root).as_posix() for path in (root / "tests").glob("test_*_static.py")}
     for change in ("docs/architecture/01-high-level-architecture.md", "docs/llm-rating/data/latest.json",
                    "web/modules/onboarding_wizard.js"):
         result = selection.select_from_paths(root, [change], base="base")
         assert "tests/test_generated_inventories.py" in result.files, change
-        assert result.tier == "selected" and set(result.files) == set(selection.FLOOR_TESTS), change
+        # A file of the interface also runs the interface's static witnesses (below); nothing else, never full.
+        beside = witnesses if change.startswith("web/") else set()
+        assert result.tier == "selected" and set(result.files) == set(selection.FLOOR_TESTS) | beside, change
+
+
+def test_a_change_to_the_interface_runs_its_static_witnesses_and_nothing_else_does(repo):
+    """The interface's static witnesses read web/ as data, so no import selects them: a stylesheet edited alone
+    ran none and left the target red after its merge (#3308, #3311). A stylesheet, a module or the page under web/
+    selects every tests/test_*_static.py by name; a Node test, a document or product code does not."""
+    write(repo, "tests/test_shell_static.py")
+    write(repo, "tests/test_marks_static.py")
+    write(repo, "tests/test_statically.py")
+    write(repo, "tests/system_e2e/test_deep_static.py")
+    witnesses = {"tests/test_shell_static.py", "tests/test_marks_static.py"}
+    for change in ("web/ui.css", "web/modules/pages.js", "web/index.html"):
+        result = selection.select_from_paths(repo, [change], base="base")
+        assert result.tier == "selected" and set(result.files) == {"tests/test_floor.py"} | witnesses, change
+        assert all("static witness of the interface" in dict(result.reasons)[path] for path in witnesses), change
+    for change in ("web/tests/pages.test.js", "docs/DESIGN.md", "ouroboros/unused.py", "web/fonts/readme.txt"):
+        result = selection.select_from_paths(repo, [change], base="base")
+        assert set(result.files) == {"tests/test_floor.py"}, change
 
 
 def test_reviewed_tool_binds_widening_and_force_uses_full(repo, monkeypatch):

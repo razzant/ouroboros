@@ -102,6 +102,39 @@ def test_noninline_design_keeps_map_and_direct_source(governance_repo, surface, 
         assert "no repository tools" in context.navigation and "NOT delivered" in context.navigation
 
 
+def test_a_change_under_web_carries_the_design_bible_when_the_whole_book_does_not_fit(governance_repo):
+    """The reviewer of a change under web/ judges it by the book's principles. A book too long for the reviewer's
+    inline share used to leave it with the heading map alone; the design bible (the opening lines and the numbered
+    principles) is a small part of the book and is carried then, the heading map with it."""
+    book = DESIGN_BIBLE + "\n**Seed**\n\nFull design recipes.\n" + DESIGN + "\nA recipe line.\n" * 200_000
+    _design(governance_repo, book)
+
+    def delivered(window, touched="web/ui.css"):
+        context = governance_context(governance_repo, surface="triad", touched_paths=[touched],
+                                     usable_window_tokens=window)
+        rows = {row["path"]: row for row in context.manifest if row["path"].startswith("docs/DESIGN.md")}
+        return context, rows
+
+    context, rows = delivered(1_000_000)
+    assert DESIGN_BIBLE.strip() in context.selected_inline and "principles 1–7" in context.selected_inline
+    assert "Full design recipes." not in context.selected_inline
+    assert "docs/DESIGN.md" not in context.inline_whole_documents and "Interaction meaning" in context.navigation
+    assert rows["docs/DESIGN.md"]["disposition"] == "navigation" and "inline share exhausted" in rows["docs/DESIGN.md"]["reason"]
+    assert rows["docs/DESIGN.md#Design bible"]["disposition"] == "inline"
+    assert "under web/" in rows["docs/DESIGN.md#Design bible"]["reason"]
+    # A window too small even for the principles: both are named, nothing is carried.
+    context, rows = delivered(0)
+    assert DESIGN_BIBLE.strip() not in context.selected_inline
+    assert {row["disposition"] for row in rows.values()} == {"navigation"} and len(rows) == 2
+    # A book that fits is carried whole and its bible is not carried twice; a change elsewhere gets neither.
+    _design(governance_repo, DESIGN_BIBLE + DESIGN)
+    context, rows = delivered(1_000_000)
+    assert context.inline_whole_documents["docs/DESIGN.md"] == DESIGN_BIBLE + DESIGN
+    assert context.selected_inline.count("Principle 1.") == 1 and "docs/DESIGN.md#Design bible" not in rows
+    context, rows = delivered(1_000_000, touched="ouroboros/event.py")
+    assert "Principle 1." not in context.selected_inline and "docs/DESIGN.md#Design bible" not in rows
+
+
 def test_inline_design_is_content_without_duplicate_map(governance_repo):
     _design(governance_repo)
     context = governance_context(governance_repo, surface="triad", touched_paths=["web/ui.js"],
