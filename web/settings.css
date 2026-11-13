@@ -68,9 +68,9 @@ html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-h
 html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
 html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead lead lead"; }
 
-/* Landing A (PROTOTYPE, html[data-proto-landing="panes"], settings.js): from 40rem Settings always shows two panes.
+/* The landing (settings.js): from 40rem Settings always shows two panes.
    The list's first row is Ouroboros (its state, and how many things need the owner), chosen until another row is
-   pressed; its pane holds Ouroboros's card as that row's page. Below 40rem it is the one column of landing B. */
+   pressed; its pane holds Ouroboros's card as that row's page. Below 40rem it is one column. */
 .settings-overview[hidden] { display: none; }
 .settings-shell[data-settings-view] .settings-door-glyph.settings-overview-glyph {
     border-radius: 50%;
@@ -1309,7 +1309,7 @@ html[data-layout="stack"] .settings-search { height: 44px; }
         inset-block-start: var(--space-3);
         inset-inline-end: var(--space-3);
     }
-    .settings-row:has(> .ui-row-meta > .settings-row-result[data-tone="ok"]) > .ui-row-title { padding-inline-end: 6rem; }
+    .settings-row > .ui-row-title:has(~ .ui-row-meta > .settings-row-result[data-tone="ok"]) { padding-inline-end: 6rem; }
 }
 .settings-row [data-setting-meta]:empty,
 .settings-row-result:empty,
@@ -1535,7 +1535,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 .models-main-row { cursor: pointer; }
 .models-main-row > .models-main-name { font-size: var(--type-section); font-weight: 600; line-height: var(--line-title); overflow-wrap: anywhere; }
 .models-main-row > .models-main-meta { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.models-main-row > .models-main-meta > .model-source-mark { flex: none; width: 14px; height: 14px; font-size: 10px; }
+.models-main-row > .models-main-meta > .model-source-mark { flex: none; width: 14px; height: 14px; }
 .models-main-row > .models-main-meta > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 .models-main-row > .ui-row-actions { color: var(--text-meta); }
 /* A role that follows another says so more quietly than a role with a model of its own. */
