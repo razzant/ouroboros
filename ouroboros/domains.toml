@@ -239,6 +239,7 @@ D20 = "Presence"
 "ouroboros/knowledge_rows.py" = "D15"  # how a history row stores a version's text (by change against a hash-named base, or whole) and its one verified reader
 "ouroboros/text_change.py" = "D15"  # the exact two-way change between two note versions (pure)
 "ouroboros/memory_publication.py" = "D15"
+"ouroboros/memory_texts.py" = "D15"  # one editor of identity, the world map and a project's workpad (overwrite, edit, revert) and their version reads
 "ouroboros/markdown_source.py" = "D18"
 "ouroboros/reference_books.py" = "D18"
 "ouroboros/context.py" = "D03"

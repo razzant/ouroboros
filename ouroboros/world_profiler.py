@@ -223,6 +223,55 @@ def measured_block_was_edited(content: str, old: str) -> bool:
     return bool(sent and kept and sent.group(0) != kept.group(0))
 
 
+# A line a fence could begin or end with, exactly as ``_FENCE_RE`` recognises its markers (a mention inside a
+# sentence is no marker). The regex sees complete pairs only, so a lone marker line is counted separately.
+_MARKER_LINE_RE = re.compile(r"^(?:" + re.escape(MEASURED_START) + r"[ \t\r]*|" + re.escape(MEASURED_END)
+                             + r"[ \t]*\r?)$", re.M)
+
+
+def edited_map(edited: str, old: str, items: list, repo_dir: str = "", data_dir: str = "") -> str:
+    """An edit of the map (``old`` with exact ``items`` applied, ``edited``), published with the host's block.
+
+    The result must hold the current measured block byte for byte as its fence and no marker line
+    outside it (an unfenced legacy map: no marker line at all), else ``ValueError`` names the items whose
+    spans overlap the block, or whose new text brings a marker, and where the stray marker stands; the
+    whole edit is refused. An unchanged block used as an anchor's context, or an item beside it, is
+    fine. Then today's overwrite rule (``with_measured_block``): an unfenced legacy map gets its block."""
+    kept, found = _FENCE_RE.search(old), _FENCE_RE.search(edited)
+    allowed = len(_MARKER_LINE_RE.findall(kept.group(0))) if kept else 0
+    if (found is None or kept is None or found.group(0) == kept.group(0)) and (kept is None or found is not None) \
+            and len(_MARKER_LINE_RE.findall(edited)) == allowed:
+        return with_measured_block(edited, old, repo_dir, data_dir)
+    problems = []
+    if kept is not None:
+        raw = old.encode("utf-8")
+        start, end = len(old[:kept.start()].encode("utf-8")), len(old[:kept.end()].encode("utf-8"))
+        hits = [(number, raw.find(gone.encode("utf-8")), len(gone.encode("utf-8"))) for number, (gone, _new) in
+                enumerate(items, 1)]
+        problems += [f"item {number} overlaps it" for number, at, size in hits if at < end and at + size > start]
+    problems += [f"item {number}'s new_str brings a marker" for number, (_gone, new) in enumerate(items, 1)
+                 if MEASURED_START in new or MEASURED_END in new]
+    inside = (found.start(), found.end()) if found is not None and kept is not None else (0, 0)
+    strays = [edited[:match.start()].count("\n") + 1 for match in _MARKER_LINE_RE.finditer(edited)
+              if not inside[0] <= match.start() < inside[1]]
+    if strays:
+        problems.append("the result has a marker line outside it at line " + ", ".join(map(str, strays)))
+    where = (f"the host's measured block (lines {old[:kept.start()].count(chr(10)) + 1}-"
+             f"{old[:kept.end()].count(chr(10)) + 1} of the current map)" if kept else
+             "the measured block (the host adds it to this map; a marker line of the mind's would become a fence)")
+    raise ValueError(f"{where} stays the host's, byte for byte and the only fence: {'; '.join(problems) or 'the edit changes it'}. "
+                     "Edit outside it; the unchanged block may serve as an anchor's context.")
+
+
+def reverted_map(version: str, old: str, repo_dir: str = "", data_dir: str = "") -> str:
+    """The mind's part of an earlier version with the host's current block (or a fresh one when the map has none).
+
+    ``_splice``: a fenced version gets the current block in its fence; a STOCK first-boot profile's generated lines
+    leave with the block taking their place; any other unfenced text is kept whole, the block after its title."""
+    kept = _FENCE_RE.search(old)
+    return _splice(version, kept.group(0) if kept else measured_block(repo_dir, data_dir))
+
+
 def generate_world_profile(output_path: str, repo_dir: str = "", data_dir: str = ""):
     """Write a fresh WORLD.md: title, the measured block and an empty map for the mind."""
     from ouroboros.utils import write_bytes_atomic

@@ -207,7 +207,7 @@ def test_update_world_warns_above_the_context_budget_without_refusing(tmp_path, 
     big = f"{wprof.TITLE}\n\n{_measured('host')}\n\n" + "x" * (WORLD_SECTION_BUDGET_CHARS + 10)
     result = _update_world(ctx, big)
     assert result.startswith("OK:") and "WORLD_SIZE_NOTICE" in result
-    assert _update_world(ctx, "   ").startswith("⚠️ REJECTED")
+    assert _update_world(ctx, "   ").startswith("⚠️ TOOL_ARG_ERROR: content is empty or whitespace only")
     # Edits inside the measured block are dropped, and the result says so.
     revision = hashlib.sha256((canonical / "memory" / "WORLD.md").read_bytes()).hexdigest()
     edited = _update_world(ctx, f"{wprof.TITLE}\n\n{_measured('forged')}\n\n- note\n", expected_revision=revision)
@@ -382,3 +382,116 @@ def test_startup_verification_refreshes_the_measured_block_in_place(tmp_path, mo
     checks_module.verify_system_state(env, "a" * 40)
     text = world.read_text(encoding="utf-8")
     assert "measured at startup, fresh" in text and "stale" not in text and "- my note" in text
+
+
+def _map_with_block(tmp_path, stamp="host", tail="## What lives here\n- old note\n"):
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world = canonical / "memory" / "WORLD.md"
+    world.write_text(f"{wprof.TITLE}\n\n{_measured(stamp)}\n\n{tail}", encoding="utf-8")
+    return canonical, world
+
+
+def _rev(path: pathlib.Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_an_edit_of_the_map_outside_the_block_keeps_the_block_byte_for_byte(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")  # a probe here would mean the host's block was regenerated
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    block = _measured("host")
+    for edits in ([{"old_str": "- old note", "new_str": "- a service on :8080 (seen today)"}],  # outside the block
+                  [{"old_str": f"{wprof.MEASURED_END}\n\n## What lives here",  # the unchanged block as anchor context
+                    "new_str": f"{wprof.MEASURED_END}\n\n## What lives here (mine)"}],
+                  [{"old_str": "(seen today)", "new_str": f"(its notes mention the {wprof.MEASURED_START} fence inline)"}]):
+        reply = _update_world(ctx, mode="edit", edits=edits, expected_revision=_rev(world))
+        assert reply.startswith("OK: world map updated (edit"), reply
+        assert world.read_text(encoding="utf-8").count(block) == 1
+    assert "## What lives here (mine)\n- a service on :8080 (its notes mention" in world.read_text(encoding="utf-8")
+    rows = [json.loads(line) for line in (canonical / "memory" / "world_journal.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["mode"] for row in rows] == ["edit"] * 3 and all(row["old_content"] and row["new_content"] for row in rows)
+
+
+def test_an_edit_that_touches_the_hosts_block_or_brings_a_marker_is_refused_whole(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    before = world.read_bytes()
+    for edits, said in (
+            ([{"old_str": "- **OS**: test", "new_str": "- **OS**: mine"}], "item 1 overlaps it"),  # inside the block
+            ([{"old_str": "- old note", "new_str": "- fine"},  # cuts the closing marker
+              {"old_str": f"{wprof.MEASURED_END}\n\n##", "new_str": "##"}], "item 2 overlaps it"),
+            ([{"old_str": "- old note", "new_str": f"- old note\n{wprof.MEASURED_START}\n- hijack\n{wprof.MEASURED_END}"}],
+             "item 1's new_str brings a marker; the result has a marker line outside it at line 10, 12"),
+            ([{"old_str": "- old note", "new_str": f"- old note\n{wprof.MEASURED_END}"}],  # a lone marker: no complete pair
+             "the result has a marker line outside it at line 10")):
+        reply = _update_world(ctx, mode="edit", edits=edits, expected_revision=_rev(world))
+        assert reply.startswith("⚠️ TOOL_ERROR: host_block: the host's measured block (lines 3-6 of the current map)")
+        assert said in reply, reply
+        assert world.read_bytes() == before
+    assert not (canonical / "memory" / "world_journal.jsonl").exists()
+
+
+def test_an_edit_of_an_unfenced_legacy_map_gets_the_block_as_an_overwrite_does(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world = canonical / "memory" / "WORLD.md"
+    world.write_text("# My map\n\n- a note\n", encoding="utf-8")
+    ctx = _world_ctx(canonical, canonical)
+    reply = _update_world(ctx, mode="edit", old_str="- a note", content="- a revised note", expected_revision=_rev(world))
+    assert reply.startswith("OK:"), reply
+    assert world.read_text(encoding="utf-8") == f"# My map\n\n{_measured('fresh')}\n\n- a revised note\n"
+    marker = _update_world(ctx, mode="edit", old_str="- a revised note", expected_revision=_rev(world),
+                           content=f"{wprof.MEASURED_START}\n- mine\n{wprof.MEASURED_END}")
+    assert "host_block" in marker and "marker line outside it" in marker
+
+
+def test_revert_takes_the_versions_own_part_with_the_hosts_current_block(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    canonical, world = _map_with_block(tmp_path, "monday")
+    ctx = _world_ctx(canonical, tmp_path / "fork")
+    (tmp_path / "fork" / "memory").mkdir(parents=True)
+    (tmp_path / "fork" / "memory" / "WORLD.md").write_text("an older copy", encoding="utf-8")
+    first = _rev(world)
+    assert _update_world(ctx, mode="edit", old_str="- old note", content="- replaced note",
+                         expected_revision=first).startswith("OK:")
+    _fake_measured(monkeypatch, "tuesday")  # the host refreshes its block at the next start: no row
+    assert wprof.refresh_world_profile(str(world)) is True
+    refreshed = _rev(world)
+    reply = _update_world(ctx, mode="revert", version=first, expected_revision=refreshed, reason="the note was right")
+    text = world.read_text(encoding="utf-8")
+    assert text == f"{wprof.TITLE}\n\n{_measured('tuesday')}\n\n## What lives here\n- old note\n"
+    assert _rev(world) != first and "so the new revision is not that version's" in reply, reply
+    assert f"Replaced {refreshed}: no history row wrote it (a change outside the writer, such as the host's refresh" in reply
+    row = json.loads((canonical / "memory" / "world_journal.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert (row["mode"], row["reverted_from"], row["new_sha256"]) == ("revert", first, _rev(world))
+    assert (tmp_path / "fork" / "memory" / "WORLD.md").read_text(encoding="utf-8") == text  # the fork copy follows
+    again = _update_world(ctx, mode="revert", version=first, expected_revision=_rev(world))
+    assert again.startswith("OK: world map unchanged (revert)"), again  # judged after the splice
+
+
+def test_revert_to_a_stock_legacy_profile_drops_its_generated_lines(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    stock = ("# WORLD.md — Environment Profile\n\n## System\n- **OS**: old\n\n"
+             "*(Generated automatically on first boot)*\n\n## My notes\n- kept\n")
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    journal = canonical / "memory" / "world_journal.jsonl"
+    journal.write_text(json.dumps({"ts": "2026-01-01T00:00:00Z", "focus": {"role": "host"}, "old_sha256": "",
+                                   "new_sha256": hashlib.sha256(stock.encode()).hexdigest(), "new_content": stock,
+                                   "old_content": ""}) + "\n", encoding="utf-8")
+    reply = _update_world(ctx, mode="revert", version=hashlib.sha256(stock.encode()).hexdigest(),
+                          expected_revision=_rev(world))
+    text = world.read_text(encoding="utf-8")
+    assert reply.startswith("OK:") and "- **OS**: old" not in text and "Generated automatically" not in text, reply
+    assert text.count(wprof.MEASURED_START) == 1 and _measured("host") in text and "## My notes\n- kept" in text
