@@ -214,6 +214,12 @@ class _Run:
         assert page.request.get(self.url + "/api/settings").json()[KEY] == ""
         assert (self.runtime_cap(), self.runtime_cap(True)) == (0, 3), "and the runtime reads the same document so"
         self.shot(page, "light-1232-earlier-release-3")
+        for theme in ("light", "dark"):  # the unset field and its word at a phone width, before anything is saved
+            phone = self.open_settings(theme, PHONE)
+            assert phone.input_value(FIELD) == "" and phone.get_attribute(FIELD, "placeholder") == "Not set"
+            self.shot(phone, f"{theme}-320-not-set")
+            facts[f"{theme}-320-not-set"] = self.measure(phone)
+            phone.context.close()
         timeout = 605 if self.engine == 'chromium' else 606
         self.unrelated_save(page, timeout)  # the first save writes what the read said, and the marker: never again
         assert self.stored()[KEY] == "" and self.stored()[MARKER] == 1, (self.stored().get(KEY), self.stored().get(MARKER))

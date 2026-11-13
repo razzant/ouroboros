@@ -624,7 +624,7 @@ function controlHtml(row, control, ctx) {
         + ` type="${control.kind === 'secret' ? 'password' : 'text'}"`
         + `${control.kind === 'number' || control.kind === 'pair' ? ` inputmode="${control.noLimit ? 'numeric' : 'decimal'}"` : ''}`
         + `${control.noLimit ? ' placeholder="No limit"' : emptyWord ? ` placeholder="${escapeHtmlAttr(emptyWord)}"` : ''}`
-        + `${control.kind === 'number' && emptyWord ? ` size="${emptyWord.length + 1}"` : ''}`  // room for its own word
+        + `${control.kind === 'number' && emptyWord && !control.noLimit ? ` size="${emptyWord.length + 1}"` : ''}`  // room for its own word
         + `${label ? ` aria-label="${escapeHtmlAttr(label)}"` : ''} aria-describedby="${described}">`;
     const unit = control.unit ? `<span class="settings-row-unit">${escapeHtmlAttr(control.unit)}</span>` : '';
     const field = (body) => `<span class="settings-row-field">${control.unit === '$' ? unit + body : body + unit}</span>`;

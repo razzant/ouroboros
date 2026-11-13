@@ -451,6 +451,9 @@ def model_cap_value(raw: Any) -> Optional[int]:
         return MODEL_CAP_LOCAL
 
 
+OPTIONAL_VALUE_KEYS = frozenset({*OPTIONAL_BOUND_LEGACY, OWNER_CAP_KEY, MODEL_CAP_KEY})  # what the next function spells
+
+
 def document_optional_value(key: str, value: Any) -> Any:
     """The document spelling of an optional bound or cap: its number, else "unlimited" (a bound) or blank (the
     owner cap, the model limit); a typo reads finite."""

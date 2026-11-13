@@ -527,6 +527,32 @@ def test_a_limit_nobody_chose_leaves_api_routes_free_and_a_local_model_three(mon
         assert len(_records(isolated_queue, "slot")) == (1 if local > 0 else 0)
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_the_real_sender_queues_a_local_model_and_no_api_route_while_no_limit_is_chosen(monkeypatch, isolated_queue,
+                                                                                        asynchronous):
+    """Every physical send goes through ``limit_physical_send``, which learns from the route alone whether the model
+    runs on this computer: with no number chosen the local server's sender holds a slot (three at once) and an API
+    route's sender holds none. An OpenAI-compatible endpoint that happens to be on localhost is an API route."""
+    import asyncio
+    from ouroboros import llm_attempt
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    monkeypatch.setattr(llm_attempt, "require_physical_dispatch_window", lambda: None)
+    atomic_write_json(isolated_queue / "settings.json", {})
+    seen = {}
+    for name, route in (("local", {**LOCAL_ROUTE, "usage_model": "local-model"}), ("api", {**ROUTE, "usage_model": "model"}),
+                        ("compatible", {"provider": "openai-compatible", "base_url": "http://127.0.0.1:1234/v1",
+                                        "usage_model": "served"})):
+        if asynchronous:
+            async def send(name=name):
+                seen[name] = len(_records(isolated_queue, "slot"))
+            asyncio.run(mc.limit_physical_send(route, send)())
+        else:
+            mc.limit_physical_send(route, lambda name=name: seen.__setitem__(name, len(_records(isolated_queue, "slot"))))()
+    assert seen == {"local": 1, "api": 0, "compatible": 0}
+
+
 @pytest.mark.parametrize("saved,marked,read", [(3, False, ""), ("3", False, ""), (3, True, 3), (5, False, 5), (0, False, 0)])
 def test_a_saved_shipped_three_reads_blank_once_and_the_next_save_ends_it(tmp_path, monkeypatch, saved, marked, read):
     """The settings seam's side of 6A: the view carries the format marker, a read stays a read, the first whole save
@@ -539,6 +565,7 @@ def test_a_saved_shipped_three_reads_blank_once_and_the_next_save_ends_it(tmp_pa
     path = tmp_path / "saved.json"
     path.write_text(json.dumps({KEY: saved, **({MODEL_CAP_FORMAT_KEY: 1} if marked else {})}), encoding="utf-8")
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)  # a save writes its migration receipts beside the document
     inherited = {}
     config.apply_settings_to_env({**config.SETTINGS_DEFAULTS, KEY: 3}, environ=inherited)
     monkeypatch.setenv(KEY, inherited[KEY])  # what a worker started by the earlier release still carries

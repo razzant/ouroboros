@@ -55,12 +55,13 @@ _ADDED_OWNERS = {
     "setting_effect": settings_scales,
     # The owner's optional cap on acting tasks: its key, legacy value, disk format and its reads (pool-capacity D).
     "OWNER_CAP_KEY": settings_scales,
+    "MODEL_CAP_KEY": settings_scales,
+    "OPTIONAL_VALUE_KEYS": settings_scales,
     "OWNER_CAP_LEGACY": settings_scales,
     "OWNER_CAP_FORMAT_KEY": settings_scales,
     "document_optional_value": settings_scales,
     # The owner's optional limit on requests per model, and the one read seam that takes a shipped value saved
     # before either number became optional as not chosen (owner cap 09.11, model limit 13.11).
-    "MODEL_CAP_KEY": settings_scales,
     "MODEL_CAP_LOCAL": settings_scales,
     "MODEL_CAP_FORMAT_KEY": settings_scales,
     "model_cap_value": settings_scales,

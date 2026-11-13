@@ -603,18 +603,20 @@ def test_openrouters_in_flight_budget_answer_is_a_pause_and_every_other_402_stay
     ("Retry after your in-flight requests settle"). Its documentation tells the two apart by
     ``error.metadata.limit_source``. The in-flight budget is transient: the same model is retried like a rate limit,
     so the work keeps its route and its cached start. Credits and a key's own limit stay an exhausted quota."""
-    def refused(limit_source, reason=""):
+    def refused(limit_source, reason="", unwrapped=True):
         error = _ProviderError("Error code: 402", status_code=402, code="402")
-        error.body = {"error": {"code": 402, "message": "This request would exceed your available credits given your "
-                                "current in-flight requests.", "metadata": {"reason": reason, "limit_source": limit_source}}}
+        inner = {"code": 402, "message": "This request would exceed your available credits given your current "
+                 "in-flight requests.", "metadata": {"reason": reason, "limit_source": limit_source}}
+        error.body = inner if unwrapped else {"error": inner}  # the OpenAI SDK hands the error object itself as the body
         return classify_llm_exception(error)
 
-    pause = refused("openrouter_in_flight_budget", "in_flight_budget_exhausted")
-    assert (pause.kind, pause.retry_same_request, pause.status_code) == ("provider_transient", True, 402)
-    assert pause.provider_code == "openrouter_in_flight_budget"
-    for limit_source, reason in (("openrouter_credits", "weight_exceeds_budget"), ("openrouter_key_limit", ""), ("", "")):
-        quota = refused(limit_source, reason)
-        assert (quota.kind, quota.retry_same_request, quota.provider_code) == ("quota_exhausted", False, "402")
+    for unwrapped in (True, False):
+        pause = refused("openrouter_in_flight_budget", "in_flight_budget_exhausted", unwrapped)
+        assert (pause.kind, pause.retry_same_request, pause.status_code) == ("provider_transient", True, 402)
+        assert pause.provider_code == "openrouter_in_flight_budget"
+        for limit_source, reason in (("openrouter_credits", "weight_exceeds_budget"), ("openrouter_key_limit", ""), ("", "")):
+            quota = refused(limit_source, reason, unwrapped)
+            assert (quota.kind, quota.retry_same_request, quota.provider_code) == ("quota_exhausted", False, "402")
 
 
 def test_classify_llm_exception_uses_provider_code_before_429_status():

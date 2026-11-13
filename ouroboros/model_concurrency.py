@@ -368,14 +368,15 @@ def limit_physical_send(route: dict, send: Callable) -> Callable:
     from ouroboros.llm_attempt import require_physical_dispatch_window
 
     model = str(route.get("usage_model") or route.get("resolved_model") or "")
+    local = str(route.get("provider") or "") == "local"  # the built-in server: it keeps three while no number is chosen
 
     def dispatch():
-        with model_call_slot(model, route=route, check=require_physical_dispatch_window):
+        with model_call_slot(model, local, route=route, check=require_physical_dispatch_window):
             require_physical_dispatch_window()
             return send()
 
     async def dispatch_async():
-        async with model_call_slot_async(model, route=route, check=require_physical_dispatch_window):
+        async with model_call_slot_async(model, local, route=route, check=require_physical_dispatch_window):
             require_physical_dispatch_window()
             return await send()
 
