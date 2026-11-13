@@ -13,7 +13,7 @@ import pytest
 
 # The exact string the convergence rule must contain (module-level: the packet
 # seat and the two-part brief render history through ONE owner,
-# review_helpers.build_review_history_section / review_history_with_obligations).
+# review_helpers.build_review_history_section / review_history_brief).
 _EXPECTED_RULE_SUBSTRING = (
     "CONVERGENCE RULE (attempt 3+): Do NOT raise new critical findings on "
     "code that was not changed between this attempt and the previous attempt."
@@ -51,43 +51,43 @@ class TestConvergenceRuleInjection:
 
     def test_no_history_no_rule(self, module_path, func_name):
         fn = self._fn(module_path, func_name)
-        out = fn([], open_obligations=None)
+        out = fn([])
         assert "CONVERGENCE RULE" not in out
 
     def test_attempt_1_no_rule(self, module_path, func_name):
         """With 0 prior rounds, we are on attempt 1 — rule must NOT fire."""
         fn = self._fn(module_path, func_name)
-        out = fn(_make_history(0), open_obligations=None)
+        out = fn(_make_history(0))
         assert "CONVERGENCE RULE" not in out
 
     def test_attempt_2_no_rule(self, module_path, func_name):
         """With 1 prior round, we are on attempt 2 — rule must NOT fire."""
         fn = self._fn(module_path, func_name)
-        out = fn(_make_history(1), open_obligations=None)
+        out = fn(_make_history(1))
         assert "CONVERGENCE RULE" not in out
 
     def test_attempt_3_rule_present(self, module_path, func_name):
         """With 2 prior rounds, we are on attempt 3 — rule MUST fire."""
         fn = self._fn(module_path, func_name)
-        out = fn(_make_history(2), open_obligations=None)
+        out = fn(_make_history(2))
         assert "CONVERGENCE RULE" in out
 
     def test_attempt_4_rule_present(self, module_path, func_name):
         fn = self._fn(module_path, func_name)
-        out = fn(_make_history(3), open_obligations=None)
+        out = fn(_make_history(3))
         assert "CONVERGENCE RULE" in out
 
     def test_rule_text_stable(self, module_path, func_name):
         """Text of the convergence rule is pinned — prevents silent drift."""
         fn = self._fn(module_path, func_name)
-        out = fn(_make_history(3), open_obligations=None)
+        out = fn(_make_history(3))
         assert _EXPECTED_RULE_SUBSTRING in out
 
     def test_rule_after_other_rules(self, module_path, func_name):
         """Convergence rule appears AFTER anti-thrashing rules in the section
         so it shares the 'IMPORTANT RULES FOR THIS REVIEW' block."""
         fn = self._fn(module_path, func_name)
-        out = fn(_make_history(3), open_obligations=None)
+        out = fn(_make_history(3))
         important_idx = out.index("IMPORTANT RULES FOR THIS REVIEW")
         convergence_idx = out.index("CONVERGENCE RULE")
         assert important_idx < convergence_idx
@@ -193,8 +193,8 @@ class TestConvergenceRuleSharedConstant:
                     return line
             return ""
 
-        triad = _extract_convergence_line(rh(_make_history(3), open_obligations=None))
-        scope = _extract_convergence_line(sh(_make_history(3), open_obligations=None))
+        triad = _extract_convergence_line(rh(_make_history(3)))
+        scope = _extract_convergence_line(sh(_make_history(3)))
 
         assert triad, "triad review did not emit CONVERGENCE RULE line"
         assert scope, "scope review did not emit CONVERGENCE RULE line"

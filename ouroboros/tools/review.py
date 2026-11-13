@@ -520,12 +520,12 @@ def _subject_changed_paths(frozen: Any, target_repo) -> tuple[str, str]:
     return changed, _build_preflight_staged(target_repo, fallback=changed)
 
 
-def _review_history_with_open_obligations(ctx: ToolContext, frozen: Any, rebuttal: str = "") -> str:
+def _review_history_brief(ctx: ToolContext, frozen: Any, rebuttal: str = "") -> str:
     """Bind the shared cold dispute before any seat is prepared."""
     from ouroboros.review_history import prepare_history
-    from ouroboros.tools.review_helpers import review_history_with_obligations
+    from ouroboros.tools.review_helpers import review_history_brief
 
-    return review_history_with_obligations(
+    return review_history_brief(
         prepare_history(ctx, frozen, rebuttal), drive_root=getattr(ctx, "drive_root", None),
         repo_root=frozen.spec.root if frozen is not None else getattr(ctx, "repo_dir", None), task_id=str(ctx.task_id or ""))
 
@@ -616,7 +616,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         _handle_review_block_or_warning(ctx, blocked_msg, "Review checklist failed to load; nothing was reviewed and the outcome returns before Git. ")
         return None, None, True
 
-    review_history_section = _review_history_with_open_obligations(ctx, frozen, review_rebuttal)
+    review_history_section = _review_history_brief(ctx, frozen, review_rebuttal)
 
     touched_paths = [f.strip() for f in review_changed.strip().splitlines() if f.strip()]
 

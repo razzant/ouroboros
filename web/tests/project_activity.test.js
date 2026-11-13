@@ -259,6 +259,10 @@ test('a feed the server could not read keeps the rows the page showed; a read th
         current_questions_gaps: [{ reason: 'project_registry_unavailable' }], project_messages_revision: null }));
     assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [['old'], true, 'r1'],
         'unknown is not empty: the rows stay with the revision they were read at');
+    // Rows a body carries are the feed even while its count is unknown (the rooms read, the registry's count not).
+    const fresh = { id: 'fresh', chat_id: 43 };
+    apply(read({ projects: [fresh, old], project_listable_count: null, project_messages_revision: 'r2' }));
+    assert.deepEqual([feed.map((row) => row.id), revision], [['fresh', 'old'], 'r2'], 'carried rows are the feed');
     // A read that names the feed again is the feed, empty included.
     apply(read({ rooms: {}, projects: [], project_listable_count: 0, project_chat_ids: [], project_messages_revision: 'r0' }));
     assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [[], false, 'r0']);

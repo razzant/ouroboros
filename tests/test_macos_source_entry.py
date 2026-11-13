@@ -77,7 +77,7 @@ def launch(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "stop_tray_before_exit", lambda release: (calls.append("teardown"), release()))
     monkeypatch.setattr(launcher, "restore_tray_after_handoff", lambda: calls.append("restore"))
 
-    def windows_out_of_full_screen(final):  # the main thread's turn that found every window windowed
+    def windows_out_of_full_screen(final, cancelled):  # the main thread's turn that found every window windowed
         calls.append("windows")
         final()
         return True
@@ -272,8 +272,8 @@ def _lifecycle(l, monkeypatch, *, returncode=42, landed=lambda: None, waited=lam
     monkeypatch.setattr(module, "_update_server_process_record_port", lambda *a: None)
     monkeypatch.setattr(module, "_wait_for_server", lambda *a, **kw: True)
     monkeypatch.setattr(module, "_cleanup_recorded_server_group_for_pid", lambda *a: None)
-    monkeypatch.setattr(module, "_sync_existing_repo_from_bundle", lambda: l.calls.append("sync"))
-    monkeypatch.setattr(module, "_install_deps", lambda: l.calls.append("deps") or True)
+    monkeypatch.setattr(module, "sync_existing_repo_from_bundle", lambda ctx: l.calls.append("sync"))
+    monkeypatch.setattr(module, "install_deps", lambda ctx: l.calls.append("deps") or True)
     monkeypatch.setattr(module.time, "sleep", lambda *a: None)
     monkeypatch.setitem(sys.modules, "ouroboros.delegate_recovery",
                         types.SimpleNamespace(acknowledge_observed_restart_exit=lambda *a, **kw: True))
@@ -332,7 +332,7 @@ def test_unconfirmed_windows_keep_the_warm_shell_and_an_external_ui_has_none_to_
     l = launch
     _lifecycle(l, monkeypatch, returncode=42)
     monkeypatch.setattr(l.module, "_external_ui", external_ui)
-    monkeypatch.setattr(l.module, "transfer_when_windowed", lambda final: l.calls.append("unconfirmed") or False)
+    monkeypatch.setattr(l.module, "transfer_when_windowed", lambda final, cancelled: l.calls.append("unconfirmed") or False)
     if external_ui:
         with pytest.raises(Handoff):
             l.module.agent_lifecycle_loop()
@@ -363,7 +363,7 @@ def test_a_warm_handoff_before_any_window_refuses_at_once_with_the_real_barrier(
     started = time.monotonic()
     with pytest.raises(FrozenContinues):  # the loop's next start, by this shell
         l.module.agent_lifecycle_loop()
-    assert time.monotonic() - started < chrome.FULL_SCREEN_EXIT_SEC / 2, "never waits out the deadline"
+    assert time.monotonic() - started < chrome.MACOS_HANDOFF_FULLSCREEN_WAIT_SEC / 2, "never waits out the deadline"
     assert posted == [] and chrome._transfer is None, "nothing queued, no attempt left for a later window"
     assert l.calls == ["server", "sync", "deps", "probe"], "no icon, unlock or exec"
 
@@ -378,8 +378,8 @@ def test_panic_during_exit_42_cannot_handoff(launch, monkeypatch, stop_at):
         return True
 
     target, name = {
-        "sleep": (l.module.time, "sleep"), "sync": (l.module, "_sync_existing_repo_from_bundle"),
-        "deps": (l.module, "_install_deps"), "change-check": (l.module, "launcher_sources_changed"),
+        "sleep": (l.module.time, "sleep"), "sync": (l.module, "sync_existing_repo_from_bundle"),
+        "deps": (l.module, "install_deps"), "change-check": (l.module, "launcher_sources_changed"),
     }[stop_at]
     monkeypatch.setattr(target, name, stop)
     try:

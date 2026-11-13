@@ -3,6 +3,7 @@ The only brief differences are the narrative line in ``## Informational context 
 and the gate's test execution exhibit; a standalone operation has no execution fact."""
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -111,23 +112,25 @@ PRIOR_OBLIGATION = "ob-prior-round-7"
 
 
 def _seed_open_obligation(drive_root: Path, repo: Path) -> None:
-    """Seed an earlier open obligation in the durable state both doors read."""
-    from ouroboros.review_state import AdvisoryReviewState, ObligationItem, make_repo_key, save_state
+    """Seed the open obligation a body with Blocking left in the durable state both doors read."""
+    from ouroboros.review_state import make_repo_key
 
-    state = AdvisoryReviewState()
-    state.open_obligations.append(ObligationItem(
-        obligation_id=PRIOR_OBLIGATION, item="cross_module_bugs", severity="critical",
-        reason="the helper's callers were not re-read", source_attempt_ts="2026-10-01T00:00:00+00:00",
-        source_attempt_msg="fix: an earlier attempt", status="still_open", repo_key=make_repo_key(repo)))
-    save_state(drive_root, state)
+    (drive_root / "state").mkdir(parents=True, exist_ok=True)
+    (drive_root / "state" / "advisory_review.json").write_text(json.dumps({
+        "state_version": 3, "attempts": [], "next_obligation_seq": 8, "open_obligations": [{
+            "obligation_id": PRIOR_OBLIGATION, "item": "cross_module_bugs", "severity": "critical",
+            "reason": "the helper's callers were not re-read", "source_attempt_ts": "2026-10-01T00:00:00+00:00",
+            "source_attempt_msg": "fix: an earlier attempt", "status": "still_open",
+            "repo_key": make_repo_key(repo)}]}), encoding="utf-8")
 
 
 def test_the_public_builder_renders_the_brief_each_seat_was_sent(staged_body, tmp_path, monkeypatch):
     """``review_admission.build_two_part_brief`` is the one public builder of a seat's
     brief (step R; D5-004, D5-07): for the frozen subject and the intent of a wave it
     renders, byte for byte, the text the operation handed that seat at the delivery
-    boundary — the author's questions as the seat read them and the prior rounds with
-    the checkout's open obligations, through the owners the runtime itself renders with.
+    boundary — the author's questions as the seat read them and the prior rounds, never
+    an obligation the checkout stored earlier, through the owners the runtime itself
+    renders with.
 
     The builder takes as ARGUMENTS what a wave reads from its context; these, and only
     these, are where its text may differ from a wave's, and each is passed here as the
@@ -175,9 +178,9 @@ def test_the_public_builder_renders_the_brief_each_seat_was_sent(staged_body, tm
                                      commit_message=label, owner_words=owner_words_text(ctx),
                                      drive_root=ctx.drive_root, task_id=ctx.task_id)
         assert brief["parts"] == row["parts"], slot_id
-        # The builder's claim is not vacuous: the questions and the open obligation are in its text.
+        # The builder's claim is not vacuous: the questions are in its text; the stored obligation is not.
         asked = "Author questions (answer each as asked):\n1. " + QUESTIONS[0] + "\n2. " + QUESTIONS[1]
-        assert asked in brief["system"] and PRIOR_OBLIGATION in brief["system"], slot_id
+        assert asked in brief["system"] and PRIOR_OBLIGATION not in brief["system"], slot_id
         # ... and its text IS the text the seat was sent, byte for byte.
         given = by_seat[slot_id]
         if brief["parts"] == [PART_CHANGE]:  # a packet seat: the system blocks and the one user turn

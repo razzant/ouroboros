@@ -16,8 +16,7 @@ carry: an ``api_chat`` row runs a bounded native inspection episode, an
 
 The brief carries
 
-* the intent cluster — commit message, goal, scope, rebuttal, review history and
-  the open obligations;
+* the intent cluster — commit message, goal, scope, rebuttal and review history;
 * the touched-path manifest and the change-relative required-source manifest
   (``scope_required_sources``) with its MINIMUM sentence;
 * the compact repository index (``review_context_atlas.repository_index``):
@@ -54,7 +53,7 @@ from ouroboros.tools.review_helpers import (
     format_prompt_code_block,
     format_review_history_entry,
     load_checklist_section,
-    review_history_with_obligations,
+    review_history_brief,
 )
 from ouroboros.tools.review_synthesis import build_coupling_part
 
@@ -582,8 +581,8 @@ def build_retrieving_brief(
                                       intent.preflight_execution, intent.diff_pulse)
     scope_section = build_scope_section(intent.scope)
     rebuttal_section = build_rebuttal_section(intent.review_rebuttal)
-    history_section = review_history_with_obligations(intent.review_history, drive_root=brief.drive_root,
-                                                      repo_root=repo_dir, task_id=brief.task_id)
+    history_section = review_history_brief(intent.review_history, drive_root=brief.drive_root,
+                                           repo_root=repo_dir, task_id=brief.task_id)
     coupling_history_section = build_coupling_history_section(intent.coupling_history, history_section)
 
     bound = first_send_bound(brief)
