@@ -6622,11 +6622,15 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     .dashboard-shell[data-section-view="page"] .dashboard-body { padding-inline-start: var(--space-4); }
 }
 /* A phone: the list's screen keeps `☰ Dashboard`, with nothing under it; a page's screen is one row, Back (to the
-   list, or to Settings) and the page's name in the header's title style, where ☰ and the place's name stood. */
+   list, or to Settings) and the page's name in the header's title style, where ☰ and the place's name stood. Only a
+   page that REPLACED the list gives ☰ up: a drawer-width window that still holds the list beside its page (40rem up
+   to the shell's switch) has no Back, so there ☰ stays the way to every other destination. */
 html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-header .app-page-lead { display: none; }
-html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header > .app-page-leading,
-html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
-html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title toolbar"; }
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header > .app-page-leading,
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title toolbar"; }
+}
 
 .dashboard-panels,
 .dashboard-panel {

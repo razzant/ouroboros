@@ -63,10 +63,13 @@ html[data-layout="stack"] #page-settings > .app-page-header .app-page-title-row 
 html[data-layout="stack"] #page-settings > .app-page-header .app-page-lead { grid-area: lead; min-height: var(--touch-target-min); }
 html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2); }
 /* A page's or a level's screen is one row: Back and the name, where the places control and "Settings" stood (one
-   leading control on a screen; owner 13.11: a back arrow under the three lines was "не нативно"). */
-html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header > .app-page-leading,
-html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
-html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead lead lead"; }
+   leading control on a screen). Only a page that replaced the list gives the places control up: with the list beside
+   its page (40rem up to the shell's switch) the first-level page has no Back, so the control stays. */
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header > .app-page-leading,
+    html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
+    html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead lead lead"; }
+}
 
 /* The landing (settings.js): from 40rem Settings always shows two panes.
    The list's first row is Ouroboros (its state, and how many things need the owner), chosen until another row is

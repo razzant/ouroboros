@@ -96,3 +96,31 @@ def test_mains_count_and_read_follow_one_predicate():
     badge = app.split("function updateUnreadBadge()", 1)[1].split("\n}\n", 1)[0]
     assert "mainOnScreen() ? 0 : mainUnreadCount()" in badge, badge
     assert "(!mainOnScreen() && mainUnreadCount() > 0)" in app
+
+
+SECTION_PAGE_ALONE = "@container sectionplace (max-width: calc(40rem - 0.02px)) {"
+
+
+def _block(css: str, head: str) -> str:
+    """The body of the one block that starts with `head` (balanced braces)."""
+    assert css.count(head) == 1, (head, css.count(head))
+    start = css.index(head) + len(head)
+    depth, pos = 1, start
+    while depth and pos < len(css):
+        depth += {"{": 1, "}": -1}.get(css[pos], 0)
+        pos += 1
+    return css[start:pos - 1]
+
+
+def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
+    """In the stack layout a section's page is one row, Back and its name, where the places control stood. From 40rem
+    a section holds its list beside the page and the first-level page has no Back: there the places control is the
+    only way to another destination. So the rule that hides it lives inside the query that is true only below 40rem
+    (the complement of the two-pane query) and nowhere else: outside it a person at 640 to 719 px is shut in."""
+    for rel, page in (("web/style.css", "#page-dashboard"), ("web/settings.css", "#page-settings")):
+        css = _read(rel)
+        hide = f'html[data-layout="stack"] {page}[data-section-view="page"] > .app-page-header > .app-page-leading'
+        inside = _block(css, SECTION_PAGE_ALONE)
+        assert hide in inside, f"{rel}: a page that replaced the list keeps one leading control, its Back"
+        assert hide not in css.replace(inside, ""), f"{rel}: outside the below-40rem query this hides the places control beside the list"
+    assert "@container sectionplace (min-width: 40rem) {" in _read("web/ui.css"), "the two panes start where the query above ends"
