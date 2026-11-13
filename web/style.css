@@ -8870,10 +8870,13 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     gap: var(--space-2);
     min-width: 0;
 }
+/* A project's name is quieter than the open room's own text (the owner, 2026-11-14: the names stood out as if they
+   mattered more than the content and the chat): the regular weight, the ink one step under primary. The chosen row
+   keeps its ink on the crimson fill (below). */
 .nav-project-row .nav-row-label {
     flex: 1 1 auto;
-    color: var(--text-primary);
-    font-weight: 500;
+    color: var(--text-meta);
+    font-weight: 400;
     line-height: 18px;
 }
 .nav-project-time {
