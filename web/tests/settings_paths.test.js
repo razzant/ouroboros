@@ -364,3 +364,39 @@ test('app.js: Settings pressed again goes to pressedAgain and closes the open dr
     context.pressNavPage('dashboard');
     assert.deepEqual(calls, ['show:settings', 'show:dashboard']);
 });
+
+// The first-level page two panes land on is the one last opened on this device (docs/DESIGN.md "Settings"), kept across
+// loads; a stored page no longer registered falls back to Models.
+test('two panes land on the first-level page last opened on this device, or on Models when it is gone', async (t) => {
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    const store = new Map();
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+        getItem: (key) => (store.has(key) ? store.get(key) : null), setItem: (key, value) => store.set(key, String(value)) } });
+    t.after(() => { if (saved) Object.defineProperty(globalThis, 'localStorage', saved); else delete globalThis.localStorage; });
+    registerSettingsPage('test-kept', { title: 'Kept', mount() {} });
+    const land = async (sub) => {
+        const { env, content, state, showPage } = world(sub);
+        const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+        layout(sub, controls, content, { on: true });
+        state.activePage = 'settings';
+        env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
+        await settle();
+        return { controls, state };
+    };
+    // A page opened in one load is stored, and the next load lands on it.
+    await t.test('stored', async (sub) => {
+        const { controls, state } = await land(sub);
+        assert.equal(state.settingsPath, 'models', 'a first visit lands on Models');
+        await controls.open('test-kept');
+        await settle();
+        assert.equal(store.get('ouroboros.settings.last-page'), 'test-kept');
+        const next = await land(sub);
+        assert.equal(next.state.settingsPath, 'test-kept');
+    });
+    // A stored page nobody registers any more: Models, never the home searched for it.
+    await t.test('gone', async (sub) => {
+        store.set('ouroboros.settings.last-page', 'no-such-page');
+        const { state } = await land(sub);
+        assert.equal(state.settingsPath, 'models');
+    });
+});

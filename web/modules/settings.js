@@ -3,7 +3,7 @@
  * leaves Settings by its door. Every row saves itself (settings_controls.js): nothing here keeps a draft or a Save.
  *
  * What Settings shows is `state.settingsPath` ('' is the home), in memory only: no URL is written and a reload starts
- * at the home. An address no page registers (a skill written for the tabs Settings had) never shows an empty page:
+ * at the home (in two panes beside the first-level page last opened on this device, kept in localStorage). An address no page registers (a skill written for the tabs Settings had) never shows an empty page:
  * the home opens with the address's last part searched, its hyphens and underscores read as spaces (`local-model`
  * searches "local model"), and search says where the thing lives now. Pages open in levels. One opened from the
  * home, a search result or outside Settings is the first level; one opened from a page lies over that page. The
@@ -36,6 +36,13 @@ import './mcp_settings.js';
 import './model_roles.js';
 import './settings_local_model.js';
 import './settings_extension_forms.js';
+
+// The first-level page last opened on this device (docs/DESIGN.md "Settings": a section lands on its first page the
+// first time, later on the last one opened on the device). A stored page no longer registered falls back to Models.
+const LAST_PAGE_KEY = 'ouroboros.settings.last-page';
+function readLastFirst() {
+    try { return String(globalThis.localStorage?.getItem(LAST_PAGE_KEY) || ''); } catch { return ''; }
+}
 
 const quoted = (value) => String(value).replace(/["\\]/g, '\\$&');
 const visible = (el) => Boolean(el?.isConnected && el.getClientRects?.().length);
@@ -83,7 +90,7 @@ export function initSettings(ctx = {}) {
     // Landing (owner 13.11, "1. C"): from 40rem the list and an open page always stand together, never an empty pane;
     // a second press of the chosen row keeps its page when that page is on top, and returns to it from a deeper level.
     let ownChosen = false;   // the owner pressed the list's Ouroboros row: his page stays until another row is pressed
-    let lastFirst = '';      // the first-level page last opened in this load
+    let lastFirst = readLastFirst();  // the first-level page last opened on this device
     const pressed = (path, options = {}) => {
         ownChosen = !path;
         if (path && !options.row && beside() && levels[0]?.path === path) {
@@ -120,10 +127,11 @@ export function initSettings(ctx = {}) {
     }
     const rem = () => parseFloat(globalThis.getComputedStyle?.(document.documentElement)?.fontSize) || 16;
     const panes = () => (page.getBoundingClientRect?.().width || 0) >= 40 * rem();
-    // With two panes and no page open, the page last seen comes back (Models on a first visit).
+    // With two panes and no page open, the page last seen on this device comes back (Models on a first visit, or
+    // when that page is no longer there).
     const ensurePage = () => {
         if (!panes() || levels.length || ownChosen || opening || !shown()) return;
-        go(lastFirst || 'models');
+        go(lastFirst && !isDoorId(lastFirst) && settingsPageFor(lastFirst) ? lastFirst : 'models');
     };
     let panesBefore = null;
     function placeOverview(level) {
@@ -186,7 +194,10 @@ export function initSettings(ctx = {}) {
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
     // A level put aside with unsaved words (`close`) comes back as it was left; any other is drawn anew.
     function open(path, { row, back, under, opener }) {
-        if (!under) lastFirst = path;
+        if (!under && path !== lastFirst) {
+            lastFirst = path;
+            try { globalThis.localStorage?.setItem(LAST_PAGE_KEY, path); } catch { /* storage blocked: kept for this load */ }
+        }
         while (levels.length > under) close(levels.pop());
         const focused = document.activeElement === document.body ? null : document.activeElement;
         const kept = aside.get(path);
