@@ -57,28 +57,41 @@ test('the list\'s keyboard home is Find a project, or New project without the fi
     input.getClientRects = () => [{ width: 1, height: 1 }];
 
     // A closed Project's row is gone: the focus fell to the body, or stayed in the panel that left; it goes home.
+    // app.js calls this as every Project closes, with the id of the one that closed.
+    assert.match(appSource, /if \(shownProjectId && !activeProjectId\) focusAfterProjectClosed\(shownProjectId\);/);
     const panel = new NodeStub('aside');
     const inPanel = new NodeStub('button');
     panel.append(inPanel);
-    const context = vm.createContext({ document, projectsNav: nav, projectPanel: panel });
+    const context = vm.createContext({ document, projectsNav: nav, projectPanel: panel, navProjectsList: list });
     vm.runInContext(liftApp('focusAfterProjectClosed'), context);
     for (const lost of [document.body, inPanel, null]) {
         document.activeElement = lost;
-        context.focusAfterProjectClosed();
+        context.focusAfterProjectClosed('p1');
         assert.equal(document.activeElement, input, `from ${lost?.tagName ?? 'nothing'}`);
     }
+    // Closed with a pointer while its row is still listed (WebKit focuses no pressed row, so the layer has no opener):
+    // the focus is left where it fell, never put into the field.
+    const row = new NodeStub('li');
+    row.dataset.navProjectId = 'p1';
+    list.append(row);
+    for (const lost of [document.body, inPanel]) {
+        document.activeElement = lost;
+        context.focusAfterProjectClosed('p1');
+        assert.equal(document.activeElement, lost, `row listed, from ${lost.tagName}`);
+    }
+    row.remove();
     // The focus that found a place of its own (the row back in the list, another control) is left where it is.
     const elsewhere = new NodeStub('button');
     document.body.append(elsewhere);
     document.activeElement = elsewhere;
-    context.focusAfterProjectClosed();
+    context.focusAfterProjectClosed('p1');
     assert.equal(document.activeElement, elsewhere);
     // The stack layout's closed drawer is inert: nothing in it takes the focus.
     const sidebar = new NodeStub('nav');
     sidebar.setAttribute('inert', '');
     sidebar.append(header);
     document.activeElement = document.body;
-    context.focusAfterProjectClosed();
+    context.focusAfterProjectClosed('p1');
     assert.equal(document.activeElement, document.body);
 
     // The row menu's fallback is the same place (app.js openProjectMenu hands it to project_create.js).

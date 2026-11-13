@@ -459,21 +459,24 @@ function syncNavigationState() {
     });
     // Last: the list's pin group and an open row menu settle, and a closed Project's focus finds its place.
     projectsNav.markPinGroup();
-    if (shownProjectId && !activeProjectId) focusAfterProjectClosed();
+    if (shownProjectId && !activeProjectId) focusAfterProjectClosed(shownProjectId);
     shownProjectId = activeProjectId;
     // Main's count and ☰'s dot follow whether Main is the room on screen, which an open or a close just changed; a
     // room's composer mounted since the last paint carries its ☰ too.
     updateUnreadBadge();
 }
 
-// A closed Project hands the focus back to its row (layers.js); where that row is gone (deleted, archived, or no
-// longer in a find's result) the focus would fall to the page, so the list's first control takes it (projects_nav.js
-// `keyboardHome`), unless the sidebar is inert (the stack layout's closed drawer).
-function focusAfterProjectClosed() {
+// A closed Project hands the focus back to its row (layers.js). Where that row is gone (deleted, archived, or no longer
+// in a find's result) and the focus with it, the list's first control takes it (projects_nav.js `keyboardHome`), unless
+// the sidebar is inert (the stack layout's closed drawer). With the row still listed the focus is left alone: a Project
+// opened with a pointer has no opener in WebKit, and a search field taking the focus there would light its ring and
+// raise a tablet's keyboard.
+function focusAfterProjectClosed(closedId) {
     const at = document.activeElement;
+    const lost = !at || at === document.body || projectPanel?.contains(at) || at.closest?.('[hidden]');
+    if (!lost || [...(navProjectsList?.children || [])].some((el) => el.dataset?.navProjectId === closedId)) return;
     const home = projectsNav.keyboardHome();
-    if (!home || home.closest('[inert]')) return;
-    if (!at || at === document.body || projectPanel?.contains(at) || at.closest?.('[hidden]')) home.focus({ preventScroll: true });
+    if (home && !home.closest('[inert]')) home.focus({ preventScroll: true });
 }
 
 // Docked, the panel comes in from the window's edge with its room in it (owner 20.10, Q2 A): it starts once the room
