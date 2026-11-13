@@ -209,7 +209,7 @@ def measure_main_fit(
     goal = deficit + margin
     from ouroboros.context_view_facts import window_projection
     measurement = MainFitMeasurement(
-        window=window_projection(current),
+        window=window_projection(current, under_way=True),
         view_kind=plan.view_kind,
         route_fp=str(plan.route_fp or ""),
         round_id=str(round_id or ""),

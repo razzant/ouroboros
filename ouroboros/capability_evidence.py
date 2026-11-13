@@ -91,7 +91,7 @@ _CTX_REPLY_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"([0-9][0-9,]*)\s*tokens? for the completion", re.I),
     re.compile(r"([0-9][0-9,]*)\s*in the (?:completion|output)", re.I),
     re.compile(r"context limit:\s*[0-9][0-9,]*\s*\+\s*([0-9][0-9,]*)", re.I),
-    re.compile(r"is too large:\s*([0-9][0-9,]*)", re.I),
+    re.compile(r"max(?:_completion)?_tokens'?\s+is too large:\s*([0-9][0-9,]*)", re.I),
 )
 #: OpenAI's and OpenRouter's "you requested (about) N tokens" is a total: the input plus that reserved reply.
 _CTX_TOTAL_PATTERN = re.compile(r"you requested (?:(?:about|a total of)\s*)?([0-9][0-9,]*)\s*tokens", re.I)

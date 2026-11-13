@@ -20,7 +20,10 @@ def test_reserve_is_charged_once_only_to_a_total(input_limit, total, expected):
 @pytest.mark.parametrize("source,refusal,admitted", [
     ("metadata", None, 991_808),           # an unconfirmed total: the stated number less the reply floor
     ("metadata", "total", 934_464),        # the provider refused a request as a total: the whole reserve, for its life
+    ("metadata", "total+", 934_464),       # its own total is a little above the stated one: the reply is proved inside
     ("metadata", "input", 991_808),        # «prompt is too long» at the stated number: the favourable reading stands
+    ("metadata", "input+", 991_808),       # an input refusal above the stated number names no limit under it
+    ("metadata", "total,input", 934_464),  # a later refusal of the other kind leaves the total proved for its life
     ("local_health", None, 934_464),       # a local server's one buffer holds the reply too
 ])
 def test_a_request_under_way_reads_a_total_favourably_until_a_refusal_confirms_it(tmp_path, source, refusal, admitted):
@@ -28,19 +31,39 @@ def test_a_request_under_way_reads_a_total_favourably_until_a_refusal_confirms_i
     ``admitted`` is the line every question about a request that exists reads, in a round's frame as
     ``admitted_equivalent``. They differ only for a stated total nothing has proved to hold the reply."""
     evidence = ce.CapabilityEvidence(1_000_000, "confirmed", source, "r")
-    if refusal:  # at the stated number itself: it names no smaller limit, it tells the kind
-        record_observation(tmp_path, "r", refused=1_000_000, kind=refusal)
+    for kind in (refusal or "").split(",") if refusal else ():  # at the stated number itself, or (+) at the server's
+        record_observation(tmp_path, "r", refused=1_048_576 if kind.endswith("+") else 1_000_000,  # own a little above
+                           kind=kind.rstrip("+"))
     record = resolve_window(evidence, 65_536, root=tmp_path)
     assert record.usable == 934_464 and record.total_equivalent == 1_000_000  # a start keeps the reserve
     assert record.admitted == admitted and record.admitted_equivalent == admitted + 65_536
-    assert (record.total.source == "refusal") is (refusal == "total")
+    # A refusal at the stated number replaces its source; one above it leaves the stated limit as it was declared.
+    assert (record.total.source == "refusal") is (refusal in ("total", "total,input")) and record.total.tokens == 1_000_000
     assert resolve_window(evidence, 8_192, root=tmp_path).admitted == 991_808  # Nano's reserve is the floor: one line
     record_observation(tmp_path, "r", accepted=1_000_001)  # a later larger acceptance disproves the stated total
-    assert resolve_window(evidence, 65_536, root=tmp_path).admitted == 1_000_001
+    # (the server's own larger total, where a refusal named one, still holds the reply: 1,048,576 less the reserve)
+    assert resolve_window(evidence, 65_536, root=tmp_path).admitted == (983_040 if refusal == "total+" else 1_000_001)
     bare = WindowRecord("unknown", reserve=65_536)
     assert bare.admitted is None and bare.admitted_equivalent == 0
     # A record built without a floor (an input limit's twin in tests, a projection) charges a total the whole reserve.
     assert WindowRecord("r", total=WindowLimit(300_000, "total", "metadata"), reserve=65_536).admitted == 234_464
+
+
+def test_a_refusal_of_the_other_kind_stays_only_while_no_larger_acceptance_answered_it(tmp_path):
+    """The record keeps the newest refusal of each kind. One a larger acceptance has answered is gone for good: a later
+    refusal of the other kind must not bring its limit back."""
+    evidence = ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "r")
+    record_observation(tmp_path, "r", accepted=900_000)  # the largest acceptance is older than every refusal below
+    record_observation(tmp_path, "r", refused=200_000, kind="input")  # a numberless refusal at its measured size
+    assert resolve_window(evidence, 65_536, root=tmp_path).usable == 200_000
+    record_observation(tmp_path, "r", accepted=250_000)  # answered: the route took a larger input since
+    assert resolve_window(evidence, 65_536, root=tmp_path).usable == 934_464
+    record_observation(tmp_path, "r", refused=1_000_000, kind="total")
+    record = resolve_window(evidence, 65_536, root=tmp_path)
+    assert (record.usable, record.admitted, record.input) == (934_464, 934_464, None)
+    record_observation(tmp_path, "r", refused=300_000, kind="input")  # unanswered: it stands beside the proved total
+    record = resolve_window(evidence, 65_536, root=tmp_path)
+    assert record.usable == 300_000 and record.total.source == "refusal"
 
 
 def test_refusal_expires_or_is_superseded_only_by_a_later_larger_acceptance(tmp_path, monkeypatch):

@@ -118,8 +118,13 @@ def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int =
                 keep.add(newest)
                 later = next((i for i in range(newest + 1, len(rows))
                               if rows[i].get("accepted", 0) > rows[newest]["refused"]), None)
-                if later is not None:
-                    keep.add(later)
+                # The newest refusal of the other kind stays beside it (a total proved to hold the reply stays proved),
+                # unless a larger acceptance since has already answered it.
+                other = next((i for i in reversed(range(newest)) if rows[i].get("refused")
+                              and rows[i].get("kind") != rows[newest].get("kind")), None)
+                if other is not None and any(row.get("accepted", 0) > rows[other]["refused"] for row in rows[other + 1:]):
+                    other = None
+                keep.update(i for i in (later, other) if i is not None)
             record["observations"] = [rows[i] for i in sorted(keep)]
             if record["observations"] != prior:
                 ce._save(root, data)
@@ -187,15 +192,18 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
     if any(limit.acceptance_can_raise and accepted > limit.tokens for limit in limits.values()):
         limits = {kind: limit for kind, limit in limits.items() if not limit.acceptance_can_raise}
         limits["input"] = WindowLimit(accepted, "input", "accepted", accepted_at)
+    kinds, inside = set(), False
     for index in range(len(rows) - 1, -1, -1):
         row = rows[index]
-        if row.get("refused"):
+        if row.get("refused") and row["kind"] not in kinds:  # the newest refusal of each kind
+            kinds.add(row["kind"])
             if ce._age_seconds(row["ts"]) <= ce._CONFIRMED_TTL_SEC and not any(
                     later.get("accepted", 0) > row["refused"] for later in rows[index + 1:]):
                 current = limits.get(row["kind"])
-                if current is None or row["refused"] <= current.tokens:  # at the stated number too: it confirms the kind
+                if current is None or row["refused"] <= current.tokens:
                     limits[row["kind"]] = WindowLimit(row["refused"], row["kind"], "refusal", row["ts"])
-            break
+                else:  # above the stated number it names no limit under it; a total's says the reply is counted inside
+                    inside = inside or row["kind"] == "total"
     output = getattr(evidence, "response_limit", {}) or {}
     maximum = output.get("max_output_tokens", 0)
     from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
@@ -205,7 +213,7 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
                         WindowLimit(maximum, "output", output.get("source", "metadata"),
                                     output.get("observed_at", "")) if maximum and not output.get("stale")
                         else captured.output if captured else None,
-                        floor=min(int(reserve), max(NANO_MIN_HEADROOM_TOKENS, int(working))),
+                        floor=None if inside else min(int(reserve), max(NANO_MIN_HEADROOM_TOKENS, int(working))),
                         reserve=reserve, accepted=accepted, declared=declared, accepted_at=accepted_at,
                         contradicted_by=contradiction,
                         retired_ack=getattr(evidence, "retired_ack", {}) or (captured.retired_ack if captured else {}))

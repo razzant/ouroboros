@@ -20,11 +20,12 @@ from tests.test_context_economy_window import setup as gateway_fixture
 setup, live_wait, main_call = gateway_fixture, wait_fixture, main_fixture  # the real Main call fixtures
 
 
-def _fit(estimate, *, anchor=874_829, accepted=921_840, reply=65_536):
+def _fit(estimate, *, anchor=874_829, accepted=921_840, reply=65_536, stated_total=0):
+    """``stated_total``: the round sent this request inside the reply reservation of that stated, unproved total."""
     return SimpleNamespace(measurement=SimpleNamespace(
         estimated_input_tokens=estimate, anchor_input_tokens=anchor, accepted_input_tokens=accepted,
         capacity_total_tokens=None, window_reading_tokens=None, reply_allowance_tokens=reply,
-        capacity_deficit_tokens=None))
+        capacity_deficit_tokens=None, probes_reply_reservation=bool(stated_total), window={"tokens": stated_total}))
 
 
 def _ctx(message=""):
@@ -48,6 +49,15 @@ def test_the_target_is_measured_on_this_conversation_or_stays_unknown():
     assert ctx.accumulated_usage[REFUSED_INPUTS_KEY]  # recorded: the facts stop stating free room
     assert _target(_ctx(), _fit(900_000)) is None  # E at or below A contradicts the reading
     assert _target(_ctx(), _fit(933_440, anchor=None)) is None  # a cold count sizes nothing
+    # A numberless refusal of a request sent inside the reply reservation of a stated total is that total's own: it
+    # is measured against the total (input + reply - T, and the total's eighth), never against the last accepted
+    # input, whatever that was (a jump of 80,000 cut 124,668 where 5,536 were over; an earlier larger acceptance
+    # left the target unknown, which takes whole categories).
+    for accepted in (160_000, 260_000):
+        inside = _fit(240_000, anchor=160_000, accepted=accepted, stated_total=300_000)
+        assert lmc._refusal_target(_ctx(), inside) == (240_000 + 65_536 - 300_000 + 37_500, 37_500)
+    assert lmc._refusal_target(_ctx(), _fit(240_000, anchor=160_000, accepted=160_000)) == (
+        240_000 - 160_000 + 20_000, 20_000)  # outside any reservation: E - A and the eighth of A, as before
     stated = _ctx("This model's maximum context length is 400,000 tokens.")
     assert _target(stated, _fit(390_000, accepted=None, reply=20_000)) == 10_000 + 50_000
     # Anthropic and Gemini wordings state both numbers; the provider's own count beats the estimate,

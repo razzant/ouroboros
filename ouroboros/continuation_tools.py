@@ -4,6 +4,11 @@ The answered-send observer owns baseline identity; the route owns its physical
 schema limit. This owner stages current contracts, checks history against the
 fitted candidate and commits the shared list only when compatible. It never
 retires reasoning or edits a recovered source: the send/checkpoint owners do so.
+
+Fitting keeps the names history called first; one still absent keeps the saved array and says why. Adoption updates the
+shared list, so the context is fitted again; saved actor-enabled names rejoin discovery's set, and a legacy record keeps
+the residency it was permitted. The notes follow the restore: a change lists +added/-removed/~changed names and traces
+both digests.
 """
 
 from __future__ import annotations

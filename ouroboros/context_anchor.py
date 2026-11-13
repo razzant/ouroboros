@@ -194,6 +194,18 @@ def refused_request_density(usage: Optional[Mapping[str, Any]], refused: Any, me
     return stated / estimate if sent and sent == getattr(measurement, "route_fp", None) else None
 
 
+def reservation_refusal(usage: Optional[Mapping[str, Any]], refused: Any, measurement: Any) -> bool:
+    """A provider called the request ``measurement`` sized too large (``request_too_large``), and that request went out
+    inside the reply reservation of a stated total nothing has proved (``probes_reply_reservation``).
+
+    Only the favourable reading admitted it, so the refusal is that total's own, whatever its words (owner, 30 Sep
+    2026: the host sends once and records the provider's answer). ``refused`` is the attempt the provider refused: an
+    attempt of another route (a wait moved the call there) measures nothing here, so its true output cap stays one."""
+    sent = getattr(getattr(refused, "physical_context", None), "route_fp", None)
+    return bool(str((usage or {}).get("_last_llm_error_kind") or "") == "request_too_large" and measurement is not None
+                and measurement.probes_reply_reservation and sent and sent == getattr(measurement, "route_fp", None))
+
+
 def measured_units(refused_density: Optional[float], measurement: Any,
                    *tokens: Optional[int]) -> Tuple[Optional[int], ...]:
     """``tokens`` the refused request's own density counts, in the units ``measurement`` counts; None stays unknown."""

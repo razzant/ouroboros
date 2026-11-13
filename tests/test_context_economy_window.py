@@ -280,8 +280,8 @@ def test_a_rebind_keeps_the_sent_view_on_a_smaller_fitting_window_and_unfolds_no
 
 def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_and_takes_its_room(tmp_path, monkeypatch):
     """A view that fits its new window is kept byte for byte (the tests around this one). A view the window cannot
-    hold is written again anyway, so it is narrowed from its own level to the window less one eighth of work room,
-    not to the window's very edge, where the next tool result would meet the same wall (owner, 30 Sep 2026: a fold
+    hold is written again anyway, so with its excess it is asked a wall's slack, one eighth of the window, and not
+    left at the window's very edge, where the next tool result would meet the same wall (owner, 30 Sep 2026: a fold
     returns to the room line). Nothing unfolds, no owner target is applied again, and the tail is never touched."""
     from tests.test_memory_view_modes import _built
 
@@ -298,9 +298,13 @@ def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_and_t
     assert all(floor["steps"].get(step, 0) >= count for step, count in old["steps"].items())  # nothing unfolds
     assert rebound.projection("low").memory_facts["host_sections_addressed"]  # host views pay before memory detail
     assert floor["by_budget"] == old["by_budget"] and floor["budget_allowance_tokens"] is None  # no target refold
-    # One eighth of the window stays for the work, the same room a fold returns to (never the role's start room);
-    # where memory cannot make all of it, memory keeps nothing back.
-    assert floor["allowance_tokens"] == max(0, floor["physical_allowance_tokens"] - math.ceil(tight / 8))
+    # One eighth of the window is asked for the work as a wall's pass asks its slack (never a start's margin): memory's
+    # detail and ordinary host forms pay it, and where they cannot make all of it they give what they hold.
+    most = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536,
+                                   tool_schemas=[], start_mode="low", current_messages=_long_tail(low), slack_tokens=10**7)
+    shed = measured.projection("low").estimated_tokens - rebound.projection("low").estimated_tokens
+    assert shed >= math.ceil(tight / 8) or floor["steps"] == most.projection("low").memory_facts["floor"]["steps"]
+    assert floor["allowance_tokens"] == floor["physical_allowance_tokens"]  # a held view borrows no start margin
     assert sum(floor["steps"].values()) > sum(old["steps"].values())  # memory's detail made that room
     assert messages[1:] == _long_tail(low)[1:]  # the actual tail is never touched
 
@@ -381,6 +385,25 @@ def test_a_rebind_keeps_a_view_exactly_when_the_rounds_carried_input_fits_it(tmp
     if route == "same":
         # Preparation changes the input by a signed offset, not the learned tokenizer density.
         assert rebound.projection(mode).calibration_ratio == sent.measurement.measurement_density == 1.0
+
+
+@pytest.mark.parametrize("holds_reply,after", [(False, "low"), (True, "nano")], ids=["unproved-total", "total-holds-reply"])
+def test_a_held_low_view_steps_down_to_nano_only_where_nano_makes_room(tmp_path, monkeypatch, holds_reply, after):
+    """A Low view the work holds meets a window that cannot hold its transcript even with the shortest memory. On a
+    total that holds the reply, Nano's smaller reply reserve is real room and the view steps down. On a total nothing
+    has proved, Low and Nano are admitted to the same input: stepping down would cost the mode (and its reply
+    allowance) for no room, so the view stays Low and the round's own passes take bodies (review round 2)."""
+    from tests.test_memory_view_modes import _built
+
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    low = plan(1_000_000, preferred="low", tool_schemas=[])
+    messages = _long_tail(low)
+    raw = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536, tool_schemas=[],
+                                  start_mode="low", current_messages=messages).projection("low").estimated_tokens
+    # The line each reading admits is 10,000 under the shown bytes: more than this view's memory can give.
+    window = raw + (65_536 if holds_reply else 8_192) - 10_000
+    _rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=window, holds_reply=holds_reply)
+    assert mode == after and event["view_kept"] is False
 
 
 @pytest.mark.parametrize("owner,ran,mode", [

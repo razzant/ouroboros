@@ -23,7 +23,8 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import task_pacing
 from ouroboros import loop_output_exhaustion as output_recovery
-from ouroboros.context_anchor import main_input_anchor, measured_units, record_input_anchor, refused_request_density
+from ouroboros.context_anchor import (main_input_anchor, measured_units, record_input_anchor, refused_request_density,
+                                      reservation_refusal)
 from ouroboros.context_budget import WHOLE_CATEGORY
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
@@ -519,7 +520,7 @@ def _rebind_context_fit_plan(
     credential_profile_id: Optional[str] = None,
     start_mode: Optional[str] = None,  # the task's mode: a new route may lower it; a return to the primary resumes its held view
     route_is_preference: bool = False,  # ``model_route`` is the account a send will prefer (a restore), not one observed serving
-    start_work: Optional[bool] = None,  # the start is written anyway (a restore); None: when this work was never answered here
+    writes_start: Optional[bool] = None,  # the start is written anyway (a restore); None: when this work was never answered here
 ) -> Tuple[Any, str]:
     if plan is None or not all(
         hasattr(plan, name) for name in ("max_projection", "low_projection", "core_sha256")
@@ -587,10 +588,9 @@ def _rebind_context_fit_plan(
     ).reproject_for_route(  # the shown view kept while this route admits it (``WindowRecord.admitted``), else narrowed
         window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried, admitted=True,
         output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages,
-        # A move to a route that holds no copy of this work's start, and a restore, write it whole: one eighth of room.
-        start_work=(_moves_route(tools._ctx, model, use_local) and not answered_on(
-            getattr(tools._ctx, "_accumulated_usage", None), model, use_local, role)) if start_work is None else start_work,
-        room_if_narrowed=True)
+        # A move to a route that holds no copy of this work's start, and a restore, write it whole: a wall's slack with it.
+        entry=(_moves_route(tools._ctx, model, use_local) and not answered_on(
+            getattr(tools._ctx, "_accumulated_usage", None), model, use_local, role)) if writes_start is None else writes_start)
     mode = rebound.initial_mode
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas)
     shown = messages[0] if messages else None
@@ -1360,10 +1360,11 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
         msg, retry_cost = retried
         cost = float(cost or 0.0) + float(retry_cost or 0.0)
     refused = ctx.accumulated_usage.pop(REFUSED_CANDIDATE_KEY, None)  # includes a pre-send-refused image retry
-    kind = str(ctx.accumulated_usage.get("_last_llm_error_kind") or "")
-    if msg is None and kind == "request_too_large" and disposition is not None and disposition.measurement.probes_reply_reservation:
-        kind = ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"  # the stated total's own refusal
-    if msg is not None or kind != "context_overflow":
+    sized = msg is None and disposition is not None and reservation_refusal(
+        ctx.accumulated_usage, _loop().last_physical_attempt_capture(), disposition.measurement)
+    if sized:  # the stated total's own refusal in a size's words: the passes below recover it in place
+        ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+    if msg is not None or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") != "context_overflow":
         return msg, cost, ctx.active_context_mode
     ctx.accumulated_usage[CONTEXT_REFUSAL_ROUND_KEY] = ctx.round_idx  # this round's size refusal, passes or not
 
@@ -1380,7 +1381,7 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     # it earns the first retry (memory then keeps what that view kept unless this candidate is refused too).
     prepared = (WAKE_DELIVERY_STEP if _project_wake_input(ctx, overflowed=True)
                 else REBOUND_VIEW_STEP if ctx.messages and ctx.messages[0] != shown else "")
-    return _recover_context_overflow(ctx, failed_capture, cost, prepared=prepared)
+    return _recover_context_overflow(ctx, failed_capture, cost, prepared=prepared, sized=sized)
 
 
 # Size recovery (owner revision, 20.10.2026; sizing 06.11.2026): a known-window prediction of no result room or the
@@ -1425,6 +1426,8 @@ def _refusal_window(ctx: _RoundModelCallContext, fit: Any,
     if exact_window and exact_input:  # the instance's own counts, with the reply its exact request reserved
         stated, size = exact_window, exact_input
         reply = int(getattr(refused, "max_completion_tokens", 0) or reply)
+    if not stated and measurement.probes_reply_reservation:  # numberless, inside the reply reservation: the stated
+        stated = int(measurement.window["tokens"])  # total's own refusal is measured against that total
     window = stated or measurement.capacity_total_tokens or max(
         measurement.window_reading_tokens or 0, measurement.accepted_input_tokens or 0) or None
     return stated, size, reclaim_low_water_margin(None, window) if window else 0, reply, sent
@@ -1459,7 +1462,7 @@ def _refusal_target(ctx: _RoundModelCallContext, fit: Any, refused: Any = None, 
 
 
 def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, cost: float, *,
-                              prepared: str = "") -> Tuple[Any, float, str]:
+                              prepared: str = "", sized: bool = False) -> Tuple[Any, float, str]:
     """Run the refusal passes: each pass that changed the candidate earns one strictly smaller retry.
 
     ``prepared`` names a change the caller already applied without a model (a wake's stored-source
@@ -1503,6 +1506,8 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
             target, slack = measured_units(density, fit.measurement, target, slack)  # its excess in fit's units
             continue  # ``fit`` already measures the changed view the next pass starts from
         cost = float(cost or 0.0) + float(retry_cost or 0.0)
+        if sized and retry_msg is None and ctx.accumulated_usage.get("_last_llm_error_kind") == "request_too_large":
+            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"  # ``sized``: its total, in the same words
         if retry_msg is not None or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") != "context_overflow":
             return retry_msg, cost, ctx.active_context_mode  # answered, or another kind: ordinary recovery
         if isinstance(ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):

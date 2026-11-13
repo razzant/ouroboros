@@ -45,7 +45,7 @@ def test_settings_reads_stored_window_and_matches_main(tmp_path, monkeypatch, re
     assert preview["window"]["tokens"] == expected
     evidence = ce.with_role_window(ce.probe(tmp_path, **route, allow_fetch=False), typed)
     record = resolve_window(evidence, 65536, root=tmp_path)
-    assert preview["window"] == window_projection(record)
+    assert preview["window"] == window_projection(record, under_way=True)  # the main slot: a work's reading
     assert preview["window_ack"] and preview["window_route"]["route_fp"] == ack["route_fp"]
     assert ("old confirmation 1,000,000" in preview["window"]["text"]) is retired
     assert ("not used" in preview["window"]["text"]) is retired
@@ -168,3 +168,16 @@ def test_window_disagreement_names_the_observation_source(tmp_path, monkeypatch,
     assert bool(projected(86400)["contradiction"]) is disagrees
     expired = projected(86401)
     assert expired["contradiction"] is None and f"{label} says" not in expired["text"]
+
+
+def test_the_request_under_way_reading_is_named_for_a_main_work_only(tmp_path):
+    """A Main work reads a stated total more favourably after its start than a start is sized; Light, a reviewer and
+    voice size by the usable input alone, so their window text (the Settings preview) names no second reading."""
+    record = resolve_window(ce.CapabilityEvidence(300_000, "confirmed", "metadata", "r"), 65_536, root=tmp_path)
+    single, main = window_projection(record), window_projection(record, under_way=True)
+    assert "usable input 234,464; reply reserve 65,536" in single["text"] and "under way" not in single["text"]
+    assert "usable input 234,464 at a start, 291,808 for a request under way (" in main["text"]
+    assert single["usable"] == main["usable"] == 234_464 and single["admitted"] == main["admitted"] == 291_808
+    proved = resolve_window(ce.CapabilityEvidence(300_000, "confirmed", "local_health", "r"), 65_536, root=tmp_path)
+    assert "under way" not in window_projection(proved, under_way=True)["text"]  # one reading: nothing to name
+

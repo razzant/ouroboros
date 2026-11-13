@@ -127,7 +127,7 @@ class ContextFitPlan:
                             current_messages: Optional[List[Dict[str, Any]]] = None,
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
-                            slack_tokens: int = 0, room_if_narrowed: bool = False,
+                            slack_tokens: int = 0, entry: Optional[bool] = None,
                             admitted: bool = False) -> "ContextFitPlan":
         """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
@@ -138,9 +138,11 @@ class ContextFitPlan:
         ``admitted``: the plan's own window is read at ``WindowRecord.admitted``, the line this work's own requests go
         out at (Main's rebind, restore, retry in a lower mode and memory pass); without it at ``usable``, as a start
         is sized (voice; a work's first start is ``_build_context_fit_plan``).
-        ``start_work`` leaves one eighth of work room under that line where the start is written anyway (an entry on a
-        route that holds no copy of it, a restore); ``room_if_narrowed`` gives the same room to a view that must narrow
-        for the window alone, since narrowing writes it too. A view that fits is never touched.
+        ``entry``: Main binds the view to a place. Narrowing writes the start, and so does an entry on a place that
+        holds no copy of it and a restore (True): each asks a wall's slack with it (``REFUSAL_PASSES``), one eighth
+        under that line less what is free already, which memory detail and ordinary host forms pay; the mode and a
+        whole-or-outline section pay a measured excess alone. Otherwise a view that fits is never touched.
+        ``start_work`` is a first send's own room and Max decision (voice).
         """
         from dataclasses import replace
 
@@ -185,8 +187,8 @@ class ContextFitPlan:
             request += room if start_work else 0
             request -= math.ceil(required_book_addition(self, start) * ratio)  # nothing narrows to pay for the book
             measured, units = (request - frame if known_window and frame else 0), max(ratio, 0.01)
-            if room_if_narrowed and measured > 0 and not start_work:
-                start_work, measured = True, measured + room
+            if entry is not None and (entry or measured > 0):  # the start is written anyway: a wall's slack with it
+                refused_tokens, slack_tokens = max(int(refused_tokens or 0), measured), max(slack_tokens, min(room, room + measured))
             excess, deficit = max(measured, int(refused_tokens or 0)), max(measured, int(refused_tokens or 0) + slack_tokens)
             if deficit > 0 or select_mode:
                 snapshot = snapshot_from_json(self.core.memory_view_json) if self.core.memory_view_json else None
@@ -877,9 +879,6 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     stated: Dict[str, Optional[int]] = {}  # each walked mode's window in the start's frame (``frame`` fills it)
 
-    def start_levels():  # the role's room at the work's first start; one eighth where a shown view is written again
-        return 1 if kept is not None else snapshot.spec.work_room_levels if snapshot else work_room_levels
-
     def frame(selected):
         nonlocal receipts
         sent = select_tool_schemas(tool_schemas or [], context_mode=selected, schema_names=names)
@@ -890,7 +889,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                   if record and record.usable is not None else window_tokens)
         stated[selected] = record.total_equivalent if record and record.usable is not None else None
         boundary = record.boundary if record else None
-        levels = start_levels()
+        levels = snapshot.spec.work_room_levels if snapshot else work_room_levels
         host_allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=0, target_tokens=target if kept is None else None,
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
@@ -920,7 +919,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     def work():
         target = context_budget.context_mode_limits(mode, preferred, output_reserve)[0]
-        return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * start_levels()
+        return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
+            snapshot.spec.work_room_levels if snapshot else work_room_levels)
 
     # Both Max decisions use the clean-start guard's minimum ordinary memory,
     # priced in this request with its receipt, schemas, reserve and work room.
@@ -962,8 +962,16 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       and ordinary_need()[1] > window)
         if mode == "nano" or not (books_lost or overflows(shown)):
             break
-        mode = "low" if mode == "max" else "nano"
-        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
+        held = (sent, fixed, reserve, window, boundary, allowances), receipts
+        lower = "low" if mode == "max" else "nano"
+        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{lower}", frame, lower)
+        if lower == "nano" and kept is not None and window - reserve <= held[0][3] - held[0][2] and fixed >= held[0][1]:
+            # A view the work holds keeps Low where Nano would admit no more input and is no smaller (a total that
+            # nothing has proved, an input limit): the mode is not paid for nothing, the round's passes take bodies.
+            (sent, fixed, reserve, window, boundary, allowances), receipts = held
+            shown = render()
+            break
+        mode = lower
     if kept is None and overflows(shown):  # a start's refusal names its last view, never a work room's shortfall
         core_alone = overflows()
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone

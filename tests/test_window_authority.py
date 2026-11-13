@@ -87,6 +87,8 @@ def test_a_sentence_that_counts_the_input_under_its_window_is_the_windows_refusa
     assert cb.context_overflow_message(text) is (kind == "context_overflow")
     assert cb.output_or_body_size_message(text) is (kind == "request_too_large")
     assert ce._parse_ctx_limit_number(text) == window and ce._parse_ctx_requested(text) == (size, 65_536, 0)
+    # "is too large: N" is the reply only where max_tokens is what is too large; an input worded so states no reply.
+    assert ce._parse_ctx_requested("Input is too large: 250000 tokens. The maximum context length is 200000 tokens.")[1] == 0
     if kind == "context_overflow":
         record_refusal({"_last_llm_provider_message": text}, SimpleNamespace(route_fp="route"))
         record = resolve_window(ce.CapabilityEvidence(window, "confirmed", "metadata", "route"), 65_536, root=tmp_path)
