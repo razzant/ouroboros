@@ -217,6 +217,9 @@ def test_current_combined_envelope_reaches_full_and_passive_contracts_unchanged(
 
 
 def test_disabled_named_default_refresh_forwards_exact_target_without_wake(engine):
+    from ouroboros.gateway.management_contracts import ClaudexorAccountResources, ClaudexorRefreshAttempt
+    from ouroboros.gateway.schema import json_schema_for
+
     client, _, calls = engine
     target = WIRE["receipt"]["request"]["target"]
     response = client.post("/api/claudexor/quota/refresh", json={"target": target})
@@ -224,7 +227,10 @@ def test_disabled_named_default_refresh_forwards_exact_target_without_wake(engin
     from datetime import datetime
 
     envelope = response.json()
+    assert set(envelope) <= set(get_type_hints(ClaudexorAccountResources))
+    assert "refresh_attempt" not in json_schema_for(ClaudexorAccountResources).get("required", [])
     attempt = envelope.pop("refresh_attempt")
+    assert set(attempt) == set(get_type_hints(ClaudexorRefreshAttempt))
     assert attempt["reused"] is False
     assert datetime.fromisoformat(attempt["started_at"]) <= datetime.fromisoformat(attempt["completed_at"])
     assert envelope == WIRE["quota"]
