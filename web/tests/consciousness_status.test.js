@@ -95,8 +95,11 @@ test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an 
 
 test('the money of the last 24 hours, and the three last wakes in the Dashboard\'s phase words', () => {
     const snapshot = (bg) => normalizeConsciousness(bg, { enabled: true });
-    assert.equal(allowanceText(snapshot({ spent_24h_usd: 1.5, daily_usd: 20 })), '$1.50 of $20.00 in the last 24 hours');
-    assert.equal(allowanceText(snapshot({ spent_24h_usd: 1.5, daily_usd: 20, unknown_unmetered: 2 })), '≥ $1.50 of $20.00 in the last 24 hours');
+    // A whole-dollar limit reads in whole dollars, the spend rounded up (storage_format.js `formatLimitUsd`).
+    assert.equal(allowanceText(snapshot({ spent_24h_usd: 1.5, daily_usd: 20 })), '$2 of $20 in the last 24 hours');
+    // What the number leaves out is said after it in words, where a floor sign stood before it.
+    assert.equal(allowanceText(snapshot({ spent_24h_usd: 1.5, daily_usd: 20, unknown_unmetered: 2 })),
+        '$2 of $20 in the last 24 hours; 2 calls without a known price are not counted');
     assert.equal(allowanceText(snapshot({ daily_usd: 20 })), '', 'an unknown spend is unknown, never $0');
     const wakes = normalizeConsciousness({ recent_wakes: [
         { started_at: at(13, 52), summary: 'Reminded about the Swarm question', phase: 'done', ended_at: at(13, 53) },
@@ -152,7 +155,7 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         assert.equal(reads, 1, 'one read of the wakes per opening, no poller');
         const shade = status.shade;
         assert.equal(shade.querySelector('.cx-state').textContent, 'Sleeping until 14:20.');
-        assert.equal(shade.querySelector('.cx-money').textContent, '$1.50 of $20.00 in the last 24 hours');
+        assert.equal(shade.querySelector('.cx-money').textContent, '$2 of $20 in the last 24 hours');
         assert.deepEqual(shade.querySelectorAll('.cx-wake').map((row) => row.children.map((cell) => cell.textContent)),
             [['13:52', 'Reminded about the Swarm question', 'Done']]);
         const toggle = shade.querySelector('.cx-toggle');

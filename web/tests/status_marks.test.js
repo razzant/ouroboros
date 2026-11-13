@@ -102,7 +102,11 @@ const PAINTS = [
     /\bdataset\.(?:shape|hue)\s*=(?!=)/, /setAttribute\(\s*['"`]data-(?:shape|hue)['"`]/,
     /class=\\?["']status-mark\b/, /className\s*=\s*['"`]status-mark\b/, /classList\.add\(\s*['"`]status-mark['"`]/,
 ];
-const MARK_PAINT = /(?:^|;|\{)\s*(color|background(?:-color|-image)?|border-color|fill|stroke|opacity|animation(?:-name)?|box-shadow)\s*:/;
+const MARK_PAINT = /(?:^|;|\{)\s*(color|background(?:-color|-image)?|border-color|fill|stroke|opacity|animation(?:-name)?|box-shadow)\s*:/g;
+// The one mark a sheet may ring: the ☰'s dot on Ouroboros's picture on a phone, cut out of the picture by a ring in the
+// page's own background (79fac1cf4/aa7528dcd style.css "html[data-layout=stack] .mobile-nav-toggle > .status-mark").
+// Only that box-shadow, only on that exact rule: any other property it sets, or a ring elsewhere, is still a paint.
+const CUTOUTS = { 'style.css': ['html[data-layout="stack"] .mobile-nav-toggle > .status-mark'] };
 
 /** The source without its comments, which may name what was retired and why. */
 function code(source) {
@@ -144,7 +148,8 @@ function violations({ scripts, sheets, pages }) {
         if (name === 'ui.css') continue;
         for (const rule of text.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
             if (!marked.test(rule[1])) continue;
-            const property = rule[2].match(MARK_PAINT);
+            const cutout = (CUTOUTS[name] || []).includes(rule[1].trim());
+            const property = [...rule[2].matchAll(MARK_PAINT)].find((m) => !(cutout && m[1] === 'box-shadow'));
             if (property) found.push(`${name}: "${rule[1].trim()}" sets ${property[1]} on a mark`);
         }
     }
@@ -168,6 +173,9 @@ test('the ownership check sees a second painter, a painted mark and a retired na
             ['room.css', css('.rw-trigger .status-mark { margin-left: 4px; --mark-ink: red; }\n.x .status-mark i { background: red }')],
             ['old.css', css('/* .chat-live-typing was here */ .nav-unread-dot { color: red }')],
             ['quiz.css', css('.card[data-busy] .quiz-mark { color: gray } .card .quiz-mark { --mark-ink: gray }')],
+            ['style.css', css('html[data-layout="stack"] .mobile-nav-toggle > .status-mark { top: 4px; box-shadow: 0 0 0 2px var(--bg-primary); }\n'
+                + 'html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .status-mark { box-shadow: 0 0 0 2px red }')],
+            ['room2.css', css('html[data-layout="stack"] .mobile-nav-toggle > .status-mark { box-shadow: 0 0 0 2px red; color: red }')],
         ],
         pages: [],
     };
@@ -177,6 +185,8 @@ test('the ownership check sees a second painter, a painted mark and a retired na
         'modules/rogue.js: paints a mark /class=\\\\?["\']status-mark\\b/',
         'room.css: ".x .status-mark i" sets background on a mark',
         'quiz.css: ".card[data-busy] .quiz-mark" sets color on a mark',
+        'style.css: "html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .status-mark" sets box-shadow on a mark',
+        'room2.css: "html[data-layout="stack"] .mobile-nav-toggle > .status-mark" sets box-shadow on a mark',
     ]);
 });
 

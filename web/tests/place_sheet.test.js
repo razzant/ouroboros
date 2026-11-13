@@ -11,6 +11,7 @@ import { inheritedModelWords, placeChangeFor, placeSheetBodyHtml, placeSheetMeta
 import { applyPayload, setMissTransport } from '../modules/i18n.js';
 
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
+import { FLUENT } from '../modules/fluent_glyphs.js';
 import { installCardDom } from './helpers/card_dom.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
@@ -509,7 +510,9 @@ test('SVG specs paint their geometry and an empty icon paints the house plug', (
     svgSheet.close();
     const fallback = openPlaceSheet({ ...slack, icon: {} });
     assert.equal(document.body.querySelector('circle'), null);
-    assert.match(document.body.querySelector('path').getAttribute('d'), /M9 3v5M15 3v5/);
+    // The house plug is the one icon set's filled plug (Fluent plug-connected, page_icons.js CONTROL_BODIES.plug).
+    const plugPath = FLUENT['plug-connected-20-filled'].match(/ d="([^"]+)"/)[1];
+    assert.equal(document.body.querySelector('path').getAttribute('d'), plugPath);
     fallback.close();
 });
 

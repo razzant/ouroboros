@@ -30,15 +30,14 @@ test('accounts that need sign-in again are one row per harness, only over an acc
     assert.deepEqual(rows.map((row) => [row.owner, row.action, row.open]), [[true, 'Sign in', 'accounts/codex'], [true, 'Sign in', 'accounts/claude']]);
     // Read, and nobody needs sign-in: no row, and no sentence that nothing waits.
     assert.deepEqual(needRows({ accounts: accounts([account('codex', 'c', 'passed'), account('codex', 'off', 'failed', false)]) }), []);
-    // Not read: the same failing rows are a memory, so the card says only that it was not checked, with its Check.
+    // Not read: the same failing rows are a memory. The card lists no row for them (what was not read is said by the
+    // row it concerns, never as a line of the card with a Check), and the Accounts row prints no count from them.
     for (const read of ['unread', 'not_read', 'failed', 'transport', 'indeterminate']) {
-        const [row, ...rest] = needRows({ accounts: accounts([account('codex', 'a', 'failed')], read) });
-        assert.deepEqual([row.kind, row.id, row.owner, row.action, row.run, row.text, rest.length],
-            ['unread', 'accounts', false, 'Check', 'accounts', 'Accounts not checked', 0], read);
-        assert.equal(row.note, '', read);
+        assert.deepEqual(needRows({ accounts: accounts([account('codex', 'a', 'failed')], read) }), [], read);
+        assert.equal(homeAnswers({ accounts: accounts([account('codex', 'a', 'failed')], read) }).accounts, undefined, read);
     }
-    // A read that found the daemon unasked: Check would start it, and the row says so before the press.
-    assert.equal(needRows({ accounts: accounts([], 'not_read', 'wake') })[0].note, 'Check starts the agent daemon.');
+    // A read that found the daemon unasked is no row either: nothing on the card offers to start it.
+    assert.deepEqual(needRows({ accounts: accounts([], 'not_read', 'wake') }), []);
     assert.deepEqual(needRows({}), [], 'nothing read yet says nothing');
 });
 
@@ -54,8 +53,9 @@ test('a tool server that needs sign-in is a row; a status that could not be read
     assert.deepEqual(kinds(rows), ['tool-sign-in:slack', 'tool-sign-in:docs']);
     assert.deepEqual([rows[0].text, rows[0].open, rows[0].owner], ['MCP server Slack needs sign-in', 'tools/slack', true]);
     assert.deepEqual(needRows({ tools: { enabled: true, servers: servers.slice(2) } }), []);
-    assert.deepEqual(needRows({ tools: null }).map((row) => [row.kind, row.id, row.owner, row.action, row.run]),
-        [['unread', 'tools', false, 'Check', 'tools']]);
+    // A status that could not be read is no line of the card: the MCP servers row says it was not checked.
+    assert.deepEqual(needRows({ tools: null }), []);
+    assert.deepEqual(homeAnswers({ tools: null }).tools, { text: 'Not checked', owner: false });
     assert.deepEqual(needRows({ tools: undefined }), []);
 });
 
@@ -71,7 +71,9 @@ test('saved settings that wait for a restart are one row; a local model\'s pendi
     assert.deepEqual(needRows({ settings: restartState() }), [], 'nothing pending: the row has left');
     const local = needRows({ settings: restartState({ local_model: { pending_keys: ['LOCAL_MODEL_PORT'] } }) });
     assert.deepEqual(local.map((row) => [row.kind, row.open, row.action, row.run]), [['local-model', 'models/local', 'Open', undefined]]);
-    assert.deepEqual(needRows({ settings: null }).map((row) => [row.kind, row.id, row.owner]), [['unread', 'settings', false]]);
+    // A settings document that could not be read is no line of the card: the rows it answers say it was not checked.
+    assert.deepEqual(needRows({ settings: null }), []);
+    assert.deepEqual(homeAnswers({ settings: null }).models, { text: 'Not checked', owner: false });
 });
 
 test('a row answers its fact, says when it was not read, and marks the owner\'s move', () => {
@@ -123,7 +125,7 @@ test('a row answers its fact, says when it was not read, and marks the owner\'s 
     for (const to of ['models', 'agents', 'rules', 'permissions', 'tools', 'page:skills', 'dashboard:storage', 'dashboard:costs', 'dashboard:updates']) {
         assert.equal(failed[to].text, 'Not checked', to);
     }
-    assert.equal(homeAnswers({ settings, accounts: accounts([account('codex', 'a', 'passed')], 'not_read') }).accounts.text, 'Accounts not checked, 2 API keys');
+    assert.equal(homeAnswers({ settings, accounts: accounts([account('codex', 'a', 'passed')], 'not_read') }).accounts.text, '2 API keys');
     // A sign-in is the owner's move on the row too, only over what was read.
     const signIn = (read) => homeAnswers({ settings, accounts: accounts([account('codex', 'a', 'failed')], read) }).accounts.owner;
     assert.deepEqual([signIn('ok'), signIn('not_read'), answers.accounts.owner], [true, false, false]);
@@ -177,18 +179,20 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
     assert.deepEqual(statusReads, [], 'the accounts store is read as it stands, never asked');
     assert.equal(store.subscriberCount, 1);
     assert.equal(store.polling, false, 'the home is no visible surface of the store: it arms no poll');
-    // The card: an accounts facet nobody read is a neutral row with its Check, and nothing claims that nothing waits.
+    // The card: an accounts facet nobody read is no line of it (no Check that would read or wake), and nothing claims
+    // that nothing waits.
     const card = content.querySelector('[data-settings-card]');
-    assert.deepEqual(card.querySelectorAll('[data-needs]').map((row) => [row.dataset.needs, row.dataset.needId]), [['unread', 'accounts']]);
+    assert.deepEqual(card.querySelectorAll('[data-needs]').map((row) => [row.dataset.needs, row.dataset.needId]), []);
+    assert.equal(card.querySelector('[data-need-action]'), null);
     assert.equal(card.querySelector('[data-being-state]').textContent, 'Online');
     assert.equal(card.querySelector('[data-being-count]').hidden, true);
     assert.doesNotMatch(card.textContent, /nothing/i);
     const answer = (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-answer]').textContent;
-    assert.deepEqual(['models', 'rules', 'page:skills', 'dashboard:storage', 'tools'].map(answer), ['glm-5.3', 'Empty', '1 installed', 'Not measured', 'No MCP servers']);
-    // Check on the unread accounts row is the owner's press: one read of the status, still no wake.
-    await content.fire('click', { target: card.querySelector('[data-need-action]') });
+    // The Accounts row says nothing it did not read: no count of accounts, and no keys from a document that lists none.
+    assert.deepEqual(['models', 'rules', 'page:skills', 'dashboard:storage', 'tools', 'accounts'].map(answer),
+        ['glm-5.3', 'Empty', '1 installed', 'Not measured', 'No MCP servers', '']);
     await settle();
-    assert.deepEqual(statusReads, ['/api/claudexor/status']);
+    assert.deepEqual(statusReads, [], 'still no read of the status and no wake');
 });
 
 test('a page reads when it is shown, not when Settings is', async (t) => {
@@ -253,7 +257,7 @@ test('a door pressed inside Settings leads back to it: a Dashboard tab by its pa
     await settle();
     const homeEl = content.querySelector('[data-settings-home]');
     const press = async (to) => { await homeEl.fire('click', { target: homeEl.querySelector(`[data-settings-open="${to}"]`) }); await settle(); };
-    const backOf = (page) => page.querySelector('.settings-back-row');
+    const backOf = (page) => page.querySelector('.dashboard-back');
 
     // A Dashboard tab: the path the door was pressed on travels with it, and the tab draws the row.
     await press('dashboard:costs');
@@ -274,7 +278,7 @@ test('a door pressed inside Settings leads back to it: a Dashboard tab by its pa
     // Skills: under the header and its tabs, above the page's own first part.
     await press('page:skills');
     assert.deepEqual(skills.children.map((part) => part.className),
-        ['app-page-header', 'app-page-tabs', 'settings-back-row dashboard-back', 'skills-search-chrome', 'skills-scroll']);
+        ['app-page-header', 'app-page-tabs', 'dashboard-back', 'skills-search-chrome', 'skills-scroll']);
     // Leaving that page any other way drops the row.
     env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'files' } }));
     assert.equal(backOf(skills), null);

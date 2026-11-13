@@ -13,7 +13,7 @@ import { initSettings } from '../modules/settings.js';
 import { isDoorId } from '../modules/settings_home.js';
 import { registerSettingsPage, settingsPageFor, settingsPagePrefixes } from '../modules/settings_pages.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from '../modules/settings_rows.js';
-import { settle, world } from './helpers/settings_dom.js';
+import { Stub, settle, world } from './helpers/settings_dom.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const DOORS = new Set([...HOME_ROWS.map((row) => row.to).filter(isDoorId), 'main:context']);
@@ -146,8 +146,20 @@ test('an address no page registers lands on the home with its last part searched
     assert.deepEqual(pages(), ['test-known']);
 });
 
+// The fixture's element, also reading a selector of two parts (`A B`, a descendant) as a browser does: Back now stands in
+// the page's header (79fac1cf4), found there as `.app-page-header [data-settings-back]` (web/modules/settings.js).
+class DescendantStub extends Stub {
+    querySelectorAll(selector) {
+        const parts = selector.trim().split(/\s+/);
+        if (parts.length !== 2 || selector.includes(',')) return super.querySelectorAll(selector);
+        const found = new Set(super.querySelectorAll(parts[0]).flatMap((outer) => outer.querySelectorAll(parts[1])));
+        return super.querySelectorAll(parts[1]).filter((node) => found.has(node));
+    }
+}
+
 test('a page left with unsaved words is put aside and comes back as it was left; without them it is let go and drawn anew', async (t) => {
-    const { content, state, showPage } = world(t);
+    const { env, content, state, showPage } = world(t);
+    env.document.createElement = (tag) => new DescendantStub(tag);
     const drawn = [];
     const letGo = [];
     let unsaved = false;
@@ -172,7 +184,7 @@ test('a page left with unsaved words is put aside and comes back as it was left;
     await controls.open('test-editor');
     await settle();
     assert.deepEqual([pages(), drawn.length, words().getAttribute('value')], [['test-editor'], 1, 'typed']);
-    assert.equal(content.querySelector('[data-settings-back-to]').textContent, 'Settings');
+    assert.equal(content.querySelector('[data-settings-back]').getAttribute('aria-label'), 'Back to Settings');
 
     // Saved or discarded, the page is let go when it is left and drawn anew the next time.
     unsaved = false;
