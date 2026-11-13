@@ -7,7 +7,7 @@ import test from 'node:test';
 import '../modules/settings.js';
 import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
 import { applyMcpSettings, collectMcpSettings } from '../modules/mcp_settings.js';
-import { MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, fallbackBody, fallbackEntries, roleBody, routeWords, slotWaitSeconds,
+import { MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, fallbackBody, fallbackEntries, roleBody, routeWords,
     writeModelKeys } from '../modules/model_roles.js';
 import { MODEL_PROCESSING_PREFERENCES_KEY } from '../modules/route_editor_primitives.js';
 import { forgetSettingRows, outcomeLine, readSettings } from '../modules/settings_controls.js';
@@ -32,7 +32,7 @@ const VALUES = {
     [MODEL_ACCOUNTS_KEY]: { main: 'studio-01', vision: 'studio-02' }, [MODEL_CONTEXT_KEY]: { light: 64000, fallback: [0, 128000, 0] },
     [MODEL_PROCESSING_PREFERENCES_KEY]: { consciousness: 'economy' },
     OUROBOROS_WEBSEARCH_BACKEND: 'auto', OUROBOROS_WEBSEARCH_MODEL: '', OUROBOROS_CONTEXT_MODE: 'max', OUROBOROS_IMAGE_INPUT_MODE: 'auto',
-    OUROBOROS_PROCESSING_PREFERENCE: '', OUROBOROS_PROMPT_CACHE_TTL: '1h', OUROBOROS_MODEL_MAX_CONCURRENCY: 3, OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC: 45,
+    OUROBOROS_PROCESSING_PREFERENCE: '', OUROBOROS_PROMPT_CACHE_TTL: '1h', OUROBOROS_MODEL_MAX_CONCURRENCY: 3,
     OPENAI_API_KEY: 'sk-...', ANTHROPIC_API_KEY: 'sk-...', OPENROUTER_API_KEY: 'sk-...',
 };
 const EFFECT_OF = (key) => (key.startsWith('LOCAL_MODEL_') ? 'local_model' : key.startsWith('MCP_') ? 'now'
@@ -129,7 +129,7 @@ test('the Tools list: the client switch is a plain row, each server is a head wi
     assert.equal(inside(slack, '[data-entry-sign-in]').textContent, 'Sign in');
     assert.equal(inside(head(page.container, 'files'), '[data-entry-sign-in]'), null);
     assert.equal(inside(slack, '[data-entry-switch]').hasAttribute('checked'), true);
-    assert.equal(lead(), 'All tool servers are off. Their settings are kept.', 'the client\'s switch changes what the status says');
+    assert.equal(lead(), 'All MCP servers are off. Their settings are kept.', 'the client\'s switch changes what the status says');
     // Pressing a head opens that server's page; Add opens the unsaved one.
     await page.press(inside(slack, '[data-entry-open]'));
     await page.press(page.container.querySelector('[data-tools-add]'));
@@ -356,23 +356,44 @@ test('the Models list shows each role\'s route in the picture\'s order, and the 
     const page = await open(t, 'models');
     assert.deepEqual(page.container.querySelectorAll('[data-entry-id]').map((node) => node.dataset.entryId),
         ['main', 'fallback/1', 'fallback/2', 'fallback/3', 'light', 'vision', 'consciousness', 'safety', 'websearch']);
-    assert.match(head(page.container, 'main').textContent, /Main model.*gpt-main.*Codex subscription · account studio-01/s);
+    // The role's name is the card's title above its one row: the model, then the source (79fac1cf4, model_roles.js).
+    const mainCard = page.container.querySelector('[data-setting-row="models:main"]');
+    assert.equal(inside(mainCard, '.settings-card-title').textContent, 'Main model');
+    assert.match(head(page.container, 'main').textContent, /gpt-main.*Codex subscription · account studio-01/s);
     assert.match(head(page.container, 'fallback/2').textContent, /2.*kimi.*OpenRouter · by API key/s);
     const value = (id) => inside(page.container.querySelector(`[data-setting-row="${id}"]`), '[data-row-value]')?.textContent;
     assert.deepEqual(['light', 'safety', 'vision', 'consciousness', 'websearch'].map((slot) => value(`models:${slot}`)),
         ['gpt-light', 'Light model', 'Main model', 'Main model', 'Auto']);
     assert.deepEqual(rowsOf('models', { fold: false }).map((row) => row.id), ['OUROBOROS_IMAGE_INPUT_MODE', 'models:context', 'models:local', 'models:catalogue']);
     assert.deepEqual(rowsOf('models', { fold: true }).map((row) => row.id), ['OUROBOROS_PROCESSING_PREFERENCE', 'OUROBOROS_PROMPT_CACHE_TTL', 'OUROBOROS_MODEL_MAX_CONCURRENCY']);
-    assert.match(page.container.querySelector('[data-setting-row="OUROBOROS_MODEL_MAX_CONCURRENCY"]').textContent, /waits up to 45 s/);
-    // The catalogue is an action of its row, with its own result beside it; it is read when the page is shown.
+    // A request over the limit waits in line and is never sent elsewhere for waiting: the queue names no clock of its own.
+    const limit = page.container.querySelector('[data-setting-row="OUROBOROS_MODEL_MAX_CONCURRENCY"]').textContent;
+    assert.match(limit, /waits in line until a slot frees.*never sent elsewhere for waiting/s);
+    assert.doesNotMatch(limit, /waits up to|\{wait\}/);
+    // The catalogue is an action of its row, with its own result beside it; it is read at the owner's first touch of
+    // the page after each showing of its own path, never because the page was merely shown (Settings lands on Models).
     const catalogue = page.container.querySelector('[data-setting-row="models:catalogue"]');
     assert.equal(inside(catalogue, '#btn-refresh-model-catalog').textContent, 'Read again');
     assert.ok(inside(catalogue, '#settings-model-catalog-status'));
-    assert.equal(page.calls.filter((url) => url === '/api/model-catalog').length, 0, 'not read before the page is shown');
-    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'tools' } });
+    const catalogueReads = () => page.calls.filter((url) => url === '/api/model-catalog').length;
+    assert.equal(catalogueReads(), 0, 'not read before the page is shown');
     page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
     await settle();
-    assert.equal(page.calls.filter((url) => url === '/api/model-catalog').length, 1, 'read once, for its own path');
+    assert.equal(catalogueReads(), 0, 'a page merely shown reads nothing but settings');
+    await page.container.fire('pointerdown', { target: catalogue });
+    await page.container.fire('focusin', { target: catalogue });
+    await settle();
+    assert.equal(catalogueReads(), 1, 'read once at the first touch');
+    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'tools' } });
+    await settle();
+    await page.container.fire('pointerdown', { target: catalogue });
+    await settle();
+    assert.equal(catalogueReads(), 1, 'another page being shown is not a new showing of this one');
+    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
+    await settle();
+    await page.container.fire('focusin', { target: catalogue });
+    await settle();
+    assert.equal(catalogueReads(), 2, 'read again at the first touch after its own path is shown again');
     // The door shows the install's Context and leads to Main; it never writes it.
     const door = page.container.querySelector('[data-setting-row="models:context"]');
     assert.deepEqual([rowById('models:context').keys, rowById('models:context').control], [[], { kind: 'door', to: 'main:context' }]);
@@ -436,13 +457,12 @@ test('the fallbacks\' order and removal are written on the list: the order throu
     assert.match(page.container.querySelector('[data-entry-result]').textContent, /^Removed/);
 });
 
-test('a route is said in the owner\'s words, and the slot wait keeps its bounds', () => {
+test('a route is said in the owner\'s words', () => {
     assert.deepEqual(routeWords('claudexor::codex=gpt-x'), { name: 'gpt-x', mark: 'codex', source: 'Codex subscription · your accounts in turn' });
     assert.equal(routeWords('anthropic@work::claude-opus').source, 'Anthropic (work) · by API key');
     assert.equal(routeWords('google/gemini-pro').name, 'gemini-pro');
     assert.deepEqual(routeWords('', { follows: 'Light' }), { name: 'Light model', source: '', mark: '', follows: true });
     assert.equal(routeWords('openai::x', { local: true }).name, 'Local model');
-    assert.deepEqual([slotWaitSeconds('45'), slotWaitSeconds(-3), slotWaitSeconds(''), slotWaitSeconds('soon')], [45, 0, 180, 180]);
 });
 
 test('a saved local-model setting says it applies when the local model is restarted, never a restart of Ouroboros', async (t) => {

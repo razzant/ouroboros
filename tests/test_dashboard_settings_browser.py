@@ -257,7 +257,7 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     around = page.locator('#page-dashboard [data-cx-settings] > section[aria-label="Around it"] [data-setting-door]')
     assert [" ".join(text.split()) for text in around.evaluate_all(
         "(doors) => doors.map((door) => [door.querySelector('.ui-row-title').textContent, door.querySelector('[data-row-value]')?.textContent ?? ''].join(' | '))")] == [
-        "Thinks with | Main model", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
+        "Model | Main model", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
     # The Safety door opens its row's page in Settings, whose Back names this tab and returns to it.
     page.click(row("consciousness-safety"))
     back = page.locator('#page-settings [data-settings-page="permissions"] [data-settings-back]')

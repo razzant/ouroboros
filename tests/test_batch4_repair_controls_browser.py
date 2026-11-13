@@ -112,7 +112,7 @@ def test_failed_admission_reload_retry_and_tree_pause_consumers(tmp_path, monkey
                 child = page.locator('.activity-row').filter(has=page.locator('[data-id="child"]'))
                 root = page.locator('.activity-row').filter(has=page.locator('[data-id="pausing-root"]'))
                 expect(child.locator('.activity-sub')).to_have_text('Pausing…')
-                expect(root.locator('.activity-sub')).to_have_text('Paused · 1 helper still working')
+                expect(root.locator('.activity-sub')).to_have_text('Paused · 1 subagent still working')
                 for door in ('header-restart', 'settings-restart'):
                     page.locator('#' + door).click()
                     expect(page.get_by_text('1 task is still pausing', exact=False)).to_be_visible()

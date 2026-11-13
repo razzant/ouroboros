@@ -31,34 +31,31 @@ test('rows render from the registry, in order, with the label verbatim and the i
     const ids = [...rows.matchAll(/data-nav-page="([a-z]+)"/g)].map((m) => m[1]);
     assert.deepEqual(ids, ['circles', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
     const main = renderNavRow(pageById('chat'));
-    assert.match(main, /^<button class="nav-row nav-row-main" type="button" data-nav-page="chat" title="Main Ouroboros chat">/);
-    // Main's row carries its room's one status mark after the label (app.js paints it, at rest it is hidden) and the
-    // mark's words for readers, which the interface language's overlay leaves to their own translation.
-    assert.ok(main.endsWith(`<span class="nav-row-label">Main Chat</span><span class="nav-row-words" data-i18n-skip></span><span class="nav-mark-slot">${statusMarkHtml('nav-mark')}</span></button>`));
+    // Main's place is this Ouroboros's own card (owner 12.11, fifth round): its picture instead of the chat icon, its
+    // name with the place's label, Main's count and its room's one status mark (app.js paints it, at rest hidden), the
+    // mark's words for readers, which the interface language's overlay leaves to their own translation, and under them
+    // the line of what Main is doing now.
+    assert.match(main, /^<button class="nav-row nav-row-main nav-ouro" type="button" data-nav-page="chat" title="Main Ouroboros chat">/);
+    assert.equal(main, '<button class="nav-row nav-row-main nav-ouro" type="button" data-nav-page="chat" title="Main Ouroboros chat">'
+        + '<span class="nav-ouro-ava" aria-hidden="true"></span>'
+        + '<span class="nav-ouro-text"><span class="nav-ouro-line1">'
+        + '<span class="nav-ouro-name" data-i18n-skip>Ouroboros</span>'
+        + `<span class="nav-row-label">Main Chat</span><span class="nav-row-words" data-i18n-skip></span><span class="nav-mark-slot">${statusMarkHtml('nav-mark')}</span></span>`
+        + '<span class="nav-ouro-work" data-i18n-skip hidden></span></span></button>');
     assert.match(statusMarkHtml('nav-mark'), /aria-hidden="true" data-shape="none" data-hue="ink" hidden>/);
-    assert.equal((main.match(/<svg/g) || []).length, 1);
-    assert.ok(main.includes(PAGE_ICONS.chat));
+    assert.equal((main.match(/class="nav-ouro-ava"/g) || []).length, 1, 'the card shows its picture once');
+    assert.equal((main.match(/<svg/g) || []).length, 0, 'the picture stands where the chat icon was');
     const files = renderNavRow(pageById('files'));
     assert.doesNotMatch(files, /nav-row-main|status-mark|nav-row-words/, 'a tool has no status of its own');
     assert.match(files, /<span class="nav-row-label">Files<\/span><\/button>$/);
     assert.match(renderNavRow({ id: 'x', label: '<b>', icon: 'none', zone: 'foot' }), /title="&lt;b&gt;".*>&lt;b&gt;</);
 });
 
-test('the Projects header keeps the hooks the shell reads and uses the shared glyphs', () => {
+test('the Projects header is the New project button alone, with the shell\'s plus glyph', () => {
+    // Owner 13.11: no "Projects" word, no collapse, no unread total of the Projects; the row is Find a project
+    // (projects_nav.js puts the field first) and "+" at its end. The id is the hook app.js reads.
     const html = renderProjectsHeader();
-    for (const id of ['nav-projects-toggle', 'nav-projects-count', 'nav-projects-add']) {
-        assert.ok(html.includes(`id="${id}"`), id);
-    }
-    // The toggle is the word and its chevron; its facts (the unread count, then the Projects' one status mark, which
-    // app.js paints) follow "+" in Main's number and mark columns, outside the button and hidden from readers, whose
-    // name of the toggle carries their words (owner Q1 = B).
-    assert.ok(html.includes(`<span class="nav-row-label">Projects</span><span class="nav-chevron" aria-hidden="true">`));
-    assert.ok(html.includes(`</button><span class="nav-projects-facts" aria-hidden="true"><span id="nav-projects-count" class="nav-row-meta"></span>`
-        + `<span class="nav-mark-slot">${statusMarkHtml('nav-mark')}</span></span>`));
+    assert.equal(html, `<button id="nav-projects-add" class="nav-projects-add" type="button" title="New project" aria-label="New project">${SHELL_ICONS.plus}</button>`);
+    assert.doesNotMatch(html, /nav-projects-toggle|nav-projects-count|nav-projects-facts|nav-chevron|status-mark|aria-expanded/);
     assert.doesNotMatch(html, /nav-activity-marker|chat-live-typing|nav-projects-activity/);
-    assert.match(html, /aria-expanded="true" aria-controls="nav-projects-list"/);
-    assert.ok(html.includes(PAGE_ICONS.projects));
-    assert.ok(html.includes(`<span class="nav-chevron" aria-hidden="true">${SHELL_ICONS.chevron}</span>`));
-    assert.ok(html.includes(`aria-label="New project">${SHELL_ICONS.plus}</button>`));
-    assert.match(html, /<span class="nav-row-label">Projects<\/span>/);
 });

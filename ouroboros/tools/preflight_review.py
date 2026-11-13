@@ -7,7 +7,7 @@ reuse, its budget and its ceiling. A ``surface=preflight`` record never answers 
 commit panel (the reuse key carries the surface). ``deterministic_only`` keeps the
 free release metadata and labelled worktree book balance (``commit_gate.release_diagnostics``);
 ``advisory_review`` stays callable under the old name. ``review_status`` is the
-read-only diagnostic of commit attempts, open obligations and commit-readiness debt.
+read-only diagnostic of commit attempts and the checkout's preflight freshness.
 """
 
 from __future__ import annotations
@@ -41,18 +41,15 @@ def _handle_preflight_review(
                                  review_rebuttal=review_rebuttal)
 
 
-def _next_step(projection: Dict[str, Any]) -> str:
+def _next_step() -> str:
     from ouroboros.tools.review_helpers import cyber_review_authority
 
-    obligations = len(projection.get("open_obligations") or [])
-    carried = (f" {obligations} open obligation(s) from earlier blocked rounds ride into the next panel's brief."
-               if obligations else "")
     if cyber_review_authority():
         return ("Cyber Pro: whether and how to commit is your judgment; findings, missing evidence and pending "
-                "operations stay recorded, and this is not a PASS." + carried)
+                "operations stay recorded, and this is not a PASS.")
     return ("When the edits are complete, run commit_reviewed(commit_message='...'): the deterministic checks, "
             "the tests and the review panel run (the outcome returns before any commit); "
-            "preflight_reviewer='<enabled row>' optionally buys one early look first." + carried)
+            "preflight_reviewer='<enabled row>' optionally buys one early look first.")
 
 
 def _handle_review_status(
@@ -72,7 +69,7 @@ def _handle_review_status(
         # Read-only repair view of an unfinished projection, never a new handback for a blocked commit.
         from ouroboros.tools.review_change_custody import settled_record
         projection["selected_settled"] = settled_record(ledger_root(ctx), selected) is not None
-    payload = build_review_status_payload(projection, next_step=_next_step(projection), include_raw=include_raw)
+    payload = build_review_status_payload(projection, next_step=_next_step(), include_raw=include_raw)
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -114,13 +111,11 @@ _PREFLIGHT_DESCRIPTION = (
 
 _REVIEW_STATUS_DESCRIPTION = (
     "Read-only diagnostic of reviewed commits: the last commit attempt (reviewing/blocked/succeeded/failed) with "
-    "its block reason and guidance; open obligations from earlier blocking rounds (they ride into the next panel's "
-    "brief); open commit-readiness debt (`commit_readiness_debts`, `commit_readiness_debts_count`; a durable "
-    "anti-thrashing signal that `retry_anchor` names, never an admission gate); the checkout's newest "
-    "preflight look (`preflight`) and whether the worktree "
-    "moved since it (`stale_from_edit`, its editor when a tool recorded the edit); where this drive archives the "
-    "retired advisory lane's rows (`advisory_run_archive`, history only); and a next_step. Pass include_raw=true "
-    "for the targeted attempt's full per-actor evidence (triad_raw_results, scope_raw_result)."
+    "its block reason and guidance; the checkout's newest preflight look (`preflight`) and whether the worktree "
+    "moved since it (`stale_from_edit`, its editor when a tool recorded the edit); where this drive keeps the "
+    "retired advisory lane's and obligation layer's rows (`advisory_run_archive`, `obligation_archive`, history "
+    "only); and a next_step. Pass include_raw=true for the targeted attempt's full per-actor evidence "
+    "(triad_raw_results, scope_raw_result)."
 )
 
 

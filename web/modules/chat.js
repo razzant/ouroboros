@@ -1,7 +1,7 @@
 import { escapeHtmlAttr, isoMicros } from './utils.js';
 import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
-import { renderSkillIcon, strokeIcon } from './page_icons.js';
+import { fluentIcon, renderSkillIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
@@ -213,7 +213,7 @@ export function createChatInstance({
         <div id="chat-input-area">
             <div class="chat-input-wrap">
                 <button class="chat-scroll-bottom-btn ui-hit-area" id="chat-scroll-bottom" type="button" aria-label="Scroll to latest message" title="Scroll to latest message">
-                    ${strokeIcon('<path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/>', 16)}
+                    ${fluentIcon('arrow-down', 16, 'regular')}
                     <span class="chat-scroll-activity-dot" aria-hidden="true" hidden></span>
                 </button>
                 ${composerMarkup()}
@@ -230,6 +230,8 @@ export function createChatInstance({
         });
     }
     container.appendChild(page);
+    // ↓ latest stands on the capsule line, at its right end (style.css .chat-scroll-bottom-btn).
+    page.querySelector('.chat-toolbar-row')?.append(page.querySelector('.chat-scroll-bottom-btn'));
 
     const byId = (suffix) => page.querySelector(`[id="${idPrefix}-${suffix}"]`);
     const messagesDiv = byId('messages');

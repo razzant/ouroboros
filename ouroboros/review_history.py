@@ -9,7 +9,6 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
-from dataclasses import asdict
 from typing import Any
 
 
@@ -17,13 +16,12 @@ def _gap(reason: str, **source: Any) -> dict:
     return {"code": "REVIEW_HISTORY_SOURCE_UNAVAILABLE", "reason": reason, "source": source}
 
 
-def _attempts(drive_root: Any, repo_root: Any, task_id: str, *, state: Any = None) -> list:
+def _attempts(drive_root: Any, repo_root: Any, task_id: str) -> list:
     from ouroboros.review_state import _load_state_unlocked, make_repo_key
 
     if drive_root is None or repo_root is None or not task_id:
         return []
-    if state is None:
-        state = _load_state_unlocked(pathlib.Path(drive_root), strict_attempt_authority=True)
+    state = _load_state_unlocked(pathlib.Path(drive_root), strict_attempt_authority=True)
     key = make_repo_key(pathlib.Path(repo_root))
     # Exact task/repository identity, never the lifecycle reader's legacy fallback
     # and never root_task_id (a sibling task's paid budget is not its dispute).
@@ -120,12 +118,8 @@ def review_dispute_history(history: Any = (), *, drive_root: Any, repo_root: Any
     if isinstance(history, dict) and history.get("kind") == "review_dispute_history":
         return copy.deepcopy(history)
     rounds, gaps, seen_text, records, done, visiting, referenced = [], [], {}, {}, set(), set(), set()
-    state = None
     try:
-        from ouroboros.review_state import _load_state_unlocked, make_repo_key
-        if drive_root is not None and repo_root is not None:
-            state = _load_state_unlocked(pathlib.Path(drive_root), strict_attempt_authority=True)
-        attempts = _attempts(drive_root, repo_root, task_id, state=state)
+        attempts = _attempts(drive_root, repo_root, task_id)
     except (OSError, TypeError, ValueError) as exc:
         attempts = []
         gaps.append(_gap(f"attempt bindings could not be read ({type(exc).__name__})", task_id=task_id))
@@ -183,10 +177,6 @@ def review_dispute_history(history: Any = (), *, drive_root: Any, repo_root: Any
                     {"slot_id", "model", "model_id", "status", "text", "raw_text", "findings", "items"}}
                     for raw in row.triad_raw_results if isinstance(raw, dict)]})
     rounds.extend(copy.deepcopy(list(history or [])))
-    open_obligations = ([asdict(row) for row in state.get_open_obligations(repo_key=make_repo_key(pathlib.Path(repo_root)))]
-                        if state is not None else [])
-    open_ids = {row["obligation_id"] for row in open_obligations}
-    open_records = {row.review_record_id for row in attempts if open_ids.intersection(row.obligation_ids or [])}
     heads = [rid for rid in ids if rid not in referenced]
     from ouroboros.review_doctrine import history_author_fields
 
@@ -194,7 +184,7 @@ def review_dispute_history(history: Any = (), *, drive_root: Any, repo_root: Any
     for row in rounds:
         identity = {k: row[k] for k in ("review_record_id", "revision", "attempt", "subject") if k in row}
         role = ("current" if row.get("review_record_id") in heads else "historical")
-        if row.get("state") != "settled" or row.get("review_record_id") in open_records:
+        if row.get("state") != "settled":
             role = "open"
         for seat in row.get("reviewers") or []:
             for part, answer in (seat.get("answers") or {}).items():
@@ -210,8 +200,7 @@ def review_dispute_history(history: Any = (), *, drive_root: Any, repo_root: Any
                                   **history_author_fields(decision)})
     from ouroboros.review_history_view import canonical_decision_projection
     return canonical_decision_projection({"kind": "review_dispute_history", "status": "source_unavailable" if gaps else "complete",
-            "rounds": rounds, "decision_rows": decision_rows, "gaps": gaps,
-            "open_obligations": open_obligations, "record_heads": heads})
+            "rounds": rounds, "decision_rows": decision_rows, "gaps": gaps, "record_heads": heads})
 
 
 def retain_author_decision(drive_root: Any, record: dict, decision: dict) -> dict:
@@ -498,38 +487,23 @@ def wave_history_input(drive_root: Any, facts: dict, subject: dict, record_id: s
 
 # The prior-rounds section's own words beside the history it renders.
 _HISTORY_WORDS = {
-    "unreadable": ("\nREVIEW_HISTORY_SOURCE_UNAVAILABLE: durable obligations could not be read ({error}); source: "
-                   "{source}. The available history below is incomplete.\n"),
     "authored": "\n### Author's selected account of earlier review sources\n\n{view}\n",
     "index": "\n### Recorded review dispute index\n\n```json\n{index}\n```\n",
 }
 
 
-def render_history_with_obligations(history: Any, *, drive_root: Any, repo_root: Any, task_id: str = "") -> str:
-    """The prior-rounds section with the repository's durable open obligations
-    (anti-thrashing across restarts) — the ONE owner for every brief that carries
-    history: the gate's packet, the retrieving seats' brief and the public builder,
-    so a brief rebuilt outside the gate reads the history the seat was sent.
-    Unreadable state is a source gap beside the available history, never a
-    claim that the durable obligations are empty. This is not a verdict gate."""
-    open_obligations: list = []
-    gap = ""
-    if drive_root is not None and repo_root is not None:
-        try:
-            from ouroboros.review_state import _load_state_unlocked, make_repo_key
-
-            state = _load_state_unlocked(pathlib.Path(drive_root), strict_attempt_authority=True)
-            open_obligations = state.get_open_obligations(repo_key=make_repo_key(pathlib.Path(repo_root)))
-        except Exception as exc:
-            gap = _HISTORY_WORDS["unreadable"].format(
-                error=type(exc).__name__, source=pathlib.Path(drive_root) / "state/advisory_review.json")
+def render_review_history(history: Any, *, drive_root: Any, repo_root: Any, task_id: str = "") -> str:
+    """The prior-rounds section — the ONE owner for every brief that carries history: the gate's packet,
+    the retrieving seats' brief and the public builder, so a brief rebuilt outside the gate reads the
+    history the seat was sent. This task's earlier rounds on this checkout reach the next wave as
+    recorded; an unreadable source is a gap in the index, never an empty history. Not a verdict gate."""
     dispute = review_dispute_history(history, drive_root=drive_root, repo_root=repo_root, task_id=task_id)
     comparison = dispute.get("comparison")
     if task_id and drive_root is not None:
         from ouroboros.review_history_view import selected_review_history
         dispute = selected_review_history(dispute, drive_root=drive_root, task_id=task_id)["history"]
     from ouroboros.tools.review_helpers import build_review_history_section
-    section = build_review_history_section(dispute["rounds"], open_obligations=open_obligations)
+    section = build_review_history_section(dispute["rounds"])
     if dispute.get("authored_view"):
         section += _HISTORY_WORDS["authored"].format(view=json.dumps(dispute["authored_view"], ensure_ascii=False,
                                                                      sort_keys=True))
@@ -537,7 +511,7 @@ def render_history_with_obligations(history: Any, *, drive_root: Any, repo_root:
         section += _HISTORY_WORDS["index"].format(index=json.dumps({
             "status": dispute["status"], "decision_rows": dispute["decision_rows"], "gaps": dispute["gaps"]},
             ensure_ascii=False, sort_keys=True, default=str))
-    return gap + section + render_comparison(comparison)
+    return section + render_comparison(comparison)
 
 
 def review_decision_aliases(history: dict, entry: dict) -> list[tuple[list, Any]]:

@@ -44,12 +44,12 @@ test('the control mounts after the context capsule, closed: ring, name and the r
     assert.deepEqual(m.control.shown(), { min: 1, rec: 2, max: 3 }, 'the default before the first /api/state');
     assert.equal(m.el.dataset.known, 'false');
     assert.equal(m.handles.rec.getAttribute('aria-valuetext'), 'Medium');
-    assert.equal(m.head.getAttribute('aria-label'), 'Primary effort: Medium; helpers Low–High.', 'the closed button says the state, not just "Effort"');
+    assert.equal(m.head.getAttribute('aria-label'), 'Primary effort: Medium; subagents Low–High.', 'the closed button says the state, not just "Effort"');
     assert.ok(!m.head.title, 'no hover-only title: the hint says it on every surface');
     const hint = m.el.querySelector('.ui-hint');
     assert.equal(m.head.getAttribute('aria-describedby'), hint.id, 'a reader hears the hint as the description');
     assert.deepEqual([hint.hidden, ...['word', 'text', 'rule'].map((part) => hint.querySelector(`.ui-hint-${part}`).textContent)],
-        [true, 'Medium', 'Primary effort; helpers between Low and High.', CHANGE_RULE], 'closed, the hint waits with its words');
+        [true, 'Medium', 'Primary effort; subagents between Low and High.', CHANGE_RULE], 'closed, the hint waits with its words');
     assert.match(m.el.querySelector('[data-ring-band]').getAttribute('d'), /^M[\d.]+ [\d.]+ A70 70 0 0 1 /);
     assert.equal(m.segs.length, 7);
     // The strip is the seven levels alone: no title word of its own, no separator element, no reset button.

@@ -415,7 +415,7 @@ def test_coupling_history_keeps_all_rounds_and_structured_ids():
         }
         for idx in range(1, 5)
     ]
-    out = build_review_history_section(history, open_obligations=None)
+    out = build_review_history_section(history)
     assert "Round 1" in out and "Round 4" in out
     assert "⚠️ OMISSION NOTE" not in out
     assert "obligation=obl-001" in out

@@ -236,7 +236,7 @@ test('a refusal keeps the typed text and says the server\'s sentence; a value re
     assert.equal(view.line(ALLOWANCE), '', 'an edit of the row ends its result');
 });
 
-test('the model concurrency row refuses a fraction and accepts zero, negative and positive whole numbers', async (t) => {
+test('the model concurrency row refuses a fraction and accepts zero, negative and positive whole numbers, and a blank', async (t) => {
     const row = rowById('OUROBOROS_MODEL_MAX_CONCURRENCY');
     const { server, view } = await start(t, [row, TOTAL], { values: { [row.id]: 3 } });
     await view.type(row, '2.5');
@@ -248,6 +248,19 @@ test('the model concurrency row refuses a fraction and accepts zero, negative an
         assert.deepEqual(server.posts.at(-1), { [row.id]: value });
         assert.match(view.line(row), /^Saved/);
     }
+    // Not set is a value of this row (no limit for API models, 3 for a local one): a blank is sent, never refused,
+    // and the field says so where it is empty. Money beside it still refuses a blank.
+    await view.type(row, '');
+    assert.deepEqual(server.posts.at(-1), { [row.id]: '' });
+    assert.match(view.line(row), /^Saved.*was 7/);
+    assert.equal(view.field(row).getAttribute('placeholder'), 'Not set');
+    assert.match(view.meta(row), /Not set: no limit for API models, 3 for the built-in local model\. 0 or less: no limit for either\./);
+    // Room for its own word goes to this row alone: a row with a "No limit" button keeps its fixed width.
+    assert.match(settingsRow(row, {}), / size="8"/);
+    assert.doesNotMatch(settingsRow(rowById('OUROBOROS_MAX_WORKERS'), {}), / size="/);
+    const posts = server.posts.length;
+    await view.type(TOTAL, '');
+    assert.equal(server.posts.length, posts, 'a number with no word for empty still refuses a blank');
     await view.type(TOTAL, '250.5');
     assert.deepEqual(server.posts.at(-1), { TOTAL_BUDGET: 250.5 }, 'money still accepts a fraction');
 });

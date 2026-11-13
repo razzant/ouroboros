@@ -1489,10 +1489,10 @@ def build_verification_ledger(
             "errors": artifact_bundle.get("errors") or [],
         })
     review = review_evidence or {}
-    for key in ("critical_findings", "advisory_findings", "open_obligations"):
+    for key in ("critical_findings", "advisory_findings"):
         items = review.get(key)
         if isinstance(items, list) and items:
-            status = "failed" if key in {"critical_findings", "open_obligations"} else "partial"
+            status = "failed" if key == "critical_findings" else "partial"
             entries.append({
                 "kind": "review",
                 "category": key,

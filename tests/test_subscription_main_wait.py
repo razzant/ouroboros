@@ -113,7 +113,8 @@ def test_native_account_repair_rebinds_real_physical_candidate_before_send(main_
     dispatched = dispatched_attempts(ctx.drive_root)
     assert dispatched[0]["physical_context"]["route_fp"] == "capacity-account-a"
     assert dispatched[1]["physical_context"]["route_fp"] == "capacity-account-b"
-    assert dispatched[1]["physical_context"]["capacity_total_tokens"] == 240_000
+    # The round's frame for a stated 240,000 total nothing has proved: less the reply floor, plus the reserve.
+    assert dispatched[1]["physical_context"]["capacity_total_tokens"] == 240_000 - 8_192 + 65_536
     assert observations[0]["model_route"] == ROUTE_B
     assert len(gateway.accepted_operations) == 2 and gateway.creates[0] != gateway.creates[1]
     resent = _without_context_facts(gateway.uploads[1][0]["messages"], physical=True)

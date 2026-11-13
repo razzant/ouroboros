@@ -15,7 +15,6 @@ from tests._usage_store_testing import attempt_rows_in_start_order
 
 def test_abandoned_receiver_does_not_release_physical_slot(tmp_path, monkeypatch, scope):
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
-    monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "30")
     sent, release = threading.Event(), threading.Event()
     outcome = {}
 
@@ -67,7 +66,6 @@ def test_capacity_timeout_records_no_dispatch_then_a_free_slot_sends(tmp_path, m
 
 def test_owner_pause_cancels_a_queued_sender_before_physical_dispatch(tmp_path, monkeypatch, scope):
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
-    monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "10")
     sends, outcome = [], {}
     wrapped = mc.limit_physical_send(ROUTE, lambda: sends.append(True) or {"answer": "ok"})
     with mc.model_call_slot("", route=ROUTE):

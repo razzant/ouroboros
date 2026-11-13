@@ -134,7 +134,7 @@ test('fields are labelled Source and wide Model, then Account, Effort and Access
     const labels = [...grid.matchAll(/class="ui-field available-subagent-field[^"]*">(\w[\w ]*?) </g)].map((m) => m[1]);
     assert.deepEqual(labels, ['Source', 'Model', 'Account', 'Reasoning effort', 'Access']);
     assert.match(grid, /available-subagent-field-model">Model /);
-    assert.match(grid, /<option value="full" selected>Full system access<\/option><option value="workspace_write">Working files<\/option>/);
+    assert.match(grid, /<option value="full" selected>Full system access<\/option><option value="workspace_write">Workspace write<\/option>/);
     assert.match(grid, />koshak \(not checked\)</, 'the labelled field names the account alone and keeps the saved pin');
     const order = ['available-subagent-route', 'available-subagent-purpose', 'data-subagent-meta', 'data-processing-details', 'data-subagent-details']
         .map((marker) => html.indexOf(marker));

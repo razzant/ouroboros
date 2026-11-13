@@ -70,6 +70,16 @@ class MainFitMeasurement:
     mode_cause: str = ""  # why ``rendered_mode`` is lower than it (``mode_cause``); "" when it is not
 
     @property
+    def probes_reply_reservation(self) -> bool:
+        """This request goes out inside the reply reservation of a stated total nothing has proved, measured on a
+        request this route answered: only the favourable reading (``WindowRecord.admitted``) admits it, so the
+        provider's size refusal of it is that reading's answer, whatever its words (owner 30.09: the host sends once
+        and records the provider's answer). A proved total and an input limit have no such band."""
+        usable, admitted = self.window.get("usable"), self.window.get("admitted")
+        return bool(self.anchor_input_tokens is not None and usable is not None and admitted is not None
+                    and usable < self.estimated_input_tokens <= admitted)
+
+    @property
     def reprojection_input_tokens(self) -> Optional[int]:
         """Carry the anchored input into the floor's estimator units, rounding conservatively.
 
@@ -177,7 +187,9 @@ def measure_main_fit(
     reading = int(plan.window_tokens or 0) if is_known(plan, require_fresh=True) else None
     current = resolve_window(plan, reserve, bound=plan.window_witness_bound,
                              accepted_input_tokens=accepted_input_tokens)
-    capacity = current.total_equivalent if current.usable is not None else None
+    # A round measures a request that exists: its capacity is the admitted line (``WindowRecord.admitted``) in the
+    # frame of consumers which subtract R, so the check, tool delivery, the passes and the facts line read one number.
+    capacity = current.admitted_equivalent if current.admitted is not None else None
     if capacity is None:
         reading = None
     raw_book = required_book_addition(plan, rendered_mode)
@@ -197,7 +209,7 @@ def measure_main_fit(
     goal = deficit + margin
     from ouroboros.context_view_facts import window_projection
     measurement = MainFitMeasurement(
-        window=window_projection(current),
+        window=window_projection(current, under_way=True),
         view_kind=plan.view_kind,
         route_fp=str(plan.route_fp or ""),
         round_id=str(round_id or ""),

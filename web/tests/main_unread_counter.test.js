@@ -1,5 +1,6 @@
-// Both sidebar numbers count the same thing (owner Q1 = B, 19.10.2026; DESIGN "Unread"): unread standalone
-// messages, Main's from its room revision against the shared read cursor, the Projects' summed over the rows.
+// Main's number and a Project row's unread fact count the same thing (owner Q1 = B, 19.10.2026; DESIGN "Unread"):
+// unread standalone messages, from the room's revision against the shared read cursor and what was read ahead
+// elsewhere. The Projects' summed total is gone with their heading (owner 13.11; commit 110cc7646).
 // app.js is a boot script, so the functions are lifted out of its source and run against stubbed module state.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -34,6 +35,9 @@ function liftLine(start) {
 
 // What the Projects list says of the rows it holds (projects_nav.js `unreadRows`): here the feed's, or those a case adds.
 const heldRows = (feed, beyond = []) => ({ unreadRows: () => [...(feed() || []).filter((row) => row._unread), ...beyond] });
+
+// What a Project row counts unread: app.js's `isUnread` (createProjectsNav, pinned below) is this number above zero.
+const rowUnread = (row, seen) => readAhead.unreadCount(row.visible_revision, seen?.[row.id], readAhead.readAheadFor(row.chat_id));
 
 function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
     const posts = [], badges = [], acks = [], landings = [];
@@ -216,25 +220,11 @@ test('a failed write changes nothing', async () => {
     assert.equal(h.context.state.mainSeenRevision, 6);
 });
 
-test('the Projects number sums the unread messages of the unread rows', () => {
-    const count = { textContent: '', title: '', attrs: {},
-        setAttribute(name, value) { this.attrs[name] = value; }, removeAttribute(name) { delete this.attrs[name]; } };
-    const context = vm.createContext({
-        ...readAhead,
-        navProjectsCount: count,
-        projectsNav: heldRows(() => context.lastProjectRows),
-        state: { projectSeenRevision: { a: 1, b: 4, c: 0 } },
-        lastProjectRows: [{ id: 'a', visible_revision: 4, _unread: true }, { id: 'b', visible_revision: 4, _unread: false },
-            { id: 'c', visible_revision: 2, _unread: true }, { id: 'd', visible_revision: 3, _unread: false }],
-    });
-    vm.runInContext(`${lift('paintProjectsCount')}\nglobalThis.paint = paintProjectsCount;`, context);
-    context.paint();
-    assert.equal(count.textContent, '5');
-    assert.equal(count.attrs['aria-label'], '5 unread messages in Projects');
-    context.lastProjectRows = [];
-    context.paint();
-    assert.equal(count.textContent, '');
-    assert.equal(count.attrs['aria-label'], undefined);
+test("a Project row is unread by the same count as Main's number: its revision, its cursor, what was read ahead", () => {
+    assert.ok(source.includes('isUnread: (row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0,'));
+    const seen = { a: 1, b: 4, c: 0 };
+    assert.deepEqual([{ id: 'a', visible_revision: 4 }, { id: 'b', visible_revision: 4 }, { id: 'c', visible_revision: 2 }]
+        .map((row) => rowUnread(row, seen)), [3, 0, 2]);
 });
 
 test('a message read in full in another room leaves the counts without moving a cursor', () => {
@@ -243,13 +233,9 @@ test('a message read in full in another room leaves the counts without moving a 
         const main = harness({ revision: 42, seen: 40 });
         assert.equal(main.api.mainUnreadCount(), 1);  // 41 still unread; 42 was read in its Project
         assert.equal(main.context.state.mainSeenRevision, 40);
-        const count = { textContent: '', title: '', attrs: {}, setAttribute() {}, removeAttribute() {} };
-        const context = vm.createContext({ ...readAhead, navProjectsCount: count, state: { projectSeenRevision: { nova: 1 } },
-            projectsNav: heldRows(() => context.lastProjectRows),
-            lastProjectRows: [{ id: 'nova', chat_id: 5551, visible_revision: 4, _unread: true }] });
-        vm.runInContext(`${lift('paintProjectsCount')}\nglobalThis.paint = paintProjectsCount;`, context);
-        context.paint();
-        assert.equal(count.textContent, '2');  // p1 and p2 unread; m3 read in Main
+        const seen = { nova: 1 };
+        assert.equal(rowUnread({ id: 'nova', chat_id: 5551, visible_revision: 4 }, seen), 2);  // p1 and p2 unread; m3 read in Main
+        assert.deepEqual(seen, { nova: 1 });
     } finally {
         readAhead.noteReadAhead({ read_ahead_revisions: {} });  // answers join (read_ahead.js): this resets nothing, later cases use other revisions
     }
@@ -259,15 +245,14 @@ test("another client's read reaches this one at its next state snapshot, a late 
     // The host as both clients share it: one client posts its shared read there; this client only polls state.
     const host = { main_seen_revision: 70, project_seen_revision: { nova: 1 }, read_ahead_revisions: {} };
     const answers = [];  // this client's preferences reads, answered when the test says (the network's order)
-    const count = { textContent: '', title: '', attrs: {}, setAttribute() {}, removeAttribute() {} };
+    const nova = { id: 'nova', chat_id: 7302, visible_revision: 4, _unread: true };
     const context = vm.createContext({
         ...readAhead,
-        navProjectsCount: count,
         projectsNav: heldRows(() => context.lastProjectRows),
         state: { mainVisibleRevision: 72, mainSeenRevision: 70, mainSeenLoaded: true, activePage: 'files',
             projectSeenRevision: { nova: 1 } },
         navState: { activeProjectId: null },
-        lastProjectRows: [{ id: 'nova', chat_id: 7302, visible_revision: 4, _unread: true }],
+        lastProjectRows: [nova],
         updateUnreadBadge() {}, paintProjectsNav() {}, patchProjectActivityMarkers() {}, acknowledgeMainAfterPaint() {},
         fetchJson: (url, init = {}) => new Promise((resolve) => {
             assert.equal(url, '/api/ui/preferences');
@@ -276,28 +261,25 @@ test("another client's read reaches this one at its next state snapshot, a late 
         }),
     });
     vm.runInContext(liftLine('let mainOpening') + ['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'enterMain',
-        'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen', 'paintProjectsCount'].map(lift).join('\n')
-        + '\nlet sharedSeenRead = null;\nglobalThis.api = { observeMainRevision, mainUnreadCount, paintProjectsCount };', context);
-    context.api.paintProjectsCount();
-    assert.deepEqual([context.api.mainUnreadCount(), count.textContent], [2, '3']);
+        'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen'].map(lift).join('\n')
+        + '\nlet sharedSeenRead = null;\nglobalThis.api = { observeMainRevision, mainUnreadCount };', context);
+    const counts = () => [context.api.mainUnreadCount(), rowUnread(nova, context.state.projectSeenRevision)];
+    assert.deepEqual(counts(), [2, 3]);
     const stale = JSON.parse(JSON.stringify(host));  // what an earlier read saw, before the other client read m3
     host.read_ahead_revisions = { 1: [[72, 72]], 7302: [[4, 4]] };  // the other client read m3 (Main 72, Nova 4)
     context.api.observeMainRevision(72);  // an ordinary snapshot: nothing new, Main still shows unread
     assert.equal(answers.length, 1, 'a snapshot that still shows unread reads the shared cursors again');
     answers.shift()();
     await flush();
-    assert.deepEqual([context.api.mainUnreadCount(), count.textContent], [1, '2'], 'm3 read once; p1, p2 and 71 stay');
+    assert.deepEqual(counts(), [1, 2], 'm3 read once; p1, p2 and 71 stay');
     readAhead.noteReadAhead({ ...stale, read_ahead_revisions: {} });  // an older answer arriving last
-    context.api.paintProjectsCount();
-    assert.deepEqual([context.api.mainUnreadCount(), count.textContent], [1, '2']);
+    assert.deepEqual(counts(), [1, 2]);
 });
 
 function snapshotHarness({ host, beyond = [], seen }) {
     const answers = [];
-    const count = { textContent: '', title: '', attrs: {}, setAttribute() {}, removeAttribute() {} };
     const context = vm.createContext({
         ...readAhead,
-        navProjectsCount: count,
         heldRows, beyond, forgetProjectPreviews,
         navState: { activeProjectId: null },
         state: { mainVisibleRevision: 90, mainSeenRevision: 90, mainSeenLoaded: true, activePage: 'files',
@@ -306,36 +288,39 @@ function snapshotHarness({ host, beyond = [], seen }) {
         updateUnreadBadge() {}, rooms: { forget() {} },  // every read names the projects going away (room_retire.js)
         fetchJson: () => new Promise((resolve) => { answers.push(() => resolve(JSON.parse(JSON.stringify(host)))); }),
     });
-    vm.runInContext(['renderProjectsNav', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen',
-        'paintProjectsCount'].map(lift).join('\n')
+    vm.runInContext(['renderProjectsNav', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen']
+        .map(lift).join('\n')
         + '\nlet sharedSeenRead = null, knownProjectsJson = null, lastProjectRows = null, projectActivityIndex = {};'
         + '\nconst projectsNav = heldRows(() => lastProjectRows, beyond);'
-        + '\nfunction paintProjectsNav() { paintProjectsCount(); }\nglobalThis.api = { renderProjectsNav };', context);
-    return { context, count, answers };
+        + '\nfunction paintProjectsNav() {}\nglobalThis.api = { renderProjectsNav, unreadRows: () => projectsNav.unreadRows() };', context);
+    // What each row the list holds unread counts, by id (an empty list: nothing unread).
+    const unread = () => Object.fromEntries(context.api.unreadRows()
+        .map((row) => [row.id, rowUnread(row, context.state.projectSeenRevision)]));
+    return { context, unread, answers };
 }
 
 test("a snapshot showing only a Project unread reads another client's record as well", async () => {
     const host = { main_seen_revision: 90, project_seen_revision: { vega: 2 }, read_ahead_revisions: { 7303: [[5, 5]] } };
-    const { context, count, answers } = snapshotHarness({ host, seen: { vega: 2 } });
+    const { context, unread, answers } = snapshotHarness({ host, seen: { vega: 2 } });
     context.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 5, lifecycle: 'active' }], [7303]);
-    assert.equal(count.textContent, '3');  // 3, 4 and 5: the other client read 5 in Main, this one does not know yet
+    assert.deepEqual(unread(), { vega: 3 });  // 3, 4 and 5: the other client read 5 in Main, this one does not know yet
     assert.equal(answers.length, 1, 'Main shows nothing unread: the Project row alone reads the shared cursors again');
     answers.shift()();
     await flush();
-    assert.equal(count.textContent, '2');
+    assert.deepEqual(unread(), { vega: 2 });
 });
 
 test("a room beyond the feed counts and asks after another client's read though the feed shows nothing unread", async () => {
     const host = { main_seen_revision: 90, project_seen_revision: { old: 3 }, read_ahead_revisions: {} };
     const old = { id: 'old', chat_id: 7304, visible_revision: 3 };
-    const { context, count, answers } = snapshotHarness({ host, beyond: [old], seen: { old: 1 } });
+    const { context, unread, answers } = snapshotHarness({ host, beyond: [old], seen: { old: 1 } });
     context.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 0, lifecycle: 'active' }], [7303, 7304]);
-    assert.equal(count.textContent, '2', 'revisions 2 and 3 of the room a complete list showed');
+    assert.deepEqual(unread(), { old: 2 }, 'revisions 2 and 3 of the room a complete list showed');
     assert.equal(answers.length, 1, 'that room alone reads the shared cursors again');
     context.beyond.length = 0;  // the room reads as read once its cursor has moved, as the list module would say
     answers.shift()();
     await flush();
-    assert.equal(count.textContent, '');
+    assert.deepEqual(unread(), {});
 });
 
 // Main shown from elsewhere, or pressed again (DESIGN "Unread"; #2911 composed with the return rule of 3 Nov 2026).

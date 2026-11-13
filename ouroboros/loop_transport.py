@@ -247,6 +247,24 @@ def continue_unknown_transport(episode: TransportWaitEpisode, *, llm: Any, tools
 PRIMARY_REFUSAL_KINDS = frozenset({"provider_transient", "rate_limit"})
 
 
+SLOT_WAITED_KEY = "_slot_waited_sec"  # a work's seconds in the install's own queue so far (its facts line states them)
+
+
+def slot_wait_note(emit_progress: Optional[Callable[[str], Any]], usage: Any = None) -> Callable[[float, bool], None]:
+    """What a send waiting in the install's own queue gives its work (``model_concurrency.slot_wait_notes``): the
+    words that nothing was sent or charged and the work keeps its model; and, when the send gets its slot, the
+    seconds it stood in line, added to the work's own count for its next facts line."""
+    def note(waited_sec: float, admitted: bool = False) -> None:
+        if admitted:
+            if isinstance(usage, dict):
+                usage[SLOT_WAITED_KEY] = float(usage.get(SLOT_WAITED_KEY) or 0.0) + waited_sec
+        elif emit_progress is not None:
+            waited = f"{waited_sec / 60.0:.0f} min so far; " if waited_sec >= 60 else ""
+            emit_progress("🌐 No local model slot is free under Requests at once per model — this request waits in "
+                          f"line ({waited}nothing sent, $0) and keeps its model.")
+    return note
+
+
 def primary_refusal_wait(ctx: Any, error_kind: str) -> bool:
     """A declared primary wait keeps temporary refusals on ordinary paced recovery."""
     return bool(getattr(ctx, "route_wait_on_primary", False) and error_kind in PRIMARY_REFUSAL_KINDS
@@ -271,7 +289,9 @@ def fallback_chain_allowed(
     stop nothing is there to wait for, so this run ends as interrupted (owner, 12.11). A context overflow
     reaches the configured routes only after the primary's own recovery ladder
     (``loop_model_call._recover_context_overflow``) left the round unanswered: the
-    candidates inherit the compacted view (owner decision 7A, rung f).
+    candidates inherit the compacted view (owner decision 7A, rung f). A send that found
+    no slot in the install's own queue (``model_concurrency``) never opens them: the model
+    did not fail, and a move would write the work's whole start on another route (owner, 13.11).
     """
     usage = accumulated_usage or {}
     if bool(getattr(ctx, "exact_model_route", False)):
@@ -281,8 +301,8 @@ def fallback_chain_allowed(
         # repeat with no usable response since): no paid candidate may dial over
         # it, whatever the last kind says.
         return False
-    if primary_refusal_wait(ctx, last_error_kind):
-        return False
+    if primary_refusal_wait(ctx, last_error_kind) or capacity_refusal(usage):
+        return False  # a chosen wait on the primary; the install's own full queue is no failure of the model
     if getattr(ctx, "route_wait_on_primary", False) and (
             last_error_kind in ("transport_unavailable", "provider_outcome_unknown", "content_filter")
             or usage.get("_last_llm_resource_refusal")):
@@ -434,8 +454,8 @@ def reconcile_transport_wait(
              "on the same primary with paced requests; prior attempt costs remain recorded." if refused else
              "🌐 Provider connection was lost after dispatch. The outcome and any unreported cost remain unknown. "
              "Waiting for connectivity, then continuing from saved work with a new attempt; another charge is possible."
-             if unknown else "🌐 No local model slot was free, so this request was not sent — waiting under Concurrent Requests "
-             "per Model and trying again automatically ($0)." if capacity_refusal(getattr(ctx, "_accumulated_usage", None)) else
+             if unknown else "🌐 No local model slot was free, so this request was not sent — waiting under Requests "
+             "at once per model and trying again automatically ($0)." if capacity_refusal(getattr(ctx, "_accumulated_usage", None)) else
              "🌐 The request did not reach the provider — waiting and redialing automatically (failed attempts are $0).")
             + ("" if interactive else " Stop cancels."),
             incident=None,
@@ -900,7 +920,7 @@ def _provider_terminal_text(
         kept = "" if interactive else " Any files written so far are preserved in the workspace."
         if capacity_refusal(accumulated_usage):  # the install's own limit stayed full, not a provider outage
             waited = f" after {waited_sec / 60.0:.1f} min of waiting" if waited_sec > 0 else ""
-            text = ("⚠️ Local model capacity stayed unavailable: no slot under Concurrent Requests per Model freed for "
+            text = ("⚠️ Local model capacity stayed unavailable: no slot under Requests at once per model freed for "
                     f"the last request, so it was not sent, and {subject} ended{waited} without completing.")
         elif waited_sec > 0:
             text = (f"⚠️ The request did not reach the provider; {subject} waited and redialed for {waited_sec / 60.0:.1f} "

@@ -186,3 +186,22 @@ test('layout.js reads the primary input through one door, and a covering room fr
     assert.equal(room('docked', 'coarse'), true, 'a finger: the Project in Main\'s place');
     assert.equal(room('stack', 'fine'), true, 'a phone-width window: the room fills the screen');
 });
+
+test('a section holds its list beside the page from a 40rem box, and only where the engine draws that', async () => {
+    const { sectionHoldsTwoPanes } = await import('../modules/layout.js');
+    const page = (width) => ({ getBoundingClientRect: () => ({ width }) });
+    // An engine: whether it has container queries, and its root font size (the Interface size).
+    const engine = (queries, fontSize = '16px') => ({
+        CSS: { supports: (property, value) => queries && property === 'container-type' && value === 'inline-size' },
+        getComputedStyle: () => ({ fontSize }),
+    });
+    const root = {};
+    assert.equal(sectionHoldsTwoPanes(page(640), { w: engine(true), root }), true);
+    assert.equal(sectionHoldsTwoPanes(page(639.9), { w: engine(true), root }), false, 'under 40rem: one column');
+    assert.equal(sectionHoldsTwoPanes(page(700), { w: engine(true, '20px'), root }), false, '40rem is 800 px at a 20 px root');
+    // The sheets draw two panes inside `@container sectionplace`; without container queries that rule never applies,
+    // so a module that assumed two panes would hide Back beside a list nobody sees.
+    assert.equal(sectionHoldsTwoPanes(page(1200), { w: engine(false), root }), false, 'no container queries: one column at every width');
+    assert.equal(sectionHoldsTwoPanes(page(1200), { w: {}, root }), true, 'a document that cannot say is a current engine');
+    assert.equal(sectionHoldsTwoPanes({}, { w: engine(true), root }), false, 'a box nobody can measure is one column');
+});

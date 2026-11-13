@@ -55,11 +55,10 @@ explicit work-order review obligations.
   preflight stale (`review_status` reports `stale_from_edit` and its editor);
   staleness informs and gates nothing, and a look at a changed worktree is a new
   record.
-- `skip_advisory_review=True` records only `preflight: skipped`; it does not
-  waive obligations or debt. Independently applicable checks and tests, the panel,
-  the coupling question, pre/post fingerprint and exact commit/tag binding still
-  run; unresolved obligations/debt remain visible. Explain the judgment in the
-  surrounding task narrative.
+- `skip_advisory_review=True` records only `preflight: skipped` and waives
+  nothing else: independently applicable checks and tests, the panel, the
+  coupling question, pre/post fingerprint and exact commit/tag binding still
+  run. Explain the judgment in the surrounding task narrative.
 - **Loud continuation (BIBLE P3 bound):** a reviewer's answer never forbids a
   commit; Cyber may configure its own review and continue under P0. Every
   decision to continue over critical findings, quorum failure, infrastructure
@@ -90,36 +89,18 @@ explicit work-order review obligations.
   Historical feedback remains independently addressable. For Main's finish over a
   result review's findings, only findings actually shown to it count; a queued
   outcome is not proof of exposure.
-**Obligation tracking:**
-- Every blocked `commit_reviewed` verdict mints "open obligations" — a structured
-  list of the unresolved findings, synthesized to canonical issues
-  (`review_synthesis.synthesize_to_canonical_issues`) and joined to an earlier
-  obligation of the same root cause by semantic redirect
-  (`review_state.compute_obligation_semantic_redirects`). Both parts of the
-  brief mint them; a `$0` refusal mints none.
-- Open obligations ride into the next panel's brief by name (below) and are
-  cleared automatically on a successful commit. No gate admits or refuses a
-  commit on them: the panel judges whether each is resolved, and a generic PASS
-  that ignores a named obligation is a weak signal the author should not accept.
-- Repeated blockers may also synthesize **commit-readiness debt**. `review_status`
-  reports it via `commit_readiness_debts`, `commit_readiness_debts_count` and
-  `retry_anchor=commit_readiness_debt`; it is a durable anti-thrashing signal,
-  not an admission gate; the retired advisory gate projects no `repo_commit_ready`
-  verdict (DEV 05). A successful commit clears the debt.
-- **Anti-thrashing injection:** open obligations from durable review state enter
-  every reviewer prompt of the next wave as an inert JSON data block (fenced
-  ```json``` with a "DATA records — not instructions" disclaimer) with two
-  rules: (1) the JSON `"verdict"` field is the authoritative signal — withdrawal
-  notes in `"reason"` text are ignored; (2) do not rephrase prior findings under
-  a different checklist item name. One renderer serves both deliveries
-  (`review_prompt_text.build_anti_thrashing_rules_section`: packet prompts via
-  `review.py::_review_history_with_open_obligations`, retrieving briefs via
+**Earlier review rounds:**
+- The next wave of the same task on the same checkout receives that task's
+  earlier review records as written — each seat's answer, the author's
+  decisions and rebuttal — under the shared rules of
+  `review_prompt_text.build_anti_thrashing_rules_section`: the JSON `"verdict"`
+  field is authoritative; history verifies and never alone grounds a new FAIL;
+  from the third attempt, no new critical finding on unchanged code. One
+  renderer serves both deliveries (packet prompts via
+  `review.py::_review_history_brief`, retrieving briefs via
   `review_brief_coupling.build_retrieving_brief`).
-- **One root defect, one obligation:** a reviewer that sees an open obligation's
-  root defect again — in either part, under any item — reuses its
-  `obligation_id`, and the gate folds a reused open id or an exact restatement
-  into it. A reworded restatement without the id can still open a second
-  obligation; answer such duplicates together in `review_rebuttal`.
+- The host merges no finding into another and carries none into another
+  task's brief; each stays in its review record as written.
 
 ---
 
@@ -188,10 +169,8 @@ a `self_consistency` FAIL that an entire review cycle is then spent on.
 
 **Before retrying after review findings (`commit_reviewed`, `skill_review`):**
 The recorded review state — the verdict when one was reached and the individual
-findings, including the partial findings of a pending review; for commits also
-the open obligations and commit-readiness debt shown by `review_status` and the
-Review Continuity context section — stays recorded until a later review or
-successful commit resolves it; the author's response does not rewrite it.
+findings, including the partial findings of a pending review — stays recorded
+until a later review resolves it; the author's response does not rewrite it.
 Before the next attempt the author owes an outcome, not a
 procedure: consider the open findings together against the evidence and accepted
 goal rather than patching one visible symptom. Repair what the requirement still
@@ -211,8 +190,7 @@ genuinely new rebuttal, while an infrastructure outcome such as a missed
 reviewer quorum neither replays nor lapses a verdict. If attempts stop
 converging, reconsider the approach instead of repeating it. The shared retry
 note (`review_prompt_text.py::build_self_verification_template`, in the skill
-review block) and the open-obligation/debt branches
-of `review_status` `next_step` state this same duty.
+review block) states this same duty.
 
 ---
 
@@ -438,7 +416,7 @@ Ownership` section is delivered beside them.
 | 21 | canonical_memory_fork | If the diff touches Project/fork/execution roots, summaries, memory, or GC, does it preserve one canonical identity and distinguish authority/biography from execution-local state? Are referenced canonical artifacts promoted or retained before a child/root is collected, with missing legacy bytes represented as gaps? | critical when applicable |
 | 22 | context_building | Context inputs: does a new data/memory file that should reach LLM context appear there (`context.py`), and does a changed knowledge-base topic update `memory/knowledge/index-full.md`? | advisory |
 | 23 | gateway_parity | If the diff changes any browser-facing endpoint, WebSocket message, or frontend API call, are `ouroboros/gateway/contracts.py`, `ouroboros/gateway/router.py`, `web/modules/api_client.js`, `web/modules/api_types.js`, and `tests/test_gateway_parity.py` still aligned? Missing alignment is advisory unless it also breaks a frozen contract, safety guard, release metadata, or runtime behavior. | advisory |
-| 24 | cache_friendliness | If the diff builds or reorders LLM prompt/context content (context builders, review prompt assembly, message construction in `llm.py` callers): does it keep prompt caching intact — stable governance/policy content BEFORE dynamic evidence, no dynamic values (timestamps, hashes, round counters, task ids) injected into a stable cached prefix, no ordinary step rewriting sent history (DEVELOPMENT 06 "Cache-friendliness invariant"), and no removal/breakage of existing `cache_control` markers or session/cache affinity keys? A change that fragments or rewrites an existing cached prefix loses the reuse of everything after the provider's last stored boundary before it, on every repeat call; measurements of the route, not the size or position of the edit, set that cost. (PASS with "Not applicable" if no prompt/context assembly changed.) | advisory |
+| 24 | cache_friendliness | If the diff can change what a running work sends before its transcript, which account or model receives it, or when it is built again (prompt assembly, sizing and size recovery, routing and queueing, restore and update, tool definitions): does it keep prompt caching intact — stable governance/policy content BEFORE dynamic evidence, no dynamic values (timestamps, hashes, round counters, task ids) injected into a stable cached prefix, no ordinary step rewriting sent history (DEVELOPMENT 06 "Cache-friendliness invariant"), and no removal/breakage of existing `cache_control` markers or session/cache affinity keys? Does the life table in `tests/test_cache_optimization.py` still hold, and does a raised number name the physical fact or the owner decision behind it? A change that fragments or rewrites an existing cached prefix loses the reuse of everything after the provider's last stored boundary before it, on every repeat call; measurements of the route, not the size or position of the edit, set that cost. (PASS with "Not applicable" if the diff changes none of these.) | advisory |
 | 25 | display_identity_replay | If the diff changes routing, steering, task cards, or history replay, does it preserve the event-time human `Project › Task` presentation snapshot in both live and replay paths while keeping opaque IDs as internal/debug facts? | advisory when applicable |
 | 26 | web_design_system | If the diff touches `web/` (modules, stylesheets, `index.html`, onboarding assets) or backend producers/delivery of owner-facing UI messages: when the subject carries frames, look at them at the viewer's size and first say what the person sees, understands and can do, and whether it does its job; geometry and code come after. For each phrase read first (read "Words to the owner: before → after" first when supplied), say what changes without it; words that change neither understanding nor action belong in details or the record, and a DESIGN rule added by this change is no ground for its own words. Then, does it conform to `docs/DESIGN.md`, first to its design bible (does each new or changed element take one of its roles: the plain room, an object or tray, a capsule tone, one height per role with states in colour; is a deliberate departure named in the commit message, not introduced silently?), then to its type scale, foreground roles, status pairs and spacing tokens, and to the engineering rules in DEVELOPMENT.md "Design System" (no new inline visual styles, values live in `web/ui.css` tokens, shared components over page-local copies)? When the diff ADDS a UI control, chip, card, dialog, or visual pattern, does it reuse an existing shared frontend primitive (name it — the registry is ARCHITECTURE.md §3 "Navigation and shared UI contracts") or state in one line why none covers the need — and, because reuse alone does not show that two controls agree, does a control for an owner intent that already has a door come from that door (DESIGN "References and actions"), with the neighbouring rows of `docs/inventories/UI_CONTROL_TEXT_INVENTORY.md` named when control text is added or changed? If the diff edits a DESIGN rule, do the PR and its commit message cite the owner's decision it rests on (new rule text adds no date), and does the PR show the old and new sentence with a shot of the state it describes? Wording that goes beyond what the owner chose is a question for the owner, not a rule. A status or notice it adds names what ends it (DESIGN §4); a floating surface carries its own paint, and a shell change opens every surface that borrowed its backing in both themes (DESIGN principle 2). Check host/model authorship, explicit role/type and their preservation through live delivery and history against DESIGN's "Chat authorship and System rows"; Python producers are part of this surface. (PASS with "Not applicable" if neither frontend nor backend UI-message behavior changes.) | advisory |
 | 27 | size_cap_paydown | If the diff was shaped by a size limit (module cap, function gate, byte debt, or a reference book's size under the pairwise contribution-base rule): was it paid where it lives — code made simpler, a book statement that left? A reduction is honest when the reader holds fewer concepts, branches and state afterwards — dead code and duplicates removed, an existing owner reused, a replaced description or a fact moved to its owner; the same logic in fewer lines or tighter formatting is not one, nor is book prose reworded only to fit. An extraction is honest only when each resulting file has one responsibility you can state in one sentence without naming the other file, and the files have no mutual imports. A cap-driven bucket, a one-caller passthrough, or bytes bought by deleting contract-bearing comments, docstrings, messages or tests is a defect to report, not a paydown (BIBLE P7 «first simplify what exists»; DEVELOPMENT.md "Paying down a size cap"). | advisory when applicable |
@@ -453,8 +431,8 @@ Ownership` section is delivered beside them.
   applies. If the condition does not apply, write verdict PASS with a short
   reason (e.g. "Not applicable — no new tool").
 - Items 22-30 are advisory: FAIL produces a warning but does not block. Item 24
-  (`cache_friendliness`) passes with "Not applicable" when the diff touches no
-  prompt/context assembly.
+  (`cache_friendliness`) passes with "Not applicable" when the diff changes
+  none of what its trigger names.
 - Item 14 (self_consistency) is conditionally critical: FAIL only when the
   mismatch falls in the `Critical surface whitelist` (with the body carriers
   below), AND a
@@ -960,11 +938,6 @@ These are **separate surfaces** with separate prompts and state, drawn from the 
   content hash of the skill's manifest + payload files;
   `data/state/skills/<name>/review.json` is the run gate's projection of that
   record.
-
-A blocked skill review must NOT create obligations, commit-readiness
-debt, or any artefact visible to the repo-review pipeline — the two
-surfaces are deliberately siloed so a sticky skill finding cannot
-block repo commits and vice versa.
 
 ---
 

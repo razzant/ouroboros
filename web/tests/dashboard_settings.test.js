@@ -533,10 +533,12 @@ test('Back to Settings: a first row and one page layer; the press, Escape or Bac
     const field = panel.querySelector('[data-setting-control]');
     field.blur = () => { order.push('blur'); document.activeElement = null; };
     back.show(panel, 'models');
-    assert.equal(panel.firstChild.className, 'settings-back-row dashboard-back', 'Back is the first row, above the scroller, drawn as a Settings page draws its own');
-    assert.equal(panel.firstChild.textContent.trim(), 'Settings');
+    // A place without a header Back slot keeps the app's one Back (page_header.js renderBackControl) as its first row.
+    assert.equal(panel.firstChild.className, 'dashboard-back', 'Back is the first row of a place without a header slot');
+    assert.equal(panel.firstChild.textContent.trim(), '', 'the one Back is icon only');
     const button = panel.firstChild.querySelector('[data-dashboard-back]');
-    assert.deepEqual([button.className, button.getAttribute('aria-label')], ['settings-back ui-hit-area', 'Back to Settings']);
+    assert.deepEqual([button.className, button.getAttribute('aria-label'), button.getAttribute('title')],
+        ['shell-icon-control shell-back', 'Back to Settings', 'Back to Settings']);
     assert.deepEqual(layers.map(({ id, el, page, modal, focus, opener }) => ({ id, el, page, modal, focus, opener })),
         [{ id: 'dashboard-back', el: panel, page: true, modal: false, focus: false, opener: null }]);
     field.focus();
@@ -563,13 +565,20 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
     const dashboard = initDashboard({ state, openSettings: (path) => opened.push(path),
         layers: { push: (layer) => layers.push(layer), remove: (id) => { layers.splice(0, layers.length, ...layers.filter((layer) => layer.id !== id)); } } });
     const panel = (name) => dashboard.page.querySelector(`#dashboard-panel-${name}`);
+    // Back to Settings stands in the band's Back slot before the open page's name, never inside the page.
+    const slot = dashboard.page.querySelector('[data-dashboard-back-slot]');
+    const listBack = dashboard.page.querySelector('[data-dashboard-list-back]');
     panel('costs').innerHTML = '<div class="dashboard-body"><details><summary>More</summary>'
         + '<div class="ui-row settings-row" data-setting-row="OUROBOROS_MAX_ROUNDS"><input data-setting-control></div></details></div>';
     const row = panel('costs').querySelector('[data-setting-row]');
     let scrolled = null;
     row.scrollIntoView = (options) => { scrolled = options; };
     dashboard.activateTab('costs', { row: 'OUROBOROS_MAX_ROUNDS', back: '' });
-    assert.equal(panel('costs').firstChild.className, 'settings-back-row dashboard-back');
+    assert.equal(slot.children.length, 1);
+    assert.equal(slot.firstChild.getAttribute('aria-label'), 'Back to Settings');
+    assert.equal(panel('costs').querySelector('[data-dashboard-back]'), null);
+    assert.equal(dashboard.page.querySelector('[data-dashboard-lead-name]').textContent, 'Costs', 'the page is named after it');
+    assert.equal(listBack.hidden, true, 'Back to Settings stands instead of the list\'s Back');
     assert.equal(row.closest('details').open, true, 'a row behind a fold opens it');
     assert.deepEqual(scrolled, { block: 'center' });
     assert.equal(document.activeElement, row.querySelector('[data-setting-control]'));
@@ -578,17 +587,17 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
     assert.deepEqual(opened, ['']);
     dashboard.activateTab('costs', { back: 'accounts' });
     assert.equal(layers.length, 1);
-    await panel('costs').firstChild.querySelector('[data-dashboard-back]').fire('click');
+    await slot.firstChild.fire('click');
     assert.deepEqual([opened, layers.length], [['', 'accounts'], 0], 'Back itself opens that page of Settings');
     dashboard.activateTab('costs', { back: 'accounts' });
     dashboard.activateTab('storage');
-    assert.equal(panel('costs').querySelector('.dashboard-back'), null, 'another tab drops Back');
+    assert.equal(slot.firstChild, null, 'another tab drops Back');
     assert.equal(layers.length, 0);
     dashboard.activateTab('costs');
-    assert.equal(panel('costs').querySelector('.dashboard-back'), null, 'no back, no Back');
+    assert.equal(slot.firstChild, null, 'no back, no Back');
     dashboard.activateTab('costs', { back: '' });
     window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
-    assert.equal(panel('costs').querySelector('.dashboard-back'), null, 'leaving the Dashboard drops Back');
+    assert.equal(slot.firstChild, null, 'leaving the Dashboard drops Back');
     assert.equal(layers.length, 0);
     assert.equal(focusSettingRow(panel('costs'), 'NO_SUCH_ROW'), false);
     dashboard.destroy();
@@ -687,4 +696,34 @@ test('Costs reads subscriptions only through the passive view, on show and Refre
     await settle();
     assert.deepEqual(block.querySelectorAll('[data-costs-account]').map((door) => [door.dataset.costsAccount, door.querySelector('.ui-row-meta').textContent]),
         [['accounts', 'The accounts could not be read now.']]);
+});
+
+test('in a wide window the Dashboard holds its list beside a page; an engine without container queries gets the list, then a page with Back', (t) => {
+    // The sheets draw the two panes inside a container query. Where the engine has none, the module must not treat
+    // the page as standing beside the list: it would hide Back and the list would never be seen.
+    const { mount, window } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    NodeStub.prototype.getBoundingClientRect = () => ({ width: 1200 });
+    t.after(() => { delete NodeStub.prototype.getBoundingClientRect; });
+    const start = (queries) => {
+        window.CSS = { supports: () => queries };
+        const layers = [];
+        const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+        const dashboard = initDashboard({ state, openSettings: () => {},
+            layers: { push: (layer) => layers.push(layer), remove: (id) => { layers.splice(0, layers.length, ...layers.filter((layer) => layer.id !== id)); } } });
+        return { dashboard, layers, listBack: dashboard.page.querySelector('[data-dashboard-list-back]') };
+    };
+    const wide = start(true);
+    assert.equal(wide.dashboard.page.dataset.sectionView, 'page', 'two panes: a page stands beside the list at once');
+    wide.dashboard.activateTab('costs');
+    assert.equal(wide.listBack.hidden, true, 'beside its list a page has no Back');
+    assert.deepEqual(wide.layers, [], 'and is no layer over it');
+    wide.dashboard.destroy();
+    const old = start(false);
+    assert.equal(old.dashboard.page.dataset.sectionView, 'home', 'one column: the list first');
+    old.dashboard.activateTab('costs');
+    assert.equal(old.dashboard.page.dataset.sectionView, 'page');
+    assert.equal(old.listBack.hidden, false, 'the page that replaced the list leads back to it');
+    assert.equal(old.layers.length, 1, 'as a level a system Back closes');
+    old.dashboard.destroy();
 });

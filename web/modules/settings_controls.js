@@ -4,6 +4,7 @@ import { saveCheckerSettings, saveSafetyLevel, saveSafetyRules } from './conscio
 import { isDoorId } from './settings_pages.js';
 import { rowById } from './settings_rows.js';
 import { errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
+import { API_CHOICE_PREFIX, connectionParts, parseModelSource, routeChoiceGroups, selectHtml } from './route_editor_primitives.js';
 
 /** Read the complete custom-key draft, including blank and removed rows. No paint. */
 export function readCustomSecretDraft(root) {
@@ -74,13 +75,21 @@ const SEARCH_GAPS = { no_credentials: 'no API key', package_missing: 'package no
 export function webSearchPreviewWords(data, name = (id) => id) {
     if (data?.error) return { main: String(data.error), details: '' };
     const legs = data?.legs || [];
+    const deepseekKey = (leg) => (leg.connection ? `connection ${leg.connection}` : 'built-in key');
+    const unapplied = data?.source === 'deepseek'
+        ? ` ${name('deepseek')} takes no model, so the saved model ${data.unapplied_model} is not applied.`
+        : ` No built-in search serves the saved model ${data?.unapplied_model}; Auto uses the recommended models.`;
     const ignored = data?.ignored_legacy_model ? ` Anthropic does not apply the saved model ${data.ignored_legacy_model}; edit Source or Model to change it.`
-        : data?.unapplied_model ? ` No built-in search serves the saved model ${data.unapplied_model}; Auto uses the recommended models.` : '';
+        : data?.unapplied_model ? unapplied : '';
     // provider_default names the source's recommended model (search_routes.SEARCH_MODELS), not the owner's.
-    const models = legs.filter((leg) => leg.model)
-        .map((leg) => `${name(leg.source)} · ${leg.model}${leg.model_source === 'provider_default' ? ' (recommended)' : ''}`);
+    // DeepSeek takes no model, so its leg names the key it uses instead: a named connection, or the built-in key.
+    const models = legs.filter((leg) => leg.model || leg.source === 'deepseek')
+        .map((leg) => (leg.source === 'deepseek' ? `${name(leg.source)} · ${deepseekKey(leg)}`
+            : `${name(leg.source)} · ${leg.model}${leg.model_source === 'provider_default' ? ' (recommended)' : ''}`));
     const unavailable = (data?.unavailable || [])
-        .map((leg) => `${name(leg.source)} (${SEARCH_GAPS[leg.unavailable_reason] || 'not ready'})`);
+        .map((leg) => (leg.source === 'deepseek' && leg.unavailable_reason === 'no_credentials'
+            ? `${name(leg.source)} ${deepseekKey(leg)} (not configured)`
+            : `${name(leg.source)} (${SEARCH_GAPS[leg.unavailable_reason] || 'not ready'})`));
     return {
         main: `${legs.length ? `Uses ${legs.map((leg) => name(leg.source)).join(', then ')}.` : 'No search source is ready.'}${ignored}`,
         details: [models.length ? `${models.join('; ')}.` : '', unavailable.length ? `Not available now: ${unavailable.join(', ')}.` : '',
@@ -605,6 +614,7 @@ function parseTyped(row, text) {
     const trimmed = String(text ?? '').trim();
     const number = trimmed === '' ? NaN : Number(trimmed);
     if (control.noLimit) return { value: Number.isFinite(number) ? number : trimmed };
+    if (trimmed === '' && control.empty) return { value: '' };  // a number its row names when empty may be left blank
     const [min, max] = [bound(control.min), bound(control.max)];
     if (!Number.isFinite(number) || (control.integer && !Number.isInteger(number)) || (min !== null && number < min) || (max !== null && number > max)) return { refuse: NUMBER_RULE(min, max) };
     return { value: number };
@@ -617,12 +627,14 @@ export const doorSign = (to = '') => `<span class="settings-row-chevron" aria-hi
 function controlHtml(row, control, ctx) {
     const id = rowDomId(row);
     const described = [`${id}-meta`, `${id}-result`, ctx.describedBy?.(row) || ''].filter(Boolean).join(' ');
-    // An empty text field says its state in the row's own word ("None"), as an empty number says "No limit".
-    const emptyWord = control.kind === 'text' && control.empty ? control.empty[0].toUpperCase() + control.empty.slice(1) : '';
+    // An empty text field says its state in the row's own word ("None"), as an empty number says "No limit" or its own word.
+    const emptyWord = (control.kind === 'text' || control.kind === 'number') && control.empty ? control.empty[0].toUpperCase() + control.empty.slice(1) : '';
     const input = (index, label = '') => `<input ${index ? '' : `id="${id}" `}class="ui-control" data-setting-control autocomplete="off"`
         + ` type="${control.kind === 'secret' ? 'password' : 'text'}"`
         + `${control.kind === 'number' || control.kind === 'pair' ? ` inputmode="${control.noLimit ? 'numeric' : 'decimal'}"` : ''}`
-        + `${control.noLimit ? ' placeholder="No limit"' : emptyWord ? ` placeholder="${escapeHtmlAttr(emptyWord)}"` : ''}${label ? ` aria-label="${escapeHtmlAttr(label)}"` : ''} aria-describedby="${described}">`;
+        + `${control.noLimit ? ' placeholder="No limit"' : emptyWord ? ` placeholder="${escapeHtmlAttr(emptyWord)}"` : ''}`
+        + `${control.kind === 'number' && emptyWord && !control.noLimit ? ` size="${emptyWord.length + 1}"` : ''}`  // room for its own word
+        + `${label ? ` aria-label="${escapeHtmlAttr(label)}"` : ''} aria-describedby="${described}">`;
     const unit = control.unit ? `<span class="settings-row-unit">${escapeHtmlAttr(control.unit)}</span>` : '';
     const field = (body) => `<span class="settings-row-field">${control.unit === '$' ? unit + body : body + unit}</span>`;
     const named = `aria-labelledby="${id}-name" aria-describedby="${described}"`;
@@ -892,4 +904,59 @@ export function bindSettingRows(container, ctx = {}) {
             container.removeEventListener('keydown', onKeydown);
         },
     };
+}
+
+// A named key's stored name, the twin of provider_models._CONNECTION_NAME: the resolver refuses any other.
+const CONNECTION_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+/** The DeepSeek key a saved web search Model chooses: `deepseek` (the built-in key) for a blank value or another
+ *  source's model (not applied), `deepseek@name` for `deepseek@name::`; null for a misspelt head or a name outside
+ *  the key grammar as written, before `@default` reads as the built-in key (`deepseek@::`, `deepseek@Work::`,
+ *  `deepseek@work@default::`), which the resolver refuses too (search_routes) instead of sending it on another key:
+ *  the Key select shows it as not readable, never as an off or removed key. */
+export function deepseekSearchKey(saved) {
+    const text = String(saved || '').trim();
+    const { source, model } = parseModelSource(text);
+    const head = text.includes('::') ? text.slice(0, text.indexOf('::')) : '';
+    const { kind, name } = connectionParts(head);
+    if (kind === 'deepseek' && !model) return head === kind || CONNECTION_NAME.test(name) ? source : null;
+    return /^deepseek\s*[@:]/i.test(text) ? null : 'deepseek';
+}
+
+/** The saved Model a chosen DeepSeek key writes (blank for the built-in key, `deepseek@name::` for a named one), or
+ *  the saved value itself for its not-readable entry: the owner chooses a key, this editor spells it (DESIGN.md). */
+export function searchModelForKey(choice, saved) {
+    if (!String(choice || '').startsWith(API_CHOICE_PREFIX)) return saved;
+    const id = choice.slice(API_CHOICE_PREFIX.length);
+    return id === 'deepseek' ? '' : `${id}::`;
+}
+
+/** After a Source switch away from DeepSeek, the key spelling written for it is dropped; any other model stays. */
+export function searchModelAfterSourceSwitch(source, saved) {
+    const { source: head, model } = parseModelSource(saved);
+    return source !== 'deepseek' && String(saved || '').trim() && connectionParts(head).kind === 'deepseek' && !model ? '' : saved;
+}
+
+const searchKeyOptionsShown = new WeakMap();  // key select -> the English options it was last given here
+
+/** Under DeepSeek, which takes no model, the Model field gives way to the key it uses: one entry per DeepSeek key of
+ *  Accounts, labelled as every source select labels keys (`keys`: apiConnections()/configuredApiProviders() output),
+ *  and a saved key that cannot send stays chosen and says why, so a save never moves the search to another key. */
+export function syncSearchKey(source, field, select, keys = {}) {
+    if (!source || !field || !select) return;
+    const deepseek = source.value === 'deepseek';
+    [field, ...(field.labels || [])].forEach((el) => { el.hidden = deepseek; });
+    [select, ...(select.labels || [])].forEach((el) => { el.hidden = !deepseek; });
+    const key = deepseekSearchKey(field.value);
+    const choice = key ? `${API_CHOICE_PREFIX}${key}` : 'saved';
+    const [group] = routeChoiceGroups({ ...keys, currentChoice: key ? choice : '', includeSessions: false,
+        includeSubscriptions: false, providers: (keys.providers || []).filter(({ id }) => connectionParts(id).kind === 'deepseek') });
+    if (!key) group.options.unshift({ value: 'saved', label: 'Saved choice (not readable)' });
+    const html = selectHtml('', [group], choice);
+    const options = html.slice(html.indexOf('>') + 1, html.lastIndexOf('</select>'));
+    if (searchKeyOptionsShown.get(select) !== options) {
+        searchKeyOptionsShown.set(select, options);
+        select.innerHTML = options;
+    }
+    select.value = choice;
 }

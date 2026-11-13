@@ -462,7 +462,7 @@ def test_a_cold_sleep_names_on_the_owner_line_only_the_held_helper_it_chose(tmp_
         ("child-new", "awaiting_selection"), ("child-run", "awaiting_selection")]
     held = [(tail["code"], tail["ids"], tail["state"], tail["text"]) for tail in work["tails"] if tail["kind"] == "helper"]
     if chosen.get("tasks"):  # this episode is neither the helper's root nor its parent: no releaser is named
-        assert held == [("awaited_helpers_paused", ["child-run"], "held", "1 helper it waits for is paused")], held
+        assert held == [("awaited_helpers_paused", ["child-run"], "held", "1 subagent it waits for is paused")], held
     else:  # never inferred from every paused member of the work
         assert held == [], work["tails"]
 
@@ -502,7 +502,7 @@ def test_a_warm_sleep_of_the_root_names_its_held_child_and_that_ouroboros_resume
     [work] = [work for work in state_fields(tmp_path)["works"] if work["episode"]["task_id"] == "root-1"]
     assert (work["activity"], work["because"][0]["code"], work["turn"]) == ("waiting", "sleeping", [])
     assert [(tail["code"], tail["ids"], tail["text"]) for tail in work["tails"] if tail["kind"] == "helper"] == [
-        ("awaited_helpers_mind", ["child-run"], "1 helper it waits for is paused until Ouroboros resumes it")]
+        ("awaited_helpers_mind", ["child-run"], "1 subagent it waits for is paused until Ouroboros resumes it")]
 
 
 def test_an_unreadable_root_resume_basis_is_said_waited_on_once_and_its_recovery_is_shown_again(tmp_path, monkeypatch):

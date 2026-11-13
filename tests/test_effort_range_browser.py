@@ -161,7 +161,7 @@ def test_desktop_hover_opens_press_pins_escape_and_outside_close(direct_server_w
             assert (closed["name"], closed["value"], closed["headText"]) == ("Effort", "Medium", "EffortMedium"), closed
             assert abs(closed["top"] - closed["subTop"]) <= 2, closed
             assert closed["recTabIndex"] == -1, "closed handles are out of the tab order"
-            assert closed["ariaLabel"] == "Primary effort: Medium; helpers Low–High." and not closed["title"], \
+            assert closed["ariaLabel"] == "Primary effort: Medium; subagents Low–High." and not closed["title"], \
                 ("the button's name says the range; no hover-only title (the hint says it, DESIGN Hints)", closed)
             assert closed["extras"] == 0, "no title word of the strip's own, no separator element, no reset"
             _shot(page, tmp_path, f"composer-closed-{engine}-dark")

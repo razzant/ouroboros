@@ -137,6 +137,36 @@ def _provider_catalog_state_returns():
         record.write_bytes(recorded)
 
 
+_CLOCK_CHECKED: set = set()  # module names whose bound clock a test has already been started on
+
+
+def _give_late_imports_the_real_clock() -> None:
+    """Give every product module imported since the last check the clock ``deadline_utils`` defines.
+
+    Sixteen modules bind that clock by name (``from ouroboros.deadline_utils import utc_now``) and keep whatever
+    stood there at their first import; some twenty tests replace it on ``deadline_utils``. A module first imported
+    inside one of them kept the test's clock for the rest of the process: ``capability_evidence`` then read every
+    stored refusal and density witness as expired in every later test of the worker (the cache life table found
+    it). A name a product module itself defines (``ouroboros.utils.utc_now``) is left alone."""
+    real = getattr(sys.modules.get("ouroboros.deadline_utils"), "utc_now", None)
+    if getattr(real, "__module__", "") != "ouroboros.deadline_utils":
+        return  # not imported yet, or a replacement still stands: nothing to hand out
+    for name in set(sys.modules) - _CLOCK_CHECKED:
+        _CLOCK_CHECKED.add(name)
+        module = sys.modules.get(name)
+        bound = getattr(module, "utc_now", None) if name.startswith(("ouroboros.", "supervisor.")) else None
+        if bound is not None and bound is not real and not str(getattr(bound, "__module__", "")).startswith(
+                ("ouroboros", "supervisor")):
+            module.utc_now = real
+
+
+@pytest.fixture(autouse=True)
+def _late_imports_keep_the_real_clock():
+    """Before each test (the last one's patches are undone by then): ``_give_late_imports_the_real_clock``."""
+    _give_late_imports_the_real_clock()
+    yield
+
+
 @pytest.fixture
 def provider_catalog_offline(monkeypatch):
     """Keep the window probe local: no live catalog fetch for this test.
