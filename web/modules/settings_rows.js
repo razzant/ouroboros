@@ -508,7 +508,7 @@ export const HAND_WRITTEN = [
     { id: 'models:consciousness', keys: ['OUROBOROS_MODEL_CONSCIOUSNESS', 'USE_LOCAL_CONSCIOUSNESS'], page: 'models', name: 'Consciousness',
         meta: 'Thinks between your tasks.', aliases: ['Consciousness model'], writer: 'generic' },
     { id: 'models:websearch', keys: ['OUROBOROS_WEBSEARCH_BACKEND', 'OUROBOROS_WEBSEARCH_MODEL'], page: 'models', name: 'Web search',
-        meta: 'Where the built-in web search runs. Auto picks a source you have a key for.', aliases: ['Search source', 'Search model'], writer: 'generic' },
+        meta: 'Where the built-in web search runs. Auto picks a source you have a key for; DeepSeek runs only when you choose it.', aliases: ['Search source', 'Search model'], writer: 'generic' },
     { id: 'models:role-choices', keys: ['OUROBOROS_MODEL_ACCOUNTS', 'OUROBOROS_MODEL_CONTEXT_WINDOWS', 'OUROBOROS_MODEL_PROCESSING_PREFERENCES'],
         page: 'models', name: 'A role’s account, window and processing', aliases: ['Context window', 'Maximum response', 'Pinned account'], writer: 'checker' },
 ];

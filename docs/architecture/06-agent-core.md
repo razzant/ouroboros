@@ -84,12 +84,12 @@ Credential, Bible and identity mutation fences use physical owner locations (`cr
 
 #### Web access mechanisms (three distinct paths — do not conflate)
 
-`search_routes.py` resolves built-in Source/Model (Auto or strict; blank: curated `SEARCH_MODELS`), apart from skills and MCP; only a selection or call naming `kind@name::` uses that connection's key. A call's own model is mandatory: its legs or a stated failure. Local `unavailable_reason` feeds Settings; the registry hides the tool only when no call could run. The Anthropic pin keeps a saved bare id's legacy default. Paths:
+`search_routes.py` resolves built-in Source/Model (Auto or strict, DeepSeek strict only; blank: curated `SEARCH_MODELS`) apart from skills/MCP; only `kind@name::` uses a connection's key. A call's own model is mandatory: its legs or a stated failure. Local `unavailable_reason` feeds Settings; the registry hides the tool only if no call can run. The Anthropic pin keeps a saved bare id's legacy default. Paths:
 
 | path | reasoning model | fetch authority | evidence |
 |---|---|---|---|
 | Main-loop native search (provider server tool, if the main-loop setting allows) | the solve model decides whether to search; no second model enters the scaffold | provider-side | citations and request counts fold into `llm_usage` and the task's host-attested retrieval fact (result-review context, never a criterion alone); the host never sees the provider-side query |
-| `web_search` function tool | a provider-backed call may add a second model and cost | the Source/Model above, run by `ToolRegistry` | arguments, tried legs and bounded results in `tools.jsonl`; never native-search usage on the answering call |
+| `web_search` function tool | a provider leg may add a second model and cost | the Source/Model above, via `ToolRegistry` | arguments, tried legs and bounded results in `tools.jsonl`; never native-search usage on the answering call |
 | Browser tools (`browse_page`, `browser_action`) | the main loop | a local stateful Playwright session fetching or acting on arbitrary pages | arguments and result previews as tool evidence; browser state equals neither retrieval path |
 
 Ordinary delegated profiles, local-readonly or acting, keep the URL, route, private-range and control-plane guards (`browser_policy.py`, §6 MCP); a Cyber-effective acting child inherits the selected access minus explicit task restrictions. Their non-loopback private origins need host-established `resource_policy.allowed_origins`, named by Main/root scheduling in `schedule_subagent`, only inherited or narrowed by delegated and external Presence callers (`tools/control_subagent_spec.py`); among delegated profiles only a valid acting child may run JavaScript `evaluate`, on its current page. This separation is methodological authority: claims name their retrieval path.

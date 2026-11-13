@@ -1,4 +1,6 @@
-"""Web search tool — OpenAI Responses API with LLM-first overridable defaults."""
+"""Web search tool: one leg per Source of ``search_routes``, tried in the route's cascade. The paid legs (OpenAI
+Responses, the OpenRouter and Anthropic server tools, DeepSeek Search) are accounted per physical attempt; ddgs,
+an unofficial scraper, is not."""
 
 from __future__ import annotations
 
@@ -10,14 +12,17 @@ import time
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
+from ouroboros.gateways import search_api
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.usage_accounting import (
+    AttemptRequest,
     PhysicalAttemptCapture,
     UsageAccountingError,
     UsageScope,
     capture_attempt_ids,
     current_usage_scope,
+    execute_physical_attempt,
     mark_dispatched,
     mark_unresolved,
     release_attempt,
@@ -29,7 +34,7 @@ from ouroboros.config import runtime_setting
 
 log = logging.getLogger(__name__)
 
-from ouroboros.search_routes import SEARCH_MODELS, named_connection_routes, resolve_web_search_route
+from ouroboros.search_routes import MODELLESS_SOURCES, SEARCH_MODELS, named_connection_routes, resolve_web_search_route
 
 DEFAULT_SEARCH_MODEL = SEARCH_MODELS["openai"]
 DEFAULT_SEARCH_CONTEXT_SIZE = "medium"
@@ -155,56 +160,6 @@ def _estimate_openai_cost(model: str, input_tokens: int, output_tokens: int) -> 
     )
 
 
-def _obj_to_plain(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(k): _obj_to_plain(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_obj_to_plain(item) for item in value]
-    if hasattr(value, "model_dump"):
-        try:
-            return _obj_to_plain(value.model_dump())
-        except Exception:
-            pass
-    if hasattr(value, "__dict__"):
-        return {
-            str(k): _obj_to_plain(v)
-            for k, v in vars(value).items()
-            if not str(k).startswith("_")
-        }
-    return str(value)
-
-
-def _extract_sources_from_response(resp_obj: Any) -> List[Dict[str, str]]:
-    plain = _obj_to_plain(resp_obj)
-    sources: List[Dict[str, str]] = []
-    seen: set[str] = set()
-
-    stack: List[Any] = [plain]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, dict):
-            ntype = str(node.get("type") or "").lower()
-            if "url_citation" in ntype or ("url" in node and ("title" in node or "snippet" in node)):
-                url = sanitize_tool_result_for_log(str(node.get("url") or node.get("uri") or "").strip())
-                if url and url not in seen:
-                    seen.add(url)
-                    sources.append({
-                        "url": url,
-                        "title": sanitize_tool_result_for_log(str(node.get("title") or node.get("name") or "").strip()),
-                        "snippet": sanitize_tool_result_for_log(str(
-                            node.get("snippet") or node.get("text") or node.get("content")
-                            or node.get("cited_text") or node.get("description") or ""
-                        ).strip()),
-                    })
-            stack.extend(node.values())
-        elif isinstance(node, list):
-            stack.extend(node)
-
-    return sources
-
-
 def _search_key(kind: str, connection: str = "") -> str:
     """The key of the search leg's connection, read through the one resolver ('' when it cannot serve)."""
     from ouroboros.llm_routing import resolve_target
@@ -227,16 +182,8 @@ def _resolve_openai_client_settings(connection: str = "") -> tuple[str, str | No
     return "", None, "openai", "openai"
 
 
-def _openrouter_model(model: str) -> str:
-    route = resolve_web_search_route(backend="openrouter", model=model or None)
-    legs = route["legs"] + route["unavailable"]
-    if not legs:
-        raise ValueError(route.get("error", "Search model unavailable"))
-    return legs[0]["model"]
-
-
-def _anthropic_model(model: str) -> str:
-    route = resolve_web_search_route(backend="anthropic", model=model or None)
+def _leg_model(source: str, model: str) -> str:
+    route = resolve_web_search_route(backend=source, model=model or None)
     legs = route["legs"] + route["unavailable"]
     if not legs:
         raise ValueError(route.get("error", "Search model unavailable"))
@@ -245,8 +192,10 @@ def _anthropic_model(model: str) -> str:
 
 def _available_web_search_backends() -> list[str]:
     """Backends a call could reach: the configured selection's eligible legs, else the Source's recommended
-    ones (a call naming its own model meets them), else a named connection's, which only a call naming it uses."""
-    legs = (resolve_web_search_route()["legs"] or resolve_web_search_route(model="")["legs"]
+    ones (a call naming its own model meets them, so not under a Source that takes none), else a named
+    connection's, which only a call naming it uses."""
+    route = resolve_web_search_route()
+    legs = (route["legs"] or ([] if route["source"] in MODELLESS_SOURCES else resolve_web_search_route(model="")["legs"])
             or [leg for named in named_connection_routes() for leg in named["legs"]])
     return [leg["backend"] for leg in legs]
 
@@ -257,14 +206,15 @@ def _web_search_unavailability() -> tuple[str, str]:
 
     Only a route whose every unavailable leg lacks a key is ``missing_credential``;
     a key whose SDK is not installed keeps ``package_missing``. An unsupported saved
-    selection is named beside what also stops the Source's recommended legs."""
+    selection is named beside what also stops the Source's recommended legs, or alone
+    under a Source that takes no model, where no call reaches those legs."""
     from ouroboros.provider_models import connection_id
 
     route = resolve_web_search_route()
     selection_error = route.get("error", "")
     if selection_error:
         route = resolve_web_search_route(model="")
-        if route.get("error"):
+        if route.get("error") or route["source"] in MODELLESS_SOURCES:
             return "unsupported_selection", selection_error
     unavailable = route["unavailable"] + [leg for named in named_connection_routes() for leg in named["unavailable"]]
     reasons = list(dict.fromkeys("missing_credential" if leg["unavailable_reason"] == "no_credentials"
@@ -288,7 +238,7 @@ def _web_search_outer_timeout_sec() -> int:
     pinned = _web_search_backend_pin()
     if pinned == "openai":
         attempts = 2
-    elif pinned in {"openrouter", "anthropic"}:
+    elif pinned in {"openrouter", "anthropic", "deepseek"}:
         attempts = 1
     elif pinned == "ddgs":
         attempts = 0
@@ -366,7 +316,7 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
     try:
         from ouroboros.llm import openrouter_web_search_server_tool
 
-        active_model = _openrouter_model(model)
+        active_model = _leg_model("openrouter", model)
         if getattr(ctx, "emit_progress_fn", None):
             ctx.emit_progress_fn(f"🔍 Trying OpenRouter web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
         with capture_attempt_ids() as attempt_ids:
@@ -393,18 +343,12 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
         if not isinstance(usage, dict):
             usage = {}
         usage["ledger_attempt_ids"] = list(attempt_ids)
-        _emit_simple_usage(
-            ctx,
-            provider="openrouter",
-            model=active_model,
-            prompt_tokens=(usage or {}).get("prompt_tokens") if isinstance(usage, dict) else None,
-            completion_tokens=(usage or {}).get("completion_tokens") if isinstance(usage, dict) else None,
-            usage=usage if isinstance(usage, dict) else {},
-        )
+        _emit_simple_usage(ctx, provider="openrouter", model=active_model, prompt_tokens=usage.get("prompt_tokens"),
+                           completion_tokens=usage.get("completion_tokens"), usage=usage)
         return json.dumps({
             "answer": text or "(no answer)",
             "answer_type": "summary",
-            "sources": _extract_sources_from_response(response),
+            "sources": search_api.cited_sources(response),
             "backend": "openrouter_server_tool",
             "model": active_model, "reported_model": getattr(response, "model", None), "ledger_attempt_ids": list(attempt_ids),
         }, ensure_ascii=False, indent=2)
@@ -428,7 +372,7 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
         import anthropic  # noqa: F401 — the SDK's own import failure precedes any attempt claim
         from ouroboros.llm import anthropic_web_search_server_tool
 
-        active_model = _anthropic_model(model)
+        active_model = _leg_model("anthropic", model)
         if getattr(ctx, "emit_progress_fn", None):
             ctx.emit_progress_fn(f"🔍 Trying Anthropic web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
         with capture_attempt_ids() as attempt_ids:
@@ -441,13 +385,13 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
                 processing_preference=processing_preference,
                 **_web_search_caller_deadline(ctx),
             )
-        blocks = _obj_to_plain(getattr(response, "content", []) or [])
+        blocks = search_api.plain(getattr(response, "content", []) or [])
         text_parts: list[str] = []
         if isinstance(blocks, list):
             for block in blocks:
                 if isinstance(block, dict) and str(block.get("type") or "") == "text":
                     text_parts.append(str(block.get("text") or ""))
-        usage = _obj_to_plain(getattr(response, "usage", None))
+        usage = search_api.plain(getattr(response, "usage", None))
         if not isinstance(usage, dict):
             usage = {}
         from ouroboros.llm_attempt import attach_processing_receipt
@@ -457,18 +401,12 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
         from ouroboros.event_usage import REPORTED_TOKENS_KEY, anthropic_token_counts
 
         usage[REPORTED_TOKENS_KEY] = anthropic_token_counts(usage)  # native input_tokens is not the total (#1578)
-        _emit_simple_usage(
-            ctx,
-            provider="anthropic",
-            model=active_model,
-            prompt_tokens=(usage or {}).get("input_tokens") if isinstance(usage, dict) else None,
-            completion_tokens=(usage or {}).get("output_tokens") if isinstance(usage, dict) else None,
-            usage=usage if isinstance(usage, dict) else {},
-        )
+        _emit_simple_usage(ctx, provider="anthropic", model=active_model, prompt_tokens=usage.get("input_tokens"),
+                           completion_tokens=usage.get("output_tokens"), usage=usage)
         return json.dumps({
             "answer": "".join(text_parts).strip() or "(no answer)",
             "answer_type": "summary",
-            "sources": _extract_sources_from_response(response),
+            "sources": search_api.cited_sources(response),
             "backend": "anthropic_server_tool",
             "model": active_model, "reported_model": getattr(response, "model", None), "ledger_attempt_ids": list(attempt_ids),
         }, ensure_ascii=False, indent=2)
@@ -519,6 +457,54 @@ def _web_search_ddgs(query: str, *, _max_attempts: int = 3) -> str:
             break
     detail = sanitize_tool_result_for_log(str(last_exc))[:500]
     raise RuntimeError(f"DDGS web search failed ({type(last_exc).__name__}): {detail}") from last_exc
+
+
+def _web_search_deepseek(ctx: ToolContext, query: str, connection: str = "") -> str:
+    """DeepSeek's own Search API (``gateways/search_api.py``), an explicit Source only: the query as written in
+    one physical attempt whose price stays unknown, never read as free; an ambiguous send is never repeated."""
+    from ouroboros._usage_wait import close_after_model_send
+    from ouroboros.deadline_utils import physical_dispatch_timeout
+    from ouroboros.llm_attempt import _PhysicalSendNotStarted
+    from ouroboros.net_transport import web_search_openai_client
+    from ouroboros.provider_models import DEEPSEEK_BASE_URL
+
+    if _web_search_deadline_exhausted(ctx):
+        return _web_search_deadline_result()
+    refusal = search_api.query_refusal(query)
+    if refusal:  # it cannot be sent as written: nothing is reserved or sent
+        return json.dumps({**refusal, "backend": "deepseek_search_tool"}, ensure_ascii=False, indent=2)
+    api_key = _search_key("deepseek", connection)
+    if not api_key:
+        raise RuntimeError(f"DeepSeek connection {connection} is not configured" if connection
+                           else "DEEPSEEK_API_KEY is not configured")
+    scope = _accounting_scope(ctx, "web_search.deepseek")
+    request = AttemptRequest(model="", provider="deepseek", force_unknown_reservation=True, drive_root=scope.drive_root,
+                             task_id=scope.task_id, root_task_id=scope.root_task_id, parent_task_id=scope.parent_task_id,
+                             category=scope.category, source=scope.source)
+    _search_progress(ctx, f"🔍 Trying DeepSeek web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
+    client = web_search_openai_client(api_key=api_key, base_url=DEEPSEEK_BASE_URL,
+                                      timeout=_web_search_transport_timeout(ctx), follow_redirects=False)
+
+    def send():
+        timeout = physical_dispatch_timeout(_web_search_transport_timeout(ctx))
+        if _web_search_deadline_exhausted(ctx):  # this leg's window, spent after its claim: positively unsent
+            raise _PhysicalSendNotStarted("deadline")
+        return search_api.send_search(client, query, timeout=timeout)
+
+    try:
+        with capture_attempt_ids() as attempt_ids:
+            try:
+                payload = execute_physical_attempt(request, send, extractor=search_api.search_usage)
+            finally:
+                close_after_model_send(client)  # a sender that outlives its receiver keeps it until its send ends
+    except UsageAccountingError as exc:
+        if _own_window_refused(ctx, exc):
+            return _web_search_deadline_result()
+        raise
+    except Exception as exc:
+        raise _wrapped_provider_error("DeepSeek", exc) from exc
+    return json.dumps({**search_api.search_result(payload), "backend": "deepseek_search_tool",
+                       "ledger_attempt_ids": list(attempt_ids)}, ensure_ascii=False, indent=2)
 
 
 def _is_timeout_error(exc: Exception) -> bool:
@@ -730,7 +716,7 @@ def _web_search_openai(
                         requested=request.processing_preference, submitted_native=request.submitted_processing_mode)
                     if receipt is not None:
                         usage["processing"] = receipt
-                    sources = _extract_sources_from_response(resp_obj)
+                    sources = search_api.cited_sources(resp_obj)
 
         text = "".join(text_parts)
         input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
@@ -912,6 +898,8 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
                 elif leg["source"] == "anthropic":
                     raw = _web_search_anthropic(ctx, query, model="anthropic::" + leg["model"], processing_preference=preference,
                                                 **named)
+                elif leg["source"] == "deepseek":
+                    raw = _web_search_deepseek(ctx, query, **named)
                 else:
                     raw = _web_search_ddgs(query)
             result = json.loads(raw)
@@ -940,6 +928,8 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
         _search_progress(ctx, f"⚠️ Web search outcome unknown ({last}); no further attempt or fallback was sent")
     elif result.get("reason_code") == "deadline_exhausted":
         _search_progress(ctx, "⚠️ Web search stopped: the owner deadline leaves no dispatch window")
+    elif result.get("reason_code") in {"query_limit", "argument_invalid"}:  # refused here; nothing was sent
+        _search_progress(ctx, f"⚠️ Web search not sent: {last} does not accept this query as written")
     elif "error" in result and tried:
         # The exception text stays in the result and Logs, never in the owner's row.
         _search_progress(ctx, f"⚠️ Web search failed ({last}); no source answered; details in Logs")
@@ -958,7 +948,8 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
     return text
 
 
-_SOURCE_LABELS = {"openai": "OpenAI", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ddgs": "DDGS"}
+_SOURCE_LABELS = {"openai": "OpenAI", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ddgs": "DDGS",
+                  "deepseek": "DeepSeek"}
 
 
 def _search_progress(ctx: ToolContext, text: str) -> None:
@@ -981,7 +972,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "A single focused search query (split compound asks into separate calls)."},
-                "model": {"type": "string", "description": "This call's model: native id or routed source[@connection]::model; must agree with a pinned Source (ddgs takes none). Omit for the configured one."},
+                "model": {"type": "string", "description": "This call's model: native id or routed source[@connection]::model; must agree with a pinned Source (ddgs and DeepSeek take none). Omit for the configured one."},
                 "search_context_size": {"type": "string", "enum": ["low", "medium", "high"],
                                         "description": f"How much context to fetch (default: {DEFAULT_SEARCH_CONTEXT_SIZE})"},
                 "reasoning_effort": {"type": "string", "enum": ["low", "medium", "high"],
