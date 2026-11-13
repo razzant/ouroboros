@@ -235,7 +235,7 @@ def test_tools_from_the_home_a_switch_writes_one_entry_and_a_stale_list_is_refus
     # The client's switch is a plain row that acts at once; the fold holds the two waits.
     assert commit_row_quiet(page, "MCP_ENABLED") == ""
     assert server.writes()[-1] == {"MCP_ENABLED": False}
-    page.wait_for_function("() => /All tool servers are off/.test(document.querySelector('#page-settings [data-mcp-global]')?.textContent || '')")
+    page.wait_for_function("() => /All MCP servers are off/.test(document.querySelector('#page-settings [data-mcp-global]')?.textContent || '')")
     level.locator("details[data-settings-fold] > summary").click()
     assert commit_row(page, "MCP_TOOL_TIMEOUT_SEC", 90).startswith("Saved · was 60")
     page.close()

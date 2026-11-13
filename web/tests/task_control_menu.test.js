@@ -113,7 +113,7 @@ test('Resume retires an unconfirmed Pause id, but a refused Resume leaves it ret
 test('tree Resume keeps helpers for selection and source refusals use the server sentence', async () => {
     const seen = [], toast = (text) => seen.push(text);
     await resumeTaskAction('answered', { resume: async () => ({ ok: true, tree_only: true }), toast });
-    assert.equal(seen.pop(), 'Resumed. Ouroboros or you choose which helpers continue.');
+    assert.equal(seen.pop(), 'Resumed. Ouroboros or you choose which subagents continue.');
     const refusal = Object.assign(new Error('pause_source_unreadable'), {
         body: { message: 'Resume refused: Its saved state could not be restored' },
     });
@@ -519,7 +519,7 @@ test('an accepted Resume keeps its own words and names the gap its Pause did not
     toasts.length = 0;
     await resumeTaskAction('tree-gap', { resume: async () => ({ ok: true, tree_only: true,
         membership_gaps: { rows: [{ task_id: 'x', reason: 'identity_mismatch' }], count: 1 } }), toast });
-    assert.equal(toasts[0][0], 'Resumed. Ouroboros or you choose which helpers continue.');
+    assert.equal(toasts[0][0], 'Resumed. Ouroboros or you choose which subagents continue.');
     assert.match(toasts[1][0], /^The Pause did not wait for 1 saved task record .* \(x\); whether it belongs here is unknown\.$/);
     toasts.length = 0;
     await resumeTaskAction('plain', { resume: async () => ({ ok: true }), toast });

@@ -182,8 +182,8 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
     assert (work["activity"], work["because"][0]["code"], work["turn"], work["mark"]) == (
         "waiting", "sleeping", [], "still")
     assert [(tail["code"], tail["ids"], tail["state"], tail["text"]) for tail in work["tails"]] == [
-        ("awaited_helpers_mind", ["chosen"], "held", "1 helper it waits for is paused until Ouroboros resumes it"),
-        ("awaited_helpers_owner", ["panic"], "held", "1 helper it waits for is paused until you resume it")]
+        ("awaited_helpers_mind", ["chosen"], "held", "1 subagent it waits for is paused until Ouroboros resumes it"),
+        ("awaited_helpers_owner", ["panic"], "held", "1 subagent it waits for is paused until you resume it")]
     assert "other" not in str(work["tails"]), "a paused helper the sleep did not choose is not why it waits"
     controls = ws.controls_for(root, row("root"))
     assert "resume" not in [entry["action"] for entry in controls], "no Resume door is invented for a helper"
@@ -194,8 +194,8 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
         "sleep": {"mode": "warm", "tasks": ["chosen", "panic"]}}})
     work = ws.roll_up_work("root", [later, selected, panic], episode={"task_id": "later", "state": later})
     assert [(tail["code"], tail["ids"], tail["text"]) for tail in work["tails"]] == [
-        ("awaited_helpers_owner", ["panic"], "1 helper it waits for is paused until you resume it"),
-        ("awaited_helpers_paused", ["chosen"], "1 helper it waits for is paused")]
+        ("awaited_helpers_owner", ["panic"], "1 subagent it waits for is paused until you resume it"),
+        ("awaited_helpers_paused", ["chosen"], "1 subagent it waits for is paused")]
     # Without the saved selection (or once the episode ended) the line says no such thing.
     awake = ws.roll_up_work("root", [sleeper(), selected], episode={"task_id": "root", "state": sleeper()})
     assert awake["tails"] == []
@@ -309,12 +309,12 @@ def test_held_continue_with_running_helpers_is_working_and_says_why():
     work = ws.roll_up_work("p", members, episode={"task_id": "c", "state": current}, name="Release 7.7", room=42)
     assert work["activity"] == "working" and work["release"] == "self" and work["turn"] == []
     assert work["because"][0]["code"] == "earlier_attempt_finishing" and work["because"][0]["count"] == 3
-    assert work["because"][0]["text"] == "Continue starts when 3 helpers of the earlier attempt finish"
+    assert work["because"][0]["text"] == "Continue starts when 3 subagents of the earlier attempt finish"
     assert work["episode"] == {"task_id": "c", "live": True} and work["live"] is True
-    assert work["tails"] == []  # the sentence already names the helpers it waits for
+    assert work["tails"] == []  # the sentence already names the subagents it waits for
     assert sorted(work["members"]["ids"]) == ["c", "h0", "h1", "h2"]
     one = ws.roll_up_work("p", [current, *_helpers(1)], episode={"task_id": "c", "state": current})
-    assert one["because"][0]["text"] == "Continue starts when the helper of the earlier attempt finishes"
+    assert one["because"][0]["text"] == "Continue starts when the subagent of the earlier attempt finishes"
 
 
 def test_held_continue_waiting_on_external_runs_or_on_nothing_visible():
@@ -335,7 +335,7 @@ def test_helpers_of_an_ended_attempt_keep_the_work_working_with_its_outcome():
     assert work["because"] == []
     assert work["tails"] == [{**ws.reason("helpers_running", count=2, ids=["h0", "h1"]), "kind": "helper",
                               "state": "live"}]
-    assert work["tails"][0]["text"] == "2 helpers still working" and work["mark"] == "moving"
+    assert work["tails"][0]["text"] == "2 subagents still working" and work["mark"] == "moving"
     assert work["episode"]["live"] is False
 
 

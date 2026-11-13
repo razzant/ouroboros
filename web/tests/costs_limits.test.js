@@ -67,7 +67,7 @@ test('the limits card is the data module\'s Costs rows, each with its name, its 
     assert.deepEqual(fold.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow), ['OUROBOROS_MAX_ROUNDS', 'OUROBOROS_TASK_ABS_CEILING_SEC']);
     for (const [key, label, meta, notes] of [
         ['TOTAL_BUDGET', 'Total budget', /Paid work stops/, ['costs-budget-help']],
-        ['OUROBOROS_PER_TASK_COST_USD', 'One task', /A task and its helpers stop/, ['costs-budget-help']],
+        ['OUROBOROS_PER_TASK_COST_USD', 'One task', /A task and its subagents stop/, ['costs-budget-help']],
         ['OUROBOROS_CONSCIOUSNESS_DAILY_USD', 'Consciousness per 24 hours', /wake-ups, replies in places and the work they start/,
             ['costs-allowance-spend', 'costs-allowance-state', 'costs-allowance-help']]]) {
         const field = page.field(key);

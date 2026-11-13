@@ -928,7 +928,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
             return state
         refusal = ClaudexorUnavailable(
             "trust_full_access_required", "Full access is disabled for this scope; its existing choice was preserved. "
-            "Lower this call with access=workspace_write or select Working files on the actor row.",
+            "Lower this call with access=workspace_write or select Workspace write on the actor row.",
             status_code=403,
         )
         # An unrecognized source keeps the list: only the two named values skip it.

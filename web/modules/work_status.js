@@ -168,8 +168,8 @@ function tailWords(tails) {
     const helpers = counted('helpers_running');
     const runs = counted('delegated_running');
     if (!helpers || !runs) return tails.map(reasonText);
-    const both = fmt('{helpers} and {runs} still working', {
-        helpers: helpers.count === 1 ? tr('work.because.one_helper', '1 subagent')
+    const both = fmt('{subagents} and {runs} still working', {
+        subagents: helpers.count === 1 ? tr('work.because.one_helper', '1 subagent')
             : fmt('{count} subagents', { count: helpers.count, n: helpers.count }),
         runs: runs.count === 1 ? tr('work.because.one_external_run', '1 external run')
             : fmt('{count} external runs', { count: runs.count, n: runs.count }),

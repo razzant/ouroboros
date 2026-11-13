@@ -172,8 +172,8 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | More providers | `(no class)` | modules/settings_accounts.js | 1 |
 | More: GPU layers, port, chat format | `(no class)` | modules/settings_local_model.js | 1 |
 | More: legacy base address | `(no class)` | modules/settings_connections.js | 1 |
-| More: limits for helpers and their folders | `(no class)` | modules/subagents_settings.js | 1 |
 | More: processing, prompt cache, requests at once | `(no class)` | modules/model_roles.js | 1 |
+| More: subagent limits and folders | `(no class)` | modules/subagents_settings.js | 1 |
 | More: timeouts, import, refresh | `(no class)` | modules/mcp_settings.js | 1 |
 | More: translations | `(no class)` | modules/settings_language.js | 1 |
 | Move | `files-context-item` | modules/files.js | 1 |

@@ -18,7 +18,7 @@ room_ui = rw.room_ui
 subscription_ui = rw.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
 
-REASON = "Continue starts when 3 helpers of the earlier attempt finish"
+REASON = "Continue starts when 3 subagents of the earlier attempt finish"
 NAME = "Ouroboros 7.7.0 — finish the saved release"
 MARKER = f".nav-project-row[data-project-id='{rw.PROJECT['id']}'] .status-mark"
 

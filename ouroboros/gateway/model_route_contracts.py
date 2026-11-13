@@ -22,10 +22,12 @@ __all__ = ["WebSearchLeg", "WebSearchRoute", "ResponseLimit", "ResponseLimitRout
 class WebSearchLeg(TypedDict):
     """One built-in search transport the resolver may try, in order."""
 
-    source: str  # openai | openrouter | anthropic | ddgs
+    source: str  # openai | openrouter | anthropic | ddgs | deepseek
     backend: str
-    model: str  # the wire model; empty for ddgs
+    model: str  # the wire model; empty for ddgs and deepseek
     model_source: Literal["selection", "provider_default"]  # provider_default: the source's recommended model
+    connection: NotRequired[str]  # the named connection whose key this leg uses; absent: the built-in one
+    query_max_chars: NotRequired[int]  # the longest query this transport accepts (deepseek)
     # Only on an ``unavailable`` leg: the locally known cause, never a provider probe.
     unavailable_reason: NotRequired[Literal["no_credentials", "package_missing", "legacy_openai_base_url"]]
 
@@ -41,7 +43,7 @@ class WebSearchRoute(TypedDict):
     note: str
     error: NotRequired[str]  # the selection has no built-in transport
     ignored_legacy_model: NotRequired[str]  # a saved bare model the Anthropic source does not apply
-    unapplied_model: NotRequired[str]  # under Auto, a saved model no built-in transport serves
+    unapplied_model: NotRequired[str]  # a saved model Auto's transports or the DeepSeek source do not apply
 
 
 class ResponseLimit(TypedDict):

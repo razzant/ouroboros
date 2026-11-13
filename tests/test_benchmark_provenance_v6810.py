@@ -174,11 +174,17 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         False,
         "tools/search.py recoverable ambiguous paid-call result returned to the LLM; the root task remains live",
     ),
+    "query_limit": (
+        False,
+        "gateways/search_api.py a web_search query DeepSeek's documented contract refuses, returned to the LLM before "
+        "any reservation; the root task remains live",
+    ),
     # tell_task: both are one-call tool results for the model's next turn, never the root task's terminal reason.
     "argument_invalid": (
         False,
         "tools/control_relay.py tell_task argument refusal (TOOL_ARG_ERROR, published as completed_no_effect before "
-        "any write) returned to the LLM; the root task remains live",
+        "any write), and gateways/search_api.py a web_search query UTF-8 cannot carry (before any reservation), "
+        "returned to the LLM; the root task remains live",
     ),
     "arrival_effect_unknown": (
         False,

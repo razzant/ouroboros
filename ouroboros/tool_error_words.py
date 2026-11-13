@@ -37,7 +37,7 @@ _TOOL_NOUNS = {
     "github_write": "A GitHub write",
     "send_user_message": "A message send",
     "place_reply": "A reply",
-    "schedule_subagent": "A helper start",
+    "schedule_subagent": "A subagent start",
     "commit_reviewed": "A commit",
     "vcs_commit_reviewed": "A commit",
     "skill_exec": "A skill run",

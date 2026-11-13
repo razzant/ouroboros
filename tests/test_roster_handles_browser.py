@@ -189,7 +189,7 @@ def test_a_switched_off_reviewer_keeps_its_mark_and_leaves_the_pool(role_ui):
     # The roster's own switch off: one write, and the page says what still reviews.
     level.locator('[data-setting-row="OUROBOROS_SUBAGENTS"] .ui-switch').click()
     page.wait_for_function("() => document.querySelector('#page-settings [data-review-pool-stays]')?.hidden === false")
-    assert level.locator("[data-review-pool-stays]").inner_text() == "Helpers are off; agents marked Reviewer still review."
+    assert level.locator("[data-review-pool-stays]").inner_text() == "Subagents are off; agents marked Reviewer still review."
     assert roles.saved_catalog(ui)["enabled"] is False and len(_saved(ui)) == 3
     roles.capture(page, "roster-handles-switched-off-row")
     # Its own page: the mark holds, and the exception is said under the switches.

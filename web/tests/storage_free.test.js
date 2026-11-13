@@ -269,7 +269,7 @@ test('each item keeps its own outcome and reason, in the server’s order; a los
     const html = trayHtml(free('done', { run: run({ selected: 6 }) }), { ...read(), outcomes });
     assert.match(html, /<summary[^>]*>Each item \(4\)<\/summary>/);
     assert.match(html, /data-outcome="failed"[\s\S]*Work folder · Could not be deleted\./);
-    assert.match(html, /data-outcome="kept"[\s\S]*Working copy · Kept: changed after the check\./);
+    assert.match(html, /data-outcome="kept"[\s\S]*Worktree · Kept: changed after the check\./);
     assert.match(html, /data-outcome="not_started"[\s\S]*Temporary environment · Not started: left as it was\./);
     assert.match(html, /data-outcome="deleting"[\s\S]*Moved aside; still being deleted\./);
     assert.match(html, /data-outcome="stuck"[\s\S]*Not deleted yet; the app retries at its next maintenance run\./);
@@ -295,7 +295,7 @@ test('what the pool leaves out is named by reason, item by item, and the saved g
     assert.match(html, /Kept ·[\s\S]*2 unique work not verified saved · 1 still in use/);
     const reasons = trayHtml(free('ready', { pool: pool({ excluded: [{ reason: 'unproven_excluded_inputs', count: 1 }, { reason: 'never_seen_before', count: 2 }] }) }), read());
     assert.match(reasons, /1 files only a patch rule calls disposable · 2 for another reason/, 'a reason this client lacks words for is still counted');
-    assert.match(html, /data-free-excluded="capture_unproven"[\s\S]*Working copy · unique work not verified saved/);
+    assert.match(html, /data-free-excluded="capture_unproven"[\s\S]*Worktree · unique work not verified saved/);
     assert.match(html, /data-free-excluded="unreadable_record"[\s\S]*Other item · their task record could not be read[\s\S]*\/data\/state\/headless_tasks\/z\.json/);
     assert.doesNotMatch(html.split('data-free-excluded')[1], /size unknown/, 'an item the pool leaves out is not sized, which says nothing');
     assert.match(html, /Saved work in/);
@@ -502,7 +502,7 @@ test('a plan holding only copies by hand is still a review, and an item left out
         copy('x'), entry('y', { reason: 'in_use', availability: 'none', bytes: null }), entry('z', { reason: 'advanced_group', availability: 'saved_group', kind: 'other', bytes: null }) ] };
     const html = trayHtml(free('ready', { pool: pool({ manual: { count: 1, bytes: 2 * GB, bytes_complete: true }, excluded: [
         { reason: 'capture_unproven', count: 1, manual_count: 1 }, { reason: 'in_use', count: 1 }, { reason: 'advanced_group', count: 1 }] }) }), { ...read(), excluded: listed });
-    assert.match(html, /data-free-excluded="capture_unproven" data-availability="manual_discard"[\s\S]*Working copy · unique work not verified saved · can be discarded by hand/);
+    assert.match(html, /data-free-excluded="capture_unproven" data-availability="manual_discard"[\s\S]*Worktree · unique work not verified saved · can be discarded by hand/);
     assert.doesNotMatch(html.match(/data-free-excluded="in_use"[\s\S]*?<\/li>/)[0], /discarded by hand/);
     assert.doesNotMatch(html.match(/data-free-excluded="advanced_group"[\s\S]*?<\/li>/)[0], /discarded by hand/);
     assert.match(html, /Kept · 1 still in use</);
@@ -525,7 +525,7 @@ test('the copies screen lists every copy unchosen, with what it would lose said 
     assert.doesNotMatch(html, /Choose all/, 'there is no select-all on this screen');
     assert.match(html, /Nothing selected/);
     assert.doesNotMatch(html, /btn-danger|data-free-manual-go|data-free-go|data-free-saved-go/);
-    assert.match(html, /Task m0[\s\S]*2\.0 GB[\s\S]*Working copy · the whole folder goes[\s\S]*\/data\/state\/headless_tasks\/m0[\s\S]*3 files not verified saved · 4\.2 MB\./);
+    assert.match(html, /Task m0[\s\S]*2\.0 GB[\s\S]*Worktree · the whole folder goes[\s\S]*\/data\/state\/headless_tasks\/m0[\s\S]*3 files not verified saved · 4\.2 MB\./);
     assert.match(html, /Show the 3 files[\s\S]*notes\/draft\.md[\s\S]*3\.0 MB[\s\S]*\.cache\/x\.bin/);
     assert.match(html, /Task m1[\s\S]*size unknown[\s\S]*61 files not verified saved · 9\.0 MB\./);
     assert.match(html, /Show the 50 largest of 61 files[\s\S]*11 more are not listed\./, 'the sample is disclosed as a sample');
@@ -660,10 +660,10 @@ test('a manual run reports in the existing outcome words; a copy whose work coul
         copy('a', { outcome: 'removed', reason: null }), copy('b', { outcome: 'kept', reason: 'capture_unproven' }), copy('c', { outcome: 'kept', reason: 'changed' }),
         copy('d', { outcome: 'kept', reason: 'in_use' }), copy('e', { outcome: 'failed', reason: null }) ] };
     const html = trayHtml(free('done', { run: run({ selected: 5, removed: 1 }) }), { ...read(), outcomes });
-    assert.match(html, /data-outcome="removed"[\s\S]*Working copy · Removed\./);
-    assert.match(html, /data-outcome="kept"[\s\S]*Working copy · Kept: its work could not be saved first, so nothing was removed\./);
-    assert.match(html, /Working copy · Kept: changed after the check\./);
-    assert.match(html, /Working copy · Kept: still in use\./);
+    assert.match(html, /data-outcome="removed"[\s\S]*Worktree · Removed\./);
+    assert.match(html, /data-outcome="kept"[\s\S]*Worktree · Kept: its work could not be saved first, so nothing was removed\./);
+    assert.match(html, /Worktree · Kept: changed after the check\./);
+    assert.match(html, /Worktree · Kept: still in use\./);
     assert.match(html, /data-outcome="failed"[\s\S]*Could not be deleted\./);
     // The pool's own kept item keeps the pool's words.
     const pooled = trayHtml(free('done', { run: run() }), { ...read(), outcomes: { ...outcomes, items: [entry('p', { outcome: 'kept', reason: 'capture_unproven', availability: 'none' })] } });

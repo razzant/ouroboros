@@ -52,7 +52,7 @@ test('a tool server that needs sign-in is a row; a status that could not be read
     ];
     const rows = needRows({ tools: { enabled: true, servers } });
     assert.deepEqual(kinds(rows), ['tool-sign-in:slack', 'tool-sign-in:docs']);
-    assert.deepEqual([rows[0].text, rows[0].open, rows[0].owner], ['Tool server Slack needs sign-in', 'tools/slack', true]);
+    assert.deepEqual([rows[0].text, rows[0].open, rows[0].owner], ['MCP server Slack needs sign-in', 'tools/slack', true]);
     assert.deepEqual(needRows({ tools: { enabled: true, servers: servers.slice(2) } }), []);
     assert.deepEqual(needRows({ tools: null }).map((row) => [row.kind, row.id, row.owner, row.action, row.run]),
         [['unread', 'tools', false, 'Check', 'tools']]);
@@ -184,7 +184,7 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
     assert.equal(card.querySelector('[data-being-count]').hidden, true);
     assert.doesNotMatch(card.textContent, /nothing/i);
     const answer = (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-answer]').textContent;
-    assert.deepEqual(['models', 'rules', 'page:skills', 'dashboard:storage', 'tools'].map(answer), ['glm-5.3', 'Empty', '1 installed', 'Not measured', 'No tool servers']);
+    assert.deepEqual(['models', 'rules', 'page:skills', 'dashboard:storage', 'tools'].map(answer), ['glm-5.3', 'Empty', '1 installed', 'Not measured', 'No MCP servers']);
     // Check on the unread accounts row is the owner's press: one read of the status, still no wake.
     await content.fire('click', { target: card.querySelector('[data-need-action]') });
     await settle();
