@@ -282,3 +282,16 @@ def test_scope_refusals_carry_the_resolvers_own_code(tmp_path, store):
     assert "no project scope" in _workpad_write(unscoped, "x") and _code(unscoped) == "TOOL_ARG_ERROR"
     assert _project_scope(placed, "racer", write=True)[2] == "ACCESS_BLOCKED"
     assert _resolve_project_id(placed, "racer", write=True) == _project_scope(placed, "racer", write=True)[:2]
+
+
+def test_a_finish_reads_a_blind_overwrites_warning_and_skips_an_ok_receipt(tmp_path, store):
+    """The real producer's codes through the completion rule: LEGACY_WARNING is read before a finish, OK is not."""
+    from ouroboros.tool_capabilities import completion_observation_calls
+    from ouroboros.tools.project_journal import _workpad_write
+
+    mine, other = _ctx(tmp_path, "t-1"), _ctx(tmp_path, "t-2")
+    _workpad_write(mine, "mine\n")
+    own = {"tool": "workpad_write", "tool_result_code": (_workpad_write(mine, "again\n"), _code(mine))[1]}
+    blind = {"tool": "workpad_write", "tool_result_code": (_workpad_write(other, "theirs\n"), _code(other))[1]}
+    assert (own["tool_result_code"], blind["tool_result_code"]) == ("OK", "LEGACY_WARNING")
+    assert completion_observation_calls([own, blind]) == [blind]
