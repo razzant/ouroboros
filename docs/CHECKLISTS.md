@@ -55,11 +55,10 @@ explicit work-order review obligations.
   preflight stale (`review_status` reports `stale_from_edit` and its editor);
   staleness informs and gates nothing, and a look at a changed worktree is a new
   record.
-- `skip_advisory_review=True` records only `preflight: skipped`; it does not
-  waive obligations or debt. Independently applicable checks and tests, the panel,
-  the coupling question, pre/post fingerprint and exact commit/tag binding still
-  run; unresolved obligations/debt remain visible. Explain the judgment in the
-  surrounding task narrative.
+- `skip_advisory_review=True` records only `preflight: skipped` and waives
+  nothing else: independently applicable checks and tests, the panel, the
+  coupling question, pre/post fingerprint and exact commit/tag binding still
+  run. Explain the judgment in the surrounding task narrative.
 - **Loud continuation (BIBLE P3 bound):** a reviewer's answer never forbids a
   commit; Cyber may configure its own review and continue under P0. Every
   decision to continue over critical findings, quorum failure, infrastructure
@@ -90,36 +89,18 @@ explicit work-order review obligations.
   Historical feedback remains independently addressable. For Main's finish over a
   result review's findings, only findings actually shown to it count; a queued
   outcome is not proof of exposure.
-**Obligation tracking:**
-- Every blocked `commit_reviewed` verdict mints "open obligations" — a structured
-  list of the unresolved findings, synthesized to canonical issues
-  (`review_synthesis.synthesize_to_canonical_issues`) and joined to an earlier
-  obligation of the same root cause by semantic redirect
-  (`review_state.compute_obligation_semantic_redirects`). Both parts of the
-  brief mint them; a `$0` refusal mints none.
-- Open obligations ride into the next panel's brief by name (below) and are
-  cleared automatically on a successful commit. No gate admits or refuses a
-  commit on them: the panel judges whether each is resolved, and a generic PASS
-  that ignores a named obligation is a weak signal the author should not accept.
-- Repeated blockers may also synthesize **commit-readiness debt**. `review_status`
-  reports it via `commit_readiness_debts`, `commit_readiness_debts_count` and
-  `retry_anchor=commit_readiness_debt`; it is a durable anti-thrashing signal,
-  not an admission gate; the retired advisory gate projects no `repo_commit_ready`
-  verdict (DEV 05). A successful commit clears the debt.
-- **Anti-thrashing injection:** open obligations from durable review state enter
-  every reviewer prompt of the next wave as an inert JSON data block (fenced
-  ```json``` with a "DATA records — not instructions" disclaimer) with two
-  rules: (1) the JSON `"verdict"` field is the authoritative signal — withdrawal
-  notes in `"reason"` text are ignored; (2) do not rephrase prior findings under
-  a different checklist item name. One renderer serves both deliveries
-  (`review_prompt_text.build_anti_thrashing_rules_section`: packet prompts via
-  `review.py::_review_history_with_open_obligations`, retrieving briefs via
+**Earlier review rounds:**
+- The next wave of the same task on the same checkout receives that task's
+  earlier review records as written — each seat's answer, the author's
+  decisions and rebuttal — under the shared rules of
+  `review_prompt_text.build_anti_thrashing_rules_section`: the JSON `"verdict"`
+  field is authoritative; history verifies and never alone grounds a new FAIL;
+  from the third attempt, no new critical finding on unchanged code. One
+  renderer serves both deliveries (packet prompts via
+  `review.py::_review_history_brief`, retrieving briefs via
   `review_brief_coupling.build_retrieving_brief`).
-- **One root defect, one obligation:** a reviewer that sees an open obligation's
-  root defect again — in either part, under any item — reuses its
-  `obligation_id`, and the gate folds a reused open id or an exact restatement
-  into it. A reworded restatement without the id can still open a second
-  obligation; answer such duplicates together in `review_rebuttal`.
+- The host merges no finding into another and carries none into another
+  task's brief; each stays in its review record as written.
 
 ---
 
@@ -188,10 +169,8 @@ a `self_consistency` FAIL that an entire review cycle is then spent on.
 
 **Before retrying after review findings (`commit_reviewed`, `skill_review`):**
 The recorded review state — the verdict when one was reached and the individual
-findings, including the partial findings of a pending review; for commits also
-the open obligations and commit-readiness debt shown by `review_status` and the
-Review Continuity context section — stays recorded until a later review or
-successful commit resolves it; the author's response does not rewrite it.
+findings, including the partial findings of a pending review — stays recorded
+until a later review resolves it; the author's response does not rewrite it.
 Before the next attempt the author owes an outcome, not a
 procedure: consider the open findings together against the evidence and accepted
 goal rather than patching one visible symptom. Repair what the requirement still
@@ -211,8 +190,7 @@ genuinely new rebuttal, while an infrastructure outcome such as a missed
 reviewer quorum neither replays nor lapses a verdict. If attempts stop
 converging, reconsider the approach instead of repeating it. The shared retry
 note (`review_prompt_text.py::build_self_verification_template`, in the skill
-review block) and the open-obligation/debt branches
-of `review_status` `next_step` state this same duty.
+review block) states this same duty.
 
 ---
 
@@ -960,11 +938,6 @@ These are **separate surfaces** with separate prompts and state, drawn from the 
   content hash of the skill's manifest + payload files;
   `data/state/skills/<name>/review.json` is the run gate's projection of that
   record.
-
-A blocked skill review must NOT create obligations, commit-readiness
-debt, or any artefact visible to the repo-review pipeline — the two
-surfaces are deliberately siloed so a sticky skill finding cannot
-block repo commits and vice versa.
 
 ---
 
