@@ -30,6 +30,7 @@ from ouroboros.project_facts import (
     project_workpad_path,
     sanitize_project_id,
 )
+from ouroboros.memory_texts import edit_properties
 from ouroboros.project_naming import CONTINUE_TITLE_PREFIX
 from ouroboros.task_carrier import inline_execution
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -38,7 +39,6 @@ from ouroboros.utils import (
     append_jsonl,
     jsonl_generation_signature,
     utc_now_iso,
-    write_text_atomic,
 )
 
 log = logging.getLogger(__name__)
@@ -49,7 +49,6 @@ _JOURNAL_KINDS = ("start", "checkpoint", "blocked", "done", "note")
 # file tools refuse the project store).
 _READ_SOURCES = {"journal": project_journal_path, "reflections": project_reflections_path}
 _MAX_TEXT_CHARS = 4000
-_WORKPAD_MAX_BYTES = 256 * 1024
 
 
 def _actor_facts(ctx: ToolContext) -> tuple[Dict[str, Any], Dict[str, Any], bool, str, str]:
@@ -524,40 +523,60 @@ def _journal_read(
     return f"## Project journal ({pid})\n\n" + "\n".join(lines)
 
 
-@completed_local_read
-def _workpad_read(ctx: ToolContext, project_id: str = "") -> str:
+def _workpad_page(ctx: ToolContext, project_id: Any = "") -> Tuple[str, Optional[bytes], str]:
+    """``(project id, the page's exact bytes or None when it has none, refusal)``: one byte capture of the page,
+    under the read scope (``_resolve_project_id(write=False)``), never translated or stripped."""
     pid, scope_error = _resolve_project_id(ctx, project_id, write=False)
     if scope_error:
-        return scope_error + " (workpad_read)"
+        return "", None, scope_error + " (workpad_read)"
     if not pid:
-        return "⚠️ TOOL_ARG_ERROR (workpad_read): no project scope."
+        return "", None, "⚠️ TOOL_ARG_ERROR (workpad_read): no project scope."
     path = project_workpad_path(pid)
-    if not path.is_file():
-        return f"(workpad for project {pid} is empty)"
     try:
-        return path.read_text(encoding="utf-8")
+        return pid, (path.read_bytes() if path.is_file() else None), ""
     except OSError as exc:
-        return f"⚠️ TOOL_ERROR (workpad_read): {exc}"
+        return pid, None, f"⚠️ TOOL_ERROR (workpad_read): {exc}"
 
 
-def _workpad_write(ctx: ToolContext, content: str, project_id: str = "") -> str:
+def _empty_workpad(pid: str) -> str:
+    return f"(workpad for project {pid} is empty)"
+
+
+@completed_local_read
+def _workpad_read(ctx: ToolContext, project_id: str = "") -> str:
+    pid, raw, refusal = _workpad_page(ctx, project_id)
+    if refusal:
+        return refusal
+    if raw is None:
+        return _empty_workpad(pid) + " workpad_write creates it; there is no revision yet."
+    try:
+        page = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return f"⚠️ TOOL_ERROR (workpad_read): the page is not UTF-8 ({exc.reason})"
+    return (f"revision={hashlib.sha256(raw).hexdigest()} (project {pid}'s workpad, {len(page)} chars; the page "
+            "follows exactly)\n\n" + page)
+
+
+def _workpad_write(ctx: ToolContext, content: Optional[str] = None, project_id: str = "", mode: str = "overwrite",
+                   expected_revision: Optional[str] = None, old_str: Optional[str] = None,
+                   new_str: Optional[str] = None, edits: Optional[list] = None, version: Optional[str] = None,
+                   reason: Optional[str] = "") -> str:
+    """Write the project's page through the plain-text editor (``memory_texts``): overwrite, edit or revert, its
+    history row first beside the page."""
+    from ouroboros.memory_texts import workpad_source, write_text
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
     pid, scope_error = _resolve_project_id(ctx, project_id, write=True)
-    if scope_error:
-        return scope_error + " (workpad_write)"
-    if not pid:
-        return "⚠️ TOOL_ARG_ERROR (workpad_write): no project scope."
-    body = str(content or "")
-    if len(body.encode("utf-8", errors="ignore")) > _WORKPAD_MAX_BYTES:
-        return ("⚠️ TOOL_ARG_ERROR (workpad_write): workpad exceeds 256KB — keep it a "
-                "working page; move durable facts to knowledge_write and history to journal_write.")
-    path = project_workpad_path(pid)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        # Replace, never truncate in place: a failed write leaves the previous page whole.
-        write_text_atomic(path, body)
-    except OSError as exc:
-        return f"⚠️ TOOL_ERROR (workpad_write): {exc}"
-    return f"OK: workpad[{pid}] written ({len(body)} chars)."
+    if scope_error or not pid:
+        forbidden = scope_error.startswith("⚠️ TOOL_FORBIDDEN")
+        return _publish_tool_result(ctx, ToolResult(
+            status="blocked" if forbidden else "error", code="ACCESS_BLOCKED" if forbidden else "TOOL_ARG_ERROR",
+            text=(scope_error or "⚠️ TOOL_ARG_ERROR (workpad_write): no project scope.") + (
+                " (workpad_write)" if scope_error else "")))
+    metadata = getattr(ctx, "task_metadata", {}) or {}
+    return write_text(ctx, workpad_source(pid), content=content, mode=mode, expected_revision=expected_revision,
+                      old_str=old_str, new_str=new_str, edits=edits, version=version, reason=reason,
+                      source_type=str((metadata if isinstance(metadata, dict) else {}).get("delegation_role") or "task"))
 
 
 _FOCUS_SOURCE_REFUSAL_PREFIXES = (
@@ -565,7 +584,7 @@ _FOCUS_SOURCE_REFUSAL_PREFIXES = (
 )
 # A focus points at ONE bounded page of an existing reader; a retained answer is
 # a cognitive artifact, not a mirror of the store. Larger answers are refused
-# with the repair (narrow the page), never clipped.
+# with the repair the reader has (a narrower page; the workpad has none), never clipped.
 _FOCUS_SOURCE_MAX_BYTES = 256 * 1024
 
 
@@ -597,8 +616,9 @@ def _read_focus_source(ctx: ToolContext, source: Dict[str, Any]) -> Tuple[Option
         if reader == "journal_read":
             text = _journal_read(ctx, project_id=str(args.get("project_id") or ""),
                                  offset=int(args.get("offset") or 0), snapshot=str(args.get("snapshot") or ""))
-        elif reader == "workpad_read":
-            text = _workpad_read(ctx, project_id=str(args.get("project_id") or ""))
+        elif reader == "workpad_read":  # the page's own bytes, as captured: not the read's revision line
+            pid, raw, refusal = _workpad_page(ctx, str(args.get("project_id") or ""))
+            text = refusal or (_empty_workpad(pid) if raw is None else raw.decode("utf-8"))
         elif reader == "recent_tasks":
             from ouroboros.tools.recent_tasks import _handle_recent_tasks
             text = _handle_recent_tasks(ctx, offset=int(args.get("offset") or 0), snapshot=str(args.get("snapshot") or ""))
@@ -643,7 +663,9 @@ def _read_focus_source(ctx: ToolContext, source: Dict[str, Any]) -> Tuple[Option
             return "", f"{reader} refused: {code or 'typed error'}"
     if len(body.encode("utf-8")) > _FOCUS_SOURCE_MAX_BYTES:
         return "", (f"{reader} answered {len(body.encode('utf-8'))} bytes, above the {_FOCUS_SOURCE_MAX_BYTES}-byte "
-                    "focus source bound; point the focus at a narrower page (offset/snapshot) or a smaller reader")
+                    "focus source bound; " + ("the workpad has no narrower page: name another reader, or fold the page "
+                                              "with workpad_write first" if reader == "workpad_read" else
+                                              "point the focus at a narrower page (offset/snapshot) or a smaller reader"))
     return body, ""
 
 
@@ -1002,7 +1024,9 @@ def get_tools() -> List[ToolEntry]:
             "workpad_read",
             {
                 "name": "workpad_read",
-                "description": "Read the current project's free-form workpad page.",
+                "description": ("Read the current project's free-form workpad page exactly, after its revision "
+                                "line (expected_revision for workpad_write). Its earlier versions: "
+                                "memory_read(source='workpad')."),
                 "parameters": {"type": "object", "properties": dict(common)},
             },
             lambda ctx, project_id="": _workpad_read(ctx, project_id),
@@ -1013,20 +1037,34 @@ def get_tools() -> List[ToolEntry]:
             {
                 "name": "workpad_write",
                 "description": (
-                    "Overwrite the current project's workpad page (<=256KB). A working "
-                    "page for plans/links/state — durable facts belong in knowledge_write, "
-                    "history in journal_write."
+                    "Write the current project's workpad, a working page for plans, links and state (durable facts "
+                    "belong in knowledge_write, history in journal_write). Change parts with mode='edit': "
+                    "edits=[{old_str, new_str}, ...] (or one old_str with content), each old_str exact text found "
+                    "once in the revision I read, all or none; mode='overwrite' (default) replaces the whole page "
+                    "with content; mode='revert' puts back version=<revision>. expected_revision (shown under the "
+                    "resident page and by workpad_read) is required for edit and revert; an overwrite without it "
+                    "still lands, and replacing a version this task did not write answers with a warning. A stale "
+                    "revision writes nothing and returns what changed since. reason is kept in the page's history. "
+                    "The receipt states the page's size (it enters every request of its project whole), what it "
+                    "replaced and the calls that read it (memory_read(source='workpad:<project id>', version=...)) "
+                    "and put it back."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "content": {"type": "string"},
+                        **edit_properties(
+                            "page", "workpad", "Required for edit and revert: the page's current revision (under the "
+                            "resident page, from workpad_read, a receipt or a refusal). Optional for overwrite; empty "
+                            "creates a missing page only. A stale revision writes nothing and returns what changed "
+                            "since."),
                         **common,
                     },
-                    "required": ["content"],
+                    "required": [],
                 },
             },
-            lambda ctx, content, project_id="": _workpad_write(ctx, content, project_id),
+            lambda ctx, content=None, project_id="", mode="overwrite", expected_revision=None, old_str=None,
+            new_str=None, edits=None, version=None, reason="": _workpad_write(
+                ctx, content, project_id, mode, expected_revision, old_str, new_str, edits, version, reason),
             timeout_sec=15,
         ),
     ]

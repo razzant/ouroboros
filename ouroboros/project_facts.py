@@ -277,7 +277,10 @@ def _project_store_reader_hint(parts: list) -> str:
         part = {
             project_workpad_path(pid).relative_to(own).as_posix(): (
                 "workpad", f"workpad_read(project_id='{pid}')",
-                f"workpad_write(project_id='{pid}', content=...) replaces it"),
+                f"workpad_write(project_id='{pid}', mode=..., expected_revision=...) writes it (edit changes parts, "
+                "overwrite replaces it, revert puts back a version)"),
+            project_workpad_history_path(pid).relative_to(own).as_posix(): (
+                "workpad history", f"memory_read(source='workpad:{pid}')", "each workpad_write appends its row"),
             project_journal_path(pid).relative_to(own).as_posix(): (
                 "journal", f"journal_read(project_id='{pid}')",
                 f"journal_write(project_id='{pid}', kind=..., text=...) appends to it"),
@@ -336,6 +339,11 @@ def project_journal_path(project_id: str) -> pathlib.Path:
 def project_workpad_path(project_id: str) -> pathlib.Path:
     """Free-form per-project working notes (markdown scratchpad)."""
     return _project_store_root(project_id) / "workpad.md"
+
+
+def project_workpad_history_path(project_id: str) -> pathlib.Path:
+    """The workpad's history journal, beside the page under the same root (``memory_texts``: rows by change)."""
+    return _project_store_root(project_id) / "workpad_history.jsonl"
 
 
 def project_reflections_path(project_id: str) -> pathlib.Path:
