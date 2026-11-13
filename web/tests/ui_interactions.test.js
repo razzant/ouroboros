@@ -262,14 +262,15 @@ test('a vertical list brings the chosen row into view inside its own scroller, n
     doc.body.append(page);
     const controller = bindTabStrip(strip, { dataAttr: 'data-view' });
     tabs[0].focus();
-    // End chooses the last row, below the rail's visible edge (160): the rail scrolls by what it lacks, the page not.
+    // End chooses the last row, below the rail's visible edge (160): the rail scrolls by what it lacks and the edge
+    // fade's clearance (24, so the row is not dimmed under the fade), the page not.
     strip.emit('keydown', { target: tabs[0], key: 'End' });
     assert.equal(doc.activeElement, tabs[2]);
-    assert.deepEqual([rail.scrollTop, page.scrollTop, strip.scrollLeft ?? 0], [120, 0, 0]);
-    // A row already in view moves nothing; one above the top edge comes back to it.
+    assert.deepEqual([rail.scrollTop, page.scrollTop, strip.scrollLeft ?? 0], [144, 0, 0]);
+    // A row already in view moves nothing; one above the top edge comes back to it, the same clearance inside it.
     tabs.forEach((tab, i) => { tab.rect = { left: 0, right: 200, top: -50 + i * 100, bottom: -10 + i * 100 }; });
     strip.emit('keydown', { target: tabs[2], key: 'ArrowUp' });
-    assert.equal(rail.scrollTop, 120, 'the second row stands in view');
+    assert.equal(rail.scrollTop, 144, 'the second row stands in view');
     strip.emit('keydown', { target: tabs[1], key: 'ArrowUp' });
     assert.deepEqual([rail.scrollTop, page.scrollTop], [30, 0]);
     controller.destroy();

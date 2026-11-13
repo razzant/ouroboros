@@ -22,7 +22,7 @@
 
 import { settingsReturn } from './dashboard.js';
 import { renderBackControl, renderPageHeader, setBackControlTarget } from './page_header.js';
-import { bindScrollFade } from './scroll_fade.js';
+import { FADE_CLEARANCE, bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
 import { isDoorId, mountSettingsHome, settingsTitle } from './settings_home.js';
 import { settingsPageFor } from './settings_pages.js';
@@ -349,10 +349,9 @@ export function initSettings(ctx = {}) {
         // it comes in just past the scroll-edge fade.
         const rail = homeEl.getBoundingClientRect();
         const box = chosen.getBoundingClientRect();
-        const fade = 24;
         if (box.top >= rail.top && box.bottom <= rail.bottom) return;
-        if (box.top < rail.top) homeEl.scrollTop += box.top - rail.top - fade;
-        else homeEl.scrollTop += box.bottom - rail.bottom + fade;
+        if (box.top < rail.top) homeEl.scrollTop += box.top - rail.top - FADE_CLEARANCE;
+        else homeEl.scrollTop += box.bottom - rail.bottom + FADE_CLEARANCE;
         places.set(homeEl, homeEl.scrollTop);
     }
 
