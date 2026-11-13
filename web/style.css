@@ -119,8 +119,8 @@ html[data-layout="stack"] .shell-icon-control {
 
 /* The sidebar's zones (docs/DESIGN.md "Shell"; owner 12.11, the fifth round "Карточка и тихие разделы"): a pinned
    head (this Ouroboros's card, the Main Chat place), the Projects list as the ONE scroller, then at the bottom edge
-   the tools, three to a line, and the foot (the version and the update); free room, when the list is short or
-   folded, lies between the list and the tools. Row
+   the sections, three to a line on a desk, and the foot (the version and the update); free room, when the list is
+   short, lies between the list and the sections. Row
    heights follow the pointer: a finger gets the touch minimum, a mouse a quieter row, and a short window with a
    mouse compacts the rows first. A window too short even for that falls back to the whole column scrolling with
    the head sticky and the foot still on the bottom edge. */
@@ -129,7 +129,6 @@ html[data-layout="stack"] .shell-icon-control {
     --nav-item-h: 32px;      /* a Project row */
     --nav-control-h: 28px;   /* a row's ⋯ and the header's + */
     --nav-kebab-w: var(--nav-control-h);  /* the column a Project row's ⋯ takes (none on touch: a long press opens it) */
-    --nav-label-x: calc(var(--space-3) + 18px + var(--space-3));  /* the one text column every label starts on */
     --sidebar-pad-bottom: var(--space-3);  /* the foot's inset from the bottom edge; the drawer adds the safe area */
     width: var(--drag-width, var(--sidebar-width));
     height: var(--vvh);
@@ -352,8 +351,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     white-space: nowrap;
 }
 
-.nav-row,
-.nav-section-toggle {
+.nav-row {
     display: flex;
     flex-direction: row;
     align-items: center;
@@ -373,20 +371,10 @@ html[data-layout="stack"] .resize-handle { display: none; }
     position: relative;
 }
 
-.nav-row svg,
-.nav-section-toggle svg {
+.nav-row svg {
     flex: 0 0 auto;
     width: 18px;
     height: 18px;
-}
-
-.nav-row-icon {
-    flex: 0 0 18px;
-    width: 18px;
-    height: 18px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
 }
 
 .nav-row-label {
@@ -398,19 +386,11 @@ html[data-layout="stack"] .resize-handle { display: none; }
 }
 
 /* The sidebar's marks are the shared status marks (ui.css "Status marks", status_mark.js): one per place, in the
-   place's own ink (hover and the chosen row's ink included), the owner's amber and the unread crimson its only hues.
-   The Projects header carries the Projects' one mark in the rows' mark column; its chevron follows its word. */
-#nav-projects-toggle > .nav-row-label { flex: 0 1 auto; }
-
-.nav-row-meta {
-    flex: 0 0 auto;
-    color: var(--text-meta);
-    font-size: var(--type-meta);
-}
+   place's own ink (hover and the chosen row's ink included), the owner's amber and the unread crimson its only hues. */
 
 /* The chosen place is one crimson fill with its ink, on the rest shadow like every chosen capsule, for the card, a
-   Project row and a tool alike; no left stripe (owner 12.11). A Project's hue stays in its mark. One row at a time;
-   the Projects header is never chosen (a Project row is). The fill itself is .nav-row.active below. */
+   Project row and a section alike; no left stripe (owner 12.11). A Project's hue stays in its mark. One row at a
+   time. The fill itself is .nav-row.active below. */
 
 /* Unread counts and badges are the crimson accent (a live fact for you), never red and never a glow (owner Q6=A);
    a Project row's own new messages are the crimson hue of its status mark. */
@@ -533,7 +513,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 @media (hover: hover) {
     .nav-row:hover,
-    .nav-section-toggle:hover,
     .nav-project-pin:hover + .nav-project-row:not(.active) {  /* a row's Pin lies over it */
         background: var(--tone-quiet-hover);
         border-color: transparent;
@@ -560,7 +539,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
 }
 
 .nav-row:focus,
-.nav-section-toggle:focus,
 .app-tab:focus,
 .chat-header-btn:focus {
     outline: none;
@@ -569,7 +547,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
 /* Inset: these sit flush inside the sidebar / header strip, which clips an
    outer ring (docs/DESIGN.md "Focus"). */
 .nav-row:focus-visible,
-.nav-section-toggle:focus-visible,
 .app-tab:focus-visible,
 .chat-header-btn:focus-visible {
     outline: 2px solid var(--focus-accent-border);
@@ -881,12 +858,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex-direction: column;
     gap: var(--space-1);
     margin-top: var(--space-2);
-}
-
-.nav-chevron {
-    flex: 0 0 auto;
-    color: var(--text-muted);
-    transition: transform 0.15s ease;
 }
 
 /* Main content in the shell grid. */
@@ -4512,12 +4483,10 @@ html[data-layout="stack"] #primary-sidebar:not(.open):not(.dragging) {
 }
 /* A tap on a drawer row answers with its colour at once (a press is colour, never a sink): without a hover the rows
    had only iOS's grey flash. */
-.nav-row,
-.nav-section-toggle {
+.nav-row {
     -webkit-tap-highlight-color: transparent;
 }
-.nav-row:not(.active):active,
-.nav-section-toggle:active {
+.nav-row:not(.active):active {
     background: var(--tone-quiet-hover);
 }
 html[data-layout="stack"] .unread-badge {
@@ -6340,8 +6309,6 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* The consciousness allowance under its field (costs.js allowancePresentation): the clock's own spend in its words, what
    that leaves out in the meta ink and the door to Consciousness; then up to three status sentences (.ui-status), each
    its fact in the line's tone and what follows from it in the meta ink, a held wake's ending in its card's door. */
-.costs-allowance-spend { margin: 0; }
-.costs-allowance-spend .cost-cell-note { display: inline; }
 .costs-allowance-state { display: grid; gap: var(--space-2); }
 .costs-allowance-state:empty { display: none; }
 .costs-allowance-line { margin: 0; max-width: 72ch; min-width: 0; overflow-wrap: anywhere; }
@@ -8701,7 +8668,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
    Multi-project sidebar + right thread panel (v6.32.0)
    =========================================================================== */
 
-/* The middle zone: the Projects header pinned at its top, the list below it the sidebar's ONE scroller. A window
+/* The middle zone: Find a project and + pinned at its top, the list below it the sidebar's ONE scroller. A window
    too short for it scrolls the whole column instead (the head stays sticky). */
 .nav-projects {
     display: flex;
@@ -8710,8 +8677,8 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     width: 100%;
     align-items: stretch;
     margin: var(--space-1) 0 0;
-    /* The zone takes the column's free room, so the tools and the foot stand at the bottom edge (owner 12.11); the
-       list in it is as tall as its rows, so a short or folded list leaves that room under its last row. */
+    /* The zone takes the column's free room, so the sections and the foot stand at the bottom edge (owner 12.11);
+       the list in it is as tall as its rows, so a short list leaves that room under its last row. */
     flex: 1 1 auto;
     min-height: 0;
 }
@@ -8737,9 +8704,8 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 /* Find a project (owner 4.11, A1 refined; projects_nav.js): one floating capsule a Project row high (32 on the desk,
    44 on touch) in the header pills' material, --chip-float standing on --elev-rest. It is built as the composer's
    field is (DESIGN "The composer field"): the capsule is the object, the words' row has no surface, and focus is a
-   ring drawn as shadows, so no border adds to its height. The magnifier takes the rows' icon column at the house
-   glyph size, the words start on the rows' label column, and × (while there is a query) closes the row in the +
-   column. --space-1 after the header row, --space-2 before the first row: the step the pins keep before the rest. */
+   ring drawn as shadows, so no border adds to its height. The magnifier leads at the house glyph size, the words
+   follow it, and × (while there is a query) closes the field before +. --space-1 after the header row, --space-2 before the first row: the step the pins keep before the rest. */
 .nav-projects-find {
     display: flex;
     align-items: center;
@@ -8870,9 +8836,8 @@ html .nav-projects-list[data-finding] .nav-project-row { height: auto; }
     overflow-wrap: anywhere;
 }
 
-/* Project rows read as a compact list nested under the "Projects" header (no
-   glyph/dot, label indented to align under the parent label, shorter rows and
-   no left active bar) — a dropdown list, not standalone tabs. */
+/* A Project row's item: the row and, over its end, its ⋯ (and its Pin over the time); no glyph and no stripe. A
+   deleting item keeps the grid that gives `Deleting…` its column. */
 .nav-project-item {
     display: grid;
     grid-template-columns: minmax(0, 1fr) var(--nav-kebab-w);
@@ -8979,9 +8944,9 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 .nav-project-row[data-solo] .nav-project-says { display: none; }
 .nav-project-row.active :is(.nav-row-label, .nav-project-time, .nav-project-says) { color: inherit; }
 
-/* A deleting row states one trailing fact, `Deleting…`, in its wider sibling column. Its census mark stays in the
-   accessible name but is not drawn (app.js): motion on a row the owner cannot open would read as work to look at. */
-.nav-project-item.is-deleting .nav-project-row { grid-template-columns: minmax(0, 1fr); }
+/* A deleting row states one trailing fact, `Deleting…`, in its wider sibling column (the item's grid below). Its
+   census mark stays in the accessible name but is not drawn (app.js): motion on a row the owner cannot open would read
+   as work to look at. */
 
 @media (hover: hover) {
     .nav-project-row:not(.active):hover {
@@ -9008,48 +8973,13 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     white-space: nowrap;
 }
 
-/* The Projects header: the toggle, the unread count, its status mark, then "+" (New project). */
-/* The Projects header keeps Main's columns (owner 19.10, Q1 = B): the toggle (icon, word, chevron), then its facts,
-   the count and the mark in the number and mark columns of Main and the rows, and + in the ⋯ column. On touch, where
-   rows have no ⋯ column, + follows the chevron so the facts keep those columns. A press on the facts toggles too. */
 .nav-projects-header {
     display: flex;
     align-items: center;
     width: 100%;
 }
 
-.nav-projects-header > .nav-section-toggle {
-    flex: 0 1 auto;
-    width: auto;
-    min-width: 0;
-    padding-right: var(--space-2);
-    border-radius: var(--radius-inner) 0 0 var(--radius-inner);
-}
-
-.nav-projects-facts {
-    order: 1;
-    flex: 1 0 auto;
-    align-self: stretch;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: var(--space-3);
-    /* A Project row ends its mark column one border and --space-1 before its edge; the facts end where it does. */
-    padding-right: calc(var(--space-1) + 1px);
-    border-radius: 0 var(--radius-inner) var(--radius-inner) 0;
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: var(--motion-tone);
-}
-
-.nav-projects-facts > .nav-mark-slot {
-    flex: 0 0 18px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.nav-projects-add { order: 2; flex-shrink: 0; }  /* the ⋯ column keeps its width in a narrow sidebar */
+.nav-projects-add { order: 2; flex-shrink: 0; }  /* + keeps its width in a narrow sidebar */
 
 /* The Projects list starts with its search; no "Projects" word and no collapse. The row is the find
    capsule and, at its end, New project: a round capsule of the same material and height, as a messenger's compose
@@ -9068,45 +8998,6 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 }
 @media (hover: hover) {
     .nav-projects-header > .nav-projects-add:hover { background: var(--chip-float-hover); color: var(--text-primary); }
-}
-
-@media (pointer: coarse) {
-    .nav-projects-add { order: 0; }
-}
-
-@media (hover: hover) {
-    .nav-projects-facts:hover,
-    .nav-projects-header > .nav-section-toggle:has(~ .nav-projects-facts:hover),
-    .nav-projects-header > .nav-section-toggle:hover ~ .nav-projects-facts {
-        background: var(--tone-quiet-hover);
-        color: var(--text-primary);
-    }
-}
-
-.nav-projects-header .nav-chevron {
-    display: inline-flex;
-    width: 16px;
-    height: 16px;
-    transform: rotate(90deg);
-    transition: transform 0.15s ease;
-}
-.nav-projects-header .nav-chevron > svg { width: 16px; height: 16px; }
-
-.nav-projects-header .nav-section-toggle[aria-expanded="false"] .nav-chevron {
-    transform: rotate(0deg);
-}
-
-.nav-projects-header .nav-row-meta:not(:empty) {
-    min-width: 18px;
-    height: 18px;
-    padding: 0 5px;
-    border-radius: var(--pill-radius);
-    background: var(--tone-crimson);
-    color: var(--tone-crimson-ink);
-    font-size: var(--type-meta);
-    font-weight: 600;
-    line-height: 18px;
-    text-align: center;
 }
 
 .nav-projects-add {
@@ -9186,13 +9077,12 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     outline-offset: -2px;
 }
 
-/* A row's Pin or Unpin: the ⋯'s quiet control over the row's icon column, left of the name, in no column of its own.
-   It is drawn while a pointer hovers the row or the keyboard is on it, and is a target only while drawn, so a finger
-   (no hover) presses the row there and keeps the long press's menu. Over the chosen row it takes the row's ink, and
+/* A row's Pin or Unpin: the ⋯'s quiet control over the time on the name's line, in no column of its own. It is drawn
+   while a pointer hovers the row or the keyboard is on it, and is a target only while drawn, so a finger (no hover)
+   presses the row there and keeps the long press's menu. Over the chosen row it takes the row's ink, and
    the row keeps its hover under it (the rows' hover rule). */
 .nav-project-pin {
-    /* Rows have no icon column since the fifth round: the Pin stands over the time on the name's line, which gives
-       way to it while it is drawn. */
+    /* The time gives way to it while it is drawn. */
     position: absolute;
     z-index: 1;  /* over the row, which follows it */
     top: 3px;
@@ -9233,9 +9123,6 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
         overflow: hidden;
         opacity: 0;
         pointer-events: none;
-    }
-    .nav-project-item:has(> .nav-project-kebab:is(:focus, [aria-expanded="true"])) {
-        grid-template-columns: minmax(0, 1fr) var(--nav-control-h);
     }
     .nav-project-item {
         -webkit-touch-callout: none;
