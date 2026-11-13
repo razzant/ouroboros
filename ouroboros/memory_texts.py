@@ -388,6 +388,29 @@ def _page(head: str, text: str, start: int, resume: Any) -> str:
     return head + "\n" + cont + "\n" + text[start:end]
 
 
+def version_door(ctx: Any, source: Any, version: Any, start: Any, fingerprint: Any,
+                 selectors: dict) -> tuple[Optional[str], list[str]]:
+    """``(answer, notes)`` of memory_read: its version door's answer when ``source`` names a memory text (or a
+    ``version`` is given without one, which the door refuses), else ``None`` and the argument notes a chronicle read
+    carries. A blank ``source`` or ``version`` takes the omitted path, named. ``selectors`` are the chronicle's own,
+    each passed as None when its caller omitted it (a default such as ``after_seq=0`` or ``rows=False`` is no
+    selector; numeric 0 is a real ``room_id``); one given beside ``source`` is a conflict the door refuses."""
+    from ouroboros.tools.arg_feedback import ignored_argument_note
+
+    notes = []
+    if isinstance(source, str) and not source.strip():
+        notes.append(ignored_argument_note("source", source, "no memory text named; the chronicle is read"))
+        source = None
+    if source is None and isinstance(version, str) and not version.strip():
+        notes.append(ignored_argument_note("version", version, "no revision named"))
+        version = None
+    if source is None and version is None:
+        return None, notes
+    given = [name for name, value in selectors.items()
+             if value is not None and not (isinstance(value, str) and not value.strip())]
+    return read_versions(ctx, source, version, start, fingerprint, given), notes
+
+
 def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint: Any, others: list[str]) -> str:
     """``memory_read(source=...)``: one version of a memory text, or the list of its versions; never the chronicle.
 

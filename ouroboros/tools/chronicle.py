@@ -76,6 +76,7 @@ from ouroboros.memory_view_account import (quote_line, selection_facts, source_c
 from ouroboros.store import StoreError
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tool_call_log import chronicle_lead_metadata
+from ouroboros.tools.arg_feedback import with_argument_notes
 from ouroboros.tools.registry import ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.utils import sha256_text, utc_now_iso
@@ -1284,13 +1285,14 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
     unknown = sorted(set(bounds) - {"from", "to"})
     if unknown:
         return _arg_error(ctx, f"unknown argument(s): {', '.join(unknown)}")
-    if source is not None or (version is not None and str(version).strip()):  # a memory text's versions: no chronicle
-        from ouroboros.memory_texts import read_versions
+    from ouroboros.memory_texts import version_door  # a memory text's versions, read without the chronicle
 
-        given = {"node_id": node_id, "room_id": room_id, "after_seq": after_seq, "rows": rows, "task_id": task_id,
-                 "period": period, "source_ref": source_ref, "revision": revision, "story": story, "owner_words": owner_words,
-                 "proposed_selection": proposed_selection, **bounds}
-        return read_versions(ctx, source, version, start, fingerprint, [k for k, v in given.items() if v not in (None, "", 0)])
+    door, notes = version_door(ctx, source, version, start, fingerprint, {  # each selector by its own omission rule
+        "node_id": node_id, "room_id": room_id, "after_seq": after_seq or None, "rows": rows or None, "task_id": task_id,
+        "period": period, "source_ref": source_ref or None, "revision": revision, "story": story or None,
+        "owner_words": owner_words or None, "proposed_selection": proposed_selection, **bounds})
+    if door is not None:
+        return door
     if (sum(bool(mode) for mode in (node_id, source_ref, rows, story, owner_words, proposed_selection is not None)) > 1
             or (story or owner_words) and room_id is not None):
         return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, story=true, owner_words=true, "
@@ -1351,7 +1353,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
         return _arg_error(ctx, str(exc))
     except (OSError, TimeoutError) as exc:
         return _failure(ctx, exc)
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))
+    return with_argument_notes(ctx, _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text)), notes)
 
 
 # --- memory_mark ----------------------------------------------------------------------------------

@@ -278,3 +278,27 @@ def test_a_workpad_reads_through_its_project_scope_and_its_versions_outlive_the_
     page.unlink()  # a historical version reads even when the live page is gone
     gone = _read(root, source="workpad:atlas", version=first)
     assert gone.endswith("# Plan\n\n- one\n") and "the text does not exist now" in gone, gone
+
+
+def test_a_blank_source_or_version_takes_the_chronicle_path_with_a_note(tmp_path, identity, monkeypatch):
+    """K5: a blank ``source`` (or a blank ``version`` without one) names nothing: the chronicle read runs as on the base,
+    the answer naming the ignored argument; the door stays shut."""
+    import ouroboros.memory_texts as texts
+
+    monkeypatch.setattr(texts, "read_versions", lambda *a, **k: pytest.fail("the door opened for a blank source"))
+    ctx = _ctx(tmp_path)
+    plain = _read(ctx, owner_words=True)  # a chronicle-path read that needs no activated chronicle
+    for arguments, said in (({"source": ""}, "source='' ignored"), ({"source": "  "}, "source='  ' ignored"),
+                            ({"version": ""}, "version='' ignored"), ({"source": "", "version": " "}, "version=' ' ignored")):
+        reply = _read(ctx, owner_words=True, **arguments)
+        assert reply.startswith(plain) and said in reply[len(plain):], (arguments, reply)
+
+
+def test_a_real_selector_beside_source_is_refused_and_a_default_is_not_a_selector(tmp_path, identity):
+    ctx = _ctx(tmp_path)
+    for arguments in ({"room_id": 0}, {"room_id": "0"}, {"after_seq": 3}, {"rows": True}, {"story": True}):
+        reply = _read(ctx, source="identity", **arguments)
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR") and f"drop {next(iter(arguments))}" in reply, (arguments, reply)
+    for arguments in ({"room_id": None}, {"room_id": ""}, {"after_seq": 0}, {"rows": False}, {"story": False},
+                      {"owner_words": False}, {"node_id": ""}, {"revision": ""}):
+        assert _read(ctx, source="identity", **arguments).startswith("[identity: versions newest first"), arguments
