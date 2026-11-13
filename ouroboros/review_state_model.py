@@ -41,7 +41,8 @@ def _rs():
 
 
 def _row_key(row: Dict[str, Any]) -> str:
-    return str(row.get("repo_key") or "")
+    """A stored row's checkout key; an empty or missing one is the legacy key, as the retired layer read it."""
+    return str(row.get("repo_key") or "") or _rs()._LEGACY_CURRENT_REPO_KEY
 
 
 def _written_before(row: Dict[str, Any], landed: Any) -> bool:
@@ -137,7 +138,7 @@ class AdvisoryReviewState:
         for item in self.attempts:
             landed = _rs()._parse_iso_ts(str(item.finished_ts or item.updated_ts or item.ts or ""))
             if item.status == "succeeded" and landed is not None:
-                landings.append((landed, str(item.repo_key or "")))
+                landings.append((landed, str(item.repo_key or "") or _rs()._LEGACY_CURRENT_REPO_KEY))
         for landed, where in sorted(landings):
             scope = {where} if any(_row_key(row) == where for row in remaining) else unkeyed
             remaining = [row for row in remaining if not (_row_key(row) in scope and _written_before(row, landed))]

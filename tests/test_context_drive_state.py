@@ -317,6 +317,7 @@ def test_a_continuation_written_again_without_a_landing_keeps_the_stored_obligat
     ([("obl-u", "", "still_open")], ["F"], []),
     ([("obl-u", "", "still_open"), ("obl-x", "R", "still_open")], ["R"], ["obl-u"]),  # R's own rows go first
     ([("obl-u", "", "still_open"), ("obl-x", "R", "still_open")], ["R", "R"], []),  # then the keyless ones
+    ([("obl-e", "", "still_open"), ("obl-l", "LEGACY", "still_open")], ["LEGACY"], []),  # one keyless scope
 ])
 def test_a_stored_obligation_clears_where_the_retired_layer_cleared_it_in_view_and_hold_alike(
         tmp_path, stored, landings, open_ids):
