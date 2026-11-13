@@ -86,23 +86,30 @@ test('Logs owns its actual scroller; generic page restoration still restores oth
 // A repaint keeps the reading place: WebKit holds a box in a size container to what remains while a part with an <svg>
 // is drawn again (page_places.js). The change is seen after it lands, before the frame is painted. Boxes stand on an
 // Element whose `scrollTop` the platform owns (`raw`), as a browser's do: a write is held to what the box can reach, a
-// box out of sight reads 0 and takes no write, and the platform's `scrollTo` and `scrollIntoView` do not pass through
-// `scrollTop`. `engine` is what the engine's one probe answers.
+// box out of sight reads 0 for its scroll and its heights and takes no write, and the platform's scroll methods and
+// `scrollIntoView` do not pass through `scrollTop`. `engine` is what the engine's one probe answers; it is asked
+// after the scroll event that first needs it, which `scrolled` lets pass.
 function repaintWorld({ engine = true } = {}) {
     let notify = null;
     let observed = false;
     let asked = 0;
+    const afterEvent = [];
     const scrollListeners = [];
     class Element {}
     const land = (box, top) => { if (box.rendered) box.raw = Math.max(0, Math.min(Number(top) || 0, box.scrollHeight - box.clientHeight)); };
     Object.defineProperty(Element.prototype, 'scrollTop', { configurable: true,
         get() { return this.rendered ? this.raw : 0; }, set(value) { land(this, value); } });
+    Object.defineProperty(Element.prototype, 'scrollHeight', { configurable: true,
+        get() { return this.rendered ? this.holds : 0; }, set(value) { this.holds = value; } });
+    Object.defineProperty(Element.prototype, 'clientHeight', { configurable: true, get() { return this.rendered ? 500 : 0; } });
     Element.prototype.scrollTo = function scrollTo({ top }) { land(this, top); };
+    Element.prototype.scroll = function scroll(left, top) { land(this, top); };
+    Element.prototype.scrollBy = function scrollBy(left, top) { land(this, this.raw + top); };
     Element.prototype.scrollIntoView = function scrollIntoView() { land(this.parentElement, this.at); };
     const platformIntoView = Element.prototype.scrollIntoView;
     const element = (parent, { container = false, height = 2000, owned = false, at = 0 } = {}) => {
         const node = Object.assign(Object.create(Element.prototype), { nodeType: 1, parentElement: parent, isConnected: true,
-            rendered: true, raw: 0, scrollLeft: 0, scrollHeight: height, clientHeight: 500, container, owned, at,
+            rendered: true, raw: 0, scrollLeft: 0, holds: height, container, owned, at,
             getClientRects() { return this.rendered ? [{}] : []; },
             contains(other) { for (let n = other; n; n = n.parentElement) if (n === this) return true; return false; },
             closest() { for (let n = this; n; n = n.parentElement) if (n.owned) return n; return null; },
@@ -116,9 +123,17 @@ function repaintWorld({ engine = true } = {}) {
         getComputedStyle: (el) => ({ containerType: el.container ? 'inline-size' : 'normal' }),
         MutationObserver: class { constructor(fn) { notify = fn; }
             observe(root, options) { assert.equal(root, content); assert.ok(options.childList && options.subtree); observed = true; } } };
-    initPagePlaces({ doc, win, drops: () => { asked += 1; return engine; } });
+    let inEvent = false;
+    initPagePlaces({ doc, win, later: (run) => afterEvent.push(run),
+        drops: () => { assert.ok(!inEvent, 'the engine is not asked inside a scroll event'); asked += 1; return engine; } });
     // The owner scrolls: the platform moves the box, then says so. The engine's drop moves it and says nothing yet.
-    const scrolled = (box, top) => { box.raw = top; scrollListeners.forEach((fn) => fn({ target: box })); };
+    const scrolled = (box, top) => {
+        box.raw = top;
+        inEvent = true;
+        scrollListeners.forEach((fn) => fn({ target: box }));
+        inEvent = false;
+        afterEvent.splice(0).forEach((run) => run());
+    };
     const dropped = (box, to = 0) => { box.raw = to; };
     const changed = (...targets) => { assert.ok(observed, 'the document is watched'); notify(targets.map((target) => ({ target }))); };
     return { content, element, scrolled, dropped, changed, shown: () => pageShown.forEach((fn) => fn({ detail: { page: 'any' } })),
@@ -219,6 +234,12 @@ test('a page that moves a remembered box itself moves its place: a repaint in th
     w.element(box, { at: 120 }).scrollIntoView();  // a found row is brought into view, above where the owner was
     w.changed(w.element(box));
     assert.equal(box.scrollTop, 120);
+    for (const [move, lands] of [[() => box.scroll(0, 60), 60], [() => box.scrollBy(0, -400), 80]]) {
+        w.scrolled(box, 480);
+        move();
+        w.changed(w.element(box));
+        assert.equal(box.scrollTop, lands);
+    }
 });
 
 test('a write that does not land keeps the place: a box out of sight, and content that is not there yet', () => {
@@ -231,6 +252,7 @@ test('a write that does not land keeps the place: a box out of sight, and conten
     late.scrollHeight = 500; late.raw = 0;      // its rows are being read again
     w.shown();                                  // the page is shown again: every box under it is asked back
     away.scrollTop = away.scrollTop;            // a page drawing again while away puts back what it read: 0
+    w.changed(w.element(away), w.element(tab)); // and what it drew is seen while it is out of sight
     assert.deepEqual([tab.scrollTop, away.scrollTop, late.scrollTop], [0, 0, 0]);
     for (const each of [tab, away]) { each.rendered = true; each.raw = 0; }  // shown again, each starts at its top (WebKit)
     late.scrollHeight = 2000;                   // the rows arrived

@@ -3275,8 +3275,9 @@ while it reconnects: the room's bar says Reconnecting….
 **A repaint keeps the reading place.** A page that draws again what it shows (a poll, a reconnect, a saved row)
 leaves every box where the owner scrolled it: only the owner, or the page on purpose, moves it, and a page that shows
 something else in the same box (another folder) sends it to its top itself. A page draws in one step, since a box
-emptied now and filled later has lost its place. Where an engine would drop the box, one rule holds it for every page
-(`web/modules/page_places.js`); a room's feed and the Logs list keep their own reading place.
+emptied now and filled later has lost its place. Putting back a box that an engine drops as it is drawn again is one
+module's work, not each page's (`web/modules/page_places.js`); a room's feed and the Logs list keep their own reading
+place.
 
 **Haptics.** Inside Telegram, and only there (its HapticFeedback; a browser and the
 desktop app have none), a few moments are felt, one meaning each: the drawer,

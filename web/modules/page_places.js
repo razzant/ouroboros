@@ -11,16 +11,16 @@
  * is or lies in a size container (`container-type`, as Settings and every Dashboard tab are) and the part drawn again
  * holds an <svg>, the box is held to what remains while that part is inserted, so it falls to the top, or part of the
  * way under whatever stands above the part (plain HTML shows it: 800 becomes 0; without the container or without the
- * <svg> it stays, as it always does in Chromium). An engine is asked once whether it does this (`dropsOnRedraw`), and
- * one that does not is left wholly alone. In one that does, after every change in the document and before the frame is
- * painted, a box the change left above its place goes back, when:
+ * <svg> it stays, as it always does in Chromium). An engine is asked once whether it does this (`dropsOnRedraw`, after
+ * the first scroll), and one that does not is left wholly alone. In one that does, after every change in the document
+ * and before the frame is painted, a box the change left above its place goes back, when:
  *   - the change lies in a size container;
  *   - the box lost more scroll than what it holds got shorter (an engine that keeps the reader's row while what stands
  *     above it shrinks moves the box by exactly that, and a number put back would move the row);
  *   - the box holds within a screen of what it held: the same thing drawn again. Something else shown in the box
  *     (another folder, a filtered list) is its page's to place.
- * A page that moves a remembered box itself (`scrollTop`, `scrollTo`, `scrollIntoView`: a new circle's form at the top)
- * has moved the place with it, so a repaint in the same moment never undoes that move. */
+ * A page that moves a remembered box itself (`scrollTop`, `scrollTo`, `scroll`, `scrollBy`, `scrollIntoView`: a new
+ * circle's form at the top) has moved the place with it, so a repaint in the same moment never undoes that move. */
 export const OWN_PLACE = '.chat-messages, #chat-messages, #page-logs';
 
 // Whether this engine drops a box's scroll when what it holds is drawn again: the plain case, off screen.
@@ -42,7 +42,8 @@ export function dropsOnRedraw(doc = document) {
     return dropped;
 }
 
-export function initPagePlaces({ doc = document, win = window, drops = () => dropsOnRedraw(doc) } = {}) {
+export function initPagePlaces({ doc = document, win = window, drops = () => dropsOnRedraw(doc),
+    later = (run) => (win.setTimeout || setTimeout)(run, 0) } = {}) {
     const places = new Map();  // a scrolled box → where it was left, and how much it held then
     const remember = (box) => places.set(box, [box.scrollTop, box.scrollLeft, box.scrollHeight]);
     // A page, tab or room shown again: its boxes go back where they were; a box no longer in the page is forgotten.
@@ -56,11 +57,11 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
         }
     };
 
-    // A page's own move of a remembered box is its new place at once: the box's `scrollTop` and `scrollTo` say so as
-    // they move it (the element's own, over the platform's), and `scrollIntoView` says it for every box around what it
-    // shows. A box out of sight takes no write and reads 0, and one whose content is not there yet cannot reach what
-    // it is asked: neither is a move, so the box keeps the place it had (a hidden Dashboard tab, a closed Project's
-    // panel, a page read again while away).
+    // A page's own move of a remembered box is its new place at once: the box's `scrollTop` and its scroll methods say
+    // so as they move it (the element's own, over the platform's), and `scrollIntoView` says it for every box around
+    // what it shows. A box out of sight takes no write and reads 0, and one whose content is not there yet cannot
+    // reach what it is asked: neither is a move, so the box keeps the place it had (a hidden Dashboard tab, a closed
+    // Project's panel, a page read again while away).
     const native = win.Element?.prototype && Object.getOwnPropertyDescriptor(win.Element.prototype, 'scrollTop');
     const moved = (box, asked) => {
         if (box.getClientRects?.().length !== 0 && !(native.get.call(box) < asked - 1)) remember(box);
@@ -70,12 +71,14 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
         Object.defineProperty(box, 'scrollTop', { configurable: true,
             get() { return native.get.call(this); },
             set(value) { native.set.call(this, value); moved(this, value); } });
-        const scrollTo = box.scrollTo;
-        if (typeof scrollTo !== 'function') return;
-        box.scrollTo = function scrollToHere(...args) {
-            scrollTo.apply(this, args);
-            moved(this, typeof args[0] === 'object' ? args[0]?.top : args[1]);
-        };
+        for (const name of ['scrollTo', 'scroll', 'scrollBy']) {
+            const platform = box[name];
+            if (typeof platform !== 'function') continue;
+            box[name] = function ownMove(...args) {
+                platform.apply(this, args);
+                moved(this, name === 'scrollBy' ? undefined : typeof args[0] === 'object' ? args[0]?.top : args[1]);
+            };
+        }
     };
     // The boxes a change touched, each with what changed in it. Only a box the owner left below its top is asked, and
     // its layout is read only when the change lies in a size container: a list outside one (the Projects) costs a
@@ -102,7 +105,8 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
             return false;
         };
         for (const [box, targets] of touched) {
-            if (!targets.some(inContainer)) continue;
+            // A box out of sight reads 0 for all of it: a page drawing again while away tells nothing of its place.
+            if (!targets.some(inContainer) || box.getClientRects?.().length === 0) continue;
             const [top, , held] = places.get(box);
             const holds = box.scrollHeight;
             // In place, moved on by the owner, or moved up only as far as what it holds got shorter: where it is now
@@ -111,8 +115,11 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
             if (Math.abs(holds - held) <= box.clientHeight) box.scrollTop = Math.min(top, holds - box.clientHeight);
         }
     };
-    // Asked at the first scroll, when the page is laid out for certain; an engine that keeps the place gets none of it.
-    let repairs = null;
+    // Asked once, after the first scroll, when the page is laid out for certain; an engine that keeps the place gets
+    // none of it. Not inside the scroll event: a document changed there loses the engine's own keeping of the reader's
+    // row for the box that scrolled.
+    let asked = false;
+    let repairs = false;
     const watchRepaints = () => {
         const into = win.Element?.prototype?.scrollIntoView;
         if (native?.set && typeof into === 'function') {
@@ -123,11 +130,13 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
         }
         // The whole document: pages, and the sheets and dialogs that lie over them.
         if (doc.body && win.MutationObserver) new win.MutationObserver(repainted).observe(doc.body, { childList: true, subtree: true });
+        for (const box of places.keys()) ownMoves(box);
     };
+    const ask = () => { if ((repairs = Boolean(drops()))) watchRepaints(); };
     const onScroll = (event) => {
         const box = event.target;
         if (box?.nodeType !== 1 || box.matches(OWN_PLACE)) return;
-        if (repairs === null && (repairs = Boolean(drops()))) watchRepaints();
+        if (!asked) { asked = true; later(ask); }
         if (repairs && !places.has(box)) ownMoves(box);
         remember(box);
     };
