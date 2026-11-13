@@ -646,7 +646,7 @@ def _update_identity(ctx: ToolContext, content: str | None = None, expected_revi
                      mode: str = "overwrite", old_str: str | None = None, new_str: str | None = None,
                      edits: list | None = None, version: str | None = None, reason: str | None = "") -> str:
     """Revise the identity manifest (who I am, who I want to become): overwrite, edit or revert (``memory_texts``)."""
-    from ouroboros.memory_texts import identity_source, write_text
+    from ouroboros.memory_texts import Deferred, identity_source, write_text
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.tool_access_reads import canonical_runtime_reader
 
@@ -654,10 +654,14 @@ def _update_identity(ctx: ToolContext, content: str | None = None, expected_revi
     # am speaking in, so a project room or an external conversation revises the
     # same continuous file. The root follows the same precedence as
     # _chat_history, so a forked execution drive still writes the identity the
-    # canonical root reads back.
-    root = canonical_data_root(ctx)
-    reader = "Canonical identity reader:\n" + canonical_runtime_reader(ctx, root, "memory/identity.md")
-    return write_text(ctx, identity_source(root, reader), content=content, mode=mode, expected_revision=expected_revision,
+    # canonical root reads back; it is resolved after the arguments parse.
+    def located():
+        root = canonical_data_root(ctx)
+        return identity_source(root, "Canonical identity reader:\n" + canonical_runtime_reader(
+            ctx, root, "memory/identity.md"))
+
+    return write_text(ctx, Deferred("identity", "identity", True, located), content=content, mode=mode,
+                      expected_revision=expected_revision,
                       old_str=old_str, new_str=new_str, edits=edits, version=version, reason=reason,
                       source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))
 
@@ -681,15 +685,15 @@ def _update_world(ctx: ToolContext, content: str | None = None, expected_revisio
                   mode: str = "overwrite", old_str: str | None = None, new_str: str | None = None,
                   edits: list | None = None, version: str | None = None, reason: str | None = "") -> str:
     """Publish my map of my world; the host's measured block is kept or restored (``memory_texts``)."""
-    from ouroboros.memory_texts import world_source, write_text
+    from ouroboros.memory_texts import Deferred, world_source, write_text
     from ouroboros.tool_access import canonical_data_root
 
     # One map, every room and every drive (P1): like identity, the canonical root
     # is the one the context reads back, so a forked child drive or Light mode
     # keeps what it learned instead of writing a copy that dies with the task; the
     # forked drive's copy (what a child's read_file opens) follows each publication.
-    source = world_source(canonical_data_root(ctx), str(getattr(ctx, "repo_dir", "") or ""),
-                          getattr(ctx, "drive_root", None))
+    source = Deferred("world", "world map", True, lambda: world_source(
+        canonical_data_root(ctx), str(getattr(ctx, "repo_dir", "") or ""), getattr(ctx, "drive_root", None)))
     return write_text(ctx, source, content=content, mode=mode, expected_revision=expected_revision, old_str=old_str,
                       new_str=new_str, edits=edits, version=version, reason=reason, notices=_world_notices,
                       source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))

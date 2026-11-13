@@ -58,6 +58,17 @@ class TextSource:
     outside: str = "an outside edit, or a write before history"  # what changes the text without a row
 
 
+@dataclass(frozen=True)
+class Deferred:
+    """A source located only after its call's arguments parse, so an argument error never depends on a root:
+    ``name``, ``noun`` and ``nonempty`` are all the parse reads, ``build`` resolves the rest."""
+
+    name: str
+    noun: str
+    nonempty: bool
+    build: Any  # () -> TextSource
+
+
 def identity_source(root: Path, footer: str = "") -> TextSource:
     from ouroboros.memory import Memory
 
@@ -276,11 +287,12 @@ def _mirror(source: TextSource, publication: Publication) -> None:
         pass
 
 
-def write_text(ctx: Any, source: TextSource, *, content: Any = None, mode: Any = "overwrite",
+def write_text(ctx: Any, source: Any, *, content: Any = None, mode: Any = "overwrite",
                expected_revision: Any = None, old_str: Any = None, new_str: Any = None, edits: Any = None,
                version: Any = None, reason: Any = "", source_type: str = "task", notices: Any = None) -> str:
     """One write of a plain memory text, parsed, published and answered (the tool handlers delegate here).
 
+    ``source`` is a ``TextSource`` or a ``Deferred`` one, located after the arguments parse.
     ``notices(mode, content, publication)`` adds the source's own lines to a receipt (the map's)."""
     notes: list[str] = []
     version, edits, old_str, reason = normalize_arguments(mode, version, expected_revision, edits, old_str, reason, notes)
@@ -296,7 +308,10 @@ def write_text(ctx: Any, source: TextSource, *, content: Any = None, mode: Any =
                              "should say, or change parts of it with mode=edit")
     except ValueError as exc:
         said = f" ({'; '.join(notes)})" if notes else ""
-        return _answer(ctx, source, f"⚠️ TOOL_ARG_ERROR: {exc}{said}", status="error", code="TOOL_ARG_ERROR")
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                                                    text=f"⚠️ TOOL_ARG_ERROR: {exc}{said}"))
+    if isinstance(source, Deferred):
+        source = source.build()
     target: Any = None
     if mode == "revert":  # outside the lock: a recorded row never changes, and the text is verified by its hash
         try:
