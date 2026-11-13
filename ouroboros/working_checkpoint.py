@@ -311,10 +311,19 @@ def save_before_effects(limit_ctx: Any) -> None:
 
 @contextlib.contextmanager
 def model_call_scope(limit_ctx: Any):
-    """Bind the loop's existing checkpoint writer for write-ahead call allowances."""
+    """Bind the loop's existing checkpoint writer for write-ahead call allowances, and the work's own note for a
+    send of this call that waits in the install's model queue (``model_concurrency.slot_wait_notes``)."""
+    from ouroboros.loop_transport import SLOT_WAITED_KEY, slot_wait_note
+    from ouroboros.model_concurrency import slot_wait_notes
+
+    emit = getattr(getattr(getattr(limit_ctx, "tools", None), "_ctx", None), "emit_progress_fn", None)
+    usage = getattr(limit_ctx, "accumulated_usage", None)
+    if isinstance(usage, dict):
+        usage.setdefault(SLOT_WAITED_KEY, 0.0)  # the key exists before a send thread adds to it: no thread but this adds a key
     token = _MODEL_CALL.set(limit_ctx)
     try:
-        yield
+        with slot_wait_notes(slot_wait_note(emit, usage)):
+            yield
     finally:
         _MODEL_CALL.reset(token)
 

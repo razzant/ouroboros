@@ -14,9 +14,10 @@ from tests._usage_store_testing import dispatched_attempts
 setup, live_wait, main_call = gateway_fixture, wait_fixture, main_fixture
 
 
-def _large(ctx, *, known=True, stale=False, irreducible=False):
+def _large(ctx, *, known=True, stale=False, irreducible=False, repeats=48_000):
+    """A start above the 200K window itself (``repeats`` 34,000: inside its reply reserve only)."""
     plan = ctx.context_fit_plan
-    large = "Exact source text. " * 40_000
+    large = "Exact source text. " * repeats
     plan = replace(plan, window_tokens=200_000, status="confirmed" if known else "unprobeable", stale=stale,
                    max_projection=replace(plan.max_projection, system_content_json=json.dumps(large)))
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
@@ -47,14 +48,30 @@ def test_known_window_folds_before_first_provider_send(main_call, monkeypatch):
     rows = [json.loads(line) for line in (ctx.drive_logs / "events.jsonl").read_text().splitlines()]
     [prediction] = [row for row in rows if row.get("checkpoint_kind") == "context_fit_refused"]
     assert prediction["cause"] == "known_window_prediction"
-    assert prediction["capacity_total_tokens"] == 200_000
-    assert prediction["response_reserve_tokens"] == 65_536
-    assert prediction["estimated_input_tokens"] > 150_000
+    assert prediction["response_reserve_tokens"] == 65_536  # the frame is the admitted line plus the reply reserve
+    assert prediction["capacity_total_tokens"] - 65_536 == 200_000 - 8_192 < prediction["estimated_input_tokens"]
     assert prediction["predicted_free_tokens"] == (
         prediction["capacity_total_tokens"] - prediction["response_reserve_tokens"] - prediction["estimated_input_tokens"])
     assert prediction["physical_context"]["round_id"]
     assert prediction["candidate_context_sha256"] and "provider_message" not in prediction
     assert not any(row.get("type") in {"llm_api_error", "remote_context_overflow"} for row in rows)
+
+
+def test_a_candidate_inside_the_reply_reserve_is_sent_whole(main_call):
+    """The other direction (owner, 30 Sep 2026: nothing is removed on a guess; the host acts before a send only when
+    the request does not fit under the most favourable reading): a stated 200K may bound the input alone, so a
+    candidate that leaves less than the 65,536 reply reserve but stays under the admitted line goes out once, whole."""
+    ctx, gateway, *_ = main_call
+    large = _large(ctx, repeats=34_000)
+    fit = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
+    size, line = fit.measurement.estimated_input_tokens, fit.measurement.capacity_total_tokens - fit.measurement.response_reserve_tokens
+    assert not fit.predicted_capacity_miss and 200_000 - 65_536 < size < line == 191_808
+    answer, _, mode = loop._call_round_model(ctx)
+    assert answer and mode == "max" and len(gateway.creates) == 1
+    assert large in json.dumps(gateway.uploads[0][0])
+    assert not loop._context_overflow_retries(ctx.tools._ctx)
+    rows = [json.loads(line) for line in (ctx.drive_logs / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert not [row for row in rows if row.get("checkpoint_kind") == "context_fit_refused"]
 
 
 @pytest.mark.parametrize("known,stale", [(False, False), (True, True)])
@@ -113,7 +130,7 @@ def test_caption_admission_measures_the_final_candidate(main_call, monkeypatch, 
                         lambda *a, **kw: (caption, {"prompt_tokens": 2, "completion_tokens": 6000, "cost": 0.01}))
     ctx.messages[-1]["content"] = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}]
     before = loop._measure_round_main_fit(ctx, automatic_pass_used=False).measurement
-    capacity = before.estimated_input_tokens + before.response_reserve_tokens + 1000
+    capacity = before.estimated_input_tokens + 8_192 + 1000  # the pre-caption candidate sits 1,000 under the send ceiling
     plan = replace(ctx.context_fit_plan, window_tokens=capacity, status="confirmed" if known else "unprobeable")
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
     fit = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
@@ -129,7 +146,7 @@ def test_caption_admission_measures_the_final_candidate(main_call, monkeypatch, 
         sent = gateway.uploads[0][0]
         assert caption.strip() in str(sent)
         if known:
-            assert bounded_prompt_tokens_for_payload(sent, 0) + before.response_reserve_tokens < capacity
+            assert bounded_prompt_tokens_for_payload(sent, 0) + 8_192 < capacity
     assert REFUSED_INPUTS_KEY not in ctx.accumulated_usage
 
 

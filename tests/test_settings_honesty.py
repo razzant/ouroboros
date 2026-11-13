@@ -503,7 +503,9 @@ def test_metadata_covers_added_settings_but_never_tokens_a_new_secret(isolated_s
     # A future ordinary key and a new custom secret must not need a second metadata inventory.
     added, secret = "OUROBOROS_TEST_SETTING", "NEW_SERVICE_API_KEY"
     monkeypatch.setitem(config.SETTINGS_DEFAULTS, added, 7)
-    isolated_settings.write_text(json.dumps({secret: "private-test-key"}), encoding="utf-8")
+    # A document an earlier release wrote still holds the queue's removed wait bound: a retired key is not served.
+    isolated_settings.write_text(json.dumps({secret: "private-test-key", "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": 180}),
+                                 encoding="utf-8")
     app = _settings_app(monkeypatch, isolated_settings)
     app.routes.append(Route("/api/settings", settings.api_settings_get, methods=["GET"]))
     response = TestClient(app).get("/api/settings")
@@ -517,7 +519,8 @@ def test_metadata_covers_added_settings_but_never_tokens_a_new_secret(isolated_s
     assert meta["effects"][OWNER_CAP_KEY] == "now" and meta["tokens"][OWNER_CAP_KEY]
     assert secret in meta["effects"] and secret not in meta["tokens"]
     assert "private-test-key" not in response.text
-    assert not {"OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC"} & shown.keys()
+    assert not {"OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC",
+                "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC"} & shown.keys()
 
 
 @pytest.mark.parametrize("key,old,new", [

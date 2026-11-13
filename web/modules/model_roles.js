@@ -720,13 +720,6 @@ export function roleBody(fresh, entry, index = 0, readFallbacks = '') {
     return body;
 }
 
-// The slot wait the concurrency row names: a finite value, below 0 shown as 0 because
-// `model_concurrency._max_slot_wait_sec` counts it so, else the 180 s default. Only the sentence follows it.
-export function slotWaitSeconds(saved) {
-    const wait = Number.parseFloat(saved);
-    return Number.isFinite(wait) ? Math.max(0, wait) : 180;
-}
-
 const slotsOf = (settings) => (Array.isArray(settings?._meta?.setup_contract?.modelSlots) ? settings._meta.setup_contract.modelSlots : []);
 const wordsOf = (id) => HAND_WRITTEN.find((row) => row.id === id) || { id, keys: [], name: id, meta: '' };
 const shortModel = (model) => String(model || '').slice(String(model || '').lastIndexOf('/') + 1);
@@ -846,10 +839,9 @@ function mountModels(container, { path, ctx }) {
         }
         say('models:websearch', Object.fromEntries(SEARCH_SOURCES)[settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto'] || String(settings.OUROBOROS_WEBSEARCH_BACKEND));
         say('models:context', CONTEXT_WORDS[String(settings.OUROBOROS_CONTEXT_MODE || '').toLowerCase()] || String(settings.OUROBOROS_CONTEXT_MODE || ''));
-        // The fold's rows are drawn once their values are read (the wait a request over the limit takes is the install's).
+        // The fold's rows are drawn once their values are read.
         if (!fold) {
-            const rows = rowsOf('models', { fold: true }).map((row) => (row.id !== 'OUROBOROS_MODEL_MAX_CONCURRENCY' ? row
-                : { ...row, more: row.more.replace('{wait}', String(slotWaitSeconds(settings.OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC))) }));
+            const rows = rowsOf('models', { fold: true });
             foldHost.innerHTML = rows.map((row) => settingsRow(row)).join('');
             fold = bindSettingRows(foldHost, { rows, ask: ctx.ask });
         }
