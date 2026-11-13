@@ -15,7 +15,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D05 | Tool surfaces: files, code, shell, media, external | 55 | 0 |
 | D06 | Review stack | 101 | 0 |
 | D07 | Delegation, subagents & Claudexor | 113 | 0 |
-| D08 | Supervisor: queue, workers, events & runtime control | 79 | 0 |
+| D08 | Supervisor: queue, workers, events & runtime control | 80 | 0 |
 | D09 | Cancellation, owner control & process custody | 28 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
 | D11 | Gateway, server & Web UI | 119 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1042** | **0** |
+| **total** | | **1043** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -720,6 +720,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `supervisor/loop_load.py`
 - `supervisor/message_bus.py`
 - `supervisor/message_ingress.py`
+- `supervisor/message_origin.py`
 - `supervisor/owner_pause_control.py`
 - `supervisor/owner_pause_resume.py`
 - `supervisor/pool_admission.py`

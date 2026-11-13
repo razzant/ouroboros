@@ -27,6 +27,7 @@ from .lib.telegram_api import (
     next_telegram_retry_delay,
     _LOCALIZED_TEXTS,
     _MAX_TELEGRAM_UPLOAD_BYTES,
+    _u16len,
 )
 from .lib.telegram_state import (
     _state_file, _load_settings, _is_silent_mode_enabled,
@@ -37,6 +38,7 @@ from .lib.telegram_state import (
     _quiet_progress,
 )
 from .lib import telegram_i18n, telegram_inbound, telegram_quiz
+from .lib.telegram_origin import origin_label
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
 from .lib.telegram_share import make_prepare_share
@@ -81,6 +83,7 @@ def _bridge_client(api, event=None, chat_id: int = 0,
     client = TelegramClient(token, trust_env=_HONOR_ENV_PROXIES,
                             proxy=telegram_proxy(pathlib.Path(api.get_state_dir())),
                             **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
+                            origin_label=origin_label(event, telegram_i18n.language()) if event is not None else "",
                             api_base_url=api_base_url, files_dir=files_dir, binding=binding, generation=generation)
     return client, generation
 
@@ -1111,7 +1114,8 @@ def _make_outbound(api, cue: TypingCue | None = None):
             # note of its episode to replace. Any other host row, a typed problem among them, keeps its sound and run.
             host_row = event.get("role") == "system" and not _quiet_progress(event)
             quiet = _is_silent_mode_enabled(local_settings) and not host_row
-            single = quiet and event.get("is_progress") is True and len(message_chunks(text, parse_mode)) == 1
+            single = quiet and event.get("is_progress") is True and len(message_chunks(
+                text, parse_mode, limit=getattr(client, "text_limit", 4096))) == 1
             tracked_msg_id = _get_silent_msg(api, client.bot_id, chat_id) if single else 0
 
             # An answer never lands under, or revives, the typing it ends (DESIGN §9).
@@ -1173,10 +1177,12 @@ def _make_photo(api):
                 # Media cannot replace a text bubble in Telegram — break the
                 # silent chain so the next outbound starts a fresh message.
                 _clear_silent_msg(api, chat_id)
+                caption = str(event.get("caption") or "")
+                caption = await client.media_caption(chat_id, caption)
                 await client.send_photo(
                     chat_id,
                     image_base64,
-                    caption=str(event.get("caption") or ""),
+                    caption=caption,
                     mime=str(event.get("mime") or "image/png"),
                 )
         except Exception as exc:
@@ -1195,6 +1201,7 @@ def _make_video(api):
                 # Media cannot replace a text bubble — reset silent tracking.
                 _clear_silent_msg(api, chat_id)
                 caption = str(event.get("caption") or "")
+                caption = await client.media_caption(chat_id, caption)
                 mime = str(event.get("mime") or "video/mp4")
                 import base64 as _base64
                 files = {"video": ("video.mp4", _base64.b64decode(video_base64), mime)}
@@ -1244,6 +1251,7 @@ def _make_document(api):
                 else:
                     file_bytes = _base64.b64decode(file_base64)
                 mime = str(event.get("mime") or "application/octet-stream")
+                caption = await client.media_caption(chat_id, caption)
                 if _is_native_audio_document(filename, mime):
                     try:
                         await client.send_audio(
@@ -1370,6 +1378,10 @@ def _make_quiz(api, cue: TypingCue | None = None):
                 question, plain_labels, stake, assumption, wait_for_answer=wait_for_answer, **card)
             compact = telegram_quiz.render_compact_text(
                 plain_labels, project_name=project_name, recommended_index=recommended_index, lang=lang)
+            # Sends use the event client's fixed origin, so EVERY explanation part gets it.
+            # Edits use the remembered text on an unlabelled client (including the poller's).
+            heading = origin_label(event, lang)
+            prefix = f"{heading}\n\n" if heading else ""
             token = telegram_quiz.mint_token(task_id, quiz_id)
             # One button per option; a reply to the card is a free-form answer.
             # Both reach the host's decision ingress (#472). An overflowing card
@@ -1382,7 +1394,7 @@ def _make_quiz(api, cue: TypingCue | None = None):
                     hint_text=(telegram_quiz.hint_secret(lang) if secret else telegram_quiz.hint(lang) if labels
                                else telegram_quiz.hint_open(lang)),
                     keyboard=telegram_quiz.quiz_keyboard(token, labels),
-                    reserve=telegram_quiz.answered_edit_reserve(lang),
+                    reserve=telegram_quiz.answered_edit_reserve(lang) + _u16len(prefix),
                 )
                 delivered()
                 if overflowed:
@@ -1395,9 +1407,10 @@ def _make_quiz(api, cue: TypingCue | None = None):
                 telegram_quiz.remember_quiz(api, client.bot_id, token, {
                     "task_id": task_id, "quiz_id": quiz_id, "chat_id": chat_id,
                     "message_id": int(message_id or 0), "options": labels,
-                    "text": settled_text, **({"secret": True} if secret else {}),
+                    "text": prefix + settled_text, **({"secret": True} if secret else {}),
                 })
-                await telegram_quiz.apply_retained_fact(api, token, lang, client_factory=lambda: client, published=event)
+                await telegram_quiz.apply_retained_fact(
+                    api, token, lang, client_factory=lambda: _telegram_client(api), published=event)
         except Exception as exc:
             _report_failure(api, "quiz", exc)
     return handle

@@ -20,6 +20,7 @@ from ouroboros import dialogue_store
 from ouroboros.store import StoreError, acquisition_budget
 from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
 from supervisor.state import load_state
+from supervisor.message_origin import message_origin, stamp_message_origin
 from supervisor.message_ingress import (  # noqa: F401 - the named ingress's public names stay importable here
     _INGRESS_LOCK, accept_chat, accept_local_message, accepted_chat_message, log_chat, record_inbound_message,
     recover_pending_dispatches)
@@ -467,6 +468,7 @@ class LocalChatBridge:
                 event["system_type"] = str(system_type)
             if meta:
                 event.update(meta)
+            stamp_message_origin(DATA_DIR, event, chat_id=chat_id, task_id=task_id)
             publish_event(CHAT_OUTBOUND, event)
         return True, "ok"
 
@@ -536,6 +538,7 @@ class LocalChatBridge:
         if not is_a2a_chat_id(chat_id):
             publish_event(CHAT_OUTBOUND, {
                 **payload,
+                "message_origin": message_origin(DATA_DIR, chat_id),
                 "text": "",
                 "transport": self.chat_transport(chat_id),
             })
@@ -670,6 +673,9 @@ class LocalChatBridge:
         if self._broadcast_fn:
             self._broadcast_fn(msg)
         publish_event(CHAT_PHOTO, {
+            "message_origin": message_origin(DATA_DIR, chat_id, task_id),
+            "task_id": str(task_id or ""),
+            **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
             "transport": self.chat_transport(chat_id),
             "caption": str(caption or ""),
@@ -733,6 +739,9 @@ class LocalChatBridge:
         if self._broadcast_fn:
             self._broadcast_fn(msg)
         publish_event(CHAT_VIDEO, {
+            "message_origin": message_origin(DATA_DIR, chat_id, task_id),
+            "task_id": str(task_id or ""),
+            **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
             "transport": self.chat_transport(chat_id),
             "caption": str(caption or ""),
@@ -813,6 +822,9 @@ class LocalChatBridge:
         if self._broadcast_fn:
             self._broadcast_fn(msg)
         publish_event(CHAT_DOCUMENT, {
+            "message_origin": message_origin(DATA_DIR, chat_id, task_id),
+            "task_id": str(task_id or ""),
+            **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
             "transport": self.chat_transport(chat_id),
             "caption": str(caption or ""),
@@ -869,6 +881,9 @@ class LocalChatBridge:
         if self._broadcast_fn:
             self._broadcast_fn(msg)
         publish_event(CHAT_LINKS, {
+            "message_origin": message_origin(DATA_DIR, chat_id, task_id),
+            "task_id": str(task_id or ""),
+            **(projection_fields(stored) if stored else {}),
             "chat_id": int(chat_id or 0),
             "transport": self.chat_transport(chat_id),
             "title": safe_title,
@@ -1009,6 +1024,7 @@ class LocalChatBridge:
         from ouroboros.secret_requests import transport_hint
 
         publish_event(CHAT_QUIZ, {
+            "message_origin": message_origin(DATA_DIR, chat_id, task_id),
             "chat_id": int(chat_id or 0),
             "transport": quiz_transport,
             "wait_for_answer": bool(wait_for_answer),

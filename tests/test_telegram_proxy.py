@@ -210,6 +210,11 @@ class _RecordingClient:
 
     def __init__(self, token, **kwargs):
         _RecordingClient.built.append((token, kwargs))
+        self.origin_label = kwargs.get("origin_label", "")
+        self.text_limit = 4096
+
+    async def media_caption(self, _chat_id, caption):
+        return caption
 
     async def call(self, _method, **_kwargs):
         return {"ok": True, "result": {}}
@@ -258,6 +263,7 @@ def test_every_bridge_client_carries_exactly_the_local_proxy(tmp_path, monkeypat
     for index, (token, options) in enumerate(_RecordingClient.built):
         assert token == _TOKEN
         options = dict(options)
+        assert options.pop("origin_label") == ""
         if index in {1, 2, 3, 4, 5, 6}:  # mirrored rows, excluding quiz-state edits and typing
             assert callable(options.pop("on_message"))
             assert options.pop("reply_to_message_id") == 0
