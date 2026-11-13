@@ -24,7 +24,7 @@
  * alike: pins, then the newest message (`last_message_at`; unread is a mark, never a rank); a browse keeps every row
  * it showed. A repaint away from the list's top keeps the first row in view whose place did not change where it was,
  * and the keyboard on its row wherever it moved; a find keeps its rows where they stand while words are in the
- * field. Collapsing the Projects ends the find or the browse.
+ * field.
  */
 import { fmt, fmtInto, tr } from './i18n.js';
 import { SHELL_ICONS, controlIcon } from './page_icons.js';
@@ -46,7 +46,7 @@ function foldName(text) {
 
 /** A mark's words go into its place's name (its tooltip and accessible name): the hue is never the only way it is
  *  told. Every row here names itself this way. */
-export function setActivityOwnerName(owner, baseName, words) {
+function setActivityOwnerName(owner, baseName, words) {
     if (!owner) return;
     const name = words ? `${baseName} · ${words}` : baseName;
     owner.setAttribute('aria-label', name);
@@ -425,7 +425,7 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
     // in view, so what a new message brings to the top shows there.
     function rowsInView() {
         const top = Math.max(list.getBoundingClientRect().top, 0);
-        const rows = [...list.children].filter((el) => el.dataset.navProjectId && !el.hidden);
+        const rows = [...list.children].filter((el) => el.dataset.navProjectId);
         if (!rows.length || rows[0].getBoundingClientRect().top >= top - 0.5) return [];
         const bottom = Math.min(list.getBoundingClientRect().bottom, window.innerHeight);
         const seen = [];
@@ -637,7 +637,7 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
     const browseFrom = (owed) => ({ shown: new Set(resting(facts()).map((row) => row.id)), owed });
 
     // ---- the owner's keys and presses ---------------------------------------------------------------------------
-    const rowStops = () => [...list.querySelectorAll(':scope > .nav-project-item:not([hidden]) > .nav-project-row:not(:disabled), :scope > .nav-projects-more')];
+    const rowStops = () => [...list.querySelectorAll(':scope > .nav-project-item > .nav-project-row:not(:disabled), :scope > .nav-projects-more')];
     const onInput = () => setQuery(input.value, { typed: true });
     const onFieldKey = (event) => {
         if (event.isComposing) return;
@@ -645,7 +645,7 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
             const first = rowStops()[0];
             if (first) { event.preventDefault(); first.focus(); }
         } else if (event.key === 'Enter' && searching()) {
-            const first = list.querySelector(':scope > .nav-project-item:not([hidden]) > .nav-project-row:not(:disabled)');
+            const first = list.querySelector(':scope > .nav-project-item > .nav-project-row:not(:disabled)');
             event.preventDefault();
             if (first) first.click();
         } else if (event.key === 'Escape' && input.value) {
@@ -661,7 +661,7 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         event.preventDefault();
         const next = stops[at + (event.key === 'ArrowDown' ? 1 : -1)];
         if (next) next.focus();
-        else if (event.key === 'ArrowUp' && !find.hidden) input.focus();
+        else if (event.key === 'ArrowUp') input.focus();
     };
     const onMore = (event) => {
         if (more.getAttribute('aria-busy') === 'true') return;

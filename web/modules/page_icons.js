@@ -19,7 +19,8 @@ const regular = (name) => FLUENT[`${name}-20-regular`];
 
 const PAGE_BODIES = {
     chat: filled('chat'),
-    // Projects: "layer" — distinct from the Files folder glyph (the Projects header renders it: pages.js).
+    // Projects: "layer" — distinct from the Files folder glyph (a reference to a Project renders it:
+    // project_reference.js).
     projects: filled('layer'),
     // Circles: the people a circle gathers; its places wear their connectors' marks.
     circles: filled('people-community'),

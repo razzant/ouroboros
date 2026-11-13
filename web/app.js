@@ -142,7 +142,8 @@ if (navProjectsList) bindScrollFade(navProjectsList);
 // generation and the state's complete set of Project rooms), and, when the owner asks, every older Project by its
 // name or by Show more; a row opens through openProjectPanel. Its own list reads and confirmed changes take their
 // order from the same sequencer (`begin()` only numbers; it starts no read). An older room a find or browse shows is
-// counted while shown (number, ☰, marks; `onShown` reads nothing) and another client's read of it is asked after.
+// counted while shown (its row's mark and the ☰'s; `onShown` reads nothing) and another client's read of it is asked
+// after.
 const projectsNav = createProjectsNav({ header: navProjectsHeader, list: navProjectsList,
     feed: () => lastProjectRows, feedOrder: () => projectsFeedOrder,
     nextOrder: () => stateSnapshots.begin().generation,
