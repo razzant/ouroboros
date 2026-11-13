@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { computeHydratedDirectActivities } from '../modules/chat_activity.js';
-import { summarizeRoom } from '../modules/project_activity.js';
+import { IDLE_SUMMARY, summarizeRoom } from '../modules/project_activity.js';
+import { markView, paintStatusMark } from '../modules/status_mark.js';
 import { censusTaskPhase, desiredLiveCardPhase, setHistoricalUnavailable, setLiveCardPhase, syncParkedPhase } from '../modules/task_phase_chip.js';
 import { emptyWorkState, roomStatusView, workRowView } from '../modules/work_status.js';
 import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import { ElementStub, TextStub } from './chat_dom_fixture.js';
 import { projection, room, work } from './work_fixture.js';
 
@@ -269,4 +271,37 @@ test('actual child queue hydration refreshes room status once and reconciles dep
         for (let pass = 0; pass < 3; pass++) { snapshot(); await settle(); }
         assert.equal(reads.filter(url => url === '/api/tasks/child').length, 5);
     } finally { instance?.destroy(); restoreDom(prior); }
+});
+
+// A named work with a focus line (owner 12.11, the fifth round): a room's summary carries the line of its work, the
+// work's own name and its focus, and Ouroboros's card says on its second line what Main is doing now (app.js
+// paintMainRow): the work's name, else its focus, else its line, after the word while it is paused, nothing at rest.
+test("a named work with a focus line: the summary carries its name and focus, and Ouroboros's card says them", () => {
+    const named = work(held, { activity: 'waiting', because: [{ code: 'project_admission', text: hold.label }],
+        name: 'Tidy the release notes', focus: { text: 'Reading the changelog' } });
+    const summary = summarizeRoom({ ...room('waiting'), works: ['same-id'] }, [named]);
+    assert.deepEqual(summary, { mark: 'still', owner: false, word: 'Waiting', note: '', line: hold.label,
+        name: 'Tidy the release notes', focus: 'Reading the changelog', label: `Waiting · ${hold.label}` });
+
+    const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
+    const from = app.indexOf('\nfunction paintMainRow(');
+    assert.ok(from >= 0, 'paintMainRow is a top-level function in app.js');
+    const nodes = { '.nav-mark': { dataset: { shape: 'none', hue: 'ink' }, hidden: true }, '.nav-row-words': { textContent: '' },
+        '.nav-ouro-work': { textContent: '', hidden: true } };
+    const context = vm.createContext({ IDLE_SUMMARY, markView, paintStatusMark, projectRooms: new Map(),
+        navMainRow: { querySelector: (selector) => nodes[selector] || null } });
+    vm.runInContext(`${app.slice(from + 1, app.indexOf('\n}\n', from + 1) + 2)}\nglobalThis.paint = paintMainRow;`, context);
+    const second = (main) => {
+        if (main) context.projectRooms.set('1', main); else context.projectRooms.delete('1');
+        context.paint();
+        const line = nodes['.nav-ouro-work'];
+        return line.hidden ? null : line.textContent;
+    };
+    assert.equal(second(summary), 'Tidy the release notes', "the work's own name first");
+    assert.equal(second({ ...summary, name: '' }), 'Reading the changelog', 'its focus when it has no name');
+    assert.equal(second({ ...summary, name: '', focus: '' }), hold.label, 'its line when it has neither');
+    assert.equal(second({ ...summary, mark: 'pause', word: 'Paused' }), 'Paused · Tidy the release notes', 'paused: the word first');
+    assert.equal(second({ ...summary, mark: 'ring' }), null, 'unconfirmed: no line');
+    assert.equal(second(null), null, 'at rest: no line');
+    assert.equal(nodes['.nav-ouro-work'].textContent, '');
 });

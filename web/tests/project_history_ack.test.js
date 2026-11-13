@@ -124,7 +124,7 @@ function cursorHarness({ seen = {}, rows = [], answer = () => ({}) } = {}) {
         state: { projectSeenRevision: { ...seen } },
         lastProjectRows: rows,
         paintProjectsNav: () => paints.push(rows.map((row) => [row.id, row._unread])),
-        paintProjectsCount: () => {}, patchProjectActivityMarkers: () => {}, mergeMainSeenRevision: () => false,
+        patchProjectActivityMarkers: () => {}, mergeMainSeenRevision: () => false,
         fetchJson: async (url, init = {}) => { posts.push([url, init.method || 'GET', init.body || '']); return answer(init); },
     });
     vm.runInContext(`${lift('markProjectViewed')}\n${lift('mergeProjectSeenRevisions')}
