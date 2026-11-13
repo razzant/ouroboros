@@ -18,7 +18,7 @@ composition, not a second shared palette. This file names roles, not an inventor
 ## Design bible: "Airy dopamine"
 
 This distils the interface Ouroboros already has into rules, so every agent extends
-it the same way. Every rule below derives from these lines and holds in both themes;
+it the same way. Every rule below derives from these lines and holds in both themes and at the size real installations reach (their counts, longest names and largest amounts);
 a component that needs its own exception is a design defect. A rule names a role (whose
 object, what is chosen, what is primary); how a theme draws that role is its seed below,
 so a recipe is written once for both themes and a theme differs only in its token
@@ -97,15 +97,19 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    progress signal; nothing else animates by itself, and a state change never moves a
    neighbour, resizes a bar or changes a height.
 7. **Words serve the next step.** The main view says the state and what its reader
-   needs to understand or do next, in owner words. A phrase stays there only if without
-   it its reader would understand or act differently, so a gap that changes either stays
+   needs to understand or do next, in owner words. A phrase or a number stays there only if
+   without it its reader would understand or act differently. A gap that changes either stays
    visible (an unconfirmed Panic; a message not confirmed as saved, beside Send again);
    provenance, caveats, codes and any gap (`not recorded`, `not declared`,
    `not confirmed`) that changes neither are facts of the record and of details that pointer,
-   touch and keyboard open, never hover alone. Clarity comes from placement, never from
+   touch and keyboard open, never hover alone. A thing with an accepted name in the field keeps
+   it (subagents, MCP servers, context window, max output tokens, worktrees, fallback models), the
+   product's own things keep the product's names (rooms, places, wake-ups), and a plainer paraphrase
+   replaces neither. Clarity comes from placement, never from
    smaller text or a line quota. This book keeps principles and roles; exact strings,
    templates and their history live in the code, its tests hold their facts and places,
-   and the owner's reactions live in the installation's knowledge.
+   a decision the product's owner makes about this system becomes its rule here, cited in the change
+   that writes it, and an installation owner's taste lives in that installation's knowledge.
 
 **Seed (light | dark)**
 
@@ -424,8 +428,8 @@ or blur closes suggestions without assigning a value. Selected, hover, focus,
 disabled and invalid states have different meanings and remain distinguishable.
 Availability never rewrites a selection: a Claude `[1m]` variant whose base
 model a usable account lists reads Available, noting that the engine checks the
-variant at session start, and an unread catalog reads Not checked. Maximum
-response sits beside the context window as Auto or a whole number for this
+variant at session start, and an unread catalog reads Not checked. Max output
+tokens sit beside the context window as Auto or a whole number for this
 exact model, server and account; Apply acknowledges it at once, and
 a route change clears it. Web search is its own Source and Model:
 Auto lists the routes it may use, a chosen source is strict, and skills, MCP
@@ -500,10 +504,10 @@ tells them apart, and Swarm never fills the capsule (owner 28.10).
 Until the room's values arrive the ring stays unlit and the value secondary,
 never a faded capsule. Closed, Effort names only the primary level; its ring (a 300°
 arc: band minimum..maximum, dot primary) and the button's name carry the range.
-Context's word/arcs show its root works' observed modes, not the setting or helpers (owner 08.11).
+Context's word/arcs show its root works' observed modes, not the setting or subagents (owner 08.11).
 Its dot marks the chosen arc when they differ; `Mixed` lights the observed modes, unseen is `—`.
-Never a fill level. Subagents' network (owner 27.10, G) joins Ouroboros to three helpers: Off lights none,
-Auto one helper/thread, Swarm all helpers and their connecting threads.
+Never a fill level. Subagents' network (owner 27.10, G) joins Ouroboros to three subagents: Off lights none,
+Auto one subagent/thread, Swarm all subagents and their connecting threads.
 
 **A capsule opens inline, never as a dropdown/panel, one at a time** (owner 11.10; panels tried 26.10,
 withdrawn 27.10); its value yields to the strip. Context: Nano · Low · Max under a glass thumb;
@@ -512,9 +516,9 @@ hint ("Hints") above it (owner 28.10) gives the mode's meaning (hovering another
 dated observation/cause, and «Applies to new steps; running work finishes.» When Settings turns subagents off or they are not set up yet, Subagents says `Off` with a lock; open, Auto
 and Swarm are disabled and the hint says why with `Open Settings`, the keyboard's next stop after the strip; the room
 keeps its own value. Effort's seven levels carry
-a primary pill and two helper bounds; the primary may lie outside them. A
+a primary pill and two subagent bounds; the primary may lie outside them. A
 segment is its word plus `--capsule-seg-pad` a side; the pill covers its segment;
-band, pill and brackets share one vertical inset. The primary and helper bounds never
+band, pill and brackets share one vertical inset. The primary and subagent bounds never
 move each other; the brackets cannot cross. A level tap sets primary; each bracket
 has its own handle. A drag keeps its grab offset on whole levels. A stored `minimal` shows at Low until its handle moves.
 
@@ -567,14 +571,14 @@ save keeps the draft, says why and returns to the saved value — unsaved values
 never shown as saved.
 
 **What Swarm leaves behind.** An owner message the host accepted while its room was on Swarm says `Swarm`
-before its time: a request, never proof that helpers ran. A Swarm root's card says one line, first in its foot,
-from its receipt: helpers started (counted from recorded starts, a child's own runs with that child), `N helpers requested ·
-K started` where requests outnumber starts, or while none is recorded the helpers requested, with `none started` only
-from a receipt that knows its whole tree; then every refused start (`N helper starts failed`) and every start nobody has
-confirmed or denied that no started helper holds (`N helper starts unconfirmed`), side by side with the starts, or
-`helpers unknown`; then models, `$X known + N not final`, subscription sessions; never minds, waves, families, peaks,
+before its time: a request, never proof that subagents ran. A Swarm root's card says one line, first in its foot,
+from its receipt: subagents started (counted from recorded starts, a child's own runs with that child), `N subagents requested ·
+K started` where requests outnumber starts, or while none is recorded the subagents requested, with `none started` only
+from a receipt that knows its whole tree; then every refused start (`N subagent starts failed`) and every start nobody has
+confirmed or denied that no started subagent holds (`N subagent starts unconfirmed`), side by side with the starts, or
+`subagents unknown`; then models, `$X known + N not final`, subscription sessions; never minds, waves, families, peaks,
 percentages or one sum the facts do not make, and an unknown amount is a word, never $0. Only a root the record proves
-tried no helper has no line and adds nothing to its foot: no fan-out observed and a receipt that knows its whole tree
+tried no subagent has no line and adds nothing to its foot: no fan-out observed and a receipt that knows its whole tree
 (complete coverage, its actors, the refusals it read) holding only the root and its reviews. The observation alone, an
 older or partial receipt is no proof and keeps its line; a later read that proves it takes the line away
 (`web/modules/swarm_presentation.js`). Scheduled work runs on Auto whoever wrote the schedule, so it carries no Swarm line
@@ -1318,17 +1322,17 @@ preference when it opens and on every reconnect; there is no file watcher.
   name and line (owner 30.10, B); empty activity reserves no band, and a duplicate title is not activity.
   Full narration and Reviews expand independently. A completed child's result is
   its report: `Report to parent`, semibold at the row's size and ink, leads its
-  collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). A helper the host could not start has no
-  report: its cause leads the line, the host's notice to its parent stays in details. Helpers' outcomes are their
-  root's Details: under a finished, collapsed root a finished helper folds away (the disclosure's accessible name
-  still counts them, `N children`), a helper still running or holding a running helper stays in view, and an open
-  root shows every helper as before. A helper folds at the root's settle, at its own when it finishes later, or when the last running helper it
+  collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). A subagent the host could not start has no
+  report: its cause leads the line, the host's notice to its parent stays in details. Subagents' outcomes are their
+  root's Details: under a finished, collapsed root a finished subagent folds away (the disclosure's accessible name
+  still counts them, `N children`), a subagent still running or holding a running subagent stays in view, and an open
+  root shows every subagent as before. A subagent folds at the root's settle, at its own when it finishes later, or when the last running subagent it
   holds finishes: the exception to "a state change never moves a neighbour", named here. The root keeps primary title
   ink at weight 500, children secondary ink at 400. Nested frames keep real
   ancestry on an opaque secondary surface, so white tints never accumulate.
-- **An executor label names the helper and states only exceptions.** The
+- **An executor label names the executor and states only exceptions.** The
   ordinary case is the bare name — an assigned route beside the card's own
-  `Working` chip, or every settled run ok; it names the selected helper and is
+  `Working` chip, or every settled run ok; it names the selected executor and is
   not proof of current computation. A progress actor adds `last update`; a
   refused pin, no run, runs not settled, failed or unverified runs, unreadable
   evidence and an undisclosed outcome split qualify it. One priority phrase
@@ -1471,12 +1475,12 @@ then one mark, as on the sidebar's rows; no frame at rest, a neutral
 tint on hover and while open, a caret when it opens. A working work the host dated as silent
 says so first in its quiet line (a recorded Stop still leads), `No recorded progress since 14:02`, in status ink (no amber, no
 new mark), until its own progress. A work comprises one request, its Continue
-episodes and live helpers, delegated runs or post-answer upkeep. The server's
+episodes and live subagents, delegated runs or post-answer upkeep. The server's
 single work/room status is worded by the bar, work list, sidebar, cards and tray;
 none decides its own.
 Activity uses the chip's queue words, never raw phase codes, and the work's controls.
-Parked helpers close when their ended root's tree is quiet; a live member keeps
-that tree's paused helpers resumable and may keep amber visible. A
+Parked subagents close when their ended root's tree is quiet; a live member keeps
+that tree's paused subagents resumable and may keep amber visible. A
 card without a projected work (a child, Main's owner-action message, a replayed
 card) takes its shape from its census phase through one table pinned to the
 server's `mark_of`, and the owner's move only from proved facts (`can_resume`,
@@ -1509,18 +1513,18 @@ message) in two lines that keyboard focus or open details show whole, with the
 state under the name and its quiet line beside it, the row's mark before it (an
 outcome is a dot in its tone: Done and Done with warnings green, Stopped neutral,
 Failed red). The word is the current episode's alone; the line says its reason, then
-what still runs beside it (helpers, external runs, review work beside a task that is not
+what still runs beside it (subagents, external runs, review work beside a task that is not
 running, such as the review a Pause lets finish, a run nobody can confirm); a work card's chip says the same word with the same line
 beside it, and the sidebar's name says both. An outcome stays beside `Finalizing…`; `Paused` stays until Resume, its
 line saying who or what paused it (the owner's press with its time, Ouroboros, nobody when a press declared no one),
 the words the declaring press recorded following its head verbatim whoever declared it (`You paused it: …`);
 `Waiting` says what it waits for and goes on by itself when that happens (a sleep: each source it chose, joined by
-`or` — the helper by its name, else how many, its external run, a service, a reviewer, a sender by its name, else a
+`or` — the subagent by its name, else how many, its external run, a service, a reviewer, a sender by its name, else a
 message — and its time last, in the viewer's clock, a time alone also waking on a message; a record
-that saved no choice reads `until it is woken`), unless a helper its sleep chose is paused: the line then says so and who resumes
-that helper (`… until Ouroboros resumes it` only when this episode may ask for it,
-or `until you resume it` after Panic; a Continue's earlier helper is just
-`paused`), with no new control or turn; helpers an earlier attempt left running
+that saved no choice reads `until it is woken`), unless a subagent its sleep chose is paused: the line then says so and who resumes
+that subagent (`… until Ouroboros resumes it` only when this episode may ask for it,
+or `until you resume it` after Panic; a Continue's earlier subagent is just
+`paused`), with no new control or turn; subagents an earlier attempt left running
 read as `Working`, with their count; `Queued` carries no cause when the scheduler
 recorded none, never a free-worker claim; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
@@ -1565,7 +1569,7 @@ recipient, opens another pane or manufactures activity.
 ### List editors
 
 A list editor is a section where the owner adds and edits entries in place: setup's roster and
-keys, a tool server's headers. Settings draws a list as heads (§7 “Settings”).
+keys, an MCP server's headers. Settings draws a list as heads (§7 “Settings”).
 
 - A new entry, added from its group's header (§6), appears at the end of its own group, is
   scrolled into view (the shortest distance, without animation) and takes the caret in its
@@ -1829,7 +1833,7 @@ A chat transport shows such a request as the host's note on where to enter it, w
 
 **Project question mirror.** A Project question's Main copy is its own `buildQuizCard` card, whole as anatomized above, in an assistant bubble at its ask time in the feed, not a section of its own; the Project reference in its voice line opens the exact original, and answers, materials and recovery controls work in Main. It uses the shared ring and `--project` tints; names ellipsize (full titles); the head stays the room's row. History, live pointers and the census share one task/quiz card and lifecycle wording; the canonical current questions only confirm or settle copies the feed holds, never mount them, and an incomplete read withholds only what its typed gaps name. Optional, resumed and terminal-author questions stay answerable until answered or closed; no display/history cap drops them. Replaced questions stay read-only. The owner closes from the card, a model its own or a host-proven continued task line's question, or a finished task's, always with its own reason. Closure records a reason, never an answer/approval. A late answer left delivery-unknown by a restart offers Remove from pending (no resend, never marked delivered). Publication destination stays fixed across Project conversion; current room membership controls display. Explicit materials use registered task artifacts and the existing reader.
 
-A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence (none where its own control already says it: a plain resume pause beside Resume), its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its helpers within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.
+A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence (none where its own control already says it: a plain resume pause beside Resume), its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its subagents within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.
 
 One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. A room's mark, the Projects header's and ☰'s turn amber for the same questions; the sidebar feed holds the row of a listed Project whose room is the owner's turn for as long as Main's pill keeps its question (the same reads keep and drop both), and the header's amber counts only rows the feed can show. Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
 
@@ -2431,7 +2435,7 @@ agent model; a Claudexor route by its model; the model is the fact above when th
 errors only under a chip that warns or fails; under Done the block's own rows
 name them) and running narration's `updated` (in a root's head).
 One positive task-local tool-call count joins that line and remains after Done
-(owner 22.10, A). Helpers are not aggregated. Rounds (usable solve responses)
+(owner 22.10, A). Subagents are not aggregated. Rounds (usable solve responses)
 and known zero calls stay in Details, making no work or footer row; missing
 counts stay absent. Session nanny counts appear only in `Supervision` (footer and
 Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details. A root's Details add `Spent on` and `Ran on`, its read-time cost breakdown by purpose and by the route that
@@ -2812,8 +2816,8 @@ pin. Catalog entries are suggestions, not account-specific entitlement or
 context evidence. Changing a model or account never changes the delivery kind:
 an API catalog row keeps its explicit Native or Packet choice regardless of its
 subagent id, while a session row retrieves with its native tools. Session Access
-uses the catalog's existing select: Full system access (default), Working files,
-or Read only. Writable reviewers check private copies; their outputs remain
+uses the catalog's existing select: Full system access (default), Workspace write,
+or Read only. Writable reviewers check worktrees; their outputs remain
 evidence without product integration. Access never changes delivery. Catalog refreshes
 preserve the edited value, focus, selection and scroll position. Returning to a
 reviewer's previous source restores that source's model/account draft; a new
@@ -2879,7 +2883,7 @@ stops clear of them.
 means and what a change did, and a paragraph waits behind `More`. The home is Ouroboros's card, search and six
 groups of rows; a wide window keeps it beside the open page, whose first row is Back. A row opens its page or is a
 door: what lives elsewhere (a Dashboard tab beside its live state, Main's composer) shows its value here and leads
-there, and a tab or page opened from here leads back. A list of entries (agents, tool servers, keys, fallbacks) is heads:
+there, and a tab or page opened from here leads back. A list of entries (agents, MCP servers, keys, fallbacks) is heads:
 a press opens the entry's page, Add an unsaved one. The card speaks in Ouroboros's voice: what it has read that
 waits for the owner here, each with its one action, and a neutral Check for what it has not read.
 
@@ -2941,14 +2945,14 @@ actively prepared and would reach a Telegram chat under the current mirror
 settings (Main and Project replies included), the bridge renews Telegram's
 typing action there, once per chat however many tasks back it, every few
 seconds at most. Ouroboros's own model and tool work counts; while that work
-waits, what it waits on counts when it works: a helper's own work, a delegated
+waits, what it waits on counts when it works: a subagent's own work, a delegated
 run the host currently observes running, or a review seat not waiting for model
 access. A running run's provider retry inside its engine carries no fact, so it
 reads as running. An intermediate message does not end the cue, and work
 resuming after a wait brings it back with no new start. By itself a question
 waiting for the owner, a wait for model access, a timer- or mail-only wait, a
 run queued or paused on its own question, Pause or Stop now renews nothing; a
-handed-off answer stops the helpers too, and background work nobody asked for
+handed-off answer stops the subagents too, and background work nobody asked for
 and unknown state never count. An action already sent when the answer leaves
 may still be accepted after it, and Telegram may show the last action for up
 to five seconds more; no message, card, percentage or Stop button is added.
