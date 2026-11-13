@@ -783,7 +783,8 @@ test('the allowance under its field: the clock\'s own spend, what it leaves out,
     const open = allowancePresentation(state({ status: 'sleeping', spent_24h_usd: 12.4, daily_usd: 300,
         allowance_status: 'available', allowance_open_rows: 2, unknown_unmetered: 3 }), { now });
     // What the number leaves out is said after it in words, where a floor sign stood before it.
-    assert.equal(open.spend, '$13 of $300 in the last 24 hours; 3 calls without a known price are not counted');
+    assert.equal(open.spend, '$13 of $300 in the last 24 hours; 3 calls without a known price and calls in progress are not counted',
+        'calls still open beside calls without a price: both are said, as the meter\'s note says them');
     assert.equal(open.meter.note, 'Not counted: 3 calls without a known price and calls in progress');
     const pending = allowancePresentation(state({ status: 'sleeping', spent_24h_usd: 0, daily_usd: 20,
         allowance_status: 'available', allowance_open_rows: 1 }), { now });
