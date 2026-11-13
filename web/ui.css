@@ -221,9 +221,6 @@
     /* The crimson tone without its fill, for a chosen control that has no body (Read aloud while it speaks, the
        Official mark): on dark that is the crimson word, since the tone's own ink is white. */
     --tone-crimson-word: var(--accent-light);
-    /* The chosen place's left mark: on the solid crimson it is the fill's white ink (the accent would vanish into
-       the fill). */
-    --place-mark: var(--tone-crimson-ink);
     --tone-green: rgba(255, 255, 255, 0.16);
     --tone-green-hover: rgba(255, 255, 255, 0.2);
     --tone-red: rgba(255, 255, 255, 0.09);
@@ -416,16 +413,16 @@
     --voice-ouroboros-note-hover: var(--voice-ouroboros);
     --relay-ledge-1: #faebec;  /* the accent at 10 % over white */
     --relay-ledge-2: #f7e3e5;  /* the accent at 14 % over white */
-    /* The crimson tone is the accent ladder's; its hover stops at 14 % so the ink keeps 4.5:1 on it. */
-    --tone-crimson: var(--accent-10);
-    --tone-crimson-hover: var(--accent-14);
-    /* One step deeper than the accent text, so a tonal capsule keeps 4.5:1 on a voice-tinted backing too. */
-    --tone-crimson-ink: #b52b3b;
-    /* One pale crimson for both strengths: on white a tint is already quiet. */
-    --tone-crimson-soft: var(--tone-crimson);
-    --tone-crimson-soft-ink: var(--tone-crimson-ink);
-    --tone-crimson-word: var(--tone-crimson-ink);
-    --place-mark: var(--accent);
+    /* Where you are (the sidebar's chosen place) and the primary action are the solid crimson under white ink, as on
+       dark (owner 13.11, 1A); its hover and press deepen, so the white keeps 4.5:1. */
+    --tone-crimson: #d32d43;
+    --tone-crimson-hover: #c32a3f;
+    --tone-crimson-ink: #ffffff;
+    /* Every other choice is the pale tint with crimson ink, one step deeper than the accent text, so it keeps 4.5:1
+       on a voice-tinted backing too. */
+    --tone-crimson-soft: #f6dde1;
+    --tone-crimson-soft-ink: #b52b3b;
+    --tone-crimson-word: #b52b3b;
     --tone-green: rgba(34, 197, 94, 0.14);
     --tone-green-hover: rgba(34, 197, 94, 0.22);
     --tone-red: rgba(239, 68, 68, 0.10);
@@ -434,7 +431,7 @@
     --tone-amber-hover: rgba(245, 158, 11, 0.26);
     --tone-quiet-hover: rgba(28, 33, 51, 0.06);
     --press: brightness(0.95);
-    --press-solid: var(--press);
+    --press-solid: brightness(0.92);
     /* The light theme's own values of tokens the dark seed in :root sets differently (hues, status triples, the
        System voice, the owner's quote tint, the Project's tints). */
     --user-bubble-from: rgba(80, 120, 190, 0.14);
@@ -643,8 +640,7 @@
    4): a tab is its word in the meta ink; the chosen tab is the soft crimson with its ink, as the chosen row of a
    place's list is (owner 13.11: a selection is always red, roles differ by the shade of red, never a grey or black
    plate). The solid crimson stays the place's (the sidebar's chosen row) and the primary action's. One weight for
-   every tab, so choosing one moves no neighbour. PROTOTYPE: html[data-proto-page-tone="bright"] draws the chosen tab
-   in the solid crimson, to compare. The strip that holds them is the page's (style.css .app-tab-strip). */
+   every tab, so choosing one moves no neighbour. The strip that holds them is the page's (style.css .app-tab-strip). */
 .app-tab {
     --control-pad-x: var(--pill-padding-x);
     flex: 0 0 auto;
@@ -666,7 +662,6 @@
 .app-tab:hover { background: var(--tone-quiet-hover); color: var(--text-primary); }
 .app-tab.active,
 .app-tab.is-active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); box-shadow: none; }
-html[data-proto-page-tone="bright"] .app-tab:is(.active, .is-active) { background: var(--tone-crimson); color: var(--tone-crimson-ink); --press: var(--press-solid); }
 .app-tab:not(:disabled):active { filter: var(--press); }
 .app-tab:disabled { box-shadow: none; }
 .app-tab:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
@@ -779,14 +774,23 @@ html[data-proto-page-tone="bright"] .app-tab:is(.active, .is-active) { backgroun
 }
 /* The fill under a bound strip's chosen option: the option's own soft crimson and corners, behind the words, never
    pressed or read. While it is bound the chosen option is clear and keeps its ink, so the fill shows through it. */
-.ui-segment-group[data-segment-fill] { position: relative; isolation: isolate; }
+/* segment_fill.js writes the chosen option's box onto the group (--segment-fill-x/-y/-w/-h); until it has, the fill
+   is an empty box at the corner. */
+.ui-segment-group[data-segment-fill] {
+    --segment-fill-x: 0;
+    --segment-fill-y: 0;
+    --segment-fill-w: 0;
+    --segment-fill-h: 0;
+    position: relative;
+    isolation: isolate;
+}
 .ui-segment-fill {
     position: absolute;
     z-index: -1;
-    left: var(--segment-fill-x, 0);
-    top: var(--segment-fill-y, 0);
-    width: var(--segment-fill-w, 0);
-    height: var(--segment-fill-h, 0);
+    left: var(--segment-fill-x);
+    top: var(--segment-fill-y);
+    width: var(--segment-fill-w);
+    height: var(--segment-fill-h);
     box-sizing: border-box;
     border-radius: var(--control-radius);
     background: var(--tone-crimson-soft);
@@ -1096,13 +1100,10 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
 /* The chosen page of a place is the soft crimson with its ink (owner 13.11: a selection is always red; roles differ by
    the shade, never a grey or black plate). The solid crimson marks the place itself (the sidebar's chosen row) and the
    primary action; the soft crimson marks everything else that is chosen: the open page of a place, a tab, an option,
-   a segment, a filter. PROTOTYPE: html[data-proto-page-tone="bright"] draws the open page in the solid crimson, to
-   compare. A list that stands alone (one column: a phone, a narrow window) marks no row: there is no page beside it
+   a segment, a filter. A list that stands alone (one column: a phone, a narrow window) marks no row: there is no page beside it
    to be the chosen one. */
 .section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); box-shadow: none; }
 .section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) :is(.section-row-title, .section-row-answer, .section-row-end, .section-row-glyph) { color: var(--tone-crimson-soft-ink); }
-html[data-proto-page-tone="bright"] .section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) { background: var(--tone-crimson); color: var(--tone-crimson-ink); }
-html[data-proto-page-tone="bright"] .section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) :is(.section-row-title, .section-row-answer, .section-row-end, .section-row-glyph) { color: var(--tone-crimson-ink); }
 /* The glyph stands bare at every width (a tile under it is another system's list item): 20 px in a one-column list,
    where the rows are a finger tall, 18 px in the rail. */
 .section-row-glyph {

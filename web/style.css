@@ -445,7 +445,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     --mark-unread: var(--accent-light);
     --focus-accent-border: var(--accent-light);
 }
-:root:not([data-theme="light"]) .nav-ouro.active { --text-primary: var(--tone-crimson-ink); --text-meta: var(--tone-crimson-ink); }
+/* Chosen, the card takes the solid crimson's white ink in both themes (:root keeps it above the dark voice's inks). */
+:root .nav-ouro.active { --text-primary: var(--tone-crimson-ink); --text-meta: var(--tone-crimson-ink); }
 .nav-ouro-ava {
     flex: 0 0 36px;
     width: 36px;
@@ -525,9 +526,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     color: var(--tone-crimson-ink);
     box-shadow: var(--elev-rest);
 }
-/* Light theme: without the left mark the chosen place needs a deeper fill than the resting voice card beside it
-   (Opus and Carbon, 12.11): the strong crimson tint at 20 % here, a line for the book's amendment table. */
-:root[data-theme="light"] #primary-sidebar .nav-row.active { background: rgb(201 53 69 / 0.2); }
 
 .nav-row:focus,
 .nav-section-toggle:focus,
@@ -1389,10 +1387,10 @@ html[data-layout="docked"] .app-page-title-block:has(> .app-page-back:not(:empty
     align-items: center;
     gap: var(--space-2);
 }
-html[data-layout="docked"] .app-page-title-block:has(> .app-page-back:not(:empty)) > .app-page-lead { flex: 1 1 auto; }
+html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) ~ .app-page-lead { flex: 1 1 auto; }
 /* Back takes the header's start inset (a step from the column's edge) and the hidden title takes no place in the row,
    so the tabs or the location after it keep the room they have without Back. */
-html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-block:has(> .app-page-back:not(:empty)) > .app-page-title-row {
+html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-block > .app-page-title-row:has(~ .app-page-back:not(:empty)) {
     position: absolute;
 }
 html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
@@ -1401,7 +1399,7 @@ html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
 html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) {
     grid-template-areas: "leading title toolbar" "back back back";
 }
-html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) > .app-page-title-block { display: contents; }
+html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back:not(:empty)) { display: contents; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-back { grid-area: back; }
 .app-page-tabs[data-back] { display: flex; align-items: center; gap: var(--space-1); }
@@ -4260,23 +4258,11 @@ html[data-layout="stack"] .mobile-nav-toggle {
     flex: 0 0 44px;
     display: inline-flex;
 }
-/* The ☰'s dot says what waits behind it (app.js paintNavToggles): the shared 7px fact dot on the control's top-right,
-   clear of the glyph's top stroke, with no ring around it; inset closer on the composer's 32px capsule. */
-.mobile-nav-toggle > .status-mark {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-}
-.mobile-nav-toggle.composer-menu > .status-mark {
-    top: 3px;
-    right: 3px;
-}
-/* PROTOTYPE: what the places control wears. Ouroboros's picture fills the control (the same picture as his card in the
-   list it opens), so the control has no glass of its own; "menu" keeps the three lines, "back" draws the back arrow. */
-.mobile-nav-toggle > :is(.places-face, .places-menu, .places-back) { display: none; }
-.mobile-nav-toggle > :is(.places-menu, .places-back) { align-items: center; justify-content: center; }
-html:not([data-proto-places]) .mobile-nav-toggle > .places-face,
-html[data-proto-places="avatar"] .mobile-nav-toggle > .places-face {
+/* What the places control wears: Ouroboros's picture fills the control (the same picture as his card in the list it
+   opens), so the control has no glass of its own. Its dot says what waits behind it (app.js paintNavToggles): the
+   shared 7px fact dot on the picture's top-right, ringed in the room's surface; closer in on the composer's capsule. */
+html[data-layout="stack"] .mobile-nav-toggle { background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+html[data-layout="stack"] .mobile-nav-toggle > .places-face {
     display: block;
     width: 34px;
     height: 34px;
@@ -4284,16 +4270,9 @@ html[data-proto-places="avatar"] .mobile-nav-toggle > .places-face {
     background: url("logo.jpg") center / cover no-repeat, #e6e0de;
     box-shadow: var(--elev-rest);
 }
-html:not([data-proto-places]) .mobile-nav-toggle.composer-menu > .places-face,
-html[data-proto-places="avatar"] .mobile-nav-toggle.composer-menu > .places-face { width: 100%; height: 100%; }
-html:not([data-proto-places]) .mobile-nav-toggle,
-html[data-proto-places="avatar"] .mobile-nav-toggle { background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
-html[data-proto-places="menu"] .mobile-nav-toggle > .places-menu,
-html[data-proto-places="back"] .mobile-nav-toggle > .places-back { display: inline-flex; }
-html:not([data-proto-places]) .mobile-nav-toggle > .status-mark,
-html[data-proto-places="avatar"] .mobile-nav-toggle > .status-mark { top: 4px; right: 4px; box-shadow: 0 0 0 2px var(--surface-room, #0f0f11); border-radius: 50%; }
-html:not([data-proto-places]) .mobile-nav-toggle.composer-menu > .status-mark,
-html[data-proto-places="avatar"] .mobile-nav-toggle.composer-menu > .status-mark { top: -1px; right: -1px; }
+html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .places-face { width: 100%; height: 100%; }
+html[data-layout="stack"] .mobile-nav-toggle > .status-mark { position: absolute; top: 4px; right: 4px; box-shadow: 0 0 0 2px var(--bg-primary); border-radius: 50%; }
+html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .status-mark { top: -1px; right: -1px; }
 /* A room's ☰ is the first control of its composer's row, under the thumb (owner 19.10, 1A): as tall as the
    capsules beside it, with the touch minimum as its finger target (.ui-hit-area). */
 html[data-layout="stack"] .chat-toolbar-row > .composer-menu {
@@ -5219,16 +5198,17 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     border-radius: calc(var(--capsule-seg-pad) + var(--space-1));
 }
 
-/* Context: exactly three modes, the chosen one under a glass thumb, in its mode's colour (Max the
-   accent, full context; Low the neutral ink, reduced: a level the owner chose is not a warning; Nano the
-   project fuchsia). Subagents' strip is the same mode strip (--mode-ink, --mode-fill), below. */
+/* Context: exactly three modes, the chosen one under a glass thumb, in its mode's ink (Max the accent, full context;
+   Low the neutral ink, reduced: a level the owner chose is not a warning; Nano the project fuchsia). A chosen value
+   never stands on a grey plate: Max and Low share the strip's crimson wash, Nano its fuchsia. Subagents' strip is
+   the same mode strip (--mode-ink, --mode-fill), below. */
 .chat-context-mode {
     --mode-ink: var(--accent-light);
     --mode-fill: var(--accent-14);
 }
 .chat-context-mode[data-context-mode="low"] {
     --mode-ink: var(--status-neutral-fg);
-    --mode-fill: var(--status-neutral-bg);
+    --mode-fill: var(--accent-14);
 }
 .chat-context-mode[data-context-mode="nano"] {
     --mode-ink: var(--project);
@@ -5295,8 +5275,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     }
 }
 
-/* Subagents: Off · Auto · Swarm on the same strip, the chosen one in its tone (Off the neutral ink, Auto and Swarm the
-   accent); a value Settings rules out is disabled ink. The mark is a small network: Ouroboros in meta ink, its helpers
+/* Subagents: Off · Auto · Swarm on the same strip, the chosen one in its ink (Off the neutral ink, Auto and Swarm the
+   accent) on the strip's crimson wash; a value Settings rules out is disabled ink. The mark is a small network: Ouroboros in meta ink, its helpers
    and their threads in the rail's ink until the mode lights them: none, the first, every helper and the threads between
    them (Swarm). Closed, Off is muted and Auto and Swarm read like the neighbours' values: no fill, the network tells them
    apart (owner 28.10); Settings-off adds a small lock. Open, the hint above it says what the value means (ui_hint.js). */
@@ -5306,7 +5286,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .chat-subagents-mode[data-mode="off"] {
     --mode-ink: var(--status-neutral-fg);
-    --mode-fill: var(--status-neutral-bg);
 }
 :is(.chat-subagents-strip, .chat-model-strip) .chat-context-thumb { left: var(--thumb-left, 0); width: var(--thumb-width, 0); }
 .chat-subagents-mode .chat-seg { justify-content: center; min-width: var(--touch-target-min); box-sizing: border-box; }
@@ -5508,8 +5487,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 /* Model (DESIGN "Composer owner controls"; composer_model.js): the first capsule, the model new work in this room
    starts on. Its glyph is the mark of the source that model is reached through, lit like a ring's arc only while the
    room chose its own; the capsule itself stays neutral, like its neighbours. Its strip is the family's mode strip
-   (Main · the recent models · Search) under a neutral thumb: a model is not a level. */
-.chat-model-mode { --mode-fill: rgba(var(--neutral-rgb), 0.14); }
+   (Main · the recent models · Search) under the strip's crimson wash (a chosen value never stands on a grey plate);
+   its ink stays neutral: a model is not a level. */
+.chat-model-mode { --mode-fill: var(--accent-14); }
 .chat-model-mode .chat-capsule-glyph { color: var(--text-meta); }
 .chat-model-mode[data-own="true"] .chat-capsule-glyph { color: var(--tone-crimson-word); }
 .chat-model-mode .chat-capsule-glyph .model-source-mark { width: 15px; height: 15px; }
@@ -6289,8 +6269,14 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 }
 .costs-meter-note[hidden] { display: none; }
 .costs-meter > .ui-disclosure { margin-top: var(--space-1); }
-.costs-spend-bar { --meter-fill: var(--tone-crimson); height: 8px; margin: var(--space-1) 0; border-radius: var(--pill-radius); background: var(--accent-18); overflow: hidden; }
-:root[data-theme="light"] .costs-spend-bar { --meter-fill: var(--tone-crimson-ink); }
+.costs-spend-bar {
+    --meter-fill: var(--tone-crimson);
+    height: 8px;
+    margin: var(--space-1) 0;
+    border-radius: var(--pill-radius);
+    background: var(--accent-18);
+    overflow: hidden;
+}
 .costs-spend-bar > i { display: block; width: var(--spend-share, 0%); min-width: 8px; height: 100%; border-radius: inherit; background: var(--meter-fill); transition: width var(--motion-fade, 180ms) var(--ease-sheet, ease); }
 .costs-spend-bar[data-reached="1"] > i { background: var(--amber); }
 .costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
@@ -9025,18 +9011,6 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 @media (hover: hover) {
     .nav-projects-header > .nav-projects-add:hover { background: var(--chip-float-hover); color: var(--text-primary); }
 }
-/* PROTOTYPE switch: the Projects' unread total and status mark at the end of the search row (to compare). */
-.nav-projects-header > .nav-projects-facts { display: none; }
-html[data-proto-side-count] .nav-projects-header > .nav-projects-facts {
-    display: flex;
-    order: 1;
-    flex: 0 0 auto;
-    align-self: center;
-    gap: var(--space-2);
-    padding: 0;
-    background: transparent;
-    cursor: default;
-}
 
 @media (pointer: coarse) {
     .nav-projects-add { order: 0; }
@@ -9175,7 +9149,7 @@ html[data-proto-side-count] .nav-projects-header > .nav-projects-facts {
     pointer-events: auto;
     color: var(--text-primary);
 }
-.nav-project-item:has(> .nav-project-pin:focus-visible) .nav-project-time { visibility: hidden; }
+.nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time { visibility: hidden; }
 @media (hover: hover) {
     .nav-project-item:hover .nav-project-time { visibility: hidden; }
 }
