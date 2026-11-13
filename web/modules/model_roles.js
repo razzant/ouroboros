@@ -1042,6 +1042,7 @@ function mountWebSearch(container, { path, ctx }) {
             const wanted = { OUROBOROS_WEBSEARCH_BACKEND: selection().backend, OUROBOROS_WEBSEARCH_MODEL: selection().model };
             const body = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => value !== asRead?.[key]));
             outcome = await writeModelKeys('models:websearch', body, fresh, { ask: ctx.ask });
+            if (landed(outcome)) asRead = wanted;  // the new baseline before the reread, for typing that reread keeps
         } catch (error) { outcome = { state: 'refused', effect: 'now', withheld: '', message: error?.message || String(error), code: '' }; }
         setButtonBusy(button, false);
         if (landed(outcome) || outcome.state === 'unchanged') { dirty = false; container.querySelector('[data-editor-discard]').hidden = true; await read(); }

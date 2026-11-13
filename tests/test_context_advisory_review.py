@@ -136,6 +136,7 @@ class TestAdvisoryReviewStatusInContext:
                     "verdict": "FAIL",
                 }],
                 readiness_warnings=["Review was blocked and needs follow-up."],
+                review_record_id="rv-old",
             ),
             expect_task_id="task-old",
         )
@@ -155,140 +156,125 @@ class TestAdvisoryReviewStatusInContext:
         dynamic_text = messages[0]["content"][-1]["text"]
 
         assert "## Review Continuity" in dynamic_text
-        # The debt is still narrated as the retry anchor; since decision 3A it no
-        # longer holds a commit, and no readiness axis is projected next to it.
-        assert "retry_anchor=commit_readiness_debt" in dynamic_text
-        assert "Commit-readiness debt" in dynamic_text
+        # Neither a readiness axis (decision 3A) nor a debt or retry anchor is projected beside the facts.
+        for gone in ("retry_anchor", "commit_readiness_debt", "Commit-readiness debt"):
+            assert gone not in dynamic_text, gone
         assert "stale_marker=2026-04-07T10:00:00" in dynamic_text
         for retired in ("Advisory readiness", "repo_commit_ready", "advisory_status=", "snapshot_hash=",
                         "bypass_reason=", "no advisory run matches", "manual audit override"):
             assert retired not in dynamic_text, retired
         assert "### Open review continuations" in dynamic_text
         assert "critical_finding=tests_affected: Fix the failing test before commit" in dynamic_text
+        assert "review_record_id=rv-old" in dynamic_text  # the record holds every seat's answer as written
         assert "### Historical review ledger" in dynamic_text
         assert "## Scratchpad" in dynamic_text
         assert dynamic_text.index("## Scratchpad") < dynamic_text.index("## Drive state")
         assert dynamic_text.index("## Runtime context") < dynamic_text.index("## Review Continuity")
 
-    def test_review_continuity_context_ignores_foreign_repo_obligations(self, tmp_path):
-        from ouroboros.agent_task_pipeline import build_review_context
-        from ouroboros.review_state import (
-            AdvisoryReviewState,
-            CommitAttemptRecord,
-            compute_snapshot_hash,
-            make_repo_key,
-            save_state,
-        )
+    def test_the_context_fallback_shows_earlier_obligations_when_no_attempt_is_left(self, tmp_path):
+        """Without a review-context builder the context falls back to the review status section: earlier open
+        obligations of this checkout show there even when no attempt row remains; an empty review state adds none."""
+        import json
 
-        env = self._make_env(tmp_path)
-        repo_a = tmp_path / "repo"
-        repo_b = tmp_path / "repo-other"
-        (repo_a / ".git").mkdir(parents=True, exist_ok=True)
-        (repo_b / ".git").mkdir(parents=True, exist_ok=True)
-        (repo_a / "tracked.py").write_text("print('repo a')\n", encoding="utf-8")
-        (repo_b / "tracked.py").write_text("print('repo b')\n", encoding="utf-8")
-
-        repo_a_key = make_repo_key(repo_a)
-        repo_b_key = make_repo_key(repo_b)
-        state = AdvisoryReviewState()
-        state.advisory_runs.append({  # an archived row of the retired lane
-            "snapshot_hash": compute_snapshot_hash(repo_a), "commit_message": "repo a ready",
-            "status": "fresh", "ts": "2026-04-07T10:00:00+00:00", "repo_key": repo_a_key,
-        })
-        state.record_attempt(CommitAttemptRecord(
-            ts="2026-04-07T10:01:00+00:00",
-            commit_message="repo b blocked",
-            status="blocked",
-            repo_key=repo_b_key,
-            tool_name="commit_reviewed",
-            task_id="task-b",
-            attempt=1,
-            block_reason="critical_findings",
-            critical_findings=[{
-                "item": "foreign_issue",
-                "reason": "other repo only",
-                "severity": "critical",
-                "verdict": "FAIL",
-            }],
-        ))
-        save_state(tmp_path, state)
-
-        dynamic_text = build_review_context(env)
-        assert "## Review Continuity" in dynamic_text
-        assert f"- repo_key={repo_a_key}" in dynamic_text
-        assert "open_obligations=0" in dynamic_text
-        assert "foreign_issue" not in dynamic_text
-        assert "repo b blocked" not in dynamic_text
-
-    def test_review_continuity_context_keeps_open_obligations_without_runs(self, tmp_path):
-        from ouroboros.agent_task_pipeline import build_review_context
-        from ouroboros.review_state import (
-            AdvisoryReviewState,
-            ObligationItem,
-            make_repo_key,
-            save_state,
-        )
+        from ouroboros.context import build_llm_messages
+        from ouroboros.memory import Memory
+        from ouroboros.review_state import make_repo_key
 
         env = self._make_env(tmp_path)
         (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "repo" / "tracked.py").write_text("print('hi')\n", encoding="utf-8")
-
         repo_key = make_repo_key(tmp_path / "repo")
-        state = AdvisoryReviewState(
-            open_obligations=[
-                ObligationItem(
-                    obligation_id="obl-0001",
-                    item="tests_affected",
-                    severity="critical",
-                    reason="Coverage still missing",
-                    source_attempt_ts="2026-04-07T10:00:00+00:00",
-                    source_attempt_msg="blocked commit",
-                    repo_key=repo_key,
-                    fingerprint="finding:tests_affected:abc123",
-                )
-            ]
-        )
-        save_state(tmp_path, state)
 
-        dynamic_text = build_review_context(env)
-        assert "## Review Continuity" in dynamic_text
-        assert "open_obligations=1" in dynamic_text
-        assert "[obl-0001] tests_affected: Coverage still missing" in dynamic_text
+        def dynamic_text(document):
+            (tmp_path / "state" / "advisory_review.json").write_text(json.dumps(document), encoding="utf-8")
+            messages, _ = build_llm_messages(env=env, memory=Memory(drive_root=tmp_path),
+                                             task={"id": "task-new", "type": "task", "text": "continue"},
+                                             review_context_builder=None)
+            return messages[0]["content"][-1]["text"]
 
-    def test_review_continuity_context_keeps_all_debt_evidence(self, tmp_path):
+        recorded = "2026-04-07T10:00:00+00:00"
+        row = {"obligation_id": "obl-0003", "item": "tests_affected", "severity": "critical",
+               "reason": "Coverage still missing", "source_attempt_ts": recorded, "source_attempt_msg": "blocked",
+               "status": "still_open", "resolved_by": "", "repo_key": repo_key,
+               "fingerprint": "finding:tests_affected:abc", "created_ts": recorded, "updated_ts": recorded}
+        shown = dynamic_text({"state_version": 3, "attempts": [], "open_obligations": [row], "next_obligation_seq": 4})
+        assert "earlier_open_obligations=1" in shown and "[obl-0003] tests_affected" in shown
+        quiet = dynamic_text({"state_version": 3, "attempts": []})
+        assert "Advisory Pre-Review Status" not in quiet and "earlier_open_obligations" not in quiet
+
+    def test_review_continuity_shows_earlier_obligations_until_a_commit_lands_never_as_current(self, tmp_path):
+        """An open obligation this checkout recorded before obligations retired shows once in each
+        Review Continuity view (the fallback section's too), a foreign checkout's never, beside the continuation's
+        record address; no obligation count, debt or retry anchor is projected; a commit that lands here after it
+        ends the block."""
+        import json
+
         from ouroboros.agent_task_pipeline import build_review_context
-        from ouroboros.review_state import (
-            AdvisoryReviewState,
-            CommitReadinessDebtItem,
-            make_repo_key,
-            save_state,
-        )
+        from ouroboros.context_sections import review_status_host_section
+        from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, update_state
+        from ouroboros.task_continuation import ReviewContinuation, save_review_continuation
 
         env = self._make_env(tmp_path)
         (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "repo" / "tracked.py").write_text("print('hi')\n", encoding="utf-8")
-
         repo_key = make_repo_key(tmp_path / "repo")
-        state = AdvisoryReviewState(
-            commit_readiness_debts=[
-                CommitReadinessDebtItem(
-                    debt_id="debt-0001",
-                    category="repeated_obligation",
-                    title="Commit readiness debt",
-                    summary="Repeated tests blocker",
-                    repo_key=repo_key,
-                    source_obligation_ids=["obl-0001"],
-                    evidence=[
-                        "first evidence",
-                        "second evidence",
-                        "third evidence",
-                    ],
-                )
-            ]
-        )
-        save_state(tmp_path, state)
+        recorded = "2026-04-07T10:00:00+00:00"
 
-        dynamic_text = build_review_context(env)
-        assert "first evidence" in dynamic_text
-        assert "second evidence" in dynamic_text
-        assert "third evidence" in dynamic_text
+        def fallback():  # the section a context shows when the builder above yields nothing
+            return review_status_host_section(load_state(tmp_path), tmp_path / "repo", tmp_path)
+        mine = {"obligation_id": "obl-0003", "item": "tests_affected", "severity": "critical",
+                "reason": "Coverage still missing", "source_attempt_ts": recorded, "source_attempt_msg": "blocked",
+                "status": "still_open", "resolved_by": "", "repo_key": repo_key,
+                "fingerprint": "finding:tests_affected:abc", "created_ts": recorded, "updated_ts": recorded}
+        foreign = {**mine, "obligation_id": "obl-0004", "item": "foreign_issue", "repo_key": str(tmp_path / "other")}
+        debt = {"debt_id": "crd-0001", "category": "readiness_warning", "summary": "Review was blocked",
+                "status": "queued", "repo_key": repo_key, "fingerprint": "readiness_warning:attempt:abc"}
+        (tmp_path / "state" / "advisory_review.json").write_text(json.dumps({  # what a body with Blocking left
+            "state_version": 3, "attempts": [], "open_obligations": [mine, foreign], "next_obligation_seq": 5,
+            "commit_readiness_debts": [debt], "next_commit_readiness_debt_seq": 2}), encoding="utf-8")
+        save_review_continuation(tmp_path, ReviewContinuation(
+            task_id="task-old", source="blocked_review", stage="blocking_review", repo_key=repo_key,
+            tool_name="commit_reviewed", attempt=1, block_reason="critical_findings", review_record_id="rv-0001",
+            critical_findings=[{"item": "tests_affected", "reason": "Fix the failing test", "severity": "critical",
+                                "verdict": "FAIL"}]))
+
+        section = build_review_context(env)
+        for view in (section.full_text, section.operative_view):
+            assert view.count("- earlier_open_obligations=1 (recorded before obligations retired") == 1
+            assert view.count("[obl-0003] tests_affected: Coverage still missing") == 1
+            assert "review_record_id=rv-0001" in view
+            for gone in ("obl-0004", "foreign_issue", "crd-0001", "commit_readiness_debt", "retry_anchor"):
+                assert gone not in view, gone
+            assert "open_obligations=" not in view.replace("earlier_open_obligations=", "")
+        for view in (fallback().full_text, fallback().operative_view):
+            assert view.count("[obl-0003] tests_affected: Coverage still missing") == 1 and "obl-0004" not in view
+
+        update_state(tmp_path, lambda state: state.record_attempt(CommitAttemptRecord(
+            ts="2026-04-08T10:00:00+00:00", commit_message="landed", status="succeeded", repo_key=repo_key,
+            task_id="task-new", attempt=1)))
+        landed = build_review_context(env)
+        for view in (landed.full_text, landed.operative_view):
+            assert "earlier_open_obligations" not in view and "obl-0003" not in view
+            assert "review_record_id=rv-0001" in view  # the continuation follows its own rule
+        for view in (fallback().full_text, fallback().operative_view):
+            assert "obl-0003" not in view
+
+
+def test_the_operative_continuity_view_names_the_latest_attempts_readiness_warnings(tmp_path):
+    """The compact Review Continuity view keeps what it used to show as readiness debt: the latest attempt's
+    readiness warnings for this checkout, by count and text; an attempt without warnings adds no line."""
+    from ouroboros.context_sections import continuity_status_lines
+    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, make_repo_key
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    def lines(warnings, status="blocked"):
+        state = AdvisoryReviewState(attempts=[CommitAttemptRecord(
+            ts="2026-11-13T08:00:00+00:00", commit_message="m", status=status, repo_key=make_repo_key(repo),
+            task_id="t", attempt=1, readiness_warnings=warnings)])
+        return "\n".join(continuity_status_lines(state, repo))
+
+    warned = lines(["The staged diff changed after review; review it again before landing."])
+    assert "- readiness_warnings=1 (latest attempt, blocked)" in warned
+    assert "The staged diff changed after review; review it again before landing." in warned
+    assert "readiness_warnings" not in lines([])
+    assert "readiness_warnings" not in lines(["Review expired before landing."], status="succeeded")  # landed: owes none

@@ -322,11 +322,13 @@ def test_obsolete_index_helper_keeps_latest_and_unknown_rows():
     assert view.obsolete_review_index_positions([current, invalid]) == ()
 
 
-def test_old_settled_fail_and_linked_open_obligation_survive_another_history_group(staged_body, tmp_path, monkeypatch):
+def test_an_old_settled_fail_outside_the_selected_group_survives_another_history_group(staged_body, tmp_path, monkeypatch):
+    """A history group the author selects from later rounds closes only those decisions for the author's account:
+    the older settled FAIL the group leaves out stays visible in full. A superseded settled round is historical
+    (selectable) and only the author's selection groups it; no host record holds it open."""
     from pathlib import Path
     from ouroboros import capability_evidence, reviewer_window, review_substrate, review_ledger
     from ouroboros.review_history import review_dispute_history
-    from ouroboros.review_state import load_state, save_state, ObligationItem, make_repo_key
     from ouroboros.tools.registry import ToolContext
     from tests.test_review_cold_history import _run, _dispatch
     from tests import _contributor_packet_shared as shared
@@ -356,28 +358,23 @@ def test_old_settled_fail_and_linked_open_obligation_survive_another_history_gro
         monkeypatch.setattr(review_substrate, "run_review_request", serve)
         records.append(_run(ctx, "change", ""))
     assert review_ledger.load_record(drive, records[0])["verdict"]["aggregate"] == "FAIL"
-    # The obligation owner retains unresolved work independently of later paid
-    # review settlement. Use its persisted shape and exact attempt association.
-    state = load_state(drive)
-    state.open_obligations.append(ObligationItem("obl-closed-history-test", "parser", "critical",
-        "OPEN OBLIGATION STILL NEEDS REPAIR", "2026-10-10T00:00:00Z", "prior failed review",
-        repo_key=make_repo_key(root)))
-    next(a for a in state.attempts if a.review_record_id == records[0]).obligation_ids.append("obl-closed-history-test")
-    save_state(drive, state)
     canonical = [deepcopy(review_ledger.load_record(drive, rid)) for rid in records]
+    rows = review_dispute_history(drive_root=drive, repo_root=root, task_id=ctx.task_id)["decision_rows"]
+    first = [row for row in rows if row.get("review_record_id") == records[0]]
+    failed = [row for row in first if "OPEN CRITIC REASON" in json.dumps(row.get("remark"), default=str)]
+    assert failed and {row["history_role"] for row in failed} == {"historical"}, "settled and superseded: no host hold"
     options = view.review_note_options(ctx)["entries"]
-    group = [e["bound_decision"] for e in options if e["groupable"]]
+    group = [e["bound_decision"] for e in options if e["groupable"] and e["source"] not in [r["source"] for r in first]]
     assert group
     after, receipt, _ = apply_local(ctx, _capture(ctx), FIRST, all_units=True, review_notes=[
         {"bound_decisions": group, "remark": "The closed experiment.", "reason": "I retained its useful conclusion separately from the unresolved parser."}])
     assert receipt["status"] == "applied"
     shown = _index(after)[-1]
-    assert "OPEN CRITIC REASON" in str(shown) and "OPEN OBLIGATION STILL NEEDS REPAIR" in str(shown)
+    assert "OPEN CRITIC REASON" in str(shown)
     assert any(r["decision_kind"] == "actor_history_group" for r in shown["decision_rows"])
     prior = next(e for e in shown["addresses"].values() if e["read"].get("arguments", {}).get("ids") == [records[0]])
     assert "aggregate verdict FAIL" in prior["what"] and "rounds" not in shown
     assert [review_ledger.load_record(drive, rid) for rid in records] == canonical
-    assert review_dispute_history(drive_root=drive, repo_root=root, task_id=ctx.task_id)["open_obligations"]
 
 
 def _groups(messages):

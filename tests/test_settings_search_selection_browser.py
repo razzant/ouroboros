@@ -469,6 +469,54 @@ def test_a_held_deepseek_choice_offers_the_keys_added_in_accounts_meanwhile(save
     assert not ui['errors'].unexpected(), ui['errors'].report()
 
 
+def test_a_source_chosen_while_a_landed_save_is_read_back_saves_its_model_too(saved_ui):
+    """A landed Save is the baseline at once: a Source switched while its read-back is pending saves Source and Model
+    together, so a key spelling written for DeepSeek never stays beside another Source the page shows without it."""
+    from playwright.sync_api import expect
+
+    ui = saved_ui
+    page, _preview, field = _open_models(ui, {'OUROBOROS_WEBSEARCH_BACKEND': 'auto', 'OUROBOROS_WEBSEARCH_MODEL': '',
+                                              **_DEEPSEEK_KEYS})
+    editor = page.locator('[data-settings-page="models/role/websearch"]')
+    source, key, save, discard = (page.locator('#s-websearch-source'), page.locator('#s-websearch-key'),
+                                  editor.locator('[data-editor-save]'), editor.locator('[data-editor-discard]'))
+    source.select_option('deepseek')
+    key.select_option(label='DeepSeek · Work')
+    held, posted = [], []
+
+    def hold_reads_after_the_post(route):  # the Save's own read stays pending until released below
+        if route.request.method == 'POST':
+            posted.append(route.request.url)
+        if route.request.method == 'GET' and posted:
+            held.append(route)
+        else:
+            route.fallback()
+    for pattern in ('**/api/settings', '**/api/settings?*'):
+        page.route(pattern, hold_reads_after_the_post)
+    save.click()
+    expect(discard).to_be_hidden()  # the write landed; hidden right before the page reads its settings back
+    assert held and (_on_disk().get('OUROBOROS_WEBSEARCH_BACKEND'), _on_disk().get('OUROBOROS_WEBSEARCH_MODEL')) == (
+        'deepseek', 'deepseek@work::')
+    source.select_option('openai')  # chosen while the read-back is pending
+    expect(field).to_have_value('')
+    for pattern in ('**/api/settings', '**/api/settings?*'):
+        page.unroute(pattern, hold_reads_after_the_post)
+    for route in held:
+        route.fallback()
+    expect(editor.locator('[data-editor-result]')).to_contain_text('Saved')  # the first Save has finished
+    expect(source).to_have_value('openai')
+    expect(discard).to_be_visible()
+    with page.expect_response(lambda response: response.request.method == 'POST' and '/api/settings' in response.url):
+        save.click()
+    expect(discard).to_be_hidden()
+    assert _on_disk().get('OUROBOROS_WEBSEARCH_BACKEND') == 'openai' and not _on_disk().get('OUROBOROS_WEBSEARCH_MODEL')
+    page.reload()
+    open_settings(page, 'models/role/websearch')
+    expect(source).to_have_value('openai')
+    expect(field).to_have_value('')
+    assert not ui['errors'].unexpected(), ui['errors'].report()
+
+
 # A translated install (the house idiom: the gateway's /api/ui/i18n answer, stubbed). Each field's help is its own
 # sentence the overlay translates whole, and the Key select's words translate like any option.
 _HELP_RU = 'Используется только встроенным веб-поиском. Пустое поле: модель, которую Ouroboros рекомендует для каждого источника.'
