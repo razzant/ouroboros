@@ -24,16 +24,21 @@ from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CON
 
 # The Main context builder's declaration on its leading system message: how many leading
 # text blocks are byte-stable across conversations (governance and books; with a memory
-# view, identity and my sealed story too: two). A provider that reads a cache only inside
+# view, resident memory too). A provider that reads a cache only inside
 # the leading system group keeps only those blocks there, each as its own system item
 # (``split_leading_system_prefix``). Host-only metadata: popped from every send copy.
 STABLE_PREFIX_BLOCKS_KEY = "_stable_prefix_blocks"
+# The same declaration one grain finer, on resident memory's own block: its ``chars`` leading characters
+# (the head, with the newlines that join the story) hold nothing of the story, so works whose stories were
+# cut differently still agree on them; ``story_whole`` says this work's story was not cut at all
+# (``memory_view.story_is_whole``). Host-only, like the count.
+SHARED_HEAD_KEY = "_shared_head"
 
 # One send-copy policy. These are host custody/presentation fields, never model
 # content. Strings (including JSON tool results/arguments) remain byte-identical.
 HOST_ONLY_MESSAGE_KEYS = frozenset({
     "_host_context_kind", "_host_text_sha256", TOOL_RESULT_RECORD_KEY,
-    REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY, STABLE_PREFIX_BLOCKS_KEY,
+    REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY, STABLE_PREFIX_BLOCKS_KEY, SHARED_HEAD_KEY,
     "cache_control", "_context_capsule", "_evicted_image", "_caption", "_source_path", "_source_sha256",
     "_review_image_id", "_original_image_url", "acceptance_observation", "_acceptance_observation", "review_feedback",
     "_capture_source", "_canonical", "_requested_look", "_tool_answer", "_call_frame_source", "_call_frame_digest",
@@ -235,11 +240,19 @@ class _MessageShapingMixin:
         """Use a spare Anthropic breakpoint for Main's complete starting context.
 
         A rolling history entry cannot preserve the unmarked system tail after
-        compaction. Keep the declared governance/story endpoints and the rolling
+        compaction. Keep the declared governance/memory endpoints and the rolling
         one; C takes priority over the finalizer's optional tools-only endpoint.
         No spare slot (e.g. a full separate handbook) means no change. Unsealed
         prompts stay unchanged: caching their previously uncached C would buy a
         write rather than merely split an already-cached prefix.
+
+        Where C takes the slot and resident memory's block declares its shared head
+        (``SHARED_HEAD_KEY``), that block is sent as two text blocks, head then story,
+        whose texts concatenate to its bytes. It keeps its one breakpoint: at the end
+        of the head when the story was narrowed for this work (only the head can then
+        be another work's bytes), at its own end when the story is whole (a head
+        entry another work wrote is still read from there, one position back).
+        Nothing is added: never a fifth breakpoint.
 
         Called only by direct/OR Anthropic builders on their fresh payload, before
         TTL finalization. The original transcript and native replay receipts are
@@ -269,6 +282,14 @@ class _MessageShapingMixin:
                 or len(cls._payload_cache_breakpoints(payload)) >= cls._MAX_CACHE_BREAKPOINTS):
             return
         blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        memory, sent = content[-2], blocks[-2] if len(blocks) > 1 else None
+        shared = memory.get(SHARED_HEAD_KEY)
+        at = shared.get("chars") if isinstance(shared, dict) else None
+        if (isinstance(at, int) and isinstance(sent, dict) and isinstance(sent.get("cache_control"), dict)
+                and sent.get("text") == memory["text"] and 0 < at < len(memory["text"])):
+            parts = [{"type": "text", "text": memory["text"][:at]}, {"type": "text", "text": memory["text"][at:]}]
+            parts[bool(shared.get("story_whole"))]["cache_control"] = sent["cache_control"]
+            blocks[-2:-1] = parts
 
     @classmethod
     def _copy_messages_with_cache_policy(

@@ -295,11 +295,105 @@ def test_anthropic_preserves_the_message_seal_and_gives_schemas_only_a_free_slot
     assert "cache_control" not in payload["tools"][-1]
     system = payload.get("system", payload["messages"][0].get("content"))
     assert ("cache_control" in system[-1]) == (not has_book)
+    assert "cache_control" in system[0], "common governance keeps its own breakpoint in every arm"
+    sent, built = ([block["text"] for block in blocks] for blocks in (system, canonical[0]["content"]))
+    assert "".join(sent) == "".join(built) and len(sent) == len(built) + (not has_book)  # B as head and story, or whole
     # The newest tool result, or the task message itself: the seal changed neither row.
     assert kept[-1]["text"] == ("result 5" if long else messages[1]["content"])
     assert any(block.get("text", "").startswith("## DEVELOPMENT.md\n") for block in kept) == has_book
     assert all(block["cache_control"] == {"type": "ephemeral", "ttl": "1h"} for block in kept)
     assert messages == canonical and tools == _tools()
+
+
+def _story_start(tmp_path, monkeypatch, window, mode="low", **task):
+    """``(sealed messages, cap)`` of a first request in ``mode`` on a route of ``window`` tokens; one page of 238,000
+    characters in my story, which a window of 160,000 tokens cannot hold whole."""
+    from types import SimpleNamespace
+
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.context_fit import seal_task_transcript
+    from tests.test_common_story import _page
+
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", mode)
+    env, memory, _rooms = world(tmp_path)
+    ChronicleStore(memory.drive_root).ensure_activated()
+    _page(memory.drive_root, "1", 10, 11, text="Story. " * 34_000)
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=window)
+    messages, cap = _messages(env, memory, {**MAIN, **task},
+                              route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+    seal_task_transcript(messages)
+    return messages, cap
+
+
+def _anthropic_system(monkeypatch, provider, messages):
+    """The system blocks the lane itself puts on the wire, with the whole payload."""
+    from ouroboros.llm import LLMClient
+    from tests.test_review_prompt_caching import _openrouter_target, _send_direct_anthropic, _tools
+
+    client = LLMClient(api_key="unused")
+    if provider == "anthropic":
+        payload, usage = _send_direct_anthropic(monkeypatch, messages, _tools())
+        assert usage.get("prompt_cache_breakpoints_reduced") is None
+    else:
+        target = _openrouter_target("anthropic/claude-fable-5")
+        payload = client._build_remote_kwargs(target, messages, "high", 512, "auto", None, _tools(), skip_capability_fetch=True)
+        client._normalize_payload_cache_ttl(target, payload)
+        assert client._cache_breakpoint_tls.pending is None
+    return payload.get("system", payload["messages"][0].get("content")), payload
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
+@pytest.mark.parametrize("window,whole", [(1_000_000, True), (160_000, False)])
+def test_resident_memory_keeps_its_breakpoint_where_another_work_agrees_with_it(tmp_path, monkeypatch, provider, window, whole):
+    """A new work's first request reads another work's start as far as a breakpoint both ended on the same bytes
+    (#3231). B's head (identity, the catalogue, the maps) holds nothing of my story, so works whose stories were cut
+    differently still agree on it; the story after it is one text only while no work had it narrowed for its window.
+    So B goes as its head and its story, and its one breakpoint ends the story while that is whole and the head once
+    it was narrowed: behind a narrowed story it ended bytes no other work repeats. Nothing is added: four breakpoints,
+    A' and C keep theirs, the texts are B's."""
+    from ouroboros import memory_view as mv
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_messages import SHARED_HEAD_KEY
+    from tests.test_review_prompt_caching import _deep_markers
+
+    messages, cap = _story_start(tmp_path, monkeypatch, window, workspace_root=str(foreign_tree(tmp_path / "project")))
+    canonical = copy.deepcopy(messages)
+    a, b, c = messages[0]["content"]
+    declared = b[SHARED_HEAD_KEY]
+    narrowed = set(cap["memory_view"]["floor"]["steps"]) & set(mv.STORY_STEPS)
+    assert declared["story_whole"] is whole and bool(narrowed) is (not whole)  # the fit's level alone decides
+    head, story = b["text"][:declared["chars"]], b["text"][declared["chars"]:]
+    assert head.endswith("\n\n") and story.startswith("## My story\n") and "## My story" not in head
+    system, payload = _anthropic_system(monkeypatch, provider, messages)
+    assert [block["text"] for block in system] == [a["text"], head, story, c["text"]]
+    assert ["cache_control" in block for block in system] == [True, not whole, whole, True]
+    assert len(LLMClient._payload_cache_breakpoints(payload)) == len(_deep_markers(payload)) == 4
+    assert SHARED_HEAD_KEY not in json.dumps(payload), "the declaration is the host's own"
+    assert messages == canonical
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
+@pytest.mark.parametrize("case", ["handbook", "unsealed", "child"])
+def test_resident_memory_stays_one_block_where_the_allocator_does_not_act(tmp_path, monkeypatch, provider, case):
+    """The other direction: the full handbook's own block leaves no spare breakpoint, an unsealed prompt buys no
+    write, and a declared child's B holds no story to cut. Each is sent block for block as it was built."""
+    from ouroboros.llm_messages import SHARED_HEAD_KEY
+
+    child = {"delegation_role": "subagent", "parent_task_id": "bound", "root_task_id": "bound",
+             "task_contract": {"input_sources": "declared"}, "configured_subagent": {"route": {"kind": "api_model"}}}
+    window, mode, task = {"handbook": (1_000_000, "max", {}), "child": (160_000, "low", child),
+                          "unsealed": (160_000, "low", {"workspace_root": str(foreign_tree(tmp_path / "project"))})}[case]
+    messages, _cap = _story_start(tmp_path, monkeypatch, window, mode, **task)
+    if case == "unsealed":
+        for message in messages:
+            message.pop("cache_control", None)
+    content = messages[0]["content"]
+    assert sum(SHARED_HEAD_KEY in block for block in content) == (case != "child")
+    assert any(block["text"].startswith("## DEVELOPMENT.md\n") for block in content) == (case == "handbook")
+    system, payload = _anthropic_system(monkeypatch, provider, messages)
+    assert [block["text"] for block in system] == [block["text"] for block in content]
+    marks = ["cache_control" in block for block in system]
+    assert marks == [True] * (len(content) - 1) + [case == "child"] and SHARED_HEAD_KEY not in json.dumps(payload)
 
 
 def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_path):

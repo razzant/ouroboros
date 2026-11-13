@@ -1251,6 +1251,11 @@ def _story_key(level: FloorLevel) -> Tuple[Any, ...]:
                  if (shown := tuple(i for i in ids if i.startswith("quote:")) if step == "F7" else ids))
 
 
+def story_is_whole(level: FloorLevel) -> bool:
+    """Whether ``level`` names no story step: its story is then the whole story's text, the same for every focus."""
+    return not _story_key(level)
+
+
 def story_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> int:
     """``json_chars(render_story(snapshot, level))``, read from the snapshot's pieces: what pricing a level costs."""
     key = _story_key(level)

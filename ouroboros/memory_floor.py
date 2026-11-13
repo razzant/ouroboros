@@ -547,7 +547,7 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     receipts = shown.memory_facts.get("host_sections_addressed", ())
     if receipts:
         facts["host_sections_addressed"] = receipts
-    system = _system_blocks(plan.core, governance, story, room, mode, section_views(sections, receipts))
+    system = _system_blocks(plan.core, governance, story, room, mode, section_views(sections, receipts), mv.story_is_whole(level))
     tokens = _request_tokens(system, shown.user_content_json or plan.user_content_json,
                             current_messages=plan.messages_for(mode))
     projection = dataclasses.replace(shown, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
