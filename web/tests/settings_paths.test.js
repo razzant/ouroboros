@@ -236,3 +236,102 @@ test('words the shell searched are spent by the first press on their results; wo
     await press('home:costs');
     assert.equal(field().value, 'budget');
 });
+
+// Two panes (from 40rem) or one column, as settings.js measures them: the page box's width, and whether the list is on
+// screen beside a level.
+// screen beside a level. Every box stands in the list's view; the card moves between the list and its pane.
+function layout(t, controls, content, wide) {
+    const proto = Object.getPrototypeOf(Stub.prototype);
+    const before = { box: proto.getBoundingClientRect, prepend: proto.prepend };
+    proto.getBoundingClientRect = function box() { return { top: 0, bottom: 10, width: 0 }; };
+    proto.prepend = function prepend(node) { this.insertBefore(node, this.children[0] || null); };
+    t.after(() => Object.assign(proto, { getBoundingClientRect: before.box, prepend: before.prepend }));
+    controls.page.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: wide.on ? 1000 : 300 });
+    content.querySelector('[data-settings-home]').getClientRects = () => (wide.on ? [{ width: 1, height: 1 }] : []);
+}
+
+test('the list\'s chosen row returns to its page from a deeper level, and keeps it as it stands when it is on top', async (t) => {
+    const { content, state, showPage } = world(t);
+    const drawn = { first: 0, deeper: 0 };
+    let firstCtx = null;
+    registerSettingsPage('test-first', { title: 'First', mount(body, { ctx }) { drawn.first += 1; firstCtx = ctx; } });
+    registerSettingsPage('test-deeper', { title: 'Deeper', mount() { drawn.deeper += 1; } });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    layout(t, controls, content, { on: true });
+    const pages = () => content.querySelectorAll('.settings-page').map((el) => el.dataset.settingsPage).filter(Boolean);
+    const level = (path) => content.querySelectorAll('.settings-page').find((el) => el.dataset.settingsPage === path);
+    const pressRow = async () => {
+        const home = content.querySelector('[data-settings-home]');
+        const row = new Stub('button');
+        row.setAttribute('data-settings-open', 'test-first');
+        home.querySelector('[data-settings-list]').appendChild(row);
+        await home.fire('click', { target: row });
+        await settle();
+    };
+    await controls.open('test-first');
+    await settle();
+    const firstEl = level('test-first');
+
+    // Its page on top: the press keeps it as it stands, never drawn anew.
+    await pressRow();
+    assert.deepEqual([pages(), state.settingsPath, drawn.first], [['test-first'], 'test-first', 1]);
+
+    // A deeper level over it: the same press returns to the first-level page, which is not drawn anew.
+    firstCtx.openSettings('test-deeper');
+    await settle();
+    assert.deepEqual([pages(), state.settingsPath], [['test-first', 'test-deeper'], 'test-deeper']);
+    await pressRow();
+    assert.deepEqual([pages(), state.settingsPath, drawn.first], [['test-first'], 'test-first', 1]);
+    assert.equal(level('test-first'), firstEl);
+    assert.equal(firstEl.hidden, false);
+});
+
+test('Settings pressed again in the sidebar: two panes keep a first-level page and return from a deeper one; one column shows the list', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    const drawn = { first: 0, deeper: 0 };
+    let letGo = 0;
+    let firstCtx = null;
+    registerSettingsPage('test-first', { title: 'First', mount(body, { ctx }) {
+        drawn.first += 1;
+        firstCtx = ctx;
+        return { unmount() { letGo += 1; } };
+    } });
+    registerSettingsPage('test-deeper', { title: 'Deeper', mount() { drawn.deeper += 1; } });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const wide = { on: true };
+    layout(t, controls, content, wide);
+    const pages = () => content.querySelectorAll('.settings-page').map((el) => el.dataset.settingsPage).filter(Boolean);
+    const level = (path) => content.querySelectorAll('.settings-page').find((el) => el.dataset.settingsPage === path);
+    let announced = 0;
+    env.window.addEventListener('ouro:settings-page-shown', () => { announced += 1; });
+    await controls.open('test-first');
+    await settle();
+    const firstEl = level('test-first');
+    announced = 0;
+
+    // Beside the list, a first-level page: nothing closes, nothing is drawn or announced again.
+    assert.equal(controls.pressedAgain(), true);
+    await settle();
+    assert.deepEqual([pages(), state.settingsPath, drawn.first, letGo, announced], [['test-first'], 'test-first', 1, 0, 0]);
+    assert.equal(level('test-first'), firstEl);
+
+    // A deeper level: back to its section's first-level page, as it was left.
+    firstCtx.openSettings('test-deeper');
+    await settle();
+    controls.pressedAgain();
+    await settle();
+    assert.deepEqual([pages(), state.settingsPath, drawn.first, letGo], [['test-first'], 'test-first', 1, 0]);
+    assert.equal(firstEl.hidden, false);
+
+    // One column: the list, whatever level was open.
+    wide.on = false;
+    firstCtx.openSettings('test-deeper');
+    await settle();
+    controls.pressedAgain();
+    await settle();
+    assert.deepEqual([pages(), state.settingsPath], [[], '']);
+
+    // Settings not shown: the press is the sidebar's ordinary showing, not this one.
+    state.activePage = 'chat';
+    assert.equal(controls.pressedAgain(), false);
+});

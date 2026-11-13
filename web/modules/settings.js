@@ -10,7 +10,7 @@
  * header's Back names where it leads: the level under it, the home ("Settings"), or the place outside Settings that
  * opened it (`back: { label, go }`).
  *
- * The page box's width decides the layout (settings.css `@container settingspage`). Narrow: one level alone, each one
+ * The page box's width decides the layout (settings.css `@container sectionplace`). Narrow: one level alone, each one
  * `page: true` layer of the shell's stack (layers.js), so Escape, the browser's or Android's Back and Telegram's Back
  * close exactly one level, as Back does; a field that holds focus is left first, so its row commits. Wide: the home
  * beside the level; every level below the first is still a layer. A level under another keeps its place, the home
@@ -81,12 +81,15 @@ export function initSettings(ctx = {}) {
     const beside = () => levels.length > 0 && visible(homeEl);
     const pageCtx = { openSettings: (path, options) => go(path, options), openDashboardTab, showPage, layers, ws, state, readSettings };
     // Landing (owner 13.11, "1. C"): from 40rem the list and an open page always stand together, never an empty pane;
-    // a second press of the chosen row keeps its page.
+    // a second press of the chosen row keeps its page when that page is on top, and returns to it from a deeper level.
     let ownChosen = false;   // the owner pressed the list's Ouroboros row: his page stays until another row is pressed
     let lastFirst = '';      // the first-level page last opened in this load
     const pressed = (path, options = {}) => {
         ownChosen = !path;
-        if (path && !options.row && beside() && levels[0]?.path === path) return true;
+        if (path && !options.row && beside() && levels[0]?.path === path) {
+            if (levels.length > 1) closeLevels(1);
+            return true;
+        }
         return go(path, { ...options, fresh: true });
     };
     const home = mountSettingsHome(homeEl, { open: pressed,
@@ -395,6 +398,16 @@ export function initSettings(ctx = {}) {
         return true;
     }
 
+    // Settings pressed in the sidebar while it is shown (app.js). Two panes: the list beside a first-level page (or
+    // Ouroboros's card) stays as it stands, nothing closes or repaints; a deeper level returns to its section's
+    // first-level page. One column: the list.
+    function pressedAgain() {
+        if (!shown()) return false;
+        if (!panes()) { if (levels.length) closeLevels(0); }
+        else if (levels.length > 1) closeLevels(1);
+        return true;
+    }
+
     const onScroll = (event) => {
         const box = event.target;
         if (box === homeEl || (overviewEl && box === overviewEl) || levels.some((level) => level.el === box)) places.set(box, box.scrollTop);
@@ -441,5 +454,5 @@ export function initSettings(ctx = {}) {
 
     // Loopback-only debug hook, like app.js's __ouroWs: Settings has no URL, so browser tests open a path through it.
     window.__ouroSettings = { open: openFromOutside };
-    return { page, open: openFromOutside };
+    return { page, open: openFromOutside, pressedAgain };
 }

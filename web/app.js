@@ -518,9 +518,10 @@ onLayoutChange((layout) => {
 
 document.querySelectorAll('[data-nav-page]').forEach(btn => {
     btn.addEventListener('click', () => {
-        // Settings pressed while it is shown returns to its home (landing A: the Ouroboros row chosen again).
+        // Settings pressed while it is shown (settings.js `pressedAgain`): beside the list a first-level page stays as
+        // it stands and a deeper level returns to its section's first-level page; in one column the list comes back.
         if (btn.dataset.navPage === 'settings' && state.activePage === 'settings' && settingsControls) {
-            void settingsControls.open('');
+            settingsControls.pressedAgain();
             return;
         }
         showPage(btn.dataset.navPage);
