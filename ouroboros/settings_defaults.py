@@ -135,12 +135,10 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # retry budget. Permanent classes fail fast regardless.
     "OUROBOROS_TRANSIENT_RETRY_MAX": 6,
     # #4 self-DoS guard: max concurrent provider calls per (model, use_local) route; excess
-    # worker threads wait (deadline-bounded) instead of storming one model's rate limit. <=0
-    # disables. Default-on (see ouroboros/model_concurrency.py).
+    # sends wait in line (no clock of their own: a slot, the caller's deadline, Stop or Pause ends
+    # the wait) instead of storming one model's rate limit. <=0 disables. Default-on
+    # (see ouroboros/model_concurrency.py).
     "OUROBOROS_MODEL_MAX_CONCURRENCY": 3,
-    # Hard ceiling (seconds) a provider call waits for a concurrency slot when the task has
-    # NO deadline; past it the call is refused before dispatch ($0), never sent without a slot. SSOT here.
-    "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": 180,
     # The owner's interface language for this install: a BCP-47 tag ("ru", "pt-BR", "art-x-<slug>"
     # for an invented language); "" = not chosen, the English source renders. Written by
     # POST /api/ui/i18n/language, read live by the SPA and the Telegram skill, by the mind at its
@@ -411,6 +409,7 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC",  # owner 3A; 30 Oct: await waits its ask, silence its window
     # pool-capacity WP5: delegate_wait is a sleep on runs (the body observes them); no window holds a slot.
     "OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC",
+    "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC",  # owner 13 Nov: a send waits in the install's own queue with no clock of its own
 )
 
 

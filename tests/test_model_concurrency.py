@@ -24,7 +24,6 @@ def isolated_queue(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "3")
-    monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "30")
     mc.reset_for_tests()
     yield tmp_path
     mc.reset_for_tests()
@@ -46,7 +45,6 @@ def _worker(root, cap, name, entered, release, cancel=None, counts=None):
     config.SETTINGS_PATH = root / "settings.json"
     os.environ["OUROBOROS_DATA_DIR"] = str(root)
     os.environ["OUROBOROS_MODEL_MAX_CONCURRENCY"] = str(cap)
-    os.environ["OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC"] = "60"
     try:
         with mc.model_call_slot("model", route=ROUTE, cancel_event=cancel):
             if counts is not None:
@@ -169,25 +167,53 @@ def test_waiter_cancellation_releases_its_ticket(isolated_queue, processes):
         assert len(_records(isolated_queue, "slot")) == 1
 
 
-@pytest.mark.parametrize("deadline", ["expired", "wait_ceiling"])
-def test_timeout_never_runs_body_and_retry_can_enter(monkeypatch, isolated_queue, deadline):
+@pytest.mark.parametrize("deadline", ["expired", "soon"])
+def test_a_passed_deadline_never_runs_body_and_retry_can_enter(monkeypatch, isolated_queue, deadline):
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
     with mc.model_call_slot("model", route=ROUTE):
-        monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "1")
-        bound = time.time() - 1 if deadline == "expired" else None
+        bound = time.time() - 1 if deadline == "expired" else time.time() + 0.3
         with pytest.raises(mc.ModelSlotTimeout) as refused:
             with mc.model_call_slot("model", deadline_ts=bound, route=ROUTE):
-                pytest.fail("timeout bypassed capacity")
+                pytest.fail("a passed deadline bypassed capacity")
         # The refusal names the install's own slot wait (never a provider), the model, the measured wait
-        # and the bound that ended it: an already-passed deadline is not reported as a slot that never freed.
-        text, ended_by = str(refused.value), ("the caller's deadline" if deadline == "expired"
-                                              else "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC")
+        # and the only bound a wait has: its caller's deadline.
+        text = str(refused.value)
         assert text.startswith("Local model slot wait expired before dispatch: model model; no slot was acquired within "), text
-        assert text.endswith(f" s ({ended_by}); the request was not sent") and "Provider" not in text, text
+        assert text.endswith(" s (the caller's deadline); the request was not sent") and "Provider" not in text, text
         assert not _records(isolated_queue, "ticket")
         assert len(_records(isolated_queue, "slot")) == 1
     with mc.model_call_slot("model", route=ROUTE):
         assert len(_records(isolated_queue, "slot")) == 1
+
+
+def test_a_waiter_without_a_deadline_keeps_its_place_until_a_slot_frees(monkeypatch, isolated_queue):
+    """The waiter has no clock of its own (owner, 13 Nov 2026: a work waits in its own queue and keeps its place; it
+    is not sent elsewhere for waiting). A send behind a full queue says so once through its work's bound note, keeps
+    one ticket however long the holder takes, enters when the slot frees and then notes how long it stood in line. A
+    send that finds a free slot notes nothing."""
+    monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
+    notes, entered = [], threading.Event()
+
+    def waiting_send():
+        with mc.slot_wait_notes(lambda waited, admitted: notes.append((waited, admitted))), \
+                mc.model_call_slot("model", route=ROUTE):
+            entered.set()
+
+    thread = threading.Thread(target=waiting_send)
+    with mc.model_call_slot("model", route=ROUTE):
+        thread.start()
+        _until(lambda: notes)
+        time.sleep(0.3)  # many polls later: still one ticket, one note, no refusal
+        assert not entered.is_set() and thread.is_alive()
+        assert len(_records(isolated_queue, "ticket")) == 1 and len(notes) == 1
+        assert notes[0][0] >= 0 and notes[0][1] is False
+    thread.join(10)
+    assert entered.is_set() and not thread.is_alive() and not _records(isolated_queue, "ticket")
+    assert len(notes) == 2 and notes[1][1] is True and notes[1][0] >= 0.3  # the whole time in line, once
+    quiet = []
+    with mc.slot_wait_notes(lambda *note: quiet.append(note)), mc.model_call_slot("model", route=ROUTE):
+        assert len(_records(isolated_queue, "slot")) == 1
+    assert quiet == []
 
 
 def test_slot_released_on_exception(isolated_queue, monkeypatch):
@@ -213,10 +239,9 @@ def test_disabled_is_passthrough(monkeypatch, isolated_queue):
 
 def test_one_model_shares_its_route_and_every_other_identity_separates(monkeypatch, isolated_queue):
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
-    monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "1")
     with mc.model_call_slot("main", route=ROUTE):
         with pytest.raises(mc.ModelSlotTimeout):
-            with mc.model_call_slot("main", route={**ROUTE, "base_url": ROUTE["base_url"] + "/"}):
+            with mc.model_call_slot("main", route={**ROUTE, "base_url": ROUTE["base_url"] + "/"}, deadline_ts=time.time() + 0.3):
                 pytest.fail("the same model on the same route escaped by an endpoint spelling")
         for model, key, value in [("checker", "provider", "test"), ("main", "api_key", "other-fake"),
                                   ("main", "base_url", "https://other.invalid/v1"), ("main", "provider", "other")]:
@@ -231,7 +256,6 @@ def test_one_model_shares_its_route_and_every_other_identity_separates(monkeypat
 def test_managed_engine_routes_are_not_queued_by_the_host(monkeypatch, isolated_queue):
     """Claudexor's one daemon arbitrates its accounts: the host cap never shrinks that parallel work."""
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
-    monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "1")
     managed = {"provider": "claudexor", "source": "managed", "credential_profile_id": ""}
     with mc.model_call_slot("main", route=managed):
         with mc.model_call_slot("main", route=managed):
@@ -239,7 +263,7 @@ def test_managed_engine_routes_are_not_queued_by_the_host(monkeypatch, isolated_
     # A direct route at the same cap still queues (the guard is not off).
     with mc.model_call_slot("main", route=ROUTE):
         with pytest.raises(mc.ModelSlotTimeout):
-            with mc.model_call_slot("main", route=ROUTE):
+            with mc.model_call_slot("main", route=ROUTE, deadline_ts=time.time() + 0.3):
                 pytest.fail("a direct route escaped its cap")
 
 
@@ -437,7 +461,7 @@ def test_a_saved_cap_reaches_work_started_under_the_old_one_and_the_save_says_so
     """The Settings field's contract: the 0 / 3 / 7 an owner saves is what the NEXT physical call of a task
     that started under 3 admits under (the cap is read from the settings document at each call), the save
     reports that as an immediate effect, a saved 0 means no queue at all, and a positive cap still waits
-    and then refuses. A cap of 0 OR LESS (a hand-saved -1 included) has always meant no queue and is read
+    in line. A cap of 0 OR LESS (a hand-saved -1 included) has always meant no queue and is read
     exactly as saved. The factory value stays 3."""
     from ouroboros import config
     from ouroboros.gateway.settings import _effect_buckets
@@ -446,7 +470,7 @@ def test_a_saved_cap_reaches_work_started_under_the_old_one_and_the_save_says_so
 
     key = "OUROBOROS_MODEL_MAX_CONCURRENCY"
     assert config.SETTINGS_DEFAULTS[key] == 3
-    snapshot = task_settings_snapshot({key: 3}, {key: "3", "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": "1"})
+    snapshot = task_settings_snapshot({key: 3}, {key: "3"})
     settings = isolated_queue / "settings.json"
     with task_settings_scope(snapshot):
         assert mc._cap() == 3, "no saved document: the task's own admitted value"
@@ -461,6 +485,6 @@ def test_a_saved_cap_reaches_work_started_under_the_old_one_and_the_save_says_so
         atomic_write_json(settings, {key: 2})
         with mc.model_call_slot("model", route=ROUTE), mc.model_call_slot("model", route=ROUTE):
             assert len(_records(isolated_queue, "slot")) == 2
-            with pytest.raises(mc.ModelSlotTimeout):
-                with mc.model_call_slot("model", route=ROUTE):
+            with pytest.raises(mc.ModelSlotTimeout):  # its caller's deadline ends the wait; the queue has no clock
+                with mc.model_call_slot("model", route=ROUTE, deadline_ts=time.time() + 0.3):
                     pytest.fail("a request over the cap was sent anyway")
