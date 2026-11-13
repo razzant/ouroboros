@@ -251,18 +251,18 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
 
     function detailsHtml(row) {
         if (!showContext) return '';
-        return `<details class="model-role-details ui-disclosure"><summary><span>${only ? 'More: processing, window, longest answer' : 'Context &amp; processing'} · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></span></summary>
+        return `<details class="model-role-details ui-disclosure"><summary><span>${only ? 'More: processing, context window, max output' : 'Context &amp; processing'} · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></span></summary>
             <label class="ui-field">Processing ${processingSelectHtml(`data-model-role-processing aria-label="${escapeHtml(row.slot.label)} processing"`, row.processing_preference)}</label>
             <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div>
             <div class="ui-field-help" data-processing-capability></div>
             <div class="model-role-context">
-                <label class="ui-field">Window <input id="${escapeHtml(inputIdFor(row))}-context" class="ui-control" data-model-role-context type="number" min="0" step="1"
+                <label class="ui-field">Context window <input id="${escapeHtml(inputIdFor(row))}-context" class="ui-control" data-model-role-context type="number" min="0" step="1"
                     placeholder="Auto" value="${escapeHtml(row.context || '')}" aria-label="${escapeHtml(row.slot.label)} context window">
                     <span class="ui-field-help" data-model-context-note>${escapeHtml(modelContextNote(row.windowPreview))}</span></label>
                 <button type="button" class="btn btn-default" data-window-clear hidden>Clear confirmation</button>
             </div>
             <div class="model-role-context">
-                <label class="ui-field">Maximum response <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} maximum response">
+                <label class="ui-field">Max output tokens <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} max output tokens">
                     <span class="ui-field-help" data-response-note>Auto. Applies to this exact model and server; blank restores metadata.</span></label>
                 <button type="button" class="btn btn-default" data-response-apply>Apply maximum</button>
             </div></details>`;
@@ -443,11 +443,11 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         const note = node.querySelector('[data-response-note]');
         const value = Number(field.value || 0);
         if (apply && (field.validity.badInput || !Number.isSafeInteger(value) || value < 0)) {
-            note.textContent = 'Maximum response must be a positive whole number, or Auto.';
+            note.textContent = 'Max output tokens must be a positive whole number, or Auto.';
             field.setAttribute('aria-invalid', 'true'); return;
         }
         const model = responseModel(row);
-        if (!model || model.endsWith('::')) { note.textContent = 'Choose a model to check its maximum response.'; return; }
+        if (!model || model.endsWith('::')) { note.textContent = 'Choose a model to check its max output tokens.'; return; }
         const identity = JSON.stringify([model, row.local, row.account, row.context]);
         const draft = field.value;
         const sequence = row.responseSequence = (row.responseSequence || 0) + 1;
@@ -459,7 +459,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const data = await apiClient.responseLimitPreview({ model, local: row.local, account: row.account,
                 role: row.slot.slot, window: Number(row.context || 0) });
             if (!current()) return;
-            if (!data.response_limit || !data.route) throw new Error('Maximum response is not checked');
+            if (!data.response_limit || !data.route) throw new Error('Max output tokens are not checked');
             row.windowPreview = data;
             node.querySelector('[data-model-context-note]').textContent = modelContextNote(data);
             node.querySelector('[data-window-clear]').hidden = !data.window_ack;
@@ -467,7 +467,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (apply) {
                 const result = await apiClient.ownerCapabilityAck({ ...data.route, route_fp: evidence.route_fp, max_output_tokens: value });
                 if (!current()) return;
-                if (!result.ok) throw new Error(result.error || 'Maximum response could not be saved');
+                if (!result.ok) throw new Error(result.error || 'Max output tokens could not be saved');
                 evidence = result.ack;
                 saved = true;
             }
@@ -477,7 +477,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const source = evidence.source === 'owner_ack' ? 'your maximum' : 'model metadata';
             const endpoint = data.route.base_url ? new URL(data.route.base_url) : null;
             const server = endpoint ? ` Server: ${endpoint.host}${endpoint.pathname.replace(/\/$/, '')}.` : '';
-            note.textContent = `${evidence.max_output_tokens && !evidence.stale ? `${evidence.max_output_tokens.toLocaleString('en-US')} tokens · ${source}` : 'Auto: maximum response unknown'}.${server} Context window is separate.${data.route.provider === 'claudexor' ? ' Planning allowance only; the native engine controls its response.' : ''}`;
+            note.textContent = `${evidence.max_output_tokens && !evidence.stale ? `${evidence.max_output_tokens.toLocaleString('en-US')} tokens · ${source}` : 'Auto: max output tokens unknown'}.${server} Context window is separate.${data.route.provider === 'claudexor' ? ' Planning allowance only; the native engine controls its response.' : ''}`;
         } catch (error) { if (current()) note.textContent = error.message; }
         finally {
             if (row.responseApplying === sequence) row.responseApplying = 0;

@@ -190,7 +190,7 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
     const route = snapshot.modelRoute;
     if (route) {  // the words of the Consciousness tab's row and the Models page: "Main model", "Local model"
         const name = route.local ? 'Local model' : parseModelSource(route.value).model || route.value;
-        lines.push({ tone: 'muted', text: `Thinks with ${name}${route.layer === 'main' ? ' (Main model)' : ''}.` });
+        lines.push({ tone: 'muted', text: `Model: ${name}${route.layer === 'main' ? ' (Main model)' : ''}.` });
     }
     return { spend, detail, lines };
 }

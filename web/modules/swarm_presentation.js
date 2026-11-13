@@ -67,12 +67,12 @@ function helperWords(detail, efficiency) {
     const requested = Math.max(Number.isInteger(noted) && noted > 0 ? noted : 0, new Set([...children, ...started]).size);
     const failed = Array.isArray(receipt?.refused_starts) ? receipt.refused_starts.filter((row) => row && typeof row === 'object').length : 0;
     const words = started.size
-        ? (requested > started.size ? [`${counted(requested, 'helper')} requested`, `${started.size} started`] : [`${counted(started.size, 'helper')} started`])
-        : requested ? [`${counted(requested, 'helper')} requested`, ...(knowsTree(receipt) && !open.size ? ['none started'] : [])] : [];
-    words.push(...(failed ? [`${counted(failed, 'helper start')} failed`] : []),
-        ...(open.size ? [`${counted(open.size, 'helper start')} unconfirmed`] : []));
+        ? (requested > started.size ? [`${counted(requested, 'subagent')} requested`, `${started.size} started`] : [`${counted(started.size, 'subagent')} started`])
+        : requested ? [`${counted(requested, 'subagent')} requested`, ...(knowsTree(receipt) && !open.size ? ['none started'] : [])] : [];
+    words.push(...(failed ? [`${counted(failed, 'subagent start')} failed`] : []),
+        ...(open.size ? [`${counted(open.size, 'subagent start')} unconfirmed`] : []));
     if (words.length) return words;
-    return triedNoHelper(receipt, efficiency, rootId) ? [] : ['helpers unknown'];
+    return triedNoHelper(receipt, efficiency, rootId) ? [] : ['subagents unknown'];
 }
 
 function ownBubble(feed, row) {

@@ -840,11 +840,11 @@ test('the model its wake-ups think with: its own slot, or Main\'s said as Main, 
     const base = { status: 'sleeping', spent_24h_usd: 1, daily_usd: 20, allowance_status: 'available' };
     const lines = (route) => allowancePresentation(state({ ...base, model_route: route }), { now }).lines;
     assert.deepEqual(lines({ value: 'anthropic/claude-opus-5-5', layer: 'consciousness', local: false }),
-        [{ tone: 'muted', text: 'Thinks with anthropic/claude-opus-5-5.' }]);
+        [{ tone: 'muted', text: 'Model: anthropic/claude-opus-5-5.' }]);
     assert.deepEqual(lines({ value: 'claudexor::codex=gpt-6-astra', layer: 'main', local: false }),
-        [{ tone: 'muted', text: 'Thinks with gpt-6-astra (Main model).' }]);
+        [{ tone: 'muted', text: 'Model: gpt-6-astra (Main model).' }]);
     assert.deepEqual(lines({ value: 'qwen/qwen3-32b', layer: 'main', local: true }),
-        [{ tone: 'muted', text: 'Thinks with Local model (Main model).' }]);
+        [{ tone: 'muted', text: 'Model: Local model (Main model).' }]);
     assert.deepEqual(state({ model_route: { value: 'm', layer: 'consciousness', local: 'yes' } }).modelRoute,
         { value: 'm', layer: 'consciousness', local: false }, 'only a true local flag is local');
     for (const unknown of [null, undefined, {}, { value: '', layer: 'main' }, { value: 'm', layer: 'place' }]) {

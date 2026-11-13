@@ -916,7 +916,7 @@
       "record": {"status": "failed", "reason_code": "subagent_executor_unavailable", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "subagent_executor_unavailable"}}},
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "This helper could not start because its route was unavailable; it spent nothing."
+      "acceptance_clause": "This subagent could not start because its route was unavailable; it spent nothing."
     },
     {
       "name": "a reaped task names its absolute ceiling in owner words",
@@ -1303,13 +1303,13 @@
       "name": "a helper set to run as a coding session that finished without one says so in words",
       "record": {"status": "completed", "reason_code": "configured_actor_incomplete", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "configured_actor_incomplete"}, "objective": {"status": "degraded", "source": "configured_actor_terminal", "actor_status": "incomplete"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "This helper was set to run as a coding session, and no such run succeeded; its answer came without one."
+      "acceptance_clause": "This subagent was set to run as a coding session, and no such run succeeded; its answer came without one."
     },
     {
       "name": "a helper whose coding-session run is unknown says so in words",
       "record": {"status": "completed", "reason_code": "configured_actor_unknown", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "configured_actor_unknown"}, "objective": {"status": "degraded", "source": "configured_actor_terminal", "actor_status": "unknown"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "This helper was set to run as a coding session; whether that run succeeded is unknown."
+      "acceptance_clause": "This subagent was set to run as a coding session; whether that run succeeded is unknown."
     },
     {
       "name": "a details-only leftover listed before a loud one: the clause names the loud one and counts only it",

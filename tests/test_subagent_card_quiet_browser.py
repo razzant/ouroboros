@@ -252,15 +252,15 @@ def test_the_rosters_switch_names_what_it_stops(role_ui):
     level = settings_page(page, "agents")
     row = level.locator('[data-setting-row="OUROBOROS_SUBAGENTS"]')
     toggle = row.locator(".ui-switch")
-    assert row.locator(".ui-row-title").inner_text().strip() == "Hand work to helpers"
-    assert row.locator("[data-setting-meta]").inner_text() == "Ouroboros decides when. Off stops it in every room."
+    assert row.locator(".ui-row-title").inner_text().strip() == "Subagents"
+    assert row.locator("[data-setting-meta]").inner_text() == "Ouroboros decides when to delegate. Off stops it in every room."
     stays = level.locator("[data-review-pool-stays]")
     assert stays.is_hidden()
     before = _box(toggle)
     toggle.click()
     page.wait_for_function("() => document.querySelector('#page-settings [data-review-pool-stays]')?.hidden === false")
     # Said when it matters, in the list below the switch, which stays where the owner pressed it.
-    assert stays.inner_text() == "Helpers are off; agents marked Reviewer still review."
+    assert stays.inner_text() == "Subagents are off; agents marked Reviewer still review."
     assert _box(toggle) == before and not row.locator("[data-setting-control]").is_checked()
     assert row.locator("[data-setting-result]").inner_text().strip().startswith("Saved")
     roles.capture(page, "quiet-delegation-off")

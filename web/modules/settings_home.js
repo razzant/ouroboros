@@ -82,11 +82,11 @@ export function needRows(facts = {}) {
         rows.push({ kind: 'unread', id: 'accounts', owner: false, action: 'Check', run: 'accounts', text: fmt('Accounts not checked'),
             note: accounts.kind === 'wake' ? fmt('Check starts the agent daemon.') : '' });
     }
-    if (tools === null) rows.push({ kind: 'unread', id: 'tools', owner: false, action: 'Check', run: 'tools', text: fmt('Tool servers not checked') });
+    if (tools === null) rows.push({ kind: 'unread', id: 'tools', owner: false, action: 'Check', run: 'tools', text: fmt('MCP servers not checked') });
     for (const server of (tools?.servers || []).filter(toolNeedsSignIn)) {
         rows.push({ kind: 'tool-sign-in', id: String(server.id ?? serverName(server)), owner: true, action: 'Open',
             open: `tools/${encodeURIComponent(String(server.id ?? serverName(server)))}`,
-            text: fmt('Tool server {name} needs sign-in', { name: serverName(server) }) });
+            text: fmt('MCP server {name} needs sign-in', { name: serverName(server) }) });
     }
     if (settings === null) rows.push({ kind: 'unread', id: 'settings', owner: false, action: 'Check', run: 'settings', text: fmt('Saved settings not checked') });
     const restart = settings?._meta?.restart_state;
@@ -142,9 +142,9 @@ function accountsWords(accounts, settings) {
 }
 
 function toolsWords(tools) {
-    if (tools.enabled === false) return fmt('Tool servers off');
+    if (tools.enabled === false) return fmt('MCP servers off');
     const servers = Array.isArray(tools.servers) ? tools.servers : [];
-    if (!servers.length) return fmt('No tool servers');
+    if (!servers.length) return fmt('No MCP servers');
     // A server whose configuration could not be loaded is listed without its runtime facts: it is not on.
     const on = servers.filter((server) => server?.enabled === true && Object.hasOwn(server, 'tool_count')).length;
     return { text: fmt(servers.length === 1 ? '{on} of {n} server on' : '{on} of {n} servers on', { on, n: servers.length }),
