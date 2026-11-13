@@ -20,8 +20,11 @@ def _access():
 def canonical_runtime_reader(ctx: Any, canonical_root: pathlib.Path, rel: str) -> str:
     """Address canonical bytes through existing READ aliases; dispatch owns admission.
 
-    Relative runtime paths keep execution-drive bytes. This recipe predicts no
-    permission, existence or freshness and reads no file to construct its address.
+    Relative runtime paths keep execution-drive bytes (fork-relative reads stay local).
+    This recipe predicts no permission, existence or freshness and reads no file to
+    construct its address. Identity reads name their physical source and byte revision
+    (``core_file_tools._stamp_read_view``), and they and ``update_identity`` answers
+    end with this reader.
     """
     source = (canonical_root / rel).resolve(strict=False)
     if ctx is None:
