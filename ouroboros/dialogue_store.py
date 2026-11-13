@@ -989,14 +989,33 @@ def _bound(before: Optional[int]) -> int:
 
 
 def probe_rows(root: Any, stream: str, keys: Iterable[Tuple[str, Any]], *, before: Optional[int] = None,
-               lower: int = 0, limit: int = 200, newest_first: bool = True) -> List[Row]:
+               lower: int = 0, limit: int = 200, newest_first: bool = True,
+               max_bytes: Optional[int] = None) -> List[Row]:
     """The union of the ``(column, value)`` keys' rows in ``[lower, before)``, newest first, at
     most ``limit`` rows: the candidate rows of a room or a task tree. One statement per column reads
     at most ``limit`` coordinates through its index; only the union's winning rows fetch bodies in
-    that snapshot; JSON decoding follows release. ``("chat_id", None)`` probes NULL chats."""
+    that snapshot (with ``max_bytes``, only those up to the one whose stored lengths reach it,
+    ``within_bytes``); JSON decoding follows release. ``("chat_id", None)`` probes NULL chats."""
     with transaction(root, write=False) as conn:
-        probed = _probe(conn, stream, keys, before=before, lower=lower, limit=limit, newest_first=newest_first)
+        probed = _probe(conn, stream, keys, before=before, lower=lower, limit=limit, newest_first=newest_first,
+                        max_bytes=max_bytes)
     return _probed(*probed)
+
+
+def within_bytes(conn: sqlite3.Connection, stream: str, seqs: List[int], max_bytes: int) -> List[int]:
+    """The first of ``seqs``, in their order, until their stored lengths reach ``max_bytes``, the row crossing it
+    included: a read of the rows' lengths, never of their bodies."""
+    lengths: Dict[int, int] = {}
+    for start in range(0, len(seqs), 900):  # within SQLite's parameter floor
+        batch = seqs[start:start + 900]
+        lengths.update(conn.execute(f"SELECT seq, length FROM dialogue WHERE stream=? AND seq IN "
+                                    f"({','.join('?' * len(batch))})", (stream, *batch)).fetchall())
+    total = 0
+    for index, seq in enumerate(seqs, 1):
+        total += lengths.get(seq, 0)
+        if total >= max_bytes:
+            return seqs[:index]
+    return seqs
 
 
 def _probed(chosen: List[int], pages: List[str]) -> List[Row]:
@@ -1006,7 +1025,7 @@ def _probed(chosen: List[int], pages: List[str]) -> List[Row]:
 
 
 def _probe(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]], *, before: Optional[int],
-           lower: int, limit: int, newest_first: bool) -> Tuple[List[int], List[str]]:
+           lower: int, limit: int, newest_first: bool, max_bytes: Optional[int] = None) -> Tuple[List[int], List[str]]:
     """Capture the winning stored records; the transaction owner decodes after release.
 
     One statement per column selects, through that column's index, the first ``limit`` coordinates
@@ -1015,6 +1034,8 @@ def _probe(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]
     column's first ``limit``, so the first ``limit`` of these is the union's."""
     found = _probe_seqs(conn, stream, keys, before=before, lower=lower, limit=limit, newest_first=newest_first)
     chosen = heapq.nlargest(limit, found) if newest_first else heapq.nsmallest(limit, found)
+    if max_bytes is not None:
+        chosen = within_bytes(conn, stream, chosen, max_bytes)
     # Python 3.10 has no getlimit; 999 is the default variable limit at our SQLite 3.24 floor.
     variables = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(conn, "getlimit") else 999
     pages = []

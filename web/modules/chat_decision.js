@@ -8,7 +8,7 @@ import { paintAttachmentOutcome } from './chat_attachments.js';
 import { nameProjectReference, projectReference } from './project_reference.js';
 import { ANSWERABLE_QUIZ_STATES, QUIZ_LIFECYCLE, questionMark, questionPresentation, waitFacts, WAIT_FIELDS,
     normalizeQuiz, appendRecommendedBadge, renderOwnerAnswer, questionDeliveryPending, unknownDeliveryRemovable,
-    appendQuestionReplyControls, paintChosenAnswer } from './question_presentation.js';
+    appendQuestionReplyControls, paintChosenAnswer, mountQuizStake, quizOptionWords } from './question_presentation.js';
 import { fmt, tr, tx } from './i18n.js';
 import { syncQuestionMaterials } from './result_files.js';
 import { memberPaused } from './work_status.js';
@@ -805,9 +805,7 @@ export function createChatDecision({
         if (quiz.stake) {
             const stake = document.createElement('div');
             stake.className = 'chat-quiz-stake';
-            const stakeText = `${tr('quiz.at_stake', 'At stake:')} ${quiz.stake}`;
-            if (mountMarkdown) mountMarkdown(stake, stakeText);
-            else stake.textContent = stakeText;
+            mountQuizStake(stake, quiz.stake, mountMarkdown);
             card.append(stake);
         }
 
@@ -822,18 +820,10 @@ export function createChatDecision({
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'chat-quiz-option';
-            const label = document.createElement('span');
-            label.className = 'chat-quiz-option-label';
-            label.textContent = String(option.label || '');
+            const [label, detail] = quizOptionWords(document, option);
             btn.append(label);
             if (option.recommended === true) appendRecommendedBadge(btn);
-            const detailText = String(option.detail || '');
-            if (detailText) {
-                const detail = document.createElement('span');
-                detail.className = 'chat-quiz-option-detail';
-                detail.textContent = detailText;
-                btn.append(detail);
-            }
+            if (detail) btn.append(detail);
             btn.addEventListener('click', () => {
                 if (!ANSWERABLE_QUIZ_STATES.includes(card.dataset.state)) return;
                 // A typed remark rides WITH the click: the owner picked this
