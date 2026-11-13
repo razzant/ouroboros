@@ -199,7 +199,29 @@ def test_a_settled_continuation_stays_while_an_earlier_obligation_mark_awaits_a_
     for kept in ("idstask", "snapshottask"):
         assert continuation_path(tmp_path, kept).exists(), kept
         assert f"task={kept}" in dynamic_text
+    assert "obligation_ids=obl-0001 (recorded before obligations retired)" in dynamic_text  # tied to the earlier rows
     for released in ("findingstask", "landedtask", "emptytask"):
         assert not continuation_path(tmp_path, released).exists(), released
         assert (archived_continuation_dir(tmp_path) / f"{released}.json").exists(), released  # durable
         assert released in dynamic_text and f"task={released}" not in dynamic_text  # the archive line names it
+
+
+def test_a_continuation_written_again_for_an_attempt_recorded_before_obligations_retired_keeps_its_mark():
+    """The same task writing its continuation again after the update copies the mark its legacy attempt still carries,
+    so the open-work rule keeps holding it until a commit lands; an attempt recorded since carries none."""
+    from types import SimpleNamespace
+
+    from ouroboros.task_continuation import build_review_continuation
+
+    def attempt(**fields):
+        return SimpleNamespace(phase="blocking_review", repo_key="r", tool_name="commit_reviewed", attempt=1,
+                               commit_message="m", block_reason="critical_findings", block_details="",
+                               critical_findings=[{"item": "x", "reason": "y", "severity": "critical"}],
+                               advisory_findings=[], degraded_reasons=[], readiness_warnings=[],
+                               review_record_id="rv-1", **fields)
+
+    task = {"id": "t-1", "type": "task"}
+    legacy = build_review_continuation(task, attempt(obligation_ids=["obl-0001", "obl-0002"]), source="blocked_review")
+    current = build_review_continuation(task, attempt(), source="blocked_review")
+    assert legacy.obligation_ids == ["obl-0001", "obl-0002"] and legacy.review_record_id == "rv-1"
+    assert current.obligation_ids == [] and current.review_record_id == "rv-1"

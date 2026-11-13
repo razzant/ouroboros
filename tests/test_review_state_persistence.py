@@ -153,6 +153,25 @@ def test_the_retired_obligation_rows_survive_every_save_as_stored_and_a_fresh_st
     assert not set(RETIRED) & set(_payload(fresh)) and store.load_state(fresh).retired_review_rows == {}
 
 
+def test_a_counter_past_its_default_is_kept_when_both_stored_lists_are_empty(tmp_path):
+    """A former-Blocking file whose obligations all cleared still numbered them: the counter is saved back with the
+    empty lists, so a rollback does not reuse an old obligation id; defaults alone are dropped."""
+    numbered = {"open_obligations": [], "next_obligation_seq": 37, "commit_readiness_debts": [],
+                "next_commit_readiness_debt_seq": 1}
+    _path(tmp_path).parent.mkdir(parents=True)
+    _path(tmp_path).write_text(json.dumps({"state_version": 3, "attempts": [], **numbered}), encoding="utf-8")
+    store.update_state(tmp_path, lambda state: None)
+    assert {key: _payload(tmp_path).get(key) for key in numbered} == numbered
+    assert store.load_state(tmp_path).retired_review_rows == numbered
+
+    defaults = tmp_path / "defaults"
+    (defaults / "state").mkdir(parents=True)
+    _path(defaults).write_text(json.dumps({"state_version": 3, "attempts": [], **numbered,
+                                           "next_obligation_seq": 1}), encoding="utf-8")
+    store.update_state(defaults, lambda state: None)
+    assert not set(numbered) & set(_payload(defaults)) and store.load_state(defaults).retired_review_rows == {}
+
+
 def test_unknown_object_is_not_stringified_and_cannot_replace_durable_evidence(tmp_path):
     state = store.AdvisoryReviewState(attempts=[_attempt(triad_raw_results=[{"raw_text": "retained"}])])
     store.save_state(tmp_path, state)

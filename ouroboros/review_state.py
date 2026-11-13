@@ -29,6 +29,8 @@ _LOCK_RELPATH = "locks/advisory_review.lock"
 # unchanged right after the attempts.
 RETIRED_REVIEW_KEYS = ("open_obligations", "next_obligation_seq", "commit_readiness_debts",
                        "next_commit_readiness_debt_seq")
+_RETIRED_DEFAULTS = {"open_obligations": [], "next_obligation_seq": 1, "commit_readiness_debts": [],
+                     "next_commit_readiness_debt_seq": 1}
 
 
 def _malformed_roster_row(surface: str) -> Dict[str, Any]:
@@ -190,9 +192,11 @@ def _load_state_unlocked(
         last_stale_repo_key=str(data.get("last_stale_repo_key", "")),
         last_stale_task_id=str(data.get("last_stale_task_id", "")),
         earlier_stale_markers=_earlier_stale_markers_from(data.get("earlier_stale_markers")),
-        # Empty lists and default counters carry nothing; an earlier body reads their absence as empty.
+        # Empty lists and default counters carry nothing; an earlier body reads their absence as empty. A counter
+        # past its default is kept with the lists, so a rollback does not number a new obligation like an old one.
         retired_review_rows=({key: data[key] for key in RETIRED_REVIEW_KEYS if key in data}
-                             if data.get("open_obligations") or data.get("commit_readiness_debts") else {}),
+                             if any(data.get(key) not in (None, default) for key, default in _RETIRED_DEFAULTS.items())
+                             else {}),
     )
 
     state.attempts.sort(key=_attempt_order_key)

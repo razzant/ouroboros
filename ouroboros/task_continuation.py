@@ -30,7 +30,8 @@ class ReviewContinuation:
     block_details: str = ""
     critical_findings: List[Dict[str, Any]] = field(default_factory=list)
     advisory_findings: List[Dict[str, Any]] = field(default_factory=list)
-    # Written by bodies before the obligation layer retired; read only as recorded open work (``open_work_matcher``).
+    # Marks recorded before the obligation layer retired (or copied from an attempt that carries them); read only
+    # as recorded open work (``open_work_matcher``).
     obligation_ids: List[str] = field(default_factory=list)
     open_obligations: List[Dict[str, Any]] = field(default_factory=list)
     readiness_warnings: List[str] = field(default_factory=list)
@@ -253,6 +254,8 @@ def build_review_continuation(
         task_type=str(task.get("type") or ""),
         parent_task_id=str(task.get("parent_task_id") or ""),
         review_record_id=str(getattr(attempt, "review_record_id", "") or ""),
+        # Only an attempt recorded before obligations retired carries ids; a re-written continuation keeps its mark.
+        obligation_ids=[str(x) for x in (getattr(attempt, "obligation_ids", None) or [])],
     )
 
 

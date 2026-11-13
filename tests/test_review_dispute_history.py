@@ -471,3 +471,19 @@ def test_commit_reviewed_keeps_since_review_in_its_round_and_rejoins_with_the_fr
     settled = review_ledger.load_record(drive, reference["review_record_id"])
     assert settled["state"] == "settled" and settled["brief"]["since_review"] == named[0]
     assert settled["brief"]["dispute_input"]["comparison"] == dispatched
+
+
+def test_an_unreadable_review_state_is_a_named_gap_beside_the_supplied_history(tmp_path):
+    """The prior-rounds section names an unreadable source as a gap in its index and still carries the history it
+    was given; a readable state names no gap."""
+    from ouroboros.tools.review_helpers import review_history_brief
+
+    repo = tmp_path / "repo"
+    (tmp_path / "state").mkdir()
+    readable = review_history_brief(_rounds(), drive_root=tmp_path, repo_root=repo, task_id="task-1")
+    (tmp_path / "state" / "advisory_review.json").write_text("{broken", encoding="utf-8")
+    unreadable = review_history_brief(_rounds(), drive_root=tmp_path, repo_root=repo, task_id="task-1")
+    assert "REVIEW_HISTORY_SOURCE_UNAVAILABLE" in unreadable and "attempt bindings could not be read" in unreadable
+    assert "REVIEW_HISTORY_SOURCE_UNAVAILABLE" not in readable
+    for said in ("The bounded file is the accepted scope.", "I disagree because atomic writes need a proof."):
+        assert said in unreadable and said in readable

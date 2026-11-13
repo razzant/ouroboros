@@ -74,7 +74,6 @@ def test_second_task_reviews_and_commits_only_explicitly_selected_correction(tmp
     monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda _ctx: False)
     monkeypatch.setattr(git, "_post_commit_result", lambda *_a, **_kw: None)
     monkeypatch.setattr(git, "_auto_push", lambda *_a, **_kw: publications.append("mock") or "")
-    # These independent language services are not the critic transport under test.
 
     def context(task_id):
         return ToolContext(repo_dir=root, drive_root=data, task_id=task_id,

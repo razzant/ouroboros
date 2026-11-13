@@ -160,7 +160,8 @@ class CommitAttemptRecord:
     phase: str = "review"
     blocked: bool = False
     advisory_findings: List[Dict[str, Any]] = field(default_factory=list)
-    # Ids the retired obligation layer gave this row's findings; history only, never written again.
+    # Ids the retired obligation layer gave this row's findings; history only: nothing mints new ones, and a
+    # later write of the same attempt drops them (the incoming row wins).
     obligation_ids: List[str] = field(default_factory=list)
     readiness_warnings: List[str] = field(default_factory=list)
     late_result_pending: bool = False

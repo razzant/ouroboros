@@ -226,3 +226,24 @@ class TestAdvisoryReviewStatusInContext:
             assert "review_record_id=rv-0001" in view  # the continuation follows its own rule
         for view in (fallback().full_text, fallback().operative_view):
             assert "obl-0003" not in view
+
+
+def test_the_operative_continuity_view_names_the_latest_attempts_readiness_warnings(tmp_path):
+    """The compact Review Continuity view keeps what it used to show as readiness debt: the latest attempt's
+    readiness warnings for this checkout, by count and text; an attempt without warnings adds no line."""
+    from ouroboros.context_sections import continuity_status_lines
+    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, make_repo_key
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    def lines(warnings):
+        state = AdvisoryReviewState(attempts=[CommitAttemptRecord(
+            ts="2026-11-13T08:00:00+00:00", commit_message="m", status="blocked", repo_key=make_repo_key(repo),
+            task_id="t", attempt=1, readiness_warnings=warnings)])
+        return "\n".join(continuity_status_lines(state, repo))
+
+    warned = lines(["The staged diff changed after review; review it again before landing."])
+    assert "- readiness_warnings=1 (latest attempt, blocked)" in warned
+    assert "The staged diff changed after review; review it again before landing." in warned
+    assert "readiness_warnings" not in lines([])

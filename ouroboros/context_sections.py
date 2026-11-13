@@ -409,6 +409,11 @@ def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
                   f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}"]
         if look_unreadable:
             lines.append(f"  preflight_unreadable={look_unreadable} (marker unverified)")
+    latest = state.latest_attempt_for(repo_key=repo_key)
+    warnings = [str(w) for w in (getattr(latest, "readiness_warnings", None) or []) if str(w).strip()]
+    if warnings:
+        lines.append(f"- readiness_warnings={len(warnings)} (latest attempt, {getattr(latest, 'status', '') or '?'})")
+        lines.extend(f"  {warning}" for warning in warnings)
     return lines + earlier_obligation_lines(state, repo_key)
 
 

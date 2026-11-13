@@ -1518,6 +1518,8 @@ def build_review_context(env: Any) -> str:
                         )
                 if item.review_record_id:
                     lines.append(f"  review_record_id={item.review_record_id}")
+                if item.obligation_ids:
+                    lines.append(f"  obligation_ids={', '.join(item.obligation_ids)} (recorded before obligations retired)")
         if corrupt:
             lines.append("\n### Corrupt review continuations")
             _CORRUPT_CAP = 3
