@@ -18,8 +18,8 @@ export const SUBAGENT_MODES = Object.freeze(['off', 'auto', 'swarm']);
 const WORDS = Object.freeze({ off: 'Off', auto: 'Auto', swarm: 'Swarm' });
 export const SUBAGENT_MEANINGS = Object.freeze({
     off: 'Ouroboros works alone in this chat: no subagents, no Claude Code or Codex sessions. Reviews still run.',
-    auto: 'Ouroboros decides when helpers, critics and debate are worth it.',
-    swarm: "Don't economise: helpers, critics and debate on every step, as wide as your models allow. Costs more.",
+    auto: 'Ouroboros decides when subagents, critics and debate are worth it.',
+    swarm: "Don't economise: subagents, critics and debate on every step, as wide as your models allow. Costs more.",
 });
 // Why only Off can be chosen (`subagents_availability` in the room's state); `available` or an unknown answer locks nothing.
 export const SUBAGENT_LOCKS = Object.freeze({

@@ -639,9 +639,12 @@
 /* A control inside a row is the small capsule: the row height, a tighter inset, the meta text size. */
 .btn-sm { --control-h: var(--control-h-sm); --control-pad-x: var(--space-3); --button-font-size: var(--type-meta); }
 
-/* Tabs (DESIGN.md design bible): a tab is a neutral capsule with the secondary ink; the chosen tab (a place) takes the
-   crimson tone and stays standing; a press deepens the colour, nothing changes height. The strip that scrolls them is
-   the page's (style.css .app-tab-strip). */
+/* Tabs: the pages of a place, where they are few and fit whole in the header. Navigation has no body (bible, principle
+   4): a tab is its word in the meta ink; the chosen tab is the soft crimson with its ink, as the chosen row of a
+   place's list is (owner 13.11: a selection is always red, roles differ by the shade of red, never a grey or black
+   plate). The solid crimson stays the place's (the sidebar's chosen row) and the primary action's. One weight for
+   every tab, so choosing one moves no neighbour. PROTOTYPE: html[data-proto-page-tone="bright"] draws the chosen tab
+   in the solid crimson, to compare. The strip that holds them is the page's (style.css .app-tab-strip). */
 .app-tab {
     --control-pad-x: var(--pill-padding-x);
     flex: 0 0 auto;
@@ -649,20 +652,21 @@
     box-sizing: border-box;
     height: var(--control-h);
     border: 1px solid transparent;
-    background: var(--surface-capsule);
-    color: var(--text-secondary);
-    box-shadow: var(--elev-rest);
+    background: transparent;
+    color: var(--text-meta);
+    box-shadow: none;
     border-radius: var(--control-radius);
-    padding: var(--control-pad-y) var(--control-pad-x);
+    padding: var(--control-pad-y) var(--space-3);
     font: inherit;
     font-size: var(--button-font-size);
     font-weight: 600;
     cursor: pointer;
     transition: var(--motion-tone);
 }
-.app-tab:hover { background: var(--surface-capsule-hover); box-shadow: var(--elev-rest); color: var(--text-primary); }
+.app-tab:hover { background: var(--tone-quiet-hover); color: var(--text-primary); }
 .app-tab.active,
-.app-tab.is-active { background: var(--tone-crimson); color: var(--tone-crimson-ink); box-shadow: var(--elev-rest); --press: var(--press-solid); }
+.app-tab.is-active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); box-shadow: none; }
+html[data-proto-page-tone="bright"] .app-tab:is(.active, .is-active) { background: var(--tone-crimson); color: var(--tone-crimson-ink); --press: var(--press-solid); }
 .app-tab:not(:disabled):active { filter: var(--press); }
 .app-tab:disabled { box-shadow: none; }
 .app-tab:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
@@ -744,8 +748,12 @@
 .ui-segment:focus-visible { z-index: 1; outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 
 /* The strip (.ui-segment-group; page_header.js renderSegmentedField draws it, owner 11.11): the options of one choice
-   in one track, each as wide as its word and only the chosen one filled. Nothing slides, is measured or is written
-   inline: a track wider than its row wraps onto another line inside its own body and an option alone wider than its
+   in one track, each as wide as its word and only the chosen one filled. The fill travels (owner 12.11): one shared
+   binder (segment_fill.js, bound to every strip at boot) lays a .ui-segment-fill behind the options, measures the
+   chosen one and writes its box on the track as --segment-fill-x/-y/-w/-h; along one line it slides there on
+   --motion-fade with --ease-sheet, to another line of a wrapped track (or on first paint, a resize, reduced motion) it
+   is put in place. A track nobody bound fills its chosen option itself, as before. The layout is never measured or
+   written: a track wider than its row wraps onto another line inside its own body and an option alone wider than its
    line breaks its words, so a strip never scrolls sideways. The track is the control's height and its options that
    height less the inset, their corners concentric with its own. Under a finger the track is the touch minimum: an
    option's reach ends at the track's edge, and the lines of a wrapped track lie further apart than two reaches. */
@@ -769,6 +777,28 @@
 @media (pointer: coarse) {
     .ui-segment-group { --control-h: calc(var(--touch-target-min) - 2 * var(--segment-inset)); }
 }
+/* The fill under a bound strip's chosen option: the option's own soft crimson and corners, behind the words, never
+   pressed or read. While it is bound the chosen option is clear and keeps its ink, so the fill shows through it. */
+.ui-segment-group[data-segment-fill] { position: relative; isolation: isolate; }
+.ui-segment-fill {
+    position: absolute;
+    z-index: -1;
+    left: var(--segment-fill-x, 0);
+    top: var(--segment-fill-y, 0);
+    width: var(--segment-fill-w, 0);
+    height: var(--segment-fill-h, 0);
+    box-sizing: border-box;
+    border-radius: var(--control-radius);
+    background: var(--tone-crimson-soft);
+    pointer-events: none;
+}
+.ui-segment-group[data-segment-fill="travel"] > .ui-segment-fill {
+    transition: left var(--motion-fade) var(--ease-sheet), width var(--motion-fade) var(--ease-sheet);
+}
+.ui-segment-group[data-segment-fill] > .ui-segment:is(.active, [aria-checked="true"]) { background: transparent; color: var(--tone-crimson-soft-ink); }
+@media (prefers-reduced-motion: reduce) {
+    .ui-segment-group[data-segment-fill] > .ui-segment-fill { transition: none; }
+}
 
 /* An object on the room (DESIGN.md design bible): one flat fill on the rest shadow with the object radius, no edge
    (the transparent 1px border only keeps the box's size). Inside an object a group or row is a tray
@@ -779,6 +809,12 @@
     border-radius: var(--radius-object);
     box-shadow: var(--elev-rest);
     padding: var(--card-pad);
+}
+/* A card that holds one row and nothing else is that row: no tray inside the object, the card's own insets. */
+.ui-card > .ui-row:only-child {
+    padding: 0;
+    border: 0;
+    background: transparent;
 }
 /* On a phone a card keeps 18 px at its sides, so a three-way choice fits its row instead of wrapping two and one
    (owner, board of 06.11: 24 px on a desk, 18 px on a phone). */
@@ -963,6 +999,179 @@ details.ui-disclosure > :not(summary) { margin-top: var(--space-2); }
 /* The list's one length control: "Show all (N)" is a quiet small capsule at the list's start edge; the label and its
    count come from the caller. */
 .ui-list-more { align-self: flex-start; justify-self: start; margin-top: var(--space-2); }
+
+/* === The section list: a place's own pages (Settings, Dashboard) ====================================================
+   A place that has pages draws one list of them, and the place's box decides the layout. The place element is
+   `.section-place` (the container `sectionplace`); in it, `.section-shell[data-section-view]` holds the list's column
+   `.section-rail` and the page's column `.section-pane`, and the header's lead `.section-lead` follows the same
+   columns. Narrower than 40rem one column shows the list ("home") or the page ("page"); from 40rem an open page stands
+   beside the list, which becomes the rail: `--section-rail-w` wide, a property both the shell's grid and the header's
+   lead read, so each column has its name in the band over it. The list is `.section-list` > `.section-group` (an
+   optional `.section-group-title`) > `.section-rows` (a card of rows on a phone) > `.section-row`: a glyph, the page's
+   name over its current answer (`-glyph`, `-words`, `-title`, `-answer`), and an end (`-end`: a status mark, a chevron
+   in one column, a ↗ where the row leaves for another place, `[data-section-out]`). The chosen row is
+   `[aria-current="page"]` (links) or `[aria-selected="true"]` (a tablist). */
+.section-place {
+    container: sectionplace / inline-size;
+    /* 240 px at the owner's 733 px box (a 493 px pane), 272 at 842 (a 570 px pane: a row's own box passes 28rem there,
+       so it holds its control beside its words again; at 566 it was one pixel short), 348 from 918. An unregistered
+       property: `100cqi` is resolved where it is used (the shell's grid, the header's lead), and both stand in this
+       box, so both read the same width. */
+    --section-rail-w: clamp(240px, calc(100cqi - 570px), 348px);
+    /* The rail's inner end: one step tighter while the rail is compact (narrower than 300 px, a box under 866 px), so
+       a row's words keep at least 170 px at 240. What stands in the lead over the rail reads it to stay as wide as the
+       rail's column. */
+    --section-rail-start: var(--page-header-padding-x);
+    --section-rail-end: var(--space-3);
+}
+@container sectionplace (max-width: 865.98px) {
+    .section-shell, .app-page-header { --section-rail-start: var(--space-3); --section-rail-end: var(--space-1); }
+}
+.section-shell {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    overflow: hidden;
+}
+.section-rail {
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: var(--space-3) var(--page-header-padding-x) 56px;
+}
+html[data-layout="stack"] .section-rail { padding-inline: 12px; }
+.section-pane { display: grid; min-width: 0; min-height: 0; }
+.section-shell[data-section-view="page"] > .section-rail,
+.section-shell[data-section-view="home"] > .section-pane { display: none; }
+
+/* The header's lead: the shell's own columns. Over the list stands what the place puts there (Settings: its search
+   field), over a page `(‹) <page>` in the header's one title style. One column: the list's part over the list, Back
+   and the name over a page. Two panes: the list's part as wide as the rail's column, the name at the page's inset. */
+.section-lead {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 720px);
+    align-items: center;
+    min-width: 0;
+}
+.section-lead-col { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.section-lead-page > .shell-back[hidden] { display: none; }
+.section-place[data-section-view="home"] .section-lead-page,
+.section-place[data-section-view="page"] .section-lead-rail { display: none; }
+
+.section-list { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.section-group { display: flex; flex-direction: column; gap: var(--space-2); }
+.section-group-title {
+    margin: 0;
+    padding: 0 var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    font-weight: 600;
+    line-height: var(--line-meta);
+}
+.section-rows { --card-pad: var(--space-2); display: flex; flex-direction: column; gap: 2px; }
+.section-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: var(--space-3);
+    width: 100%;
+    min-height: 56px;
+    padding: var(--space-2) var(--space-3);
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+@media (hover: hover) { .section-row:hover { background: var(--tone-quiet-hover); } }
+.section-row:active { filter: var(--press); }
+.section-row:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* The chosen page of a place is the soft crimson with its ink (owner 13.11: a selection is always red; roles differ by
+   the shade, never a grey or black plate). The solid crimson marks the place itself (the sidebar's chosen row) and the
+   primary action; the soft crimson marks everything else that is chosen: the open page of a place, a tab, an option,
+   a segment, a filter. PROTOTYPE: html[data-proto-page-tone="bright"] draws the open page in the solid crimson, to
+   compare. A list that stands alone (one column: a phone, a narrow window) marks no row: there is no page beside it
+   to be the chosen one. */
+.section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); box-shadow: none; }
+.section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) :is(.section-row-title, .section-row-answer, .section-row-end, .section-row-glyph) { color: var(--tone-crimson-soft-ink); }
+html[data-proto-page-tone="bright"] .section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) { background: var(--tone-crimson); color: var(--tone-crimson-ink); }
+html[data-proto-page-tone="bright"] .section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) :is(.section-row-title, .section-row-answer, .section-row-end, .section-row-glyph) { color: var(--tone-crimson-ink); }
+/* The glyph stands bare at every width (a tile under it is another system's list item): 20 px in a one-column list,
+   where the rows are a finger tall, 18 px in the rail. */
+.section-row-glyph {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    color: var(--text-secondary);
+}
+.section-row-glyph > svg:not(.settings-gauge) { width: 20px; height: 20px; }
+.section-row-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.section-row-title { color: var(--text-primary); font-size: var(--type-body); font-weight: 600; line-height: var(--line-title); }
+.section-row-answer { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
+.section-row-answer:empty { display: none; }
+.section-row-end { display: flex; align-items: center; gap: var(--space-2); color: var(--text-disabled); }
+
+/* Two panes: the list is the rail beside the page, and navigation rows have no body (bible, principle 4): no card
+   around a group, the group's name in the meta style, each row the app sidebar's row: a solid 18 px glyph with no
+   tile, the name over its current answer (one line that ellipsizes), a ↗ only where the row leaves for another place.
+   The rail draws no scrollbar (between the panes a bar reads as a rule line); its scroll-edge fade says that more
+   waits. */
+@container sectionplace (min-width: 40rem) {
+    .section-shell[data-section-view="page"] { grid-template-columns: var(--section-rail-w) minmax(0, 1fr); }
+    .section-shell[data-section-view="page"] > .section-rail {
+        display: block;
+        padding-inline: var(--section-rail-start) var(--section-rail-end);
+        scrollbar-width: none;
+    }
+    .section-shell[data-section-view="page"] > .section-rail::-webkit-scrollbar { display: none; }
+    .section-place[data-section-view="page"] .section-lead {
+        grid-template-columns: calc(var(--section-rail-w) - var(--section-rail-start) - var(--section-rail-end)) minmax(0, 1fr);
+        column-gap: calc(var(--section-rail-end) + var(--space-4));
+        margin-inline-start: calc(var(--section-rail-start) - var(--page-header-padding-x));
+    }
+    .section-place[data-section-view="page"] .section-lead-rail { display: flex; }
+    .section-shell[data-section-view="page"] > .section-rail .section-list { gap: var(--space-4); }
+    .section-shell[data-section-view="page"] > .section-rail .section-group { gap: var(--space-1); }
+    .section-shell[data-section-view="page"] > .section-rail .section-group-title { padding-inline: var(--space-2); }
+    .section-shell[data-section-view="page"] > .section-rail .section-rows {
+        --card-pad: 0px;
+        gap: 2px;
+        padding: 0;
+        border-radius: 0;
+        background: none;
+        box-shadow: none;
+    }
+    .section-shell[data-section-view="page"] .section-row {
+        column-gap: 0;
+        min-height: 44px;
+        padding: 5px var(--space-2);
+        border-radius: var(--radius-inner);
+    }
+    .section-shell[data-section-view="page"] .section-row-glyph {
+        width: 18px;
+        height: 18px;
+        margin-inline-end: 10px;
+        border-radius: 0;
+        background: transparent;
+        color: var(--text-secondary);
+    }
+    .section-shell[data-section-view="page"] .section-row-glyph > svg { width: 18px; height: 18px; }
+    .section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"], :hover) .section-row-glyph { color: inherit; }
+    .section-shell[data-section-view="page"] .section-row-title { overflow-wrap: normal; word-break: normal; }
+    .section-shell[data-section-view="page"] .section-row-answer { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .section-shell[data-section-view="page"] .section-row-end { gap: var(--space-1); }
+    .section-shell[data-section-view="page"] .section-row[data-section-out] .section-row-end,
+    .section-shell[data-section-view="page"] .section-row-end:has(> .status-mark:not([hidden])) { margin-inline-start: var(--space-1); }
+    .section-shell[data-section-view="page"] .section-row:not([data-section-out]) .section-row-end > svg { display: none; }
+}
 
 /* The primary slot (DESIGN principle 4: the crimson is the one primary action of a place). The containers that have
    one — the page header's actions, a section's actions, an action row, a dialog's foot — paint their [data-primary]
@@ -1195,7 +1404,7 @@ textarea.ui-control { resize: vertical; }
     border-radius: 50%;
     background: var(--switch-thumb);
     box-shadow: var(--elev-rest);
-    transition: transform 140ms ease;
+    transition: transform var(--motion-fade) var(--ease-sheet);  /* the system's curve; its fade time, the nearest token to a short travel */
 }
 .ui-switch input:checked + .ui-switch-track { background: var(--green); }
 .ui-switch input:checked + .ui-switch-track .ui-switch-thumb { transform: translateX(18px); }
@@ -1214,7 +1423,7 @@ textarea.ui-control { resize: vertical; }
     .ui-control { font-size: var(--type-section); }
 }
 @media (prefers-reduced-motion: reduce) {
-    .btn, .ui-control { transition: none; }
+    .btn, .ui-control, .ui-switch-thumb { transition: none; }
 }
 
 /* Measured popup placement and its floating material are shared; menu/listbox interaction stays separate. The paint
@@ -1520,3 +1729,7 @@ textarea.ui-control { resize: vertical; }
 @media (prefers-reduced-motion: reduce) {
     .status-mark[data-shape="moving"] > i { animation: none; }
 }
+/* Fluent glyphs (page_icons.js fillIcon) are filled 20x20 geometry: a selector that strokes the hand-drawn Lucide
+   svgs must never outline them, so they stay filled with the text colour and unstroked wherever they sit. */
+svg[data-glyph="fluent"],
+svg[data-glyph="fluent"] path { fill: currentColor; stroke: none; }

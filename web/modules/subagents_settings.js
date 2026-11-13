@@ -170,7 +170,7 @@ function rowErrors(row, index, ids, rows = null, inherited = '') {
     ids.add(id);
     const route = row?.route || {};
     if (row?.access !== undefined && !['readonly', 'workspace_write', 'full'].includes(row.access)) {
-        errors.push('access must be Read only, Working files or Full system access.');
+        errors.push('access must be Read only, Workspace write or Full system access.');
     } else if (row?.access !== undefined && route.kind !== ROUTE_KIND_AGENT_SESSION) {
         errors.push('can select access only with an Agent session.');
     }
@@ -346,7 +346,7 @@ function reviewPoolSummary(state, settings = false) {
     return {
         count: `Reviewers: ${pool}`,
         // Said when it matters: Delegation off leaves review on for the marked rows.
-        stays: !marked || state.setting?.enabled ? '' : settings ? 'Helpers are off; agents marked Reviewer still review.'
+        stays: !marked || state.setting?.enabled ? '' : settings ? 'Subagents are off; agents marked Reviewer still review.'
             : 'Delegation is off; rows marked Reviewer still review.',
         // Settings asks in a dialog when the server refuses (writeEntry); setup ticks the box before its Finish.
         empty, confirm: Boolean(items.length && !pool) && !settings, note, history: migration.history,
@@ -450,7 +450,7 @@ function restoreFocus(host, saved) {
 }
 
 // Session access choices; one list, so a further native profile lands in one place.
-const ACCESS_CHOICES = [{ value: 'full', label: 'Full system access' }, { value: 'workspace_write', label: 'Working files' }, { value: 'readonly', label: 'Read only' }];
+const ACCESS_CHOICES = [{ value: 'full', label: 'Full system access' }, { value: 'workspace_write', label: 'Workspace write' }, { value: 'readonly', label: 'Read only' }];
 const ACCESS_HELP = 'Full system access (the default) can reach outside the working folder. The selected agent must support it. Explicit task restrictions still apply.';
 
 // History, provenance and the row's secondary facts, behind one explicit disclosure
@@ -619,7 +619,7 @@ function agentPageHtml(row, state, index, live) {
             </div>
             <p class="ui-status agent-status" data-subagent-status data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.text)}</p>
             ${reviewLinesHtml(row, state, index)}`)}
-            ${card('What it is good at', form.purpose(''), 'Ouroboros reads this when it chooses a helper.')}
+            ${card('What it is good at', form.purpose(''), 'Ouroboros reads this when it chooses a subagent.')}
             ${card('Runs on', `${form.route}${form.meta}${form.more}
             <div data-subagents-validation class="available-subagents-diagnostics" data-tone="error" hidden></div>
             <div class="ui-action-row"><button type="button" class="btn btn-save" data-editor-save>Save</button>
@@ -1424,11 +1424,11 @@ function mountAgents(container, { path, ctx }) {
     const entry = path.split('/')[1] || '';
     const hostId = `agents-root-${++roots}`;
     const root = `<div id="${hostId}" class="settings-stack agents-root"></div>`;
-    container.innerHTML = entry ? root : `<p class="settings-page-lead">Helpers Ouroboros may hand work to, and reviewers whose word counts.</p>
+    container.innerHTML = entry ? root : `<p class="settings-page-lead">Subagents Ouroboros can delegate to, and reviewers that check its work.</p>
         <section class="ui-card settings-card">${settingsRow({ ...rowById(KEY), control: { kind: 'switch' } })}</section>
         ${root}
         <section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold>
-            <summary>More: limits for helpers and their folders</summary>
+            <summary>More: subagent limits and folders</summary>
             <div class="settings-rows" data-agents-fold></div>
         </details></section>`;
     const unbindRechecks = bindRecheckMarks(container);

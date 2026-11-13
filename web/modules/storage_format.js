@@ -19,6 +19,14 @@ export function formatUsd(value) {
         ? `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : formatUsdKnown(value);
 }
 
+/** Money beside a limit. PROTOTYPE (owner 13.11: no cents on the spend cards): whole dollars where the scale (the
+ *  limit, else the spend) is $100 or more; below that the cents are the substance and stay. */
+export function formatUsdScale(value, scale) {
+    const amount = Number(value);
+    if (!Number.isFinite(amount) || !(Number(scale) >= 100)) return formatUsd(value);
+    return `$${Math.round(amount).toLocaleString('en-US')}`;
+}
+
 export const plural = (n, one, many) => (Number(n) === 1 ? fmt(one, { n }) : fmt(many, { n, count: number(n) }));
 
 // Work that runs now (a count, a listing, a cleanup): the shared moving mark in the line's ink, beside the

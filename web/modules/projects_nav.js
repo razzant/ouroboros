@@ -53,6 +53,26 @@ export function setActivityOwnerName(owner, baseName, words) {
     owner.title = name;
 }
 
+/** When a room's newest message came, the way a messenger says it: the clock while it is recent, then the weekday,
+ *  then the date. */
+export function whenOf(at, now = Date.now()) {
+    const t = at ? new Date(at) : null;
+    if (!t || Number.isNaN(t.getTime())) return '';
+    const hours = (now - t.getTime()) / 36e5;
+    if (hours < 20) return t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    if (hours < 24 * 6) return t.toLocaleDateString('en-US', { weekday: 'short' });
+    return t.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
+/** The one line a row says under its name: what waits for the owner, else what its work is doing, else nothing. */
+export function rowLine(summary = IDLE_SUMMARY) {
+    if (summary.owner) return { kind: 'ask', text: summary.note || summary.word || '' };
+    if (!['moving', 'still', 'pause'].includes(summary.mark)) return { kind: 'rest', text: '' };
+    const doing = summary.focus || summary.name || summary.line || '';
+    if (summary.mark === 'pause') return { kind: 'rest', text: [summary.word, doing].filter(Boolean).join(' · ') };
+    return { kind: 'live', text: doing || summary.word || '' };
+}
+
 // The server's order (projects_summary): the newest message, else the activity of a store still dating its history.
 const recency = (row) => String(row.last_message_at || row.last_active_at || row.updated_at || row.created_at || '');
 // The registry's own order (project_closure.select_projects): that time, then id, newest first.
@@ -185,7 +205,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     status.setAttribute('aria-live', 'polite');
     status.dataset.i18nSkip = '';
     find.append(glyph, input, clear, status);
-    header.after(find);
+    header.prepend(find);  // PROTOTYPE (owner 13.11): the list starts with its search; "+" ends the same row
 
     // ---- the list's own commands: Project-row geometry in the meta ink, so none reads as one more Project --------
     const command = (className) => {
@@ -308,9 +328,26 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             btn.className = 'nav-row nav-project-row';
             btn.type = 'button';
             btn.dataset.projectId = project.id;
+            // Two lines (owner 12.11, the fifth round): the name and the time of the newest message; under them the
+            // one line that matters (what waits for the owner, else what the work is doing) and the row's mark.
+            const line1 = document.createElement('span');
+            line1.className = 'nav-project-line1';
             const label = document.createElement('span');
             label.className = 'nav-row-label';
-            btn.append(label, createStatusMark(document, 'nav-mark'));
+            label.dir = 'auto';
+            const time = document.createElement('span');
+            time.className = 'nav-project-time';
+            line1.append(label, time);
+            const line2 = document.createElement('span');
+            line2.className = 'nav-project-line2';
+            const says = document.createElement('span');
+            says.className = 'nav-project-says';
+            says.dir = 'auto';
+            const slot = document.createElement('span');
+            slot.className = 'nav-mark-slot';
+            slot.append(createStatusMark(document, 'nav-mark'));
+            line2.append(says, slot);
+            btn.append(line1, line2);
             item.appendChild(btn);
             if (deleting) {
                 const deletingStatus = document.createElement('span');
@@ -354,6 +391,9 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         btn.disabled = deleting;
         const label = btn.querySelector('.nav-row-label');
         if (label.textContent !== (project.name || project.id)) label.textContent = project.name || project.id;
+        const time = btn.querySelector('.nav-project-time');
+        const when = whenOf(project.last_message_at);
+        if (time && time.textContent !== when) time.textContent = when;
         const active = project.id === activeId();
         btn.classList.toggle('active', active);
         if (active) btn.setAttribute('aria-current', 'page');
@@ -487,6 +527,12 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             // A deleting row draws only `Deleting…`; its census fact stays in its name.
             paintStatusMark(button.querySelector('.nav-mark'),
                 deleting ? markView() : markView({ mark: summary.mark, owner: summary.owner, unread: unreadRow }));
+            const said = deleting ? null : rowLine(summary);
+            const says = button.querySelector('.nav-project-says');
+            if (says && says.textContent !== (said?.text || '')) says.textContent = said?.text || '';
+            if (says) says.dataset.kind = said?.kind || '';
+            // With nothing to say under it, a long name takes both lines.
+            button.toggleAttribute('data-solo', !said?.text);
             // The pin is said in the row's full name (its tooltip and accessible name); at rest nothing draws it.
             const name = `${row.name || row.id}${row.pinned === true ? ' · Pinned' : ''}`;
             setActivityOwnerName(button, deleting ? `${name} — Deleting…${row.delete_error ? ` ${row.delete_error}` : ''}` : name,

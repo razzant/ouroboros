@@ -1,4 +1,4 @@
-import { formatUsd, number } from './storage_format.js';
+import { formatUsd, formatUsdScale, number } from './storage_format.js';
 import { apiFetch } from './api_client.js';
 import { escapeHtmlAttr } from './ui_primitives.js';
 import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
@@ -11,7 +11,7 @@ import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountCostPeriod } from './cost_period.js';
 import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
-import { controlIcon } from './page_icons.js';
+import { controlIcon, fluentIcon } from './page_icons.js';
 import { fmt, translateString } from './i18n.js';
 import { parseModelSource } from './route_editor_primitives.js';
 
@@ -54,6 +54,17 @@ function optionalFiniteNumber(value) {
     if (value === null || value === undefined || value === '') return null;
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
+}
+
+/** Money on a limit's meter card. PROTOTYPE (owner 13.11: "Десятичные доли думаю не нужны"): whole dollars where the
+ *  card's scale (its limit, else its spend) is $100 or more; below that the cents are the substance and stay. */
+export const meterUsd = formatUsdScale;
+/** What is left of a limit, rounded as the spend beside it is, so the two add up to the limit; room that rounds to
+ *  nothing is still said to be room. */
+function leftWords(remaining, scale) {
+    if (!(Number(scale) >= 100)) return `${formatUsd(remaining)} left`;
+    const whole = Math.round(remaining);
+    return remaining > 0 && whole === 0 ? 'Less than $1 left' : `$${whole.toLocaleString('en-US')} left`;
 }
 
 /** One breakdown cell in the task card's words: `Cost pending` while a call of it is still open and nothing is
@@ -110,12 +121,17 @@ export function costDashboardPresentation(data) {
     // older count stands in; with neither this says only what it knows.
     const openRows = optionalFiniteNumber(accounting.accounting_open_rows ?? accounting.non_final_rows);
     const openCause = openRows !== null && openRows > 0 ? ` (${number(Math.trunc(openRows))} open)` : '';
+    const scale = limit > 0 ? limit : known;
     return {
         state: 'available',
-        figure: limit > 0 ? `${formatUsd(known)} of ${formatUsd(limit)}` : formatUsd(known),
-        left: reached ? 'Limit reached: new paid work is refused' : limit > 0 ? `${formatUsd(remaining)} left` : 'No limit set',
-        // The producer's words for the unresolved upper bound (cost_projection.uncounted_money_text): a worst case.
-        open: unresolved > 0 ? `up to ${formatUsd(unresolved)} for calls without a known price` : '',
+        // PROTOTYPE (owner 13.11): the card says the spend of its limit in whole dollars, what is left, and in one
+        // quiet line what the number leaves out, in the words of the limits card's own line ("Not counted: …").
+        spent: meterUsd(known, scale),
+        of: limit > 0 ? `of ${meterUsd(limit, scale)}` : '',
+        figure: limit > 0 ? `${meterUsd(known, scale)} of ${meterUsd(limit, scale)}` : meterUsd(known, scale),
+        left: reached ? 'Limit reached: new paid work is refused' : limit > 0 ? leftWords(remaining, scale) : 'No limit set',
+        // The unresolved upper bound (cost_projection.uncounted_money_text): a worst case, not spending.
+        open: unresolved > 0 ? `Not counted: up to ${meterUsd(unresolved, scale)} in calls without a known price` : '',
         reached,
         share: limit > 0 ? Math.min(100, Math.max(0, (known / limit) * 100)) : null,
         facts: [
@@ -153,14 +169,15 @@ const NEW_STARTS = 'new wake-ups, replies in places and its own tasks';
  *  follows from it (`note`, quieter). Off, a $0 limit and an unreadable ledger say so instead. No time is guessed: a
  *  withheld or stale forecast says so. */
 export function allowancePresentation(snapshot, { now = Date.now(), timeZone } = {}) {
-    if (!snapshot) return { spend: 'What it spent in the last 24 hours could not be read.', detail: '', lines: [] };
+    const meter = allowanceMeter(snapshot);
+    if (!snapshot) return { spend: 'What it spent in the last 24 hours could not be read.', detail: '', lines: [], meter };
     const spend = allowanceText(snapshot) || 'What it spent in the last 24 hours is unknown.';
     const detail = [snapshot.allowanceOpenRows > 0 ? 'pending' : '',
         snapshot.unknownUnmetered > 0 ? `${number(snapshot.unknownUnmetered)} without a price` : ''].filter(Boolean).join(' · ');
     const lines = [];
     if (snapshot.enabled === false) {
         lines.push({ text: 'Consciousness is off: it starts nothing that counts here until it is started again.', tone: 'muted' });
-        return { spend, detail, lines };
+        return { spend, detail, lines, meter };
     }
     const exhausted = snapshot.allowanceStatus ? snapshot.allowanceStatus === 'exhausted' : snapshot.status === 'allowance_exhausted';
     if (snapshot.dailyUsd === 0) {
@@ -190,9 +207,33 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
     const route = snapshot.modelRoute;
     if (route) {  // the words of the Consciousness tab's row and the Models page: "Main model", "Local model"
         const name = route.local ? 'Local model' : parseModelSource(route.value).model || route.value;
-        lines.push({ tone: 'muted', text: `Thinks with ${name}${route.layer === 'main' ? ' (Main model)' : ''}.` });
+        lines.push({ tone: 'muted', text: `Model: ${name}${route.layer === 'main' ? ' (Main model)' : ''}.` });
     }
-    return { spend, detail, lines };
+    return { spend, detail, lines, meter };
+}
+
+/** The consciousness limit as a meter. PROTOTYPE (owner 13.11: "карточку с тратами сознания будто бы не хватает
+ *  ежедневное"): its spend of the 24-hour limit in the card's money, the share, what is left, and what the number
+ *  leaves out. Empty where the snapshot does not say; the sentence of allowancePresentation then says why. */
+export function allowanceMeter(snapshot) {
+    const spent = snapshot?.spentUsd;
+    const limit = snapshot?.dailyUsd;
+    if (spent === null || spent === undefined || limit === null || limit === undefined) {
+        return { spent: '', of: '', share: null, left: '', reached: false, note: '' };
+    }
+    const scale = limit > 0 ? limit : spent;
+    const exhausted = snapshot.allowanceStatus ? snapshot.allowanceStatus === 'exhausted' : snapshot.status === 'allowance_exhausted';
+    const reached = limit > 0 && (exhausted || spent >= limit);
+    const out = [snapshot.unknownUnmetered > 0 ? `${number(snapshot.unknownUnmetered)} calls without a known price` : '',
+        snapshot.allowanceOpenRows > 0 ? 'calls in progress' : ''].filter(Boolean).join(' and ');
+    return {
+        spent: meterUsd(spent, scale),
+        of: `of ${meterUsd(limit, scale)}`,
+        share: limit > 0 ? Math.min(100, Math.max(0, (spent / limit) * 100)) : null,
+        left: limit === 0 ? 'May not spend' : reached ? 'Limit reached' : leftWords(Math.max(0, limit - spent), scale),
+        reached,
+        note: out ? `Not counted: ${out}` : '',
+    };
 }
 
 // What the allowance counts, in this card's own note: the shared note of the setup contract speaks of the total budget
@@ -260,28 +301,42 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     page.id = 'page-costs';
     page.className = 'dashboard-body scroll-fade-y';  // the page binds every .scroll-fade-y scroller once (app.js)
     page.innerHTML = `
-        <section class="ui-card" aria-label="Known spend">
-            <div class="dashboard-hero">
-                <p class="dashboard-hero-kicker">Known spend</p>
-                <p class="dashboard-hero-figure" id="cost-known-limit">Loading…</p>
-                <div class="costs-spend-bar" id="cost-spend-bar" hidden><i></i></div>
-                <p class="dashboard-hero-meta ui-status" id="cost-left"></p>
-                <div class="dashboard-hero-actions"><button type="button" class="btn btn-default btn-sm" id="btn-refresh-costs">Refresh</button></div>
+        <div class="costs-meters">
+        <section class="ui-card costs-meter" aria-labelledby="costs-meter-total">
+            <div class="costs-meter-head">
+                <h3 class="costs-meter-title" id="costs-meter-total">Total budget</h3>
+                <button type="button" class="costs-meter-action" id="btn-refresh-costs" aria-label="Refresh" title="Refresh">${fluentIcon('arrow-clockwise', 18, 'regular')}</button>
             </div>
+            <div class="costs-meter-line">
+                <p class="costs-meter-figure" id="cost-known-limit"><b id="cost-spent">Loading…</b><span id="cost-of"></span></p>
+                <p class="costs-meter-left ui-status" id="cost-left"></p>
+            </div>
+            <div class="costs-spend-bar" id="cost-spend-bar" hidden><i></i></div>
+            <p class="costs-meter-note" id="cost-open" hidden></p>
             <details class="ui-disclosure costs-details" id="cost-details" hidden>
                 <summary>Details</summary>
                 <dl class="dashboard-facts" id="cost-facts"></dl>
                 <p class="costs-copy">The unresolved upper bound is calls in flight, or ended without a price, at their reserved ceiling: a worst case, not spending.</p>
             </details>
         </section>
+        <section class="ui-card costs-meter" aria-labelledby="costs-meter-consciousness">
+            <div class="costs-meter-head">
+                <h3 class="costs-meter-title" id="costs-meter-consciousness">Consciousness, last 24 hours</h3>
+                <button type="button" class="costs-meter-action" data-costs-consciousness aria-label="Open Consciousness" title="Open Consciousness">${controlIcon('chevron', 18)}</button>
+            </div>
+            <div class="costs-meter-line">
+                <p class="costs-meter-figure"><b id="costs-allowance-spent">Reading…</b><span id="costs-allowance-of"></span></p>
+                <p class="costs-meter-left ui-status" id="costs-allowance-left"></p>
+            </div>
+            <div class="costs-spend-bar" id="costs-allowance-bar" hidden><i></i></div>
+            <p class="costs-meter-note" id="costs-allowance-spend" hidden></p>
+            <div class="costs-allowance-state" id="costs-allowance-state" aria-live="polite"></div>
+        </section>
+        </div>
         <section class="ui-card costs-budget" aria-labelledby="costs-budget-title">
             <h3 class="dashboard-card-title" id="costs-budget-title">Budget limits</h3>
             <div class="costs-limits dashboard-settings">${limitRows(false)}</div>
             <p class="ui-field-help costs-gaps" id="costs-gaps" hidden></p>
-            <div class="costs-allowance">
-                <p class="ui-field-help costs-allowance-spend" id="costs-allowance-spend">Reading…</p>
-            </div>
-            <div class="costs-allowance-state" id="costs-allowance-state" aria-live="polite"></div>
             <details class="ui-disclosure">
                 <summary>How the total and per-task limits count</summary>
                 <p class="costs-copy" id="costs-budget-help" role="note">${BUDGET_NOTE_FALLBACK}</p>
@@ -361,9 +416,12 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         const facts = page.querySelector('#cost-facts');
         const left = page.querySelector('#cost-left');
         const available = view.state === 'available';
-        page.querySelector('#cost-known-limit').textContent = available ? view.figure
-            : view.state === 'loading' ? 'Loading…' : 'Unavailable';
-        left.textContent = available ? [view.left, view.open].filter(Boolean).join(' · ') : '';
+        const open = page.querySelector('#cost-open');
+        page.querySelector('#cost-spent').textContent = available ? view.spent : view.state === 'loading' ? 'Loading…' : 'Unavailable';
+        page.querySelector('#cost-of').textContent = available ? view.of : '';
+        left.textContent = available ? view.left : '';
+        open.textContent = available ? view.open : '';
+        open.hidden = !(available && view.open);
         if (available && view.reached) left.dataset.tone = 'warn'; else delete left.dataset.tone;
         bar.hidden = !available || view.share === null;
         bar.dataset.reached = available && view.reached ? '1' : '0';
@@ -383,10 +441,20 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             allowanceExpiry?.unref?.();  // a test runner's clock is never kept alive by it
         }
         const view = allowancePresentation(snapshot);
-        const door = '<button type="button" class="consciousness-inline-link ui-hit-area" data-costs-consciousness>Consciousness ›</button>';
-        // Each separator keeps to the word before it (a no-break space), so a wrapped line never starts with one.
-        page.querySelector('#costs-allowance-spend').innerHTML = `${escapeHtmlAttr(view.spend)}`
-            + `${view.detail ? `\u00a0· <span class="cost-cell-note">${escapeHtmlAttr(view.detail)}</span>` : ''}\u00a0· ${door}`;
+        const meter = view.meter;
+        // The meter card of the 24 hours (PROTOTYPE, owner 13.11): the figure, its bar, what is left, what it leaves out.
+        page.querySelector('#costs-allowance-spent').textContent = meter.spent || 'Unknown';
+        page.querySelector('#costs-allowance-of').textContent = meter.of;
+        const bar = page.querySelector('#costs-allowance-bar');
+        bar.hidden = meter.share === null;
+        bar.dataset.reached = meter.reached ? '1' : '0';
+        bar.setAttribute('style', `--spend-share: ${meter.share !== null ? meter.share.toFixed(1) : 0}%`);
+        const left = page.querySelector('#costs-allowance-left');
+        left.textContent = meter.left;
+        if (meter.reached) left.dataset.tone = 'warn'; else delete left.dataset.tone;
+        const note = page.querySelector('#costs-allowance-spend');
+        note.textContent = meter.spent ? meter.note : view.spend;  // unreadable or unknown: the sentence that says so
+        note.hidden = !note.textContent;
         page.querySelector('#costs-allowance-state').innerHTML = view.lines.map((line) => `<p class="ui-status costs-allowance-line" `
             + `data-tone="${line.tone}">${escapeHtmlAttr(line.text)}`
             + `${line.note ? ` <span class="costs-allowance-note">${escapeHtmlAttr(line.note)}</span>` : ''}`
@@ -465,7 +533,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         if (path !== undefined) void openSettings?.(path, { back: { label: 'Costs', go: () => openDashboardTab?.('costs') } });
     });
     // The allowance's doors: a held wake's card in Main, and the Consciousness tab.
-    budgetCard.addEventListener('click', (event) => {
+    page.querySelector('.costs-meters').addEventListener('click', (event) => {
         if (openTaskReference(event)) return;
         if (event.target.closest?.('[data-costs-consciousness]')) void openDashboardTab?.('consciousness');
     });

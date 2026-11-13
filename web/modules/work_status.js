@@ -116,25 +116,25 @@ export function activityWord(state = {}) {
 // server's sentences (gateway/work_status.py REASON_TEXT); the web fixture pins them to the server's own.
 const COUNTED_REASONS = {
     earlier_attempt_finishing: (n) => (n === 1
-        ? tr('work.because.earlier_attempt_finishing', 'Continue starts when the helper of the earlier attempt finishes')
-        : fmt('Continue starts when {count} helpers of the earlier attempt finish', { count: n, n })),
+        ? tr('work.because.earlier_attempt_finishing', 'Continue starts when the subagent of the earlier attempt finishes')
+        : fmt('Continue starts when {count} subagents of the earlier attempt finish', { count: n, n })),
     earlier_runs_finishing: (n) => (n === 1
         ? tr('work.because.earlier_runs_finishing', 'Continue starts when the external run of the earlier attempt finishes')
         : fmt('Continue starts when {count} external runs of the earlier attempt finish', { count: n, n })),
-    helpers_running: (n) => (n === 1 ? tr('work.because.helpers_running', '1 helper still working')
-        : fmt('{count} helpers still working', { count: n, n })),
+    helpers_running: (n) => (n === 1 ? tr('work.because.helpers_running', '1 subagent still working')
+        : fmt('{count} subagents still working', { count: n, n })),
     delegated_running: (n) => (n === 1 ? tr('work.because.delegated_running', '1 external run still working')
         : fmt('{count} external runs still working', { count: n, n })),
     external_runs_unconfirmed: (n) => (n === 1 ? tr('work.because.external_runs_unconfirmed', '1 external run may still be running')
         : fmt('{count} external runs may still be running', { count: n, n })),
     awaited_helpers_mind: (n) => (n === 1
-        ? tr('work.because.awaited_helpers_mind', '1 helper it waits for is paused until Ouroboros resumes it')
-        : fmt('{count} helpers it waits for are paused until Ouroboros resumes them', { count: n, n })),
+        ? tr('work.because.awaited_helpers_mind', '1 subagent it waits for is paused until Ouroboros resumes it')
+        : fmt('{count} subagents it waits for are paused until Ouroboros resumes them', { count: n, n })),
     awaited_helpers_owner: (n) => (n === 1
-        ? tr('work.because.awaited_helpers_owner', '1 helper it waits for is paused until you resume it')
-        : fmt('{count} helpers it waits for are paused until you resume them', { count: n, n })),
-    awaited_helpers_paused: (n) => (n === 1 ? tr('work.because.awaited_helpers_paused', '1 helper it waits for is paused')
-        : fmt('{count} helpers it waits for are paused', { count: n, n })),
+        ? tr('work.because.awaited_helpers_owner', '1 subagent it waits for is paused until you resume it')
+        : fmt('{count} subagents it waits for are paused until you resume them', { count: n, n })),
+    awaited_helpers_paused: (n) => (n === 1 ? tr('work.because.awaited_helpers_paused', '1 subagent it waits for is paused')
+        : fmt('{count} subagents it waits for are paused', { count: n, n })),
 };
 
 // What a sleep waits for, one clause per kind the server named (gateway/work_status.py SLEEP_CLAUSES; the web fixture
@@ -169,8 +169,8 @@ function tailWords(tails) {
     const runs = counted('delegated_running');
     if (!helpers || !runs) return tails.map(reasonText);
     const both = fmt('{helpers} and {runs} still working', {
-        helpers: helpers.count === 1 ? tr('work.because.one_helper', '1 helper')
-            : fmt('{count} helpers', { count: helpers.count, n: helpers.count }),
+        helpers: helpers.count === 1 ? tr('work.because.one_helper', '1 subagent')
+            : fmt('{count} subagents', { count: helpers.count, n: helpers.count }),
         runs: runs.count === 1 ? tr('work.because.one_external_run', '1 external run')
             : fmt('{count} external runs', { count: runs.count, n: runs.count }),
     });

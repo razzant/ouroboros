@@ -9,6 +9,8 @@ function classAttr(parts) {
     return parts.filter(Boolean).join(' ');
 }
 
+// PROTOTYPE: the control is drawn one of three ways, chosen by html[data-proto-places]: Ouroboros's own picture (the
+// default: press him, and his places open, with his card on top), the three lines ("menu"), or a back arrow ("back").
 // The shell's ☰: one of the shell's icon controls (style.css .shell-icon-control), shown in the stack layout. A
 // page's header carries it in its leading slot, where the drawer's × then sits; a room (Main, a Project) carries it
 // as the composer row's first control instead, under the thumb (owner 19.10, 1A), as tall as the capsules beside it
@@ -17,7 +19,7 @@ function classAttr(parts) {
 export function renderMobileNavToggle({ inComposer = false } = {}) {
     const classes = inComposer ? 'shell-icon-control mobile-nav-toggle composer-menu ui-hit-area' : 'shell-icon-control mobile-nav-toggle';
     return `
-        <button class="${classes}" type="button" data-mobile-nav-toggle aria-label="Open navigation" aria-controls="primary-sidebar" aria-expanded="false">${SHELL_ICONS.menu}${statusMarkHtml()}</button>
+        <button class="${classes}" type="button" data-mobile-nav-toggle aria-label="Open navigation" aria-controls="primary-sidebar" aria-expanded="false"><span class="places-face" aria-hidden="true"></span><span class="places-menu" aria-hidden="true">${SHELL_ICONS.menu}</span><span class="places-back" aria-hidden="true">${SHELL_ICONS.back}</span>${statusMarkHtml()}</button>
     `;
 }
 
@@ -45,6 +47,7 @@ export function renderPageHeader({
     toolbarClass = '',
     showMobileNav = true,
     named = true,
+    leadHtml = '',  // the page's own navigation written straight into the lead (Settings): the bar is never empty
 } = {}) {
     const variantClass = variant ? `app-page-header-${escapeHtml(variant)}` : '';
     const words = title ?? pageLabel(page);
@@ -62,7 +65,8 @@ export function renderPageHeader({
         : '';
     const facts = [
         named ? ' data-sidebar-names' : '',
-        named && !toolbar && !trailing && !tabs ? ' data-empty' : '',
+        named && !toolbar && !trailing && !tabs && !leadHtml ? ' data-empty' : '',
+        leadHtml ? ' data-lead data-lead-written' : '',
     ].join('');
     const id = titleId ? ` id="${escapeHtml(titleId)}"` : '';
     return `
@@ -71,13 +75,63 @@ export function renderPageHeader({
             <div class="app-page-title-block">
                 <div class="app-page-title-row">
                     <h2 class="app-page-title"${id}>${escapeHtml(words)}</h2>
-                </div>${named ? '<div class="app-page-lead"></div>' : ''}
+                </div>${named || leadHtml ? `<div class="app-page-back" data-page-back></div><div class="app-page-lead">${leadHtml}</div>` : ''}
             </div>
             ${toolbar}
             ${trailing}
         </div>
         ${tabs}
     `;
+}
+
+/**
+ * Back (docs/DESIGN.md "Page header", the Back control): one recipe for the whole app. A header control like ☰ and ×
+ * (style.css .shell-icon-control: a neutral capsule at the chrome height, the touch minimum in the stack layout)
+ * holding the chevron-left glyph at 20 px, named for where it leads in its tooltip and accessible name. `attrs` are
+ * the caller's hooks (a data attribute its handler finds it by).
+ */
+export function renderBackControl({ to = '', attrs = '' } = {}) {
+    const name = to ? `Back to ${to}` : 'Back';
+    return `<button type="button" class="shell-icon-control shell-back" ${attrs} aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">${SHELL_ICONS.back}</button>`;
+}
+
+/**
+ * The header's Back slot (renderPageHeader writes it before the lead): `control` stands there, so it never scrolls
+ * away with a lead that is a scroller (Dashboard's tabs, Files' location). On a desk the slot stands before the lead;
+ * in the stack layout it starts the row under ☰: the page's tab strip when it has one, else a row of the header's own.
+ * Returns the disposer, which takes the control away and puts the slot back.
+ */
+export function placePageBack(header, control) {
+    const slot = header?.querySelector?.('[data-page-back]');
+    if (!slot || !control) return () => {};
+    const block = slot.parentElement;
+    const lead = block.querySelector(':scope > .app-page-lead');
+    const tabs = header.nextElementSibling?.classList?.contains('app-page-tabs') ? header.nextElementSibling : null;
+    slot.replaceChildren(control);
+    header.setAttribute('data-back', '');
+    const place = (layout) => {
+        const stack = (typeof layout === 'string' ? layout : currentLayout()) !== 'docked';
+        if (stack && tabs) tabs.prepend(slot);
+        else if (slot.parentElement !== block) block.insertBefore(slot, lead);
+        tabs?.toggleAttribute('data-back', stack);
+    };
+    place();
+    const offLayout = onLayoutChange(place);
+    return () => {
+        offLayout();
+        slot.replaceChildren();
+        if (slot.parentElement !== block) block.insertBefore(slot, lead);
+        header.removeAttribute('data-back');
+        tabs?.removeAttribute('data-back');
+    };
+}
+
+/** Point an existing Back control somewhere else: its tooltip and accessible name follow. */
+export function setBackControlTarget(button, to = '') {
+    if (!button) return;
+    const name = to ? `Back to ${to}` : 'Back';
+    button.setAttribute('aria-label', name);
+    button.title = name;
 }
 
 /**

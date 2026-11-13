@@ -61,7 +61,7 @@ const emptyServer = () => ({ id: '', name: '', enabled: false, transport: 'strea
     auth_header: 'Authorization', auth_token: '', allowed_tools: [] });
 
 const isLive = (server) => savedMcpSecrets.has(server);
-const serverName = (server) => String(server?.name || server?.id || server?.slug || 'Tool server');
+const serverName = (server) => String(server?.name || server?.id || server?.slug || 'MCP server');
 /** The id of a server's page: its canonical identity (id, slug or name), as the status keys it. */
 const pageId = (server) => canonicalServerId(isLive(server) ? savedMcpSecrets.get(server).identity : serverIdentity(server));
 // The entry as a read gave it, without the switch (a head writes that at once, beside an open form).
@@ -752,8 +752,8 @@ function headHtml(server) {
 function envelopeWords() {
     const envelope = mcpStatusEnvelope;
     if (!envelope) return { text: '', tone: '' };
-    if (!envelope.sdk_available) return { text: `Tool servers cannot run: ${envelope.sdk_error || 'install `mcp>=1.10` to use them.'}`, tone: 'warn' };
-    if (!envelope.enabled) return { text: 'All tool servers are off. Their settings are kept.', tone: '' };
+    if (!envelope.sdk_available) return { text: `MCP servers cannot run: ${envelope.sdk_error || 'install `mcp>=1.10` to use them.'}`, tone: 'warn' };
+    if (!envelope.enabled) return { text: 'All MCP servers are off. Their settings are kept.', tone: '' };
     const servers = Array.isArray(envelope.servers) ? envelope.servers : [];
     const tools = servers.reduce((sum, s) => sum + Number(s.tool_count || 0), 0);
     const weights = envelope.weights;
@@ -772,7 +772,7 @@ function paintList() {
         if (words.tone) lead.dataset.tone = words.tone; else delete lead.dataset.tone;
         lead.hidden = !words.text;
     }
-    const heads = !loaded ? '' : !mcpServers.length ? '<p class="settings-card-lead">No tool server yet. Add one, or import a file other agent programs use.</p>'
+    const heads = !loaded ? '' : !mcpServers.length ? '<p class="settings-card-lead">No MCP server yet. Add one, or import an mcp.json from Claude Code, Cursor or Codex.</p>'
         : mcpServers.map((server, index) => (isServer(server) && pageId(server) ? headHtml(server)
             : `<div class="ui-row settings-row" data-mcp-invalid="${index}"><p class="ui-row-title">Entry ${index + 1} cannot be read</p>
                 <p class="ui-row-meta"><span>It is kept as it is until you remove it.</span></p>
@@ -845,7 +845,7 @@ function mountList(container, { path, ctx }) {
     container.innerHTML = `<p class="settings-page-lead">Outside services Ouroboros can call.</p>
         <section class="ui-card settings-card"><div class="settings-rows">${rows(false)}</div></section>
         <section class="ui-card settings-card" data-setting-row="${KEY}">
-            <div class="settings-card-head"><h3 class="settings-card-title">Tool servers</h3>
+            <div class="settings-card-head"><h3 class="settings-card-title">MCP servers</h3>
                 <span class="ui-result" data-entry-result role="status" aria-live="polite"></span>
                 <div class="ui-section-actions"><button type="button" class="btn btn-default btn-sm" data-tools-add>Add server</button></div></div>
             <p class="settings-card-lead" data-mcp-global hidden></p>
@@ -934,7 +934,7 @@ const serverOfPage = (id) => mcpServers.find((server) => isServer(server) && pag
 const entryOf = (path) => { try { return decodeURIComponent(String(path).split('/')[1] || ''); } catch { return ''; } };
 
 registerSettingsPage('tools', {
-    title: (path) => { const id = entryOf(path); return !id ? 'Tools' : id === 'new' ? 'New server' : NAMES.get(id) || 'Tool server'; },
+    title: (path) => { const id = entryOf(path); return !id ? 'Tools' : id === 'new' ? 'New server' : NAMES.get(id) || 'MCP server'; },
     mount: (container, page) => (entryOf(page.path) ? mountEditor(container, page, entryOf(page.path)) : mountList(container, page)),
 });
 

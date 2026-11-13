@@ -57,6 +57,7 @@ import { fmt, markBootRead, pendingBootRead, refreshDictionary, setLanguage, sto
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './modules/ui_helpers.js';
 import { bindDocumentSelectionDismissal, ordinaryPress } from './modules/selection_lifecycle.js';
+import { watchSegmentFills } from './modules/segment_fill.js';
 
 const state = {
     messages: [],
@@ -93,7 +94,7 @@ let dashboardControls = null;
 const PROJECTS_COLLAPSED_KEY = 'ouroboros.projects.collapsed';
 const navState = {
     activeProjectId: null,
-    projectsExpanded: (() => { try { return localStorage.getItem(PROJECTS_COLLAPSED_KEY) !== '1'; } catch { return true; } })(),
+    projectsExpanded: true,  // PROTOTYPE (owner 13.11): the list has no collapse; a remembered one is not read
     mobileDrawerOpen: false,
 };
 // The one stack of layers over the room (layers.js): the drawer and the Project panel register here, so Escape,
@@ -112,7 +113,9 @@ const shellMotion = createShellMotion({ content: document.getElementById('conten
 // The places come from the one registry (pages.js): Main into the pinned head, the tools into the foot that
 // follows the Projects, before the version. Nothing below looks a row up before this.
 primarySidebar?.querySelector('.sidebar-head')?.insertAdjacentHTML('beforeend', renderNavRows('head'));
-primarySidebar?.querySelector('.sidebar-foot-meta')?.insertAdjacentHTML('beforebegin', renderNavRows('foot'));
+// The tools stand at the column's bottom edge, three to a line (two in the phone drawer), above the version (owner
+// 12.11, the fifth round).
+primarySidebar?.querySelector('.sidebar-foot-meta')?.insertAdjacentHTML('beforebegin', `<div class="nav-tools">${renderNavRows('foot')}</div>`);
 measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head and foot
 const navProjectsHeader = primarySidebar?.querySelector('.nav-projects-header');
 if (navProjectsHeader) navProjectsHeader.innerHTML = renderProjectsHeader();
@@ -139,6 +142,9 @@ const navProjectsToggle = document.getElementById('nav-projects-toggle');
 const navProjectsCount = document.getElementById('nav-projects-count');
 const navProjectsList = document.getElementById('nav-projects-list');
 const navMainRow = primarySidebar?.querySelector('.nav-row-main');
+// The Projects list is the column's one scroller: rows that wait past an edge fade under it (style.css .scroll-fade-y).
+navProjectsList?.classList.add('scroll-fade-y');
+if (navProjectsList) bindScrollFade(navProjectsList);
 // The Projects list (projects_nav.js): the feed's rows as renderProjectsNav decides them (with their state read's
 // generation and the state's complete set of Project rooms), and, when the owner asks, every older Project by its
 // name or by Show more; a row opens through openProjectPanel. Its own list reads and confirmed changes take their
@@ -256,7 +262,7 @@ function updateUnreadBadge() {
         if (!badge) {
             badge = document.createElement('span');
             badge.className = 'unread-badge';
-            btn.appendChild(badge);
+            (btn.querySelector('.nav-ouro-line1') || btn).appendChild(badge);
         }
         badge.textContent = count > 99 ? '99+' : String(count);
     } else if (badge) {
@@ -514,6 +520,11 @@ onLayoutChange((layout) => {
 
 document.querySelectorAll('[data-nav-page]').forEach(btn => {
     btn.addEventListener('click', () => {
+        // Settings pressed while it is shown returns to its home (landing A: the Ouroboros row chosen again).
+        if (btn.dataset.navPage === 'settings' && state.activePage === 'settings' && settingsControls) {
+            void settingsControls.open('');
+            return;
+        }
         showPage(btn.dataset.navPage);
     });
 });
@@ -1043,6 +1054,15 @@ function paintMainRow() {
     const words = navMainRow?.querySelector('.nav-row-words');
     const text = summary.label ? ` · ${summary.label}` : '';
     if (words && words.textContent !== text) words.textContent = text;
+    // The card's second line: what Main is doing now, the title of its running work; none while it rests.
+    const work = navMainRow?.querySelector('.nav-ouro-work');
+    if (work) {
+        const busy = summary.mark !== 'none' && summary.mark !== 'ring';
+        const said = busy ? (summary.name || summary.focus || summary.line || '') : '';
+        const line = said && summary.mark === 'pause' ? `${summary.word} · ${said}` : said;
+        if (work.textContent !== line) work.textContent = line;
+        work.hidden = !line;
+    }
 }
 
 // The ☰ tells what waits behind it (owner 19.10, 3A): an amber dot while Main or a Project waits for the owner, else a
@@ -1562,6 +1582,8 @@ installDesktopShellLinkInterceptor();
 // Selection dismissal is document-wide; install it with other shell-level listeners,
 // not per-room chat instances, so closing a Project room cannot remove Main's behavior.
 bindDocumentSelectionDismissal(document, { onPress: () => rooms.forgetShownSelections([mainChat]) });
+// Every strip (.ui-segment-group) on every page gets the one travelling fill, wherever its markup came from.
+watchSegmentFills(document.body);
 
 // Populate the project-thread isolation set BEFORE opening the socket so the live
 // fan-out never misclassifies an early project frame as main-chat traffic during
