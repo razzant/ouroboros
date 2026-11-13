@@ -9,10 +9,11 @@ import {
     taskCostProjection,
 } from '../modules/chat_activity.js';
 import { costPresentationDetail, costPresentationMeta, renderLiveCardMeta } from '../modules/chat_activity.js';
-import { TABLES, allowancePresentation, breakdownRowName, costBucketPresentation, costDashboardPresentation,
+import { TABLES, allowancePresentation, breakdownRowName, costBucketPresentation, costDashboardPresentation, initCosts,
     roomTimeText } from '../modules/costs.js';
 import { normalizeConsciousness } from '../modules/consciousness_api.js';
 import { summarizeLogEvent } from '../modules/log_events.js';
+import { setup } from './dashboard_dom_fixture.js';
 import {
     accountedUpperBound,
     accountedUpperBoundWithChildren,
@@ -254,7 +255,7 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
     };
     const fact = (view, label) => Object.fromEntries(view.facts)[label];
     const pending = costDashboardPresentation(base);
-    assert.equal(pending.figure, '$0 of $10');
+    assert.deepEqual([pending.spent, pending.of], ['$0', 'of $10']);
     assert.equal(pending.left, '$10 left');
     // An older payload carries no cause. Say only what is known — never invent "0 open".
     assert.equal(fact(pending, 'Final'), 'No');
@@ -313,9 +314,9 @@ test('cost dashboard sets the limit against known spend, open holds beside it (#
         },
     });
     // $2 known of $10: the $24 of holds is said beside it and kept in Details, never added in as spending.
-    assert.equal(shown.figure, '$2 of $10');
+    assert.deepEqual([shown.spent, shown.of], ['$2', 'of $10']);
     assert.equal(shown.left, '$8 left');
-    assert.equal(shown.open, 'Not counted: up to $20 in calls without a known price', 'the producer\'s words: a worst case, not spending');
+    assert.equal(shown.open, 'Not counted: up to $20 in calls without a known price', 'the unresolved upper bound, said as a worst case and never as spending');
     assert.equal(shown.reached, false);
     assert.equal(shown.share, 20);
     assert.deepEqual(shown.facts.map(([label]) => label), ['Final', 'Confirmed', 'Estimated', 'Reserved',
@@ -330,7 +331,7 @@ test('the known spend leads grouped like money, says what is left, and a reached
         reserved_usd: 0, unresolved_upper_bound_usd: 0, ...accounting } });
     const near = view({ settled_usd: 29438.2, limit_usd: 29800, remaining_known_usd: 361.8 });
     // A whole-dollar limit: the spend rounds up, what is left rounds down, and the two add up to the limit.
-    assert.equal(near.figure, '$29,439 of $29,800');
+    assert.deepEqual([near.spent, near.of], ['$29,439', 'of $29,800']);
     assert.equal(near.left, '$361 left', 'the room the admission rule reports, never recomputed past it');
     assert.equal(near.open, '', 'nothing open is said only when something is');
     assert.equal(near.reached, false);
@@ -340,7 +341,7 @@ test('the known spend leads grouped like money, says what is left, and a reached
     assert.equal(reached.left, 'Limit reached: new paid work is refused');
     assert.equal(reached.share, 100);
     const unlimited = view({ settled_usd: 12.5, limit_usd: 0 });
-    assert.deepEqual([unlimited.figure, unlimited.left, unlimited.share], ['$13', 'No limit set', null]);
+    assert.deepEqual([unlimited.spent, unlimited.of, unlimited.left, unlimited.share], ['$13', '', 'No limit set', null]);
 });
 
 test('a breakdown cell is its amount in the card\'s words, what it leaves out on the face under it, never a free zero', () => {
@@ -777,23 +778,21 @@ test('the allowance under its field: the clock\'s own spend, what it leaves out,
     const now = Date.UTC(2026, 10, 10, 19, 0);
     assert.deepEqual(allowancePresentation(state({ status: 'sleeping', spent_24h_usd: 12.4, daily_usd: 300,
         allowance_status: 'available', allowance_open_rows: 0 }), { now }),
-        { spend: '$13 of $300 in the last 24 hours', detail: '', lines: [],
+        { spend: '$13 of $300 in the last 24 hours', lines: [],
             meter: { spent: '$13', of: 'of $300', share: (12.4 / 300) * 100, left: '$287 left', reached: false, note: '' } });
     const open = allowancePresentation(state({ status: 'sleeping', spent_24h_usd: 12.4, daily_usd: 300,
         allowance_status: 'available', allowance_open_rows: 2, unknown_unmetered: 3 }), { now });
     // What the number leaves out is said after it in words, where a floor sign stood before it.
-    assert.deepEqual([open.spend, open.detail], ['$13 of $300 in the last 24 hours; 3 calls without a known price are not counted',
-        'pending · 3 without a price']);
+    assert.equal(open.spend, '$13 of $300 in the last 24 hours; 3 calls without a known price are not counted');
     assert.equal(open.meter.note, 'Not counted: 3 calls without a known price and calls in progress');
     const pending = allowancePresentation(state({ status: 'sleeping', spent_24h_usd: 0, daily_usd: 20,
         allowance_status: 'available', allowance_open_rows: 1 }), { now });
-    assert.deepEqual([pending.spend, pending.detail], ['$0 so far of $20 in the last 24 hours', 'pending'],
-        'a call still open is no final $0');
+    assert.equal(pending.spend, '$0 so far of $20 in the last 24 hours', 'a call still open is no final $0');
     const unread = allowancePresentation(state({ status: 'allowance_unknown', daily_usd: 300, allowance_status: 'allowance_unknown' }), { now });
     assert.equal(unread.spend, 'What it spent in the last 24 hours is unknown.');
     assert.deepEqual(unread.lines, [{ text: 'The usage ledger could not be read, so whether consciousness has room is unknown.', tone: 'muted' }]);
     assert.deepEqual(unread.meter, { spent: '', of: '', share: null, left: '', reached: false, note: '' }, 'an unknown spend draws no meter, never a zero');
-    assert.deepEqual(allowancePresentation(null), { spend: 'What it spent in the last 24 hours could not be read.', detail: '', lines: [],
+    assert.deepEqual(allowancePresentation(null), { spend: 'What it spent in the last 24 hours could not be read.', lines: [],
         meter: { spent: '', of: '', share: null, left: '', reached: false, note: '' } });
 });
 
@@ -860,4 +859,24 @@ test('the model its wake-ups think with: its own slot, or Main\'s said as Main, 
     }
     assert.deepEqual(allowancePresentation(state({ ...base, enabled: false, model_route: { value: 'm', layer: 'main' } }), { now }).lines,
         [{ text: 'Consciousness is off: it starts nothing that counts here until it is started again.', tone: 'muted' }]);
+});
+
+// The Total budget card paints what costDashboardPresentation says (costs.js renderLead): the spend, "of" the limit and
+// what is left, each in its own node, in the limit's money.
+test('the Total budget card paints the spend, its limit and what is left in whole dollars of a whole-dollar limit', async (t) => {
+    const { mount, routes, window } = setup(t);
+    const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
+    routes.set('/api/cost-breakdown', response({ total_calls: 423015, by_model: {}, accounting: {
+        available: true, cost_final: true, non_final_rows: 0, unknown_unmetered: 0, confirmed_usd: 29438.2, estimated_usd: 0,
+        reserved_usd: 0, unresolved_upper_bound_usd: 0, settled_usd: 29438.2, limit_usd: 29800, remaining_known_usd: 361.8 } }));
+    routes.set('/api/settings', response({ TOTAL_BUDGET: 29800 }));
+    routes.set('/api/consciousness', response({ error: 'busy' }, 503));
+    routes.set('/api/state', response({ error: 'busy' }, 503));
+    initCosts({ mount, state: { activePage: 'dashboard' }, openDashboardTab: async () => {} });
+    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
+    for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(['#cost-spent', '#cost-of', '#cost-left'].map((id) => mount.querySelector(id).textContent),
+        ['$29,439', 'of $29,800', '$361 left']);
+    assert.equal(mount.querySelector('#cost-spend-bar').getAttribute('style'), '--spend-share: 98.8%');
+    assert.equal(mount.querySelector('#cost-open').hidden, true, 'nothing is left out, so nothing is said of it');
 });

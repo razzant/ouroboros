@@ -122,7 +122,6 @@ export function costDashboardPresentation(data) {
         // quiet line what the number leaves out, in the words of the limits card's own line ("Not counted: …").
         spent: formatLimitUsd(known, limit),
         of: limit > 0 ? `of ${formatLimitUsd(limit, limit, 'limit')}` : '',
-        figure: limit > 0 ? `${formatLimitUsd(known, limit)} of ${formatLimitUsd(limit, limit, 'limit')}` : formatLimitUsd(known, limit),
         left: reached ? 'Limit reached: new paid work is refused' : limit > 0 ? leftLine(remaining, limit) : 'No limit set',
         // The unresolved upper bound (cost_projection.uncounted_money_text): a worst case, not spending.
         open: unresolved > 0 ? `Not counted: up to ${formatLimitUsd(unresolved, limit)} in calls without a known price` : '',
@@ -156,22 +155,20 @@ export function roomTimeText(iso, { now = Date.now(), timeZone } = {}) {
 const NEW_STARTS = 'new wake-ups, replies in places and its own tasks';
 
 /** The consciousness allowance under its field, from the consciousness snapshot (consciousness_api.js): the spend line
- *  is the clock's own window (`allowanceText`, the Shade's and the Dashboard's words), never a sum of the tables;
- *  `detail` what it leaves out (pending calls, calls without a price); `lines` at most three: the window (its limit
- *  reached, with a conditional time when room returns), a held wake (its proven cause, with its card's door) and the
+ *  is the clock's own window (`allowanceText`, the Shade's and the Dashboard's words), never a sum of the tables, and
+ *  says what it leaves out; `lines` at most three: the window (its limit reached, with a conditional time when room
+ *  returns), a held wake (its proven cause, with its card's door) and the
  *  model its wake-ups think with when the host could read it, each its fact (`text`, in the line's tone) and what
  *  follows from it (`note`, quieter). Off, a $0 limit and an unreadable ledger say so instead. No time is guessed: a
  *  withheld or stale forecast says so. */
 export function allowancePresentation(snapshot, { now = Date.now(), timeZone } = {}) {
     const meter = allowanceMeter(snapshot);
-    if (!snapshot) return { spend: 'What it spent in the last 24 hours could not be read.', detail: '', lines: [], meter };
+    if (!snapshot) return { spend: 'What it spent in the last 24 hours could not be read.', lines: [], meter };
     const spend = allowanceText(snapshot) || 'What it spent in the last 24 hours is unknown.';
-    const detail = [snapshot.allowanceOpenRows > 0 ? 'pending' : '',
-        snapshot.unknownUnmetered > 0 ? `${number(snapshot.unknownUnmetered)} without a price` : ''].filter(Boolean).join(' · ');
     const lines = [];
     if (snapshot.enabled === false) {
         lines.push({ text: 'Consciousness is off: it starts nothing that counts here until it is started again.', tone: 'muted' });
-        return { spend, detail, lines, meter };
+        return { spend, lines, meter };
     }
     const exhausted = snapshot.allowanceStatus ? snapshot.allowanceStatus === 'exhausted' : snapshot.status === 'allowance_exhausted';
     if (snapshot.dailyUsd === 0) {
@@ -203,7 +200,7 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
         const name = route.local ? 'Local model' : parseModelSource(route.value).model || route.value;
         lines.push({ tone: 'muted', text: `Model: ${name}${route.layer === 'main' ? ' (Main model)' : ''}.` });
     }
-    return { spend, detail, lines, meter };
+    return { spend, lines, meter };
 }
 
 /** The consciousness limit as a meter: its spend of the 24-hour limit in the limit's money, the share, what is left,
