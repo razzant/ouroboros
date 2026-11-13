@@ -19,12 +19,25 @@ export function formatUsd(value) {
         ? `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : formatUsdKnown(value);
 }
 
-/** Money beside a limit. PROTOTYPE (owner 13.11: no cents on the spend cards): whole dollars where the scale (the
- *  limit, else the spend) is $100 or more; below that the cents are the substance and stay. */
-export function formatUsdScale(value, scale) {
+/** Money that stands beside a limit (the limit cards of Costs, the consciousness allowance, the Costs rows of Settings'
+ *  and Dashboard's lists, Main's budget), one rule for every such place. The precision follows the LIMIT: a limit in
+ *  whole dollars (or none) reads in whole dollars, the spend (ROLE 'spent', also an upper bound) rounded UP and what
+ *  is left (ROLE 'left') rounded DOWN, so the two add up to the limit and the room is never overstated; a limit set
+ *  with cents keeps cents for the limit, the spend and what is left, rounded the same ways. A positive amount that
+ *  would round to nothing is said in words (`less than $1`, with cents `less than $0.01`). An amount that is not
+ *  known is the dash, never $0. Thousands are grouped ($42,088). A task's or a call's cost is not this: `formatUsd`. */
+export function formatLimitUsd(value, limit, role = 'spent') {
+    if (value === null || value === undefined || value === '') return '—';
     const amount = Number(value);
-    if (!Number.isFinite(amount) || !(Number(scale) >= 100)) return formatUsd(value);
-    return `$${Math.round(amount).toLocaleString('en-US')}`;
+    if (!Number.isFinite(amount)) return '—';
+    const cap = Number(limit);
+    const unit = Number.isFinite(cap) && cap > 0 && !Number.isInteger(Math.round(cap * 100) / 100) ? 0.01 : 1;
+    const steps = amount / unit;
+    // A hair of float error (42087.99999…) is not a dollar of spend; `|| 0` keeps a rounded zero from reading -0.
+    const rounded = ((role === 'left' ? Math.floor(steps + 1e-6) : role === 'limit' ? Math.round(steps) : Math.ceil(steps - 1e-6)) * unit) || 0;
+    if (amount > 0 && (rounded === 0 || (role === 'spent' && amount < unit))) return unit === 1 ? 'less than $1' : 'less than $0.01';
+    const digits = unit === 1 ? 0 : 2;
+    return `$${rounded.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 }
 
 export const plural = (n, one, many) => (Number(n) === 1 ? fmt(one, { n }) : fmt(many, { n, count: number(n) }));
