@@ -8799,15 +8799,16 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 .nav-projects-list { overflow-anchor: none; }
 
 /* While finding, a found name may take three lines, so the words that matched are not cut off behind the ellipsis
-   (the resting list keeps one line). The row grows; its mark keeps its column, centred on the row. */
-.nav-projects-list[data-finding] .nav-project-row { padding-block: 5px; }
-.nav-projects-list[data-finding] .nav-project-row > .nav-row-label {
+   (the resting list keeps the rows' two lines). The row grows past its fixed height; its time keeps the name's first
+   line and its newest line and mark stay under the name. */
+html .nav-projects-list[data-finding] .nav-project-row { height: auto; }
+.nav-projects-list[data-finding] .nav-project-row .nav-project-line1 { align-items: flex-start; }
+.nav-projects-list[data-finding] .nav-project-row .nav-row-label {
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 3;
     white-space: normal;
     overflow-wrap: anywhere;
-    line-height: 1.35;
 }
 
 /* The list's own commands (Show more, Clear search, Show all projects, Try again) and its one sentence take a
