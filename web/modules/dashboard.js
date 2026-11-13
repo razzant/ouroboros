@@ -347,18 +347,23 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     function showTab(tabName, { row = '', back: path, asLevel = false } = {}) {
         const name = tabName || 'logs';
         if (!tabStrip.select(name)) return false;
-        back.clear();
-        panels.forEach((panel) => {
-            const on = panel.dataset.dashboardPanel === name;
-            panel.classList.toggle('active', on);
-            panel.hidden = !on;
-        });
-        state.dashboardActiveSubtab = name;
-        if (asLevel && !panes()) level = true;
-        paint();
-        window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
         const panel = panels.find((candidate) => candidate.dataset.dashboardPanel === name);
-        if (typeof path === 'string') back.show(panel, path);
+        // One change of the layer stack: a level that Back to Settings replaces at once is never pushed and removed
+        // first (Telegram's Back would show, hide and show again).
+        const steps = () => {
+            back.clear();
+            panels.forEach((each) => {
+                const on = each.dataset.dashboardPanel === name;
+                each.classList.toggle('active', on);
+                each.hidden = !on;
+            });
+            state.dashboardActiveSubtab = name;
+            if (asLevel && !panes()) level = true;
+            paint();
+            window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
+            if (typeof path === 'string') back.show(panel, path);
+        };
+        if (layers?.batch) layers.batch(steps); else steps();
         if (row) focusSettingRow(panel, row);
         return true;
     }

@@ -613,6 +613,33 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
     dashboard.destroy();
 });
 
+// A Settings row or search result in one column opens a Dashboard page with Back to Settings: the layer stack changes
+// once (the level that Back replaces is never pushed and removed first), so Telegram's Back is not told show, hide,
+// show in one task (layers.js: one snapshot per batch).
+test('openDashboardTab with back changes the layer stack once in one column', (t) => {
+    const { mount } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    const stack = [];
+    const seen = [''];
+    let depth = 0;
+    const commit = () => { if (depth === 0) seen.push(stack.map((layer) => layer.id).join(',')); };
+    const layers = {
+        push(layer) { if (!stack.some((open) => open.id === layer.id)) stack.push(layer); commit(); },
+        remove(id) { stack.splice(0, stack.length, ...stack.filter((layer) => layer.id !== id)); commit(); },
+        batch(fn) { depth += 1; try { return fn(); } finally { depth -= 1; commit(); } },
+    };
+    const state = { dashboardActiveSubtab: 'logs', activePage: 'dashboard' };
+    const dashboard = initDashboard({ state, openSettings() {}, layers });
+    seen.splice(0, seen.length, stack.map((layer) => layer.id).join(','));
+    dashboard.activateTab('costs', { back: 'accounts' });
+    const changes = seen.filter((ids, i) => i > 0 && ids !== seen[i - 1]);
+    assert.deepEqual(changes, ['dashboard-back'], 'one change: Back to Settings, with no level pushed and removed');
+    // Without a Back the page is the level, pushed once as well.
+    dashboard.activateTab('storage');
+    assert.deepEqual(stack.map((layer) => layer.id), ['dashboard-level']);
+    dashboard.destroy();
+});
+
 // ---- Costs › Subscriptions: the passive quota read --------------------------------------------------------------
 
 const NOW = Date.parse('2026-11-11T12:00:00Z');
