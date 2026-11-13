@@ -697,3 +697,33 @@ test('Costs reads subscriptions only through the passive view, on show and Refre
     assert.deepEqual(block.querySelectorAll('[data-costs-account]').map((door) => [door.dataset.costsAccount, door.querySelector('.ui-row-meta').textContent]),
         [['accounts', 'The accounts could not be read now.']]);
 });
+
+test('in a wide window the Dashboard holds its list beside a page; an engine without container queries gets the list, then a page with Back', (t) => {
+    // The sheets draw the two panes inside a container query. Where the engine has none, the module must not treat
+    // the page as standing beside the list: it would hide Back and the list would never be seen.
+    const { mount, window } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    NodeStub.prototype.getBoundingClientRect = () => ({ width: 1200 });
+    t.after(() => { delete NodeStub.prototype.getBoundingClientRect; });
+    const start = (queries) => {
+        window.CSS = { supports: () => queries };
+        const layers = [];
+        const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+        const dashboard = initDashboard({ state, openSettings: () => {},
+            layers: { push: (layer) => layers.push(layer), remove: (id) => { layers.splice(0, layers.length, ...layers.filter((layer) => layer.id !== id)); } } });
+        return { dashboard, layers, listBack: dashboard.page.querySelector('[data-dashboard-list-back]') };
+    };
+    const wide = start(true);
+    assert.equal(wide.dashboard.page.dataset.sectionView, 'page', 'two panes: a page stands beside the list at once');
+    wide.dashboard.activateTab('costs');
+    assert.equal(wide.listBack.hidden, true, 'beside its list a page has no Back');
+    assert.deepEqual(wide.layers, [], 'and is no layer over it');
+    wide.dashboard.destroy();
+    const old = start(false);
+    assert.equal(old.dashboard.page.dataset.sectionView, 'home', 'one column: the list first');
+    old.dashboard.activateTab('costs');
+    assert.equal(old.dashboard.page.dataset.sectionView, 'page');
+    assert.equal(old.listBack.hidden, false, 'the page that replaced the list leads back to it');
+    assert.equal(old.layers.length, 1, 'as a level a system Back closes');
+    old.dashboard.destroy();
+});

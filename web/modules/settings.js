@@ -21,6 +21,7 @@
  * path; the row helper never rewrites a field that holds focus or typed text. */
 
 import { settingsReturn } from './dashboard.js';
+import { sectionHoldsTwoPanes } from './layout.js';
 import { renderBackControl, renderPageHeader, setBackControlTarget } from './page_header.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
@@ -115,8 +116,7 @@ export function initSettings(ctx = {}) {
         disposeOverviewFade = bindScrollFade(overviewEl);
         return overviewEl;
     }
-    const rem = () => parseFloat(globalThis.getComputedStyle?.(document.documentElement)?.fontSize) || 16;
-    const panes = () => (page.getBoundingClientRect?.().width || 0) >= 40 * rem();
+    const panes = () => sectionHoldsTwoPanes(page);
     // With two panes and no page open, the page last seen comes back (Models on a first visit).
     const ensurePage = () => {
         if (!panes() || levels.length || ownChosen || opening || !shown()) return;

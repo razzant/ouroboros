@@ -1,4 +1,5 @@
 import { bindTabStrip, placePageBack, renderBackControl, renderPageHeader } from './page_header.js';
+import { sectionHoldsTwoPanes } from './layout.js';
 import { fluentIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
@@ -248,9 +249,8 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     const backSlot = page.querySelector('[data-dashboard-back-slot]');
     const tabStrip = bindTabStrip(list, { dataAttr: 'data-dashboard-tab', onChange: (name) => showTab(name) });
     const disposeFade = bindScrollFade(rail);
-    const rem = () => parseFloat(globalThis.getComputedStyle?.(document.documentElement)?.fontSize) || 16;
-    // Two panes from a 40rem box (ui.css @container sectionplace), as Settings.
-    const panes = () => (page.getBoundingClientRect?.().width || 0) >= 40 * rem();
+    // Two panes from a 40rem box where the engine draws them (ui.css @container sectionplace), as Settings.
+    const panes = () => sectionHoldsTwoPanes(page);
     let level = false;   // one column: the open page stands as a level over the list
     let layered = false;
 
