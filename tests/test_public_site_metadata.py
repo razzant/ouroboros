@@ -25,6 +25,7 @@ INDEXABLE = {
     "/privacy/": SITE / "privacy" / "index.html",
     "/terms/": SITE / "terms" / "index.html",
     "/paper/": SITE / "paper" / "index.html",
+    "/community/": SITE / "community" / "index.html",
     "/install/": SITE / "install" / "index.html",
     "/benchmarks/": SITE / "benchmarks" / "index.html",
     "/history/first-48-hours/": SITE / "history" / "first-48-hours" / "index.html",
