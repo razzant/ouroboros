@@ -42,7 +42,7 @@ test('accounts that need sign-in again are one row per harness, only over an acc
     assert.deepEqual(needRows({}), [], 'nothing read yet says nothing');
 });
 
-test('a tool server that needs sign-in is a row; a status that could not be read is a neutral row with its Check', () => {
+test('a tool server that needs sign-in is a row; a status that could not be read is no row, and its MCP servers row says Not checked', () => {
     const servers = [
         { id: 'slack', name: 'Slack', enabled: true, sign_in: { state: 'needed', reason: 'expired' } },
         { id: 'docs', name: 'Docs', enabled: true, sign_in: { state: 'signed_in', reason: 'insufficient_scope', required_scope: 'write' } },
