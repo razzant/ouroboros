@@ -13,6 +13,7 @@ import os
 import time
 from collections import Counter
 from contextlib import contextmanager
+from itertools import chain
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Mapping
@@ -20,7 +21,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 import yaml
 
-from ouroboros import knowledge_versions, text_change, utils
+from ouroboros import knowledge_rows, knowledge_versions, text_change, utils
 # The edit compiler lives beside its one caller's module; ``compile_anchored_edits`` stays importable here.
 from ouroboros.knowledge_edits import EditRefused, compile_anchored_edits, compile_edit_items, edit_items
 from ouroboros.markdown_source import MarkdownSource, parse_markdown_navigation, parse_markdown_source
@@ -627,33 +628,20 @@ def _lifecycle_content(current: KnowledgeNote, mode: str, reason: str) -> bytes:
     return (b"---\n" + front + b"---\n" if metadata else b"") + current.raw[current.source.body_span.start_byte:]
 
 
-# One read of the journal's tail per write, the memory reader's own journal budget: on a 300 MB
-# journal this note's newest row lies inside it for ~96 % of the repeated bytes. A miss, or a newest
-# row holding other text, only keeps the replaced version inline, as every row did before.
+# One read of the journal's tail per write, the memory reader's own journal budget: the base of the
+# replaced version is looked for there. A miss only stores both texts whole, as every row did before.
 _JOURNAL_TAIL_BYTES = 8 * 1024 * 1024
 
 
-def _newest_row(journal: Path, address: KnowledgeAddress) -> tuple[int, dict[str, Any]] | None:
-    """This note's newest row within one read of the journal's tail, under the shelf lock every writer holds."""
-    return next(knowledge_versions.tail_rows(journal, address, _JOURNAL_TAIL_BYTES), None)
-
-
-def _recorded_version(newest: tuple[int, dict[str, Any]] | None, address: KnowledgeAddress,
-                      text: str) -> dict[str, Any] | None:
-    """The memory reader's address of this note's newest captured row, when its ``new_content`` is ``text``.
-
-    ``None`` keeps ``text`` inline: an empty text, a newest row that holds other text or none (an
-    outside edit, a write whose source never landed, a digest-era row), no row within the journal's
-    tail, or an unreadable journal. A row whose source landed holds a real version even when its
-    index failed, so it is named.
-    """
-    if not text or newest is None:
-        return None
-    offset, row = newest
-    if (row.get("publication") != "source_capture" or not isinstance(row.get("address"), dict)
-            or row.get("new_content") != text):
-        return None
-    return {"kind": "entry", "journal": f"knowledge:{address.scope}", "offset": offset, "field": ["new_content"]}
+def _tail_read(journal: Path, address: KnowledgeAddress, revision: str | None) -> tuple[Any, Any]:
+    """``(newest, base)``: this note's newest row and, for a ``revision`` (``None``: no base wanted), the newest
+    row holding that version that reads back (``knowledge_rows.verified_base``), each ``(offset, row)`` or
+    ``None``, from one read of the journal's tail under the shelf lock every writer of the journal holds."""
+    rows = knowledge_versions.tail_rows(journal, address, _JOURNAL_TAIL_BYTES)
+    newest = next(rows, None)
+    if newest is None or revision is None:
+        return newest, None
+    return newest, knowledge_rows.verified_base(journal, chain([newest], rows), revision)
 
 
 @dataclass(frozen=True)
@@ -719,12 +707,13 @@ def write_knowledge_note(
     ``removed_chars``/``added_chars`` from the exact change of the two texts
     (``text_change``), ``removed_headings``/``added_headings``, ``removed_sections`` and
     ``body_changed``/``summary_changed`` (heading and changed facts are ``None``
-    when a side has no parsed source). It keeps the version it publishes whole;
-    the version it replaces stays inline unless this note's newest row within the
-    journal's tail read holds exactly those bytes, which ``old_content_ref`` then
-    names as a memory-reader entry address. Lifecycle rows keep both. That same
-    read gives ``previous`` (who wrote the replaced version) and, for a stale
-    revision one of its rows wrote, ``held`` (that version and what came since).
+    when a side has no parsed source). The row names its base, this note's newest
+    row in the journal's tail read that holds the replaced version and reads back,
+    and carries the change from it, with the whole new text by the byte rule
+    (``knowledge_rows``); without a verified base, and on lifecycle rows, both texts
+    are stored whole. That same read gives ``previous`` (who wrote the replaced
+    version) and, for a stale revision one of its rows wrote, ``held`` (that version
+    and what came since).
 
     ``archive``/``restore`` require an existing revision and own only the
     ``archive: {at, reason}`` field, never body bytes. The tool's optional
@@ -779,7 +768,8 @@ def write_knowledge_note(
             return KnowledgeWriteResult(False, "revision_required", current, revision)
         if expected_revision is not None and expected_revision != revision:
             return KnowledgeWriteResult(False, "revision_conflict", current, revision, held=None if not expected_revision
-                                        else knowledge_versions.held_version(journal, address, expected_revision, _JOURNAL_TAIL_BYTES))
+                                        else knowledge_versions.held_version(journal, address, expected_revision, _JOURNAL_TAIL_BYTES,
+                                                                             current.text if current else None))
         # A refused revert says why; its caller holds the current revision (checked above), so no note is resent.
         if mode == "revert" and version != revision and isinstance(target, Exception):
             return KnowledgeWriteResult(False, f"version_unavailable: {target}", current, revision, show_source=False)
@@ -844,7 +834,8 @@ def write_knowledge_note(
         # an unparseable side leaves both unknown, like its heading delta.
         old_body, old_summary = ((current.raw[current.source.body_span.start_byte:], current.summary)
                                  if current and current.source else (b"", ""))
-        removed_chars, added_chars = text_change.change_chars(text_change.exact_change(old_text, updated.text))
+        change = text_change.exact_change(old_text, updated.text)
+        removed_chars, added_chars = text_change.change_chars(change)
         delta = {"old_chars": len(old_text), "new_chars": len(updated.text),
                  "old_body_chars": body_chars(current), "new_body_chars": body_chars(updated),
                  "change_chars": len(updated.text) - len(old_text), "removed_chars": removed_chars,
@@ -852,12 +843,11 @@ def write_knowledge_note(
                  "removed_sections": knowledge_versions.removed_sections(current, updated),
                  "body_changed": old_body != raw[updated.source.body_span.start_byte:] if known else None,
                  "summary_changed": old_summary != updated.summary if known else None}
-        # Capture the new version, and the one it replaces unless an earlier row
-        # already holds those exact bytes, before replacing source bytes. A capture
+        # Capture the new version, and the one it replaces (by its change from a
+        # verified base, else whole), before replacing source bytes. A capture
         # is not a commit receipt; a failed publication returns its actual
         # current source, never success.
-        newest = _newest_row(journal, address) if current is not None else None
-        recorded = None if lifecycle else _recorded_version(newest, address, old_text)
+        newest, base = _tail_read(journal, address, None if lifecycle else revision) if current is not None else (None, None)
         previous = None if current is None else {**knowledge_versions.row_facts(
             newest[1] if newest is not None and newest[1].get("new_sha256") == revision else {}), "revision": revision}
         history = {"ts": utc_now_iso(), "task_id": task_id, "topic": address.topic, "mode": mode,
@@ -867,8 +857,9 @@ def write_knowledge_note(
                    "old_chars": len(old_text), "new_chars": len(updated.text),
                    # An existing empty file is the version sha256(b""); only a note's absence has none.
                    "old_sha256": current.revision if current is not None else "", "new_sha256": updated.revision,
-                   **({"old_content_ref": recorded} if recorded else {"old_content": old_text}),
-                   "new_content": updated.text, "source_ref": updated.source_ref(), "delta": delta,
+                   **({"old_content": old_text, "new_content": updated.text} if lifecycle
+                      else knowledge_rows.encode(old_text, updated.text, base, change)),
+                   "source_ref": updated.source_ref(), "delta": delta,
                    **({"summary": summary} if summary is not None else {}),
                    **({"reason": reason} if reason.strip() else {}),
                    **({"reverted_from": version} if mode == "revert" else {})}

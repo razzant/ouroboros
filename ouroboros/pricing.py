@@ -505,8 +505,12 @@ def price_source(provider: Any, settings: Optional[Mapping[str, Any]] = None) ->
             rate = float(read("OUROBOROS_RUB_USD_RATE") or 0)
         except (TypeError, ValueError):
             rate = 0.0
-        # One catalog for every Cloud.ru connection, read with the built-in key (llm_pricing.fetch_cloudru_pricing).
-        return "catalog" if rate > 0 and str(read("CLOUDRU_FOUNDATION_MODELS_API_KEY") or "").strip() else "unknown"
+        # One catalog for every Cloud.ru connection, read with the built-in one's key as the resolver finds it
+        # (llm_pricing.fetch_cloudru_pricing).
+        from ouroboros.provider_models import model_has_credentials, provider_has_credentials_in_settings
+        keyed = (provider_has_credentials_in_settings("cloudru", dict(settings)) if settings is not None
+                 else model_has_credentials("cloudru::"))
+        return "catalog" if rate > 0 and keyed else "unknown"
     return "catalog" if kind in CATALOG_PROVIDERS else "unknown"
 
 
