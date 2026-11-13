@@ -50,8 +50,9 @@ def test_a_request_under_way_reads_a_total_favourably_until_a_refusal_confirms_i
 
 
 def test_a_refusal_of_the_other_kind_stays_only_while_no_larger_acceptance_answered_it(tmp_path):
-    """The record keeps the newest refusal of each kind. One a larger acceptance has answered is gone for good: a later
-    refusal of the other kind must not bring its limit back."""
+    """The record keeps the newest refusal of each kind, each with the first later acceptance above it. A refusal so
+    answered binds nothing: a later refusal of the other kind does not bring its limit back, and an acceptance answers
+    the refusal it exceeds whichever kind was refused last."""
     evidence = ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "r")
     record_observation(tmp_path, "r", accepted=900_000)  # the largest acceptance is older than every refusal below
     record_observation(tmp_path, "r", refused=200_000, kind="input")  # a numberless refusal at its measured size
@@ -64,6 +65,21 @@ def test_a_refusal_of_the_other_kind_stays_only_while_no_larger_acceptance_answe
     record_observation(tmp_path, "r", refused=300_000, kind="input")  # unanswered: it stands beside the proved total
     record = resolve_window(evidence, 65_536, root=tmp_path)
     assert record.usable == 300_000 and record.total.source == "refusal"
+    # An acceptance that is neither a new maximum nor above the newest refusal still answers the refusal it exceeds.
+    record_observation(tmp_path, "r", refused=1_000_000, kind="total")  # the total's refusal is the newest again
+    record_observation(tmp_path, "r", accepted=350_000)
+    record = resolve_window(evidence, 65_536, root=tmp_path)
+    assert (record.usable, record.input) == (934_464, None) and record.total.source == "refusal"
+    # The other order: a total refused below the stated number, then an input refusal above it, then an acceptance
+    # between the two. The total's refusal is answered; the input's stands.
+    other = replace(evidence, route_fp="o")
+    record_observation(tmp_path, "o", accepted=900_000)
+    record_observation(tmp_path, "o", refused=300_000, kind="total")
+    record_observation(tmp_path, "o", refused=600_000, kind="input")
+    assert resolve_window(other, 65_536, root=tmp_path).admitted == 234_464
+    record_observation(tmp_path, "o", accepted=350_000)
+    record = resolve_window(other, 65_536, root=tmp_path)
+    assert (record.admitted, record.input.tokens, record.total.source) == (600_000, 600_000, "metadata")
 
 
 def test_refusal_expires_or_is_superseded_only_by_a_later_larger_acceptance(tmp_path, monkeypatch):
@@ -179,6 +195,14 @@ def test_a_request_inside_the_reply_reservation_is_known_as_one(tmp_path, monkey
     anchor = InputAnchor(input_tokens=size, estimate_tokens=size, transcript_tokens=size, round=1) if anchored else None
     fit = cf.measure_main_fit(plan, [], [], profile="owner_max", rendered_mode="max", round_id="r", anchor=anchor).measurement
     assert fit.estimated_input_tokens == size and fit.probes_reply_reservation is probes
+    # The gate itself: a size-worded refusal of the request this route was sent, never another route's or another kind.
+    from types import SimpleNamespace
+    from ouroboros.context_anchor import reservation_refusal
+
+    sent = lambda route: SimpleNamespace(physical_context=SimpleNamespace(route_fp=route))
+    assert reservation_refusal({"_last_llm_error_kind": "request_too_large"}, sent(fit.route_fp), fit) is probes
+    assert reservation_refusal({"_last_llm_error_kind": "request_too_large"}, sent("another-route"), fit) is False
+    assert reservation_refusal({"_last_llm_error_kind": "bad_request"}, sent(fit.route_fp), fit) is False
 
 
 @pytest.mark.parametrize("main", [True, False])

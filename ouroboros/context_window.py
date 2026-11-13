@@ -99,32 +99,31 @@ def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int =
             record = data.setdefault("main_windows", {}).setdefault(route_fp, {})
             rows = record.setdefault("observations", [])
             prior = list(rows)
-            # Retain immutable frontier observations, including a later acceptance
-            # below a historic maximum that nevertheless supersedes a newer refusal.
-            last_refusal = next((row for row in reversed(rows) if row.get("refused")), {})
+            # Retain immutable frontier observations: the largest acceptance, the newest refusal of each kind (a total
+            # proved to hold the reply stays proved beside a later input refusal) and, for each, the first later
+            # acceptance above it, which answers it even below a historic maximum.
+            def answer(index):
+                return next((later for later in range(index + 1, len(rows))
+                             if rows[later].get("accepted", 0) > rows[index]["refused"]), None)
+
+            def refusals():
+                newest = {}
+                for index in reversed(range(len(rows))):
+                    if rows[index].get("refused"):
+                        newest.setdefault(rows[index].get("kind"), index)
+                return list(newest.values())
+
             high = max((row.get("accepted", 0) for row in rows), default=0)
-            supersedes = accepted > last_refusal.get("refused", accepted) and not any(
-                row.get("accepted", 0) > last_refusal.get("refused", 0)
-                for row in rows[rows.index(last_refusal) + 1:]) if last_refusal else False
-            if refused or accepted > high or supersedes:
+            if refused or accepted > high or any(
+                    accepted > rows[index]["refused"] for index in refusals() if answer(index) is None):
                 rows.append({"accepted": accepted, "refused": refused, "kind": "input" if accepted else kind,
                              "reserve": reserve, "transmitted": transmitted, "ts": ce.utc_now_iso()})
             keep = set()
             largest = max(range(len(rows)), key=lambda i: rows[i].get("accepted", 0), default=None)
             if largest is not None and rows[largest].get("accepted"):
                 keep.add(largest)
-            newest = next((i for i in reversed(range(len(rows))) if rows[i].get("refused")), None)
-            if newest is not None:
-                keep.add(newest)
-                later = next((i for i in range(newest + 1, len(rows))
-                              if rows[i].get("accepted", 0) > rows[newest]["refused"]), None)
-                # The newest refusal of the other kind stays beside it (a total proved to hold the reply stays proved),
-                # unless a larger acceptance since has already answered it.
-                other = next((i for i in reversed(range(newest)) if rows[i].get("refused")
-                              and rows[i].get("kind") != rows[newest].get("kind")), None)
-                if other is not None and any(row.get("accepted", 0) > rows[other]["refused"] for row in rows[other + 1:]):
-                    other = None
-                keep.update(i for i in (later, other) if i is not None)
+            for index in refusals():
+                keep.update(i for i in (index, answer(index)) if i is not None)
             record["observations"] = [rows[i] for i in sorted(keep)]
             if record["observations"] != prior:
                 ce._save(root, data)

@@ -477,20 +477,6 @@ def record_primary_return_request(owner, model: str, use_local: bool, role: str)
         owner._execution_trace.setdefault("primary_return_requests", []).append(row)
 
 
-def answered_on(usage, model: str, use_local: bool, role: str) -> bool:
-    """Whether this work already has an accepted answer on this model string (its connection included) and locality:
-    ``accepted_routes``, written below at every change of the answering route and carried with the work's usage
-    across a restore. Accounts are no part of it: an engine's account rotation keeps the string, and a second direct
-    key of one model is another string. A route never answered on holds no copy of this work's start."""
-    from ouroboros.model_slots import route_binding
-    from ouroboros.model_wait import current_model_wait
-
-    waiter = current_model_wait()
-    target = route_binding(model, use_local, role, overrides=waiter.overrides if waiter else None)[:2]
-    rows = usage.get("accepted_routes") if isinstance(usage, dict) else None
-    return any(tuple((row.get("to_binding") or ())[:2]) == target for row in rows or () if isinstance(row, dict))
-
-
 def record_round_route_result(ctx, role: str, *, accepted: bool) -> None:
     from ouroboros.model_slots import route_binding
     from ouroboros.model_wait import current_model_wait

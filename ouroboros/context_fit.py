@@ -127,7 +127,7 @@ class ContextFitPlan:
                             current_messages: Optional[List[Dict[str, Any]]] = None,
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
-                            slack_tokens: int = 0, entry: Optional[bool] = None,
+                            slack_tokens: int = 0, room_if_narrowed: bool = False,
                             admitted: bool = False) -> "ContextFitPlan":
         """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
@@ -138,11 +138,11 @@ class ContextFitPlan:
         ``admitted``: the plan's own window is read at ``WindowRecord.admitted``, the line this work's own requests go
         out at (Main's rebind, restore, retry in a lower mode and memory pass); without it at ``usable``, as a start
         is sized (voice; a work's first start is ``_build_context_fit_plan``).
-        ``entry``: Main binds the view to a place. Narrowing writes the start, and so does an entry on a place that
-        holds no copy of it and a restore (True): each asks a wall's slack with it (``REFUSAL_PASSES``), one eighth
-        under that line less what is free already, which memory detail and ordinary host forms pay; the mode and a
-        whole-or-outline section pay a measured excess alone. Otherwise a view that fits is never touched.
-        ``start_work`` is a first send's own room and Max decision (voice).
+        ``room_if_narrowed`` (Main's rebind): a view that must narrow for the window is written again anyway, so with
+        its excess it asks a wall's slack (``REFUSAL_PASSES``), one eighth, which memory detail and ordinary host
+        forms pay; the mode and a whole-or-outline section pay the measured excess alone. A view that fits is never
+        touched, at a restore and on a place that holds no copy of it too: nothing is taken on the guess that the
+        work will reach its wall (owner, 30 Sep 2026). ``start_work`` is a first send's own room and Max decision (voice).
         """
         from dataclasses import replace
 
@@ -187,8 +187,8 @@ class ContextFitPlan:
             request += room if start_work else 0
             request -= math.ceil(required_book_addition(self, start) * ratio)  # nothing narrows to pay for the book
             measured, units = (request - frame if known_window and frame else 0), max(ratio, 0.01)
-            if entry is not None and (entry or measured > 0):  # the start is written anyway: a wall's slack with it
-                refused_tokens, slack_tokens = max(int(refused_tokens or 0), measured), max(slack_tokens, min(room, room + measured))
+            if room_if_narrowed and measured > 0:  # narrowing writes the start anyway: a wall's slack with it
+                refused_tokens, slack_tokens = max(int(refused_tokens or 0), measured), max(slack_tokens, room)
             excess, deficit = max(measured, int(refused_tokens or 0)), max(measured, int(refused_tokens or 0) + slack_tokens)
             if deficit > 0 or select_mode:
                 snapshot = snapshot_from_json(self.core.memory_view_json) if self.core.memory_view_json else None
@@ -965,8 +965,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         held = (sent, fixed, reserve, window, boundary, allowances), receipts
         lower = "low" if mode == "max" else "nano"
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{lower}", frame, lower)
-        if lower == "nano" and kept is not None and window - reserve <= held[0][3] - held[0][2] and fixed >= held[0][1]:
-            # A view the work holds keeps Low where Nano would admit no more input and is no smaller (a total that
+        if lower == "nano" and kept is not None and admitted and window - reserve <= held[0][3] - held[0][2] and fixed >= held[0][1]:
+            # A view a Main work holds keeps Low where Nano would admit no more input and is no smaller (a total that
             # nothing has proved, an input limit): the mode is not paid for nothing, the round's passes take bodies.
             (sent, fixed, reserve, window, boundary, allowances), receipts = held
             shown = render()

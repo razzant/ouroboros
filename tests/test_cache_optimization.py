@@ -560,15 +560,16 @@ def test_supervising_wake_horizon_fires_only_past_the_applied_ttl(tmp_path):
 # --- a work's cache life --------------------------------------------------------------------------------------------
 #
 # The law (DEVELOPMENT 06): in Main's loop a work's start (tools, system row) is written only where the answering place
-# holds no copy, or at a restore; a restore, a narrowing and a model's first entry ask a wall's slack of memory detail,
-# not the mode; a start its route still holds changes only by physics or the mind's own act. Each life below runs one
-# work end to end on the production producers (tests/_work_life.py) and names, per answered request, the product's own
-# class of what it did to its route's start and the place that answered it. Beside the sequence every life holds the
-# clauses of three mechanisms, each in both its directions: P4, a start write that is not the work's first leaves one
-# eighth of the stated window free under the line its requests go out at (a restore, a rebind that must narrow and an
-# entry on a model string that never answered the work ask it as a wall's slack, which memory detail pays and the mode
-# never does; the place measures it within half an eighth, the host sizes by its own estimate), while an account
-# rotation of one string keeps its start and takes none and a return finds its start held;
+# holds no copy, or at a restore; a view narrowed for the window asks a wall's slack of memory detail (DEVELOPMENT 04:
+# rebinds re-cut no fitting sent view); a start its route still holds changes only by physics or the mind's own
+# act. Each life below runs one work end to end on the production producers (tests/_work_life.py) and names, per
+# answered request, the product's own class of what it did to its route's start and the place that answered it.
+# Beside the sequence every life holds the clauses of three mechanisms, each in both its directions: P4, a start write
+# that narrowed the view for its window (a wall's pass, a bind onto a place that admits less than the request held)
+# leaves one eighth of the stated window free under the line its requests go out at (the place measures it within
+# half an eighth, the host sizes by its own estimate), while a restore of a view its window held takes nothing on
+# the guess that the work will reach its wall, an account rotation of one string keeps its start and a return finds
+# its start held;
 # P3, nothing is refused before sending while the input leaves 8,192 of the stated window (nano's own reserve), unless
 # the product recorded a refusal of the total kind for the route; a part the mind read comes back whole while the
 # request with it whole would still go out, and a view under way is kept by that same line (a work inside the reply
@@ -663,8 +664,8 @@ WORK_LIVES = {
     "a_restore_inside_the_reply_reservation": (
         Life(places=(_A,), reads=(_P90, _P90) + (8_000,) * 2, door=3, keeps_mode=True),
         _ON_A + r" system_changed@a( append@a)*", {}, 0),
-    # A door, and a move to a key that never answered this work, while it sits inside its last eighth: the start is
-    # written anyway, so the entry leaves a wall's eighth of room, paid by memory detail, and the mode holds.
+    # A door, and a move to a key that never answered this work, while it sits inside its last eighth: the window holds
+    # the view, so nothing is taken from it (the owner, 30 Sep 2026: nothing is removed on a guess) and the mode holds.
     "a_restore_inside_the_last_eighth": (
         Life(places=(_A,), reads=(_P90, _P90, _WIDE, 8_000), door=3, keeps_mode=True),
         _ON_A + r" system_changed@a( append@a)*", {}, 0),
@@ -674,7 +675,7 @@ WORK_LIVES = {
              light="named", reads=(200_000,) * 7 + (8_000,) * 2, memory=1.0, acts=((8, ("switch", OPUS_NAMED)),),
              keeps_mode=True),
         r"first_request@opus( append@opus)+ entered_model@named( append@named)*", {"entered_model": OPUS}, 0),
-    # A return there finds its start held: nothing is asked of the view, whatever room it has.
+    # A return there finds its start held.
     "a_return_inside_the_last_eighth": (
         Life(places=(_A, Place("opus", OPUS, window=600_000, density=1.4, marked=True)), light="opus",
              reads=(_P90, _P90, _WIDE, 2_000, 2_000), acts=((4, ("switch", OPUS)), (5, ("return",))), keeps_mode=True),

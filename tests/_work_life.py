@@ -604,9 +604,10 @@ def answered_rows(record: Dict[str, Any]) -> List[Dict[str, Any]]:
 def breaches(record: Dict[str, Any], places: Dict[str, Place], *, sequence: str, details: Dict[str, str],
              refusals: int = 0, queued: bool = False, mode: str = "") -> List[str]:
     """Every clause of the law ``record`` breaks, each named by the mechanism that holds it (``tests/test_cache_
-    optimization.py``): the sequence of (class, answering place); P4's room after a start write that is not the
-    work's first (under the admitted line, measured by the place within half an eighth, since the host sizes by its
-    own estimate); P3's
+    optimization.py``): the sequence of (class, answering place); P4's room after a start write that narrowed the
+    view for its window (a wall's pass, or a bind onto a place whose line the request answered before it did not fit:
+    under the admitted line, measured by the place within half an eighth, since the host sizes by its own estimate)
+    and its other side, that a restore of a view its window held takes nothing on a guess; P3's
     favourable reading before a send, unless the product recorded a refusal of the total kind no later than it, the
     same reading for a part the mind read (it comes back whole while the request with it whole would still go out),
     and its learning from a refusal or a cut reply; P5's queue that refuses nothing, tells the work's feed that a send
@@ -620,17 +621,29 @@ def breaches(record: Dict[str, Any], places: Dict[str, Place], *, sequence: str,
     tokens = " ".join(row["token"] for row in rows)
     if not re.fullmatch(sequence, tokens):
         found.append(f"sequence: {tokens!r} is not {sequence!r}")
+    before = None  # the request answered before this one
     for row in rows:
         if row["class"] in details and row["detail"] != details[row["class"]]:
             found.append(f"detail: {row['token']} names {row['detail']!r}, not {details[row['class']]!r}")
         if row["class"] in ("system_changed", "tools_changed", "history_rewritten") and not row["origins"]:
             found.append(f"origin: {row['token']} changed the start with no seam of the host claiming it")
-        if row["class"] in START_CLASSES - {"first_request"} and row["room"] is not None:
+        if row["class"] in START_CLASSES - {"first_request"} and row["room"] is not None and before is not None:
             stated = places[row["place"]].window
             eighth = math.ceil(stated / 8)  # of the stated window; ``room`` is under the admitted line
-            if row["room"] < eighth // 2:
-                found.append(f"P4 room: {row['token']} left {row['room']} of {stated} after its start write, "
-                             f"under the eighth {eighth}")
+            line = row["known"] + row["room"]  # the admitted line of this place, as its ledger row measured it
+            # What the request answered before it counts here; the view was narrowed for the window when a wall's
+            # pass wrote this start or that request did not fit this place's line.
+            carried = math.ceil(before["known"] * places[row["place"]].density / places[before["place"]].density)
+            walled = any(str(origin).startswith(("refusal_pass", "memory_coarsened")) for origin in row["origins"])
+            if walled or carried > line:
+                if row["room"] < eighth // 2:
+                    found.append(f"P4 room: {row['token']} left {row['room']} of {stated} after its start write, "
+                                 f"under the eighth {eighth}")
+            elif before["place"] == row["place"] and carried - row["known"] > max(0, eighth - (line - carried)) // 2 > 0:
+                # A restore of a view its window held: more than half the room it lacked is gone from the request.
+                found.append(f"P4 guess: {row['token']} sent {row['known']} where {carried} fitted its line {line}: "
+                             f"room was taken from a view the window held")
+        before = row
         if mode and row["mode"] != mode:
             found.append(f"mode: {row['token']} ran in {row['mode']!r}, not {mode!r}")
     total = any(row.get("kind") == "total" for row in record["windows"])  # what the product learned, not the place
