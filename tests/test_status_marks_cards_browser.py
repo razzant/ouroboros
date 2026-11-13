@@ -111,8 +111,8 @@ SHEET = {
     "warnings": ("Done with warnings", "ok", "dot", "ok"),
     "stopped": ("Stopped", "neutral", "dot", "neutral"),
     "failed": ("Failed", "failed", "dot", "failed"),
-    # A running parent keeps its live word; its helper's question is the owner's amber dot.
-    "parent": ("Working", "live", "dot", "owner"),
+    # A running parent keeps its live word; its helper's question turns its moving dots the owner's hue.
+    "parent": ("Working", "live", "moving", "owner"),
 }
 # The token each body tone's text and each mark hue resolves to (ui.css, style.css "Status marks").
 TONE_INK = {"live": "--accent-light", "owner": "--status-warn-fg", "ok": "--status-ok-fg",
