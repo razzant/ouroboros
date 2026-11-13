@@ -286,6 +286,6 @@ def test_concurrency_field(direct_server_with_data, monkeypatch):
         assert desktop["labelText"] == "Requests at once per model"
         words = desktop["helpText"]
         assert "counted per model, key and server" in words
-        assert "Not set: no limit for API models, 3 for a local model. 0 or less: no limit for either." in words
+        assert "Not set: no limit for API models, 3 for the built-in local model. 0 or less: no limit for either." in words
         assert "waits in line until a slot frees" in words and "never sent elsewhere for waiting" in words
         assert "Routes your subscriptions serve are not limited here" in words

@@ -379,7 +379,7 @@ export const ROWS = [
         aliases: ['Prompt Cache TTL', 'cache'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_MODEL_MAX_CONCURRENCY', keys: ['OUROBOROS_MODEL_MAX_CONCURRENCY'], page: 'models', fold: true,
-        name: 'Requests at once per model', meta: 'Direct API and local-model requests, counted per model, key and server. Not set: no limit for API models, 3 for a local model. 0 or less: no limit for either.',
+        name: 'Requests at once per model', meta: 'Direct API and local-model requests, counted per model, key and server. Not set: no limit for API models, 3 for the built-in local model. 0 or less: no limit for either.',
         more: 'A request over the limit waits in line until a slot frees, the work is stopped, or its own deadline passes; it is never sent elsewhere for waiting. Routes your subscriptions serve are not limited here.',
         control: { kind: 'number', integer: true, empty: 'not set' },
         aliases: ['Concurrent Requests per Model', 'concurrency'],
