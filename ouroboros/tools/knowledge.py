@@ -14,6 +14,7 @@ from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.knowledge import INDEX_FILE as INDEX_FILE, OVERVIEW_TOPIC as OVERVIEW_TOPIC
 from ouroboros.knowledge import sanitize_topic as _sanitize_topic
+from ouroboros.knowledge_edits import check_arguments, normalize_arguments
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolEntry, ToolContext
 from ouroboros.tools.tool_result import ToolResult, _MAX_META_BYTES, _publish_tool_result, completed_local_read
@@ -282,81 +283,24 @@ def _knowledge_write(
     new_str: str | None = None,
 ) -> str:
     notes = []  # a value that means what omission means takes the omitted path, said in the result (tools/arg_feedback)
-    blank_version = isinstance(version, str) and not version.strip()  # empty or whitespace: it names no revision
-    # Outside revert, a blank version or the revision this call already names as expected_revision asks for nothing.
-    if mode != "revert" and (blank_version or isinstance(version, str) and version == expected_revision):
-        notes.append(ignored_argument_note("version", version, ("" if blank_version else "the same as expected_revision; ")
-                                           + "only mode=revert takes a version"))
-        version = None
-    if isinstance(edits, list) and not edits:
-        notes.append(ignored_argument_note("edits", edits, "an empty list asks for no replacement"))
-        edits = None
-    if old_str == "" and mode != "edit":
-        notes.append(ignored_argument_note("old_str", old_str, "only mode=edit replaces text"))
-        old_str = None
-    if reason is None and mode != "archive":  # optional text: null is an omitted reason; archive still requires one
-        notes.append(ignored_argument_note("reason", reason, "no reason is recorded"))
-        reason = ""
+    # The argument rules every exact editor shares (knowledge_edits); archive still requires its reason.
+    version, edits, old_str, reason = normalize_arguments(mode, version, expected_revision, edits, old_str, reason,
+                                                          notes, reason_required=("archive",))
     try:
         sanitized = _sanitize_topic(topic)
         lifecycle = mode in ("archive", "restore")
-        if mode not in _MODES or not isinstance(content, (str, type(None))):
-            raise ValueError("content must be Markdown; mode must be " + ", ".join(_MODES))
-        if new_str is not None:  # the one-pair edit's replacement as other editors spell it: content
-            if not isinstance(new_str, str):
-                raise ValueError("new_str must be text, the replacement of old_str (empty text deletes it)")
-            if mode == "edit" and edits is not None and new_str:
-                raise ValueError("each edits item carries its own new_str; a top-level new_str belongs to the "
-                                 "one-pair spelling with old_str")
-            if mode == "edit" and isinstance(old_str, str) and old_str:
-                if content and new_str and content != new_str:
-                    raise ValueError("new_str and content both give old_str's replacement and differ; pass one")
-                if content is not None and bool(content) != bool(new_str):  # an empty one beside the other is filler
-                    empty, given = ("content", "new_str") if new_str else ("new_str", "content")
-                    notes.append(ignored_argument_note(empty, "", f"{given} gives the replacement"))
-                content = content or new_str  # both empty: the replacement is empty text, which deletes
-            elif new_str:
-                raise ValueError("new_str is the replacement of old_str in mode=edit, the same as content; "
-                                 + ("pass old_str with it" if mode == "edit" else f"mode={mode} takes its text as content"))
-            else:
-                notes.append(ignored_argument_note("new_str", new_str, "only an edit with old_str takes a replacement"))
         if mode == "archive" and sanitized in knowledge_store.ALWAYS_ACTIVE_TOPICS:
             raise ValueError("the overview must stay active")
-        if not isinstance(reason, str) or (mode == "archive" and not reason.strip()):
-            raise ValueError("reason is required for archive and optional text on every other mode")
         summary = None if summary == "" else summary  # an empty summary asks for nothing
         if summary is not None and (not isinstance(summary, str) or not summary.strip()):
             raise ValueError(f"summary={summary!r} is not summary text; pass the revised summary, "
                              "or omit summary to keep the current one")
-        if mode != "edit" and (old_str is not None or edits is not None):
-            raise ValueError("old_str is used only with mode=edit" if old_str is not None
-                             else "edits is used only with mode=edit")
-        if mode not in ("overwrite", "append", "edit") and summary is not None:
+        if mode not in ("overwrite", "append", "edit") and summary is not None and mode in _MODES:
             raise ValueError(f"summary is used only with mode=overwrite, append or edit, not mode={mode}")
-        if mode == "revert" and (version is None or blank_version):
-            raise ValueError("mode=revert requires version, the revision to put back")
-        if mode != "revert" and version is not None:
-            raise ValueError("version is used only with mode=revert; knowledge_read(version=...) reads one")
-        if mode == "revert" and content:
-            raise ValueError("mode=revert takes version, expected_revision and an optional reason; no content")
-        if mode not in ("edit", "revert") and not lifecycle and content is None:
-            raise ValueError(f"mode={mode} requires content")
-        if (lifecycle or mode == "revert") and content is None:
-            content = ""
-        if mode == "edit" and edits is not None:
-            if old_str not in (None, "") or content:
-                raise ValueError("edits carries its own replacements: pass edits without old_str and content")
-            content, old_str = "", None
-        elif mode == "edit" and summary is not None and old_str in (None, ""):  # "" asks for nothing
-            if content:
-                raise ValueError(f"content ({len(content)} chars) has no old_str to replace; pass old_str "
-                                 "for a body edit, or omit content to revise only the summary")
-            content, old_str = "", None
-        elif mode == "edit" and (not isinstance(old_str, str) or not old_str):
-            raise ValueError("mode=edit requires edits, or a non-empty old_str, or a summary")
-        elif mode == "edit" and content is None:
-            raise ValueError("mode=edit with old_str requires content, its replacement "
-                             "(empty text deletes the old_str span)")
+        content, old_str, edits = check_arguments(
+            mode, content, old_str, new_str, edits, version, reason, notes, modes=_MODES,
+            no_content=("revert", "archive", "restore"), reason_required=("archive",), alone="summary",
+            alone_given=summary is not None, version_reader="knowledge_read(version=...)")
         address = _address(ctx, sanitized, scope)
         # The turn is the writer; the route stamp is the route that ANSWERED the
         # loop's last round (provider + resolved model, account when Claudexor
