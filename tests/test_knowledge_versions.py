@@ -122,15 +122,36 @@ def test_history_lists_versions_newest_first_marks_the_current_one_and_names_gap
     assert "reason: not recorded" in rows[3] and "focus unknown" in rows[3]
     assert f"1 journal line(s) naming this note are not JSON and were skipped (the first at byte offset {torn_at})" in listing
     assert f"expected_revision={third.revision!r}" in listing
-    assert listing.endswith(f"expected_revision={third.revision!r}). Each line is the note after its write, so undoing a "
-                            "write means putting back the line below it, unless that line is marked not the base of the "
-                            "next write.\n"), listing
+    assert listing.endswith(f"expected_revision={third.revision!r}). Each line is the note after its write; undoing a "
+                            "write puts back the version it replaced, the one after 'replaced' on its line.\n"), listing
+    # Each line names the version its write actually replaced: the capture that never landed replaced `second` too.
+    assert [re.search(r" · (replaced [0-9a-f]{64}|created it \(nothing before it\)) · ", row)[1] for row in rows] == [
+        f"replaced {second.revision}", f"replaced {second.revision}", f"replaced {first.revision}",
+        "created it (nothing before it)"]
     page = tools._knowledge_read(ctx, TOPIC, view="history", start_char=10, end_char=60)
     assert body(page) == body(listing)[10:60] and '"complete_chars": ' in page
-    # The line below `second` is not marked, so it is the version the write that made `second` replaced.
-    undo = tools._knowledge_write(ctx, TOPIC, mode="revert", version=rows[3].split(" · ")[0][2:],
+    # Undoing the write that made `second` puts back the version its own line names.
+    undo = tools._knowledge_write(ctx, TOPIC, mode="revert", version=re.search(r"replaced ([0-9a-f]{64})", rows[2])[1],
                                   expected_revision=third.revision, scope="global")
     assert undo.startswith("✅") and store.read_knowledge_note(target).text == first.text, undo
+
+
+def test_the_listing_names_a_version_found_only_on_a_rows_old_side_as_that_writes_undo(tmp_path):
+    """Undo is the version a write replaced, not the line below: after an outside edit the next write's row holds the
+    outside text only on its old side, and the listing names exactly that version, which reads back and reverts."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    first = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    target.path.write_bytes(first.raw.replace(b"One.", b"Outside."))  # an edit outside the writer: no row
+    outside = store.read_knowledge_note(target)
+    second = store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=outside.revision).current
+    rows = [line for line in versions.render_history(second).splitlines() if line.startswith("- ")]
+    assert rows[0].startswith(f"- {second.revision} · ") and f" · replaced {outside.revision} · " in rows[0], rows
+    assert rows[1].startswith(f"- {first.revision} · ") and "not the base of the next write" in rows[1], rows
+    assert outside.revision not in rows[1]  # no line wrote the outside text: only the next row's old side holds it
+    assert versions.find_version(target, outside.revision) == (outside.text, {})
+    undo = tools._knowledge_write(ctx, TOPIC, mode="revert", version=outside.revision,
+                                  expected_revision=second.revision, scope="global")
+    assert undo.startswith("✅") and target.path.read_bytes() == outside.raw, undo
 
 
 def test_history_prints_the_headings_each_row_recorded_and_parses_no_earlier_version(tmp_path, monkeypatch):

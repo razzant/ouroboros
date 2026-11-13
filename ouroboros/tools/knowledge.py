@@ -88,10 +88,7 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
     header = "[Knowledge source] " + json.dumps(ref, ensure_ascii=False, sort_keys=True) + "\n"
     header += "".join(f"[Range note] {item}\n" for item in range_notes) + _argument_notes(notes)
     if earlier is not None:
-        written = ("no history row wrote it (an outside edit, or a write before history)"
-                   if earlier["ts"] == knowledge_versions.UNKNOWN else
-                   f"written {earlier['ts']} by focus {knowledge_versions.focus_text(earlier['focus'])} "
-                   f"({earlier['mode']}; reason: {knowledge_versions.reason_text(earlier['reason'])})")
+        written = knowledge_versions.written_text(earlier)
         header += f"[Earlier version, not the current note: {written}. The current revision is {earlier['current_revision']}.]\n"
     if note.parse_error:
         header += "[Metadata unavailable; the complete original Markdown follows.]\n"
