@@ -872,7 +872,8 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         "conversation and folder; the old task is not resumed and its helpers are not yours to steer; with "
         "integrate_subagent_patch(task_id=...) a helper's FINISHED native result can be applied or verified (the "
         "default), accepted as it stands when it is a shared result (decision='accept' with your reason, never a "
-        "verification) or rejected, "
+        "verification) or rejected (a cancelled helper stays cancelled, but its ready retained capture is decided "
+        "the same ways with your reason), "
         "and the old task's stopped delegated runs are yours to continue with delegate_start(subagent_id=..., "
         "continue_from=<run_id>, prompt=...) instead of redoing them.",
         *([tree_note] if tree_note else []),
