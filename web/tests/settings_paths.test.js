@@ -236,3 +236,43 @@ test('words the shell searched are spent by the first press on their results; wo
     await press('home:costs');
     assert.equal(field().value, 'budget');
 });
+
+// The header's Back (settings.js paintLead): beside the list a first level opened inside Settings needs none, since
+// the list it would lead to is on screen; in one column it leads to the list; a deeper level's Back is named after the
+// level under it.
+test('the header Back is hidden beside the list, leads to the list in one column, and names the level under a deeper one', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    env.document.createElement = (tag) => new DescendantStub(tag);
+    let deeper = null;
+    registerSettingsPage('test-outer', { title: 'Outer', mount(body, { ctx }) {
+        body.innerHTML = '<p>outer</p>';
+        deeper = () => ctx.openSettings('test-inner');
+    } });
+    registerSettingsPage('test-inner', { title: 'Inner', mount(body) { body.innerHTML = '<p>inner</p>'; } });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const back = () => content.querySelector('.app-page-header [data-settings-back]');
+    const said = () => [back().hidden, back().getAttribute('aria-label')];
+    const pages = () => content.querySelectorAll('.settings-page').map((level) => level.dataset.settingsPage);
+    await controls.open('');
+    await settle();
+    assert.equal(back().hidden, true, 'the list alone: no Back');
+    // Beside the list (the fixture lays every element out, so the list is on screen).
+    await controls.open('test-outer');
+    await settle();
+    assert.deepEqual([pages(), said()], [['test-outer'], [true, 'Back to Settings']], 'a first level beside the list: the list is on screen');
+    deeper();
+    await settle();
+    assert.deepEqual(pages(), ['test-outer', 'test-inner']);
+    assert.deepEqual(said(), [false, 'Back to Outer'], 'a deeper level: Back leads to the level under it, by its name');
+    await back().fire('click');
+    await settle();
+    assert.deepEqual([pages(), said()], [['test-outer'], [true, 'Back to Settings']]);
+    // One column: the list is not on screen, so a first level shows Back to it.
+    content.querySelector('[data-settings-home]').getClientRects = () => [];
+    await controls.open('test-outer');
+    await settle();
+    assert.deepEqual(said(), [false, 'Back to Settings']);
+    await back().fire('click');
+    await settle();
+    assert.deepEqual([pages(), back().hidden], [[], true]);
+});
