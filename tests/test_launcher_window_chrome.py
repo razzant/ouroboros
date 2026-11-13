@@ -1097,9 +1097,20 @@ def released(worker, outcome):
     return outcome
 
 
-def test_a_failed_exit_keeps_full_screen_and_refuses_the_waiting_handoff_at_once(mac, monkeypatch):
-    """AppKit's DidFail (a delegate message, no notification): the window stays in full screen with its full-screen
-    chrome, the handoff refuses in that turn without asking again or waiting out its deadline, and a later one asks."""
+def unreadable_mask_once(native):
+    """The next ``styleMask`` read raises (a window AppKit is tearing down); later reads see the mask again."""
+    def unreadable():
+        del native.styleMask
+        raise RuntimeError("window gone")
+
+    native.styleMask = unreadable
+
+
+@pytest.mark.parametrize("mask", ["still full screen", "unreadable"])
+def test_a_failed_exit_keeps_full_screen_and_refuses_the_waiting_handoff_at_once(mac, monkeypatch, mask):
+    """AppKit's DidFail (a delegate message, no notification) the live mask confirms, or cannot deny: the window
+    stays in full screen with its full-screen chrome, the handoff refuses in that turn without asking again or waiting
+    out its deadline, and a later one asks."""
     monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
     chrome, window, native = shown()
     declare(chrome, DOC_A)
@@ -1110,7 +1121,11 @@ def test_a_failed_exit_keeps_full_screen_and_refuses_the_waiting_handoff_at_once
     mac.main.run(first=True)
     full_screen(mac, "WillExit")
     assert native.toolbar().visible
+    native.mask |= wc._FULL_SCREEN
+    if mask == "unreadable":
+        unreadable_mask_once(native)
     native.delegate().windowDidFailToExitFullScreen_(native)
+    native.mask &= ~wc._FULL_SCREEN
     mac.main.run()
     assert released(worker, outcome) == {"ran": False} and seen == []
     assert chrome._phase == "full" and not native.toolbar().visible, "the full-screen chrome, no band"
@@ -1122,6 +1137,69 @@ def test_a_failed_exit_keeps_full_screen_and_refuses_the_waiting_handoff_at_once
     leave_full_screen(mac, native)
     mac.main.run()
     assert released(worker, outcome) == {"ran": True} and seen == ["later"]
+
+
+@pytest.mark.parametrize("then", ["DidExit", "an extra toggle re-enters"])
+def test_a_failed_exit_said_with_the_mask_already_out_waits_for_appkits_last_word(mac, monkeypatch, caplog, then):
+    """macOS 26.4 also says an exit failed in its exiting phase, the mask already out of full screen, 1-31 ms before
+    the DidExit of an exit that succeeds: nothing changes, so DidExit hands over in its turn, and a re-entry asks
+    anew once DidEnter, as #3198 did. launcher.log keeps the message as #3134's trail."""
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
+    chrome, window, native = shown()
+    declare(chrome, DOC_A)
+    mac.pywebview.windows.append(window)
+    full_screen(mac, "WillEnter", "DidEnter")
+    main, seen = threading.current_thread(), []
+    worker, outcome = hand_over(lambda: seen.append((threading.current_thread() is main, chrome._phase)))
+    mac.main.run(first=True)
+    full_screen(mac, "WillExit")
+    published = len(mac.webview.evaluated)
+    assert not native.mask & wc._FULL_SCREEN and native.calls.count("toggle full screen") == 1
+    with caplog.at_level("INFO", logger="launcher.window_chrome"):
+        native.delegate().windowDidFailToExitFullScreen_(native)
+    mac.main.run()
+    assert seen == [] and worker.is_alive() and wc._transfer.state == "pending", "still waiting, not refused"
+    assert chrome._phase == "exiting" and native.toolbar().visible and len(mac.webview.evaluated) == published
+    assert "a handoff waits for DidExit" in caplog.text
+    if then != "DidExit":
+        full_screen(mac, "WillEnter", "DidEnter")
+        mac.main.run()
+        assert native.calls.count("toggle full screen") == 2, "the stint that began asks anew"
+        full_screen(mac, "WillExit")
+    full_screen(mac, "DidExit")
+    mac.main.run()
+    assert seen == [(True, "windowed")] and released(worker, outcome) == {"ran": True}
+
+
+@pytest.mark.parametrize("mask", ["already full screen", "unreadable"])
+def test_a_failed_entry_the_mask_does_not_deny_changes_nothing_until_did_enter(mac, monkeypatch, mask):
+    """A failed entry whose live mask already holds full screen, or cannot be read, is no windowed window: the
+    phase, band and page stay as WillEnter left them, nothing runs, and DidEnter asks the window to leave."""
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
+    chrome, window, native = shown()
+    declare(chrome, DOC_A)
+    mac.pywebview.windows.append(window)
+    full_screen(mac, "WillEnter")
+    seen = []
+    worker, outcome = hand_over(lambda: seen.append("final"))
+    mac.main.run(first=True)
+    published = len(mac.webview.evaluated)
+    native.mask |= wc._FULL_SCREEN
+    if mask == "unreadable":
+        unreadable_mask_once(native)
+        native.mask &= ~wc._FULL_SCREEN  # unread, so never the reason to call the window windowed
+    native.delegate().windowDidFailToEnterFullScreen_(native)
+    mac.main.run()
+    assert chrome._phase == "entering" and not native.toolbar().visible and len(mac.webview.evaluated) == published
+    assert seen == [] and worker.is_alive() and wc._transfer.state == "pending", "the handoff waits for DidEnter"
+    assert "toggle full screen" not in native.calls
+    full_screen(mac, "DidEnter")
+    mac.main.run()
+    assert native.calls.count("toggle full screen") == 1 and seen == []
+    native.mask &= ~wc._FULL_SCREEN
+    leave_full_screen(mac, native)
+    mac.main.run()
+    assert seen == ["final"] and released(worker, outcome) == {"ran": True}
 
 
 def test_a_failed_entry_restores_the_windowed_title_bar_and_the_waiting_handoff_runs(mac, monkeypatch):
@@ -1137,6 +1215,7 @@ def test_a_failed_entry_restores_the_windowed_title_bar_and_the_waiting_handoff_
     worker, outcome = hand_over(lambda: seen.append(threading.current_thread() is main))
     mac.main.run(first=True)
     assert seen == [] and "toggle full screen" not in native.calls, "a transition under way is never toggled"
+    assert not native.mask & wc._FULL_SCREEN, "the live mask denies full screen"
     native.delegate().windowDidFailToEnterFullScreen_(native)
     assert chrome._phase == "windowed" and native.toolbar().visible
     assert mac.webview.evaluated[-1]["top"] == TOOLBAR_BAND, "the band is reserved again"
@@ -1146,6 +1225,96 @@ def test_a_failed_entry_restores_the_windowed_title_bar_and_the_waiting_handoff_
     mac.main.run()
     assert seen == [True] and released(worker, outcome) == {"ran": True}
     assert "toggle full screen" not in native.calls
+
+
+@pytest.mark.parametrize("when", ["never in full screen", "after DidExit"])
+def test_a_late_or_repeated_failed_exit_of_a_windowed_window_changes_nothing(mac, when):
+    """A failed exit said once the window is windowed, its mask out of full screen (late, or said again), leaves the
+    ordinary window as it is: windowed, its band shown, nothing published."""
+    chrome, window, native = shown()
+    declare(chrome, DOC_A)
+    if when == "after DidExit":
+        full_screen(mac, "WillEnter", "DidEnter")
+        leave_full_screen(mac, native)
+    published = len(mac.webview.evaluated)
+    assert chrome._phase == "windowed" and native.toolbar().visible
+    for _ in range(2):
+        native.delegate().windowDidFailToExitFullScreen_(native)
+    assert chrome._phase == "windowed" and native.toolbar().visible and len(mac.webview.evaluated) == published
+
+
+def test_a_failed_exit_the_mask_contradicts_without_did_exit_ends_at_the_deadline(mac, monkeypatch):
+    """The remainder #3198 shares: a failed exit said while the mask is already out, then no DidExit. The waiting
+    handoff is abandoned at its deadline, nothing torn down; a transition still under way is never toggled, so the
+    next handoff asks nothing and is abandoned too; once AppKit settles the window in full screen, a handoff asks."""
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 0.3)
+    chrome, window, native = shown()
+    mac.pywebview.windows.append(window)
+    full_screen(mac, "WillEnter", "DidEnter")
+    seen = []
+    worker, outcome = hand_over(lambda: seen.append("first"))
+    mac.main.run(first=True)
+    full_screen(mac, "WillExit")
+    first = wc._transfer
+    native.delegate().windowDidFailToExitFullScreen_(native)
+    mac.main.run()
+    assert finished(worker, outcome) == {"ran": False} and first.state == "abandoned", "the deadline, not a refusal"
+    worker, outcome = hand_over(lambda: seen.append("second"))
+    mac.main.run(first=True)
+    assert finished(worker, outcome) == {"ran": False} and wc._transfer.state == "abandoned"
+    assert chrome._phase == "exiting" and native.calls.count("toggle full screen") == 1, "never toggled mid-exit"
+    full_screen(mac, "WillEnter", "DidEnter")
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
+    worker, outcome = hand_over(lambda: seen.append("third"))
+    mac.main.run(first=True)
+    assert native.calls.count("toggle full screen") == 2, "a stint AppKit confirmed is asked anew"
+    leave_full_screen(mac, native)
+    mac.main.run()
+    assert released(worker, outcome) == {"ran": True} and seen == ["third"]
+
+
+def test_a_failed_entry_judged_windowed_refuses_once_the_mask_turns_full_screen(mac, monkeypatch):
+    """A failed entry with the mask out is windowed, yet the handoff's turn reads the live mask again: one that took
+    the full-screen bit meanwhile is unknown, so the handoff refuses and nothing runs."""
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
+    chrome, window, native = shown()
+    mac.pywebview.windows.append(window)
+    full_screen(mac, "WillEnter")
+    seen = []
+    worker, outcome = hand_over(lambda: seen.append("final"))
+    mac.main.run(first=True)
+    native.delegate().windowDidFailToEnterFullScreen_(native)
+    assert chrome._phase == "windowed" and mac.main.turns, "a turn to look again is posted"
+    native.mask |= wc._FULL_SCREEN
+    mac.main.run()
+    assert released(worker, outcome) == {"ran": False} and seen == []
+    assert "toggle full screen" not in native.calls
+
+
+def test_a_failed_exit_the_mask_contradicts_in_one_of_two_windows_settles_nothing(mac, monkeypatch):
+    """Two observed windows asked to leave: one says its exit failed with the mask already out. The handoff still
+    waits for both DidExit and runs only in the turn that found both windowed."""
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
+    first, first_window, first_native = shown()
+    full_screen(mac, "WillEnter", "DidEnter")
+    first_observers = dict(mac.observers)  # the stand-in center keeps only the last window's observers
+    second, second_window, second_native = shown()
+    full_screen(mac, "WillEnter", "DidEnter")
+    mac.pywebview.windows.extend([first_window, second_window])
+    seen = []
+    worker, outcome = hand_over(lambda: seen.append((first._phase, second._phase)))
+    mac.main.run(first=True)
+    assert first_native.calls.count("toggle full screen") == second_native.calls.count("toggle full screen") == 1
+    first_observers["NSWindowWillExitFullScreenNotification"](None)
+    first_native.delegate().windowDidFailToExitFullScreen_(first_native)
+    mac.main.run()
+    assert seen == [] and worker.is_alive() and wc._transfer.state == "pending"
+    first_observers["NSWindowDidExitFullScreenNotification"](None)
+    mac.main.run()
+    assert seen == [] and wc._transfer.state == "pending", "the other window is still in full screen"
+    leave_full_screen(mac, second_native)
+    mac.main.run()
+    assert seen == [("windowed", "windowed")] and released(worker, outcome) == {"ran": True}
 
 
 class AnsweringDelegate(PywebviewDelegate):
@@ -1183,6 +1352,7 @@ def test_the_failure_delegate_forwards_the_previous_ones_messages_and_gives_it_b
     full_screen(mac, "WillEnter")
     delegate.windowDidFailToEnterFullScreen_(native)
     full_screen(mac, "WillEnter", "DidEnter", "WillExit")
+    native.mask |= wc._FULL_SCREEN  # a real failure: the mask stays in full screen
     delegate.windowDidFailToExitFullScreen_(native)
     if previous == "answering":
         assert own.messages == [(wc._FAILED_ENTER, native), (wc._FAILED_EXIT, native)], "forwarded as received"
@@ -1275,6 +1445,23 @@ def test_a_stop_before_the_windows_agree_asks_no_window_to_leave_and_runs_nothin
         leave_full_screen(mac, native)
         mac.main.run()
     assert released(worker, outcome) == {"ran": False} and seen == []
+
+
+@pytest.mark.parametrize("cause", ["stop", "window refuses"])
+def test_the_refusal_log_names_a_stop_apart_from_a_window_that_cannot_leave(mac, caplog, cause):
+    """launcher.log is the evidence trail of a refused handoff: a Stop names itself, never a window state it checked
+    not, and a window that cannot be confirmed windowed keeps the generic line."""
+    _chrome, window, native = shown()
+    mac.pywebview.windows.append(window)
+    full_screen(mac, "WillEnter", "DidEnter")
+    if cause == "window refuses":
+        native.visible = False  # hidden in full screen: only showing it could end its stint
+    with caplog.at_level("WARNING", logger="launcher.window_chrome"):
+        worker, outcome = hand_over(cancelled=lambda: cause == "stop")
+        mac.main.run(first=True)
+        assert finished(worker, outcome) == {"ran": False}
+    stop, generic = "A Stop came before the windows agreed", "cannot be confirmed out of full screen"
+    assert (stop in caplog.text, generic in caplog.text) == ((True, False) if cause == "stop" else (False, True))
 
 
 def test_without_its_webview_the_window_stays_ordinary(mac, monkeypatch):
