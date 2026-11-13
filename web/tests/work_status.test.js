@@ -72,7 +72,7 @@ test('the mark is the server\'s shape; whose move it is stands beside it, said i
         'a Pause still settling: neutral ink, the server\'s moving mark');
     const queued = roomStatusView({ room: room('queued') });
     assert.deepEqual([queued.text, queued.mark, queued.tone], ['Queued', 'still', 'queued']);
-    // A working room with a question elsewhere keeps its word and its shape; the owner's dot takes the mark's place.
+    // A working room with a question elsewhere keeps its word and its moving shape, in the owner's hue.
     const mixed = roomStatusView({ room: room('working', { turn: [{ kind: 'question', task_id: 'x', quiz_id: 'q' }] }) });
     assert.deepEqual([mixed.text, mixed.tone, mixed.mark, mixed.owner, mixed.amber], ['Working', 'live', 'moving', true, 'question']);
     assert.deepEqual(markView(mixed), { shape: 'moving', hue: 'owner' });
