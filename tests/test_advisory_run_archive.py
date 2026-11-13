@@ -7,8 +7,9 @@ a ``readiness_warning:advisory:`` fingerprint) — survives every ordinary save 
 stored and is named where it lives (``review_status.advisory_run_archive``, the store
 actually read), while the context, the ``review_status`` projection and the task evidence
 read as if it were absent. An ``advisory_stale`` debt copy of the stale marker is archived
-the same way; the preflight look and its marker stay live beside it, and live debts keep
-their ordinary lifecycle.
+the same way; the preflight look and its marker stay live beside it. The retired obligation
+layer's own debts are an archive too, kept in the same stored list and named by
+``review_status.obligation_archive``; no live debt remains.
 
 Retired with that decision, because their subject no longer exists: rendering old runs in
 the historical ledger, the ``review_status`` run list and its run-derived freshness
@@ -162,11 +163,10 @@ def test_archive_rows_survive_ordinary_attempt_and_commit_saves_exactly_as_store
     def assert_archive_as_stored():
         saved = _saved(drive)
         # The exact original subtrees, byte for byte: unknown fields, the whole raw_result, more
-        # than five evidence lines, empty and missing timestamps, null and odd-typed values.
-        assert _compact(saved["advisory_runs"]) == _compact(original["advisory_runs"])
-        assert _compact(saved["commit_readiness_debts"][-len(archived):]) == _compact(archived), (
-            "kept as stored, after the live")
-        assert [row["debt_id"] for row in saved["commit_readiness_debts"]].count("crd-0005") == 1
+        # than five evidence lines, empty and missing timestamps, null and odd-typed values, and
+        # the debts in their stored order, neither verified, pruned nor joined by a new one.
+        for key in ("advisory_runs", "commit_readiness_debts"):
+            assert _compact(saved[key]) == _compact(original[key]), key
         return saved
 
     # The ordinary production writes: reviewed attempts under the locked read-modify-write.
@@ -174,20 +174,11 @@ def test_archive_rows_survive_ordinary_attempt_and_commit_saves_exactly_as_store
         repo_key, 1, readiness_warnings=["modern warning"],
         critical_findings=[{"item": "tests_affected", "reason": "add a test", "severity": "critical",
                             "verdict": "FAIL"}])))
-    saved = assert_archive_as_stored()
-    live_rows = {row["debt_id"]: row for row in saved["commit_readiness_debts"][:-len(archived)]}
-    # The modern warning's debt takes the next free id: the archived crd-0005 is never reused.
-    assert live_rows["crd-0006"]["fingerprint"].startswith("readiness_warning:attempt:")
-    # Each half of the archive predicate alone is live debt, verified when no longer observed.
-    assert {live_rows[debt_id]["status"] for debt_id in ("crd-0001", "crd-0002")} == {"verified"}
-    assert [debt.debt_id for debt in load_state(drive).get_open_commit_readiness_debts(repo_key=repo_key)] == ["crd-0006"]
-
+    assert_archive_as_stored()
     update_state(drive, lambda state: state.record_attempt(_succeeded(repo_key, 2)))
-    assert {row["status"] for row in assert_archive_as_stored()["commit_readiness_debts"][:-len(archived)]} == {
-        "verified"}
+    assert_archive_as_stored()
     update_state(drive, lambda state: state.on_successful_commit(repo_key=None))
     assert_archive_as_stored()
-    assert load_state(drive).get_open_commit_readiness_debts() == []
 
 
 def test_review_status_names_the_store_it_read_and_existing_readers_return_the_rows(ctx):
@@ -205,7 +196,8 @@ def test_review_status_names_the_store_it_read_and_existing_readers_return_the_r
     assert "history only" in archive["note"].lower() and "readiness_warning:advisory:" in archive["note"]
     assert "advisory_stale" in archive["note"]
     assert "advisory_runs" not in status and "latest_advisory_hash" not in status
-    assert status["latest_advisory_status"] == "none" and status["commit_readiness_debts"] == []
+    assert status["latest_advisory_status"] == "none" and "commit_readiness_debts" not in status
+    assert "obligation_archive" not in status, "the advisory lane's debts are its own archive"
 
     rows = json.loads(_query_data(ctx, op="json", kind="advisory_review", select="advisory_runs"))
     # query_data answers canonical (sorted-key) JSON; every row and value is there.
@@ -245,50 +237,42 @@ def test_context_status_and_evidence_read_as_if_the_archive_were_absent(ctx):
     assert (archived_context, archived_ledger, archived_evidence) == (context, ledger, evidence)
     assert {key: value for key, value in archived_status.items() if key != "advisory_run_archive"} == status
     assert "advisory_run_archive" not in status
-    assert "ARCHIVE" not in _compact([archived_context, archived_ledger, archived_evidence,
-                                      archived_status["commit_readiness_debts"]])
+    assert "ARCHIVE" not in _compact([archived_context, archived_ledger, archived_evidence])
     for retired in ("recent_advisory_runs", "foreign_advisory_runs", "advisory_status", "snapshot_hash"):
         assert retired not in archived_evidence and retired not in archived_evidence["current_repo"], retired
-    # The modern owed work and the look's stale marker still reach every surface.
-    assert "open_obligations=1" in context and "stale_marker=" in context and "invalidated_by=task task-a" in context
-    assert evidence["current_repo"]["stale_task_id"] == "task-a" and evidence["open_obligations"]
-    assert status["stale_from_edit"] is True and status["commit_readiness_debts_count"] == 1
+    # The modern finding and the look's stale marker still reach every surface.
+    assert "tests_affected: add a test" in context and "stale_marker=" in context and "invalidated_by=task task-a" in context
+    assert evidence["current_repo"]["stale_task_id"] == "task-a"
+    assert status["stale_from_edit"] is True and status["selected_commit_attempt"]["critical_findings"] == 1
 
 
-def test_live_debts_keep_their_lifecycle_and_bound_beside_the_archive(tmp_path):
-    repo_key = make_repo_key(_checkout(tmp_path))
-    drive = tmp_path / "drive"
-    archived = _archived_debts(repo_key)
-    closed = [{"debt_id": f"crd-{n:04d}", "category": "obligation_repeat", "summary": f"closed {n}",
-               "status": "verified", "repo_key": repo_key, "fingerprint": f"obligation_repeat:obl-{n:04d}",
-               "source": "review_state", "updated_at": f"2026-07-01T00:{n % 60:02d}:00+00:00"}
-              for n in range(100, 160)]
-    _inject_archive(drive, [], [*archived, *_live_debts(repo_key), *closed])
+def test_review_status_names_the_obligation_archive_and_projects_no_obligation_or_debt(ctx):
+    """``review_status`` projects no obligation, debt or retry anchor, and its next step names none.
+    When the state file holds what the retired obligation layer stored, ``obligation_archive`` names the store it
+    read and counts those rows as stored, the advisory lane's debts staying in ``advisory_run_archive``; with none
+    it is absent."""
+    from ouroboros.tools.preflight_review import _handle_review_status
 
-    def debts():
-        saved = _saved(drive)["commit_readiness_debts"]
-        assert _compact(saved[-len(archived):]) == _compact(archived), "the archive is never resolved or pruned"
-        return {row["debt_id"]: row for row in saved[:-len(archived)]}
+    drive = pathlib.Path(ctx.drive_root)
+    repo_key = make_repo_key(ctx.repo_dir)
+    retired = {"open_obligations", "open_obligations_count", "commit_readiness_debts", "commit_readiness_debts_count",
+               "retry_anchor"}
+    plain = json.loads(_handle_review_status(ctx))
+    assert "obligation_archive" not in plain and not retired & set(plain)
 
-    assert [debt.debt_id for debt in load_state(drive).get_open_commit_readiness_debts(repo_key=repo_key)] == [
-        "crd-0001", "crd-0002"]
-    # Nothing observes the live debts now: they are verified, and the retention bound
-    # prunes only live closed rows — the archive rides outside it.
-    update_state(drive, lambda state: state.record_attempt(_blocked(repo_key, 1)))
-    live = debts()
-    assert len(live) == 50 and {live[debt_id]["status"] for debt_id in ("crd-0001", "crd-0002")} == {"verified"}
-    # The stale marker is the one freshness fact: it mints no debt, and the archived
-    # ``advisory_stale`` copy is neither reopened nor verified.
-    def stale_then_review(state):
-        state.mark_look_stale("2026-01-01T00:00:00+00:00", reason_ts="2026-10-28T11:00:00+00:00", reason="an edit",
-                              stale_repo_key=repo_key, stale_task_id="task-a")
-        state.record_attempt(_blocked(repo_key, 2))
+    data = _inject_archive(drive, _archive_rows(repo_key), [*_archived_debts(repo_key), *_live_debts(repo_key)])
+    data.update(open_obligations=[{"obligation_id": "obl-0004", "item": "tests_affected", "status": "still_open",
+                                   "repo_key": repo_key, "reason": "OBLIGATION-SENTINEL"}], next_obligation_seq=5)
+    (drive / _STATE_RELPATH).write_text(_compact(data), encoding="utf-8")
 
-    update_state(drive, stale_then_review)
-    assert "crd-0003" not in debts() and load_state(drive).get_open_commit_readiness_debts() == []
-    update_state(drive, lambda state: state.on_successful_commit(repo_key=None))
-    debts()
-    assert load_state(drive).get_open_commit_readiness_debts() == []
+    status = json.loads(_handle_review_status(ctx))
+    archive = status["obligation_archive"]
+    assert archive["path"] == str((drive / _STATE_RELPATH).resolve())
+    assert (archive["open_obligations"], archive["commit_readiness_debts"]) == (1, 3)
+    assert "history only" in archive["note"] and "Review Continuity" in archive["note"]
+    assert status["advisory_run_archive"]["advisory_debts"] == 4, "the advisory archive keeps its own count"
+    assert not retired & set(status) and "obligation" not in status["next_step"].lower()
+    assert "OBLIGATION-SENTINEL" not in json.dumps(status) and "live crd-" not in json.dumps(status)
 
 
 def test_a_preflight_look_still_stales_on_edit_beside_fresh_archive_rows(ctx):

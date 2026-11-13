@@ -1390,7 +1390,7 @@ def get_tools() -> List[ToolEntry]:
         "since_review": _string(
             "A review_record_id of an earlier change review of this same repository (another task or copy of "
             "it) to compare with: seats are shown what changed since that review's subject, its verdict only as a "
-            "label of those earlier bytes; no PASS, finding or obligation carries over. An unknown, foreign or "
+            "label of those earlier bytes; no PASS or finding carries over. An unknown, foreign or "
             "unreadable record is a stated comparison gap. Omitted: the reviews this task already bound on this "
             "checkout are compared."),
     }

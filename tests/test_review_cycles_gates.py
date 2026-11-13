@@ -101,12 +101,14 @@ def test_finalize_blocked_review_records_block_class(tmp_path, monkeypatch):
 
 
 def test_an_owner_stop_is_named_by_its_cause_never_as_a_review_refusal(tmp_path, monkeypatch):
-    """The owner's stop of a commit review: its cause in words, its own phase and continuation source, the review's
-    findings kept, and no light-model call spent after the stop; a reviewer's refusal still synthesizes."""
+    """The owner's stop of a commit review: its cause in words, its own phase and continuation
+    source, and no commit. Neither the stop nor a blocked review asks a model about the findings or turns them into
+    obligations or debt: each attempt and its continuation keep the findings exactly as the reviewers gave them, and
+    the state file gains no obligation or debt key."""
     import ouroboros.cancel_intents as intents
     import ouroboros.tools.git as git_mod
-    from ouroboros import review_custody
-    from ouroboros.review_state import load_state, make_repo_key
+    from ouroboros import llm, review_custody
+    from ouroboros.review_state import _STATE_RELPATH, load_state, make_repo_key
     from ouroboros.task_continuation import load_review_continuation
 
     ctx = types.SimpleNamespace(drive_root=tmp_path, task_id="t1")
@@ -119,30 +121,33 @@ def test_an_owner_stop_is_named_by_its_cause_never_as_a_review_refusal(tmp_path,
     assert "owner" not in review_custody.REVIEW_STOP_WORDS["stopped"], "a stop is not always the owner's"
 
     monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **k: "")
-    calls = []
-    monkeypatch.setattr("ouroboros.tools.review_synthesis.synthesize_to_canonical_issues",
-                        lambda findings, **k: calls.append("synthesis") or list(findings))
-    monkeypatch.setattr("ouroboros.review_state.compute_obligation_semantic_redirects",
-                        lambda *a, **k: calls.append("dedup") or {})
-    findings = [{"item": "x", "reason": "r", "severity": "critical", "verdict": "FAIL"}]
-    for task, reason in (("t-stop", "owner_stopped"), ("t-refused", "critical_findings")):
+    monkeypatch.setattr(llm.LLMClient, "chat", lambda *a, **k: pytest.fail("no model is asked about the findings"))
+    findings = [{"item": "x", "reason": "r", "severity": "critical", "verdict": "FAIL"},
+                {"item": "bug_x", "reason": "the same root cause, worded by another seat", "severity": "critical",
+                 "verdict": "FAIL"}]
+    cases = (("t-stop", "owner_stopped", "owner_control", "owner_stopped"),
+             ("t-refused", "critical_findings", "blocking_review", "blocked_review"))
+    for task, reason, phase, _source in cases:
         work = types.SimpleNamespace(
             repo_dir=tmp_path, drive_root=tmp_path, task_id=task, task_metadata={},
             _current_review_tool_name="commit_reviewed", _last_triad_models=[], _last_scope_model="",
             _last_triad_raw_results=[], _last_scope_raw_result={}, _review_degraded_reasons=[])
-        git_mod._finalize_blocked_review(
-            work, "msg", 0.0, combined_msg=f"{reason} words", block_reason=reason, combined_findings=findings,
+        returned = git_mod._finalize_blocked_review(
+            work, "msg", 0.0, combined_msg=f"{reason} words", block_reason=reason, combined_findings=list(findings),
             pre_fingerprint={"fingerprint": "fp"}, post_fingerprint={"fingerprint": "fp"}, block_class="verdict",
-            phase="owner_control" if reason == "owner_stopped" else "blocking_review")
-        if reason == "owner_stopped":
-            assert calls == [], "no model is spent after the owner's stop"
+            phase=phase)
+        assert returned == f"{reason} words"
     rows = {row.task_id: row for row in load_state(pathlib.Path(tmp_path)).filter_attempts(
         repo_key=make_repo_key(pathlib.Path(tmp_path)))}
-    assert rows["t-stop"].phase == "owner_control" and rows["t-stop"].block_reason == "owner_stopped"
-    assert rows["t-stop"].critical_findings, "the review's findings stay on the stopped attempt"
-    assert rows["t-refused"].phase == "blocking_review" and calls == ["synthesis", "dedup"]
-    assert load_review_continuation(pathlib.Path(tmp_path), "t-stop").source == "owner_stopped"
-    assert load_review_continuation(pathlib.Path(tmp_path), "t-refused").source == "blocked_review"
+    for task, reason, phase, source in cases:
+        assert (rows[task].phase, rows[task].block_reason, rows[task].status) == (phase, reason, "blocked")
+        assert rows[task].critical_findings == findings and rows[task].obligation_ids == []
+        continuation = load_review_continuation(pathlib.Path(tmp_path), task)
+        assert continuation.source == source and continuation.critical_findings == findings
+        assert continuation.obligation_ids == [] and continuation.open_obligations == []
+    saved = json.loads((pathlib.Path(tmp_path) / _STATE_RELPATH).read_text(encoding="utf-8"))
+    for key in ("open_obligations", "next_obligation_seq", "commit_readiness_debts", "next_commit_readiness_debt_seq"):
+        assert key not in saved, key
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ouroboros.utils import atomic_write_json, replace_atomic, utc_now_iso
 
@@ -30,6 +30,8 @@ class ReviewContinuation:
     block_details: str = ""
     critical_findings: List[Dict[str, Any]] = field(default_factory=list)
     advisory_findings: List[Dict[str, Any]] = field(default_factory=list)
+    # Marks of the retired obligation layer: ids an attempt recorded before it retired carries, and the snapshot of
+    # this checkout's still-open stored obligations taken at each write; read only as open work (``open_work_matcher``).
     obligation_ids: List[str] = field(default_factory=list)
     open_obligations: List[Dict[str, Any]] = field(default_factory=list)
     readiness_warnings: List[str] = field(default_factory=list)
@@ -39,6 +41,8 @@ class ReviewContinuation:
     parent_task_id: str = ""
     created_ts: str = ""
     updated_ts: str = ""
+    # The attempt's review ledger record, where every seat's answer stays as written; "" = unknown (an older file).
+    review_record_id: str = ""
 
 
 def continuation_dir(drive_root: Any) -> pathlib.Path:
@@ -179,9 +183,8 @@ def retire_settled_continuations(
 
     Age alone never proves the blocked review work landed. When the caller can
     check, it supplies ``has_open_work(continuation) -> bool``: a settled-and-old
-    continuation whose recorded obligations are STILL open in the review ledger
-    is kept in place — it remains the designed resume pointer for genuinely
-    unresolved work (P1/P3). Only provably-closed records ride the age path.
+    continuation that still records open work is kept in place — it remains the
+    designed resume pointer for genuinely unresolved work (P1/P3).
     """
     retired: List[str] = []
     for path in sorted(continuation_dir(drive_root).glob("*.json")):
@@ -209,10 +212,10 @@ def retire_settled_continuations(
 def build_review_continuation(
     task: Dict[str, Any],
     attempt: Any,
-    open_obligations: List[Any],
     *,
     source: str,
     warning: str = "",
+    earlier_open_obligations: Sequence[Dict[str, Any]] = (),
 ) -> Optional[ReviewContinuation]:
     task_id = str(task.get("id") or "").strip()
     if not task_id:
@@ -221,7 +224,7 @@ def build_review_continuation(
     warnings = [str(item) for item in (getattr(attempt, "readiness_warnings", []) or []) if str(item).strip()]
     if warning:
         warnings.append(str(warning))
-    if attempt is None and not open_obligations:
+    if attempt is None and not earlier_open_obligations:
         if source != "task_exception" or not warnings:
             return None
         return ReviewContinuation(
@@ -246,13 +249,16 @@ def build_review_continuation(
         block_details=str(getattr(attempt, "block_details", "") or ""),
         critical_findings=list(getattr(attempt, "critical_findings", []) or []),
         advisory_findings=list(getattr(attempt, "advisory_findings", []) or []),
-        obligation_ids=list(getattr(attempt, "obligation_ids", []) or []),
-        open_obligations=[_obligation_to_dict(item) for item in open_obligations],
         readiness_warnings=warnings,
         degraded_reasons=list(getattr(attempt, "degraded_reasons", []) or []),
         warnings=[str(item) for item in warnings if str(item).strip()],
         task_type=str(task.get("type") or ""),
         parent_task_id=str(task.get("parent_task_id") or ""),
+        review_record_id=str(getattr(attempt, "review_record_id", "") or ""),
+        # Only an attempt recorded before obligations retired carries ids. The snapshot is read again at every write,
+        # so a continuation written again keeps its mark while those stored obligations stay open.
+        obligation_ids=[str(x) for x in (getattr(attempt, "obligation_ids", None) or [])],
+        open_obligations=[dict(row) for row in earlier_open_obligations],
     )
 
 
@@ -279,12 +285,8 @@ def capture_review_continuation_from_state(
     )
     obligation_repo_key = str(getattr(attempt, "repo_key", "") or repo_key or "")
     continuation = build_review_continuation(
-        task,
-        attempt,
-        state.get_open_obligations(repo_key=obligation_repo_key or None),
-        source=source,
-        warning=warning,
-    )
+        task, attempt, source=source, warning=warning,
+        earlier_open_obligations=state.earlier_open_obligations(obligation_repo_key or None))
     if continuation is None:
         return None
     return save_review_continuation(drive_root, continuation, expect_task_id=task_id)
@@ -329,24 +331,8 @@ def _continuation_from_dict(data: Dict[str, Any], *, expected_task_id: str = "")
         parent_task_id=str(data.get("parent_task_id", "") or ""),
         created_ts=str(data.get("created_ts", "") or ""),
         updated_ts=str(data.get("updated_ts", "") or ""),
+        review_record_id=str(data.get("review_record_id", "") or ""),
     )
-
-
-def _obligation_to_dict(item: Any) -> Dict[str, Any]:
-    if isinstance(item, dict):
-        return item
-    return {
-        "obligation_id": str(getattr(item, "obligation_id", "") or ""),
-        "fingerprint": str(getattr(item, "fingerprint", "") or ""),
-        "item": str(getattr(item, "item", "") or ""),
-        "severity": str(getattr(item, "severity", "") or ""),
-        "reason": str(getattr(item, "reason", "") or ""),
-        "status": str(getattr(item, "status", "") or ""),
-        "source_attempt_ts": str(getattr(item, "source_attempt_ts", "") or ""),
-        "source_attempt_msg": str(getattr(item, "source_attempt_msg", "") or ""),
-        "created_ts": str(getattr(item, "created_ts", "") or ""),
-        "updated_ts": str(getattr(item, "updated_ts", "") or ""),
-    }
 
 
 def _quarantine_corrupt_continuation(drive_root: Any, task_id: str, *, reason: str) -> None:
@@ -389,19 +375,15 @@ def _safe_ts_token(ts: str) -> str:
 
 
 def open_work_matcher(state: Any) -> Any:
-    """Build ``has_open_work(continuation)`` from the ledger's open obligations.
-
-    ``state`` is duck-typed (``get_open_obligations(repo_key=None)``) so this
-    module keeps zero review-state imports. A continuation matches when any of
-    its recorded obligation markers is still open in the ledger.
-    """
+    """Build ``has_open_work(continuation)``: a continuation records open work while an obligation its marks name
+    (``obligation_ids`` or its ``open_obligations`` snapshot, by id or fingerprint) is still open among the rows the
+    retired layer stored, that is until a commit lands in that obligation's own checkout, when the layer cleared it
+    (``earlier_open_obligations``). A continuation that holds only findings, or names no stored open obligation,
+    follows the age rule. ``state`` is duck-typed so this module keeps zero review-state imports."""
     open_markers = {
         marker
-        for ob in state.get_open_obligations(repo_key=None)
-        for marker in (
-            str(getattr(ob, "obligation_id", "") or ""),
-            str(getattr(ob, "fingerprint", "") or ""),
-        )
+        for row in state.earlier_open_obligations(None)
+        for marker in (str(row.get("obligation_id") or ""), str(row.get("fingerprint") or ""))
         if marker
     }
 
@@ -409,8 +391,7 @@ def open_work_matcher(state: Any) -> Any:
         markers = {str(x) for x in (item.obligation_ids or [])}
         for entry in item.open_obligations or []:
             if isinstance(entry, dict):
-                markers.add(str(entry.get("obligation_id") or ""))
-                markers.add(str(entry.get("fingerprint") or ""))
+                markers.update((str(entry.get("obligation_id") or ""), str(entry.get("fingerprint") or "")))
         markers.discard("")
         return bool(markers & open_markers)
 
@@ -423,11 +404,10 @@ def retire_settled_continuations_for_context(
     """Retire aged settled continuations, keeping unresolved review work live.
 
     The Review Continuity preamble of ``build_review_context``: ``state``
-    supplies the open-obligation ledger and ``load_result(task_id)`` the task
+    supplies the review ledger and ``load_result(task_id)`` the task
     result dict — both injected so this module stays free of review-state and
-    task-result imports. A settled continuation recording a still-open ledger
-    obligation is unresolved review work — age must not archive it away
-    (P1/P3); only provably-closed records ride the age path.
+    task-result imports. A settled continuation that still records open work
+    (``open_work_matcher``) is not archived by age (P1/P3).
     """
     from ouroboros.task_status import SETTLED_STATUSES
 

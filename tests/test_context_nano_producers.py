@@ -49,9 +49,7 @@ def test_pool_and_continuity_keep_current_facts_once_with_history_by_address(tmp
     assert 'mode=advanced' in pool.operative_view and 'enforcement=' not in pool.operative_view
     assert all(row['subagent_id'] in pool.operative_view for row in shape.pool()['pool'])
     continuity = parts['review_continuity']
-    for debt in shape.review_state(tmp_path).commit_readiness_debts:
-        assert continuity.operative_view.count(debt.summary) == 1
-    assert continuity.operative_view.count('2026-10-23T12:00:00Z') == 1
+    assert continuity.operative_view.count('2026-10-23T12:00:00Z') == 1  # the stale marker, a current fact, once
     assert 'v7.4.0' in continuity.full_text and 'v7.4.0' not in continuity.operative_view
     assert 'review_status()' in continuity.operative_view
     from ouroboros.subagent_runtime import review_pool_host_section

@@ -25,25 +25,12 @@ log = logging.getLogger(__name__)
 
 _STATE_RELPATH = "state/advisory_review.json"
 _LOCK_RELPATH = "locks/advisory_review.lock"
-
-
-def _obligation_from_dict(d: Dict[str, Any]) -> ObligationItem:
-    return ObligationItem(
-        **{key: str(d.get(key, default)) for key, default in _OBLIGATION_STR_DEFAULTS.items()},
-        fingerprint=str(d.get("fingerprint", "") or _make_obligation_fingerprint(d.get("item", ""), d.get("reason", ""))),
-        created_ts=str(d.get("created_ts", d.get("source_attempt_ts", ""))),
-        updated_ts=str(d.get("updated_ts", d.get("source_attempt_ts", ""))),
-    )
-
-
-def _commit_readiness_debt_from_dict(d: Dict[str, Any]) -> CommitReadinessDebtItem:
-    return CommitReadinessDebtItem(
-        **{key: str(d.get(key, default)) for key, default in _DEBT_STR_DEFAULTS.items()},
-        source_obligation_ids=[str(x) for x in (d.get("source_obligation_ids") or [])],
-        evidence=[str(x) for x in (d.get("evidence") or [])],
-        occurrence_count=_coerce_int(d.get("occurrence_count", 0)),
-        consecutive_observations=_coerce_int(d.get("consecutive_observations", 0)),
-    )
+# What the retired obligation layer stored, in its saved order; kept as an archive under these keys and written back
+# unchanged right after the attempts.
+RETIRED_REVIEW_KEYS = ("open_obligations", "next_obligation_seq", "commit_readiness_debts",
+                       "next_commit_readiness_debt_seq")
+_RETIRED_DEFAULTS = {"open_obligations": [], "next_obligation_seq": 1, "commit_readiness_debts": [],
+                     "next_commit_readiness_debt_seq": 1}
 
 
 def _malformed_roster_row(surface: str) -> Dict[str, Any]:
@@ -195,47 +182,24 @@ def _load_state_unlocked(
 
     advisory_runs = data.get("advisory_runs", [])
     attempts = [_commit_attempt_from_dict(item) for item in (item for item in raw_attempts if isinstance(item, dict))]
-    open_obligations = [_obligation_from_dict(item) for item in (item for item in data.get("open_obligations", []) if isinstance(item, dict))]
-    raw_debts = [item for item in data.get("commit_readiness_debts", []) if isinstance(item, dict)]
-    commit_readiness_debts = [
-        _commit_readiness_debt_from_dict(item) for item in raw_debts if not _is_archived_advisory_debt(item)
-    ]
 
     state = AdvisoryReviewState(
         state_version=_coerce_int(data.get("state_version", data.get("schema_version", _STATE_SCHEMA_VERSION))),
         advisory_runs=list(advisory_runs) if isinstance(advisory_runs, list) else [],
         attempts=attempts,
-        open_obligations=open_obligations,
-        next_obligation_seq=_coerce_int(
-            data.get("next_obligation_seq", _infer_next_prefixed_sequence(open_obligations, "obl-")),
-            _infer_next_prefixed_sequence(open_obligations, "obl-"),
-        ),
-        commit_readiness_debts=commit_readiness_debts,
-        next_commit_readiness_debt_seq=_coerce_int(
-            data.get("next_commit_readiness_debt_seq", _infer_next_prefixed_sequence(commit_readiness_debts, "crd-")),
-            _infer_next_prefixed_sequence(commit_readiness_debts, "crd-"),
-        ),
         last_stale_from_edit_ts=str(data.get("last_stale_from_edit_ts", "")),
         last_stale_reason=str(data.get("last_stale_reason", "")),
         last_stale_repo_key=str(data.get("last_stale_repo_key", "")),
         last_stale_task_id=str(data.get("last_stale_task_id", "")),
         earlier_stale_markers=_earlier_stale_markers_from(data.get("earlier_stale_markers")),
-        archived_advisory_debts=[item for item in raw_debts if _is_archived_advisory_debt(item)],
+        # Empty lists and default counters carry nothing; an earlier body reads their absence as empty. A counter
+        # past its default is kept with the lists, so a rollback does not number a new obligation like an old one.
+        retired_review_rows=({key: data[key] for key in RETIRED_REVIEW_KEYS if key in data}
+                             if any(data.get(key) not in (None, default) for key, default in _RETIRED_DEFAULTS.items())
+                             else {}),
     )
 
     state.attempts.sort(key=_attempt_order_key)
-
-    state._coalesce_open_obligations()
-    state.next_obligation_seq = max(
-        1,
-        int(state.next_obligation_seq or 1),
-        _infer_next_prefixed_sequence(state.open_obligations, "obl-"),
-    )
-    state.next_commit_readiness_debt_seq = max(
-        1,
-        int(state.next_commit_readiness_debt_seq or 1),
-        _infer_next_prefixed_sequence(state.commit_readiness_debts, "crd-"),
-    )
     return state
 
 
@@ -247,69 +211,6 @@ def load_state(drive_root: pathlib.Path) -> AdvisoryReviewState:
         path = drive_root / _STATE_RELPATH
         log.warning("Failed to load advisory review state from %s: %s", path, e)
         return AdvisoryReviewState()
-
-
-def compute_obligation_semantic_redirects(
-    state: AdvisoryReviewState,
-    findings: List[Any],
-    *,
-    repo_key: str,
-    drive_root: Any,
-) -> Dict[str, str]:
-    """Off-lock C9.3 pre-pass: for each FAIL/critical FREE-TEXT (bug_*/risk_*) finding that
-    would miss the exact obligation fingerprint, ask the shared detector whether it
-    duplicates an OPEN obligation of the same repo. Returns ``{fingerprint -> obligation_id}``
-    for HIGH-confidence matches only.
-
-    Must run OUTSIDE the review-state lock (it calls a light model). Side-effect-free and
-    fail-open: any failure (model down, no candidates, parse error) yields no redirect — the
-    finding becomes a new obligation — and it NEVER blocks review. Checklist-item findings are
-    skipped: they fold only as an exact restatement or by a reused open ``obligation_id``."""
-    try:
-        if not findings:
-            return {}
-        open_obs = state.get_open_obligations(repo_key=repo_key)
-        if not open_obs:
-            return {}
-        existing_fps = {str(ob.fingerprint or "") for ob in open_obs if ob.fingerprint}
-        candidates = [
-            {"id": ob.obligation_id, "text": f"{ob.item}: {ob.reason}".strip(": ")}
-            for ob in open_obs[:20]
-            if ob.obligation_id and (str(ob.item or "").strip() or str(ob.reason or "").strip())
-        ]
-        if not candidates:
-            return {}
-
-        from ouroboros.semantic_dedup import find_semantic_duplicate_id
-
-        redirects: Dict[str, str] = {}
-        for f in findings:
-            if not isinstance(f, dict):
-                continue
-            if str(f.get("verdict", "")).upper() != "FAIL":
-                continue
-            if str(f.get("severity", "")).lower() != "critical":
-                continue
-            item = str(f.get("item", "unknown"))
-            reason = str(f.get("reason", ""))
-            # Only FREE-TEXT findings; a checklist item folds by fingerprint or reused id.
-            if _normalize_obligation_item_key(item):
-                continue
-            fingerprint = _make_obligation_fingerprint(item, reason)
-            if fingerprint in existing_fps or fingerprint in redirects:
-                continue
-            dup_id = find_semantic_duplicate_id(
-                f"{item}: {reason}".strip(": "),
-                candidates,
-                subject="code-review obligation (a critical finding that blocks commit until fixed)",
-                call_type="obligation_dedup",
-                drive_root=drive_root,
-            )
-            if dup_id:
-                redirects[fingerprint] = dup_id
-        return redirects
-    except Exception:
-        return {}
 
 
 _EVIDENCE_REF_KEYS = frozenset({"retained_in", "sha256", "bytes", "file_count"})
@@ -362,7 +263,6 @@ def _save_state_unlocked(
 ) -> None:
     path = drive_root / _STATE_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    _prepare_state_for_persistence(state)
     # Fill missing additive mappings before shallow encoding; keep legacy author/source bindings.
     for attempt in state.attempts:
         for name in ("author_disposition", "review_input"):
@@ -374,12 +274,8 @@ def _save_state_unlocked(
         "schema_version": _STATE_SCHEMA_VERSION,
         "advisory_runs": state.advisory_runs,
         "attempts": [_dataclass_mapping(r) for r in state.attempts],
-        "open_obligations": [_dataclass_mapping(o) for o in state.open_obligations],
-        "next_obligation_seq": int(state.next_obligation_seq or 1),
-        # The retired advisory lane's debts follow the live ones, exactly as stored.
-        "commit_readiness_debts": [*map(_dataclass_mapping, state.commit_readiness_debts),
-                                   *getattr(state, "archived_advisory_debts", ())],
-        "next_commit_readiness_debt_seq": int(state.next_commit_readiness_debt_seq or 1),
+        # What the retired obligation layer stored, exactly as loaded, where it stood (a ``__new__`` state has none).
+        **(getattr(state, "retired_review_rows", None) or {}),
         "last_stale_from_edit_ts": state.last_stale_from_edit_ts,
         "last_stale_reason": state.last_stale_reason,
         "last_stale_repo_key": state.last_stale_repo_key,
@@ -610,10 +506,8 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
     repo_key = make_repo_key(repo_dir) if repo_dir is not None else None
     attempts = state.filter_attempts(repo_key=repo_key) if repo_key is not None else list(state.attempts)
     last_attempt = state.latest_attempt_for(repo_key=repo_key) if repo_key is not None else state.latest_attempt()
-    open_obs = state.get_open_obligations(repo_key=repo_key)
-    open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
 
-    if last_attempt is None and not open_obs and not open_debts:
+    if last_attempt is None:
         return "## Advisory Pre-Review Status\n\nNo reviewed attempts recorded yet."
 
     lines = [
@@ -629,17 +523,6 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
     # the count and the recovery path; nothing is silently dropped.
     _LEDGER_ATTEMPT_CAP = 5
     _COMMIT_MSG_CAP = 300
-
-    if open_debts:
-        lines.append(f"\n### Commit-readiness debt ({len(open_debts)})")
-        for debt in open_debts:
-            lines.append(
-                f"- [{debt.debt_id}] [{str(debt.status or '').upper()}] {debt.title}: {debt.summary}"
-            )
-            if debt.source_obligation_ids:
-                lines.append(f"    obligations={', '.join(debt.source_obligation_ids)}")
-            for evidence in list(debt.evidence or []):
-                lines.append(f"    evidence={evidence}")
 
     if attempts:
         lines.append("\n### Recent reviewed attempts")
@@ -705,32 +588,8 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
         elif advisory_findings:
             _append_finding_lines(lines, advisory_findings, "Advisory findings")
 
-    if open_obs:
-        lines.append(f"\n📋 **Open obligations from previous blocking rounds ({len(open_obs)}):**")
-        for ob in open_obs:
-            lines.append(f"   [{ob.obligation_id}] [{ob.severity.upper()}] {ob.item}: {_truncate_review_reason(ob.reason, limit=120)}")
-            lines.append(f"      Source: {ob.source_attempt_ts} — \"{ob.source_attempt_msg}\"")
-        lines.append("   Advisory MUST verify each obligation is resolved before PASS.")
-
     return "\n".join(lines)
 
-
-def _prepare_state_for_persistence(state: AdvisoryReviewState) -> None:
-    """Normalize ledgers and counters before persistence."""
-    state._coalesce_open_obligations()
-    debts = _commit_readiness_debts_view(state)
-    for debt in debts:
-        state._hydrate_commit_readiness_debt(debt)
-    state.next_obligation_seq = max(
-        1,
-        int(state.next_obligation_seq or 1),
-        _infer_next_prefixed_sequence(state.open_obligations, "obl-"),
-    )
-    state.next_commit_readiness_debt_seq = max(
-        1,
-        int(state.next_commit_readiness_debt_seq or 1),
-        _infer_next_prefixed_sequence(debts, "crd-"),
-    )
 
 def _resolve_mutation_repo_keys(
     mutation_root: pathlib.Path | None,
@@ -783,46 +642,29 @@ def _build_invalidation_reason(
 # here so this facade stays the single import surface for callers and tests.
 from ouroboros.review_state_records import (  # noqa: E402, F401 -- intentional public re-exports
     CommitAttemptRecord,
-    CommitReadinessDebtItem,
-    ObligationItem,
     ReviewStateLockError,
     ReviewStateMutation,
     _ATTEMPT_MERGE_INCOMING_FIRST,
     _ATTEMPT_MERGE_INCOMING_LISTS,
     _ATTEMPT_STR_DEFAULTS,
-    _CANONICAL_OBLIGATION_ITEM_RE,
-    _DEBT_STR_DEFAULTS,
     _DEFAULT_TOOL_NAME,
     _LEGACY_CURRENT_REPO_KEY,
     _MAX_ATTEMPT_HISTORY,
-    _MAX_COMMIT_READINESS_DEBTS,
-    _OBLIGATION_STR_DEFAULTS,
-    _OPEN_COMMIT_READINESS_DEBT_STATUSES,
     _REVIEW_ATTEMPT_GRACE_SEC,
     _REVIEW_ATTEMPT_TTL_SEC,
     _STATE_SCHEMA_VERSION,
-    _allocate_prefixed_id,
     _append_finding_lines,
     _attempt_identity_tuple,
     _attempt_order_key,
     _coerce_int,
-    _commit_readiness_debts_view,
     _dataclass_mapping,
     _dedupe_strings,
     _filter_lifecycle_records,
     _filter_repo_scope,
-    _infer_next_prefixed_sequence,
     _is_archived_advisory_debt,
-    _looks_like_public_obligation_id,
-    _make_obligation_fingerprint,
-    _max_iso_ts,
     _merge_attempt,
-    _min_iso_ts,
     _normalize_findings,
-    _normalize_fingerprint_text,
-    _normalize_obligation_item_key,
     _parse_iso_ts,
-    _stable_digest,
     _utc_now,
     infer_review_phase,
 )

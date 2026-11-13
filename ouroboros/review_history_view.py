@@ -16,7 +16,7 @@ full bodies and adds a gap, never a replacement verdict or another paid call.
 
 The resident ``[Current review decisions]`` row is the 6A view of the mandatory
 part (``review_index_view``): every decision verbatim, the operative subject,
-untransferred attachments, open obligations and gaps, with reviewer letters,
+untransferred attachments and gaps, with reviewer letters,
 receipts, route/custody metadata and manifests behind one address table of exact
 readers. Its identity is the hash of those decision fields; a new copy is appended
 only when they change and is never rewritten in place between folds. Superseded
@@ -313,7 +313,7 @@ def project_decision_groups(history: dict, notes: Sequence[dict], *, source_hist
 
     Producers name current/open rows. Selection declares that the other named
     history is closed for this author's account; it never changes closure or
-    clears an obligation. The exact member list lives in the selected source.
+    clears open work. The exact member list lives in the selected source.
     """
     entries = {_sha(e["bound_decision"]): e for e in decision_entries(source_history) if e["bound_decision"]}
     result, groups, gaps, replaced = copy.deepcopy(history), [], [], {}
@@ -422,8 +422,7 @@ def review_index_view(mandatory: Mapping[str, Any], family: str, *, task_id: str
     """The resident row's content: the 6A content of one family's projected history with ONE address table.
 
     Verbatim: every decision row (finding, status, reason, standing and the actor's note; only its ``source``
-    becomes a key of ``addresses``), the operative subject, untransferred attachments, open obligations and
-    gaps. By address, each entry naming what it holds and the exact reader this task resolves: reviewer
+    becomes a key of ``addresses``), the operative subject, untransferred attachments and gaps. By address, each entry naming what it holds and the exact reader this task resolves: reviewer
     letters, outputs and receipts, route and custody metadata, manifests, coverage, earlier plan texts and
     author selections. A round with no addressable source stays whole in ``rounds``; unknown producer
     fields stay whole. Nothing is summarized; nothing leaves the durable record.
