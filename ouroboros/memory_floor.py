@@ -697,7 +697,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          working_reserve_tokens: Optional[int] = None,
                          measure_text: Optional[Callable[[str, str], int]] = None,
                          start_work: bool = False,
-                         max_room: Optional[Mapping[str, Any]] = None,
+                         max_room: Optional[Mapping[str, Any]] = None, stated_window_tokens: Optional[int] = None,
                          shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> ViewFit:
     """One mode's projection, the floor decided once.
 
@@ -720,6 +720,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     if kept is not None:
         target = context_budget.context_mode_limits(owner_mode, owner_mode, output_reserve)[0] if kept.by_budget else None
     window = int(window_tokens) if known_window and window_tokens else None
+    named = int(stated_window_tokens) if window is not None and stated_window_tokens else window  # as the note names it
     allowances = floor_allowances(window_tokens=window, output_reserve_tokens=reserve, non_memory_tokens=non_memory_tokens,
                                   target_tokens=None if kept is not None else target, calibration_ratio=ratio,
                                   work_room_levels=1 if kept is not None else snapshot.spec.work_room_levels,
@@ -729,7 +730,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     uncovered = uncovered_owner_rows(snapshot)
     def receipt(level):
-        note = floor_note(level, window_tokens=window, mode=mode, target_tokens=target, lowered_from=lowered_from,
+        note = floor_note(level, window_tokens=named, mode=mode, target_tokens=target, lowered_from=lowered_from,
                           tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot)
         if allowances["margin"] is not None and size(level) > allowances["margin"]:
             gone = dict(level.addressed)
@@ -748,7 +749,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                                 measure=measure)  # stops it before owner rows.
     elif level is None:
         level = fit_memory_view(snapshot, allowances, kept=kept or mv.FULL_VIEW, saving=saving, measure=measure)
-    facts = view_facts(snapshot, level, window_tokens=window, mode=mode, allowances=allowances,
+    facts = view_facts(snapshot, level, window_tokens=named, mode=mode, allowances=allowances,
                        target_tokens=target, lowered_from=lowered_from)
     bound = allowances["margin"]
     facts["floor"]["ordinary_unfit"] = bound is not None and measure(ordinary_level(snapshot)) > bound

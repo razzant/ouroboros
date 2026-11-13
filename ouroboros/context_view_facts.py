@@ -130,9 +130,8 @@ def required_book_fact(usage):
     if not book:
         return ""
     estimate, reserve = (int(usage.get(key) or 0) for key in ("_context_prompt_estimate", "_context_response_reserve_tokens"))
-    capacity, ceiling = usage.get("_context_capacity_total_tokens"), int(usage.get("_context_send_ceiling_tokens") or 0)
-    room = (" on a window nothing measured" if capacity is None else f" against {int(capacity) - reserve:,} usable"
-            if ceiling <= int(capacity) - reserve else f" against the {ceiling:,} this window admits")
+    capacity = usage.get("_context_capacity_total_tokens")
+    room = f" against {int(capacity) - reserve:,} usable" if capacity is not None else " on a window nothing measured"
     continues = "; a Continue keeps it" if size_refusal_cause(usage) in TECHNICAL_REASON_CODES else ""
     return (f"\nThis task directly requires the whole development handbook (~{book:,} tokens), which stayed; "
             f"without it the input is ~{max(0, estimate - book):,}{room}. {REQUIRED_BOOK_CHOICES.format(continues)}")
@@ -151,6 +150,9 @@ def window_projection(record):
     dated = f"{label} {observed.replace('T', ' ')[:16]}".strip()
     if limit:
         text = f"window {limit.tokens:,} {limit.kind}: {dated}; usable input {record.usable:,}"
+        if (record.admitted or 0) > record.usable:  # a request under way is read more favourably than a start is sized
+            text += (f" at a start, {record.admitted:,} for a request under way (the reply is counted outside this "
+                     "total until a size refusal says it is inside)")
     else:
         text = "window unknown"
         if record.accepted:
@@ -166,7 +168,7 @@ def window_projection(record):
         text += f"; old confirmation {record.retired_ack['window_tokens']:,}, {stamp} — not used"
     return dict(tokens=limit.tokens if limit else None, kind=limit.kind if limit else "unknown",
                 reserve=record.reserve, source=source, observed_at=observed, contradiction=contradiction,
-                retired_ack=record.retired_ack, usable=record.usable, text=text)
+                retired_ack=record.retired_ack, usable=record.usable, admitted=record.admitted, text=text)
 
 
 def window_fact(plan, reserve):

@@ -68,9 +68,6 @@ class MainFitMeasurement:
     required_book_tokens: int = 0
     preferred_mode: str = ""  # the plan's owner mode at this measurement
     mode_cause: str = ""  # why ``rendered_mode`` is lower than it (``mode_cause``); "" when it is not
-    # The largest input the pre-send check admits (``WindowRecord.send_ceiling``): the stated numbers read most
-    # favourably, while every fit keeps the reserve. None: an unknown window, or a producer that names none.
-    send_ceiling_tokens: Optional[int] = None
 
     @property
     def reprojection_input_tokens(self) -> Optional[int]:
@@ -155,8 +152,7 @@ def measure_main_fit(
     from ouroboros.context_fit import estimate_context_prompt_tokens
     from ouroboros.capability_evidence import canonical_evidence_root, is_known, resolve_main_token_density
     from ouroboros.context_budget import (
-        NANO_MIN_HEADROOM_TOKENS, OWNER_LOW_TARGET_TOKENS, OWNER_NANO_TARGET_TOKENS, context_mode_limits,
-        reply_allowance_tokens,
+        OWNER_LOW_TARGET_TOKENS, OWNER_NANO_TARGET_TOKENS, context_mode_limits, reply_allowance_tokens,
     )
 
     raw_input = int(estimate_context_prompt_tokens(messages, tools, provider=plan.provider, reasoning_effort=reasoning_effort))
@@ -181,7 +177,9 @@ def measure_main_fit(
     reading = int(plan.window_tokens or 0) if is_known(plan, require_fresh=True) else None
     current = resolve_window(plan, reserve, bound=plan.window_witness_bound,
                              accepted_input_tokens=accepted_input_tokens)
-    capacity = current.total_equivalent if current.usable is not None else None
+    # A round measures a request that exists: its capacity is the admitted line (``WindowRecord.admitted``) in the
+    # frame of consumers which subtract R, so the check, tool delivery, the passes and the facts line read one number.
+    capacity = current.admitted_equivalent if current.admitted is not None else None
     if capacity is None:
         reading = None
     raw_book = required_book_addition(plan, rendered_mode)
@@ -227,8 +225,6 @@ def measure_main_fit(
         window_witness_bound=plan.window_witness_bound,
         window_observation_fp=current.route_fp,
         required_book_tokens=book, preferred_mode=str(plan.preferred_mode or ""), mode_cause=mode_cause(plan, rendered_mode),
-        send_ceiling_tokens=current.send_ceiling(max(NANO_MIN_HEADROOM_TOKENS, plan.working_reserve_tokens or 0))
-        if capacity is not None else None,
     )
     action: Literal["send", "send_target_miss"] = (
         "send_target_miss" if target_deficit and target_deficit > 0 else "send")

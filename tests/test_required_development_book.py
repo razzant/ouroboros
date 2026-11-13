@@ -56,9 +56,9 @@ def fixed_density(monkeypatch):
                         lambda *_a, **_kw: (RATIO, "fresh_route_usage"))
 
 
-def _route(window, known=True):
+def _route(window, known=True, source="metadata"):
     evidence = SimpleNamespace(route_fp="route", status="confirmed" if known else "unprobeable",
-                               stale=False, window_tokens=window)
+                               stale=False, window_tokens=window, source=source)
     return lambda *_a, **_kw: ({"provider": "fixture", "model": "fixture"}, evidence)
 
 
@@ -77,9 +77,10 @@ def _core(root, *, required=False, subject=False, book_tokens=40_000, assignment
         memory_view_json=memory_view.snapshot_json(snapshot) if memory else "")
 
 
-def _plan(root, core, preferred, window, *, known=True, task=None):
+def _plan(root, core, preferred, window, *, known=True, task=None, source="metadata"):
     return fit.build_context_fit_plan(SimpleNamespace(drive_root=root), core, task or {"id": "t", "type": "task"},
-                                      preferred_mode=preferred, tool_schemas=SCHEMAS, route_resolver=_route(window, known))
+                                      preferred_mode=preferred, tool_schemas=SCHEMAS,
+                                      route_resolver=_route(window, known, source))
 
 
 def _blocks(plan, mode):
@@ -506,14 +507,17 @@ def test_ordinary_unasked_outputs_are_the_same_beside_the_book_on_a_roomy_route(
 
 
 def test_a_tight_route_delivers_the_ordinary_output_and_the_admission_charges_the_book(tmp_path, fixed_density):
-    """Astra's pair: a window with 2,000 tokens beside the book's start. The output is the one the same view without
-    the book gets; the next request is then over by what the book adds alone, which the admission refuses by name."""
+    """Astra's pair: a window with 2,000 tokens beside the book's start, on a route whose one buffer holds the reply
+    too (a local server states it), so a request under way has the room its start had. The output is the one the same
+    view without the book gets; the next request is then over by what the book adds alone, which the admission
+    refuses by name."""
     shape = dict(memory=False, book_tokens=100_000)
     roomy = _plan(tmp_path, _core(tmp_path, required=True, **shape), "low", 1_000_000)
     window = math.ceil((roomy.low_projection.estimated_tokens + fit.tool_schema_tokens(SCHEMAS)) * RATIO) + RESERVE + 2_000
     text = "An ordinary command output line.\n" * 1_000
     (plain, plain_receipt), (held, receipt) = (_batch(_plan(tmp_path, _core(tmp_path, required=required, **shape), "low",
-                                                            window), text) for required in (False, True))
+                                                            window, source="local_health"), text)
+                                               for required in (False, True))
     assert held["result"] == plain["result"] == text and not held.get("result_partial")
     assert receipt["unsolicited_allowance_tokens"] == plain_receipt["unsolicited_allowance_tokens"] > 2_000
     assert not plain_receipt["fit"]["capacity_deficit_tokens"]

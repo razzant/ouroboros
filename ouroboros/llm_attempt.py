@@ -516,9 +516,7 @@ def refused_candidate_facts(request: AttemptRequest, **measurement: Any) -> Dict
 
 
 def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]]:
-    """Final-candidate W/R/P for Main admission; exact local input outranks density. An estimate refuses only
-    above the candidate's send ceiling (``WindowRecord.send_ceiling``: the stated numbers read most favourably);
-    the refusal's facts keep the whole reserve, which is what the passes after it restore."""
+    """Final-candidate W/R/P for Main admission; exact local input outranks density."""
     from ouroboros.context_budget import context_mode_limits
     from ouroboros.context_fit import reclaim_low_water_margin
 
@@ -538,9 +536,7 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
     size = request.prompt_tokens_exact if exact else math.ceil(
         request.prompt_tokens_bounded_estimate * (physical.measurement_density or 1.0))
     free = window - reserve - size
-    ceiling = None if exact else getattr(physical, "send_ceiling_tokens", None)
-    # The check's own additions to the measured reserve (a required book's reply in Nano) stay charged.
-    if free >= 0 or (ceiling is not None and ceiling - max(0, reserve - physical.response_reserve_tokens) - size >= 0):
+    if free >= 0:
         return None  # only physical W gates; the owner target never vetoes a send
     return refused_candidate_facts(
         request, capacity_total_tokens=window, response_reserve_tokens=reserve, free_tokens=free,

@@ -185,7 +185,8 @@ def test_an_accepted_input_raises_a_known_planning_window():
     assert above.measurement.window_reading_tokens == 872_000
     below = measure_main_fit(plan, messages, [], profile="owner_max", rendered_mode="max", round_id="r",
                              accepted_input_tokens=640_000)
-    assert below.measurement.capacity_total_tokens == 872_000  # a floor under the window cancels nothing
+    # A floor under the window cancels nothing: the stated total stands, read as a request under way reads it.
+    assert below.measurement.capacity_total_tokens - below.measurement.response_reserve_tokens == 872_000 - 8_192
 
 
 def test_the_facts_line_states_where_the_size_comes_from():

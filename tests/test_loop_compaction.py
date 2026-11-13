@@ -82,7 +82,7 @@ def _lowered_from_max(plan, messages, *, measured_input_tokens=None):
     plan.reproject_for_route.assert_called_once_with(
         window_tokens=500_000, known_window=True, ratio=1.0, output_reserve=65_536,
         tool_schemas=[], start_mode="max", current_messages=messages, select_mode="low",
-        measured_input_tokens=measured_input_tokens)
+        measured_input_tokens=measured_input_tokens, admitted=True)  # the line this work's own requests go out at
     assert plan.reproject_for_route.call_args.kwargs["current_messages"] is messages  # actual transcript, not a copy
 
 

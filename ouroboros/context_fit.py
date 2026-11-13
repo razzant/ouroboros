@@ -127,16 +127,20 @@ class ContextFitPlan:
                             current_messages: Optional[List[Dict[str, Any]]] = None,
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
-                            slack_tokens: int = 0, room_if_narrowed: bool = False) -> "ContextFitPlan":
+                            slack_tokens: int = 0, room_if_narrowed: bool = False,
+                            admitted: bool = False) -> "ContextFitPlan":
         """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
         The measurement belongs to this candidate, includes tools and excludes the reply; withholding an image can shrink it.
         A requested saving alone does not establish pressure on held owner words or notes.
         ``slack_tokens`` asks room beyond the measured or refused excess: memory and ordinary host forms may pay it,
         a whole-or-outline section never (``memory_floor._host_steps``).
-        ``start_work`` sizes a start that is written anyway (an entry on a route that holds no copy of it, a restore)
-        with one eighth of work room; ``room_if_narrowed`` gives the same room to a view that must narrow for the
-        window alone, since narrowing writes it too. A view that fits is never touched for room.
+        ``admitted``: the plan's own window is read at ``WindowRecord.admitted``, the line this work's own requests go
+        out at (Main's rebind, restore, retry in a lower mode and memory pass); without it at ``usable``, as a start
+        is sized (voice; a work's first start is ``_build_context_fit_plan``).
+        ``start_work`` leaves one eighth of work room under that line where the start is written anyway (an entry on a
+        route that holds no copy of it, a restore); ``room_if_narrowed`` gives the same room to a view that must narrow
+        for the window alone, since narrowing writes it too. A view that fits is never touched.
         """
         from dataclasses import replace
 
@@ -145,12 +149,15 @@ class ContextFitPlan:
                         if self.working_reserve_tokens is not None else {})
         contents, start, books = {}, start_mode or self.preferred_mode, ("max", "low")
         reserve = context_budget.context_mode_limits(start, self.preferred_mode, output_reserve, **reserve_args)[1]
-        record = resolve_window(self, reserve, bound=self.window_witness_bound) if self.window_record else None
-        if record is not None:
-            if not known_window or window_tokens not in (self.window_tokens, record.total_equivalent):
-                record = None  # the caller supplied a different physical route frame
-            else:
-                window_tokens = record.total_equivalent  # input limits keep their bound when the reserve changes
+        # The plan's own window, named in either of its frames (a start's, or the admitted one a round measures in);
+        # any other number is a different physical route frame the caller supplied, and stands as given.
+        own = resolve_window(self, reserve, bound=self.window_witness_bound) if known_window else None
+        if own is not None and (own.usable is None or window_tokens not in (
+                self.window_tokens, own.total_equivalent, own.admitted_equivalent)):
+            own = None
+        record, frame = own if self.window_record else None, window_tokens
+        if own is not None:  # the plan keeps the start's frame: input limits keep their bound when the reserve changes
+            frame, window_tokens = own.admitted_equivalent if admitted else own.total_equivalent, own.total_equivalent
         if current_messages is None:
             retained = self.projection(start).continuation_messages_json
             if retained is not None:
@@ -173,11 +180,11 @@ class ContextFitPlan:
             overhead = int(measured_input_tokens) - raw if measured_input_tokens is not None else 0
             request = math.ceil((raw + overhead) * ratio)
             request += context_mode_limits(start, self.preferred_mode, output_reserve, **reserve_args)[1]
-            room = math.ceil((record.boundary if record else window_tokens) / context_budget.RECLAIM_LOW_WATER_DIVISOR
+            room = math.ceil((own.boundary if own else window_tokens) / context_budget.RECLAIM_LOW_WATER_DIVISOR
                              ) if known_window and window_tokens else 0
             request += room if start_work else 0
             request -= math.ceil(required_book_addition(self, start) * ratio)  # nothing narrows to pay for the book
-            measured, units = (request - window_tokens if known_window and window_tokens else 0), max(ratio, 0.01)
+            measured, units = (request - frame if known_window and frame else 0), max(ratio, 0.01)
             if room_if_narrowed and measured > 0 and not start_work:
                 start_work, measured = True, measured + room
             excess, deficit = max(measured, int(refused_tokens or 0)), max(measured, int(refused_tokens or 0) + slack_tokens)
@@ -187,8 +194,8 @@ class ContextFitPlan:
                     self.core, {form: _governance_blocks(None, self.core, mode=form) for form in books},
                     self.user_content_json, preferred=self.preferred_mode, start=start_mode, select=select_mode,
                     tool_schemas=tool_schemas, working_reserve_tokens=self.working_reserve_tokens,
-                    window_tokens=window_tokens, known_window=known_window, output_reserve=output_reserve, ratio=ratio,
-                    window_record=record,
+                    window_tokens=frame, known_window=known_window, output_reserve=output_reserve, ratio=ratio,
+                    window_record=own, admitted=admitted,  # each mode's frame is read off the window (its reserve differs)
                     envelope_overhead_tokens=overhead,
                     start_work=start_work,
                     resident=True, current_messages=current_messages,  # actual running tail, enable_tools included
@@ -798,13 +805,15 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       select: Optional[str] = None, kept_sections: Optional[Mapping[str, Iterable[Mapping]]] = None,
                       working_reserve_tokens: Optional[int] = None, window_record: Optional[WindowRecord] = None, work_room_levels: int = 1,
                       envelope_overhead_tokens: int = 0, start_work: bool = False, slack: int = 0, retain: Any = None,
-                      ) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
+                      admitted: bool = False) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
     """Select books once, choose memory in one walk. Unsent book forms share the selected memory, not another budget.
 
     Every automatic choice reads the ordinary view of this capture; a directly required handbook joins it last with
     its own note, so neither costs a form, mode or schema (owner 1.11.2026). At a fresh start on a known window the
     ordinary estimate, the book, its note and the reply the ordinary view keeps must fit, else the named refusal.
     ``retain``: how a host step captures its section (default ``section_floor.retain_section``).
+    Each mode's frame is the record's ``total_equivalent`` (a start keeps the whole reply reserve), or with
+    ``admitted`` its admitted line (``WindowRecord.admitted``: a view the work holds, in whatever mode it is fitted again).
     """
     from dataclasses import replace
     from ouroboros import memory_floor as floor
@@ -863,7 +872,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             lowered_from=preferred if selected != preferred else None, start_work=start_work,
             max_room=floor.with_max_room({}, room_fact, selected).get("max_room"),
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
+            stated_window_tokens=stated.get(selected),  # the note names the window as stated, never the admitted frame
             boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed)
+
+    stated: Dict[str, Optional[int]] = {}  # each walked mode's window in the start's frame (``frame`` fills it)
 
     def start_levels():  # the role's room at the work's first start; one eighth where a shown view is written again
         return 1 if kept is not None else snapshot.spec.work_room_levels if snapshot else work_room_levels
@@ -874,7 +886,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         target, reserve = context_budget.context_mode_limits(selected, preferred, output_reserve,
                                                             working_reserve_tokens=working_reserve_tokens)
         record = replace(window_record, reserve=reserve) if window_record else None
-        window = record.total_equivalent if record and record.usable is not None else window_tokens
+        window = ((record.admitted_equivalent if admitted else record.total_equivalent)
+                  if record and record.usable is not None else window_tokens)
+        stated[selected] = record.total_equivalent if record and record.usable is not None else None
         boundary = record.boundary if record else None
         levels = start_levels()
         host_allowances = floor.floor_allowances(window_tokens=window if known_window else None,
@@ -1222,5 +1236,5 @@ def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
         window_witness_bound=getattr(measurement, "window_witness_bound", False),
         window_observation_fp=measurement.window_observation_fp,
         required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
-        mode_cause=measurement.mode_cause, send_ceiling_tokens=getattr(measurement, "send_ceiling_tokens", None),
+        mode_cause=measurement.mode_cause,
     )

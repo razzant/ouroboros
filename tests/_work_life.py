@@ -8,8 +8,9 @@ the real OpenAI lane to an in-memory SDK client. Behind both sits one stub provi
 per place (an engine account, or one API key of one model string) and reads the longest run of byte-equal elements (the
 tool array, each system block, each later row) of that place's previous request; it counts tokens at the place's own
 density and enforces the place's bound the way the place does (``input``: an input above it is refused with its number;
-``total``: input plus the reply allowance above it is refused, with its number or, ``total_unnumbered``, without;
-``cut``: nothing is refused and the reply is cut to what is left); and it answers a scripted mind.
+``total``: input plus the reply allowance above it is refused, with its number, or, ``total_unnumbered``, without;
+``cut``: nothing is refused and the reply is cut to what is left); and it answers a scripted mind. It also notes how
+each part the mind read came back: whole, or as a partial view (``tool_result_delivery.RESULT_VIEW_MARKER``).
 
 A life is read back from the product's own record of each request (``physical_context.prefix`` ->
 ``transcript_prefix.prefix_class``), joined with the place that answered it (the observer keys a route by its model
@@ -31,6 +32,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.tool_result_delivery import RESULT_VIEW_MARKER
 from tests.test_llm_claudexor import MODEL as CX
 from tests.test_llm_claudexor import ROUTE, result
 
@@ -110,8 +112,10 @@ def _elements(tools: Any, rows: List[Dict[str, Any]]) -> Tuple[List[Tuple[str, A
 class Provider:
     """The far side of both transports: one answer per physical request, a cache per place, a log per request."""
 
-    def __init__(self, places: Dict[str, Place], script: List[tuple]):
+    def __init__(self, places: Dict[str, Place], script: List[tuple], parts: Optional[Dict[str, int]] = None):
         self.places, self.script = places, list(script)
+        self.parts = dict(parts or {})  # a readable part's name -> its characters
+        self.asked: Dict[str, int] = {}  # a read's call id -> the characters of the part it asked for
         self.cache: Dict[str, Tuple[List[str], List[int]]] = {}
         self.marks: Dict[str, set] = {}  # key -> the prefixes (by digest) that a marked element of an answer ended
         self.log: List[Dict[str, Any]] = []
@@ -139,6 +143,12 @@ class Provider:
                      "known": known, "start_tokens": sum(sizes[:start]), "elements": len(items),
                      "start_elements": start, "digests": digests, "sizes": sizes,
                      "facts": next((text for text in reversed(texts) if "[CONTEXT_FACTS]" in text), "")}
+            before = next((row for row in reversed(self.log) if row.get("kind") == "answered"), None)
+            entry["reads"] = [  # each part that arrives in this request: its size, whether it came as a partial view
+                {"chars": self.asked.pop(call), "cut": RESULT_VIEW_MARKER in text,
+                 "before": before["tokens"] if before and before["place"] == place.name else None}
+                for (kind, item), text in zip(items, texts)
+                if kind == "row" and (call := str(item.get("tool_call_id") or "")) in self.asked]
             self.log.append(entry)
             limit, over = place.limit, total + (reply if place.kind != "input" else 0)
             if place.kind != "cut" and over > limit:
@@ -173,6 +183,8 @@ class Provider:
                          "start" if common < start else "transcript")
             self.cache[key] = (digests, sizes)
             entry["message"] = _message(action, entry["n"])
+            if action[0] == "read":
+                self.asked[f"read-{entry['n']}"] = self.parts.get(action[-1], 0)
             return entry
 
 
@@ -498,6 +510,7 @@ class Life:
     memory: float = 0.35  # of the owner-shaped memory of tests/_memory_scale_fixture.py
     mode: str = "max"
     second: bool = False  # after it, a second work's first request on the primary's key
+    keeps_mode: bool = False  # nothing in this life is a reason to run in a lower mode than it started in
 
 
 def run_life(life: Life, main_call: Any, monkeypatch: Any, tmp_path: Any) -> Dict[str, Any]:
@@ -513,7 +526,7 @@ def run_life(life: Life, main_call: Any, monkeypatch: Any, tmp_path: Any) -> Dic
     for at, act in sorted(life.acts, reverse=True):
         script.insert(at - 1, act)
     first, second = (script[:life.door] + [("final", "Parked.")], script[life.door:]) if life.door else (script, [])
-    provider = world.provider = Provider(places, first)
+    provider = world.provider = Provider(places, first, dict(zip(names, life.reads)))
     wire_claudexor(world.gateway, provider)
     wire_remote(world.ctx.llm, provider, monkeypatch)
     held: List[Any] = []
@@ -564,7 +577,8 @@ def answered_rows(record: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Each answered request: the product's class of it, the place that answered, its input and the room it left.
 
     The ledger's sent attempts (every state but ``released``) and the provider's log are the same requests in the
-    same order; ``room`` is the stated window less the reply reserve and the input the place counted."""
+    same order; ``room`` is what the request left under the line it was measured against (the capacity its ledger row
+    names, the admitted line of ``WindowRecord``, less the reply reserve and the input the place counted)."""
     sent = [row for row in record["ledger"] if row["state"] != "released"]
     assert len(sent) == len(record["log"]), ("harness: the ledger and the provider disagree on the requests sent",
                                              [row["state"] for row in sent], [entry["kind"] for entry in record["log"]])
@@ -573,20 +587,23 @@ def answered_rows(record: Dict[str, Any]) -> List[Dict[str, Any]]:
         if entry["kind"] != "answered":
             continue
         room = (row["window"] - (row["reserve"] or 0) - entry["known"]) if row["window"] else None
-        rows.append({**row, "place": entry["place"], "tokens": entry["tokens"], "room": room,
+        rows.append({**row, "place": entry["place"], "tokens": entry["tokens"], "known": entry["known"], "room": room,
                      "token": f"{row['class']}@{entry['place']}"})
     return rows
 
 
 def breaches(record: Dict[str, Any], places: Dict[str, Place], *, sequence: str, details: Dict[str, str],
-             refusals: int = 0, queued: bool = False) -> List[str]:
+             refusals: int = 0, queued: bool = False, mode: str = "") -> List[str]:
     """Every clause of the law ``record`` breaks, each named by the mechanism that holds it (``tests/test_cache_
     optimization.py``): the sequence of (class, answering place); P4's room after a start write that is not the
-    work's first (measured by the place within half an eighth, since the host sizes by its own estimate); P3's
-    favourable reading before a send, unless the product recorded a refusal of the total kind no later than it, and
-    its learning from a refusal or a cut reply; P5's queue that refuses nothing, tells the work's feed that a send
+    work's first (under the admitted line, measured by the place within half an eighth, since the host sizes by its
+    own estimate); P3's
+    favourable reading before a send, unless the product recorded a refusal of the total kind no later than it, the
+    same reading for a part the mind read (it comes back whole while the request with it whole would still go out),
+    and its learning from a refusal or a cut reply; P5's queue that refuses nothing, tells the work's feed that a send
     waits in line and states the time on the mind's next facts line (``queued``: this life met a full queue; a life
-    that met none reads neither); and a start change that no seam of the host claims."""
+    that met none reads neither); a start change that no seam of the host claims; and, where ``mode`` names one, that
+    no request ran in another mode."""
     import re
 
     rows = answered_rows(record)
@@ -600,20 +617,36 @@ def breaches(record: Dict[str, Any], places: Dict[str, Place], *, sequence: str,
         if row["class"] in ("system_changed", "tools_changed", "history_rewritten") and not row["origins"]:
             found.append(f"origin: {row['token']} changed the start with no seam of the host claiming it")
         if row["class"] in START_CLASSES - {"first_request"} and row["room"] is not None:
-            eighth = math.ceil(row["window"] / 8)
+            stated = places[row["place"]].window
+            eighth = math.ceil(stated / 8)  # of the stated window; ``room`` is under the admitted line
             if row["room"] < eighth // 2:
-                found.append(f"P4 room: {row['token']} left {row['room']} of {row['window']} after its start write, "
+                found.append(f"P4 room: {row['token']} left {row['room']} of {stated} after its start write, "
                              f"under the eighth {eighth}")
+        if mode and row["mode"] != mode:
+            found.append(f"mode: {row['token']} ran in {row['mode']!r}, not {mode!r}")
     total = any(row.get("kind") == "total" for row in record["windows"])  # what the product learned, not the place
     total_refused = [entry["round"] for entry in record["log"] if entry["kind"] == "refused"
                      and places[entry["place"]].kind in ("total", "total_unnumbered")] if total else []
     for event in record["events"]:
         if event.get("checkpoint_kind") == "context_fit_refused" and event.get("cause") == "known_window_prediction":
-            stated, size = int(event.get("capacity_total_tokens") or 0), int(event.get("estimated_input_tokens") or 0)
+            # The window the route states, never the capacity frame the event carries (the admitted line plus R).
+            stated = min((place.window for place in places.values() if place.model == event.get("model")),
+                         default=int(event.get("capacity_total_tokens") or 0))
+            size = int(event.get("estimated_input_tokens") or 0)
             standing = any(at <= int(event.get("round") or 0) for at in total_refused)
             if size <= stated - FAVOURABLE_HEADROOM and not standing:
                 found.append(f"P3 reading: refused before sending an input of {size} the stated {stated} holds with "
                              f"{stated - size} to spare (no total refusal stands)")
+    for entry in record["log"]:
+        place = places[entry["place"]]
+        line = place.window - (REPLY_ALLOWANCE if total else FAVOURABLE_HEADROOM)
+        for read in entry.get("reads") or () if place.dense == 1.0 else ():  # a dense part: the host's estimate is off
+            whole = math.ceil(read["chars"] * place.density / 4)
+            # The unasked share is one eighth; the host sizes by its own estimate, so a tenth and 2,000 tokens of slack.
+            if (read["cut"] and read["before"] is not None and whole <= math.ceil(place.window / 8)
+                    and read["before"] + math.ceil(whole * 1.1) + 2_000 <= line):
+                found.append(f"P3 delivery: request {entry['n']} got a part of {whole} tokens as a partial view, though "
+                             f"{read['before']} + {whole} fits the {line} this place admits")
     refused = [entry for entry in record["log"] if entry["kind"] == "refused"]
     if len(refused) > refusals:
         found.append(f"P3 learning: the provider refused {len(refused)} requests (allowed {refusals}): "

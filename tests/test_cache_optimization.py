@@ -569,8 +569,10 @@ def test_supervising_wake_horizon_fires_only_past_the_applied_ttl(tmp_path):
 # string never answered is sized with it; the place measures it within half an eighth, the host sizes by its own
 # estimate), while an account rotation of one string keeps its start and takes none and a return finds its start held;
 # P3, nothing is refused before sending while the input leaves 8,192 of the stated window (nano's own reserve), unless
-# the product recorded a refusal of the total kind for the route, and a place's refusal or cut reply teaches the host
-# once; P5, the install's own queue refuses nothing and moves nothing, tells the work's feed that its send waits in
+# the product recorded a refusal of the total kind for the route; a part the mind read comes back whole while the
+# request with it whole would still go out, and a view under way is kept by that same line (a work inside the reply
+# reservation rotates accounts and survives a restore in its mode); a place's refusal, in whatever words, or its cut
+# reply teaches the host once; P5, the install's own queue refuses nothing and moves nothing, tells the work's feed that its send waits in
 # line and states the time on the mind's next facts line, while a real failure still walks the chain; and a start
 # change always names the seam that made it (raised here, outside the observer's own handlers).
 
@@ -590,7 +592,8 @@ def _a(**changes):
 WORK_LIVES = {
     "ordinary": (Life(places=(_A, _B), fallbacks=("b",), reads=(8_000,) * 3), _ON_A, {}, 0),
     "a_start_at_unknown_density": (Life(places=(_a(window=340_000, density=1.15),), reads=(8_000,) * 3), _ON_A, {}, 0),
-    "growth_to_the_wall": (Life(places=(_A,), reads=(_P90,) * 5), _ON_A + _WALLS + "?", {}, 0),
+    # Three parts go in whole, the fourth meets the admitted line: a wall there, an eighth freed, and once more.
+    "growth_to_the_wall": (Life(places=(_A,), reads=(_P90,) * 5), _ON_A + _WALLS + "{1,2}", {}, 0),
     # An API route names its number; Claudexor passes no provider sentence on, so its refusals carry none.
     "a_total_that_refuses_with_its_number": (
         Life(places=(Place("opus", OPUS, density=1.4, marked=True, kind="total"),), primary="opus", reads=(_WIDE,) * 5),
@@ -603,9 +606,14 @@ WORK_LIVES = {
     "an_input_refusal_at_the_stated_number": (
         Life(places=(Place("opus", OPUS, density=1.4, dense=4.2, marked=True),), primary="opus",
              reads=(200_000,) + (_P50,) * 4, dense=(0,)),
-        r"first_request@opus( append@opus)*( system_changed@opus( append@opus)*)+", {}, 1),
+        r"first_request@opus( append@opus)*( (system_changed|history_rewritten)@opus( append@opus)*)+", {}, 1),
     "an_account_rotation_of_one_model": (Life(places=(_A, _B), reads=(8_000,) * 4, rotate=3, pinned=False),
                                          _ON_A + r"( append@b)+", {}, 0),
+    # The work has grown past the stated window less the reply reserve; its requests still go out. The engine then
+    # answers on another account: the view is kept, every part comes back whole, the mode holds.
+    "a_rotation_inside_the_reply_reservation": (
+        Life(places=(_A, _B), reads=(_P90, _P90) + (8_000,) * 3, rotate=4, pinned=False, keeps_mode=True),
+        _ON_A + r"( append@b)+", {}, 0),
     "a_move_to_a_model_string_never_answered": (
         Life(places=(_A, Place("opus", OPUS, window=400_000, density=1.4, marked=True)), light="opus",
              reads=(_P50,) * 4, acts=((4, ("switch", OPUS)),)),
@@ -618,7 +626,8 @@ WORK_LIVES = {
                       reads=(8_000,) * 3, acts=((2, ("switch", OPUS)), (4, ("return",)))),
                  _ON_A + r" entered_model@opus( append@opus)+ returned_to_model@a( append@a)*",
                  {"entered_model": CX, "returned_to_model": OPUS}, 0),
-    "a_real_outage": (Life(places=(_A, Place("b", CX, "account-b", window=240_000)), fallbacks=("b",),
+    # The account that takes over admits less than the request holds: the view narrows, to the room line.
+    "a_real_outage": (Life(places=(_A, Place("b", CX, "account-b", window=200_000)), fallbacks=("b",),
                            reads=(8_000,) * 4, acts=((2, ("lost",)),)),
                       r"first_request@a system_changed@b( append@b)*", {}, 0),
     "a_full_queue_with_a_fallback": (Life(places=(_OP, _A), primary="opus", fallbacks=("a",), reads=(8_000,) * 3,
@@ -630,6 +639,10 @@ WORK_LIVES = {
                   {}, 0),
     "a_restore_that_fits_with_room": (Life(places=(_a(window=400_000),), reads=(8_000,) * 2, door=2),
                                       _ON_A + r" system_changed@a( append@a)*", {}, 0),
+    # A door while the work sits inside the reply reservation: the restore reads the line its requests went out at.
+    "a_restore_inside_the_reply_reservation": (
+        Life(places=(_A,), reads=(_P90, _P90) + (8_000,) * 2, door=3, keeps_mode=True),
+        _ON_A + r" system_changed@a( append@a)*", {}, 0),
     "the_mind_folds": (Life(places=(_A,), reads=(_WIDE,) * 3, acts=((3, ("fold",)),)),
                        _ON_A + r" history_rewritten@a( append@a)*", {"history_rewritten": "compaction"}, 0),
     "a_200k_window_with_a_small_memory": (Life(places=(_a(window=200_000),), reads=(30_000,) * 4, memory=0.25),
@@ -673,7 +686,7 @@ def test_a_works_life_writes_its_start_only_at_its_entries(name, main_call, monk
     life, sequence, details, refusals = WORK_LIVES[name]
     record = run_life(life, main_call, monkeypatch, tmp_path)
     found = breaches(record, {place.name: place for place in life.places}, sequence=sequence, details=details,
-                     refusals=refusals, queued=bool(life.queue))
+                     refusals=refusals, queued=bool(life.queue), mode=life.mode if life.keeps_mode else "")
     excused = WORK_LIFE_GAPS.get(name, ("", ""))[0]
     if excused and record["text"] and found and all(line.startswith(excused) for line in found):
         raise LifeBreach(f"{name}:\n" + "\n".join(found))

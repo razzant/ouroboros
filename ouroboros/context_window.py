@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 
-_TOTAL_PROVEN = frozenset({"refusal", "local_health"})  # sources that prove a total: ``WindowRecord.send_ceiling``
+_REPLY_INSIDE = frozenset({"refusal", "local_health"})  # what proves a total holds the reply: ``WindowRecord.admitted``
 
 
 @dataclass(frozen=True)
@@ -36,26 +36,32 @@ class WindowRecord:
     accepted_at: str = ""
     contradicted_by: Optional[WindowLimit] = None
     retired_ack: dict = field(default_factory=dict)
+    floor: Optional[int] = None  # the reply floor ``admitted`` charges an unproven total; None: the whole reserve
 
     @property
     def usable(self) -> Optional[int]:
+        """The input a start is sized to: a total always leaves the whole reply reserve."""
         limits = ([self.input.tokens] if self.input else []) + (
             [max(0, self.total.tokens - self.reserve)] if self.total else [])
+        return min(limits) if limits else None
+
+    @property
+    def admitted(self) -> Optional[int]:
+        """The largest input a request that exists goes out at, each stated number read most favourably: an input
+        limit whole; a total less the whole reserve where it is known to hold the reply too (a size refusal said so,
+        or a local server stated its one buffer), else less the reply floor. Every question a round asks about its
+        own request reads this one line (the pre-send check, the room a tool result is shown in, whether a view is
+        kept, what a pass leaves), so nothing is cut on the guess that the reply is inside. A provider that counts
+        the reply refuses such a request once, and that refusal proves the total."""
+        proven = self.floor is None or (self.total is not None and self.total.source in _REPLY_INSIDE)
+        limits = ([self.input.tokens] if self.input else []) + ([max(0, self.total.tokens - (
+            self.reserve if proven else min(self.reserve, self.floor)))] if self.total else [])
         return min(limits) if limits else None
 
     @property
     def boundary(self) -> Optional[int]:
         limits = [limit.tokens for limit in (self.input, self.total) if limit]
         return min(limits) if limits else None
-
-    def send_ceiling(self, floor: int) -> Optional[int]:
-        """The largest input a send is admitted at, each stated number read most favourably (the fit keeps
-        ``usable``): an input limit whole; a total less the whole reserve where it is known to hold the reply too
-        (a size refusal said so, or a local server stated its one buffer), else less ``floor``, the reply floor.
-        A provider that counts the reply refuses such a send once, and that refusal confirms the total."""
-        limits = ([self.input.tokens] if self.input else []) + ([self.total.tokens - (
-            self.reserve if self.total.source in _TOTAL_PROVEN else min(self.reserve, int(floor)))] if self.total else [])
-        return max(0, min(limits)) if limits else None
 
     @property
     def limiting(self) -> Optional[WindowLimit]:
@@ -74,6 +80,11 @@ class WindowRecord:
     def total_equivalent(self) -> int:
         """Compatibility frame for consumers which subtract R; never provider evidence."""
         return self.usable + self.reserve if self.usable is not None else 0
+
+    @property
+    def admitted_equivalent(self) -> int:
+        """``admitted`` in that same frame: what a round's measurement reports as its capacity."""
+        return self.admitted + self.reserve if self.admitted is not None else 0
 
 
 def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int = 0,
@@ -187,10 +198,14 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
             break
     output = getattr(evidence, "response_limit", {}) or {}
     maximum = output.get("max_output_tokens", 0)
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
+    # The least a request leaves for its reply: Nano's own reserve, or a route's larger declared working room.
+    working = getattr(evidence, "working_reserve_tokens", None) or route_window_kwargs(evidence)["working_reserve_tokens"] or 0
     return WindowRecord(fp, limits.get("input"), limits.get("total"),
                         WindowLimit(maximum, "output", output.get("source", "metadata"),
                                     output.get("observed_at", "")) if maximum and not output.get("stale")
                         else captured.output if captured else None,
+                        floor=min(int(reserve), max(NANO_MIN_HEADROOM_TOKENS, int(working))),
                         reserve=reserve, accepted=accepted, declared=declared, accepted_at=accepted_at,
                         contradicted_by=contradiction,
                         retired_ack=getattr(evidence, "retired_ack", {}) or (captured.retired_ack if captured else {}))
@@ -203,7 +218,7 @@ def record_refusal(usage, plan, refused_input: int = 0) -> None:
     accepted request of this conversation), passed only when measured: Codex states no number, and a
     route that never records its refusals keeps planning at a larger acceptance and is refused again.
     A numberless refusal of a request sent inside the reply reservation of a stated total says that total holds the
-    reply too, so it is recorded as the total's own refusal (``WindowRecord.send_ceiling`` then charges the reserve).
+    reply too, so it is recorded as the total's own refusal (``WindowRecord.admitted`` then charges the reserve).
     Without a stated limit or a measured size a refusal adds no ceiling, and a refusal of one input string's
     length (``INPUT_STRING_LENGTH_CODES``) adds none at any size: it says nothing of the token window."""
     from ouroboros import capability_evidence as ce

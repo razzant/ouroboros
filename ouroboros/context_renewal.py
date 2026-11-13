@@ -163,12 +163,9 @@ def renew_after_refusal(limit_ctx: Any, tools: Any) -> bool:
     reserve = usage.get("_context_response_reserve_tokens") or 0
     book = int(usage.get("_context_required_book_tokens") or 0)
     # A required handbook is kept, never paid for: only what a view without it could not hold renews or cuts,
-    # and an excess nothing measures is not guessed onto my memory. A known window that holds that view, or would
-    # admit its send (``WindowRecord.send_ceiling``), is the task's typed incompatibility (``context_capacity``);
-    # an unknown one proves none.
-    ceiling = usage.get("_context_send_ceiling_tokens")
-    if book and (capacity is None or measure(messages) - book + reserve <= capacity
-                 or (ceiling is not None and measure(messages) - book <= ceiling)):
+    # and an excess nothing measures is not guessed onto my memory. A known window that holds that view is the
+    # task's typed incompatibility (``context_capacity``); an unknown one proves none.
+    if book and (capacity is None or measure(messages) - book + reserve <= capacity):
         usage[REQUIRED_BOOK_UNFIT_KEY] = capacity is not None
         return _cannot_help(limit_ctx)
     seed, record = renewal_view(messages, observation=getattr(tools._ctx, "_last_context_observation", None),

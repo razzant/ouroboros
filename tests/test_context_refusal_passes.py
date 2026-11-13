@@ -411,5 +411,8 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
     assert getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR) == {"system": "low_retry"}
     assert ctx.messages[0] == ctx.context_fit_plan.projection(mode).system_message()
     assert ctx.context_fit_plan.window_record is not None
-    assert measure(ctx).measurement.capacity_total_tokens == (ceiling or 1_000_000)
+    # A refused total charges the whole reply reserve; the stated one, not refused yet, the reply floor
+    # (``WindowRecord.admitted``): the round's frame is that line plus the reserve.
+    fit = measure(ctx).measurement
+    assert fit.capacity_total_tokens - fit.response_reserve_tokens == (ceiling - fit.response_reserve_tokens if ceiling else 1_000_000 - 8_192)
     assert ctx.context_fit_plan.window_record.source.startswith("refusal" if ceiling else "metadata")

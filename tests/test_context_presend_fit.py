@@ -48,9 +48,8 @@ def test_known_window_folds_before_first_provider_send(main_call, monkeypatch):
     rows = [json.loads(line) for line in (ctx.drive_logs / "events.jsonl").read_text().splitlines()]
     [prediction] = [row for row in rows if row.get("checkpoint_kind") == "context_fit_refused"]
     assert prediction["cause"] == "known_window_prediction"
-    assert prediction["capacity_total_tokens"] == 200_000
-    assert prediction["response_reserve_tokens"] == 65_536
-    assert prediction["estimated_input_tokens"] > 200_000 - 8_192  # above the send ceiling, not merely the reserve
+    assert prediction["response_reserve_tokens"] == 65_536  # the frame is the admitted line plus the reply reserve
+    assert prediction["capacity_total_tokens"] - 65_536 == 200_000 - 8_192 < prediction["estimated_input_tokens"]
     assert prediction["predicted_free_tokens"] == (
         prediction["capacity_total_tokens"] - prediction["response_reserve_tokens"] - prediction["estimated_input_tokens"])
     assert prediction["physical_context"]["round_id"]
@@ -61,11 +60,12 @@ def test_known_window_folds_before_first_provider_send(main_call, monkeypatch):
 def test_a_candidate_inside_the_reply_reserve_is_sent_whole(main_call):
     """The other direction (owner, 30 Sep 2026: nothing is removed on a guess; the host acts before a send only when
     the request does not fit under the most favourable reading): a stated 200K may bound the input alone, so a
-    candidate that leaves less than the 65,536 reply reserve but stays under the send ceiling goes out once, whole."""
+    candidate that leaves less than the 65,536 reply reserve but stays under the admitted line goes out once, whole."""
     ctx, gateway, *_ = main_call
     large = _large(ctx, repeats=34_000)
     fit = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
-    assert fit.predicted_capacity_miss and fit.measurement.estimated_input_tokens < fit.measurement.send_ceiling_tokens == 191_808
+    size, line = fit.measurement.estimated_input_tokens, fit.measurement.capacity_total_tokens - fit.measurement.response_reserve_tokens
+    assert not fit.predicted_capacity_miss and 200_000 - 65_536 < size < line == 191_808
     answer, _, mode = loop._call_round_model(ctx)
     assert answer and mode == "max" and len(gateway.creates) == 1
     assert large in json.dumps(gateway.uploads[0][0])
