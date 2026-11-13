@@ -639,9 +639,10 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
 
 from ouroboros.context_sections import (  # noqa: E402,F401 — existing public builder surface
     build_knowledge_sections, knowledge_navigation_sections, _build_registry_section,
-    _build_installed_skills_section, _drive_state_section, runtime_host_section, revision_line,
+    _build_installed_skills_section, _drive_state_section, runtime_host_section,
     _SHARED_UNDERSTANDING_GAP,
 )
+from ouroboros.context_sections import revision_line  # noqa: E402
 from ouroboros.section_floor import HostSection, capture_sections, labelled_section  # noqa: E402
 
 
