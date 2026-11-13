@@ -212,7 +212,7 @@ def test_cards_activity_logs_and_budget_speak_the_status_marks(tmp_path, engine)
                         assert chip["markColor"] == (chip["color"] if hue == "ink" else tokens[HUE_INK[hue]]), (name, chip)
                         moving = shape == "moving" and motion != "reduce"
                         assert (chip["animation"] != "none") == moving, (name, motion, chip)
-                    # A live chip keeps the moving dots' width when the owner's dot takes their place: Working stays put.
+                    # A live chip keeps the moving dots' width in the owner's hue too: Working stays put.
                     assert abs(chips["parent"]["width"] - chips["working"]["width"]) <= 0.5, (chips["parent"], chips["working"])
                     # The unconfirmed ring is faint.
                     assert chips["unconfirmed"]["opacity"] == "0.55", chips["unconfirmed"]

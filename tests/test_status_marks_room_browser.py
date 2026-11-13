@@ -3,11 +3,11 @@ controlled transport of ``tests/test_room_work_browser.py``.
 
 A room's status control draws one shared mark after its word (web/modules/status_mark.js, drawn by the recipe at the
 end of web/ui.css): the room's shape in the word's ink (three moving dots, the same dots still, the pause's two bars,
-a ring), the owner's amber dot in that place while something waits for the owner, the green dot of ``Online`` at
-rest, a ring while the page reconnects and nothing while the host starts. A Shade row's known outcome is a dot in the
-outcome's hue beside its word. The transcript's typing bubble is the same moving mark, shown only while the room's
-work moves; reduced motion stops every bounce. Colours are compared with the tokens they resolve to, never with RGB
-literals.
+a ring), in the owner's hue while something waits for the owner (moving dots stay moving, anything else is the amber
+dot), the green dot of ``Online`` at rest, a ring while the page reconnects and nothing while the host starts. A Shade
+row's known outcome is a dot in the outcome's hue beside its word. The transcript's typing bubble is the same moving
+mark, shown only while the room's work moves; reduced motion stops every bounce. Colours are compared with the tokens
+they resolve to, never with RGB literals.
 """
 from __future__ import annotations
 
@@ -202,7 +202,7 @@ def test_typing_bubble_moves_only_while_the_room_works_and_reduced_motion_stops_
     transport.activities = [rw.activity("t-live"), rw.activity("t-ask", kind="direct_chat", client_message_id="cm-ask",
                                                                  **rw.waited("q-typing"))]
     transport.refresh()
-    owner = wait_mark(page, BAR["main"], lambda m: m["hue"] == "owner", "the owner's dot in the bar")
+    owner = wait_mark(page, BAR["main"], lambda m: m["hue"] == "owner", "the owner's hue in the bar")
     assert owner["word"] == "Working" and typing.is_visible(), owner
     # Reduced motion: every moving mark keeps its three dots and stops bouncing.
     trigger = rw.trigger(page)
