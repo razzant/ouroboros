@@ -485,7 +485,9 @@ test('a card says what its rows add from the last read, and only then: captions 
     const tasks = rowNode(host, 'OUROBOROS_CONSCIOUSNESS_MAX_TASKS');
     const caption = tasks.querySelector('[data-row-caption]');
     assert.equal(caption.textContent, 'first');
-    assert.equal(caption.nextElementSibling, tasks.querySelector('[data-setting-result]'), 'the caption stands before the result line');
+    assert.equal(caption.parentElement.children.at(-1), caption, 'the caption ends the meta line');
+    assert.equal(tasks.querySelector('.ui-row-actions').nextElementSibling, tasks.querySelector('[data-setting-result]'),
+        'the result line stands after the control, never inside the words');
     const door = rowNode(host, 'consciousness-allowance');
     assert.equal(door.querySelector('.ui-row-actions').firstChild, door.querySelector('[data-row-value]'), 'a value stands before the chevron');
     said = { OUROBOROS_CONSCIOUSNESS_MAX_TASKS: { caption: 'second' } };

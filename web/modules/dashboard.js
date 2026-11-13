@@ -87,7 +87,7 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
             span.className = `settings-row-${kind}`;
             span.setAttribute(`data-row-${kind}`, '');
             const box = node.querySelector(kind === 'caption' ? '.ui-row-meta' : '.ui-row-actions');
-            box.insertBefore(span, kind === 'caption' ? node.querySelector('[data-setting-result]') : box.firstChild);
+            box.insertBefore(span, kind === 'caption' ? null : box.firstChild);  // a caption ends the meta line
         }
         if (span && span.textContent !== (text || '')) span.textContent = text || '';
     };

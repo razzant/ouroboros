@@ -1301,19 +1301,11 @@ html[data-layout="stack"] .settings-search { height: 44px; }
    body, so the light theme's unset warning word would leave it unmarked). */
 #page-settings :is(.ui-row-meta, .models-main-meta, [data-setting-meta])[data-tone="warn"] { color: var(--status-warn-fg); }
 .settings-row-result { min-height: 0; }
-/* A narrow row stacks its words over its control, and "Saved" wrapped onto a line of its own there, pushing the control
-   down as it arrived (bible, principle 6: a state change never changes a height). In such a row a good result stands
-   at the end of the title's line instead, where nothing else is; a refusal or a warning keeps its place in the text,
-   where it has room for its words. */
-.settings-row { position: relative; }
-@container (max-width: 28rem) {
-    .settings-row > .ui-row-meta > .settings-row-result[data-tone="ok"] {
-        position: absolute;
-        inset-block-start: var(--space-3);
-        inset-inline-end: var(--space-3);
-    }
-    .settings-row > .ui-row-title:has(~ .ui-row-meta > .settings-row-result[data-tone="ok"]) { padding-inline-end: 6rem; }
-}
+/* A row's result stands on a line of its own under the row's words and control, the full width of the row (the rows
+   draw it after their control). It never lies over the title, the words or the control, and the control does not move
+   when it arrives (bible, principle 6): beside the words the control is centred on the title and meta lines alone;
+   under them, the result comes after it. */
+.settings-row > .settings-row-result { grid-column: 1 / -1; }
 .settings-row [data-setting-meta]:empty,
 .settings-row-result:empty,
 .settings-row-fact:empty { display: none; }

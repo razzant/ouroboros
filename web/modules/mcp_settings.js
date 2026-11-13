@@ -391,8 +391,9 @@ function editorHtml(server) {
             <section class="ui-card settings-card">
                 <div class="settings-rows"><div class="ui-row settings-row" data-kind="switch">
                     <p class="ui-row-title">Use this server</p>
-                    <p class="ui-row-meta"><span>${live ? 'Off keeps it here; its tools leave new requests.' : 'A new server starts off. Test it, then switch it on.'}</span><span class="ui-result settings-row-result" data-entry-result role="status" aria-live="polite"></span></p>
+                    <p class="ui-row-meta"><span>${live ? 'Off keeps it here; its tools leave new requests.' : 'A new server starts off. Test it, then switch it on.'}</span></p>
                     <div class="ui-row-actions">${use}</div>
+                    <span class="ui-result settings-row-result" data-entry-result role="status" aria-live="polite"></span>
                 </div></div>
                 <div class="mcp-sign-in" data-mcp-sign-in data-sign-in-key="${escapeHtml(signInKey(server))}" ${signInKey(server) ? '' : 'hidden'}>${signInRow(server)}</div>
             </section>
