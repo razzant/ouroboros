@@ -58,6 +58,7 @@ class Node extends Events {
             });
         });
     }
+    get parentElement() { return this.parent || null; }
     closest(selector) { return this.matches(selector) ? this : this.parent?.closest(selector) || null; }
     contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
     querySelectorAll(selector) { return this.children.flatMap((child) => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]); }
@@ -77,7 +78,9 @@ function environment() {
         ResizeObserver: Observer, MutationObserver: Observer,
         requestAnimationFrame: () => 1, cancelAnimationFrame() {},
         getComputedStyle: (node) => ({ visibility: node.visibility || 'visible',
-            scrollPaddingInlineStart: node.scrollPadding || '0px', scrollPaddingInlineEnd: node.scrollPadding || '0px' }),
+            scrollPaddingInlineStart: node.scrollPadding || '0px', scrollPaddingInlineEnd: node.scrollPadding || '0px',
+            scrollPaddingTop: node.scrollPadding || '0px', scrollPaddingBottom: node.scrollPadding || '0px',
+            overflowY: node.overflowY || 'visible' }),
     });
     doc.body = new Node(doc, 'body');
     doc.activeElement = doc.body;
@@ -237,6 +240,38 @@ test('revealed tabs keep the strip padding clear of the edge fade', () => {
     tabs[2].rect = {left: 300, right: 370};
     controller.select('three');
     assert.equal(strip.scrollLeft, 166);
+    controller.destroy();
+});
+
+test('a vertical list brings the chosen row into view inside its own scroller, never the page', () => {
+    const { doc, node } = environment();
+    const page = node('main');
+    page.overflowY = 'auto'; page.scrollHeight = 2000; page.clientHeight = 400; page.scrollTop = 0;
+    const rail = node('nav');
+    rail.overflowY = 'auto'; rail.scrollHeight = 300; rail.clientHeight = 120; rail.scrollTop = 0; rail.clientTop = 0;
+    rail.rect = { left: 0, right: 200, top: 40, bottom: 160 };
+    const strip = node('div', { role: 'tablist', 'aria-orientation': 'vertical' });
+    strip.clientWidth = 200; strip.scrollHeight = strip.clientHeight = 300;
+    const tabs = ['one', 'two', 'three'].map((value, i) => node('button', {
+        role: 'tab', 'data-view': value, 'aria-selected': String(i === 0),
+    }));
+    tabs.forEach((tab, i) => { tab.rect = { left: 0, right: 200, top: 40 + i * 100, bottom: 80 + i * 100 }; });
+    strip.append(...tabs);
+    rail.append(strip);
+    page.append(rail);
+    doc.body.append(page);
+    const controller = bindTabStrip(strip, { dataAttr: 'data-view' });
+    tabs[0].focus();
+    // End chooses the last row, below the rail's visible edge (160): the rail scrolls by what it lacks, the page not.
+    strip.emit('keydown', { target: tabs[0], key: 'End' });
+    assert.equal(doc.activeElement, tabs[2]);
+    assert.deepEqual([rail.scrollTop, page.scrollTop, strip.scrollLeft ?? 0], [120, 0, 0]);
+    // A row already in view moves nothing; one above the top edge comes back to it.
+    tabs.forEach((tab, i) => { tab.rect = { left: 0, right: 200, top: -50 + i * 100, bottom: -10 + i * 100 }; });
+    strip.emit('keydown', { target: tabs[2], key: 'ArrowUp' });
+    assert.equal(rail.scrollTop, 120, 'the second row stands in view');
+    strip.emit('keydown', { target: tabs[1], key: 'ArrowUp' });
+    assert.deepEqual([rail.scrollTop, page.scrollTop], [30, 0]);
     controller.destroy();
 });
 

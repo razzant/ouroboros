@@ -317,10 +317,31 @@ export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange
         && !tab.matches('[hidden], [inert]');
     const enabled = (tab) => selectable(tab) && !tab.closest('[hidden], [inert]');
     let selected = null;
+    // A vertical list (the Dashboard's) scrolls in its own box, the list or the rail around it: the chosen row is
+    // brought between that box's top and bottom, and nothing beyond the box moves (never the page).
+    function revealInScroller(tab) {
+        const view = strip.ownerDocument.defaultView;
+        const doc = strip.ownerDocument;
+        let box = strip;
+        while (box && box !== doc.body && box !== doc.documentElement) {
+            const overflow = view.getComputedStyle(box).overflowY;
+            if ((overflow === 'auto' || overflow === 'scroll') && box.scrollHeight > box.clientHeight) break;
+            box = box.parentElement;
+        }
+        if (!box || box === doc.body || box === doc.documentElement) return;
+        const style = view.getComputedStyle(box);
+        const bounds = box.getBoundingClientRect();
+        const rect = tab.getBoundingClientRect();
+        const top = bounds.top + (box.clientTop || 0) + (parseFloat(style.scrollPaddingTop) || 0);
+        const bottom = bounds.top + (box.clientTop || 0) + box.clientHeight - (parseFloat(style.scrollPaddingBottom) || 0);
+        if (rect.top < top) box.scrollTop += rect.top - top;
+        else if (rect.bottom > bottom) box.scrollTop += rect.bottom - bottom;
+    }
     function revealSelected() {
         if (disposed || !strip.clientWidth) return;
         const tab = tabs().find((item) => item.getAttribute(dataAttr) === selected);
         if (!tab) return;
+        if (strip.getAttribute('aria-orientation') === 'vertical') { revealInScroller(tab); return; }
         const bounds = strip.getBoundingClientRect();
         const rect = tab.getBoundingClientRect();
         const style = strip.ownerDocument.defaultView.getComputedStyle(strip);
