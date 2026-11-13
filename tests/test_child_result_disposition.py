@@ -708,6 +708,31 @@ def test_legacy_cancel_requested_latch_is_pending_not_handled(tmp_path):
     ) == "cancelled"
 
 
+def test_an_exact_decision_on_a_cancelled_childs_result_outranks_the_cancellation(tmp_path):
+    """A parent that integrated or discarded its cancelled child's exact retained result has decided it, while the
+    child stays cancelled; a deferral leaves the cancellation in force, and another revision is not decided."""
+    from ouroboros.loop import _child_disposition_state
+    from ouroboros.task_status import load_effective_task_result
+    from ouroboros.tools.join_ledger import _child_result_sha256
+    from ouroboros.tools.task_tree import _tree_note
+    from tests._store_shared import read_result, seed_result
+
+    _write_child(tmp_path, status="cancelled", parent_decision="cancelled")
+
+    def state():
+        return _child_disposition_state(load_effective_task_result(tmp_path, "child1"))
+
+    digest = _child_result_sha256(load_effective_task_result(tmp_path, "child1"))
+    for disposition, expected in (("deferred", "cancelled"), ("irrelevant", "irrelevant"),
+                                  ("integrated", "integrated")):
+        assert _tree_note(_parent_ctx(tmp_path), "decision", f"{disposition} after reading it",
+                          payload=_payload("child1", disposition, digest)).startswith("OK:")
+        assert state() == expected
+    assert load_effective_task_result(tmp_path, "child1")["status"] == "cancelled"
+    seed_result(tmp_path, "child1", {**read_result(tmp_path, "child1"), "result": "another revision"})
+    assert state() == "cancelled"
+
+
 def test_settled_cancel_blocks_custom_child_read_and_artifact_copy(
     tmp_path, monkeypatch
 ):

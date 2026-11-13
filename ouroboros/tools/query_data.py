@@ -51,11 +51,12 @@ _BLOB_KIND_HINT = ("; op=blob reads observability CAS blobs only. A digest in a 
                    "result names, memory_read(source_ref={kind, root, path, size, sha256, task_id})")
 # ``context_snapshot``: the skill's current declared context snapshot, the address its outdated note names.
 _STATES = ("review", "review_job", "health", "enabled", "deps", "grants", "context_snapshot")
-# A knowledge history row holds the complete version it published and, unless it names an
-# earlier row, the one it replaced, so the ordinary 8 MiB log window would cover hours of
-# writes; this read budget covers far more of them.
+# A knowledge history row may hold whole versions of the note (older rows always do), so the
+# ordinary 8 MiB log window would cover hours of writes; this read budget covers far more of them.
 _HISTORY_SCAN_BYTES = 256 * 1024 * 1024
-_HISTORY_BODY_FIELDS = ("old_content", "new_content")
+# The note texts a row carries: whole versions, and a change row's removed and added texts (its
+# ``base`` stays, an address). Left out before filtering and before the input budget is spent.
+_HISTORY_BODY_FIELDS = ("old_content", "new_content", "change")
 _SELECTOR = re.compile(r"(?:[^.\[\]]+|\[(?:\d+|\*)\])(?:\.[^.\[\]]+|\[(?:\d+|\*)\])*")
 
 
@@ -376,7 +377,7 @@ def _older_segments(path, live, where, need, budget, admit):
 
 
 def _knowledge_history(path, where, tail, gaps=None):
-    """The newest ``tail`` matching knowledge writes, each without its two note bodies.
+    """The newest ``tail`` matching knowledge writes, each without its note texts (``_HISTORY_BODY_FIELDS``).
 
     Facts a row lacks stay absent (old rows carry no publication stamp); the current
     text is ``knowledge_read``. A window past the read budget is said as truncated.

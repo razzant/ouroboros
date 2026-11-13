@@ -1,14 +1,63 @@
-"""The version a knowledge history row replaced, read the way an extension reads it."""
+"""The version a knowledge history row replaced, read the way an extension reads it; rows that store changes."""
 from __future__ import annotations
 
 
-def replaced(root, row):
-    """Inline ``old_content``, or the earlier row ``old_content_ref`` names, through the memory reader."""
-    if "old_content" in row:
-        return row["old_content"]
+def changed_rows(journal, texts, topic, scope="global"):
+    """Successive versions of one note appended to ``journal`` as the writer stores them: each row names the
+    previous row as its base and carries its change (``knowledge_rows.encode``, the byte rule deciding whole texts).
+    Returns each row's byte offset."""
+    import json
+
+    from ouroboros import knowledge_rows
+
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    offsets, previous = [], None
+    with journal.open("ab") as stream:
+        for text in texts:
+            offset, old = stream.tell(), "" if previous is None else previous[2]
+            row = {"topic": topic, "address": {"scope": scope, "topic": topic}, "publication": "source_capture",
+                   "mode": "overwrite", "old_sha256": "" if previous is None else knowledge_rows.sha256_text(old),
+                   "new_sha256": knowledge_rows.sha256_text(text),
+                   **knowledge_rows.encode(old, text, None if previous is None else previous[:2])}
+            stream.write((json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
+            offsets.append(offset)
+            previous = (offset, row, text)
+    return offsets
+
+
+def _read(root, address):
     from ouroboros.memory_reader import MAX_LENGTH, read_memory
 
-    return read_memory(root, "document", {"address": row["old_content_ref"], "length": MAX_LENGTH})["text"]
+    return read_memory(root, "document", {"address": address, "length": MAX_LENGTH})["text"]
+
+
+def _field(root, row, field):
+    """One field of a history row read through the memory reader, at the row's exact line in its shelf's journal."""
+    import json
+    import pathlib
+
+    scope = row["address"]["scope"]
+    shelf = pathlib.Path(root) / ("memory" if scope == "global" else f"projects/{scope[len('project:'):]}")
+    raw = (shelf / "knowledge_history.jsonl").read_bytes()
+    line = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+    offset = raw.index(line)
+    assert offset == 0 or raw[offset - 1:offset] == b"\n" and raw.count(line) == 1
+    return _read(root, {"kind": "entry", "journal": f"knowledge:{scope}", "offset": offset, "field": [field]})
+
+
+def replaced(root, row):
+    """The version a row replaced, through the memory reader: inline ``old_content``, the earlier row a legacy
+    ``old_content_ref`` names, or a change row's ``old_content`` (the text of the version its base holds)."""
+    if "old_content" in row:
+        return row["old_content"]
+    if "old_content_ref" in row:
+        return _read(root, row["old_content_ref"])
+    return _field(root, row, "old_content")
+
+
+def published(root, row):
+    """The version a row published: its whole ``new_content``, or a change row's, through the memory reader."""
+    return row["new_content"] if "new_content" in row else _field(root, row, "new_content")
 
 
 def applied_blocks(held, reply):
