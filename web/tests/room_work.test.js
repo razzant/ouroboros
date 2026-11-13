@@ -487,7 +487,7 @@ test('a row names its card\'s coined name first, then its work\'s own name; a ho
     } finally { shade?.destroy(); restoreDom(prior); }
 });
 
-test('the one mark after the word is the room\'s shape, the owner\'s amber dot in its place, Online\'s own dot at rest', () => {
+test('the one mark after the word is the room\'s shape, in the owner\'s hue while the owner\'s move stands, Online\'s own dot at rest', () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
     let work;
     try {

@@ -660,9 +660,9 @@ test('a work card says its work\'s word alone, its line beside it; plain running
 });
 
 // The work's look reaches its card apart from the word: a running parent whose helper waits for the owner keeps
-// its own live word with the owner's amber dot (the server takes the turn from every member), and the look survives
-// the card's outcome, its record adapter and its painter (docs/DESIGN.md "Status marks").
-test('a work card keeps its work\'s look beside its own words: the owner\'s dot reaches a running parent', () => {
+// its own live word and its moving dots in the owner's hue (the server takes the turn from every member), and the
+// look survives the card's outcome, its record adapter and its painter (docs/DESIGN.md "Status marks").
+test('a work card keeps its work\'s look beside its own words: the owner\'s hue reaches a running parent', () => {
     const parent = structuredClone(CASES.working_call.works[0]);
     assert.equal(cardWorkView(parent), null, 'plain running work keeps the card\'s own words');
     parent.turn = [{ kind: 'question', task_id: 'helper', quiz_id: 'q1' }];
@@ -674,7 +674,7 @@ test('a work card keeps its work\'s look beside its own words: the owner\'s dot 
         [null, { mark: 'moving', owner: true, note: 'A question waits for your answer' }]);
     const view = desiredLiveCardPhase(record);
     assert.deepEqual([view.text, view.tone, view.owner, view.mark], ['Working', 'live', true, 'moving']);
-    // The outcome owns the chip while its work finalizes; the owner's move stays its dot.
+    // The outcome owns the chip while its work finalizes; the owner's move keeps its hue.
     const late = desiredLiveCardPhase({ ...record, finalizingHold: true, observedOutcome: 'done' });
     assert.deepEqual([late.text, late.tone, late.owner, late.secondary], ['Done', 'ok', true, 'Finalizing…']);
     // The work's own word that is the owner's move takes the amber body too.
@@ -682,7 +682,7 @@ test('a work card keeps its work\'s look beside its own words: the owner\'s dot 
     const waits = { ...record, workView: cardWorkView(limit), workLook: { mark: limit.mark, owner: limit.turn.length > 0 } };
     assert.deepEqual(['text', 'secondary', 'tone', 'owner'].map((key) => desiredLiveCardPhase(waits)[key]),
         ['Paused', 'Spending limit reached', 'owner', true]);
-    // A turn the body lists is a fact even when another member could not be confirmed: the dot stays.
+    // A turn the body lists is a fact even when another member could not be confirmed: the owner's hue stays.
     const partial = { ...parent, confirmed: false };
     const read = reconcileWorkState(emptyWorkState(), { ...body, works_complete: false, works: [partial] }, 42);
     applyCardWorkViews(new Map([['w', record]]), read);
