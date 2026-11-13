@@ -1268,9 +1268,13 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
         # A catalog save retires the former review lanes: the pool replaces them.
         if catalog_saved:
             current.pop(REVIEW_LANES_KEY, None)
-        # Typed as every reader types them: a float field resent as "20" is no change from 20.0.
+        # Typed as every reader types them: a float field resent as "20" is no change from 20.0. A saved choice's zero
+        # is a value of its own, never the blank that says "not chosen".
         typed = coerce_settings_raw(current)
-        all_changed = [k for k in current if str(typed.get(k, "") or "") != str(old_effective_settings.get(k, "") or "")]
+        def said(values, key):
+            value = values.get(key)
+            return "" if value is None else str(value if key in SAVED_CHOICE_SETTINGS else value or "")
+        all_changed = [k for k in current if said(typed, k) != said(old_effective_settings, k)]
         if catalog_saved and str(old_effective_settings.get(REVIEW_LANES_KEY) or "").strip():
             all_changed.append(REVIEW_LANES_KEY)
         if runtime_changed:

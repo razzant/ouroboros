@@ -394,7 +394,7 @@ def defaults_for_settings_document(document_present: bool) -> dict:
     compatibility pass only rewrites an existing document), so only a document an earlier
     release or a harness wrote without the key falls to the legacy value. Every view carries
     the owner cap's format marker, so the first save of a fresh install keeps a cap it sets."""
-    defaults = {**SETTINGS_DEFAULTS, OWNER_CAP_FORMAT_KEY: 1}
+    defaults = {**SETTINGS_DEFAULTS, OWNER_CAP_FORMAT_KEY: 1, MODEL_CAP_FORMAT_KEY: 1}
     if document_present:
         defaults.update(OPTIONAL_BOUND_LEGACY)
     return defaults
@@ -410,19 +410,56 @@ OWNER_CAP_LEGACY = 10
 OWNER_CAP_FORMAT_KEY = "_owner_cap_format"  # disk format, never an environment setting or owner knob
 
 
-def owner_cap_document(raw: Any) -> Any:
-    """The read seam's migration of a document from before the optional cap (no format marker): its saved 10 reads
-    as blank. A read stays a read; every view carries the marker (``defaults_for_settings_document``), so the next
-    whole-document save ends the migration, and a partial save writes the blank the migration read."""
-    if (not isinstance(raw, Mapping) or raw.get(OWNER_CAP_FORMAT_KEY) == 1
-            or raw.get(OWNER_CAP_KEY) not in (OWNER_CAP_LEGACY, str(OWNER_CAP_LEGACY))):
+# «Requests at once per model» (owner, 13.11.2026, 5A and 6A): blank, the shipped default, is no number of the
+# owner's. A route to a provider's API then has no limit of the host's (the provider keeps its own); a model served on
+# this computer keeps ``MODEL_CAP_LOCAL`` (its server computes only what its slots allow). A whole number is the limit
+# for both, zero or less none for either, as before; anything else is a typo that reads finite. A document without
+# the format marker was written while every shipped default was saved: its 3 reads once as blank; 5, say, stays.
+MODEL_CAP_KEY = "OUROBOROS_MODEL_MAX_CONCURRENCY"
+MODEL_CAP_LOCAL = 3  # also the value every install saved before the owner's choice became optional
+MODEL_CAP_FORMAT_KEY = "_model_cap_format"  # disk format, never an environment setting or owner knob
+# An optional number whose earlier shipped value every document carries: (key, that value, the marker that ends it).
+_UNCHOSEN_SAVED = ((OWNER_CAP_KEY, OWNER_CAP_LEGACY, OWNER_CAP_FORMAT_KEY), (MODEL_CAP_KEY, MODEL_CAP_LOCAL, MODEL_CAP_FORMAT_KEY))
+
+
+def unchosen_saved_document(raw: Any) -> Any:
+    """The read seam's migration of a document from before an optional number (no format marker): the value the
+    shipped default saved for it (the owner cap's 10, the model limit's 3) reads as blank. A read stays a read; every
+    view carries the markers (``defaults_for_settings_document``), so the next whole-document save ends the migration,
+    and a partial save writes the blank the migration read."""
+    if not isinstance(raw, Mapping):
         return raw
-    return {**raw, OWNER_CAP_KEY: ""}
+    blank = {key: "" for key, saved, marker in _UNCHOSEN_SAVED
+             if raw.get(marker) != 1 and raw.get(key) in (saved, str(saved))}
+    return {**raw, **blank} if blank else raw
+
+
+def model_cap_value(raw: Any) -> Optional[int]:
+    """One read of the model limit: ``None`` = not chosen, else a whole number (zero or less: no limit). An
+    unlimited alias reads blank; a typo takes the finite ``MODEL_CAP_LOCAL``, reported once per process and value."""
+    if raw is None or isinstance(raw, str) and (not raw.strip() or raw.strip().lower() in UNLIMITED_ALIASES):
+        return None
+    try:
+        if isinstance(raw, bool) or isinstance(raw, float) and not raw.is_integer():
+            raise ValueError(raw)
+        return int(raw)
+    except (TypeError, ValueError):
+        if (MODEL_CAP_KEY, repr(raw)) not in _WARNED_OPTIONAL_BOUNDS:
+            _WARNED_OPTIONAL_BOUNDS.add((MODEL_CAP_KEY, repr(raw)))
+            logging.getLogger(__name__).warning(
+                "%s=%r is not a whole number or blank; using the finite fallback %s", MODEL_CAP_KEY, raw, MODEL_CAP_LOCAL)
+        return MODEL_CAP_LOCAL
+
+
+OPTIONAL_VALUE_KEYS = frozenset({*OPTIONAL_BOUND_LEGACY, OWNER_CAP_KEY, MODEL_CAP_KEY})  # what the next function spells
 
 
 def document_optional_value(key: str, value: Any) -> Any:
-    """The document spelling of an optional bound or the owner cap: a positive int, else "unlimited" (a bound) or
-    blank (the cap); a typo reads finite."""
+    """The document spelling of an optional bound or cap: its number, else "unlimited" (a bound) or blank (the
+    owner cap, the model limit); a typo reads finite."""
+    if key == MODEL_CAP_KEY:
+        cap = model_cap_value(value)
+        return "" if cap is None else cap
     bound = optional_bound_value(key, value)
     if bound is not None:
         return bound
