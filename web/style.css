@@ -519,6 +519,11 @@ html[data-layout="stack"] .resize-handle { display: none; }
         border-color: transparent;
         color: var(--text-primary);
     }
+    /* A hovered card keeps its own material: the hover tint lies over the voice instead of replacing it (on dark the
+       voice restates the tint as its opaque lighter step, so it reads as before). */
+    .nav-ouro:not(.active):hover {
+        background: linear-gradient(var(--tone-quiet-hover), var(--tone-quiet-hover)), var(--voice-ouroboros);
+    }
 }
 .nav-row.active {
     background: var(--tone-crimson);
@@ -7249,7 +7254,6 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     align-items: center;
     gap: var(--space-1);
     line-height: var(--line-title);
-    color: var(--text-secondary);
     white-space: nowrap;
 }
 .skills-category-count { color: var(--text-meta); font-weight: 500; }
