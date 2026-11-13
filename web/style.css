@@ -6615,6 +6615,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
    open page from a 40rem box, the list or the page alone below it. The shell is the section shell; the page's column
    holds the seven panels, each one tab body with its own inset and scroller. */
 .dashboard-shell { padding: 0; }
+/* The Dashboard's shell is the section shell (ui.css), which bounds its columns. A page that borrows this class
+   without a section's list (Circles) keeps the bounded column of its own, so its body is the page's scroller. */
+.dashboard-shell:not(.section-shell) { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .dashboard-lead-back { display: flex; flex: none; align-items: center; }
 .dashboard-lead-back:empty { display: none; }
 .dashboard-row-mark[hidden] { display: none; }
