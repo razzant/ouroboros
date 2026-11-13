@@ -115,6 +115,19 @@ class Toolbar:
         self.visible = visible
 
 
+class PywebviewDelegate:
+    """pywebview 5.4's window delegate in miniature: it answers close and resize, never AppKit's full-screen failures."""
+
+    def __init__(self):
+        self.messages = []
+
+    def respondsToSelector_(self, selector):
+        return selector in ("windowShouldClose:", "windowWillClose:", "windowDidResize:")
+
+    def windowWillClose_(self, notification):
+        self.messages.append(("windowWillClose:", notification))
+
+
 class NSWindow:
     """The NSWindow surface the leaf touches; its geometry follows the real rules in miniature."""
 
@@ -133,6 +146,14 @@ class NSWindow:
         self.title_bar = TitleBar()
         self.buttons = [Button(self.fill if fill_holds_buttons else View(), x, self.title_bar) for x in (19, 39, 59)]
         self.fail_on = None
+        self._delegate = PywebviewDelegate()
+
+    def delegate(self):
+        return self._delegate
+
+    def setDelegate_(self, delegate):
+        self._maybe_fail("delegate")
+        self._delegate = delegate
 
     def _maybe_fail(self, name):
         if self.fail_on == name:
@@ -301,7 +322,15 @@ def mac(monkeypatch):
         def init(self):
             return self
 
+        def respondsToSelector_(self, selector):  # NSObject's own answer: the methods its class defines
+            return callable(getattr(type(self), selector.replace(":", "_"), None))
+
+        def forwardingTargetForSelector_(self, selector):
+            return None
+
     foundation.NSObject = NSObject
+    objc = types.ModuleType("objc")
+    objc.super = super  # PyObjC's own super for its classes; the stand-in NSObject is a plain class
     foundation.NSUserDefaults = types.SimpleNamespace(standardUserDefaults=lambda: types.SimpleNamespace(
         stringForKey_=state.defaults.get))  # the app's then the global domain: a missing key is None
     webkit = types.ModuleType("WebKit")
@@ -347,7 +376,7 @@ def mac(monkeypatch):
     pyobjc_tools = types.ModuleType("PyObjCTools")
     pyobjc_tools.AppHelper = state.main
     for name, module in (("AppKit", appkit), ("WebKit", webkit), ("Foundation", foundation),
-                         ("PyObjCTools", pyobjc_tools), ("webview", state.pywebview)):
+                         ("PyObjCTools", pyobjc_tools), ("webview", state.pywebview), ("objc", objc)):
         monkeypatch.setitem(sys.modules, name, module)
     state.appkit = appkit
     return state
@@ -840,10 +869,10 @@ def test_close_releases_the_full_screen_observers(mac):
     assert names == sorted(name for name, _phase in wc._PHASES) == sorted([
         "NSWindowWillEnterFullScreenNotification", "NSWindowDidEnterFullScreenNotification",
         "NSWindowWillExitFullScreenNotification", "NSWindowDidExitFullScreenNotification"])
-    assert wc._tracked == [chrome] and chrome.windowed(object()) is True
+    assert wc._tracked == [chrome] and chrome.windowed() is True
     window.events.closed.fire()
     assert sorted(mac.removed) == names
-    assert wc._tracked == [] and chrome.windowed(object()) is False, "a closed window is never vouched for"
+    assert wc._tracked == [] and chrome.windowed() is False, "a closed window is never vouched for"
     calls = list(native.calls)
     declare(chrome, DOC_A, integrated=False, choice="dark")
     assert native.calls == calls and native.appearances == [] and mac.webview.evaluated == []
@@ -856,13 +885,14 @@ def full_screen(mac, *names):
         mac.observers[f"NSWindow{name}FullScreenNotification"](None)
 
 
-def hand_over(final=lambda: None):
+def hand_over(final=lambda: None, cancelled=None):
     """``transfer_when_windowed`` on its worker thread (the lifecycle loop's); the test thread is the main thread."""
     outcome = {}
 
     def work():
         try:
-            outcome["ran"] = wc.transfer_when_windowed(final)
+            outcome["ran"] = (wc.transfer_when_windowed(final) if cancelled is None
+                              else wc.transfer_when_windowed(final, cancelled))
         except BaseException as error:  # the worker is where ``final``'s exception must arrive
             outcome["error"] = error
 
@@ -965,7 +995,7 @@ def test_a_window_that_cannot_be_confirmed_refuses_before_any_teardown(mac, unkn
 def test_no_confirmation_by_the_deadline_abandons_and_a_later_handoff_asks_again(mac, monkeypatch):
     """The deadline delays only a refusal: no main-thread turn, or AppKit ignoring the request. A turn that comes
     afterwards does nothing, and the next handoff asks again rather than trusting the earlier request."""
-    monkeypatch.setattr(wc, "FULL_SCREEN_EXIT_SEC", 0.5)  # the test thread takes each posted turn well within it
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 0.5)  # the test thread takes each posted turn well within it
     chrome, window, native = shown()
     mac.pywebview.windows.append(window)
     seen = []
@@ -991,7 +1021,7 @@ def test_a_handoff_before_any_window_refuses_at_once_and_queues_nothing(mac, mon
     has one. Without an observed window for each listed one no main-thread turn could vouch for them all, so the
     handoff refuses at once instead of waiting out its deadline, asks AppKit nothing and leaves no attempt that a
     later window could run."""
-    monkeypatch.setattr(wc, "FULL_SCREEN_EXIT_SEC", 3600.0)  # a wait would outlast the join below by far
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)  # a wait would outlast the join below by far
     main, native = None, None
     if pywebview == "not loaded":
         monkeypatch.delitem(sys.modules, "webview")
@@ -1034,7 +1064,7 @@ def test_a_handoff_before_any_window_refuses_at_once_and_queues_nothing(mac, mon
 def test_a_claimed_handoff_is_never_abandoned_and_its_exception_reaches_the_worker(mac, monkeypatch):
     """Once the main thread runs ``final`` the deadline cannot refuse it; an exec failure is reported to the worker,
     which owns the recovery that may wait (the lock and the menu-bar item)."""
-    monkeypatch.setattr(wc, "FULL_SCREEN_EXIT_SEC", 0.05)
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 0.05)
     _chrome, window, _native = shown()
     mac.pywebview.windows.append(window)
     abandoning, settle = threading.Event(), wc._Transfer.settle
@@ -1053,6 +1083,198 @@ def test_a_claimed_handoff_is_never_abandoned_and_its_exception_reaches_the_work
     mac.main.run(first=True)
     result = finished(worker, outcome)
     assert isinstance(result.get("error"), PermissionError) and "ran" not in result
+
+
+def released(worker, outcome):
+    """``finished`` for a handoff whose deadline is far away: a regression that leaves it waiting is released."""
+    try:
+        worker.join(5)
+        assert not worker.is_alive(), "the handoff waited out its deadline instead of looking again"
+    finally:
+        if worker.is_alive():
+            wc._transfer.settle("refused")
+            worker.join(5)
+    return outcome
+
+
+def test_a_failed_exit_keeps_full_screen_and_refuses_the_waiting_handoff_at_once(mac, monkeypatch):
+    """AppKit's DidFail (a delegate message, no notification): the window stays in full screen with its full-screen
+    chrome, the handoff refuses in that turn without asking again or waiting out its deadline, and a later one asks."""
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
+    chrome, window, native = shown()
+    declare(chrome, DOC_A)
+    mac.pywebview.windows.append(window)
+    full_screen(mac, "WillEnter", "DidEnter")
+    seen = []
+    worker, outcome = hand_over(lambda: seen.append("final"))
+    mac.main.run(first=True)
+    full_screen(mac, "WillExit")
+    assert native.toolbar().visible
+    native.delegate().windowDidFailToExitFullScreen_(native)
+    mac.main.run()
+    assert released(worker, outcome) == {"ran": False} and seen == []
+    assert chrome._phase == "full" and not native.toolbar().visible, "the full-screen chrome, no band"
+    assert mac.webview.evaluated[-1]["top"] == 0, "nothing reserved in full screen"
+    assert native.calls.count("toggle full screen") == 1, "asked once, never again for this handoff"
+    worker, outcome = hand_over(lambda: seen.append("later"))
+    mac.main.run(first=True)
+    assert native.calls.count("toggle full screen") == 2, "a later handoff asks anew"
+    leave_full_screen(mac, native)
+    mac.main.run()
+    assert released(worker, outcome) == {"ran": True} and seen == ["later"]
+
+
+def test_a_failed_entry_restores_the_windowed_title_bar_and_the_waiting_handoff_runs(mac, monkeypatch):
+    """A window that could not enter full screen is windowed: its band, drag and double-click come back, and the
+    handoff that waited for the transition runs in the next turn instead of at its deadline."""
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
+    chrome, window, native = shown()
+    declare(chrome, DOC_A)
+    mac.pywebview.windows.append(window)
+    full_screen(mac, "WillEnter")
+    assert not native.toolbar().visible
+    main, seen = threading.current_thread(), []
+    worker, outcome = hand_over(lambda: seen.append(threading.current_thread() is main))
+    mac.main.run(first=True)
+    assert seen == [] and "toggle full screen" not in native.calls, "a transition under way is never toggled"
+    native.delegate().windowDidFailToEnterFullScreen_(native)
+    assert chrome._phase == "windowed" and native.toolbar().visible
+    assert mac.webview.evaluated[-1]["top"] == TOOLBAR_BAND, "the band is reserved again"
+    mac.event = press()
+    chrome.receive({"type": "drag", "doc": DOC_A})
+    assert native.calls[-1] == ("drag", mac.event), "the title bar drags again"
+    mac.main.run()
+    assert seen == [True] and released(worker, outcome) == {"ran": True}
+    assert "toggle full screen" not in native.calls
+
+
+class AnsweringDelegate(PywebviewDelegate):
+    """A previous delegate that also answers AppKit's full-screen failures."""
+
+    def respondsToSelector_(self, selector):
+        return super().respondsToSelector_(selector) or selector.startswith("windowDidFailTo")
+
+    def windowDidFailToExitFullScreen_(self, window):
+        self.messages.append(("windowDidFailToExitFullScreen:", window))
+
+    def windowDidFailToEnterFullScreen_(self, window):
+        self.messages.append(("windowDidFailToEnterFullScreen:", window))
+
+
+@pytest.mark.parametrize("previous", ["pywebview", "answering", "none"])
+def test_the_failure_delegate_forwards_the_previous_ones_messages_and_gives_it_back_on_close(mac, previous):
+    """NSWindow has one weak delegate: this one stands in front of pywebview's (close, resize...), answers exactly
+    what that one answers plus the two failures, forwards them, holds both strongly, and after close the main thread
+    restores the previous one, unless another delegate replaced this one meanwhile."""
+    native = NSWindow()
+    native._delegate = {"pywebview": PywebviewDelegate, "answering": AnsweringDelegate, "none": lambda: None}[previous]()
+    own = native._delegate
+    chrome, window, native = shown(native)
+    delegate = native.delegate()
+    assert delegate is not own and delegate.previous is own and delegate.chrome is chrome
+    assert chrome._delegate == (native, delegate), "held strongly: the window's reference is weak"
+    for selector in (wc._FAILED_ENTER, wc._FAILED_EXIT):
+        assert delegate.respondsToSelector_(selector)
+    for selector in ("windowShouldClose:", "windowWillClose:", "windowDidResize:"):
+        assert delegate.respondsToSelector_(selector) is (own is not None)
+        assert delegate.forwardingTargetForSelector_(selector) is own
+    assert not delegate.respondsToSelector_("windowDidMiniaturize:"), "nothing the previous one does not answer"
+    assert delegate.forwardingTargetForSelector_("windowDidMiniaturize:") is None
+    full_screen(mac, "WillEnter")
+    delegate.windowDidFailToEnterFullScreen_(native)
+    full_screen(mac, "WillEnter", "DidEnter", "WillExit")
+    delegate.windowDidFailToExitFullScreen_(native)
+    if previous == "answering":
+        assert own.messages == [(wc._FAILED_ENTER, native), (wc._FAILED_EXIT, native)], "forwarded as received"
+    assert chrome._phase == "full"
+    window.events.closed.fire()  # pywebview's own thread: the window is touched only in a main-thread turn
+    assert native.delegate() is delegate
+    mac.main.run()
+    assert native.delegate() is own and chrome._delegate is None
+    delegate.windowDidFailToEnterFullScreen_(native)  # a late word after close changes nothing
+    assert chrome._phase == "full"
+
+
+def test_a_replaced_delegate_is_kept_and_a_refused_install_keeps_the_handoff(mac, caplog):
+    chrome, window, native = shown()
+    theirs = PywebviewDelegate()
+    native.setDelegate_(theirs)
+    window.events.closed.fire()
+    mac.main.run()
+    assert native.delegate() is theirs, "only this delegate is ever taken back"
+    native = NSWindow()
+    native.fail_on = "delegate"
+    own = native.delegate()
+    chrome, window, native = shown(native)
+    assert native.delegate() is own and chrome._delegate is None and "Full-screen failures unheard" in caplog.text
+    mac.pywebview.windows.append(window)
+    seen = []
+    worker, outcome = hand_over(lambda: seen.append("final"))
+    mac.main.run(first=True)
+    assert finished(worker, outcome) == {"ran": True} and seen == ["final"], "#3198's barrier, unchanged"
+    window.events.closed.fire()
+    mac.main.run()
+    assert native.delegate() is own
+
+
+@pytest.mark.parametrize("left", ["a windowed window", "none"])
+def test_closing_the_full_screen_window_wakes_the_waiting_handoff(mac, monkeypatch, left):
+    """A window closed while it was asked to leave full screen sends no DidExit: its close is what the handoff waits
+    for. The windows left decide in the next turn; with none left it refuses, never an exec over no window."""
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
+    if left != "none":
+        _other, other, _native = shown()
+        mac.pywebview.windows.append(other)
+    _chrome, window, native = shown()  # the stand-in center keeps the last window's observers
+    mac.pywebview.windows.append(window)
+    full_screen(mac, "WillEnter", "DidEnter")
+    seen = []
+    worker, outcome = hand_over(lambda: seen.append("final"))
+    mac.main.run(first=True)
+    assert native.calls.count("toggle full screen") == 1 and seen == []
+    mac.pywebview.windows.remove(window)  # pywebview's windowWillClose:, then its closed event
+    window.events.closed.fire()
+    mac.main.run()
+    expected = {"ran": False} if left == "none" else {"ran": True}
+    assert released(worker, outcome) == expected and seen == (["final"] if expected["ran"] else [])
+
+
+def test_one_window_that_refuses_leaves_the_others_in_full_screen(mac, monkeypatch):
+    """Every window is judged before any is asked to leave: a hidden full-screen window listed after a visible one
+    refuses the handoff, and the visible one keeps its full screen."""
+    first, first_window, first_native = shown()
+    full_screen(mac, "WillEnter", "DidEnter")
+    _second, second_window, second_native = shown()
+    full_screen(mac, "WillEnter", "DidEnter")
+    second_native.visible = False
+    mac.pywebview.windows.extend([first_window, second_window])
+    seen = []
+    worker, outcome = hand_over(lambda: seen.append("final"))
+    mac.main.run(first=True)
+    assert finished(worker, outcome) == {"ran": False} and seen == []
+    assert "toggle full screen" not in first_native.calls + second_native.calls
+    assert first._phase == "full"
+
+
+@pytest.mark.parametrize("when", ["before the first turn", "while the window leaves"])
+def test_a_stop_before_the_windows_agree_asks_no_window_to_leave_and_runs_nothing(mac, monkeypatch, when):
+    monkeypatch.setattr(wc, "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC", 3600.0)
+    _chrome, window, native = shown()
+    mac.pywebview.windows.append(window)
+    full_screen(mac, "WillEnter", "DidEnter")
+    stopped, seen = threading.Event(), []
+    if when == "before the first turn":
+        stopped.set()
+    worker, outcome = hand_over(lambda: seen.append("final"), stopped.is_set)
+    mac.main.run(first=True)
+    if when == "before the first turn":
+        assert "toggle full screen" not in native.calls, "a Stop asks no window to leave"
+    else:
+        assert native.calls.count("toggle full screen") == 1
+        stopped.set()
+        leave_full_screen(mac, native)
+        mac.main.run()
+    assert released(worker, outcome) == {"ran": False} and seen == []
 
 
 def test_without_its_webview_the_window_stays_ordinary(mac, monkeypatch):

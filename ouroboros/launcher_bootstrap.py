@@ -916,15 +916,15 @@ LAUNCHER_HANDOFF_ENV = "OUROBOROS_LAUNCHER_HANDOFF"
 def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_lock: Callable[[], None],
                          acquire_lock: Callable[[], bool], before_release: Callable[[], None],
                          on_failure: Callable[[], None], desktop: bool, macos: bool, cancelled=lambda: False,
-                         windowed: Callable[[Callable[[], None]], bool] | None = None) -> None:
+                         windowed: Callable[..., bool] | None = None) -> None:
     """Hand off to compatible managed source; keep the shell on probe or spawn refusal.
 
     macOS selects its signed entry and probes imports/protocol with plain Python before
     teardown or unlocking. POSIX replaces the process image with that exact command; a warm
     macOS desktop shell passes ``windowed`` (``launcher_window_chrome.transfer_when_windowed``),
     which runs that teardown and exec on the main thread once no window is in full screen, or
-    refuses before any teardown. Windows spawns a quoted argv, preserving an attached CLI console
-    and hiding only when there is none. Remove the old icon while holding the lock; a definite
+    refuses before any teardown (``cancelled`` included, so a Stop asks no window to leave).
+    Windows spawns a quoted argv, preserving an attached CLI console and hiding only when there is none. Remove the old icon while holding the lock; a definite
     refusal reacquires it before restoring the shell, or exits if another launcher took it.
     A successor that starts and then fails is not a spawn refusal; no retry state is kept.
     """
@@ -969,7 +969,7 @@ def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_
 
         try:
             if windowed is not None and macos and desktop:
-                windowed(replace)  # on the main thread once no window is in full screen, or never
+                windowed(replace, cancelled)  # on the main thread once no window is in full screen, or never
             else:
                 replace()
         except Exception:

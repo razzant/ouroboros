@@ -77,7 +77,7 @@ def launch(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "stop_tray_before_exit", lambda release: (calls.append("teardown"), release()))
     monkeypatch.setattr(launcher, "restore_tray_after_handoff", lambda: calls.append("restore"))
 
-    def windows_out_of_full_screen(final):  # the main thread's turn that found every window windowed
+    def windows_out_of_full_screen(final, cancelled):  # the main thread's turn that found every window windowed
         calls.append("windows")
         final()
         return True
@@ -332,7 +332,7 @@ def test_unconfirmed_windows_keep_the_warm_shell_and_an_external_ui_has_none_to_
     l = launch
     _lifecycle(l, monkeypatch, returncode=42)
     monkeypatch.setattr(l.module, "_external_ui", external_ui)
-    monkeypatch.setattr(l.module, "transfer_when_windowed", lambda final: l.calls.append("unconfirmed") or False)
+    monkeypatch.setattr(l.module, "transfer_when_windowed", lambda final, cancelled: l.calls.append("unconfirmed") or False)
     if external_ui:
         with pytest.raises(Handoff):
             l.module.agent_lifecycle_loop()
@@ -363,7 +363,7 @@ def test_a_warm_handoff_before_any_window_refuses_at_once_with_the_real_barrier(
     started = time.monotonic()
     with pytest.raises(FrozenContinues):  # the loop's next start, by this shell
         l.module.agent_lifecycle_loop()
-    assert time.monotonic() - started < chrome.FULL_SCREEN_EXIT_SEC / 2, "never waits out the deadline"
+    assert time.monotonic() - started < chrome.MACOS_HANDOFF_FULLSCREEN_WAIT_SEC / 2, "never waits out the deadline"
     assert posted == [] and chrome._transfer is None, "nothing queued, no attempt left for a later window"
     assert l.calls == ["server", "sync", "deps", "probe"], "no icon, unlock or exec"
 
