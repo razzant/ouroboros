@@ -106,7 +106,7 @@ def no_sleep(monkeypatch):
 
 def _events(drive_logs, kind):
     path = drive_logs / "events.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
     return [row for row in rows if row.get("type") == kind]
 
 
