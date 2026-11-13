@@ -188,7 +188,7 @@ def test_the_launcher_runs_body_installs_and_handoff_in_the_runtime_venv(managed
         return True
 
     monkeypatch.setattr(launcher, "bootstrap_repo", bootstrap)
-    monkeypatch.setattr(launcher, "_install_deps", lambda: seen.setdefault("installed", True))
+    monkeypatch.setattr(launcher, "install_deps", lambda ctx: seen.setdefault("installed", True))
     monkeypatch.setattr(launcher, "mark_ready", lambda venv: seen.setdefault("ready", venv) and venv)
 
     def stop():
@@ -243,7 +243,7 @@ def test_launcher_venv_creation_keeps_the_running_python_abi(managed_launcher, m
     monkeypatch.setattr(launcher, "prepare_runtime_venv",
                         lambda path, **kw: prepare_runtime_venv(path, run=run, base_python=kw.get("base_python")))
     monkeypatch.setattr(launcher, "bootstrap_repo", lambda: True)
-    monkeypatch.setattr(launcher, "_install_deps", lambda: True)
+    monkeypatch.setattr(launcher, "install_deps", lambda ctx: True)
     monkeypatch.setattr(launcher, "_prepare_first_run_settings",
                         lambda: (_ for _ in ()).throw(ReachedLifecycle()))
     with pytest.raises(ReachedLifecycle):
@@ -378,7 +378,7 @@ def test_a_failed_ready_marker_stops_the_launcher_before_starting_the_body(manag
     prepared = RuntimeVenv(root, str(root / "bin/python"), root / "bin", False)
     monkeypatch.setattr(launcher, "prepare_runtime_venv", lambda *a, **kw: prepared)
     monkeypatch.setattr(launcher, "bootstrap_repo", lambda: True)
-    monkeypatch.setattr(launcher, "_install_deps", lambda: True)
+    monkeypatch.setattr(launcher, "install_deps", lambda ctx: True)
     def refuse(_venv):
         raise RuntimeVenvRefused("cannot record ready; files retained")
     monkeypatch.setattr(launcher, "mark_ready", refuse)
