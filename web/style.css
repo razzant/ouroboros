@@ -131,7 +131,7 @@ html[data-layout="stack"] .shell-icon-control {
     --nav-kebab-w: var(--nav-control-h);  /* the column a Project row's ⋯ takes (none on touch: a long press opens it) */
     --nav-label-x: calc(var(--space-3) + 18px + var(--space-3));  /* the one text column every label starts on */
     --sidebar-pad-bottom: var(--space-3);  /* the foot's inset from the bottom edge; the drawer adds the safe area */
-    width: var(--drag-width, var(--sidebar-width));
+    width: max(var(--sidebar-min-width), var(--drag-width, var(--sidebar-width)));
     height: var(--vvh);
     display: flex;
     flex-direction: column;
