@@ -152,10 +152,11 @@ def test_settled_continuations_retire_after_age_window(tmp_path):
 
 
 def test_a_settled_continuation_stays_while_an_earlier_obligation_mark_awaits_a_landing(tmp_path):
-    """An aged continuation of a settled task stays in context while it carries an obligation mark
-    written before obligations retired (its ids or its snapshot) and no commit has landed in its checkout since it
-    was written. A landing after it, findings alone, or no record of work at all leave it to the age rule, which
-    archives it (durable, disclosed). The rule reads the continuation and the landings, never an obligation table."""
+    """An aged continuation of a settled task stays in context while an obligation its marks name (its ids or its
+    snapshot, by id or fingerprint) is still open among the stored rows: until a commit lands in that obligation's
+    own checkout, even when the continuation itself names no checkout and another checkout lands. A landing after the
+    obligation, a mark no stored open row holds, findings alone, or no record of work at all leave it to the age
+    rule, which archives it (durable, disclosed)."""
     import json as _json
 
     from ouroboros.agent_task_pipeline import build_review_context
@@ -172,13 +173,27 @@ def test_a_settled_continuation_stays_while_an_earlier_obligation_mark_awaits_a_
         drive_root = tmp_path
 
     (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "foreign" / ".git").mkdir(parents=True, exist_ok=True)
     repo_key = make_repo_key(tmp_path / "repo")
     finding = {"item": "tests_affected", "reason": "Coverage still missing", "severity": "critical", "verdict": "FAIL"}
     snapshot = [{"obligation_id": "obl-0002", "fingerprint": "finding:tests_affected:abc", "status": "still_open"}]
 
-    def _aged(task_id, written, **fields):
+    def _row(obligation_id, written, fingerprint=""):
+        return {"obligation_id": obligation_id, "item": "tests_affected", "severity": "critical", "status": "still_open",
+                "reason": "Coverage still missing", "repo_key": repo_key, "fingerprint": fingerprint or obligation_id,
+                "created_ts": written, "updated_ts": written, "source_attempt_ts": written}
+
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "advisory_review.json").write_text(_json.dumps({  # the retired layer's stored rows
+        "state_version": 3, "attempts": [], "next_obligation_seq": 5, "open_obligations": [
+            _row("obl-0001", "2026-01-08T00:00:00+00:00"),
+            _row("obl-0002", "2026-01-08T00:00:00+00:00", fingerprint="finding:tests_affected:abc"),
+            _row("obl-0003", "2026-01-01T00:00:00+00:00"),  # the landing of 01-05 cleared it
+            _row("obl-0004", "2026-01-08T00:00:00+00:00")]}), encoding="utf-8")
+
+    def _aged(task_id, written, key=repo_key, **fields):
         save_review_continuation(tmp_path, ReviewContinuation(
-            task_id=task_id, source="blocked_review", stage="blocking_review", repo_key=repo_key, **fields))
+            task_id=task_id, source="blocked_review", stage="blocking_review", repo_key=key, **fields))
         path = continuation_path(tmp_path, task_id)
         data = _json.loads(path.read_text(encoding="utf-8"))
         data["created_ts"] = data["updated_ts"] = written
@@ -189,18 +204,23 @@ def test_a_settled_continuation_stays_while_an_earlier_obligation_mark_awaits_a_
     _aged("idstask", "2026-01-10T00:00:00+00:00", obligation_ids=["obl-0001"])
     _aged("snapshottask", "2026-01-10T00:00:00+00:00", open_obligations=snapshot)
     _aged("landedtask", "2026-01-01T00:00:00+00:00", obligation_ids=["obl-0003"], critical_findings=[finding])
+    _aged("unknowntask", "2026-01-10T00:00:00+00:00", obligation_ids=["obl-0099"])  # no stored open row holds it
+    # The old exception writer stored no checkout: neither on the continuation nor in its snapshot rows.
+    _aged("unscopedtask", "2026-01-10T00:00:00+00:00", key="", open_obligations=[{"obligation_id": "obl-0004"}])
     _aged("emptytask", "2026-01-10T00:00:00+00:00")
-    update_state(tmp_path, lambda state: state.record_attempt(CommitAttemptRecord(  # lands between the two stamps
-        ts="2026-01-05T00:00:00+00:00", finished_ts="2026-01-05T00:00:00+00:00", commit_message="landed",
-        status="succeeded", repo_key=repo_key, task_id="other", attempt=1)))
+    for landed_ts, landed_key in (("2026-01-05T00:00:00+00:00", repo_key),
+                                  ("2026-01-11T00:00:00+00:00", make_repo_key(tmp_path / "foreign"))):  # after all
+        update_state(tmp_path, lambda state, ts=landed_ts, key=landed_key: state.record_attempt(CommitAttemptRecord(
+            ts=ts, finished_ts=ts, commit_message="landed", status="succeeded", repo_key=key, task_id="other",
+            attempt=1)))
 
     dynamic_text = build_review_context(FakeEnv())
 
-    for kept in ("idstask", "snapshottask"):
+    for kept in ("idstask", "snapshottask", "unscopedtask"):
         assert continuation_path(tmp_path, kept).exists(), kept
         assert f"task={kept}" in dynamic_text
     assert "obligation_ids=obl-0001 (recorded before obligations retired)" in dynamic_text  # tied to the earlier rows
-    for released in ("findingstask", "landedtask", "emptytask"):
+    for released in ("findingstask", "landedtask", "unknowntask", "emptytask"):
         assert not continuation_path(tmp_path, released).exists(), released
         assert (archived_continuation_dir(tmp_path) / f"{released}.json").exists(), released  # durable
         assert released in dynamic_text and f"task={released}" not in dynamic_text  # the archive line names it
@@ -225,3 +245,60 @@ def test_a_continuation_written_again_for_an_attempt_recorded_before_obligations
     current = build_review_continuation(task, attempt(), source="blocked_review")
     assert legacy.obligation_ids == ["obl-0001", "obl-0002"] and legacy.review_record_id == "rv-1"
     assert current.obligation_ids == [] and current.review_record_id == "rv-1"
+
+
+
+def test_a_continuation_written_again_without_a_landing_keeps_the_stored_obligation_it_names(tmp_path):
+    """Writing a task's continuation again for an attempt that did not land, through the exception path and through
+    the commit gate alike, reads this checkout's still-open stored obligations again, so the snapshot an earlier write
+    took is not lost; a commit landing in the checkout releases both."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, update_state
+    from ouroboros.task_continuation import (
+        ReviewContinuation,
+        capture_review_continuation_from_state,
+        load_review_continuation,
+        open_work_matcher,
+        save_review_continuation,
+    )
+    from ouroboros.tools.commit_gate import _record_commit_attempt
+
+    (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
+    repo_key = make_repo_key(tmp_path / "repo")
+    stamp = "2026-01-01T00:00:00+00:00"
+    row = {"obligation_id": "obl-0007", "item": "tests_affected", "severity": "critical", "status": "still_open",
+           "reason": "Coverage still missing", "repo_key": repo_key, "fingerprint": "finding:tests_affected:abc",
+           "created_ts": stamp, "updated_ts": stamp, "source_attempt_ts": stamp}
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "advisory_review.json").write_text(_json.dumps(
+        {"state_version": 3, "attempts": [], "open_obligations": [row], "next_obligation_seq": 8}), encoding="utf-8")
+
+    def held(task_id):
+        return open_work_matcher(load_state(tmp_path))(load_review_continuation(tmp_path, task_id))
+
+    for writer in ("exception", "gate"):
+        task_id = f"marked-{writer}"
+        save_review_continuation(tmp_path, ReviewContinuation(  # written before the update: a snapshot, no ids
+            task_id=task_id, source="blocked_review", stage="blocking_review", repo_key=repo_key,
+            open_obligations=[{"obligation_id": "obl-0007", "fingerprint": row["fingerprint"], "status": "still_open"}]))
+        if writer == "exception":
+            update_state(tmp_path, lambda state, tid=task_id: state.record_attempt(CommitAttemptRecord(
+                ts="2026-01-02T00:00:00+00:00", commit_message="retry", status="failed", repo_key=repo_key,
+                task_id=tid, attempt=2)))
+            capture_review_continuation_from_state(tmp_path, {"id": task_id, "type": "task"}, source="task_exception",
+                                                   warning="RuntimeError: interrupted", repo_dir=tmp_path / "repo")
+        else:
+            _record_commit_attempt(SimpleNamespace(
+                drive_root=tmp_path, repo_dir=tmp_path / "repo", task_id=task_id, current_task_type="task",
+                parent_task_id="", _current_review_attempt_number=None),
+                "retry cannot finish", "failed", block_reason="infra_failure", critical_findings=[], _strict=True)
+        written = load_review_continuation(tmp_path, task_id)
+        assert [r.get("obligation_id") for r in written.open_obligations] == ["obl-0007"], writer
+        assert written.source != "blocked_review" and held(task_id), writer  # written again, and still held
+
+    update_state(tmp_path, lambda state: state.record_attempt(CommitAttemptRecord(
+        ts="2026-01-03T00:00:00+00:00", finished_ts="2026-01-03T00:00:00+00:00", commit_message="landed",
+        status="succeeded", repo_key=repo_key, task_id="other", attempt=1)))
+    assert not held("marked-exception") and not held("marked-gate")

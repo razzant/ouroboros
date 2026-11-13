@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ouroboros.utils import atomic_write_json, replace_atomic, utc_now_iso
 
@@ -30,8 +30,8 @@ class ReviewContinuation:
     block_details: str = ""
     critical_findings: List[Dict[str, Any]] = field(default_factory=list)
     advisory_findings: List[Dict[str, Any]] = field(default_factory=list)
-    # Marks recorded before the obligation layer retired (or copied from an attempt that carries them); read only
-    # as recorded open work (``open_work_matcher``).
+    # Marks of the retired obligation layer: ids an attempt recorded before it retired carries, and the snapshot of
+    # this checkout's still-open stored obligations taken at each write; read only as open work (``open_work_matcher``).
     obligation_ids: List[str] = field(default_factory=list)
     open_obligations: List[Dict[str, Any]] = field(default_factory=list)
     readiness_warnings: List[str] = field(default_factory=list)
@@ -215,6 +215,7 @@ def build_review_continuation(
     *,
     source: str,
     warning: str = "",
+    earlier_open_obligations: Sequence[Dict[str, Any]] = (),
 ) -> Optional[ReviewContinuation]:
     task_id = str(task.get("id") or "").strip()
     if not task_id:
@@ -223,7 +224,7 @@ def build_review_continuation(
     warnings = [str(item) for item in (getattr(attempt, "readiness_warnings", []) or []) if str(item).strip()]
     if warning:
         warnings.append(str(warning))
-    if attempt is None:
+    if attempt is None and not earlier_open_obligations:
         if source != "task_exception" or not warnings:
             return None
         return ReviewContinuation(
@@ -254,8 +255,10 @@ def build_review_continuation(
         task_type=str(task.get("type") or ""),
         parent_task_id=str(task.get("parent_task_id") or ""),
         review_record_id=str(getattr(attempt, "review_record_id", "") or ""),
-        # Only an attempt recorded before obligations retired carries ids; a re-written continuation keeps its mark.
+        # Only an attempt recorded before obligations retired carries ids. The snapshot is read again at every write,
+        # so a continuation written again keeps its mark while those stored obligations stay open.
         obligation_ids=[str(x) for x in (getattr(attempt, "obligation_ids", None) or [])],
+        open_obligations=[dict(row) for row in earlier_open_obligations],
     )
 
 
@@ -280,7 +283,10 @@ def capture_review_continuation_from_state(
         if repo_key
         else state.latest_attempt_for(task_id=task_id)
     )
-    continuation = build_review_continuation(task, attempt, source=source, warning=warning)
+    obligation_repo_key = str(getattr(attempt, "repo_key", "") or repo_key or "")
+    continuation = build_review_continuation(
+        task, attempt, source=source, warning=warning,
+        earlier_open_obligations=state.earlier_open_obligations(obligation_repo_key or None))
     if continuation is None:
         return None
     return save_review_continuation(drive_root, continuation, expect_task_id=task_id)
@@ -369,16 +375,25 @@ def _safe_ts_token(ts: str) -> str:
 
 
 def open_work_matcher(state: Any) -> Any:
-    """Build ``has_open_work(continuation)``: a continuation carrying an obligation mark written before the
-    obligation layer retired (``obligation_ids`` or its ``open_obligations`` snapshot) records open work until a
-    commit lands in its repository after it was last written, which is when the layer cleared those obligations.
-    A continuation that holds only findings follows the age rule. ``state`` is duck-typed (``landed_after``) so
-    this module keeps zero review-state imports."""
+    """Build ``has_open_work(continuation)``: a continuation records open work while an obligation its marks name
+    (``obligation_ids`` or its ``open_obligations`` snapshot, by id or fingerprint) is still open among the rows the
+    retired layer stored, that is until a commit lands in that obligation's own checkout, when the layer cleared it
+    (``earlier_open_obligations``). A continuation that holds only findings, or names no stored open obligation,
+    follows the age rule. ``state`` is duck-typed so this module keeps zero review-state imports."""
+    open_markers = {
+        marker
+        for row in state.earlier_open_obligations(None)
+        for marker in (str(row.get("obligation_id") or ""), str(row.get("fingerprint") or ""))
+        if marker
+    }
 
     def _has_open_work(item: Any) -> bool:
-        if not (item.obligation_ids or item.open_obligations):
-            return False
-        return not state.landed_after(item.repo_key, item.updated_ts or item.created_ts)
+        markers = {str(x) for x in (item.obligation_ids or [])}
+        for entry in item.open_obligations or []:
+            if isinstance(entry, dict):
+                markers.update((str(entry.get("obligation_id") or ""), str(entry.get("fingerprint") or "")))
+        markers.discard("")
+        return bool(markers & open_markers)
 
     return _has_open_work
 

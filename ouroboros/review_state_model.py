@@ -40,6 +40,11 @@ def _rs():
     return review_state
 
 
+def _row_stamp(row: Dict[str, Any]) -> str:
+    """When a stored obligation row was last written: a landing after it is what cleared it."""
+    return str(row.get("updated_ts") or row.get("source_attempt_ts") or "")
+
+
 @dataclass
 class AdvisoryReviewState:
     """Top-level durable review state."""
@@ -115,25 +120,37 @@ class AdvisoryReviewState:
         """Whether a commit landed in ``repo_key``'s checkout (any checkout when empty) after ``stamp``: a
         ``succeeded`` attempt there that finished later. An unparseable stamp proves no landing, and a landing row
         the attempt window evicted reads as none, so what waits for a landing stays longer, never shorter."""
+        return self._landed_among(self.filter_attempts(repo_key=repo_key or None), stamp)
+
+    @staticmethod
+    def _landed_among(attempts: List[CommitAttemptRecord], stamp: str) -> bool:
         since = _rs()._parse_iso_ts(str(stamp or ""))
         if since is None:
             return False
-        for item in self.filter_attempts(repo_key=repo_key or None):
+        for item in attempts:
             landed = _rs()._parse_iso_ts(str(item.finished_ts or item.updated_ts or item.ts or ""))
             if item.status == "succeeded" and landed is not None and landed > since:
                 return True
         return False
 
-    def earlier_open_obligations(self, repo_key: str) -> List[Dict[str, Any]]:
+    def earlier_open_obligations(self, repo_key: Optional[str]) -> List[Dict[str, Any]]:
         """The open obligations the retired layer stored for this checkout (its exact key, else the legacy and empty
-        keys), as stored, until a commit lands there after them: the moment that layer would have cleared them."""
+        keys), as stored, until a commit lands there after them: the moment that layer would have cleared them.
+        ``None`` reads every checkout's, each row in its own; a row stored without a key stays until a commit lands
+        in a checkout that holds no keyed row (that layer's scope rule)."""
         stored = (getattr(self, "retired_review_rows", None) or {}).get("open_obligations")
         rows = [row for row in (stored if isinstance(stored, list) else [])
                 if isinstance(row, dict) and str(row.get("status", "still_open")) == "still_open"]
-        scope = ({repo_key} if any(str(row.get("repo_key") or "") == repo_key for row in rows)
-                 else {"", _rs()._LEGACY_CURRENT_REPO_KEY})
-        return [row for row in rows if str(row.get("repo_key") or "") in scope and not self.landed_after(
-            repo_key, str(row.get("updated_ts") or row.get("source_attempt_ts") or ""))]
+        unkeyed = {"", _rs()._LEGACY_CURRENT_REPO_KEY}
+        if repo_key is None:
+            keyed = {str(row.get("repo_key") or "") for row in rows} - unkeyed
+            outside = [item for item in self.filter_attempts(repo_key=None) if str(item.repo_key or "") not in keyed]
+            return [row for row in rows if not (
+                self.landed_after(str(row.get("repo_key") or ""), _row_stamp(row))
+                if str(row.get("repo_key") or "") in keyed else self._landed_among(outside, _row_stamp(row)))]
+        scope = {repo_key} if any(str(row.get("repo_key") or "") == repo_key for row in rows) else unkeyed
+        return [row for row in rows if str(row.get("repo_key") or "") in scope
+                and not self.landed_after(repo_key, _row_stamp(row))]
 
     def _newest_stale_marker(self) -> Dict[str, str]:
         return {"ts": self.last_stale_from_edit_ts, "reason": self.last_stale_reason,

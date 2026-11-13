@@ -610,6 +610,7 @@ def _record_commit_attempt(
                             },
                             latest_attempt,
                             source=source,
+                            earlier_open_obligations=latest_state.earlier_open_obligations(repo_key),
                         )
                         if continuation is not None:
                             save_review_continuation(dr, continuation, expect_task_id=task_id)
