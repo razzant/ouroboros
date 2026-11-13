@@ -237,7 +237,6 @@ def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="ass
     root.mkdir(parents=True, exist_ok=True)
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx._accumulated_usage = usage
-    registry._ctx.active_model = "m2"  # the acting model string itself: another account or window of it, never a move
     # A declared window's RouteFacts (its units). ``holds_reply``: a total known to hold the reply too (a local
     # server's one buffer), read less the whole reserve; any other stated total is read less the reply floor.
     evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window,
@@ -404,6 +403,23 @@ def test_a_held_low_view_steps_down_to_nano_only_where_nano_makes_room(tmp_path,
     window = raw + (65_536 if holds_reply else 8_192) - 10_000
     _rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=window, holds_reply=holds_reply)
     assert mode == after and event["view_kept"] is False
+
+
+def test_only_a_main_reading_keeps_low_where_nano_admits_no_more(tmp_path, monkeypatch):
+    """The guard above reads Main's admitted frame. A caller with a frame of its own (voice: a working reserve above
+    both modes' reply reserves, so Nano admits no more input than Low) steps the held view down as it always did."""
+    from tests.test_memory_view_modes import _built
+
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    low = dataclasses.replace(plan(1_000_000, preferred="low", tool_schemas=[]), working_reserve_tokens=70_000)
+    messages = _long_tail(low)
+
+    def fitted(window, **flags):
+        return low.reproject_for_route(window_tokens=window, known_window=True, ratio=1.0, output_reserve=65_536,
+                                       tool_schemas=[], start_mode="low", current_messages=messages, **flags)
+
+    window = fitted(10_000_000).projection("low").estimated_tokens + 70_000 - 10_000  # 10,000 over what memory can give
+    assert fitted(window).initial_mode == "nano" and fitted(window, admitted=True).initial_mode == "low"
 
 
 @pytest.mark.parametrize("owner,ran,mode", [

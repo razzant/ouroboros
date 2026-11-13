@@ -787,6 +787,7 @@ def test_a_fallback_too_small_for_the_book_changes_no_memory(tmp_path, fixed_den
             task_id="outage", round_idx=2, event_queue=None, accumulated_usage={"_last_llm_error_kind": "transport_unavailable"},
             task_type="", emit_progress=lambda *_a, **_kw: None, context_fit_plan=plan, active_context_mode="low")
         assert msg is None and model == primary and mode == "low" and sent["mode"] == "low"
+        assert sent["view"] == shown  # the candidate carried the same memory (and the book, if any): nothing paid
         assert messages[0] == shown  # the primary's own view is untouched by the refused candidate
         return sent
 
