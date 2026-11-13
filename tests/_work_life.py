@@ -607,7 +607,7 @@ def breaches(record: Dict[str, Any], places: Dict[str, Place], *, sequence: str,
     optimization.py``): the sequence of (class, answering place); P4's room after a start write that narrowed the
     view for its window (a wall's pass, or a bind onto a place whose line the request answered before it did not fit:
     under the admitted line, measured by the place within half an eighth, since the host sizes by its own estimate)
-    and its other side, that a restore of a view its window held takes nothing on a guess; P3's
+    and its other side, that a restore or a move of a view its window held takes nothing on a guess; P3's
     favourable reading before a send, unless the product recorded a refusal of the total kind no later than it, the
     same reading for a part the mind read (it comes back whole while the request with it whole would still go out),
     and its learning from a refusal or a cut reply; P5's queue that refuses nothing, tells the work's feed that a send
@@ -639,8 +639,8 @@ def breaches(record: Dict[str, Any], places: Dict[str, Place], *, sequence: str,
                 if row["room"] < eighth // 2:
                     found.append(f"P4 room: {row['token']} left {row['room']} of {stated} after its start write, "
                                  f"under the eighth {eighth}")
-            elif before["place"] == row["place"] and carried - row["known"] > max(0, eighth - (line - carried)) // 2 > 0:
-                # A restore of a view its window held: more than half the room it lacked is gone from the request.
+            elif carried - row["known"] > max(0, eighth - (line - carried)) // 2 > 0:
+                # A restore or a move of a view its window held: more than half the room it lacked is gone.
                 found.append(f"P4 guess: {row['token']} sent {row['known']} where {carried} fitted its line {line}: "
                              f"room was taken from a view the window held")
         before = row

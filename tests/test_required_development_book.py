@@ -753,9 +753,8 @@ def test_the_facts_row_sizes_the_ordinary_target_without_repeating_the_book_note
 
 def test_a_fallback_too_small_for_the_book_changes_no_memory(tmp_path, fixed_density, monkeypatch):
     """A primary outage walks to a configured route the book does not fit: the request is refused there and the
-    primary's view stays. The candidate enters a model this work was never answered on, so it is sized with its own
-    work room like any such move; the book costs it no form: its memory is exactly what the same move shows without
-    the book."""
+    primary's view stays. The book costs the candidate no form: its memory is exactly what the same move shows
+    without the book."""
     from ouroboros import config, fallback_cooldown
     from tests.test_primary_view_return import _registry
 
