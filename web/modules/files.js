@@ -565,11 +565,15 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             showPane('list');
         }
         state.rootPath = data.root_path || state.rootPath;
+        const anotherFolder = (data.path || '.') !== state.path;
         state.path = data.path || '.';
         state.parentPath = data.parent_path || '.';
         state.entries = Array.isArray(data.entries) ? data.entries : [];
         renderBreadcrumb(Array.isArray(data.breadcrumb) ? data.breadcrumb : []);
         renderList();
+        // Another folder is read from its first row (DESIGN §10 "A repaint keeps the reading place": the same folder
+        // drawn again stays where it was; something else in the same box is sent to its top on purpose).
+        if (anotherFolder) listEl.scrollTop = listScroll = 0;
 
         if (!preserveEditor || (!state.selectedPath && !state.editorWritable)) {
             setPreview({

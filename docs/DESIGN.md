@@ -3273,10 +3273,10 @@ and under the closed phone drawer they rest. Reduced motion keeps only short fad
 while it reconnects: the room's bar says Reconnecting….
 
 **A repaint keeps the reading place.** A page that draws again what it shows (a poll, a reconnect, a saved row)
-leaves every box where the owner scrolled it; only the owner, or the page on purpose, moves it. WebKit drops a box
-that is or lies in a size container to its top when the part drawn again holds an `<svg>`, so one rule puts it back
-for every page (`web/modules/page_places.js`, `tests/test_repaint_keeps_place_browser.py`); a new page needs no
-scroll code of its own for it.
+leaves every box where the owner scrolled it: only the owner, or the page on purpose, moves it, and a page that shows
+something else in the same box (another folder) sends it to its top itself. A page draws in one step, since a box
+emptied now and filled later has lost its place. Where an engine would drop the box, one rule holds it for every page
+(`web/modules/page_places.js`); a room's feed and the Logs list keep their own reading place.
 
 **Haptics.** Inside Telegram, and only there (its HapticFeedback; a browser and the
 desktop app have none), a few moments are felt, one meaning each: the drawer,
@@ -3417,4 +3417,6 @@ scroll by touch); `tests/test_shell_layout_static.py`,
 `tests/test_design_system_css_static.py` keep the one switch, the registry, the
 glyph set, the breakpoint ratchet and sentence case; `web/tests/layers.test.js`,
 `web/tests/drawer_drag.test.js` and `web/tests/host_telegram.test.js` pin the
-behaviour, and `tests/test_sidebar_short_window_browser.py` the short window's pinned foot.
+behaviour, and `tests/test_sidebar_short_window_browser.py` the short window's pinned foot;
+`web/tests/page_places.test.js` and `tests/test_repaint_keeps_place_browser.py` hold the reading place through a repaint
+on every registered page, tab and Settings page.

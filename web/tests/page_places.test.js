@@ -83,71 +83,125 @@ test('Logs owns its actual scroller; generic page restoration still restores oth
     assert.deepEqual([logs.scrollTop, other.scrollTop], [0, 40], 'only logs.js restores #page-logs');
 });
 
-// A repaint keeps the reading place: WebKit drops a box in a size container to its top when a part drawn again holds
-// an <svg> (page_places.js). The change is seen after it lands, before the frame is painted.
-function repaintWorld({ element: platform = false } = {}) {
+// A repaint keeps the reading place: WebKit holds a box in a size container to what remains while a part with an <svg>
+// is drawn again (page_places.js). The change is seen after it lands, before the frame is painted. Boxes stand on an
+// Element whose `scrollTop` the platform owns (`raw`), as a browser's do: a write is held to what the box can reach, a
+// box out of sight reads 0 and takes no write, and the platform's `scrollTo` and `scrollIntoView` do not pass through
+// `scrollTop`. `engine` is what the engine's one probe answers.
+function repaintWorld({ engine = true } = {}) {
     let notify = null;
+    let observed = false;
+    let asked = 0;
     const scrollListeners = [];
-    // With `element`, boxes stand on an Element whose `scrollTop` the platform owns (`raw`), as a browser's do.
-    const Element = platform ? class {} : null;
-    if (Element) {
-        Object.defineProperty(Element.prototype, 'scrollTop', { configurable: true,
-            get() { return this.raw; }, set(value) { this.raw = Math.max(0, value); } });
-        Element.prototype.scrollTo = function scrollTo({ top }) { this.scrollTop = top; };
-    }
-    const element = (parent, { container = false, height = 2000, owned = false } = {}) => {
-        const node = Object.assign(Element ? Object.create(Element.prototype) : { scrollTop: 0 }, { nodeType: 1,
-            parentElement: parent, isConnected: true, scrollLeft: 0, scrollHeight: height, clientHeight: 500, container,
+    class Element {}
+    const land = (box, top) => { if (box.rendered) box.raw = Math.max(0, Math.min(Number(top) || 0, box.scrollHeight - box.clientHeight)); };
+    Object.defineProperty(Element.prototype, 'scrollTop', { configurable: true,
+        get() { return this.rendered ? this.raw : 0; }, set(value) { land(this, value); } });
+    Element.prototype.scrollTo = function scrollTo({ top }) { land(this, top); };
+    Element.prototype.scrollIntoView = function scrollIntoView() { land(this.parentElement, this.at); };
+    const platformIntoView = Element.prototype.scrollIntoView;
+    const element = (parent, { container = false, height = 2000, owned = false, at = 0 } = {}) => {
+        const node = Object.assign(Object.create(Element.prototype), { nodeType: 1, parentElement: parent, isConnected: true,
+            rendered: true, raw: 0, scrollLeft: 0, scrollHeight: height, clientHeight: 500, container, owned, at,
+            getClientRects() { return this.rendered ? [{}] : []; },
             contains(other) { for (let n = other; n; n = n.parentElement) if (n === this) return true; return false; },
-            closest: () => (owned ? node : null), matches: () => owned });
-        if (Element) node.raw = 0;
+            closest() { for (let n = this; n; n = n.parentElement) if (n.owned) return n; return null; },
+            matches() { return this.owned; } });
         return node;
     };
     const content = element(null);
-    const doc = { body: content, getElementById: () => null, addEventListener: (type, fn) => scrollListeners.push(fn) };
-    const win = { Element, addEventListener() {}, getComputedStyle: (el) => ({ containerType: el.container ? 'inline-size' : 'normal' }),
-        MutationObserver: class { constructor(fn) { notify = fn; } observe(root, options) { assert.equal(root, content); assert.ok(options.subtree); } } };
-    initPagePlaces({ doc, win });
-    const scrolled = (box, top) => { box.scrollTop = top; scrollListeners.forEach((fn) => fn({ target: box })); };
-    return { content, element, scrolled, changed: (...targets) => notify(targets.map((target) => ({ target }))) };
+    const doc = { body: content, getElementById: () => content, addEventListener: (type, fn) => scrollListeners.push(fn) };
+    const pageShown = [];
+    const win = { Element, addEventListener: (type, fn) => { if (type === 'ouro:page-shown') pageShown.push(fn); },
+        getComputedStyle: (el) => ({ containerType: el.container ? 'inline-size' : 'normal' }),
+        MutationObserver: class { constructor(fn) { notify = fn; }
+            observe(root, options) { assert.equal(root, content); assert.ok(options.childList && options.subtree); observed = true; } } };
+    initPagePlaces({ doc, win, drops: () => { asked += 1; return engine; } });
+    // The owner scrolls: the platform moves the box, then says so. The engine's drop moves it and says nothing yet.
+    const scrolled = (box, top) => { box.raw = top; scrollListeners.forEach((fn) => fn({ target: box })); };
+    const dropped = (box, to = 0) => { box.raw = to; };
+    const changed = (...targets) => { assert.ok(observed, 'the document is watched'); notify(targets.map((target) => ({ target }))); };
+    return { content, element, scrolled, dropped, changed, shown: () => pageShown.forEach((fn) => fn({ detail: { page: 'any' } })),
+        watched: () => observed, asked: () => asked, intoViewIsPlatforms: () => Element.prototype.scrollIntoView === platformIntoView };
 }
 
-test('a box in a size container that a repaint dropped to its top goes back where the owner left it', () => {
+test('a box a repaint dropped goes back where the owner left it, in a size container only', () => {
     const w = repaintWorld();
     const page = w.element(w.content, { container: true });
-    const box = w.element(page);
-    const part = w.element(box);
-    w.scrolled(box, 480);
-    box.scrollTop = 0;  // WebKit: the part drawn again held an <svg>
-    w.changed(part);
-    assert.equal(box.scrollTop, 480);
+    const box = w.element(page), under = w.element(page, { height: 4000 }), plain = w.element(w.content);
+    w.scrolled(box, 480); w.scrolled(under, 2500); w.scrolled(plain, 480);
+    w.dropped(box); w.dropped(plain);  // WebKit: the part drawn again held an <svg>
+    w.dropped(under, 910);             // part of the way: 1410 px of cards stand above the part drawn again
+    w.changed(w.element(box), w.element(under), w.element(plain));
+    assert.deepEqual([box.scrollTop, under.scrollTop, plain.scrollTop], [480, 2500, 0]);
 });
 
-test('a repaint leaves alone a box the owner left at its top, one that cannot reach its place, and one outside a container', () => {
+test('a change outside a size container costs the box no layout read; inside one the box is read and put back', () => {
     const w = repaintWorld();
     const page = w.element(w.content, { container: true });
-    const top = w.element(page), short = w.element(page, { height: 600 }), plain = w.element(w.content);
-    w.scrolled(top, 0); w.scrolled(short, 300); w.scrolled(plain, 300);
-    short.scrollTop = 0; plain.scrollTop = 0;  // what it holds now ends above 300; a page sent its own box to the top
-    w.changed(w.element(top), w.element(short), w.element(plain));
-    assert.deepEqual([top.scrollTop, short.scrollTop, plain.scrollTop], [0, 0, 0]);
+    const box = w.element(page), plain = w.element(w.content);
+    w.scrolled(box, 300); w.scrolled(plain, 300);
+    const reads = new Map([[box, 0], [plain, 0]]);
+    for (const each of [box, plain]) Object.defineProperty(each, 'scrollHeight', { get() { reads.set(each, reads.get(each) + 1); return 2000; } });
+    w.dropped(box); w.dropped(plain);
+    w.changed(w.element(box), w.element(plain));
+    assert.equal(reads.get(plain), 0);
+    assert.ok(reads.get(box) > 0);
+    assert.equal(box.scrollTop, 300);
 });
 
-test('a repaint that moved a box only part of the way, or not at all, is not undone; a feed is its owner\'s', () => {
+test('a box that lost only what it no longer holds is where it should be; one that lost more goes to its place or its new end', () => {
     const w = repaintWorld();
     const page = w.element(w.content, { container: true });
-    const box = w.element(page), feed = w.element(page, { owned: true });
-    w.scrolled(box, 480);
-    box.scrollTop = 200;  // a page that moved its box on purpose (a search to its field)
-    w.changed(w.element(box));
-    assert.equal(box.scrollTop, 200);
-    feed.scrollTop = 0;
-    w.changed(w.element(feed));
-    assert.equal(feed.scrollTop, 0);
+    const top = w.element(page), kept = w.element(page), end = w.element(page), on = w.element(page);
+    w.scrolled(top, 0); w.scrolled(kept, 1000); w.scrolled(end, 1500); w.scrolled(on, 480);
+    kept.scrollHeight = 1700; w.dropped(kept, 700);  // a card above the reader went: the engine kept the row, 300 up
+    end.scrollHeight = 1972; w.dropped(end);         // read to its end, one row fewer, and dropped
+    w.dropped(on, 700);                              // the owner scrolled on; the platform has not said so yet
+    w.changed(w.element(top), w.element(kept), w.element(end), w.element(on));
+    assert.deepEqual([top.scrollTop, kept.scrollTop, end.scrollTop, on.scrollTop], [0, 700, 1472, 700]);
+    // Where each was left is its place now: the next drop puts it back there.
+    w.dropped(kept); w.dropped(on);
+    w.changed(w.element(kept), w.element(on));
+    assert.deepEqual([kept.scrollTop, on.scrollTop], [700, 700]);
+    // A list read to its end that loses a few rows at a time follows its end, however much it has lost in all.
+    for (const height of [1700, 1440]) {
+        end.scrollHeight = height; w.dropped(end);
+        w.changed(w.element(end));
+        assert.equal(end.scrollTop, height - 500);
+    }
+});
+
+test('something else shown in the box is not sent to the old place; the same thing a little longer is', () => {
+    const w = repaintWorld();
+    const page = w.element(w.content, { container: true });
+    const folder = w.element(page), list = w.element(page), grown = w.element(page);
+    for (const each of [folder, list, grown]) w.scrolled(each, 480);
+    folder.scrollHeight = 5000;  // another folder: much more than it held
+    list.scrollHeight = 2300;    // the same list with a few more rows
+    w.dropped(folder); w.dropped(list);
+    w.changed(w.element(folder), w.element(list));
+    assert.deepEqual([folder.scrollTop, list.scrollTop], [0, 480]);
+    // A list that grows through repaints that leave it in place: each tells what it holds now.
+    for (const height of [2400, 2800, 3200]) { grown.scrollHeight = height; w.changed(w.element(grown)); }
+    w.dropped(grown);
+    w.changed(w.element(grown));
+    assert.equal(grown.scrollTop, 480);
+});
+
+test('a feed and what it holds are its owner\'s; their neighbour goes back', () => {
+    const w = repaintWorld();
+    const page = w.element(w.content, { container: true });
+    const feed = w.element(page, { owned: true }), box = w.element(page);
+    const inFeed = w.element(feed);  // a long code block inside a message
+    w.scrolled(feed, 480); w.scrolled(inFeed, 480); w.scrolled(box, 480);
+    w.dropped(feed); w.dropped(inFeed); w.dropped(box);
+    w.changed(w.element(feed), w.element(inFeed), w.element(box));
+    assert.deepEqual([feed.scrollTop, inFeed.scrollTop, box.scrollTop], [0, 0, 480]);
 });
 
 test('a page that moves a remembered box itself moves its place: a repaint in the same moment keeps that move', () => {
-    const w = repaintWorld({ element: true });
+    const w = repaintWorld();
     const page = w.element(w.content, { container: true });
     const box = w.element(page);
     w.scrolled(box, 480);
@@ -155,18 +209,45 @@ test('a page that moves a remembered box itself moves its place: a repaint in th
     w.changed(w.element(box));
     assert.equal(box.scrollTop, 0);
     box.scrollTo({ top: 300 });
-    box.raw = 0;  // WebKit: then a repaint drops it
+    w.dropped(box);  // WebKit: then a repaint drops it
     w.changed(w.element(box));
     assert.equal(box.scrollTop, 300);
+    box.scrollTo({ top: 0 });
+    w.changed(w.element(box));
+    assert.equal(box.scrollTop, 0);
+    w.scrolled(box, 480);
+    w.element(box, { at: 120 }).scrollIntoView();  // a found row is brought into view, above where the owner was
+    w.changed(w.element(box));
+    assert.equal(box.scrollTop, 120);
 });
 
-test('a change outside a size container costs the box no layout read', () => {
-    const w = repaintWorld({ element: true });
-    const plain = w.element(w.content);
-    w.scrolled(plain, 300);
-    let reads = 0;
-    Object.defineProperty(plain, 'scrollHeight', { get() { reads += 1; return 2000; } });
-    plain.raw = 0;  // at its top after a change, as a dropped box would be
-    w.changed(w.element(plain));
-    assert.deepEqual([reads, plain.scrollTop], [0, 0]);
+test('a write that does not land keeps the place: a box out of sight, and content that is not there yet', () => {
+    const w = repaintWorld();
+    const page = w.element(w.content, { container: true });
+    const tab = w.element(page), away = w.element(page), late = w.element(page);
+    w.scrolled(tab, 300); w.scrolled(away, 300); w.scrolled(late, 300);
+    tab.rendered = false;                       // another tab is chosen: this one is out of sight
+    away.rendered = false;                      // its page was left
+    late.scrollHeight = 500; late.raw = 0;      // its rows are being read again
+    w.shown();                                  // the page is shown again: every box under it is asked back
+    away.scrollTop = away.scrollTop;            // a page drawing again while away puts back what it read: 0
+    assert.deepEqual([tab.scrollTop, away.scrollTop, late.scrollTop], [0, 0, 0]);
+    for (const each of [tab, away]) { each.rendered = true; each.raw = 0; }  // shown again, each starts at its top (WebKit)
+    late.scrollHeight = 2000;                   // the rows arrived
+    w.shown();
+    assert.deepEqual([tab.scrollTop, away.scrollTop, late.scrollTop], [300, 300, 300]);
+});
+
+test('an engine that keeps the place is left alone; one that drops it is asked once, at the first scroll', () => {
+    const keeps = repaintWorld({ engine: false }), drops = repaintWorld();
+    assert.deepEqual([keeps.asked(), drops.asked()], [0, 0]);
+    const boxes = [keeps, drops].map((w) => {
+        const box = w.element(w.element(w.content, { container: true }));
+        w.scrolled(box, 480); w.scrolled(box, 500);
+        return box;
+    });
+    assert.deepEqual([keeps.asked(), drops.asked()], [1, 1]);
+    assert.deepEqual([keeps.watched(), drops.watched()], [false, true]);
+    assert.deepEqual(boxes.map((box) => Object.prototype.hasOwnProperty.call(box, 'scrollTop')), [false, true]);
+    assert.deepEqual([keeps.intoViewIsPlatforms(), drops.intoViewIsPlatforms()], [true, false]);
 });
