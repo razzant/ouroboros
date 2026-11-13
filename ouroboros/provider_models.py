@@ -810,7 +810,10 @@ def capability_base_url(model: str, settings: Mapping[str, Any] | None = None) -
         return ""
     read, rows = settings_view(settings)
     try:
-        get = connection_values(route, read, rows)
+        # A read, not a dispatch: a pool answers with its first serveable member in owner
+        # order, so one route's capability evidence names the pool's leading account instead
+        # of depending on which call happened to run last.
+        get = connection_values(route, read, rows, choose=False)
     except ConnectionUnavailable:
         return ""
     if route.kind == "minimax":

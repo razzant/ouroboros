@@ -65,6 +65,7 @@ D19 = "Frozen contracts (ABI)"
 D20 = "Presence"
 
 [modules]
+"ouroboros/account_streams.py" = "D02"
 "ouroboros/_usage_settlement.py" = "D16"
 "ouroboros/call_peers.py" = "D11"
 "ouroboros/call_protocol.py" = "D19"
