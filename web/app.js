@@ -515,16 +515,19 @@ onLayoutChange((layout) => {
     syncNavigationState();
 });
 
+// A page pressed in the sidebar. Settings pressed while it is shown (settings.js `pressedAgain`): beside the list a
+// first-level page stays as it stands and a deeper level returns to its section's first-level page; in one column the
+// list comes back. Pressed in the open drawer it closes the drawer, as every other place pressed there does.
+function pressNavPage(name) {
+    if (name === 'settings' && state.activePage === 'settings' && settingsControls) {
+        settingsControls.pressedAgain();
+        if (navState.mobileDrawerOpen) setMobileDrawerOpen(false);
+        return;
+    }
+    showPage(name);
+}
 document.querySelectorAll('[data-nav-page]').forEach(btn => {
-    btn.addEventListener('click', () => {
-        // Settings pressed while it is shown (settings.js `pressedAgain`): beside the list a first-level page stays as
-        // it stands and a deeper level returns to its section's first-level page; in one column the list comes back.
-        if (btn.dataset.navPage === 'settings' && state.activePage === 'settings' && settingsControls) {
-            settingsControls.pressedAgain();
-            return;
-        }
-        showPage(btn.dataset.navPage);
-    });
+    btn.addEventListener('click', () => pressNavPage(btn.dataset.navPage));
 });
 document.addEventListener('click', (event) => {
     const toggle = event.target.closest('[data-mobile-nav-toggle]');

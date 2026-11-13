@@ -8,6 +8,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 import { initSettings } from '../modules/settings.js';
 import { isDoorId } from '../modules/settings_home.js';
@@ -238,7 +239,6 @@ test('words the shell searched are spent by the first press on their results; wo
 });
 
 // Two panes (from 40rem) or one column, as settings.js measures them: the page box's width, and whether the list is on
-// screen beside a level.
 // screen beside a level. Every box stands in the list's view; the card moves between the list and its pane.
 function layout(t, controls, content, wide) {
     const proto = Object.getPrototypeOf(Stub.prototype);
@@ -334,4 +334,33 @@ test('Settings pressed again in the sidebar: two panes keep a first-level page a
     // Settings not shown: the press is the sidebar's ordinary showing, not this one.
     state.activePage = 'chat';
     assert.equal(controls.pressedAgain(), false);
+});
+
+// The sidebar's press (app.js `pressNavPage`): Settings pressed while shown goes to `pressedAgain`, never to an opening
+// anew, and the open drawer it was pressed in closes as it does for every other place; another page is shown.
+test('app.js: Settings pressed again goes to pressedAgain and closes the open drawer it was pressed in', () => {
+    const source = readFileSync(join(ROOT, 'web/app.js'), 'utf8').replace(/\r\n?/g, '\n');
+    const from = source.search(/\nfunction pressNavPage\(/);
+    const until = source.indexOf('\n}\n', from + 1);
+    assert.ok(from >= 0 && until > from, 'pressNavPage is a top-level function in app.js');
+    const calls = [];
+    const context = vm.createContext({
+        state: { activePage: 'settings' }, navState: { mobileDrawerOpen: true },
+        settingsControls: { pressedAgain: () => calls.push('again'), open: (path) => calls.push(`open:${path}`) },
+        setMobileDrawerOpen: (open) => { calls.push(`drawer:${open}`); context.navState.mobileDrawerOpen = open; },
+        showPage: (name) => calls.push(`show:${name}`),
+    });
+    vm.runInContext(source.slice(from + 1, until + 2), context);
+    context.pressNavPage('settings');
+    assert.deepEqual(calls, ['again', 'drawer:false']);
+    // No drawer open (two panes, or the drawer already closed): nothing else happens.
+    calls.length = 0;
+    context.pressNavPage('settings');
+    assert.deepEqual(calls, ['again']);
+    // Away from Settings, or another page: the ordinary showing, which closes the drawer itself.
+    calls.length = 0;
+    context.state.activePage = 'chat';
+    context.pressNavPage('settings');
+    context.pressNavPage('dashboard');
+    assert.deepEqual(calls, ['show:settings', 'show:dashboard']);
 });
