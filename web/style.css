@@ -526,6 +526,13 @@ html[data-layout="stack"] .resize-handle { display: none; }
     color: var(--tone-crimson-ink);
     box-shadow: var(--elev-rest);
 }
+/* On the solid crimson the room's focus ring and unread crimson would vanish (1.1:1 and 1.04:1 in the light theme), so
+   the chosen row restates both as the fill's ink: still the one focus token and the one unread token, as the card
+   restates them for its own voice above (:root keeps this over that restatement). */
+:root .nav-row.active {
+    --focus-accent-border: var(--tone-crimson-ink);
+    --mark-unread: var(--tone-crimson-ink);
+}
 
 .nav-row:focus,
 .nav-section-toggle:focus,
