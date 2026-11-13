@@ -3272,6 +3272,12 @@ and under the closed phone drawer they rest. Reduced motion keeps only short fad
 (the arriving room, the docked panel) and stops the wave. No veil covers the app
 while it reconnects: the room's bar says Reconnecting….
 
+**A repaint keeps the reading place.** A page that draws again what it shows (a poll, a reconnect, a saved row)
+leaves every box where the owner scrolled it; only the owner, or the page on purpose, moves it. WebKit drops a box
+that is or lies in a size container to its top when the part drawn again holds an `<svg>`, so one rule puts it back
+for every page (`web/modules/page_places.js`, `tests/test_repaint_keeps_place_browser.py`); a new page needs no
+scroll code of its own for it.
+
 **Haptics.** Inside Telegram, and only there (its HapticFeedback; a browser and the
 desktop app have none), a few moments are felt, one meaning each: the drawer,
 released, latches open or closed (a light impact); a level steps or a mode is chosen (a

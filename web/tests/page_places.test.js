@@ -82,3 +82,91 @@ test('Logs owns its actual scroller; generic page restoration still restores oth
     w.listeners.win.get('ouro:dashboard-subtab-shown')({ detail: { tab: 'logs' } });
     assert.deepEqual([logs.scrollTop, other.scrollTop], [0, 40], 'only logs.js restores #page-logs');
 });
+
+// A repaint keeps the reading place: WebKit drops a box in a size container to its top when a part drawn again holds
+// an <svg> (page_places.js). The change is seen after it lands, before the frame is painted.
+function repaintWorld({ element: platform = false } = {}) {
+    let notify = null;
+    const scrollListeners = [];
+    // With `element`, boxes stand on an Element whose `scrollTop` the platform owns (`raw`), as a browser's do.
+    const Element = platform ? class {} : null;
+    if (Element) {
+        Object.defineProperty(Element.prototype, 'scrollTop', { configurable: true,
+            get() { return this.raw; }, set(value) { this.raw = Math.max(0, value); } });
+        Element.prototype.scrollTo = function scrollTo({ top }) { this.scrollTop = top; };
+    }
+    const element = (parent, { container = false, height = 2000, owned = false } = {}) => {
+        const node = Object.assign(Element ? Object.create(Element.prototype) : { scrollTop: 0 }, { nodeType: 1,
+            parentElement: parent, isConnected: true, scrollLeft: 0, scrollHeight: height, clientHeight: 500, container,
+            contains(other) { for (let n = other; n; n = n.parentElement) if (n === this) return true; return false; },
+            closest: () => (owned ? node : null), matches: () => owned });
+        if (Element) node.raw = 0;
+        return node;
+    };
+    const content = element(null);
+    const doc = { body: content, getElementById: () => null, addEventListener: (type, fn) => scrollListeners.push(fn) };
+    const win = { Element, addEventListener() {}, getComputedStyle: (el) => ({ containerType: el.container ? 'inline-size' : 'normal' }),
+        MutationObserver: class { constructor(fn) { notify = fn; } observe(root, options) { assert.equal(root, content); assert.ok(options.subtree); } } };
+    initPagePlaces({ doc, win });
+    const scrolled = (box, top) => { box.scrollTop = top; scrollListeners.forEach((fn) => fn({ target: box })); };
+    return { content, element, scrolled, changed: (...targets) => notify(targets.map((target) => ({ target }))) };
+}
+
+test('a box in a size container that a repaint dropped to its top goes back where the owner left it', () => {
+    const w = repaintWorld();
+    const page = w.element(w.content, { container: true });
+    const box = w.element(page);
+    const part = w.element(box);
+    w.scrolled(box, 480);
+    box.scrollTop = 0;  // WebKit: the part drawn again held an <svg>
+    w.changed(part);
+    assert.equal(box.scrollTop, 480);
+});
+
+test('a repaint leaves alone a box the owner left at its top, one that cannot reach its place, and one outside a container', () => {
+    const w = repaintWorld();
+    const page = w.element(w.content, { container: true });
+    const top = w.element(page), short = w.element(page, { height: 600 }), plain = w.element(w.content);
+    w.scrolled(top, 0); w.scrolled(short, 300); w.scrolled(plain, 300);
+    short.scrollTop = 0; plain.scrollTop = 0;  // what it holds now ends above 300; a page sent its own box to the top
+    w.changed(w.element(top), w.element(short), w.element(plain));
+    assert.deepEqual([top.scrollTop, short.scrollTop, plain.scrollTop], [0, 0, 0]);
+});
+
+test('a repaint that moved a box only part of the way, or not at all, is not undone; a feed is its owner\'s', () => {
+    const w = repaintWorld();
+    const page = w.element(w.content, { container: true });
+    const box = w.element(page), feed = w.element(page, { owned: true });
+    w.scrolled(box, 480);
+    box.scrollTop = 200;  // a page that moved its box on purpose (a search to its field)
+    w.changed(w.element(box));
+    assert.equal(box.scrollTop, 200);
+    feed.scrollTop = 0;
+    w.changed(w.element(feed));
+    assert.equal(feed.scrollTop, 0);
+});
+
+test('a page that moves a remembered box itself moves its place: a repaint in the same moment keeps that move', () => {
+    const w = repaintWorld({ element: true });
+    const page = w.element(w.content, { container: true });
+    const box = w.element(page);
+    w.scrolled(box, 480);
+    box.scrollTop = 0;  // a new circle's form, shown from the top, drawn in the same moment
+    w.changed(w.element(box));
+    assert.equal(box.scrollTop, 0);
+    box.scrollTo({ top: 300 });
+    box.raw = 0;  // WebKit: then a repaint drops it
+    w.changed(w.element(box));
+    assert.equal(box.scrollTop, 300);
+});
+
+test('a change outside a size container costs the box no layout read', () => {
+    const w = repaintWorld({ element: true });
+    const plain = w.element(w.content);
+    w.scrolled(plain, 300);
+    let reads = 0;
+    Object.defineProperty(plain, 'scrollHeight', { get() { reads += 1; return 2000; } });
+    plain.raw = 0;  // at its top after a change, as a dropped box would be
+    w.changed(w.element(plain));
+    assert.deepEqual([reads, plain.scrollTop], [0, 0]);
+});
