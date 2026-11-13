@@ -1,5 +1,5 @@
 /**
- * The sidebar's Projects list (docs/DESIGN.md "Shell"): its keyed rows, their marks and names, the collapse, and the
+ * The sidebar's Projects list (docs/DESIGN.md "Shell"): its keyed rows, their marks and names, the pin group, and the
  * way to every Project older than the recent feed.
  *
  * `/api/state` carries a compact feed, the pins and the Projects with the newest messages; app.js decides what it says
@@ -45,7 +45,7 @@ function foldName(text) {
 }
 
 /** A mark's words go into its place's name (its tooltip and accessible name): the hue is never the only way it is
- *  told. The Projects header's toggle (app.js) and every row here name themselves this way. */
+ *  told. Every row here names itself this way. */
 export function setActivityOwnerName(owner, baseName, words) {
     if (!owner) return;
     const name = words ? `${baseName} · ${words}` : baseName;
@@ -87,11 +87,11 @@ export const listOrder = (a, b) => ((a.pinned === true) !== (b.pinned === true) 
 // A row keeps its place while this key does.
 const placeKey = (row) => `${row?.pinned === true}|${row ? recency(row) : ''}`;
 
-export function createProjectsNav({ section, header, list, toggle, feed, feedOrder, nextOrder, reserved, listableCount, activeId,
-    expanded, isUnread, readList, onListRead, onShown, open, openMenu, pin, isPinPending, messagesRevision = () => null }) {
+export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, reserved, listableCount, activeId,
+    isUnread, readList, onListRead, onShown, open, openMenu, pin, isPinPending, messagesRevision = () => null }) {
     // `browse`: the ids a browse shows (sorted with the list) and the rows Show more still owes; `found`: the ids a
     // find shows (null: the owner's new words, laid out anew) and how many rows besides the pins it may show.
-    const state = { query: '', browse: null, found: null, budget: PAGE, resume: null, collapsed: null, handoff: null };
+    const state = { query: '', browse: null, found: null, budget: PAGE, resume: null, handoff: null };
     // Once a complete list was read: each Project's newest observed row and its read's request order (`at`).
     let held = null;       // { rows: Map id → { row, at }, at: the list's order, time: its clock time, folded, revision }
     let reading = null;    // the read in flight: { controller }
@@ -150,7 +150,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         observeFeed();
         return new Map([...held.rows].map(([id, seen]) => [id, seen.row]));
     }
-    // What this sidebar shows unread: the feed's rooms, hidden or not (collapsed, the header speaks for them), and the
+    // What this sidebar shows unread: the feed's rooms, hidden or not (a find shows only its matches), and the
     // rooms an open find or browse lists. A room only the held list names is shown nowhere here, so it counts nowhere.
     const unreadRows = () => {
         const rows = facts();
@@ -175,7 +175,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         return [...(reserved() || [])].some((chat) => !shown.has(Number(chat)));
     };
 
-    // ---- the find field, between the header and the list (A1: always there while the list is open) -------------
+    // ---- the find field, the list's first control, always there: "+" (New project) ends its row ------------------
     const find = document.createElement('div');
     find.className = 'nav-projects-find';
     find.setAttribute('role', 'search');
@@ -239,7 +239,6 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     function view() {
         const rows = facts();
         const rest = resting(rows);
-        if (state.collapsed) return { shown: rest, after: [] };
         const all = [...rows.values()].filter(listable);
         if (searching()) return found(rows, all);
         if (state.browse) return browsed(rows, rest, all);
@@ -451,22 +450,8 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     // Keyed: a row keeps its node (and so its focus, its menu's anchor and its mark's phase) however the list moves.
     function paintRows() {
         if (destroyed) return;
-        const collapsed = !expanded();
-        if (collapsed && state.collapsed === false) {  // a collapse ends the find and the browse with the list
-            // What has the keyboard hides or goes with them, only a pinned row stays: the toggle takes it first, also
-            // from a press that let go of it on the way (a pointer focuses no button in WebKit).
-            const at = document.activeElement;
-            const letGo = beyondFeed() && (!at || at === document.body);
-            if (letGo || find.contains(at) || (list.contains(at) && !at.closest('[data-pinned]'))) {
-                toggle?.focus({ preventScroll: true });
-            }
-            Object.assign(state, { query: '', browse: null, found: null, handoff: null, resume: null });
-            input.value = '';
-            clear.hidden = true;
-        }
-        state.collapsed = collapsed;
         more.removeAttribute('aria-busy');
-        const beyond = beyondFeed() && !collapsed;
+        const beyond = beyondFeed();
         const measured = rowsInView();
         const { shown, after, waiting } = view();
         // The place being read is held by the first row in view whose place in the order holds (its pin and time):
@@ -487,18 +472,18 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         });
         const keep = new Set(nodes);
         for (const el of [...list.children]) if (!keep.has(el)) el.remove();
-        list.toggleAttribute('data-finding', searching() && !collapsed);
+        list.toggleAttribute('data-finding', searching());
         if (!searching() && status.textContent) status.textContent = '';
-        syncCollapse();  // visibility and the pin group's gap belong to the geometry we restore
+        markPinGroup();  // the pin group's gap belongs to the geometry we restore
         if (anchor?.isConnected) keepOnScreen(anchor, anchorTop);
         // Moving an existing node can blur it even though its identity survives.
         if (focused?.isConnected && list.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
         if (state.handoff && !waiting) handOff(state.handoff, nodes);
         repositionProjectRowMenu();  // anchoring may have scrolled its row after visibility settled
-        if (relisted) onShown();  // app.js says its number, header and ☰ again, marks in place: no read, no render
+        if (relisted) onShown();  // app.js says its marks and ☰ again, in place: no read, no render
         // A browse reads the complete list again once a room's newest message moved since that list was asked for,
         // beyond the feed too; a read in flight or a failed one waits (its answer, or Try again, repaints).
-        if (state.browse && !collapsed && held && !reading && !failure && messagesRevision() !== held.revision) load();
+        if (state.browse && held && !reading && !failure && messagesRevision() !== held.revision) load();
     }
 
     // A key's Show more or Show all hands the keyboard on once, when its rows have settled (read, or the read
@@ -540,32 +525,26 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         }
     }
 
-    // Collapse is all or nothing (owner 19.10, 2A): collapsed, the Projects keep only the pinned ones, and the
-    // header's mark and unread count speak for the rest (docs/DESIGN.md "Shell"); expanded, every row shows. A row
-    // that hides gives the keyboard to the Projects toggle first, and an open menu of a hidden row closes.
-    function syncCollapse() {
+    // Pins lead the list; air before the first row after them is the group's one boundary, no caption (style.css
+    // `[data-after-pins]`). An open row menu follows its anchor once the rows have settled, or closes with a row gone.
+    function markPinGroup() {
         if (destroyed) return;
-        const collapsed = !expanded();
-        if (collapsed !== state.collapsed) { render(); return; }
-        section?.toggleAttribute('data-collapsed', collapsed);
-        find.hidden = collapsed;
-        let shown = 0;
         let pinsShown = false;
         let afterPins = null;
         for (const item of list.children) {
             if (!item.classList.contains('nav-project-item')) continue;
-            const keep = !collapsed || item.hasAttribute('data-pinned');
-            if (!keep && item.contains(document.activeElement)) toggle?.focus({ preventScroll: true });
-            item.hidden = !keep;
-            if (keep) shown += 1;
-            // Pins lead the list; air before the first shown row after them is the group's one boundary, no caption.
-            if (keep && item.hasAttribute('data-pinned')) pinsShown = true;
-            else if (keep && pinsShown) afterPins ||= item;
+            if (item.hasAttribute('data-pinned')) pinsShown = true;
+            else if (pinsShown) afterPins ||= item;
         }
         for (const item of list.children) item.toggleAttribute('data-after-pins', item === afterPins);
-        list.hidden = collapsed && shown === 0;
-        // An open row menu follows its anchor once row visibility has settled, or closes with its hidden row.
         repositionProjectRowMenu();
+    }
+
+    // Where the keyboard goes when what held it inside the list is gone (a row deleted, archived or no longer found):
+    // the list's first control, Find a project, or New project when the field is not shown.
+    function keyboardHome() {
+        const shown = input.isConnected && !input.closest?.('[hidden]') && input.getClientRects?.().length > 0;
+        return shown ? input : header.querySelector('#nav-projects-add');
     }
 
     function render() {
@@ -721,7 +700,8 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         /** The feed changed (app.js renderProjectsNav, a cursor move, a pin): repaint the rows from it. */
         paint: paintRows,
         patch,
-        syncCollapse,
+        markPinGroup,
+        keyboardHome,
         refresh,
         /** A change the server just confirmed for a Project (a pin, a deletion begun): newest for that row, so a read
          *  requested before it cannot undo it. Before a complete list is held, the feed row app.js changed speaks. */
@@ -730,7 +710,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             if (seen) held.rows.set(id, { row: { ...seen.row, ...fields }, at: nextOrder() });
         },
         /** Every Project this list shows unread, the feed's hidden or not and those an open find or browse lists: what
-         *  the header's number, ☰ and the re-read of the shared cursors go by. */
+         *  ☰ and the re-read of the shared cursors go by. */
         unreadRows,
         /** The row shown for an id as its freshest read tells it, with its unread said; null when no read names it. */
         row(id) {
