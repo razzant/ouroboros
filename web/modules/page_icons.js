@@ -85,12 +85,11 @@ export function renderSkillIcon(spec, { size = 16, className = '' } = {}) {
 // (effort_chip.js wraps it in its own 20×20 filled svg).
 export const PIN_BODY = regular('pin');
 
-// The shell's control glyphs, each once: the menu (☰), back (‹), the one close (×), the one more (⋯), the
+// The shell's control glyphs, each once: back (‹), the one close (×), the one more (⋯), the
 // chevron, the magnifier of Find a project, a Project row's Pin and its slashed Unpin, and the move grip (⠿) of a
 // Widgets card. Fluent Regular (actions inside controls); a control's accessible name says what the glyph does.
 export const SHELL_ICONS = {
     search: fillIcon(regular('search'), 18),
-    menu: fillIcon(regular('navigation')),
     back: fillIcon(regular('chevron-left')),
     close: fillIcon(regular('dismiss')),
     more: fillIcon(regular('more-horizontal')),

@@ -61,9 +61,7 @@ export function initSettings(ctx = {}) {
             <span class="settings-lead-col settings-lead-rail section-lead-col section-lead-rail" data-settings-search-slot></span>
             <span class="settings-lead-col settings-lead-page section-lead-col section-lead-page">${renderBackControl({ to: 'Settings', attrs: 'data-settings-back' })}<span class="app-page-lead-title" data-settings-lead-name></span></span>
         </div>`;
-    page.dataset.settingsView = 'home';
     page.dataset.sectionView = 'home';
-    page.dataset.settingsDepth = '0';
     page.innerHTML = `${renderPageHeader({ page: 'settings', leadHtml })}
         <div class="settings-shell section-shell" data-settings-view="home" data-section-view="home">
             <div class="settings-home section-rail scroll-fade-y" data-settings-home></div>
@@ -282,8 +280,7 @@ export function initSettings(ctx = {}) {
     function paintLead() {
         const level = top();
         const overview = !level && Boolean(overviewEl && !overviewEl.hidden);
-        page.dataset.settingsView = page.dataset.sectionView = level || overview ? 'page' : 'home';
-        page.dataset.settingsDepth = String(levels.length);
+        page.dataset.sectionView = level || overview ? 'page' : 'home';
         // Ouroboros's own pane is named by its card: the band over it holds no title.
         if (leadName) leadName.textContent = level ? settingsTitle(level.path) : '';
         const leadsTo = !level ? 'Settings'

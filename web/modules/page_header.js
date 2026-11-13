@@ -65,7 +65,7 @@ export function renderPageHeader({
     const facts = [
         named ? ' data-sidebar-names' : '',
         named && !toolbar && !trailing && !tabs && !leadHtml ? ' data-empty' : '',
-        leadHtml ? ' data-lead data-lead-written' : '',
+        leadHtml ? ' data-lead' : '',
     ].join('');
     const id = titleId ? ` id="${escapeHtml(titleId)}"` : '';
     return `
