@@ -34,7 +34,9 @@ test('a held task is stationary in Chat and the sidebar, its label beside the wo
     assert.deepEqual(roomStatusView(inRoom('waiting')),
         { kind: 'online', text: 'Waiting', tone: 'held', mark: 'still', owner: false, amber: '' });
     const sidebar = summarizeRoom({ ...room('waiting'), works: ['same-id'] }, [heldWork(held)]);
-    assert.deepEqual(sidebar, { mark: 'still', owner: false, word: 'Waiting', note: '', label: `Waiting · ${hold.label}` });
+    // The row's second line (owner 12.11, fifth round) carries the work's line, its own name and its focus.
+    assert.deepEqual(sidebar, { mark: 'still', owner: false, word: 'Waiting', note: '', line: hold.label, name: '', focus: '',
+        label: `Waiting · ${hold.label}` });
 });
 
 for (const [activity, extra, text, kind, mark, tone] of [

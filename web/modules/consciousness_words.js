@@ -3,7 +3,7 @@ import { shortName } from './chat_model_routes.js';
 import { taskPresentation } from './log_events.js';
 import { taskCostMeta } from './chat_activity.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
-import { formatUsd } from './storage_format.js';
+import { formatLimitUsd, formatUsd, number } from './storage_format.js';
 
 /** The same account stamp on wake and delivery rows; account names remain authored. */
 export function sendsAsHtml(sender) {
@@ -180,11 +180,13 @@ export const usdText = formatUsd;
 export function allowanceText(snapshot) {
     const { spentUsd, dailyUsd } = snapshot;
     if (spentUsd === null || dailyUsd === null) return '';
-    const floor = snapshot.unknownUnmetered > 0 ? '≥ ' : '';
+    // The money of the limit's card (storage_format.js `formatLimitUsd`), and what the number leaves out said after it
+    // in words, where a floor sign stood before it.
+    const out = snapshot.unknownUnmetered > 0 ? `; ${number(snapshot.unknownUnmetered)} calls without a known price are not counted` : '';
     // Open accounting keeps "so far" (DESIGN): a call still open may add more, so even $0.00 is no final total.
-    const sofar = !floor && snapshot.allowanceOpenRows > 0 ? ' so far' : '';
+    const sofar = !out && snapshot.allowanceOpenRows > 0 ? ' so far' : '';
     const degraded = snapshot.integrityDegraded ? ' (ledger integrity degraded)' : '';
-    return `${floor}${formatUsd(spentUsd)}${sofar} of ${formatUsd(dailyUsd)} in the last 24 hours${degraded}`;
+    return `${formatLimitUsd(spentUsd, dailyUsd)}${sofar} of ${formatLimitUsd(dailyUsd, dailyUsd, 'limit')} in the last 24 hours${out}${degraded}`;
 }
 
 // The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit (new starts refused, or

@@ -9,7 +9,7 @@ import { effortText } from './effort_levels.js';
 import { PIN_BODY } from './page_icons.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
-const PIN_SVG = `<svg class="chat-live-effort-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${PIN_BODY}</svg>`;
+const PIN_SVG = `<svg class="chat-live-effort-pin" viewBox="0 0 20 20" fill="currentColor" data-glyph="fluent" aria-hidden="true">${PIN_BODY}</svg>`;
 
 /** `{level, requested, source}` from a chat frame, or null when the frame carries no effort level. */
 export function effortFact(frame) {

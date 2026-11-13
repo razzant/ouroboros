@@ -27,13 +27,14 @@ test('one header: no icon, no caption line, the tabs are written under the row, 
     // On a desk the tabs take the hidden title's place (bindPageHeader): the bar is not empty (owner 19.10, A).
     assert.match(tabbed, /data-sidebar-names>/);
     assert.doesNotMatch(tabbed, /data-empty/);
-    assert.match(tabbed, /<\/h2>\s*<\/div><div class="app-page-lead"><\/div>/, 'the lead slot follows the hidden title');
+    // The Back slot (placePageBack) stands before the lead, both after the hidden title.
+    assert.match(tabbed, /<\/h2>\s*<\/div><div class="app-page-back" data-page-back><\/div><div class="app-page-lead"><\/div>/, 'the Back slot, then the lead slot, follow the hidden title');
     const acting = renderPageHeader({ title: 'Files', actionsHtml: '<button>Refresh</button>' });
     assert.match(acting, /data-sidebar-names>/);
     assert.doesNotMatch(acting, /data-empty/);
     const project = renderPageHeader({ title: '', titleId: 'project-panel-title', named: false, trailingHtml: '<button>×</button>' });
     assert.match(project, /<h2 class="app-page-title" id="project-panel-title"><\/h2>/);
-    assert.doesNotMatch(project, /data-sidebar-names|data-empty|"app-page-lead"/, 'a Project is named by its owner: its name stays');
+    assert.doesNotMatch(project, /data-sidebar-names|data-empty|"app-page-lead"|data-page-back/, 'a Project is named by its owner: its name stays');
     assert.match(project, /app-page-trailing/);
     assert.match(project, /data-mobile-nav-toggle/, 'a header shows ☰ unless its room carries it in the composer');
     assert.match(renderPageHeader({ title: 'x', titleId: '"><i>' }), /id="&quot;&gt;&lt;i&gt;"/);
@@ -41,9 +42,11 @@ test('one header: no icon, no caption line, the tabs are written under the row, 
     // A room's ☰ (owner 19.10, 1A): the composer row's first control, capsule-sized with the finger's hit area.
     assert.match(renderMobileNavToggle({ inComposer: true }), /class="shell-icon-control mobile-nav-toggle composer-menu ui-hit-area"/);
     assert.match(renderMobileNavToggle(), /class="shell-icon-control mobile-nav-toggle"/);
-    // Both placements carry one status mark for what waits behind the ☰, hidden until app.js paints it.
+    // The control is Ouroboros's own picture (press him, and his places open). Both placements carry one status mark
+    // for what waits behind it, hidden until app.js paints it.
     for (const toggle of [renderMobileNavToggle(), renderMobileNavToggle({ inComposer: true })]) {
-        assert.match(toggle, /aria-label="Open navigation"[^>]*><svg[^]*<\/svg><span class="status-mark" aria-hidden="true" data-shape="none" data-hue="ink" hidden><i><\/i><i><\/i><i><\/i><\/span><\/button>/);
+        assert.match(toggle, /aria-label="Open navigation"[^>]*><span class="places-face" aria-hidden="true"><\/span><span class="status-mark" aria-hidden="true" data-shape="none" data-hue="ink" hidden><i><\/i><i><\/i><i><\/i><\/span><\/button>/);
+        assert.doesNotMatch(toggle, /<svg|places-menu|places-back/, 'no prototype variant of the control remains');
     }
 });
 

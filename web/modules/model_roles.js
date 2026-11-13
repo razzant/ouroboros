@@ -4,7 +4,7 @@
 import { apiClient, fetchJson } from './api_client.js';
 import { SAFETY_MODEL_KEYS } from './consciousness_api.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
-import { controlIcon } from './page_icons.js';
+import { sourceMark } from './model_source_mark.js';
 import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
 import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, searchModelAfterSourceSwitch, searchModelForKey, syncSearchKey, webSearchPreviewWords } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
@@ -735,10 +735,14 @@ export function routeWords(value, { local = false, account = '', follows = 'Main
         : `${API_PROVIDER_LABELS[kind] || kind}${source.includes('@') ? ` (${source.split('@')[1]})` : ''} · by API key` };
 }
 
-// A subscription's own mark; any other route takes the plain one.
-function markHtml(harness) {
-    const mark = harness ? harnessPresentation(harness) : null;
-    return mark ? `<svg viewBox="${mark.viewBox}" width="1em" height="1em" fill="currentColor" aria-hidden="true" focusable="false"><path d="${mark.path}"></path></svg>` : controlIcon('globe', 18);
+// The mark of the source a route goes through: a subscription's own, a provider's own, else its initial; a local
+// model and an unset route have none. Never a generic glyph (a globe read as "the internet", owner 13.11).
+function routeMark(value, { local = false } = {}) {
+    if (local || !String(value || '').trim()) return '';
+    const { source } = parseModelSource(value);
+    if (source.startsWith('subscription:')) return sourceMark({ lane: 'subscription', harness: source.slice(13), label: harnessPresentation(source.slice(13)).label });
+    const kind = source.split('@')[0];
+    return sourceMark({ kind, label: API_PROVIDER_LABELS[kind] || kind });
 }
 const CONTEXT_WORDS = { nano: 'Nano', low: 'Low', max: 'Max' };
 const SEARCH_SOURCES = [['auto', 'Auto'], ['openai', 'OpenAI'], ['openrouter', 'OpenRouter'], ['anthropic', 'Anthropic'],
@@ -751,17 +755,19 @@ function mountModels(container, { path, ctx }) {
     const plain = rowsOf('models', { fold: false }).map((row) => settingsRow(row, { custom })).join('');
     container.innerHTML = `<p class="settings-page-lead">Which model does which work.</p>
         <section class="ui-card settings-card" data-setting-row="models:main">
-            <div class="models-main" data-entry-id="main"></div>
-            <p class="settings-card-note">${escapeHtml(wordsOf('models:main').meta)} ${escapeHtml(MAIN_FOLLOW_NOTE)}</p>
+            <h3 class="settings-card-title">${escapeHtml(wordsOf('models:main').name)}</h3>
+            <p class="settings-card-lead">${escapeHtml(wordsOf('models:main').meta)}</p>
+            <div class="settings-rows models-main" data-entry-id="main"></div>
+            <p class="settings-card-note">${escapeHtml(MAIN_FOLLOW_NOTE)}</p>
         </section>
         <section class="ui-card settings-card" data-setting-row="models:fallbacks">
-            <div class="settings-card-head"><h3 class="settings-card-title">If Main cannot answer</h3>
+            <div class="settings-card-head"><h3 class="settings-card-title">Fallback models</h3>
                 <span class="ui-result" data-entry-result role="status" aria-live="polite"></span>
                 <div class="ui-section-actions"><button type="button" class="btn btn-default btn-sm" data-fallback-add>Add fallback</button></div></div>
             <p class="settings-card-lead">${escapeHtml(wordsOf('models:fallbacks').meta)}</p>
             <div class="settings-rows" data-models-fallbacks></div>
         </section>
-        <section class="ui-card settings-card"><h3 class="settings-card-title">Other work</h3>
+        <section class="ui-card settings-card"><h3 class="settings-card-title">Other roles</h3>
             <p class="settings-card-lead">Each uses Main until you give it a model of its own.</p>
             <div class="settings-rows">${doors.map(door).join('')}</div></section>
         <section class="ui-card settings-card"><div class="settings-rows">${plain}</div></section>
@@ -814,10 +820,12 @@ function mountModels(container, { path, ctx }) {
         const main = route('main');
         const mainNote = labels.length ? `Choose the key it uses: ${labels.slice(0, -1).join(', ')} or ${labels.at(-1)}.`
             : keyWords(settings[slots.main?.settingKey], local('main'));
-        container.querySelector('.models-main').innerHTML = `<span class="settings-head-glyph models-main-glyph" aria-hidden="true">${markHtml(main.mark)}</span>
-            <div class="models-main-words"><span class="models-kicker">${escapeHtml(wordsOf('models:main').name)}</span>
-                <span class="models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span><span class="models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${escapeHtml(mainNote || main.source)}</span></div>
-            <button type="button" class="btn btn-default" data-entry-open>Change</button>`;
+        // The answer is one row: the model, under it the source with its own mark (or what is wrong with its key), and
+        // the chevron of a row that opens a level. The role's name is the object's title above.
+        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open>
+            <span class="ui-row-title models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span>
+            <span class="ui-row-meta models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${mainNote ? '' : routeMark(settings[slots.main?.settingKey], { local: local('main') })}<span>${escapeHtml(mainNote || main.source)}</span></span>
+            <span class="ui-row-actions">${doorSign('models/role/main')}</span></button>`;
         const list = fallbackEntries(settings);
         shown = list.map((entry) => entry.value).join(',');
         const localFallback = truthy(settings.USE_LOCAL_FALLBACK);
@@ -884,7 +892,13 @@ function mountModels(container, { path, ctx }) {
         } else if (head && !hit('[data-setting-door]')) ctx.openSettings(`models/role/${head.dataset.entryId}`);
     };
     container.addEventListener('click', onClick);
-    const onShown = (event) => { if (event.detail?.path === path) { void read(); void refreshModelCatalog(); } };
+    // The catalogue is the providers' and costs a network read: it is asked at the owner's first touch of the page
+    // after each showing, so a page that is merely shown (Settings lands on it) reads nothing but settings.
+    let catalogAsked = false;
+    const askCatalog = () => { if (!catalogAsked) { catalogAsked = true; void refreshModelCatalog(); } };
+    container.addEventListener('pointerdown', askCatalog, { passive: true });
+    container.addEventListener('focusin', askCatalog);
+    const onShown = (event) => { if (event.detail?.path === path) { catalogAsked = false; void read(); } };
     const onSaved = (event) => { if (event.detail?.source === 'settings-row') void read(); };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     globalThis.window?.addEventListener('ouro:settings-updated', onSaved);

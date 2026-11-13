@@ -98,6 +98,11 @@ html[data-layout="stack"] .shell-icon-control {
     width: 44px;
     height: 44px;
 }
+/* Back (page_header.js renderBackControl; DESIGN "Page header"): the app's one Back, a shell icon control holding the
+   chevron-left, named for where it leads. It stands first in a header's lead, before the place's name or its tabs,
+   and never shrinks. */
+.shell-back { flex: none; }
+
 /* A desk has a docked sidebar: no ☰ in the headers and no drawer head (the stack layout shows both). */
 .mobile-nav-toggle,
 .drawer-head {
@@ -112,9 +117,10 @@ html[data-layout="stack"] .shell-icon-control {
    so it draws no ring, the engine's blue one included (layers.js, U122); the controls inside keep theirs. */
 [data-layer-landing]:focus { outline: none; }
 
-/* The sidebar's zones (docs/DESIGN.md "Shell"): a pinned head (Main Chat), the Projects list as the ONE scroller, the
-   tools right after it, and the foot (the version and the update) at the bottom edge; free room lies between the
-   tools and the foot, never between the list and the tools. Row
+/* The sidebar's zones (docs/DESIGN.md "Shell"; owner 12.11, the fifth round "Карточка и тихие разделы"): a pinned
+   head (this Ouroboros's card, the Main Chat place), the Projects list as the ONE scroller, then at the bottom edge
+   the tools, three to a line, and the foot (the version and the update); free room, when the list is short or
+   folded, lies between the list and the tools. Row
    heights follow the pointer: a finger gets the touch minimum, a mouse a quieter row, and a short window with a
    mouse compacts the rows first. A window too short even for that falls back to the whole column scrolling with
    the head sticky and the foot still on the bottom edge. */
@@ -139,6 +145,7 @@ html[data-layout="stack"] .shell-icon-control {
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-width: thin;
+    container-type: inline-size;  /* a narrow column stands the tools two to a line */
 }
 @media (pointer: coarse) {
     #primary-sidebar { --nav-item-h: 44px; --nav-control-h: 44px; }
@@ -157,7 +164,7 @@ html[data-layout="stack"] .shell-icon-control {
    them, so a row reached with Tab is never left under either bar, while a bar's own control (Main, the update)
    leaves the column where it is (a scroll padding on the column would count the bars as covered and move it). */
 @media (max-height: 540px), (pointer: coarse) and (max-height: 600px) {
-    #primary-sidebar :is(.nav-projects *, .sidebar-foot > [data-nav-page]) {
+    #primary-sidebar :is(.nav-projects *, .nav-tools > [data-nav-page]) {
         scroll-margin-block: var(--sidebar-head-h, 0px) var(--sidebar-foot-h, 0px);
     }
     #primary-sidebar .nav-projects { flex: 0 0 auto; min-height: 0; }
@@ -186,25 +193,60 @@ html[data-layout="stack"] .shell-icon-control {
     background: var(--surface-side);
 }
 
-/* The tools follow the Projects; the box takes the column's free room, so its last row, the version and the update,
-   rests on the bottom edge (owner 22.10) whether the list is collapsed, short or scrolling. A window too short for
-   the zones scrolls the whole column instead, and the foot sticks to the bottom edge (the fallback above). */
+/* The tools and the foot stand at the bottom edge whatever the list's length (owner 12.11): the Projects take the
+   free room above them. A window too short for the zones scrolls the whole column instead, and the foot sticks to
+   the bottom edge (the fallback above). */
 .sidebar-foot {
-    flex: 1 0 auto;
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-    gap: var(--space-1);
-    padding-top: var(--space-2);
 }
 
+/* The tools, quiet items three to a line in three columns, each as wide as its widest item: the first column starts
+   where the Project names start, the last ends where the column ends, and within a column the items start on one
+   line, so the glyphs of the two rows stand under each other. A narrow column and the phone drawer stand them two to
+   a line, a finger high there. The chosen one is the crimson capsule. */
+.nav-tools {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, auto));
+    justify-content: space-between;
+    gap: var(--space-1) 2px;
+    padding-top: var(--space-3);
+}
+.nav-tools > .nav-row {
+    width: auto;
+    min-width: 0;
+    min-height: 32px;
+    gap: 6px;
+    padding: 0 var(--space-3);
+    border-radius: var(--pill-radius);
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    font-weight: 400;
+}
+.nav-tools > .nav-row:not(.active) > svg { color: var(--text-meta); }
+.nav-tools > .nav-row { justify-self: start; }
+@container (max-width: 318px) {
+    .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .nav-tools > .nav-row:nth-child(n) { justify-self: start; }
+}
+html[data-layout="stack"] .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-top: var(--space-3); }
+html[data-layout="stack"] .nav-tools > .nav-row { min-height: 44px; }
+html[data-layout="stack"] .nav-tools > .nav-row:nth-child(n) { justify-self: start; }
+
+/* The foot: the version and the update capsule on one line. It keeps its height with no update, so nothing above it
+   moves when one arrives. */
 .sidebar-foot-meta {
-    margin-top: auto;
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-2) 0 var(--space-3);
+    min-height: 40px;
+    margin: var(--space-3) 0 var(--space-2);
+    padding: 0 var(--space-2) 0 calc(var(--space-3) + 1px);
 }
+.sidebar-foot-meta .update-notice { margin: 0; }
+html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--space-2) 0 0; }
 
 /* An older desktop page can also survive a source update with the pre-three-zone .sidebar-scroll wrapping the
    column's rows. As a box it left the list as tall as its rows: a scroller with nothing to scroll whose containment
@@ -222,8 +264,10 @@ html[data-layout="stack"] .shell-icon-control {
     --window-chrome-start: 0px;
     --window-chrome-clearance: calc(var(--window-chrome-start) + var(--space-3));
 }
+/* The card stands right under the traffic lights (owner 12.11, the fifth round frames): a step of air under them, so
+   its top reaches into the band's lower part. */
 :root[data-window-chrome="integrated"] .sidebar-head {
-    padding-top: calc(var(--space-4) + var(--window-chrome-top));
+    padding-top: max(var(--space-4), calc(var(--window-chrome-top) - var(--space-4)));
 }
 :root[data-window-chrome="integrated"] .onboarding-overlay {
     box-sizing: border-box;
@@ -241,6 +285,15 @@ html[data-layout="stack"] .shell-icon-control {
     height: var(--window-chrome-top);
     z-index: -1;
     pointer-events: auto;
+}
+/* On a desk a room's bar (Main's, a docked Project's) is the band's row too, as every page's header is
+   (.app-page-header[data-lead] below): its capsules are centred on the band at every Interface size, the insets
+   shrinking with a shorter band; the transcript's reserve and the history note follow the bar's measured height
+   (chat.js --chat-header-bar). */
+:root[data-window-chrome="integrated"][data-layout="docked"] :is(.chat-page-header, .project-panel-bar) {
+    box-sizing: border-box;
+    min-height: var(--window-chrome-top);
+    padding-block: min(10px, max(0px, calc((var(--window-chrome-top) - var(--control-h-float)) / 2)));
 }
 :root[data-window-chrome="integrated"][data-layout="stack"] .project-panel-bar { padding-left: max(14px, var(--window-chrome-clearance)); }
 :root[data-window-chrome="integrated"][data-layout="stack"] .drawer-head {
@@ -335,20 +388,9 @@ html[data-layout="stack"] .resize-handle { display: none; }
     font-size: var(--type-meta);
 }
 
-/* The chosen place: the crimson tone, its ink and a left mark (--place-mark: the accent on the light tint, the
-   fill's white ink on the dark solid), for Main and a Project row alike (U005): a Project's hue stays in its mark.
-   One row at a time; the Projects header is never chosen (a Project row is). */
-.nav-row.active::before {
-    content: '';
-    position: absolute;
-    left: 3px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 3px;
-    height: 17px;
-    border-radius: 0 3px 3px 0;
-    background: var(--place-mark);
-}
+/* The chosen place is one crimson fill with its ink, on the rest shadow like every chosen capsule, for the card, a
+   Project row and a tool alike; no left stripe (owner 12.11). A Project's hue stays in its mark. One row at a time;
+   the Projects header is never chosen (a Project row is). The fill itself is .nav-row.active below. */
 
 /* Unread counts and badges are the crimson accent (a live fact for you), never red and never a glow (owner Q6=A);
    a Project row's own new messages are the crimson hue of its status mark. */
@@ -373,18 +415,93 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 .nav-project-row { position: relative; }
 
-/* Main's row ends where a Project row's mark column ends (the ⋯ column and the row's inset), so its room's mark sits
-   at the Project rows' x by construction, in the same 18px box; its words are for readers only. */
-.nav-row-main {
-    padding-right: calc(var(--nav-kebab-w) + var(--space-1));
+/* Main's place is this Ouroboros's own card in its voice colour (owner 12.11, the fifth round; DESIGN principle 3:
+   each voice colours its own objects): its picture, its name with a quiet "Main Chat" (the place it opens), Main's
+   count and its room's mark in the Project rows' mark column, and under them what Main is doing now across the
+   card's width; nothing under them while it rests, so the card is one line tall then. As the chosen place it takes
+   the crimson tone. */
+.nav-ouro {
+    flex: 0 0 auto;
+    min-height: 56px;
+    gap: var(--space-3);
+    padding: var(--space-2) calc(var(--nav-kebab-w) + var(--space-1) + 1px) var(--space-2) var(--space-2);
+    border-radius: var(--radius-object);
+    background: var(--voice-ouroboros);
+    box-shadow: var(--elev-rest);
+    color: var(--text-primary);
 }
-.nav-row-main > .nav-mark-slot {
-    order: 2;
+/* Inside that voice on a dark room its own materials apply (ui.css "The dark voices' materials"): opaque lighter
+   steps for capsules and trays, the voice's readable inks, its light crimson for a new message. A custom property
+   resolves where it is declared, so the roles the card uses are restated here, as that rule restates them. */
+:root:not([data-theme="light"]) .nav-ouro {
+    --text-primary: #fcf9f9;
+    --text-secondary: #ebd9da;
+    --text-meta: #f2e4e5;
+    --surface-capsule: #8f263a;
+    --surface-capsule-hover: #9e3044;
+    --surface-tray: #832336;
+    --tone-quiet-hover: var(--surface-capsule);
+    --accent-light: #ffc2c6;
+    --mark-unread: var(--accent-light);
+    --focus-accent-border: var(--accent-light);
+}
+/* Chosen, the card takes the solid crimson's white ink in both themes (:root keeps it above the dark voice's inks). */
+:root .nav-ouro.active { --text-primary: var(--tone-crimson-ink); --text-meta: var(--tone-crimson-ink); }
+.nav-ouro-ava {
+    flex: 0 0 36px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: url("logo.jpg") center / cover no-repeat, #e6e0de;
+}
+.nav-ouro-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.nav-ouro-line1 {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    min-height: 20px;
+}
+.nav-ouro-name {
+    flex: 0 0 auto;
+    color: var(--text-primary);
+    font-size: var(--type-section);
+    font-weight: 600;
+    line-height: 20px;
+}
+.nav-ouro-line1 > .nav-row-label {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+/* the count stands just before the mark, a step before it, and the mark keeps the rows' own column */
+.nav-ouro-line1 > .unread-badge { order: 2; margin-right: var(--space-1); }
+.nav-ouro-line1 > .nav-mark-slot {
+    order: 3;
     flex: 0 0 18px;
     display: inline-flex;
     align-items: center;
     justify-content: center;  /* a one-dot shape sits where a Project row's does, mid-column */
 }
+.nav-ouro-work {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.nav-ouro-work[hidden] { display: none; }
+.nav-ouro.active :is(.nav-ouro-name, .nav-row-label, .nav-ouro-work) { color: inherit; }
+/* Main's count on the cherry card is the voice's lighter step with its light crimson word, not the room's crimson
+   laid on cherry. */
+:root:not([data-theme="light"]) .nav-ouro:not(.active) .unread-badge { background: var(--surface-capsule); color: var(--accent-light); }
 .nav-row-words {
     position: absolute;
     width: 1px;
@@ -407,6 +524,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     background: var(--tone-crimson);
     border-color: transparent;
     color: var(--tone-crimson-ink);
+    box-shadow: var(--elev-rest);
 }
 
 .nav-row:focus,
@@ -1160,9 +1278,11 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     min-width: 0;
 }
 
-/* One title style: the section size at 500 (a root's title), the primary ink, one line. */
+/* One title style: the section size at 500 (a root's title), the primary ink, one line. A name the header's lead
+   writes (Settings' open page) is this style too. */
 .page-header h2,
-.app-page-title {
+.app-page-title,
+.app-page-lead-title {
     margin: 0;
     min-width: 0;
     font-size: var(--type-section);
@@ -1257,6 +1377,37 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 .app-page-lead > * { min-width: 0; }
 .app-page-lead:empty,
 .app-page-tabs:not(:has(> *)) { display: none; }
+/* The Back slot (page_header.js placePageBack): one control, never part of a lead that scrolls. On a desk it stands
+   before the lead in the bar's start; in the stack layout it starts the row under ☰: the page's tab strip when it
+   has one, else a row of the header's own. */
+.app-page-back { display: flex; flex: none; align-items: center; }
+.app-page-back:empty { display: none; }
+html[data-layout="docked"] .app-page-title-block:has(> .app-page-back:not(:empty)) {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) ~ .app-page-lead { flex: 1 1 auto; }
+/* Back takes the header's start inset (a step from the column's edge) and the hidden title takes no place in the row,
+   so the tabs or the location after it keep the room they have without Back. */
+html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-block > .app-page-title-row:has(~ .app-page-back:not(:empty)) {
+    position: absolute;
+}
+html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
+    margin-inline-start: calc(var(--space-2) - var(--page-header-padding-x));
+}
+html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) {
+    grid-template-areas: "leading title toolbar" "back back back";
+}
+html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back:not(:empty)) { display: contents; }
+html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
+html[data-layout="stack"] .app-page-header[data-back] .app-page-back { grid-area: back; }
+.app-page-tabs[data-back] { display: flex; align-items: center; gap: var(--space-1); }
+.app-page-tabs[data-back] > :not(.app-page-back) { flex: 1 1 auto; min-width: 0; }
+/* Back starts the tabs' row at ☰'s inset and is centred on the tabs, not on the strip, which lends its tabs their
+   shadow room below them (.app-tab-strip: var(--space-2) above, var(--space-5) below). */
+.app-page-tabs[data-back] { padding-inline-start: var(--space-3); }
+.app-page-tabs[data-back] > .app-page-back { margin-bottom: calc(var(--space-5) - var(--space-2)); }
 /* A narrow content column gives the existing toolbar its own wrapping row; navigation lives below it. */
 html[data-layout="docked"] .app-page-header[data-narrow] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "toolbar"; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-leading { display: none; }
@@ -1342,7 +1493,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .app-tab-strip {
     display: flex;
     flex-wrap: nowrap;
-    gap: 10px;
+    gap: 2px;
     overflow-x: auto;
     min-width: 0;
     max-width: 100%;
@@ -1778,16 +1929,18 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     flex: 0 0 calc(var(--chat-input-reserve, 108px) - 8px);
 }
 
-/* Quiet transcript navigation: ↓ latest stands at the composer's end, right above the waiting pill (main_waiting.js,
-   the end of the capsule row), so every way down the feed is one stack in one place and never floats over the text
-   in the middle of the column (U016). */
+/* Quiet transcript navigation: ↓ latest is the last control of the composer's capsule line, at the chrome height, in
+   room the line always keeps at its end (an end pad of the button and the line's gap), so it can never wrap to a line of
+   its own or push a capsule, and the capsules never reach under it while it is hidden. It arrives and leaves by
+   opacity alone on the system's fade. Where the line folds (a phone) or is narrow (a Project panel under 460 px) it
+   stands above the composer's end. */
 .chat-scroll-bottom-btn {
     position: absolute;
     right: var(--space-2);
     bottom: calc(100% + var(--space-2));
     z-index: 6;
-    width: var(--composer-control-height);
-    height: var(--composer-control-height);
+    width: var(--control-h-float);
+    height: var(--control-h-float);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1800,14 +1953,30 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     box-shadow: var(--elev-float);
     cursor: pointer;
     opacity: 0;
-    transform: translateY(8px);
     pointer-events: none;
-    transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+    transition: opacity var(--motion-fade) var(--ease-sheet);
 }
 .chat-scroll-bottom-btn.visible {
     opacity: 1;
-    transform: none;
     pointer-events: auto;
+}
+.chat-toolbar-row:has(> .chat-scroll-bottom-btn) {
+    position: relative;
+    padding-inline-end: calc(var(--space-2) + var(--control-h-float) + var(--composer-row-gap));
+}
+/* In the pad, centred on the line's last row of capsules. */
+.chat-toolbar-row > .chat-scroll-bottom-btn {
+    right: var(--space-2);
+    bottom: calc((var(--composer-control-height) - var(--control-h-float)) / 2);
+}
+@container composer (max-width: 460px) {
+    .chat-toolbar-row > .chat-scroll-bottom-btn { bottom: calc(100% + var(--space-2)); }
+}
+/* A phone folds the capsule line into the field's row (it has no height of its own): there ↓ keeps its place above the
+   composer's end. */
+html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
+    right: var(--space-2);
+    bottom: calc(100% + var(--space-2));
 }
 .chat-scroll-bottom-btn:hover { color: var(--text-primary); }
 .chat-scroll-bottom-btn:not(:disabled):hover { background: var(--surface-capsule-hover); }
@@ -4089,17 +4258,21 @@ html[data-layout="stack"] .mobile-nav-toggle {
     flex: 0 0 44px;
     display: inline-flex;
 }
-/* The ☰'s dot says what waits behind it (app.js paintNavToggles): the shared 7px fact dot on the control's top-right,
-   clear of the glyph's top stroke, with no ring around it; inset closer on the composer's 32px capsule. */
-.mobile-nav-toggle > .status-mark {
-    position: absolute;
-    top: 8px;
-    right: 8px;
+/* What the places control wears: Ouroboros's picture fills the control (the same picture as his card in the list it
+   opens), so the control has no glass of its own. Its dot says what waits behind it (app.js paintNavToggles): the
+   shared 7px fact dot on the picture's top-right, ringed in the room's surface; closer in on the composer's capsule. */
+html[data-layout="stack"] .mobile-nav-toggle { background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+html[data-layout="stack"] .mobile-nav-toggle > .places-face {
+    display: block;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: url("logo.jpg") center / cover no-repeat, #e6e0de;
+    box-shadow: var(--elev-rest);
 }
-.mobile-nav-toggle.composer-menu > .status-mark {
-    top: 3px;
-    right: 3px;
-}
+html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .places-face { width: 100%; height: 100%; }
+html[data-layout="stack"] .mobile-nav-toggle > .status-mark { position: absolute; top: 4px; right: 4px; box-shadow: 0 0 0 2px var(--bg-primary); border-radius: 50%; }
+html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .status-mark { top: -1px; right: -1px; }
 /* A room's ☰ is the first control of its composer's row, under the thumb (owner 19.10, 1A): as tall as the
    capsules beside it, with the touch minimum as its finger target (.ui-hit-area). */
 html[data-layout="stack"] .chat-toolbar-row > .composer-menu {
@@ -5025,16 +5198,17 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     border-radius: calc(var(--capsule-seg-pad) + var(--space-1));
 }
 
-/* Context: exactly three modes, the chosen one under a glass thumb, in its mode's colour (Max the
-   accent, full context; Low the neutral ink, reduced: a level the owner chose is not a warning; Nano the
-   project fuchsia). Subagents' strip is the same mode strip (--mode-ink, --mode-fill), below. */
+/* Context: exactly three modes, the chosen one under a glass thumb, in its mode's ink (Max the accent, full context;
+   Low the neutral ink, reduced: a level the owner chose is not a warning; Nano the project fuchsia). A chosen value
+   never stands on a grey plate: Max and Low share the strip's crimson wash, Nano its fuchsia. Subagents' strip is
+   the same mode strip (--mode-ink, --mode-fill), below. */
 .chat-context-mode {
     --mode-ink: var(--accent-light);
     --mode-fill: var(--accent-14);
 }
 .chat-context-mode[data-context-mode="low"] {
     --mode-ink: var(--status-neutral-fg);
-    --mode-fill: var(--status-neutral-bg);
+    --mode-fill: var(--accent-14);
 }
 .chat-context-mode[data-context-mode="nano"] {
     --mode-ink: var(--project);
@@ -5101,8 +5275,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     }
 }
 
-/* Subagents: Off · Auto · Swarm on the same strip, the chosen one in its tone (Off the neutral ink, Auto and Swarm the
-   accent); a value Settings rules out is disabled ink. The mark is a small network: Ouroboros in meta ink, its helpers
+/* Subagents: Off · Auto · Swarm on the same strip, the chosen one in its ink (Off the neutral ink, Auto and Swarm the
+   accent) on the strip's crimson wash; a value Settings rules out is disabled ink. The mark is a small network: Ouroboros in meta ink, its helpers
    and their threads in the rail's ink until the mode lights them: none, the first, every helper and the threads between
    them (Swarm). Closed, Off is muted and Auto and Swarm read like the neighbours' values: no fill, the network tells them
    apart (owner 28.10); Settings-off adds a small lock. Open, the hint above it says what the value means (ui_hint.js). */
@@ -5112,7 +5286,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .chat-subagents-mode[data-mode="off"] {
     --mode-ink: var(--status-neutral-fg);
-    --mode-fill: var(--status-neutral-bg);
 }
 :is(.chat-subagents-strip, .chat-model-strip) .chat-context-thumb { left: var(--thumb-left, 0); width: var(--thumb-width, 0); }
 .chat-subagents-mode .chat-seg { justify-content: center; min-width: var(--touch-target-min); box-sizing: border-box; }
@@ -5314,8 +5487,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 /* Model (DESIGN "Composer owner controls"; composer_model.js): the first capsule, the model new work in this room
    starts on. Its glyph is the mark of the source that model is reached through, lit like a ring's arc only while the
    room chose its own; the capsule itself stays neutral, like its neighbours. Its strip is the family's mode strip
-   (Main · the recent models · Search) under a neutral thumb: a model is not a level. */
-.chat-model-mode { --mode-fill: rgba(var(--neutral-rgb), 0.14); }
+   (Main · the recent models · Search) under the strip's crimson wash (a chosen value never stands on a grey plate);
+   its ink stays neutral: a model is not a level. */
+.chat-model-mode { --mode-fill: var(--accent-14); }
 .chat-model-mode .chat-capsule-glyph { color: var(--text-meta); }
 .chat-model-mode[data-own="true"] .chat-capsule-glyph { color: var(--tone-crimson-word); }
 .chat-model-mode .chat-capsule-glyph .model-source-mark { width: 15px; height: 15px; }
@@ -6054,8 +6228,56 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* Dashboard › Costs (costs.js) on the Dashboard tab body: the known spend of the limit leads with its share as a thin
    bar under it (amber only when the limit is reached, the owner's move); the limits card's rows save themselves; the
    four breakdowns are cards of their own, two side by side where they fit, each a short list with "Show all (N)". */
-.costs-spend-bar { height: 4px; border-radius: var(--pill-radius); background: var(--status-neutral-bg); overflow: hidden; }
-.costs-spend-bar > i { display: block; width: var(--spend-share, 0%); height: 100%; border-radius: inherit; background: var(--text-meta); }
+/* Costs leads with two meters of one anatomy, side by side where they fit and one under the
+   other where they do not: the total budget and consciousness's 24 hours. Each says what the limit is, the spend of it
+   (whole dollars) with what is left on the same line, the share as a bar in the product's crimson on its own tint
+   (amber only when the limit is reached, the owner's move), and one quiet line of what the number leaves out. */
+.costs-meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: var(--space-4); align-items: start; }
+.costs-meter { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.costs-meter-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-height: var(--control-h-sm); }
+.costs-meter-title { margin: 0; min-width: 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
+.costs-meter-action {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    margin-inline-end: calc(-1 * var(--space-1));
+    padding: 0;
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: transparent;
+    color: var(--text-meta);
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+@media (hover: hover) { .costs-meter-action:hover { background: var(--tone-quiet-hover); color: var(--text-primary); } }
+.costs-meter-action:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.costs-meter-action:active { filter: var(--press); }
+.costs-meter-action[data-costs-consciousness] > svg { transform: rotate(-90deg); }  /* the set's chevron points down */
+.costs-meter-line { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 var(--space-4); }
+.costs-meter-figure { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); min-width: 0; font-variant-numeric: tabular-nums; }
+.costs-meter-figure > b { color: var(--text-primary); font-size: var(--type-page); line-height: var(--line-title); font-weight: 650; }
+.costs-meter-figure > span { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
+.costs-meter-left { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); font-weight: 600; font-variant-numeric: tabular-nums; }
+.costs-meter-note { margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); text-wrap: pretty; }
+/* Under a finger the disclosure's line is a touch target tall (ui.css "Touch reach"); its reach overlaps the card's own
+   air, so the card keeps the same step above Details and the same inset under it as on the desk. */
+@media (pointer: coarse) {
+    .costs-meter > .ui-disclosure:not([open]) { margin-top: calc(-1 * var(--space-2)); margin-bottom: calc(-1 * var(--space-3)); }
+}
+.costs-meter-note[hidden] { display: none; }
+.costs-meter > .ui-disclosure { margin-top: var(--space-1); }
+.costs-spend-bar {
+    --meter-fill: var(--tone-crimson);
+    height: 8px;
+    margin: var(--space-1) 0;
+    border-radius: var(--pill-radius);
+    background: var(--accent-18);
+    overflow: hidden;
+}
+.costs-spend-bar > i { display: block; width: var(--spend-share, 0%); min-width: 8px; height: 100%; border-radius: inherit; background: var(--meter-fill); transition: width var(--motion-fade, 180ms) var(--ease-sheet, ease); }
 .costs-spend-bar[data-reached="1"] > i { background: var(--amber); }
 .costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
 /* A table's one-line scope note under its title: what it groups by (costs.js TABLES). */
@@ -6389,16 +6611,26 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     min-height: 0;
 }
 
-.dashboard-shell {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    padding: 0 20px 18px;
-    overflow: hidden;
+/* The Dashboard is a place with pages (dashboard.js): the app's section list (ui.css "The section list") beside the
+   open page from a 40rem box, the list or the page alone below it. The shell is the section shell; the page's column
+   holds the seven panels, each one tab body with its own inset and scroller. */
+.dashboard-shell { padding: 0; }
+.dashboard-lead-back { display: flex; flex: none; align-items: center; }
+.dashboard-lead-back:empty { display: none; }
+.dashboard-row-mark[hidden] { display: none; }
+@container sectionplace (min-width: 40rem) {
+    .dashboard-shell[data-section-view="page"] .dashboard-body { padding-inline-start: var(--space-4); }
 }
-
-/* Dashboard tabs inherit shared .app-tab* styling. */
+/* A phone: the list's screen keeps `☰ Dashboard`, with nothing under it; a page's screen is one row, Back (to the
+   list, or to Settings) and the page's name in the header's title style, where ☰ and the place's name stood. Only a
+   page that REPLACED the list gives ☰ up: a drawer-width window that still holds the list beside its page (40rem up
+   to the shell's switch) has no Back, so there ☰ stays the way to every other destination. */
+html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-header .app-page-lead { display: none; }
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header > .app-page-leading,
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title toolbar"; }
+}
 
 .dashboard-panels,
 .dashboard-panel {
@@ -6487,15 +6719,11 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .dashboard-settings[data-solo] .ui-row-meta { font-size: var(--type-body); line-height: var(--line-body); }
 .dashboard-settings[data-solo] .ui-row-actions { margin-top: var(--space-2); justify-content: flex-start; }
 .dashboard-settings[data-solo] > .settings-row > .ui-row-actions > .ui-control { width: 100%; }
-/* A tab opened from Settings leads back there with its first row (dashboard.js settingsReturn), drawn as a Settings
-   page draws its Back (settings.css .settings-back-row, the later sheet: these rules name both classes to stand over
-   it). It stands above the tab's scroller, at the cards' edge, so it stays in place while the tab scrolls. */
-.settings-back-row.dashboard-back { position: static; flex: none; margin: var(--space-2) 0 var(--space-1); padding: 0 20px; background: none; }
-.dashboard-back + .dashboard-body { padding-top: var(--space-2); }
-html[data-layout="stack"] .settings-back-row.dashboard-back { padding-inline: var(--space-3); }
-/* The same row on a page a door of Settings opened (settings.js `leave`). Circles keeps the Dashboard's shell, so the
-   rules above place it there too; on Skills it stands right under the header, at that page's own gutter. */
-#page-skills > .settings-back-row.dashboard-back { padding-inline: var(--space-5); }
+/* A place opened from Settings leads back there with the app's one Back (dashboard.js settingsReturn): first in its
+   header's lead, before the tabs or the location; a page whose header has no lead keeps it as a first row at its own
+   gutter. */
+.dashboard-back { flex: none; display: flex; margin: var(--space-2) 0 var(--space-1); padding: 0 20px; }
+html[data-layout="stack"] .dashboard-back { padding-inline: var(--space-3); }
 /* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
    screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
 html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
@@ -8261,14 +8489,14 @@ html[data-layout="stack"] .chat-input-wrap[data-fold] .chat-toolbar-row > .compo
 html[data-layout="stack"] .chat-input-wrap[data-folded] .chat-toolbar-row > .composer-menu {
     transform: translateY(var(--fold-menu-dy, 0px));
 }
-html[data-layout="stack"] .chat-input-wrap[data-folded] .chat-toolbar-row > :not(.composer-menu) {
+html[data-layout="stack"] .chat-input-wrap[data-folded] .chat-toolbar-row > :not(.composer-menu, .chat-scroll-bottom-btn) {
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
     transition: opacity 120ms ease, visibility 0s linear 120ms;
 }
 /* Coming back, the capsules show once their line has opened enough to hold them. */
-html[data-layout="stack"] .chat-input-wrap[data-fold]:not([data-folded]) .chat-toolbar-row > :not(.composer-menu) {
+html[data-layout="stack"] .chat-input-wrap[data-fold]:not([data-folded]) .chat-toolbar-row > :not(.composer-menu, .chat-scroll-bottom-btn) {
     transition: opacity 160ms ease 140ms, visibility 0s;
 }
 html[data-layout="stack"] .chat-input-wrap[data-fold] .chat-field {
@@ -8282,7 +8510,7 @@ html[data-layout="stack"] .chat-input-wrap[data-folded] .chat-field {
     html[data-layout="stack"] .chat-input-wrap[data-fold] :is(.chat-toolbar-row, .chat-field),
     html[data-layout="stack"] .chat-input-wrap[data-fold] .chat-toolbar-row > .composer-menu,
     html[data-layout="stack"] .chat-input-wrap[data-folded] .chat-toolbar-row > :not(.composer-menu),
-    html[data-layout="stack"] .chat-input-wrap[data-fold]:not([data-folded]) .chat-toolbar-row > :not(.composer-menu) {
+    html[data-layout="stack"] .chat-input-wrap[data-fold]:not([data-folded]) .chat-toolbar-row > :not(.composer-menu, .chat-scroll-bottom-btn) {
         transition: none;
     }
 }
@@ -8428,10 +8656,10 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     gap: 1px;
     width: 100%;
     align-items: stretch;
-    margin: var(--space-1) 0 var(--space-2);
-    /* As tall as its rows, shrinking to scroll them when they do not fit: the tools follow it, so a short or
-       collapsed list leaves its room above the foot, never between the list and the tools. */
-    flex: 0 1 auto;
+    margin: var(--space-1) 0 0;
+    /* The zone takes the column's free room, so the tools and the foot stand at the bottom edge (owner 12.11); the
+       list in it is as tall as its rows, so a short or folded list leaves that room under its last row. */
+    flex: 1 1 auto;
     min-height: 0;
 }
 
@@ -8441,7 +8669,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     gap: 1px;
     width: 100%;
     align-items: stretch;
-    flex: 1 1 auto;
+    flex: 0 1 auto;
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -8551,7 +8779,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     width: 100%;
     min-height: var(--nav-item-h);
     margin-top: var(--space-1);
-    padding: 0 var(--space-1) 0 var(--nav-label-x);
+    padding: 0 var(--space-1) 0 calc(var(--space-3) + 1px);
     border: 1px solid transparent;
     border-radius: var(--radius-inner);
     background: transparent;
@@ -8581,7 +8809,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 
 .nav-projects-note {
     margin: var(--space-1) 0 0;
-    padding: var(--space-1) var(--space-2) var(--space-1) calc(var(--nav-label-x) + 1px);  /* the rows' words: their 1px border */
+    padding: var(--space-1) var(--space-2) var(--space-1) calc(var(--space-3) + 1px);  /* the rows' words: their 1px border */
     color: var(--text-meta);
     font-size: var(--type-body);
     line-height: var(--line-body);
@@ -8608,25 +8836,94 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     margin-top: var(--space-2);
 }
 
-/* A Project row reads in the secondary ink at the body size, read or not: its new messages are its mark's hue. */
+/* A Project row, two lines (owner 12.11, the fifth round): the Project's own title and the time of its newest
+   message; under them the one line that matters (the question that waits for the owner, else what its work is doing)
+   and the row's one status mark in its own trailing column, the same x on every row and on the card above. With
+   nothing to say under it, a long title takes both lines. Every row is two lines tall, whatever its state. */
 .nav-project-row {
-    min-height: var(--nav-item-h);
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    gap: 2px;
+    height: 48px;
+    min-height: 48px;
+    padding: 6px calc(var(--nav-kebab-w) + var(--space-1)) 6px var(--space-3);
+    border-radius: var(--radius-object);
+    color: var(--text-primary);
     font-size: var(--type-body);
-    color: var(--text-secondary);
-    padding-left: var(--nav-label-x);
-    padding-right: var(--space-1);
-    border-radius: var(--radius-inner);
-    /* One trailing column per row for its one status mark, always reserved (the global [hidden] rule removes a row's
-       mark at rest from layout, so the track, not the child, holds the slot): every mark keeps one x across rows,
-       whatever the name length and while the sibling ⋯ (the item's own column) is hovered or focused. 18px is the
-       widest mark's, three 4px dots and two 3px gaps. */
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 18px;
-    column-gap: var(--space-2);
 }
-
-.nav-project-row > .nav-row-label { grid-column: 1; }
-.nav-project-row > .nav-mark { grid-column: 2; }
+/* The chosen fill spans the whole row: the ⋯ lies over the row's end, in the column its padding keeps. */
+.nav-project-item:not(.is-deleting) { display: block; }
+.nav-project-item:not(.is-deleting) > .nav-project-kebab {
+    position: absolute;
+    top: 50%;
+    right: 2px;
+    transform: translateY(-50%);
+}
+.nav-project-row.active ~ .nav-project-kebab { color: var(--tone-crimson-ink); }
+html[data-layout="stack"] .nav-project-row, html[data-layout="stack"] .nav-project-item { min-height: 52px; }
+html[data-layout="stack"] .nav-project-row { height: 52px; }
+.nav-project-line1 {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    min-width: 0;
+}
+.nav-project-row .nav-row-label {
+    flex: 1 1 auto;
+    color: var(--text-primary);
+    font-weight: 500;
+    line-height: 18px;
+}
+.nav-project-time {
+    flex: 0 0 auto;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: 18px;
+    font-variant-numeric: tabular-nums;
+}
+.nav-project-line2 {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    height: 16px;
+}
+.nav-project-says {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.nav-project-says[data-kind="ask"] { color: var(--text-primary); }
+.nav-project-line2 > .nav-mark-slot {
+    flex: 0 0 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 16px;
+}
+.nav-project-row[data-solo] .nav-project-line1 { align-items: flex-start; }
+.nav-project-row[data-solo] .nav-row-label {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow-wrap: anywhere;
+}
+.nav-project-row[data-solo] .nav-project-line2 {
+    position: absolute;
+    right: calc(var(--nav-kebab-w) + var(--space-1));
+    bottom: 6px;
+    width: 18px;
+}
+.nav-project-row[data-solo] .nav-project-says { display: none; }
+.nav-project-row.active :is(.nav-row-label, .nav-project-time, .nav-project-says) { color: inherit; }
 
 /* A deleting row states one trailing fact, `Deleting…`, in its wider sibling column. Its census mark stays in the
    accessible name but is not drawn (app.js): motion on a row the owner cannot open would read as work to look at. */
@@ -8699,6 +8996,25 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 }
 
 .nav-projects-add { order: 2; flex-shrink: 0; }  /* the ⋯ column keeps its width in a narrow sidebar */
+
+/* The Projects list starts with its search; no "Projects" word and no collapse. The row is the find
+   capsule and, at its end, New project: a round capsule of the same material and height, as a messenger's compose
+   button stands beside its search field. */
+.nav-projects-header { gap: var(--space-2); margin: var(--space-1) 0 var(--space-2); }
+.nav-projects-header > .nav-projects-find { flex: 1 1 auto; width: auto; min-width: 0; margin: 0; }
+.nav-projects-header > .nav-projects-add {
+    order: 2;
+    width: var(--nav-item-h);
+    height: var(--nav-item-h);
+    border-radius: 50%;
+    background: var(--chip-float);
+    box-shadow: var(--elev-rest);
+    color: var(--text-secondary);
+    transition: var(--motion-tone);
+}
+@media (hover: hover) {
+    .nav-projects-header > .nav-projects-add:hover { background: var(--chip-float-hover); color: var(--text-primary); }
+}
 
 @media (pointer: coarse) {
     .nav-projects-add { order: 0; }
@@ -8821,13 +9137,14 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
    (no hover) presses the row there and keeps the long press's menu. Over the chosen row it takes the row's ink, and
    the row keeps its hover under it (the rows' hover rule). */
 .nav-project-pin {
-    --pin-w: min(var(--nav-control-h), calc(var(--nav-label-x) - var(--space-1)));  /* a finger's 44px would reach the name */
+    /* Rows have no icon column since the fifth round: the Pin stands over the time on the name's line, which gives
+       way to it while it is drawn. */
     position: absolute;
     z-index: 1;  /* over the row, which follows it */
-    inset-block: 0;
-    left: calc(1px + (var(--nav-label-x) - var(--pin-w)) / 2);  /* centred on the column, past the row's border */
-    width: var(--pin-w);
-    margin-block: auto;
+    top: 3px;
+    right: calc(var(--nav-kebab-w) + var(--space-1) + 1px - 5px);
+    width: var(--nav-control-h);
+    height: 24px;
     opacity: 0;
     pointer-events: none;
 }
@@ -8835,6 +9152,10 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     opacity: 1;
     pointer-events: auto;
     color: var(--text-primary);
+}
+.nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time { visibility: hidden; }
+@media (hover: hover) {
+    .nav-project-item:hover .nav-project-time { visibility: hidden; }
 }
 .nav-project-pin:has(+ .nav-project-row.active) { color: var(--tone-crimson-ink); }
 @media (hover: hover) {
@@ -9026,6 +9347,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 /* The bars' icon controls wear the one focus ring (DESIGN §3 Focus), like every other control. */
 .project-panel-close:focus-visible,
 .mobile-nav-toggle:focus-visible,
+.shell-back:focus-visible,
 .nav-drawer-close:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: 2px;
@@ -9474,16 +9796,26 @@ html[data-layout="stack"] .project-panel {
 .harness-account-main .ui-status[data-tone]::before {
     margin-right: 6px;
 }
-/* Narrow viewports: the actions column would squeeze the account name to a
-   couple of characters, so the row becomes one column and the buttons drop
-   under the metadata they act on. */
-@media (max-width: 980px) {
-    .harness-account-row {
+/* In Settings a narrow box (the pane, the card the row stands in; never the window): the actions column would squeeze the
+   account name to a couple of characters, so the row becomes one column and the buttons drop under the metadata
+   they act on. */
+@container (max-width: 34rem) {
+    :where(#page-settings) .harness-account-row {
         grid-template-columns: minmax(0, 1fr);
         grid-template-areas: "main" "meta" "actions";
         row-gap: 8px;
     }
-    .agent-family-head { align-items: flex-start; }
+    :where(#page-settings) .agent-family-head { align-items: flex-start; }
+}
+/* Outside Settings these classes keep their window rule (the first-run wizard, a place's sheet, Costs, a secret
+   request): there no pane measures them. */
+@media (max-width: 980px) {
+    .harness-account-row:where(:not(#page-settings *)) {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas: "main" "meta" "actions";
+        row-gap: 8px;
+    }
+    .agent-family-head:where(:not(#page-settings *)) { align-items: flex-start; }
 }
 /* Classification chip: neutral pair, never inherited ink (docs/DESIGN.md).
    Also reused by Chat's live executor chip, which keeps its own 10px sizing. */

@@ -23,7 +23,7 @@ import { harnessPresentation } from './harness_presentation.js';
 import { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
 import { fmt, translateString } from './i18n.js';
 import { readNotifyPrefs } from './notifications.js';
-import { PAGE_ICONS, SHELL_ICONS, controlIcon, strokeIcon } from './page_icons.js';
+import { PAGE_ICONS, SHELL_ICONS, controlIcon, fluentIcon } from './page_icons.js';
 import { readSkills, skillForms } from './settings_extension_forms.js';
 import { isDoorId, settingsPageFor } from './settings_pages.js';
 import { policyValueLabel } from './settings_policy.js';
@@ -50,7 +50,6 @@ export function settingsTitle(path) {
 const NOT_CHECKED = 'Not checked';
 const truthy = (value) => value === true || /^(true|1|yes|on)$/i.test(String(value ?? '').trim());
 const count = (n, one, many) => fmt(n === 1 ? one : many, { n });
-const ACCESS_LEVELS = ['light', 'advanced', 'pro', 'cyber_pro'];
 
 /** An account that needs sign-in again: enabled, and its login was checked and did not pass (harness_accounts.js). */
 const needsSignIn = (row) => row.enabled !== false && verificationBadge(row).tone === 'error';
@@ -62,13 +61,14 @@ const toolNeedsSignIn = (server) => server?.enabled !== false && Boolean(server?
  * What waits for the owner here, one row each: `{ kind, id, text, note, owner, action, open | run }`. `facts` holds what
  * was read (`undefined`: not read yet, nothing is said; `null`: the read failed): `accounts` `{ read, rows, kind }`
  * from the shared accounts store, `tools` the tool servers' status, `settings` the settings document. An account row
- * stands only over an accounts facet that was really read; a facet that was not is a neutral row with its Check
- * (`kind: 'wake'` when only starting the agent daemon can read it, which the row then says). The list never says that
- * nothing waits.
+ * stands only over an accounts facet that was really read. The list never says that nothing waits, and never what
+ * was not read: that is the answer of the row it concerns.
  */
 export function needRows(facts = {}) {
     const rows = [];
     const { accounts, tools, settings } = facts;
+    // Only what needs the owner stands here: a fact that was not read, or whose read failed, is said by the row it
+    // concerns (its answer on the home or its page), never as a line of the card with a Check.
     if (accounts?.read === READ_OK) {
         const byHarness = new Map();
         for (const row of accounts.rows.filter(needsSignIn)) byHarness.set(row.harness, [...(byHarness.get(row.harness) || []), row]);
@@ -78,17 +78,12 @@ export function needRows(facts = {}) {
                 text: list.length === 1 ? fmt('{label} account {name} needs sign-in again', { label, name: accountName(list[0]) })
                     : fmt('{n} {label} accounts need sign-in again', { n: list.length, label }) });
         }
-    } else if (accounts) {
-        rows.push({ kind: 'unread', id: 'accounts', owner: false, action: 'Check', run: 'accounts', text: fmt('Accounts not checked'),
-            note: accounts.kind === 'wake' ? fmt('Check starts the agent daemon.') : '' });
     }
-    if (tools === null) rows.push({ kind: 'unread', id: 'tools', owner: false, action: 'Check', run: 'tools', text: fmt('MCP servers not checked') });
     for (const server of (tools?.servers || []).filter(toolNeedsSignIn)) {
         rows.push({ kind: 'tool-sign-in', id: String(server.id ?? serverName(server)), owner: true, action: 'Open',
             open: `tools/${encodeURIComponent(String(server.id ?? serverName(server)))}`,
             text: fmt('MCP server {name} needs sign-in', { name: serverName(server) }) });
     }
-    if (settings === null) rows.push({ kind: 'unread', id: 'settings', owner: false, action: 'Check', run: 'settings', text: fmt('Saved settings not checked') });
     const restart = settings?._meta?.restart_state;
     if (restart?.restart_required || restart?.restart_source_unknown_keys?.length) {
         const named = (restart.restart_keys || []).map((key) => ROWS.find((row) => row.keys.includes(key))?.name).filter(Boolean);
@@ -134,9 +129,11 @@ function accountsWords(accounts, settings) {
     // A document that does not list the connections says nothing about keys: no count is printed for it.
     const keys = Array.isArray(settings?._meta?.connections) ? settings._meta.connections.filter((row) => row?.configured).length : null;
     const keyWords = keys === null ? '' : count(keys, '{n} API key', '{n} API keys');
-    if (!accounts && keys === null) return undefined;
-    const read = accounts?.read === READ_OK;
-    const known = read ? count(accounts.rows.length, '{n} account', '{n} accounts') : fmt('Accounts not checked');
+    // A count of accounts comes only from a roster that was really read and holds accounts; a store that was not
+    // read (or a daemon that merely runs) prints no count, and the row says its API keys alone.
+    const read = accounts?.read === READ_OK && accounts.rows.length > 0;
+    if (!read && keys === null) return undefined;
+    const known = read ? count(accounts.rows.length, '{n} account', '{n} accounts') : '';
     // An account that needs sign-in again is the owner's move, as its line of the card says.
     return { text: [known, keyWords].filter(Boolean).join(', '), owner: read && accounts.rows.some(needsSignIn) };
 }
@@ -202,7 +199,7 @@ export function homeAnswers(facts = {}) {
     say('permissions', settings, accessWords);
     say('dashboard:costs', state, (s) => {
         const budget = headerBudgetPresentation(s);
-        return { text: budget.state === 'available' ? String(budget.label).replace(' / ', ' of ') : budget.label, owner: budget.attention === true };
+        return { text: budget.label, owner: budget.attention === true };
     });
     const accountsAnswer = accountsWords(accounts, settings);
     if (accountsAnswer !== undefined) out.accounts = accountsAnswer;
@@ -267,20 +264,27 @@ export async function askOuroboros(words, { showPage, doc = globalThis.document 
 
 /* ---- Drawing ----------------------------------------------------------------------------------------------- */
 
-const OUT_ICON = strokeIcon('<path d="M7 17 17 7"/><path d="M7 7h10v10"/>', 14);
-const IN_ICON = strokeIcon('<path d="m9 18 6-6-6-6"/>', 14);
-// Glyphs the product's set (page_icons.js) does not carry, as Lucide draws them.
+const OUT_ICON = fluentIcon('arrow-up-right', 14, 'regular');
+const IN_ICON = fluentIcon('chevron-right', 14, 'regular');
+// Glyphs the product's set (page_icons.js) does not carry: Fluent Filled (a row names a place or a thing).
+// Models wears the cube (never a sparkle); Costs and Permissions wear a plain mark, the row's words say the value.
+// Agents wears the network of one and its helpers (the owner's choice of 27.10 for subagents), Updates the arrow up.
 const GLYPHS = Object.fromEntries(Object.entries({
-    key: '<path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/>',
-    rules: '<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
-    growth: '<path d="M16 7h6v6"/><path d="m22 7-8.5 8.5-5-5L2 17"/>',
-    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
-    moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
-    bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
-    refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
-    drive: '<path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h.01"/><path d="M10 16h.01"/>',
-    monitor: '<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
-}).map(([name, body]) => [name, strokeIcon(body, 18)]));
+    key: 'key',
+    rules: 'text-bullet-list-square',
+    growth: 'branch-fork',
+    sun: 'dark-theme',
+    moon: 'dark-theme',
+    bell: 'alert',
+    refresh: 'arrow-circle-up',
+    agents: 'organization',
+    activity: 'timeline',
+    drive: 'hard-drive',
+    monitor: 'desktop',
+    cube: 'cube',
+    wallet: 'wallet',
+    shield: 'shield-checkmark',
+}).map(([name, fluent]) => [name, fluentIcon(fluent, 18)]));
 const glyphHtml = (name) => GLYPHS[name] || PAGE_ICONS[name] || controlIcon(name, 18);
 // The chosen dictation engine's name ('' when none is chosen), from the page's speech hub as it stands.
 function dictationWord() {
@@ -290,48 +294,30 @@ function dictationWord() {
     } catch { return undefined; }
 }
 
-/** A level as ascending bars, `lit` of `steps` (Access); a share as an arc of a ring (Costs). */
-function barsHtml(lit, steps = 4) {
-    const [width, gap] = [3.2, 2.2];
-    const start = (24 - (steps * width + (steps - 1) * gap)) / 2;
-    const bars = Array.from({ length: steps }, (_, i) => {
-        const height = 6 + (12 / (steps - 1)) * i;
-        return `<rect class="${i < lit ? 'settings-gauge-lit' : 'settings-gauge-rail'}" x="${(start + i * (width + gap)).toFixed(2)}" y="${(20 - height).toFixed(2)}" width="${width}" height="${height.toFixed(2)}" rx="1.6"/>`;
-    }).join('');
-    return `<svg class="settings-gauge" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">${bars}</svg>`;
-}
-function ringHtml(share) {
-    const circumference = 2 * Math.PI * 9;
-    const arc = (portion, name) => `<circle class="${name}" cx="12" cy="12" r="9" stroke-dasharray="${(portion * (300 / 360) * circumference).toFixed(2)} ${circumference.toFixed(2)}" transform="rotate(120 12 12)"/>`;
-    return `<svg class="settings-gauge" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true">${arc(1, 'settings-gauge-rail')}${share > 0 ? arc(Math.max(0.03, Math.min(1, share)), 'settings-gauge-lit') : ''}</svg>`;
-}
 const markHtml = (presentation) => `<svg width="18" height="18" viewBox="${presentation.viewBox}" fill="currentColor" aria-hidden="true"><path d="${presentation.path}"/></svg>`;
 
-/** The glyphs that say a fact: Main's source, the Access level, the share of the budget spent, the theme. */
-function liveGlyphs({ settings, state, device = {} } = {}) {
+/** The glyphs that say a fact: Main's source (its harness mark, else the cube) and the theme. */
+function liveGlyphs({ settings, device = {} } = {}) {
     const out = {};
     if (settings) {
         const source = routeSource({ model: String(settings.OUROBOROS_MODEL || ''), use_local: truthy(settings.USE_LOCAL_MAIN) });
         const brand = source.startsWith('subscription:') ? harnessPresentation(source.slice('subscription:'.length)) : null;
-        out.models = brand && !brand.generic ? markHtml(brand) : glyphHtml('sparkle');
-        const access = settings._meta?.policy_state?.access;
-        out.permissions = barsHtml(ACCESS_LEVELS.indexOf(String(access?.current_process || access?.effective || '')) + 1);
+        out.models = brand && !brand.generic ? markHtml(brand) : glyphHtml('cube');
     }
-    if (state) out['dashboard:costs'] = ringHtml(headerBudgetPresentation(state).fillPct / 100);
     if (device.theme) out.appearance = glyphHtml(device.theme === 'light' ? 'sun' : 'moon');
     return out;
 }
 
 function doorHtml({ to, name, glyph, answer = '', result = '' }) {
-    return `<button type="button" class="settings-door" data-settings-open="${escapeHtml(to)}"${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
-        + `<span class="settings-door-glyph" aria-hidden="true" data-settings-glyph>${glyphHtml(glyph)}</span>`
-        + `<span class="settings-door-words"><span class="settings-door-title">${escapeHtml(name)}</span>`
-        + `<span class="settings-door-answer" data-settings-answer${result ? '' : ' data-i18n-fmt="settings.answer"'}>${escapeHtml(answer)}</span></span>`
-        + `<span class="settings-door-end" aria-hidden="true">${result ? '' : statusMarkHtml('settings-door-mark')}${isDoorId(to) ? OUT_ICON : IN_ICON}</span></button>`;
+    return `<button type="button" class="settings-door section-row" data-settings-open="${escapeHtml(to)}"${isDoorId(to) ? ' data-settings-door-out data-section-out' : ''}${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
+        + `<span class="settings-door-glyph section-row-glyph" aria-hidden="true" data-settings-glyph>${glyphHtml(glyph)}</span>`
+        + `<span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title">${escapeHtml(name)}</span>`
+        + `<span class="settings-door-answer section-row-answer" data-settings-answer${result ? '' : ' data-i18n-fmt="settings.answer"'}>${escapeHtml(answer)}</span></span>`
+        + `<span class="settings-door-end section-row-end" aria-hidden="true">${result ? '' : statusMarkHtml('settings-door-mark')}${isDoorId(to) ? OUT_ICON : IN_ICON}</span></button>`;
 }
 
-const groupHtml = (title, body) => `<section class="settings-group">${title ? `<h3 class="settings-group-title">${escapeHtml(title)}</h3>` : ''}`
-    + `<div class="ui-card settings-door-list">${body}</div></section>`;
+const groupHtml = (title, body) => `<section class="settings-group section-group">${title ? `<h3 class="settings-group-title section-group-title">${escapeHtml(title)}</h3>` : ''}`
+    + `<div class="ui-card settings-door-list section-rows">${body}</div></section>`;
 
 export function homeGroupsHtml(rows = HOME_ROWS) {
     return [...new Set(rows.map((row) => row.group))]
@@ -341,9 +327,9 @@ export function homeGroupsHtml(rows = HOME_ROWS) {
 /** Search results as rows, then the line that asks Ouroboros with the words. */
 export function resultsHtml(query, found) {
     const hits = found.map((entry) => doorHtml({ to: entry.to, name: entry.name, glyph: entry.glyph, answer: entry.where, result: entry.id })).join('');
-    const ask = `<button type="button" class="settings-door" data-settings-ask><span class="settings-door-glyph" aria-hidden="true">${glyphHtml('chat')}</span>`
-        + `<span class="settings-door-words"><span class="settings-door-title" data-i18n-fmt="settings.ask">${escapeHtml(fmt('Ask Ouroboros: “{words}”', { words: query.trim() }))}</span>`
-        + `<span class="settings-door-answer">The words wait in Main as a draft you send.</span></span><span class="settings-door-end" aria-hidden="true">${OUT_ICON}</span></button>`;
+    const ask = `<button type="button" class="settings-door section-row" data-settings-ask data-settings-door-out data-section-out><span class="settings-door-glyph section-row-glyph" aria-hidden="true">${glyphHtml('chat')}</span>`
+        + `<span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title" data-i18n-fmt="settings.ask">${escapeHtml(fmt('Ask Ouroboros: “{words}”', { words: query.trim() }))}</span>`
+        + `<span class="settings-door-answer section-row-answer">The words wait in Main as a draft you send.</span></span><span class="settings-door-end section-row-end" aria-hidden="true">${OUT_ICON}</span></button>`;
     return `${hits ? groupHtml('Settings', hits) : '<p class="settings-search-empty">No setting has these words.</p>'}${groupHtml('', ask)}`;
 }
 
@@ -355,6 +341,12 @@ function needRowHtml(row) {
         + `${row.note ? `<p class="ui-row-meta" data-i18n-fmt="settings.need">${escapeHtml(row.note)}</p>` : ''}`
         + `<div class="ui-row-actions"><button type="button" class="btn btn-default btn-sm" data-need-action aria-describedby="${words}">${escapeHtml(row.action)}</button></div></div>`;
 }
+
+// The facts the mounted home last read (its updates and storage reads among them), so another list of the same pages
+// (the Dashboard's, dashboard.js) can say the same answers without a read of its own.
+let seenFacts = null;
+/** What the Settings home has read so far (`{}` before it is mounted); never starts a read. */
+export const homeFactsSeen = () => seenFacts || {};
 
 /**
  * Draw the home into `root` and take its presses. `open(path, { row, opener })` opens a row's page or door; `ctx`
@@ -372,12 +364,24 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
                     <button type="button" class="settings-being-count" data-being-count aria-expanded="false" hidden></button></span></div>
             <div class="settings-needs" data-being-needs hidden></div>
         </section>
+        <div class="ui-card settings-door-list section-rows settings-overview" data-settings-overview hidden>
+            <button type="button" class="settings-door section-row" data-settings-open="" data-settings-overview-row>
+                <span class="settings-door-glyph section-row-glyph settings-overview-glyph" aria-hidden="true"></span>
+                <span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title" data-i18n-skip>Ouroboros</span>
+                    <span class="settings-door-answer section-row-answer" data-overview-answer></span></span>
+                <span class="settings-door-end section-row-end" aria-hidden="true"></span></button>
+        </div>
         <label class="settings-search">${SHELL_ICONS.search}<input type="search" id="settings-search" placeholder="Search settings" autocomplete="off" spellcheck="false" aria-label="Search settings"></label>
-        <div class="settings-home-list" data-settings-list>${homeGroupsHtml()}</div>
+        <div class="settings-home-list section-list" data-settings-list>${homeGroupsHtml()}</div>
     </div>`;
     const find = (selector) => root.querySelector(selector);
+    // The card and the search field keep their own references: the shell may move them (the field into the header,
+    // the card into the Ouroboros pane of landing A), and they work wherever they stand.
+    const cardEl = find('[data-settings-card]');
     const [needsEl, listEl, searchEl, countEl] = [find('[data-being-needs]'), find('[data-settings-list]'), find('#settings-search'), find('[data-being-count]')];
+    const [stateEl, sepEl, overviewAnswer] = [find('[data-being-state]'), find('.settings-being-sep'), find('[data-overview-answer]')];
     const facts = { device: {} };
+    seenFacts = facts;
     let current = '';
     let needs = [];
     let shownQuery = '';
@@ -388,14 +392,16 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
 
     function paintCard() {
         const being = beingState({ connected: ctx.ws?.isConnected?.() !== false, state: facts.state });
-        const stateEl = find('[data-being-state]');
         stateEl.textContent = being.text;
         stateEl.dataset.tone = being.tone;
         needs = needRows(facts);
         const waiting = needs.filter((row) => row.owner).length;
         countEl.textContent = waiting ? count(waiting, 'One thing needs you', '{n} things need you') : '';
+        // The list's own Ouroboros row (two panes from the first showing, settings.js): its state, and how many
+        // things need the owner when any do.
+        if (overviewAnswer) overviewAnswer.textContent = waiting ? `${being.text} · ${countEl.textContent}` : being.text;
         countEl.hidden = !waiting;
-        find('.settings-being-sep').hidden = !waiting;
+        sepEl.hidden = !waiting;
         const html = needs.map(needRowHtml).join('') + (needs.length > 2
             ? `<button type="button" class="btn btn-ghost btn-sm settings-needs-more" data-needs-more>${escapeHtml(fmt('Show all {n}', { n: needs.length }))}</button>` : '');
         if (needsHtml !== html) needsEl.innerHTML = needsHtml = html;
@@ -441,8 +447,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     }
     const paint = () => { paintCard(); paintList(); };
 
-    // The accounts store as it stands: this subscriber is never a visible surface, so it arms no poll.
-    // A client that never read it reads it once on Check; a read that found the daemon unasked makes Check its start.
+    // The accounts store as it stands: this subscriber is never a visible surface, so it arms no poll and reads nothing.
     const readAccounts = (view = { reads: store.reads, snapshot: store.snapshot, everSettled: store.everSettled }) => {
         facts.accounts = { read: view.reads?.accounts, snapshot: view.snapshot, rows: accountRows(view.snapshot),
             kind: view.everSettled ? refreshActionKind(view.snapshot) : 'refresh' };
@@ -485,7 +490,6 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         paintCard();
         try {
             if (row.run === 'restart') await confirmAndSendRestart({ openConfirmDialog: ask, ws: ctx.ws });
-            else if (row.run === 'accounts') await (facts.accounts?.kind === 'wake' ? store.wake() : store.refresh());
             else if (row.run) await read(row.run, serial);
         } finally {
             busy = '';
@@ -494,6 +498,8 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     }
 
     const onClick = (event) => {
+        // The card takes its own presses (it may stand outside the home); the home's handler leaves them to it.
+        if (event.currentTarget === root && cardEl?.contains?.(event.target)) return;
         const hit = (selector) => event.target.closest?.(selector);
         if (hit('[data-being-count], [data-needs-more]')) {
             const all = needsEl.dataset.all !== '1';
@@ -529,6 +535,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     const onSaved = () => { if (root.getClientRects?.().length) void read('settings', serial); };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
     root.addEventListener('click', onClick);
+    cardEl?.addEventListener('click', onClick);
     searchEl.addEventListener('input', onType);
     globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
     paint();
@@ -547,6 +554,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             serial += 1;
             offStore();
             root.removeEventListener('click', onClick);
+            cardEl?.removeEventListener('click', onClick);
             searchEl.removeEventListener('input', onType);
             globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
         },

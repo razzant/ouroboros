@@ -517,14 +517,14 @@ export const HAND_WRITTEN = [
 // Settings (`to`: a path or a door id). `glyph` names its picture; the tabs Settings had are aliases, so search still
 // finds them.
 export const HOME_ROWS = [
-    { id: 'home:models', group: 'Mind', name: 'Models', to: 'models', glyph: 'sparkle', aliases: ['Model', 'Main model'] },
-    { id: 'home:agents', group: 'Mind', name: 'Agents', to: 'agents', glyph: 'bot', aliases: ['Subagents', 'Helpers'] },
+    { id: 'home:models', group: 'Mind', name: 'Models', to: 'models', glyph: 'cube', aliases: ['Model', 'Main model'] },
+    { id: 'home:agents', group: 'Mind', name: 'Agents', to: 'agents', glyph: 'agents', aliases: ['Subagents', 'Helpers'] },
     { id: 'home:consciousness', group: 'Life', name: 'Consciousness', to: 'dashboard:consciousness', glyph: 'brain', aliases: ['Background consciousness'] },
     { id: 'home:evolution', group: 'Life', name: 'Evolution', to: 'dashboard:evolution', glyph: 'growth', aliases: ['Self-evolution', 'Post-Task Self-Evolution'] },
     { id: 'home:circles', group: 'Life', name: 'Circles', to: 'page:circles', glyph: 'circles', aliases: ['Places'] },
     { id: 'home:rules', group: 'Limits', name: 'Your rules', to: 'rules', glyph: 'rules', aliases: ['Rules', 'Safety rules'] },
-    { id: 'home:permissions', group: 'Limits', name: 'Permissions and checks', to: 'permissions', glyph: 'check', aliases: ['Behavior', 'Access', 'Safety', 'Review'] },
-    { id: 'home:costs', group: 'Limits', name: 'Costs', to: 'dashboard:costs', glyph: 'gauge', aliases: ['Budget', 'Spending'] },
+    { id: 'home:permissions', group: 'Limits', name: 'Permissions and checks', to: 'permissions', glyph: 'shield', aliases: ['Behavior', 'Access', 'Safety', 'Review'] },
+    { id: 'home:costs', group: 'Limits', name: 'Costs', to: 'dashboard:costs', glyph: 'wallet', aliases: ['Budget', 'Spending'] },
     { id: 'home:accounts', group: 'Connections', name: 'Accounts and keys', to: 'accounts', glyph: 'key', aliases: ['Providers', 'Accounts', 'Secrets', 'API keys'] },
     { id: 'home:tools', group: 'Connections', name: 'Tools', to: 'tools', glyph: 'plug', aliases: ['MCP servers', 'Tool servers'] },
     { id: 'home:skills', group: 'Connections', name: 'Skills', to: 'page:skills', glyph: 'skills', aliases: ['Extensions'] },

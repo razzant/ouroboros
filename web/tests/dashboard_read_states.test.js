@@ -655,8 +655,18 @@ test('Costs reads the allowance from the consciousness snapshot, /api/state when
     window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
     await settle(); await settle(); await settle();
     assert.equal(mount.querySelector('#setting-OUROBOROS_CONSCIOUSNESS_DAILY_USD').value, '390');
-    assert.match(mount.querySelector('#costs-allowance-spend').textContent, /^\$301\.20 of \$390\.00 in the last 24 hours\u00a0· Consciousness ›$/,
-        'the separator keeps to the word before it');
+    // The 24 hours as a meter in money beside a limit (storage_format.js formatLimitUsd): the spend rounded up, what is
+    // left rounded down, a bar of the share; nothing is left out, so the note under it is empty and hidden.
+    assert.equal(mount.querySelector('#costs-allowance-spent').textContent, '$302');
+    assert.equal(mount.querySelector('#costs-allowance-of').textContent, 'of $390');
+    assert.equal(mount.querySelector('#costs-allowance-left').textContent, '$88 left');
+    const bar = mount.querySelector('#costs-allowance-bar');
+    assert.equal(bar.hidden, false);
+    assert.equal(bar.getAttribute('style'), '--spend-share: 77.2%');
+    const note = mount.querySelector('#costs-allowance-spend');
+    assert.equal(note.textContent, '');
+    assert.equal(note.hidden, true);
+    assert.equal(mount.querySelector('[data-costs-consciousness]').getAttribute('aria-label'), 'Open Consciousness');
     const state = mount.querySelector('#costs-allowance-state');
     // The fixture reads a node's own text before its children's: the order in the page is the browser lane's.
     assert.match(state.textContent, /The consciousness wake-up is paused at the allowance it had left when it started \(\$2\.99\)\./);
@@ -666,7 +676,7 @@ test('Costs reads the allowance from the consciousness snapshot, /api/state when
     assert.equal(door.dataset.openTask, 'wake-1', 'the held wake\'s card in Main');
     const opened = [];
     window.addEventListener('ouro:open-task', (event) => opened.push(event.detail));
-    const card = mount.querySelector('.costs-budget');
+    const card = mount.querySelector('.costs-meters');
     await card.fire('click', { target: door });
     assert.deepEqual(opened, [{ task_id: 'wake-1', chat_id: 1 }]);
     await card.fire('click', { target: mount.querySelector('[data-costs-consciousness]') });
@@ -721,7 +731,8 @@ test('Dashboard binds stored, keyboard and programmatic selection to the same na
     assertSelected('costs');
     assert.deepEqual(changes, ['costs']);
     const costs = dashboard.page.querySelector('#dashboard-tab-costs');
-    await strip.fire('keydown', { target: costs, key: 'ArrowRight', preventDefault() {} });
+    // The pages are a vertical list (aria-orientation="vertical"): the arrow down moves to the next.
+    await strip.fire('keydown', { target: costs, key: 'ArrowDown', preventDefault() {} });
     assertSelected('updates');
     assert.equal(document.activeElement.id, 'dashboard-tab-updates');
     assert.deepEqual(changes, ['costs', 'updates'], 'one key gesture causes one domain load');

@@ -356,7 +356,10 @@ test('the Models list shows each role\'s route in the picture\'s order, and the 
     const page = await open(t, 'models');
     assert.deepEqual(page.container.querySelectorAll('[data-entry-id]').map((node) => node.dataset.entryId),
         ['main', 'fallback/1', 'fallback/2', 'fallback/3', 'light', 'vision', 'consciousness', 'safety', 'websearch']);
-    assert.match(head(page.container, 'main').textContent, /Main model.*gpt-main.*Codex subscription · account studio-01/s);
+    // The role's name is the card's title above its one row: the model, then the source (79fac1cf4, model_roles.js).
+    const mainCard = page.container.querySelector('[data-setting-row="models:main"]');
+    assert.equal(inside(mainCard, '.settings-card-title').textContent, 'Main model');
+    assert.match(head(page.container, 'main').textContent, /gpt-main.*Codex subscription · account studio-01/s);
     assert.match(head(page.container, 'fallback/2').textContent, /2.*kimi.*OpenRouter · by API key/s);
     const value = (id) => inside(page.container.querySelector(`[data-setting-row="${id}"]`), '[data-row-value]')?.textContent;
     assert.deepEqual(['light', 'safety', 'vision', 'consciousness', 'websearch'].map((slot) => value(`models:${slot}`)),
@@ -367,15 +370,30 @@ test('the Models list shows each role\'s route in the picture\'s order, and the 
     const limit = page.container.querySelector('[data-setting-row="OUROBOROS_MODEL_MAX_CONCURRENCY"]').textContent;
     assert.match(limit, /waits in line until a slot frees.*never sent elsewhere for waiting/s);
     assert.doesNotMatch(limit, /waits up to|\{wait\}/);
-    // The catalogue is an action of its row, with its own result beside it; it is read when the page is shown.
+    // The catalogue is an action of its row, with its own result beside it; it is read at the owner's first touch of
+    // the page after each showing of its own path, never because the page was merely shown (Settings lands on Models).
     const catalogue = page.container.querySelector('[data-setting-row="models:catalogue"]');
     assert.equal(inside(catalogue, '#btn-refresh-model-catalog').textContent, 'Read again');
     assert.ok(inside(catalogue, '#settings-model-catalog-status'));
-    assert.equal(page.calls.filter((url) => url === '/api/model-catalog').length, 0, 'not read before the page is shown');
-    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'tools' } });
+    const catalogueReads = () => page.calls.filter((url) => url === '/api/model-catalog').length;
+    assert.equal(catalogueReads(), 0, 'not read before the page is shown');
     page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
     await settle();
-    assert.equal(page.calls.filter((url) => url === '/api/model-catalog').length, 1, 'read once, for its own path');
+    assert.equal(catalogueReads(), 0, 'a page merely shown reads nothing but settings');
+    await page.container.fire('pointerdown', { target: catalogue });
+    await page.container.fire('focusin', { target: catalogue });
+    await settle();
+    assert.equal(catalogueReads(), 1, 'read once at the first touch');
+    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'tools' } });
+    await settle();
+    await page.container.fire('pointerdown', { target: catalogue });
+    await settle();
+    assert.equal(catalogueReads(), 1, 'another page being shown is not a new showing of this one');
+    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
+    await settle();
+    await page.container.fire('focusin', { target: catalogue });
+    await settle();
+    assert.equal(catalogueReads(), 2, 'read again at the first touch after its own path is shown again');
     // The door shows the install's Context and leads to Main; it never writes it.
     const door = page.container.querySelector('[data-setting-row="models:context"]');
     assert.deepEqual([rowById('models:context').keys, rowById('models:context').control], [[], { kind: 'door', to: 'main:context' }]);

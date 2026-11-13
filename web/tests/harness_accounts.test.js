@@ -59,8 +59,16 @@ import {
 test('account actions stack at the app shell compact breakpoint', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8')
         .replace(/\r\n?/g, '\n');
+    // In Settings the row stands in a pane beside the list (79fac1cf4): the narrow box it is drawn in decides, never the
+    // window.
+    assert.ok(css.includes(`@container (max-width: 34rem) {
+    :where(#page-settings) .harness-account-row {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas: "main" "meta" "actions";`),
+    'in Settings account actions must drop below status before the pane squeezes the row');
+    // Everywhere else (the first-run wizard, a place's sheet) no pane measures the row: the window rule keeps it.
     assert.ok(css.includes(`@media (max-width: 980px) {
-    .harness-account-row {
+    .harness-account-row:where(:not(#page-settings *)) {
         grid-template-columns: minmax(0, 1fr);
         grid-template-areas: "main" "meta" "actions";`),
     'account actions must drop below status before the persistent sidebar squeezes the row');

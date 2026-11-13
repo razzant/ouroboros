@@ -149,7 +149,8 @@ test('a known question survives a room whose works are unconfirmed; an owner tur
     const served = { activity: 'unknown', transition: 'none', call: '', turn: [item], amber: true, mark: 'ring',
         confirmed: false, works: [] };
     assert.deepEqual(summarizeRoom(served), { mark: 'ring', owner: true, word: 'Activity unconfirmed',
-        note: 'An unanswered question is here', label: 'Activity unconfirmed · An unanswered question is here' });
+        note: 'An unanswered question is here', line: '', name: '', focus: '',
+        label: 'Activity unconfirmed · An unanswered question is here' });
     assert.equal(summarizeRoom({ ...served, turn: [], amber: false }).owner, false);
     // The works' census incomplete and the question unreadable: the room keeps the question it had, drawn unconfirmed.
     let rooms = new Map();
