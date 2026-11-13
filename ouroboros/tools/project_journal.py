@@ -1053,10 +1053,8 @@ def get_tools() -> List[ToolEntry]:
                     "type": "object",
                     "properties": {
                         **edit_properties(
-                            "page", "workpad", "Required for edit and revert: the page's current revision (under the "
-                            "resident page, from workpad_read, a receipt or a refusal). Optional for overwrite; empty "
-                            "creates a missing page only. A stale revision writes nothing and returns what changed "
-                            "since."),
+                            "page", "The current revision (under the resident page, workpad_read's, a receipt's "
+                            "or refusal's); empty creates a missing page only."),
                         **common,
                     },
                     "required": [],

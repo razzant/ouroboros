@@ -88,24 +88,20 @@ def workpad_source(project_id: str) -> TextSource:
                       resident=f"it enters every request of project {project_id} whole")
 
 
-def edit_properties(noun: str, source: str, expected: str) -> dict:
-    """A writer schema's parameters for the shared modes, in knowledge_write's spelling (``expected``: its revision rule)."""
+def edit_properties(noun: str, expected: str) -> dict:
+    """A writer schema's parameters for the shared modes, in knowledge_write's spelling; the tool's lead explains them
+    (parameter prose does not reach every route), so each says only which mode takes it."""
     text = {"type": "string"}
     return {
-        "mode": {**text, "enum": list(MODES), "description": "edit changes parts; overwrite (default) replaces the "
-                                                              "whole text; revert puts back an earlier version."},
-        "edits": {"type": "array", "minItems": 1, "description": "mode=edit: exact replacements, all or none; each "
-                  "old_str found once in the revision you read; spans may touch, not overlap; an empty new_str deletes.",
+        "mode": {**text, "enum": list(MODES)},
+        "edits": {"type": "array", "minItems": 1, "description": "mode=edit: exact {old_str, new_str} items, all or none.",
                   "items": {"type": "object", "additionalProperties": False, "required": ["old_str", "new_str"],
                             "properties": {"old_str": text, "new_str": text}}},
-        "old_str": {**text, "description": "mode=edit, one pair: exact text found once in the revision you read; "
-                                           "content (or new_str) replaces it."},
-        "new_str": {**text, "description": "mode=edit with old_str: its replacement, the same as content (empty deletes)."},
-        "content": {**text, "description": f"mode=overwrite: the whole new {noun}; mode=edit with old_str: its "
-                                           "replacement (empty text deletes the old_str span)."},
-        "version": {**text, "description": f"mode=revert: the revision to put back (memory_read(source='{source}') "
-                                           "lists them)."},
-        "reason": {**text, "description": "Why this write: optional, kept in history, never in the text."},
+        "old_str": {**text, "description": "mode=edit, one pair: exact text found once."},
+        "new_str": {**text, "description": "old_str's replacement, as content (empty deletes)."},
+        "content": {**text, "description": f"overwrite: the whole new {noun}; edit with old_str: its replacement."},
+        "version": {**text, "description": "mode=revert: the revision to put back."},
+        "reason": {**text, "description": "Why: kept in history, never in the text."},
         "expected_revision": {**text, "description": expected},
     }
 

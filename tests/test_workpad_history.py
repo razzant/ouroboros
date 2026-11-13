@@ -256,3 +256,14 @@ def test_the_resident_page_carries_the_revision_of_the_bytes_shown(tmp_path, sto
     pad = next(section for section in sections if section.startswith(f"## Project workpad ({PID})"))
     assert pad == f"## Project workpad ({PID})\n\n" + raw.decode("utf-8") + \
         f"\nRevision of this workpad: {_sha(raw)}.\n"
+
+
+def test_a_presence_workpad_read_is_a_pure_read_not_possible_speech():
+    """SPEC §10, verified on the base first: ``may_speak`` counted a workpad read as words for the place."""
+    from ouroboros.place_reply import may_speak
+    from ouroboros.tool_capabilities import PURE_READ_TOOLS, READ_ONLY_PARALLEL_TOOLS
+
+    ctx = types.SimpleNamespace(task_metadata={})
+    assert may_speak(ctx, {"function": {"name": "workpad_read", "arguments": "{}"}}) is False
+    assert "workpad_read" in PURE_READ_TOOLS and "workpad_read" not in READ_ONLY_PARALLEL_TOOLS  # no new parallelism
+    assert may_speak(ctx, {"function": {"name": "workpad_write", "arguments": "{}"}}) is False  # a receipt write, as before

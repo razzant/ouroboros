@@ -232,7 +232,7 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
 # parallel. A tool not named here stays loud unless its leftover is details-only (a command that ran and failed, a call
 # refused before running: _outcome_tool_errors).
 PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
-    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
+    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript", "workpad_read",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.

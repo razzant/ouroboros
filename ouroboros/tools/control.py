@@ -443,8 +443,7 @@ def get_tools() -> List[ToolEntry]:
                 "it (memory_read(source='identity', version=...)) and put it back."
             ),
             "parameters": {"type": "object", "properties": edit_properties(
-                "identity", "identity", "Required: the identity's current revision (under the resident identity, or "
-                "from a receipt or refusal). A stale revision writes nothing and returns what changed since."),
+                "identity", "The current revision (under the resident identity, or a receipt's or refusal's)."),
                 "required": []},
         }, _update_identity),
         ToolEntry("update_world", {
@@ -464,9 +463,8 @@ def get_tools() -> List[ToolEntry]:
                 "read it (memory_read(source='world', version=...)) and put it back."
             ),
             "parameters": {"type": "object", "properties": edit_properties(
-                "map; the host keeps or restores its measured block", "world", "Required for an existing map: its "
-                "current revision (under the resident map, or from a receipt or refusal). A stale revision writes "
-                "nothing and returns what changed since."), "required": []},
+                "map", "The current revision (under the resident map, or a receipt's or refusal's)."),
+                "required": []},
         }, _update_world),
         ToolEntry("toggle_evolution", {
             "name": "toggle_evolution",
