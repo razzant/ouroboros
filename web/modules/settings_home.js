@@ -376,7 +376,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     </div>`;
     const find = (selector) => root.querySelector(selector);
     // The card and the search field keep their own references: the shell may move them (the field into the header,
-    // the card into the Ouroboros pane of landing A), and they work wherever they stand.
+    // the card into the Ouroboros pane that two panes show), and they work wherever they stand.
     const cardEl = find('[data-settings-card]');
     const [needsEl, listEl, searchEl, countEl] = [find('[data-being-needs]'), find('[data-settings-list]'), find('#settings-search'), find('[data-being-count]')];
     const [stateEl, sepEl, overviewAnswer] = [find('[data-being-state]'), find('.settings-being-sep'), find('[data-overview-answer]')];
