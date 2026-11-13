@@ -1428,8 +1428,13 @@ html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-
 html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
     margin-inline-start: calc(var(--space-2) - var(--page-header-padding-x));
 }
+/* A phone page that leads back (Circles or Skills opened from Settings): Back stands where the places control stood,
+   in the header's one row, as on a Settings page (DESIGN "Page header": one leading control, no second header row). */
 html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) {
-    grid-template-areas: "leading title toolbar" "back back back";
+    grid-template-areas: "back title toolbar";
+}
+html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) > .app-page-leading {
+    display: none;
 }
 html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back:not(:empty)) { display: contents; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
