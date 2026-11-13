@@ -328,3 +328,114 @@ def write_text(ctx: Any, source: TextSource, *, content: Any = None, mode: Any =
                    "that read and put back the replaced version.")
         return _answer(ctx, source, "\n".join([warning, *lines]), code="LEGACY_WARNING")
     return _answer(ctx, source, "\n".join(lines))
+
+
+# --- memory_read(source=...): the version door ------------------------------------------------------------------------
+
+SOURCES = "identity, world, workpad (this task's project) or workpad:<project id>"
+
+
+class _Withheld(ValueError):
+    """The workpad's read scope refuses this project to this actor."""
+
+
+def resolve_source(ctx: Any, address: Any) -> TextSource:
+    """A source address as memory_read names it: identity and the map on the canonical root; a workpad through the
+    project read scope (``project_journal._resolve_project_id(write=False)``), on the page's own root."""
+    if address in ("identity", "world"):
+        from ouroboros.tool_access import canonical_data_root
+
+        root = canonical_data_root(ctx)
+        return identity_source(root) if address == "identity" else world_source(root)
+    if isinstance(address, str) and (address == "workpad" or address.startswith("workpad:")):
+        from ouroboros.tools.project_journal import _resolve_project_id
+
+        pid, refusal = _resolve_project_id(ctx, address[len("workpad:"):], write=False)
+        if refusal:
+            raise (_Withheld if refusal.startswith("⚠️ TOOL_FORBIDDEN") else ValueError)(refusal.split(": ", 1)[-1])
+        if not pid:
+            raise ValueError("source='workpad' is this task's project, and this task has none: name one as "
+                             "workpad:<project id>")
+        return workpad_source(pid)
+    raise ValueError(f"source={address!r}: a memory text is {SOURCES}")
+
+
+def _page(head: str, text: str, start: int, resume: Any) -> str:
+    """One character window of a document; the second line names the continuation or completeness."""
+    from ouroboros.tool_capabilities import tool_result_limit
+
+    total = len(text)
+    start = min(start, total)
+    room = max(tool_result_limit("memory_read") - len(head) - 300, 1)  # the continuation line fits beside it
+    end = min(start + room, total)
+    cont = (f"chars {start}–{end} of {total}; next_start={end}; " + resume(end) if end < total
+            else f"chars {start}–{end} of {total}; complete")
+    return head + "\n" + cont + "\n" + text[start:end]
+
+
+def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint: Any, others: list[str]) -> str:
+    """``memory_read(source=...)``: one version of a memory text, or the list of its versions; never the chronicle.
+
+    With ``version``: that version's exact text, verified by its sha256 (the current bytes read even when no row
+    names them; an earlier one reads even when the file is gone), paged by ``start``. Without: the versions newest
+    first (``knowledge_versions.render_listing``: who, when, mode, reason, what changed and the version each write
+    replaced), paged by ``start`` with the ``fingerprint`` of the list a page continues; a list that changed between
+    pages is refused, never joined. Any other selector beside ``source`` is refused, never silently resolved."""
+
+    def failed(code: str, text: str, status: str = "error") -> str:
+        return _publish_tool_result(ctx, ToolResult(status=status, code=code, text=text,
+                                                    meta={"operation_outcome": "completed_no_effect"}))
+
+    note = ""
+    if isinstance(version, str) and not version.strip():  # a blank value names no revision: the list, said so
+        from ouroboros.tools.arg_feedback import ignored_argument_note
+
+        note, version = f"\n[Argument note] {ignored_argument_note('version', version, 'no revision named; the list of versions follows')}", None
+    try:
+        if others:
+            raise ValueError(f"source reads a memory text's versions, with version, start and fingerprint only; drop "
+                             f"{', '.join(others)}")
+        if address is None:
+            raise ValueError(f"version reads one version of a memory text: name its source ({SOURCES}); a chronicle "
+                             "record's revision is revision= with node_id")
+        if type(start) is not int or start < 0:
+            raise ValueError("start is a non-negative integer")
+        if version is not None and (not isinstance(version, str) or fingerprint):
+            raise ValueError("version is a revision text; fingerprint continues the list of versions, read without one"
+                             if fingerprint else "version is a revision text (the sha256 of that version)")
+        source = resolve_source(ctx, address)
+        raw = source.path.read_bytes() if source.path.exists() else None
+    except _Withheld as exc:
+        return failed("ACCESS_BLOCKED", f"⚠️ TOOL_FORBIDDEN: {exc}", "blocked")
+    except ValueError as exc:
+        return failed("TOOL_ARG_ERROR", f"⚠️ TOOL_ARG_ERROR: {exc}")
+    except OSError as exc:
+        return failed("TOOL_REPORTED_FAILURE", f"⚠️ TOOL_ERROR: {address} unreadable: {type(exc).__name__}")
+    current = revision_of(raw) if raw is not None else ""
+    shown = f"current revision {current}" if raw is not None else "the text does not exist now"
+    if version is not None:
+        try:
+            text, row = knowledge_versions.find_version(source, version)
+        except knowledge_versions.VersionUnavailable as exc:
+            if version != current:
+                return failed("TOOL_REPORTED_FAILURE", f"⚠️ TOOL_ERROR: version_unavailable: {exc}")
+            text, row = raw.decode("utf-8"), {}
+        which = "the current text" if version == current else "an earlier version, not the current text"
+        written = knowledge_versions.written_text(knowledge_versions.row_facts(row), source.outside)
+        head = f"[{source.name} version {version}: {which}; {written}; {shown}; {len(text)} chars]"
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=_page(
+            head, text, start, lambda end: f"memory_read(source={source.name!r}, version={version!r}, start={end})"),
+            meta={"operation_outcome": "completed_no_effect"}))
+    listing = knowledge_versions.render_listing(
+        source, current or "none (the text does not exist now)", f"History of {source.name} ({source.noun})",
+        read_call(source, "<revision>").replace("'<revision>'", "<revision>"),
+        write_call(source, mode="revert", version="<revision>", expected_revision=current or "<revision>")
+        .replace("'<revision>'", "<revision>"))
+    digest = sha256(listing.encode("utf-8")).hexdigest()[:16]
+    if (start or fingerprint) and fingerprint != digest:
+        return failed("TOOL_REPORTED_FAILURE", "⚠️ TOOL_ERROR: position_mismatch: that page belongs to another list of "
+                                               "versions (a write landed since): read it again from start=0.")
+    head = f"[{source.name}: versions newest first; {shown}; fingerprint='{digest}']{note}"
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=_page(
+        head, listing, start, lambda end: f"memory_read(source={source.name!r}, start={end}, fingerprint='{digest}')"),
+        meta={"operation_outcome": "completed_no_effect"}))

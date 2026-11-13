@@ -191,3 +191,84 @@ def test_the_registry_admits_an_edit_without_content(tmp_path, identity):
                                                  "edits": [{"old_str": "Doubts", "new_str": "Questions"}]})
     assert reply.startswith("OK: identity updated (edit"), reply
     assert "## Questions" in identity.read_text(encoding="utf-8")
+
+
+# --- memory_read(source=...): the version door ------------------------------------------------------------------------
+
+def _read(ctx, **arguments):
+    from ouroboros.tools.chronicle import _memory_read
+
+    return _memory_read(ctx, **arguments)
+
+
+def test_the_door_lists_versions_newest_first_and_reads_one_without_the_chronicle(tmp_path, identity, monkeypatch):
+    import ouroboros.tools.chronicle as chronicle
+
+    monkeypatch.setattr(chronicle, "_activated", lambda root: (_ for _ in ()).throw(AssertionError("chronicle woke")))
+    ctx = _ctx(tmp_path)
+    outside = _sha(identity.read_bytes())  # written before history: no row wrote it
+    current = _read(ctx, source="identity", version=outside)
+    assert current.startswith(f"[identity version {outside}: the current text; no history row wrote it") and \
+        current.endswith(IDENTITY), current
+    _update_identity(ctx, IDENTITY + "\nOne more line.\n", outside, reason="growing")
+    second = _sha(identity.read_bytes())
+    listing = _read(ctx, source="identity")
+    rows = [line for line in listing.splitlines() if line.startswith("- ")]
+    assert len(rows) == 1 and rows[0].startswith(f"- {second} · ") and f" · replaced {outside} · " in rows[0], listing
+    assert "reason: growing" in rows[0] and "· current" in rows[0]
+    assert "Put one back: update_identity(mode='revert', version=<revision>, expected_revision=" in listing
+    earlier = _read(ctx, source="identity", version=outside)  # now only the row's old side holds it
+    assert earlier.endswith(IDENTITY) and "an earlier version, not the current text" in earlier, earlier[:300]
+
+
+def test_the_doors_list_pages_by_its_fingerprint_and_refuses_a_changed_list(tmp_path, identity, monkeypatch):
+    monkeypatch.setattr("ouroboros.tool_capabilities.tool_result_limit", lambda _name: 700)
+    ctx = _ctx(tmp_path)
+    for number in range(3):
+        _update_identity(ctx, IDENTITY + f"\nVersion {number}.\n", _sha(identity.read_bytes()))
+    first = _read(ctx, source="identity")
+    fingerprint = re.search(r"fingerprint='([0-9a-f]{16})'", first)[1]
+    after = int(re.search(r"next_start=(\d+)", first)[1])
+    assert f"memory_read(source='identity', start={after}, fingerprint='{fingerprint}')" in first
+    assert "position_mismatch" in _read(ctx, source="identity", start=after)  # a continuation names its list
+    assert _read(ctx, source="identity", start=after, fingerprint=fingerprint).startswith("[identity: versions newest")
+    _update_identity(ctx, IDENTITY + "\nLater.\n", _sha(identity.read_bytes()))
+    assert "position_mismatch" in _read(ctx, source="identity", start=after, fingerprint=fingerprint)
+
+
+@pytest.mark.parametrize(("arguments", "said"), [
+    ({"source": "identity", "node_id": "rec-1"}, "drop node_id"),
+    ({"source": "identity", "room_id": "1"}, "drop room_id"),
+    ({"source": "identity", "revision": "r"}, "drop revision"),
+    ({"version": "a" * 64}, "name its source"),
+    ({"source": "identity", "version": "a" * 64, "fingerprint": "f"}, "fingerprint continues the list"),
+    ({"source": "scratchpad"}, "a memory text is identity, world, workpad"),
+    ({"source": "workpad"}, "this task has none"),
+])
+def test_the_door_refuses_conflicting_selectors(tmp_path, identity, arguments, said):
+    reply = _read(_ctx(tmp_path), **arguments)
+    assert reply.startswith("⚠️ TOOL_ARG_ERROR") and said in reply, reply
+
+
+def test_a_workpad_reads_through_its_project_scope_and_its_versions_outlive_the_page(tmp_path, monkeypatch):
+    import types
+
+    from ouroboros.tools.project_journal import _workpad_write
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
+    own = types.SimpleNamespace(project_id="atlas", task_id="t-1", drive_root=tmp_path, task_metadata={})
+    _workpad_write(own, "# Plan\n\n- one\n")
+    page = tmp_path / "data" / "projects" / "atlas" / "workpad.md"
+    first = _sha(page.read_bytes())
+    _workpad_write(own, mode="edit", old_str="- one", content="- one, done", expected_revision=first)
+    listing = _read(own, source="workpad")
+    assert "History of workpad:atlas (workpad)" in listing and f"replaced {first}" in listing, listing
+    assert "workpad_write(project_id='atlas', mode='revert', version=<revision>" in listing
+    child = types.SimpleNamespace(project_id="other", task_id="kid", drive_root=tmp_path,
+                                  task_metadata={"delegation_role": "subagent"})
+    withheld = _read(child, source="workpad:atlas")
+    assert withheld.startswith("⚠️ TOOL_FORBIDDEN") and "only its current project" in withheld, withheld
+    root = types.SimpleNamespace(project_id="", task_id="main", drive_root=tmp_path, task_metadata={"root_task_id": "main"})
+    page.unlink()  # a historical version reads even when the live page is gone
+    gone = _read(root, source="workpad:atlas", version=first)
+    assert gone.endswith("# Plan\n\n- one\n") and "the text does not exist now" in gone, gone
