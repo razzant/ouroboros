@@ -341,8 +341,10 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     resize?.observe(page);
 
     /** Show a tab's page. `back`, a Settings path ('' is its home), gives the page a Back there before its name;
-     *  without it there is none. `row` brings that row into view and focuses its control. */
-    function showTab(tabName, { row = '', back: path } = {}) {
+     *  without it there is none. `row` brings that row into view and focuses its control. `asLevel`: in one column
+     *  the page is shown as a level, made visible before its row is revealed (a hidden pane scrolls and focuses
+     *  nothing). */
+    function showTab(tabName, { row = '', back: path, asLevel = false } = {}) {
         const name = tabName || 'logs';
         if (!tabStrip.select(name)) return false;
         back.clear();
@@ -352,6 +354,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
             panel.hidden = !on;
         });
         state.dashboardActiveSubtab = name;
+        if (asLevel && !panes()) level = true;
         paint();
         window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
         const panel = panels.find((candidate) => candidate.dataset.dashboardPanel === name);
@@ -362,8 +365,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
 
     /** From outside the list (a deep link, a Settings row): the page is shown, as a level in one column. */
     function activateTab(tabName, options = {}) {
-        if (!showTab(tabName, options)) return;
-        if (!panes()) { level = true; paint(); }
+        showTab(tabName, { ...options, asLevel: true });
     }
 
     showTab(active);

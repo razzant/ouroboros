@@ -572,8 +572,12 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
         + '<div class="ui-row settings-row" data-setting-row="OUROBOROS_MAX_ROUNDS"><input data-setting-control></div></details></div>';
     const row = panel('costs').querySelector('[data-setting-row]');
     let scrolled = null;
-    row.scrollIntoView = (options) => { scrolled = options; };
+    let viewWhenScrolled = '';
+    // One column (the fixture measures no width): the page must be the visible level before its row is revealed,
+    // or the scroll and the focus land in a hidden pane.
+    row.scrollIntoView = (options) => { scrolled = options; viewWhenScrolled = dashboard.page.dataset.sectionView; };
     dashboard.activateTab('costs', { row: 'OUROBOROS_MAX_ROUNDS', back: '' });
+    assert.equal(viewWhenScrolled, 'page', 'the level is shown before its row is scrolled to and focused');
     assert.equal(slot.children.length, 1);
     assert.equal(slot.firstChild.getAttribute('aria-label'), 'Back to Settings');
     assert.equal(panel('costs').querySelector('[data-dashboard-back]'), null);
@@ -600,6 +604,12 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
     assert.equal(slot.firstChild, null, 'leaving the Dashboard drops Back');
     assert.equal(layers.length, 0);
     assert.equal(focusSettingRow(panel('costs'), 'NO_SUCH_ROW'), false);
+    // Two panes: the page stands beside the list as before, no level, its row revealed in it.
+    dashboard.page.getBoundingClientRect = () => ({ width: 1000 });
+    viewWhenScrolled = '';
+    dashboard.activateTab('costs', { row: 'OUROBOROS_MAX_ROUNDS' });
+    assert.deepEqual([viewWhenScrolled, listBack.hidden, layers.length], ['page', true, 0]);
+    assert.equal(document.activeElement, row.querySelector('[data-setting-control]'));
     dashboard.destroy();
 });
 
