@@ -37,11 +37,11 @@ import { carryOpenQuestions } from './question_presentation.js';
  * A map sent with an empty revision (a failed read) reaches no consumer: what they show stays, and
  * the next read asks for the whole map. A body with no revision field (an older server) applies.
  */
-// A feed the server could not read (`project_listable_count: null`, its `projects` then empty) is unknown, never
-// empty: the page keeps the rows it showed and the message revision they were read at, so a room that is the owner's
-// turn keeps its row, until a read names them.
+// A feed the server could not read (`project_listable_count: null` with no rows) is unknown, never empty: the page
+// keeps the rows it showed and the message revision they were read at, so a room that is the owner's turn keeps its
+// row, until a read names them. Rows a body carries are the feed, whatever its count says.
 const heldFeed = (prior, data) => (data?.project_listable_count === null && Array.isArray(data.projects)
-    && Array.isArray(prior?.projects) ? { ...data, projects: prior.projects,
+    && !data.projects.length && Array.isArray(prior?.projects) ? { ...data, projects: prior.projects,
         project_messages_revision: prior.project_messages_revision ?? null } : data);
 
 export function createStateSnapshotSequencer(onApply, now = () => Date.now(), onUnavailable = () => {}) {
