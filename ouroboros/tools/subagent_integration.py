@@ -33,11 +33,14 @@ import zipfile
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.tools.tool_result import completed_local_read
+from ouroboros.tools.tool_result import append_published_text, completed_local_read
 from ouroboros.tool_access_paths import entry_path
 from ouroboros.task_results import cancellation_blocks_child_result, load_task_result
 from ouroboros.task_status import effective_task_result
-from ouroboros.tools.join_ledger import _child_result_sha256, _record_child_result_disposition
+from ouroboros.tools.join_ledger import (
+    _cancelled_result_facts, _cancelled_result_note, _cancelled_result_refusal, _child_result_sha256,
+    _record_child_result_disposition,
+)
 from ouroboros.workspace_file_outputs import (
     file_output_changes, file_output_states, prepare_file_outputs, verify_file_outputs,
 )
@@ -50,10 +53,7 @@ from ouroboros.workspace_copies import protected_apply_refusal
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.config import get_runtime_mode
-from ouroboros.headless import (
-    ARTIFACT_STATUS_READY_NO_CHANGES,  # noqa: F401
-    ARTIFACT_STATUS_READY_WITH_CHANGES,
-)
+from ouroboros.headless import ARTIFACT_STATUS_READY_WITH_CHANGES
 
 # Git's own retargeting variables: they would make a Git command read a FOREIGN repository
 # (or turn a plain folder into one), so the reverse patch check strips them and lets the
@@ -64,10 +64,6 @@ _GIT_RETARGET_ENV = frozenset({
 })
 
 log = logging.getLogger(__name__)
-
-# The capture statuses a disposition may proceed over (C1-R3): a usable patch
-# exists (with changes), or the run provably changed nothing. Everything else —
-# failed, missing, unreadable — must never be applied over or release a snapshot.
 
 
 def _record_integration_disposition(
@@ -148,7 +144,7 @@ def _candidate_drive_roots(ctx: ToolContext) -> List[pathlib.Path]:
 def _locate_child_patch(
     ctx: ToolContext, child_task_id: str
 ) -> Union[str, Tuple[pathlib.Path, Dict[str, Any], Dict[str, Any]]]:
-    roots = _candidate_drive_roots(ctx)
+    roots, cancelled = _candidate_drive_roots(ctx), False
     for root in roots:
         try:
             from ouroboros.headless import current_workspace_manifest
@@ -156,6 +152,7 @@ def _locate_child_patch(
             manifest_path = current_workspace_manifest(root, child_task_id, result)
         except Exception as exc:
             return f"⚠️ INTEGRATE_RESULT_UNREADABLE: {child_task_id}: {type(exc).__name__}: {exc}."
+        cancelled = cancelled or cancellation_blocks_child_result(result)
         if not manifest_path.exists():
             if result.get("native_capture_pending"):
                 return manifest_path.parent / "workspace.patch", {"status": "failed", "note": result.get("artifact_error", "Capture unavailable")}, result
@@ -174,8 +171,9 @@ def _locate_child_patch(
     listed = ", ".join(str(r) for r in roots) or "(no drive roots resolved)"
     return (
         f"⚠️ INTEGRATE_PATCH_NOT_FOUND: no workspace_patch.json for child {child_task_id!r} under {listed}. "
-        "Ensure the child finished and was a mutative subagent that returned a workspace patch "
-        "(retrieve it with get_task_result/wait_task first)."
+        + ("It was cancelled without a retained capture and never finishes later, so nothing of it can be integrated."
+           if cancelled else "Ensure the child finished and was a mutative subagent that returned a workspace patch "
+           "(retrieve it with get_task_result/wait_task first).")
     )
 
 
@@ -191,7 +189,7 @@ def _sha256_file(path: pathlib.Path) -> str:
 
 # Verdict writing lives in tools/patch_verdict.py (module-size ceiling);
 # the historical private name stays importable for callers and tests.
-from ouroboros.tools.patch_verdict import write_patch_verdict as _write_verdict  # noqa: E402
+from ouroboros.tools.patch_verdict import decision_reason_refusal, write_patch_verdict as _write_verdict  # noqa: E402
 from ouroboros.tools.patch_staging import (  # noqa: E402
     index_entries, sparse_absent, stage_applied, staging_receipt, undo_applied,
 )
@@ -665,7 +663,8 @@ def _accept_hint(child_task_id: str) -> str:
 
 def _record_acceptance(ctx: ToolContext, child_task_id: str, reason: str, target: pathlib.Path,
                        manifest: Dict[str, Any], files: List[str], observed: str, conflicts: List[str],
-                       observation: Dict[str, Any], lineage: Dict[str, str] | None, result_sha: str) -> str:
+                       observation: Dict[str, Any], lineage: Dict[str, str] | None, result_sha: str,
+                       cancelled: Dict[str, Any] | None = None) -> str:
     """The parent's informed acceptance of a shared result: its judgment beside what the check saw.
 
     It is a decision (``accepted_shared_workspace``), never a verification: nothing is
@@ -675,7 +674,7 @@ def _record_acceptance(ctx: ToolContext, child_task_id: str, reason: str, target
     verdict = _write_verdict(
         ctx, child_task_id, outcome="accepted_shared_workspace", reason=reason, files=files, manifest=manifest,
         applied=False, conflicts=conflicts, protected=[], target=str(target), lineage=lineage, child_result_sha256=result_sha,
-        observation={"observed_outcome": observed, **observation}, failures=facts)
+        observation={"observed_outcome": observed, **observation}, failures=facts, cancelled=cancelled)
     warning = _record_integration_disposition(
         ctx, child_task_id, "integrated", reason, result_sha, lineage=lineage, verdict=verdict, unretained=facts)
     seen = f"{observed}: {'; '.join(conflicts)}" if conflicts else observed
@@ -747,7 +746,7 @@ def _registered_state(path: pathlib.Path, expected: Dict[str, Any]) -> str:
 def _verify_directory_direct_result(
     ctx: ToolContext, child_task_id: str, reason: str, target: pathlib.Path,
     manifest: Dict[str, Any], artifact_dir: pathlib.Path, result_sha: str, lineage: Dict[str, str] | None = None,
-    accepting: bool = False,
+    accepting: bool = False, cancelled: Dict[str, Any] | None = None,
 ) -> str:
     """Verify only registered postimages; direct effects are never replayed or rolled back.
 
@@ -808,7 +807,7 @@ def _verify_directory_direct_result(
         verdict = _write_verdict(
             ctx, child_task_id, outcome="direct_output_mismatch", reason=f"{reason + '. ' if reason else ''}{detail}",
             files=sorted(states), manifest=manifest, applied=False, conflicts=[str(exc)], protected=[],
-            target=str(target), lineage=lineage, child_result_sha256=result_sha)
+            target=str(target), lineage=lineage, child_result_sha256=result_sha, cancelled=cancelled)
         unaccepted = (" Acceptance was not recorded: these outputs cannot be observed under current integrity "
                       "and read authority." if accepting else "")
         return f"⚠️ INTEGRATE_DIRECTORY_OUTPUT_MISMATCH: {detail}. Verdict: {verdict or '(unwritten)'}.{unaccepted}"
@@ -818,7 +817,7 @@ def _verify_directory_direct_result(
                "verified_registered_outputs" if states else "direct_result_observed")
     if accepting:
         return _record_acceptance(ctx, child_task_id, reason, target, manifest, sorted(states), outcome, differs,
-                                  {"path_findings": findings}, lineage, result_sha)
+                                  {"path_findings": findings}, lineage, result_sha, cancelled)
     detail = (f"Registered outputs differ from their captured postimages in {target}: {_findings_text(findings)}"
               if differs else f"Verified {len(states)} registered file postimage(s) in {target}. " if states else
               f"Recorded the parent's acceptance of the direct child result in {target}; "
@@ -828,6 +827,7 @@ def _verify_directory_direct_result(
         ctx, child_task_id, outcome=outcome, reason=f"{reason + '. ' if reason else ''}{detail}",
         files=sorted(states), manifest=manifest, applied=False, conflicts=differs, protected=[], target=str(target),
         lineage=lineage, child_result_sha256=result_sha, observation={"path_findings": findings}, failures=facts,
+        cancelled=cancelled,
     )
     if differs:
         return (f"⚠️ INTEGRATE_DIRECTORY_OUTPUT_MISMATCH: {detail}. Verdict: {verdict or '(unwritten)'}. "
@@ -851,6 +851,7 @@ def _handle_external_workspace_integration(
     file_rows: List[Dict[str, Any]] = (),
     lineage: Dict[str, str] | None = None,
     accepting: bool = False,
+    cancelled: Dict[str, Any] | None = None,
 ) -> str:
     result_sha = _child_result_sha256(child_result)
     def refused(code: str, outcome: str, detail: str, target: Any = "",
@@ -859,7 +860,7 @@ def _handle_external_workspace_integration(
         verdict = _write_verdict(
             ctx, child_task_id, outcome=outcome, reason=reason or detail, files=files, manifest=manifest,
             applied=False, conflicts=list(conflicts) or [detail], protected=[], target=str(target or ""),
-            lineage=lineage, child_result_sha256=result_sha)
+            lineage=lineage, child_result_sha256=result_sha, cancelled=cancelled)
         from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
         text = (f"⚠️ {code}: {detail}. Verdict: {verdict or '(unwritten)'}. "
                 "Captured result retained; nothing was transferred or marked integrated.")
@@ -885,6 +886,7 @@ def _handle_external_workspace_integration(
     if manifest.get("capture_kind") == "directory_direct":
         return _verify_directory_direct_result(
             ctx, child_task_id, reason, target, manifest, patch_path.parent, result_sha, lineage=lineage, accepting=accepting,
+            cancelled=cancelled,
         )
     # Parse all captured paths without an ancestor repo's subdirectory prefix. Git
     # ignores a ceiling equal to its cwd and never searches the ceiling itself, so the
@@ -935,12 +937,12 @@ def _handle_external_workspace_integration(
     conflicts = missing or ([detail] if detail else [])
     if accepting and not missing:
         return _record_acceptance(ctx, child_task_id, reason, target, manifest, authoritative_touched, outcome,
-                                  conflicts, observation, lineage, result_sha)
+                                  conflicts, observation, lineage, result_sha, cancelled)
     facts: List[str] = []
     verdict = _write_verdict(
         ctx, child_task_id, outcome=outcome, reason=reason, files=authoritative_touched,
-        manifest=manifest, applied=False, conflicts=conflicts,
-        protected=[], target=str(target), lineage=lineage, child_result_sha256=result_sha, observation=observation, failures=facts)
+        manifest=manifest, applied=False, conflicts=conflicts, protected=[], target=str(target), lineage=lineage,
+        child_result_sha256=result_sha, observation=observation, failures=facts, cancelled=cancelled)
     snapshot = (f"its captured snapshot of the shared tree ({len(authoritative_touched)} path(s): every change Git "
                 "does not ignore since the child's base, which may include other writers' work; it names no author)")
     if verified:
@@ -1083,9 +1085,9 @@ def _integrate_subagent_patch(
     decision = str(decision or "apply").strip().lower()
     if decision not in {"apply", "reject", "accept"}:
         return "⚠️ TOOL_ARG_ERROR (integrate_subagent_patch): decision must be 'apply', 'reject' or 'accept'."
-    if decision == "accept" and not 0 < len(" ".join(str(reason or "").split())) <= 500:
-        return ("⚠️ TOOL_ARG_ERROR (integrate_subagent_patch): decision='accept' needs reason, your judgment after "
-                "reading the findings, at most 500 characters; it is recorded as given, never truncated.")
+    if decision == "accept" and (refusal := decision_reason_refusal(
+            reason, "decision='accept' needs reason, your judgment after reading the findings")):
+        return refusal
 
     located = _locate_child_patch(ctx, child_task_id)
     if isinstance(located, str):
@@ -1105,8 +1107,12 @@ def _integrate_subagent_patch(
     lineage, refusal = ({}, "") if child_parent == parent_tid else _continued_lineage(ctx, child_task_id, child_parent, child_result)
     if refusal:
         return refusal
-    if decision != "reject" and cancellation_blocks_child_result(child_result):
-        return "⚠️ INTEGRATE_NATIVE_CANCELLED: native promotion is refused for a cancelled child; the run result remains separate."
+    # A cancelled child's retained capture is decided only explicitly, as it stands; it stays cancelled.
+    cancelled = _cancelled_result_facts(child_result, manifest)
+    if cancelled and decision != "reject" and (refusal := _cancelled_result_refusal(
+            ctx, child_task_id, child_result, reason, _child_write_root(child_result))):
+        return refusal
+    note = _cancelled_result_note(child_task_id, cancelled) if cancelled and decision != "reject" else ""
     if child_result.get("native_capture_pending") and decision == "apply":
         from ouroboros.headless import refresh_native_capture
         from ouroboros.tool_access_paths import canonical_data_root
@@ -1133,19 +1139,15 @@ def _integrate_subagent_patch(
 
     if decision == "reject":
         facts: List[str] = []
+        result_sha = _child_result_sha256(child_result)
         verdict_path = _write_verdict(
             ctx, child_task_id, outcome="rejected", reason=reason, files=touched,
             manifest=manifest, applied=False, conflicts=[], protected=[], lineage=lineage, failures=facts,
-            child_result_sha256=_child_result_sha256(child_result),
+            child_result_sha256=result_sha, cancelled=cancelled,
         )
         disposition_warning = _record_integration_disposition(
-            ctx, child_task_id,
-            "irrelevant",
-            reason or "rejected the child result after review",
-            _child_result_sha256(child_result),
-            lineage=lineage,
-            verdict=verdict_path,
-            unretained=facts,
+            ctx, child_task_id, "irrelevant", reason or "rejected the child result after review", result_sha,
+            lineage=lineage, verdict=verdict_path, unretained=facts,
         )
         direct_note = (" Direct effects remain in the folder; rejecting this result does not undo them."
                        if manifest.get("capture_kind") == "directory_direct" else "")
@@ -1158,11 +1160,11 @@ def _integrate_subagent_patch(
     if manifest.get("capture_kind") == "directory_direct":
         if child_surface != "external_workspace":
             return "⚠️ INTEGRATE_DIRECTORY_SURFACE_MISMATCH: direct folder results require external_workspace."
-        return _handle_external_workspace_integration(
+        return append_published_text(ctx, _handle_external_workspace_integration(
             ctx, child_task_id=child_task_id, reason=reason, requested_target=str(target_root or "").strip(),
             patch_path=patch_path, manifest=manifest, child_result=child_result, touched=touched, lineage=lineage,
-            accepting=decision == "accept",
-        )
+            accepting=decision == "accept", cancelled=cancelled,
+        ), note)
 
     status = str(manifest.get("status") or "")
     if status != ARTIFACT_STATUS_READY_WITH_CHANGES:
@@ -1189,7 +1191,7 @@ def _integrate_subagent_patch(
     touched = sorted(set(touched) | {row["path"] for row in file_rows})
 
     if child_surface == "external_workspace":
-        return _handle_external_workspace_integration(
+        return append_published_text(ctx, _handle_external_workspace_integration(
             ctx,
             child_task_id=child_task_id,
             reason=reason,
@@ -1198,21 +1200,22 @@ def _integrate_subagent_patch(
             manifest=manifest,
             child_result=child_result,
             touched=touched, file_rows=file_rows, lineage=lineage,
-            accepting=decision == "accept",
-        )
-    return _apply_to_parent_repo(
+            accepting=decision == "accept", cancelled=cancelled,
+        ), note)
+    return append_published_text(ctx, _apply_to_parent_repo(
         ctx, child_task_id, reason=reason, target_root=target_root, patch_path=patch_path, manifest=manifest,
         child_result=child_result, child_surface=child_surface, file_rows=file_rows, has_patch=has_patch,
-        lineage=lineage)
+        lineage=lineage, cancelled=cancelled), note)
 
 
 def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, target_root: str,
                           patch_path: pathlib.Path, manifest: Dict[str, Any], child_result: Dict[str, Any],
                           child_surface: str, file_rows: List[Dict[str, Any]], has_patch: bool,
-                          lineage: Dict[str, str] | None) -> str:
+                          lineage: Dict[str, str] | None, cancelled: Dict[str, Any] | None = None) -> str:
     """An admitted isolated (self_worktree copy) or legacy result, applied and staged into its
     recorded source or the active repo: binding, capped-tree and protected-path checks, then
-    the locked apply. The parent stays the sole committer."""
+    the locked apply. The parent stays the sole committer. ``cancelled`` (a cancelled child's
+    facts) rides every verdict of this consumed result."""
     from ouroboros.workspace_copies import copy_binding, same_directory, source_is_system_repo, copy_apply_refusal
     from ouroboros.tools.tool_resolution import system_repo_dir_for
 
@@ -1229,7 +1232,7 @@ def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, 
         return "⚠️ INTEGRATE_TARGET_FORBIDDEN: target_root must name this copy's recorded source; legacy patches target the active root."
     if not (target / ".git").exists():
         return f"⚠️ INTEGRATE_TARGET_NOT_GIT: target {target} is not a git working tree."
-
+    result_sha = _child_result_sha256(child_result)
 
     if child_surface == "self_worktree":
         if child_copy:
@@ -1263,7 +1266,7 @@ def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, 
             _write_verdict(
                 ctx, child_task_id, outcome="blocked_protected", reason=reason, files=touched,
                 manifest=manifest, applied=False, conflicts=[], protected=[p.path for p in protected],
-                target=str(target), lineage=lineage, child_result_sha256=_child_result_sha256(child_result),
+                target=str(target), lineage=lineage, child_result_sha256=result_sha, cancelled=cancelled,
             )
             return protected_apply_refusal(
                 path=protected[0].path,
@@ -1342,7 +1345,7 @@ def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, 
             ctx, child_task_id, outcome="partially_applied" if partial_applied else "conflict", reason=reason, files=touched,
             manifest=manifest, applied=partial_applied, conflicts=conflicts or [stderr[:500]],
             protected=[p.path for p in protected], target=str(target), lineage=lineage,
-            child_result_sha256=_child_result_sha256(child_result),
+            child_result_sha256=result_sha, cancelled=cancelled,
         )
         detail = ("Integration did not finish cleanly." if apply_attempted else
                   "Result preparation failed. No file or patch apply was attempted.")
@@ -1371,22 +1374,16 @@ def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, 
     verdict_path = _write_verdict(
         ctx, child_task_id, outcome="applied", reason=reason, files=touched,
         manifest=manifest, applied=True, conflicts=[], protected=[p.path for p in protected],
-        target=str(target), lineage=lineage, child_result_sha256=_child_result_sha256(child_result), failures=facts,
-        observation={"unindexed": unindexed} if unindexed else None,
+        target=str(target), lineage=lineage, child_result_sha256=result_sha, failures=facts,
+        observation={"unindexed": unindexed} if unindexed else None, cancelled=cancelled,
     )
     diffstat = str(manifest.get("diffstat") or "").strip()
     note = ""
     if protected:
         note = f" Includes {len(protected)} protected path(s) (allowed: runtime_mode={runtime_mode})."
     disposition_warning = _record_integration_disposition(
-        ctx,
-        child_task_id,
-        "integrated",
-        reason or "applied and staged the child result in the parent worktree",
-        _child_result_sha256(child_result),
-        lineage=lineage,
-        verdict=verdict_path,
-        unretained=facts,
+        ctx, child_task_id, "integrated", reason or "applied and staged the child result in the parent worktree",
+        result_sha, lineage=lineage, verdict=verdict_path, unretained=facts,
     )
     staged, delivered, closing = staging_receipt(len(touched), unindexed)
     return (
@@ -1507,9 +1504,11 @@ def get_tools() -> List[ToolEntry]:
                     "that tree since the child's base, which may include other writers' work and names no author; "
                     "results give each captured path's state since capture, and a mismatch stays undecided until "
                     "you choose: decision='accept' with a reason records your acceptance of the result as it now "
-                    "stands beside that observation (never verification), or reject. Genesis is a standalone "
-                    "directory, not a repo patch. After the owner's Continue, the new root may also decide "
-                    "the FINISHED native result of a direct child of its recorded predecessor the same ways: "
+                    "stands beside that observation (never verification), or reject. A cancelled child stays "
+                    "cancelled, but its retained capture, once ready with nothing owed and no direct run of its own "
+                    "still live in its shared folder, can be decided these ways with a reason; only that capture is judged. "
+                    "Genesis is a standalone directory, not a repo patch. After the owner's Continue, the new root may "
+                    "also decide the FINISHED native result of a direct child of its recorded predecessor the same ways: "
                     "apply/verify, accept a shared result as it stands, or reject (same checks; a "
                     "decision already recorded on that exact result stands; the verdict names the original "
                     "parent; old helpers stay outside its control). "
@@ -1525,7 +1524,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "task_id": {"type": "string", "description": "The child subagent task_id whose workspace.patch to integrate."},
                         "decision": {"type": "string", "enum": ["apply", "reject", "accept"], "default": "apply", "description": "apply = apply/stage an isolated self_worktree patch (a new file the source's ignore rules exclude is delivered unstaged and named), or verify shared external_workspace files already written; reject = record a rejection without applying; accept = external_workspace only, after reading its findings: record that you keep the shared result as it now stands, beside what the check observed; nothing is applied, reverted or marked verified."},
-                        "reason": {"type": "string", "description": "Rationale recorded in the verdict (why apply, accept, reject or synthesize); required for accept, at most 500 characters."},
+                        "reason": {"type": "string", "description": "Rationale recorded in the verdict as given (why apply, accept, reject or synthesize); required for accept and for applying a cancelled child's capture: non-blank, at most 500 characters once each run of whitespace counts as one."},
                         "target_root": {"type": "string", "description": "Optional target assertion: external_workspace verifies at the child’s recorded folder under your current read authority, without transfer; an explicit target must equal that folder. Isolated copies return to their recorded source under current write authority; legacy patches target your active root."},
                     },
                     "required": ["task_id"],

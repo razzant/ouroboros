@@ -3,7 +3,8 @@
 The host retains complete immutable artifact bytes and ordinary run custody. It
 does not make a second execution copy, invent a Git baseline, or apply files itself.
 An explicit ``workspace="in_place"`` Git writer, which works in its starter's own
-folder and so has nothing to capture, is recognized and projected here too.
+folder and so has nothing to capture, is recognized and projected here too, as is
+whether a task's direct writers of a folder may still be live.
 """
 from __future__ import annotations
 
@@ -43,6 +44,32 @@ def is_in_place_run(record) -> bool:
     """A custody entry, request row or invocation record of an explicitly in-place Git writer."""
     ref = record.get("resource_ref") if isinstance(record, dict) else getattr(record, "resource_ref", None)
     return isinstance(ref, dict) and ref.get("workspace_kind") == "git" and ref.get("strategy") == IN_PLACE
+
+
+def live_direct_writers(root, task_id, target) -> list:
+    """Why TASK_ID may still be writing TARGET, read once from current custody: each of its own runs that writes a
+    folder directly (an ``in_place`` Git writer or a ``direct`` folder run) at TARGET or at no recorded target and
+    whose end custody does not prove, and each such start still pending. Only ``settled`` (SETTLED, written after the
+    engine reported a terminal state, or CLOSED_ABSENT, the owning store's proven absence) or a sourced observation of
+    a terminal state proves it. An unreadable read is itself the answer; a run an earlier kill left unreconciled
+    counts only while custody still shows it so."""
+    from ouroboros.delegate_custody_current import task_snapshot
+    from ouroboros.workspace_copies import same_directory
+
+    def writes_target(record, where) -> bool:
+        ref = record.get("resource_ref") if isinstance(record, dict) else getattr(record, "resource_ref", None)
+        shape = (ref.get("workspace_kind"), ref.get("strategy")) if isinstance(ref, dict) else ()
+        return shape in (("git", IN_PLACE), ("directory", "direct")) and (not where or same_directory(where, target))
+
+    try:
+        snapshot = task_snapshot(root, task_id)
+    except Exception as exc:  # a store that cannot answer leaves every such writer unknown
+        return [f"its delegated custody is unreadable ({type(exc).__name__})"]
+    return [*(f"run {rid}" for rid, entry in snapshot["runs"].items()
+              if writes_target(entry, entry.target_root or entry.execution_root)
+              and not (entry.settled or entry.terminal_source and entry.terminal_state in custody.TERMINAL_STATES)),
+            *(f"start {request.get('invocation_id') or 'unknown'}" for request in snapshot["pending"]
+              if writes_target(request, request.get("target_root") or request.get("execution_root")))]
 
 
 def in_place_refusal(authority, selector_root, workspace, mode, strategy, scope_paths):
