@@ -24,7 +24,7 @@ from ouroboros import context_budget
 from ouroboros.context_timing import timed_section
 from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
-from ouroboros import memory_view_legacy as legacy, memory_view_work as werk
+from ouroboros import memory_view_legacy as legacy, memory_view_work as work
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
                                     form_counts, holding_room, Selection, supersedes, WorkPrices, restore)
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
@@ -640,7 +640,7 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
     holding = snapshot and (telling_emergency(snapshot, level) or lowered_from and crowded_by_memory(max_room))
     if not asked and not lowered_from and not holding:
         # nothing was cut and nothing lowered: Max and Low say nothing, Nano names its reader (``### Memory check``)
-        return werk.nano_memory_check(mode, addressed_text(counts), memory_read_path(names), room_id) if mode == "nano" else ""
+        return work.nano_memory_check(mode, addressed_text(counts), memory_read_path(names), room_id) if mode == "nano" else ""
     lines, name = ["### Physical floor"], mode.capitalize()
     if asked:
         bounds = ([f"the window ({window_tokens} tokens)"]
