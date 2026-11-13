@@ -3272,6 +3272,13 @@ and under the closed phone drawer they rest. Reduced motion keeps only short fad
 (the arriving room, the docked panel) and stops the wave. No veil covers the app
 while it reconnects: the room's bar says Reconnecting….
 
+**A repaint keeps the reading place.** A page that draws again what it shows (a poll, a reconnect, a saved row)
+leaves every box where the owner scrolled it: only the owner, or the page on purpose, moves it, and a page that shows
+something else in the same box (another folder) sends it to its top itself. A page draws in one step, since a box
+emptied now and filled later has lost its place. Putting back a box that an engine drops as it is drawn again is one
+module's work, not each page's (`web/modules/page_places.js`); a room's feed and the Logs list keep their own reading
+place.
+
 **Haptics.** Inside Telegram, and only there (its HapticFeedback; a browser and the
 desktop app have none), a few moments are felt, one meaning each: the drawer,
 released, latches open or closed (a light impact); a level steps or a mode is chosen (a
@@ -3411,4 +3418,6 @@ scroll by touch); `tests/test_shell_layout_static.py`,
 `tests/test_design_system_css_static.py` keep the one switch, the registry, the
 glyph set, the breakpoint ratchet and sentence case; `web/tests/layers.test.js`,
 `web/tests/drawer_drag.test.js` and `web/tests/host_telegram.test.js` pin the
-behaviour, and `tests/test_sidebar_short_window_browser.py` the short window's pinned foot.
+behaviour, and `tests/test_sidebar_short_window_browser.py` the short window's pinned foot;
+`web/tests/page_places.test.js` and `tests/test_repaint_keeps_place_browser.py` hold the reading place through a repaint
+on every registered page, tab and Settings page.
