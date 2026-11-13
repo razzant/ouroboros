@@ -327,7 +327,7 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             # 1. Room left: the server's own window, the unpriced call said, no condition line; last, the model its
             # wake-ups think with (this server's Main, the slot left empty), in every state but Off.
             normal = "≥ $12.40 of $20.00 in the last 24 hours · 1 without a price · Consciousness ›"
-            model = "Thinks with mock-model (Main model)."
+            model = "Model: mock-model (Main model)."
             each("normal", lambda page: (spend_says(normal)(page),
                                          expect(page.locator(".costs-allowance-line")).to_have_text([model])))
             # 2. The limit reached: what waits, and when room returns if nothing more is charged, in the viewer's zone.
@@ -404,7 +404,7 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             for page in pages.values():
                 _overlay(page, lambda bg: {**bg, "model_route": {"value": long_id, "layer": "consciousness", "local": False}})
             each("long-model", lambda page: expect(page.locator(".costs-allowance-line").last).to_have_text(
-                f"Thinks with {long_id}."))
+                f"Model: {long_id}."))
             # 5. Off, through the tab's own switch: nothing counts here until it is started again.
             for page in pages.values():
                 _overlay(page, None)

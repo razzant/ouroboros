@@ -88,7 +88,7 @@ export const TASK_CONTROL_LABELS = Object.freeze({
 const STOPS = new Set([ACTION_STOP_NOW, ACTION_STOP_EARLIER]);
 const STOP_CONFIRMS = Object.freeze({
     [ACTION_STOP_NOW]: { title: 'Stop this work now?', confirmLabel: TASK_CONTROL_LABELS[ACTION_STOP_NOW], danger: true,
-        body: 'It stops at once, with the helpers it started.' },
+        body: 'It stops at once, with the subagents it started.' },
     [ACTION_STOP_EARLIER]: { title: 'Stop the earlier attempt?', confirmLabel: TASK_CONTROL_LABELS[ACTION_STOP_EARLIER],
         danger: true, body: 'What still runs of the earlier attempt stops at once; the Continue itself keeps going.' },
 });
@@ -315,7 +315,7 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         // attempt's work still runs waits for it, as its Continue did: it starts by itself once that work settles.
         toast(ack.held ? `Resume accepted; it starts by itself when the earlier attempt's work finishes: ${
             heldWorkFacts(ack.blockers) || 'earlier work is not proven settled'}.`
-            : ack.tree_only ? 'Resumed. Ouroboros or you choose which helpers continue.'
+            : ack.tree_only ? 'Resumed. Ouroboros or you choose which subagents continue.'
             : ack.late_phase ? 'Resuming: the work left after the delivered answer continues.'
             : 'Resuming: the task returns to the queue.', 'info');
         announceMembershipGap(ack.membership_gaps, 'resume', toast);  // read from the Pause's current record

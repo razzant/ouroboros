@@ -57,7 +57,7 @@ const REFUSAL_WORDS = Object.freeze({
     request_id_required: 'The request was incomplete. Try again.',
     task_not_live: 'This work has already ended.',
     presence_model_unsupported: 'A place\'s model is set in its place sheet.',
-    not_a_root_task: 'A helper runs on the model its work gave it; change the model on the work\'s own card.',
+    not_a_root_task: 'A subagent runs on the model its work gave it; change the model on the work\'s own card.',
     model_control_unavailable: 'This work has no saved record yet, so its model cannot be changed.',
     cancel_pending: 'This work is stopping; its model stays as it is.',
     model_action_state: 'This work is not running on a fallback now.',

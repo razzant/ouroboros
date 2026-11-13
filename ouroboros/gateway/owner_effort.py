@@ -56,7 +56,7 @@ def effort_range_refusal(body: Any) -> str:
             return f"'{field}' must be one of: {', '.join(EFFORT_SCALE)}."
         tiers[field] = value
     if effort_rank(tiers["min"]) > effort_rank(tiers["max"]):
-        return "The helper range must be ordered min ≤ max."
+        return "The subagent range must be ordered min ≤ max."
     return ""
 
 

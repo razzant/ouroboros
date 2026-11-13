@@ -986,10 +986,10 @@ _SLEEP_ON_HELD = {"state": "waiting", "reason": "sleep", "task_attempt": 1,
                   "sleep": {"mode": "warm", "tasks": ["rw-child"], "senders": ["rw-child"]}}
 # The chosen helper's census row carries no name, so the sleep counts it rather than name it by its id; its mail,
 # chosen too, is said as a message.
-_HELD_LINE = ("Sleeping until the task it chose finishes or a message arrives · 1 helper it waits for is paused until "
+_HELD_LINE = ("Sleeping until the task it chose finishes or a message arrives · 1 subagent it waits for is paused until "
               "Ouroboros resumes it")
 # A Continue episode holds no request door for its predecessor's helper: no releaser is named.
-_COLD_LINE = "Sleeping until the task it chose finishes · 1 helper it waits for is paused"
+_COLD_LINE = "Sleeping until the task it chose finishes · 1 subagent it waits for is paused"
 # Whether a status line shows whole where it is drawn: inside the viewport, nothing cut, nothing covering it.
 _LINE_FIT = """(el) => {
     const r = el.getBoundingClientRect();

@@ -156,12 +156,12 @@ def test_response_maximum_preview_keeps_owner_draft(route_ui, edit_order):
         page.evaluate('() => { window.restoreMaximumFetch(); window.releaseMaximumPreview(); }')
     else:
         main.locator('summary').click()
-        expect(note).to_contain_text('Auto: maximum response unknown')
+        expect(note).to_contain_text('Auto: max output tokens unknown')
         maximum.fill('4096')
         main.locator('summary').click()
         note.evaluate("node => { node.textContent = ''; }")
         main.locator('summary').click()
-    expect(note).to_contain_text('Auto: maximum response unknown')
+    expect(note).to_contain_text('Auto: max output tokens unknown')
     with page.expect_response('**/api/owner/capability-ack') as saved:
         main.locator('[data-response-apply]').click()
     assert saved.value.json()['ack']['max_output_tokens'] == 4096
@@ -191,7 +191,7 @@ def test_response_maximum_preview_keeps_owner_draft(route_ui, edit_order):
     expect(maximum).to_have_value('')
     main.locator('summary').click()
     main.locator('summary').click()
-    expect(note).to_contain_text('Auto: maximum response unknown')
+    expect(note).to_contain_text('Auto: max output tokens unknown')
     expect(maximum).to_have_value('')
     assert not route_ui['errors'].unexpected(), route_ui['errors'].report()
 

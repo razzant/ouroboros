@@ -129,7 +129,7 @@ test('the Tools list: the client switch is a plain row, each server is a head wi
     assert.equal(inside(slack, '[data-entry-sign-in]').textContent, 'Sign in');
     assert.equal(inside(head(page.container, 'files'), '[data-entry-sign-in]'), null);
     assert.equal(inside(slack, '[data-entry-switch]').hasAttribute('checked'), true);
-    assert.equal(lead(), 'All tool servers are off. Their settings are kept.', 'the client\'s switch changes what the status says');
+    assert.equal(lead(), 'All MCP servers are off. Their settings are kept.', 'the client\'s switch changes what the status says');
     // Pressing a head opens that server's page; Add opens the unsaved one.
     await page.press(inside(slack, '[data-entry-open]'));
     await page.press(page.container.querySelector('[data-tools-add]'));
