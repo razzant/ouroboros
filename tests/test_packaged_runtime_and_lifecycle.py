@@ -174,18 +174,8 @@ def test_install_deps_reports_a_failing_pip(tmp_path):
 
 # --------------------------------------------------------------------------
 # XG-7B.3: install_deps' False must reach the decisions that consume it — the
-# launcher wrapper, bootstrap, and the restart loop — not die in a bare call.
+# bootstrap and restart loop — not die in a bare call.
 # --------------------------------------------------------------------------
-
-def test_the_launcher_wrapper_propagates_the_install_result(monkeypatch):
-    import launcher
-
-    monkeypatch.setattr(launcher, "_bootstrap_context", lambda: None)
-    monkeypatch.setattr(launcher, "_install_deps_impl", lambda ctx: False)
-    assert launcher._install_deps() is False
-    monkeypatch.setattr(launcher, "_install_deps_impl", lambda ctx: True)
-    assert launcher._install_deps() is True
-
 
 def test_bootstrap_repo_reports_a_failed_dependency_install(tmp_path, monkeypatch):
     sink = []
@@ -214,7 +204,7 @@ def test_a_restart_with_a_failed_dependency_install_pauses_and_discloses(
     monkeypatch, tmp_path, caplog,
 ):
     """XG-7B.3 through the REAL caller: agent_lifecycle_loop used to discard
-    _install_deps' result and restart an evolved checkout without the packages
+    install_deps' result and restart an evolved checkout without the packages
     its reviewed commit added. It must retry once, visibly, and name the
     consequence when the retry also fails."""
     import logging
@@ -233,16 +223,16 @@ def test_a_restart_with_a_failed_dependency_install_pauses_and_discloses(
     monkeypatch.setattr(launcher, "_await_generation_endpoint", lambda *a, **kw: 52123)
     monkeypatch.setattr(launcher, "_wait_for_server", lambda port, timeout=45, abort_event=None, proc=None: True)
     monkeypatch.setattr(launcher, "PORT_FILE", tmp_path / "port")
-    monkeypatch.setattr(launcher, "_sync_existing_repo_from_bundle", lambda: None)
+    monkeypatch.setattr(launcher, "sync_existing_repo_from_bundle", lambda ctx: None)
     monkeypatch.setattr("time.sleep", lambda seconds: None)
 
     install_calls = []
 
-    def _failing_install():
+    def _failing_install(ctx):
         install_calls.append(1)
         return False
 
-    monkeypatch.setattr(launcher, "_install_deps", _failing_install)
+    monkeypatch.setattr(launcher, "install_deps", _failing_install)
 
     starts = []
 
