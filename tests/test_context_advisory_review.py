@@ -198,7 +198,8 @@ class TestAdvisoryReviewStatusInContext:
                "fingerprint": "finding:tests_affected:abc", "created_ts": recorded, "updated_ts": recorded}
         shown = dynamic_text({"state_version": 3, "attempts": [], "open_obligations": [row], "next_obligation_seq": 4})
         assert "earlier_open_obligations=1" in shown and "[obl-0003] tests_affected" in shown
-        assert "earlier_open_obligations" not in dynamic_text({"state_version": 3, "attempts": []})
+        quiet = dynamic_text({"state_version": 3, "attempts": []})
+        assert "Advisory Pre-Review Status" not in quiet and "earlier_open_obligations" not in quiet
 
     def test_review_continuity_shows_earlier_obligations_until_a_commit_lands_never_as_current(self, tmp_path):
         """An open obligation this checkout recorded before obligations retired shows once in each
