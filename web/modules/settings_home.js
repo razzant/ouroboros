@@ -199,7 +199,7 @@ export function homeAnswers(facts = {}) {
     say('permissions', settings, accessWords);
     say('dashboard:costs', state, (s) => {
         const budget = headerBudgetPresentation(s);
-        return { text: budget.state === 'available' ? String(budget.label).replace(' / ', ' of ') : budget.label, owner: budget.attention === true };
+        return { text: budget.label, owner: budget.attention === true };
     });
     const accountsAnswer = accountsWords(accounts, settings);
     if (accountsAnswer !== undefined) out.accounts = accountsAnswer;

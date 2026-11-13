@@ -1,4 +1,4 @@
-import { formatUsd, formatUsdScale, number } from './storage_format.js';
+import { formatLimitUsd, formatUsd, number } from './storage_format.js';
 import { apiFetch } from './api_client.js';
 import { escapeHtmlAttr } from './ui_primitives.js';
 import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
@@ -56,16 +56,11 @@ function optionalFiniteNumber(value) {
     return Number.isFinite(number) ? number : null;
 }
 
-/** Money on a limit's meter card. PROTOTYPE (owner 13.11: "Десятичные доли думаю не нужны"): whole dollars where the
- *  card's scale (its limit, else its spend) is $100 or more; below that the cents are the substance and stay. */
-export const meterUsd = formatUsdScale;
-/** What is left of a limit, rounded as the spend beside it is, so the two add up to the limit; room that rounds to
- *  nothing is still said to be room. */
-function leftWords(remaining, scale) {
-    if (!(Number(scale) >= 100)) return `${formatUsd(remaining)} left`;
-    const whole = Math.round(remaining);
-    return remaining > 0 && whole === 0 ? 'Less than $1 left' : `$${whole.toLocaleString('en-US')} left`;
-}
+/** A limit card's "… left" line in the limit's money (`formatLimitUsd`), its first letter raised. */
+const leftLine = (remaining, limit) => {
+    const money = formatLimitUsd(remaining, limit, 'left');
+    return `${money.charAt(0).toUpperCase()}${money.slice(1)} left`;
+};
 
 /** One breakdown cell in the task card's words: `Cost pending` while a call of it is still open and nothing is
  *  priced, `Cost not priced` once its calls settled without a price (subscription work among them: no price will
@@ -121,17 +116,16 @@ export function costDashboardPresentation(data) {
     // older count stands in; with neither this says only what it knows.
     const openRows = optionalFiniteNumber(accounting.accounting_open_rows ?? accounting.non_final_rows);
     const openCause = openRows !== null && openRows > 0 ? ` (${number(Math.trunc(openRows))} open)` : '';
-    const scale = limit > 0 ? limit : known;
     return {
         state: 'available',
-        // PROTOTYPE (owner 13.11): the card says the spend of its limit in whole dollars, what is left, and in one
+        // The card says the spend of its limit in the limit's money, what is left, and in one
         // quiet line what the number leaves out, in the words of the limits card's own line ("Not counted: …").
-        spent: meterUsd(known, scale),
-        of: limit > 0 ? `of ${meterUsd(limit, scale)}` : '',
-        figure: limit > 0 ? `${meterUsd(known, scale)} of ${meterUsd(limit, scale)}` : meterUsd(known, scale),
-        left: reached ? 'Limit reached: new paid work is refused' : limit > 0 ? leftWords(remaining, scale) : 'No limit set',
+        spent: formatLimitUsd(known, limit),
+        of: limit > 0 ? `of ${formatLimitUsd(limit, limit, 'limit')}` : '',
+        figure: limit > 0 ? `${formatLimitUsd(known, limit)} of ${formatLimitUsd(limit, limit, 'limit')}` : formatLimitUsd(known, limit),
+        left: reached ? 'Limit reached: new paid work is refused' : limit > 0 ? leftLine(remaining, limit) : 'No limit set',
         // The unresolved upper bound (cost_projection.uncounted_money_text): a worst case, not spending.
-        open: unresolved > 0 ? `Not counted: up to ${meterUsd(unresolved, scale)} in calls without a known price` : '',
+        open: unresolved > 0 ? `Not counted: up to ${formatLimitUsd(unresolved, limit)} in calls without a known price` : '',
         reached,
         share: limit > 0 ? Math.min(100, Math.max(0, (known / limit) * 100)) : null,
         facts: [
@@ -212,25 +206,23 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
     return { spend, detail, lines, meter };
 }
 
-/** The consciousness limit as a meter. PROTOTYPE (owner 13.11: "карточку с тратами сознания будто бы не хватает
- *  ежедневное"): its spend of the 24-hour limit in the card's money, the share, what is left, and what the number
- *  leaves out. Empty where the snapshot does not say; the sentence of allowancePresentation then says why. */
+/** The consciousness limit as a meter: its spend of the 24-hour limit in the limit's money, the share, what is left,
+ *  and what the number leaves out. Empty where the snapshot does not say; the sentence of allowancePresentation then says why. */
 export function allowanceMeter(snapshot) {
     const spent = snapshot?.spentUsd;
     const limit = snapshot?.dailyUsd;
     if (spent === null || spent === undefined || limit === null || limit === undefined) {
         return { spent: '', of: '', share: null, left: '', reached: false, note: '' };
     }
-    const scale = limit > 0 ? limit : spent;
     const exhausted = snapshot.allowanceStatus ? snapshot.allowanceStatus === 'exhausted' : snapshot.status === 'allowance_exhausted';
     const reached = limit > 0 && (exhausted || spent >= limit);
     const out = [snapshot.unknownUnmetered > 0 ? `${number(snapshot.unknownUnmetered)} calls without a known price` : '',
         snapshot.allowanceOpenRows > 0 ? 'calls in progress' : ''].filter(Boolean).join(' and ');
     return {
-        spent: meterUsd(spent, scale),
-        of: `of ${meterUsd(limit, scale)}`,
+        spent: formatLimitUsd(spent, limit),
+        of: `of ${formatLimitUsd(limit, limit, 'limit')}`,
         share: limit > 0 ? Math.min(100, Math.max(0, (spent / limit) * 100)) : null,
-        left: limit === 0 ? 'May not spend' : reached ? 'Limit reached' : leftWords(Math.max(0, limit - spent), scale),
+        left: limit === 0 ? 'May not spend' : reached ? 'Limit reached' : leftLine(Math.max(0, limit - spent), limit),
         reached,
         note: out ? `Not counted: ${out}` : '',
     };
@@ -442,7 +434,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         }
         const view = allowancePresentation(snapshot);
         const meter = view.meter;
-        // The meter card of the 24 hours (PROTOTYPE, owner 13.11): the figure, its bar, what is left, what it leaves out.
+        // The meter card of the 24 hours: the figure, its bar, what is left, what it leaves out.
         page.querySelector('#costs-allowance-spent').textContent = meter.spent || 'Unknown';
         page.querySelector('#costs-allowance-of').textContent = meter.of;
         const bar = page.querySelector('#costs-allowance-bar');
