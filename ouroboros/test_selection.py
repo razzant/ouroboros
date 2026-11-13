@@ -36,7 +36,8 @@ FLOOR_TESTS = {
 SELECTION_RULE = ("floor + changed tests + direct importers of changed code, tests and test helpers "
                   "+ the interface's static witnesses when web/ changes + authored widening")
 # The interface's static witnesses read web/ as data, which no import traces: a stylesheet edited alone ran none
-# of them and left the target red (#3308, #3311). By name, with no dependency analysis.
+# of them and left the target red (#3308, #3311). By name, with no dependency analysis: web/tests/ counts too,
+# since a witness runs a fixture from there in Node.
 _INTERFACE_SOURCES = (".css", ".js", ".html")
 _STATIC_WITNESS = re.compile(r"tests/test_\w+_static\.py")
 # Bind the policy this process loaded, even if its source changes later on disk.
@@ -304,7 +305,7 @@ def select_from_paths(repo: Path, paths: Iterable[str], *, base: str,
                 reasons.append((path, "direct import: " + ", ".join(bound)))
     if not full:
         full = [(p, apparatus) for p, reached in helpers.items() if not {_module(r) for r in reached} & imported]
-    if any(p.startswith("web/") and not p.startswith("web/tests/") and p.endswith(_INTERFACE_SOURCES) for p in changed):
+    if not full and any(p.startswith("web/") and p.endswith(_INTERFACE_SOURCES) for p in changed):
         witnesses = [path for path in files if _STATIC_WITNESS.fullmatch(path)]
         selected.update(witnesses)
         reasons.extend((path, "static witness of the interface: web/ changed") for path in witnesses)
