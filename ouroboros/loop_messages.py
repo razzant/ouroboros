@@ -755,7 +755,8 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
             log.debug("time/nanny facts unavailable for the facts line", exc_info=True)
             parts.append("time and nanny facts unavailable")
     if waited := float(usage.get("_slot_waited_sec") or 0.0):  # ``loop_transport.SLOT_WAITED_KEY``: the install's limit, no provider's
-        parts.append(f"waited {waited / 60.0:.1f} min so far in line under this install's Requests at once per model limit")
+        parts.append(f"waited {f'{waited / 60.0:.1f} min' if waited >= 60 else f'{max(1, round(waited))} s'} so far in line "
+                     "under this install's Requests at once per model limit")
     parts.append(_tool_results_fact(usage))
     parts.extend(filter(None, [focus_fact, reasoning_retirement_fact(usage, ctx.round_idx), superseded_host_fact(ctx.messages)]))
     mode_fact = subagents_fact_line() if subagents_fact is None else subagents_fact

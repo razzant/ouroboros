@@ -409,6 +409,7 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC",  # owner 3A; 30 Oct: await waits its ask, silence its window
     # pool-capacity WP5: delegate_wait is a sleep on runs (the body observes them); no window holds a slot.
     "OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC",
+    "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC",  # owner 13 Nov: a send waits in the install's own queue with no clock of its own
 )
 
 

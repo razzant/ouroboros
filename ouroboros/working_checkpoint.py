@@ -319,7 +319,7 @@ def model_call_scope(limit_ctx: Any):
     emit = getattr(getattr(getattr(limit_ctx, "tools", None), "_ctx", None), "emit_progress_fn", None)
     usage = getattr(limit_ctx, "accumulated_usage", None)
     if isinstance(usage, dict):
-        usage.setdefault(SLOT_WAITED_KEY, 0.0)  # here, so a send thread only replaces the value
+        usage.setdefault(SLOT_WAITED_KEY, 0.0)  # the key exists before a send thread adds to it: no thread but this adds a key
     token = _MODEL_CALL.set(limit_ctx)
     try:
         with slot_wait_notes(slot_wait_note(emit, usage)):

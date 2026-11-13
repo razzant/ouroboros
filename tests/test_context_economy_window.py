@@ -212,6 +212,9 @@ def test_the_facts_line_states_the_time_a_work_stood_in_the_installs_own_queue(m
     far (``loop_transport.slot_wait_note`` counts it); a work that never queued reads nothing about it."""
     queued = _facts(monkeypatch, _slot_waited_sec=750.0)
     assert "| waited 12.5 min so far in line under this install's Requests at once per model limit |" in queued
+    for seconds, words in ((0.6, "waited 1 s so far"), (2.4, "waited 2 s so far"), (59.4, "waited 59 s so far")):
+        short = _facts(monkeypatch, _slot_waited_sec=seconds)  # a wait under a minute is seconds, never "0.0 min"
+        assert f"| {words} in line under this install's" in short and " 0.0 min" not in short
     for usage in ({}, {"_slot_waited_sec": 0.0}):
         assert "Requests at once per model" not in _facts(monkeypatch, **usage)
 
