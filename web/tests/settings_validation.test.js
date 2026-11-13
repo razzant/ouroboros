@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { collectCustomSecretDraft, settingsWriteFailure, webSearchPreviewWords } from '../modules/settings_controls.js';
+import { collectCustomSecretDraft, deepseekSearchKey, searchModelAfterSourceSwitch, searchModelForKey, settingsWriteFailure,
+    syncSearchKey, webSearchPreviewWords } from '../modules/settings_controls.js';
 
 const draft = (overrides = {}) => ({
     key: '', value: '', appliedValue: '', originalKey: '', clear: false, removed: false,
@@ -90,3 +91,79 @@ test('the web search preview names the sources once in order; models, gaps and c
     assert.deepEqual(webSearchPreviewWords({ error: 'Search routes are not ready' }), { main: 'Search routes are not ready', details: '' });
 });
 
+test('a DeepSeek preview names the key it uses; every other source keeps its own words', () => {
+    const name = (id) => ({ deepseek: 'DeepSeek', openai: 'OpenAI', anthropic: 'Anthropic' })[id] || id;
+    const leg = { source: 'deepseek', backend: 'deepseek_search_tool', model: '', model_source: 'provider_default' };
+    assert.deepEqual(webSearchPreviewWords({ source: 'deepseek', legs: [{ ...leg, connection: 'work' }] }, name),
+        { main: 'Uses DeepSeek.', details: 'DeepSeek · connection work. Uses saved account credentials.' });
+    assert.deepEqual(webSearchPreviewWords({ source: 'deepseek', legs: [leg] }, name),
+        { main: 'Uses DeepSeek.', details: 'DeepSeek · built-in key. Uses saved account credentials.' });
+    // A saved model this Source ignores changes what the owner does next, so it stays in the main line.
+    assert.equal(webSearchPreviewWords({ source: 'deepseek', legs: [leg], unapplied_model: 'gpt-5.5' }, name).main,
+        'Uses DeepSeek. DeepSeek takes no model, so the saved model gpt-5.5 is not applied.');
+    // A named connection that is missing, disabled or of another kind is named as itself, never as the built-in key.
+    const gap = (extra) => webSearchPreviewWords({ source: 'deepseek', legs: [],
+        unavailable: [{ ...leg, ...extra, unavailable_reason: 'no_credentials' }] }, name);
+    assert.deepEqual(gap({ connection: 'work' }), { main: 'No search source is ready.',
+        details: 'Not available now: DeepSeek connection work (not configured). Uses saved account credentials.' });
+    assert.equal(gap({}).details, 'Not available now: DeepSeek built-in key (not configured). Uses saved account credentials.');
+    // Auto and the sources with a model say what they said before DeepSeek: no connection beside a model.
+    assert.deepEqual(webSearchPreviewWords({ source: 'auto', unapplied_model: 'x-1',
+        legs: [{ source: 'openai', model: 'gpt-5.5', model_source: 'selection', connection: 'work' }],
+        unavailable: [{ source: 'anthropic', unavailable_reason: 'no_credentials' }] }, name), {
+        main: 'Uses OpenAI. No built-in search serves the saved model x-1; Auto uses the recommended models.',
+        details: 'OpenAI · gpt-5.5. Not available now: Anthropic (no API key). Uses saved account credentials.' });
+});
+
+test('a DeepSeek key is chosen from the keys of Accounts and spelled only by the editor', () => {
+    // The saved Model as the Key select reads it: a key, or null for a misspelt head the resolver refuses.
+    assert.deepEqual(['', 'deepseek::', 'deepseek@default::', 'deepseek@work::', 'gpt-5.5', 'openai@work::gpt-5.5',
+        ' deepseek@k-2_b:: ', `deepseek@${'w'.repeat(32)}::`]
+        .map(deepseekSearchKey), ['deepseek', 'deepseek', 'deepseek', 'deepseek@work', 'deepseek', 'deepseek',
+        'deepseek@k-2_b', `deepseek@${'w'.repeat(32)}`]);
+    assert.deepEqual(['deepseek@work', 'deepseek@work:', 'DeepSeek@work::', 'deepseek@work:: (local)', 'deepseek::deepseek-chat']
+        .map(deepseekSearchKey), [null, null, null, null, null]);
+    // A name outside the key grammar (provider_models._CONNECTION_NAME) as written, which the resolver refuses as
+    // invalid: `@default` reads as the built-in key only as the whole name, never after another one.
+    assert.deepEqual(['deepseek@::', 'deepseek@Work::', 'deepseek@DEFAULT::', 'deepseek@-work::', 'deepseek@wo rk::',
+        'deepseek@work@x::', `deepseek@${'w'.repeat(33)}::`, 'deepseek@work@default::', 'deepseek@default@work::']
+        .map(deepseekSearchKey), [null, null, null, null, null, null, null, null, null]);
+    assert.deepEqual([searchModelForKey('api:deepseek', 'gpt-5.5'), searchModelForKey('api:deepseek@work', ''),
+        searchModelForKey('saved', 'deepseek@work')], ['', 'deepseek@work::', 'deepseek@work']);
+    // Leaving DeepSeek drops only the spelling written for it; another source's model stays the owner's.
+    assert.deepEqual([searchModelAfterSourceSwitch('auto', 'deepseek@work::'), searchModelAfterSourceSwitch('openai', 'gpt-5.5'),
+        searchModelAfterSourceSwitch('deepseek', 'deepseek@work::'), searchModelAfterSourceSwitch('auto', 'deepseek@work')],
+    ['', 'gpt-5.5', 'deepseek@work::', 'deepseek@work']);
+
+    const key = (id, label, extra = {}) => ({ id, label, kind: id.split('@')[0], name: id.split('@')[1] || '', enabled: true,
+        configured: true, ...extra });
+    const connections = [key('deepseek', 'DeepSeek'), key('deepseek@work', 'DeepSeek · Work'),
+        key('deepseek@old', 'DeepSeek · old', { enabled: false }), key('openai', 'OpenAI')];
+    const keys = { connections, providers: connections.filter((entry) => entry.enabled).map(({ id, label }) => ({ id, label })) };
+    const label = () => ({ hidden: false });
+    const page = (saved, source = 'deepseek') => ({ source: { value: source }, field: { value: saved, labels: [label()] },
+        select: { innerHTML: '', value: '', labels: [label()] } });
+    const shown = (select) => [...select.innerHTML.matchAll(/<option value="([^"]*)"( selected)?( disabled)?>([^<]*)</g)]
+        .map(([, value, selected, disabled, text]) => `${text}${selected ? ' *' : ''}${disabled ? ' -' : ''}`);
+    for (const [saved, expected] of [
+        ['', ['DeepSeek *', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+        ['deepseek@work::', ['DeepSeek', 'DeepSeek · Work *', 'Add a key in Accounts for more -']],
+        ['deepseek@old::', ['DeepSeek', 'DeepSeek · Work', 'DeepSeek · old (off) *', 'Add a key in Accounts for more -']],
+        ['deepseek@gone::', ['DeepSeek', 'DeepSeek · Work', 'DeepSeek · gone (removed) *', 'Add a key in Accounts for more -']],
+        ['deepseek@work', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+        // A name outside the key grammar is not readable: no second "DeepSeek · Work", no nameless key said to be removed.
+        ['deepseek@Work::', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+        ['deepseek@::', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+        ['deepseek@work@default::', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+    ]) {
+        const { source, field, select } = page(saved);
+        syncSearchKey(source, field, select, keys);
+        assert.deepEqual(shown(select), expected, saved);
+        assert.equal(select.value, deepseekSearchKey(saved) === null ? 'saved' : `api:${deepseekSearchKey(saved)}`);
+        assert.deepEqual([field.hidden, field.labels[0].hidden, select.hidden, select.labels[0].hidden], [true, true, false, false]);
+        assert.equal(field.value, saved);  // showing a choice never rewrites the saved Model
+    }
+    const { source, field, select } = page('gpt-5.5', 'openai');  // every other Source keeps its Model field
+    syncSearchKey(source, field, select, keys);
+    assert.deepEqual([field.hidden, select.hidden, field.value], [false, true, 'gpt-5.5']);
+});

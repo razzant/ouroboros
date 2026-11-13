@@ -11,7 +11,8 @@ carry inline and which it reaches through a navigation map. Three tiers:
    ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is byte-stable across
    commits, so the caller puts it in its cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
-   change touches ``web/``, its design bible alone for changed words elsewhere;
+   change touches ``web/`` (its design bible alone when the whole book does not fit
+   the share), its design bible alone for changed words elsewhere;
    the review-and-commit protocol chapter always; and
    every DEVELOPMENT chapter whose text mentions a touched file NAME. Bounded by
    :data:`~ouroboros.runtime_limits.REVIEW_GOVERNANCE_INLINE_SHARE` of the
@@ -644,6 +645,17 @@ def governance_context(
     chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
     chapter_text[DESIGN_PATH] = design_text
     design_missing = design_text.startswith("[⚠️ OMISSION") or not design_text.strip()
+    # The design bible alone: its opening lines and numbered principles. The seed and
+    # component recipes follow the principles inside the same Markdown section: stop
+    # where the numbered list ends, not at H2.
+    bible_path = f"{DESIGN_PATH}#Design bible"
+    bible = None if design_missing else re.search(
+        r"(?ms)^## Design bible\b.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", design_text)
+    if bible:
+        last = re.findall(r"(?m)^(\d+)\. ", bible[0])[-1]
+        bible_title = f"{bible_path} (excerpt: principles 1–{last})"
+        chapter_text[bible_path] = bible[0].strip()
+    bible_absent = "design bible excerpt unavailable; inspect the named source"
     if design_missing:
         rows.append(_row(DESIGN_PATH, 2, "navigation", 0,
                          design_text or "DESIGN source is empty; content not delivered"))
@@ -651,17 +663,11 @@ def governance_context(
         candidates.append(((1, 0, DESIGN_PATH), DESIGN_PATH, DESIGN_PATH,
                            "a touched path is under web/"))
     elif has_words:
-        # The seed and component recipes follow the numbered principles inside
-        # the same Markdown section: stop where the numbered list ends, not at H2.
-        bible = re.search(r"(?ms)^## Design bible\b.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", design_text)
-        path = f"{DESIGN_PATH}#Design bible"
         if bible:
-            last = re.findall(r"(?m)^(\d+)\. ", bible[0])[-1]
-            chapter_text[path] = bible[0].strip()
-            candidates.append(((1, 0, path), path, f"{path} (excerpt: principles 1–{last})",
+            candidates.append(((1, 0, bible_path), bible_path, bible_title,
                                "changed source words; design bible excerpt only"))
         else:
-            rows.append(_row(path, 2, "navigation", 0, "design bible excerpt unavailable; inspect the named source"))
+            rows.append(_row(bible_path, 2, "navigation", 0, bible_absent))
         rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
                          "full DESIGN remains on demand; only its bible is selected for source words"))
     else:
@@ -669,7 +675,17 @@ def governance_context(
                          "heading map only; no frontend path or changed source words"))
 
     for order, path, title, reason in sorted(candidates):
-        _admit(path, title, chapter_text.get(path, ""), 2, reason)
+        if _admit(path, title, chapter_text.get(path, ""), 2, reason) or path != DESIGN_PATH:
+            continue
+        # The whole book does not fit this reviewer's share. Its principles are what a
+        # change under web/ is judged by, so they are carried before any chapter chosen
+        # by a file name; the heading map still indexes the rest.
+        if bible:
+            _admit(bible_path, bible_title, chapter_text[bible_path], 2,
+                   "a touched path is under web/ and the whole book does not fit the inline share; "
+                   "design bible excerpt")
+        else:
+            rows.append(_row(bible_path, 2, "navigation", 0, bible_absent))
 
     # --- tier 3: the map, never whole -------------------------------------
     arch_book, arch_problem = _load_book(root, ARCHITECTURE_BOOK_ID)

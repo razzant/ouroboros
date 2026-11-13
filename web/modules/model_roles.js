@@ -6,7 +6,7 @@ import { SAFETY_MODEL_KEYS } from './consciousness_api.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { controlIcon } from './page_icons.js';
 import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
-import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, webSearchPreviewWords } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, searchModelAfterSourceSwitch, searchModelForKey, syncSearchKey, webSearchPreviewWords } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { HAND_WRITTEN, rowsOf } from './settings_rows.js';
 import { setResult } from './ui_primitives.js';
@@ -741,7 +741,8 @@ function markHtml(harness) {
     return mark ? `<svg viewBox="${mark.viewBox}" width="1em" height="1em" fill="currentColor" aria-hidden="true" focusable="false"><path d="${mark.path}"></path></svg>` : controlIcon('globe', 18);
 }
 const CONTEXT_WORDS = { nano: 'Nano', low: 'Low', max: 'Max' };
-const SEARCH_SOURCES = [['auto', 'Auto'], ['openai', 'OpenAI'], ['openrouter', 'OpenRouter'], ['anthropic', 'Anthropic'], ['ddgs', 'DuckDuckGo']];
+const SEARCH_SOURCES = [['auto', 'Auto'], ['openai', 'OpenAI'], ['openrouter', 'OpenRouter'], ['anthropic', 'Anthropic'],
+    ['ddgs', 'DuckDuckGo'], ['deepseek', 'DeepSeek']];
 
 function mountModels(container, { path, ctx }) {
     const custom = (row) => `<button type="button" class="btn btn-default btn-sm" id="btn-refresh-model-catalog" data-models-action>${escapeHtml(row.control.label)}</button>`;
@@ -976,10 +977,15 @@ function mountWebSearch(container, { path, ctx }) {
         <section class="ui-card settings-card models-role"><div class="models-form">
             <label class="ui-field"><span>Source</span><select id="s-websearch-source" class="ui-control">${SEARCH_SOURCES.map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label>
             <label class="ui-field"><span>Model</span><input id="s-websearch-model" class="ui-control" type="text" placeholder="Recommended for each source" autocomplete="off" spellcheck="false">
-                <span class="ui-field-help">Only the built-in web search uses it. Empty follows the model Ouroboros recommends for each source.</span></label></div>
+                <span class="ui-field-help">Only the built-in web search uses it. Empty follows the model Ouroboros recommends for each source.</span></label>
+            <label class="ui-field" hidden><span>Key</span><select id="s-websearch-key" class="ui-control" hidden></select>
+                <span class="ui-field-help">DeepSeek search takes no model: choose the key it uses.</span></label></div>
             <div class="ui-field-help" data-websearch-preview role="status"></div>
             ${SAVE_ROW}</section>`;
     const [source, model, preview] = ['#s-websearch-source', '#s-websearch-model', '[data-websearch-preview]'].map((selector) => container.querySelector(selector));
+    // DeepSeek takes no model: under it the Key field, with its own help, stands in for Model (owner decision, 11 Nov 2026).
+    const key = container.querySelector('#s-websearch-key');
+    let searchKeys = {};  // the DeepSeek keys of Accounts the Key select offers
     let dirty = false;
     let previews = 0;
     // An edited native Anthropic id takes the routed spelling, so dispatch recognizes the new intent.
@@ -996,18 +1002,27 @@ function mountWebSearch(container, { path, ctx }) {
             preview.innerHTML = `${escapeHtml(main)}${details ? ` <details class="ui-disclosure"><summary>Details</summary>${escapeHtml(details)}</details>` : ''}`;
         } catch { if (mine === previews) preview.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     };
-    let asRead = {};  // the choice as read when the typing began: a Save writes only what the owner changed from it
+    let asRead = null;  // the choice as read when the typing began (null before a read): a Save writes only what changed
     const read = async () => {
-        if (dirty) { void showPreview(); return; }  // a typed choice stays; the routes it would take are read again
         let settings;
-        try { settings = await ctx.readSettings(); } catch { return; }
-        source.value = settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto';
-        model.value = String(settings.OUROBOROS_WEBSEARCH_MODEL || '');
-        asRead = { OUROBOROS_WEBSEARCH_BACKEND: source.value, OUROBOROS_WEBSEARCH_MODEL: model.value };
+        try { settings = await ctx.readSettings(); } catch { if (dirty) void showPreview(); return; }
+        // A typed choice stays, one begun while this read was pending too; the routes it would take and the keys of
+        // Accounts (where the Key select's pointer leads) are read again for it. Only the first read fills the fields
+        // under typing, so a Save never writes a Source the owner was not shown.
+        if (!dirty || !asRead) {
+            source.value = settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto';
+            model.value = String(settings.OUROBOROS_WEBSEARCH_MODEL || '');
+            asRead = { OUROBOROS_WEBSEARCH_BACKEND: source.value, OUROBOROS_WEBSEARCH_MODEL: model.value };
+        }
+        const profiles = settings?._meta?.setup_contract?.providerProfiles || {};
+        searchKeys = { connections: apiConnections(settings, profiles), providers: configuredApiProviders(settings, profiles),
+            providerProfiles: profiles };
+        syncSearchKey(source, model, key, searchKeys);
         void showPreview();
     };
     const say = (words) => setResult(container.querySelector('[data-editor-result]'), words);
-    const edited = () => { dirty = true; container.querySelector('[data-editor-discard]').hidden = false; say({}); void showPreview(); };
+    const edited = () => { dirty = true; syncSearchKey(source, model, key, searchKeys);
+        container.querySelector('[data-editor-discard]').hidden = false; say({}); void showPreview(); };
     const onClick = async (event) => {
         const button = event.target.closest?.('[data-editor-save]');
         if (event.target.closest?.('[data-editor-discard]')) { dirty = false; container.querySelector('[data-editor-discard]').hidden = true; void read(); return; }
@@ -1017,15 +1032,18 @@ function mountWebSearch(container, { path, ctx }) {
         try {
             const fresh = await ctx.readSettings();
             const wanted = { OUROBOROS_WEBSEARCH_BACKEND: selection().backend, OUROBOROS_WEBSEARCH_MODEL: selection().model };
-            const body = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => value !== asRead[key]));
+            const body = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => value !== asRead?.[key]));
             outcome = await writeModelKeys('models:websearch', body, fresh, { ask: ctx.ask });
+            if (landed(outcome)) asRead = wanted;  // the new baseline before the reread, for typing that reread keeps
         } catch (error) { outcome = { state: 'refused', effect: 'now', withheld: '', message: error?.message || String(error), code: '' }; }
         setButtonBusy(button, false);
         if (landed(outcome) || outcome.state === 'unchanged') { dirty = false; container.querySelector('[data-editor-discard]').hidden = true; await read(); }
         say(saveWords(outcome));
     };
     const onShown = (event) => { if (event.detail?.path === path) void read(); };
-    source.addEventListener('change', edited);
+    // Leaving DeepSeek drops only the key spelling written for it; the Key select spells the chosen one.
+    source.addEventListener('change', () => { model.value = searchModelAfterSourceSwitch(source.value, model.value); edited(); });
+    key?.addEventListener('change', () => { model.value = searchModelForKey(key.value, model.value); edited(); });
     model.addEventListener('input', edited);
     container.addEventListener('click', onClick);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
