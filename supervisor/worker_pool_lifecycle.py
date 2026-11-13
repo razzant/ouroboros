@@ -1088,7 +1088,8 @@ def reconcile_worker_capacity(residual_demand, reading: Any = None) -> None:
             break
 
 
-def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1, lane: str = LANE_PROJECT) -> bool:
+def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1, lane: str = LANE_PROJECT,
+                       warm_context_sources: bool = False) -> bool:
     """Create or replace a slot under the lifecycle serializer, outside queue lock.
 
     ``lane`` names the slot's lane; a conversation carrier ignores the project
@@ -1104,7 +1105,8 @@ def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1, lan
     from supervisor.worker_process import close_worker_stop_channel, spawn_worker_process
 
     try:
-        proc = spawn_worker_process(ctx, wid, in_q, _pool().get_event_q(), _pool().REPO_DIR, _pool().DRIVE_ROOT)
+        proc = spawn_worker_process(ctx, wid, in_q, _pool().get_event_q(), _pool().REPO_DIR, _pool().DRIVE_ROOT,
+                                    warm_context_sources=warm_context_sources)
     except Exception:
         in_q.close()
         in_q.cancel_join_thread()

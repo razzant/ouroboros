@@ -163,6 +163,9 @@ test('the card says who it is and its state, never that nothing waits', () => {
     assert.deepEqual(beingState({ connected: true, state: { supervisor_ready: true } }), { text: 'Online', tone: 'ok' });
     assert.deepEqual(beingState({ connected: false, state: { supervisor_ready: true } }), { text: 'Reconnecting…', tone: 'muted' });
     assert.equal(beingState({ connected: true, state: { supervisor_ready: false, boot: { phase: 'failed', error: 'x' } } }).tone, 'danger');
+    assert.deepEqual(beingState({ connected: true, state: { supervisor_ready: false, boot: {
+        phase: 'serving', dialogue_ready: true, steps: [{ name: 'startup:task_recovery', state: 'running' }],
+    } } }), { text: 'Chat ready, restoring saved work', tone: 'muted' });
 });
 
 test('showing the home reads only what is passive: no catalogue, no review pool, no wake, no refresh, no status poll', async (t) => {

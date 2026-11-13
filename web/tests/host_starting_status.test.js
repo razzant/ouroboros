@@ -267,17 +267,17 @@ test('the Starting… header follows the phase: starting, chat ready, failed', (
     assert.deepEqual(startingStatus(null), { kind: 'starting', text: 'Starting…', title: '' });
     assert.deepEqual(startingStatus(SERVING), { kind: 'starting', text: 'Starting…', title: '' });
     assert.deepEqual(startingStatus(CHAT_READY),
-        { kind: 'starting', text: 'Chat ready, restoring background tasks', title: '' });
+        { kind: 'starting', text: 'Chat ready, loading extensions', title: 'loading extensions' });
     assert.deepEqual(startingStatus(FAILED),  // the word stays whole; the cause is the step a short bar drops first
         { kind: 'failed', text: 'Start failed', tone: 'failed', step: 'current-facts store not published: failed',
           title: 'current-facts store not published: failed' }, 'a failed start is its own state, never a starting one');
     assert.deepEqual(startingStatus({ ...SERVING, phase: 'failed' }),
         { kind: 'failed', text: 'Start failed', tone: 'failed', step: '', title: '' });
     assert.deepEqual(startingStatus(SOFT_FAILED),
-        { kind: 'starting', text: 'Chat ready, restoring background tasks', title: 'extensions: ValueError: bad manifest' },
+        { kind: 'starting', text: 'Chat ready, finishing startup', title: 'extensions: ValueError: bad manifest' },
         'a fail-soft step shows its error while the start goes on');
     const idle = emptyWorkState();
-    assert.equal(roomStatusView(idle, { ready: false, boot: CHAT_READY }).text, 'Chat ready, restoring background tasks');
+    assert.equal(roomStatusView(idle, { ready: false, boot: CHAT_READY }).text, 'Chat ready, loading extensions');
     assert.equal(roomStatusView(idle, { ready: true, boot: FAILED }).text, 'Online',
         'readiness outranks the phase: a ready supervisor is Online whatever the boot said');
     assert.equal(roomStatusView({ ...idle, room: room('queued') }, { ready: false, boot: CHAT_READY }).text,
@@ -302,10 +302,10 @@ test('Main: the header paints the phase from the snapshot and forgets it on disc
         chat.snapshot({ supervisor_ready: false, boot: SERVING });
         assert.equal(chat.status(), 'Starting…');
         chat.snapshot({ supervisor_ready: false, boot: CHAT_READY });
-        assert.equal(chat.status(), 'Chat ready, restoring background tasks');
+        assert.equal(chat.status(), 'Chat ready, loading extensions');
         assert.equal(chat.kind(), 'status-badge starting', 'still the starting tone: tasks are not admitted yet');
         chat.instance.hydrateStateSnapshot({ supervisor_ready: false }, Infinity, 50);
-        assert.equal(chat.status(), 'Chat ready, restoring background tasks', 'a body without the phase changes nothing');
+        assert.equal(chat.status(), 'Chat ready, loading extensions', 'a body without the phase changes nothing');
         const page = chat.instance.page;
         const trigger = page.querySelector('.rw-trigger');
         const failure = page.querySelector('.rw-failure');
@@ -343,8 +343,33 @@ test('Main: the header paints the phase from the snapshot and forgets it on disc
 test('Project panel: seeds the phase from the page snapshot', () => {
     const panel = mountChat({ asPanel: true, latest: { supervisor_ready: false, boot: CHAT_READY } });
     try {
-        assert.equal(panel.status(), 'Chat ready, restoring background tasks');
+        assert.equal(panel.status(), 'Chat ready, loading extensions');
         panel.snapshot({ supervisor_ready: true });
         assert.equal(panel.status(), 'Online');
     } finally { panel.close(); }
+});
+
+
+test('actual startup substeps replace generic restoration and concurrent work remains in the title', () => {
+    const active = (names) => ({ ...CHAT_READY, steps: names.map((name) => ({ name, state: 'running' })) });
+    for (const [name, text] of [
+        ['startup:event_queue', 'preparing task transport'], ['startup:bootstrap', 'checking program files'],
+        ['startup:queue_restore', 'restoring the queue'], ['startup:worker_spawn', 'starting executors'],
+        ['startup:task_recovery', 'restoring saved work'], ['startup:resume', 'resuming saved work'],
+    ]) {
+        assert.equal(startingStatus(active([name])).text, `Chat ready, ${text}`);
+    }
+    const concurrent = startingStatus(active(['supervisor_outcome', 'startup:event_queue', 'extensions']));
+    assert.equal(concurrent.text, 'Chat ready, loading extensions');
+    assert.equal(concurrent.title, 'loading extensions · preparing task transport');
+    assert.equal(startingStatus(active(['supervisor', 'supervisor_outcome', 'unknown-new-stage'])).text,
+        'Chat ready, finishing startup', 'unknown or outer steps do not invent restoration');
+    assert.equal(startingStatus({ ...active(['extensions']), phase: 'failed', error: 'transport failed' }).text, 'Start failed');
+    const soft = startingStatus({ ...active(['startup:worker_spawn']), steps: [
+        { name: 'extensions', state: 'failed', error: 'bad manifest' },
+        { name: 'startup:worker_spawn', state: 'running' },
+        { name: 'startup:task_recovery', state: 'done' },
+    ] });
+    assert.equal(soft.text, 'Chat ready, starting executors');
+    assert.equal(soft.title, 'extensions: bad manifest · starting executors');
 });

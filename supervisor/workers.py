@@ -148,7 +148,7 @@ def event_bus_exitcode() -> Optional[int]:
     return getattr(proc, "exitcode", None) if proc is not None else None
 
 
-def get_event_q(*, create: bool = True):
+def get_event_q(*, create: bool = True, drive_root=None, stop_requested=None):
     """Return the process-lifetime supervisor event bus, creating it lazily.
 
     Worker-pool generations are replaceable; the producers that publish onto
@@ -159,7 +159,9 @@ def get_event_q(*, create: bool = True):
     with ``create=False``; they never create an undrained child-local bus.
     Every call, the cached return included, reads the manager process's exit
     code first and raises ``EventBusLost`` once it is set: the bus is whole or
-    it is over, and nothing is respawned onto a dead one.
+    it is over, and nothing is respawned onto a dead one. Boot may supply an explicit
+    custody/log root before workers.init, plus a stop predicate rechecked under this lock.
+    A partial manager remains owned for shutdown and is never replaced by a second attempt.
     """
     global _EVENT_Q, _EVENT_Q_MANAGER, _EVENT_Q_GENERATION
     with _EVENT_Q_LOCK:
@@ -172,6 +174,10 @@ def get_event_q(*, create: bool = True):
             return _EVENT_Q
         if not create:
             raise RuntimeError("supervisor event bus is not attached")
+        if stop_requested is not None and stop_requested():
+            raise RuntimeError("supervisor event bus preparation stopped")
+        if _EVENT_Q_MANAGER is not None:
+            raise RuntimeError("supervisor event bus initialization did not finish")
         # A raw multiprocessing.Queue has an asynchronous feeder and its
         # pipe can be corrupted when a worker is force-killed mid-frame.
         # A manager-backed queue serializes synchronously in the producer
@@ -182,8 +188,17 @@ def get_event_q(*, create: bool = True):
         from supervisor.event_observation import EventQueueManager
 
         _EVENT_Q_MANAGER = EventQueueManager(ctx=mp.get_context("spawn"))
+        root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
+        _EVENT_Q_MANAGER._ouroboros_drive_root = root
+        started, cpu = time.monotonic(), time.thread_time()
         _EVENT_Q_MANAGER.start(initializer=_ignore_stop_signals)
+        if stop_requested is not None and stop_requested():
+            _EVENT_Q_MANAGER._process.kill()  # no extra wait on Panic; the normal owner joins it
+            raise RuntimeError("supervisor event bus preparation stopped")
+        manager_wall, manager_cpu = time.monotonic() - started, time.thread_time() - cpu
+        started, cpu = time.monotonic(), time.thread_time()
         _EVENT_Q = _EVENT_Q_MANAGER.Queue()
+        queue_wall, queue_cpu = time.monotonic() - started, time.thread_time() - cpu
         _EVENT_Q_GENERATION = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
         try:
             from ouroboros.process_custody import record_process
@@ -192,7 +207,7 @@ def get_event_q(*, create: bool = True):
             manager_pid = int(getattr(manager_proc, "pid", 0) or 0)
             if manager_pid:
                 record_process(
-                    DRIVE_ROOT,
+                    root,
                     pid=manager_pid,
                     cmd="multiprocessing SyncManager",
                     purpose="supervisor_event_queue_manager",
@@ -203,13 +218,15 @@ def get_event_q(*, create: bool = True):
             log.warning("Failed to custody-track event queue manager", exc_info=True)
         try:
             append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                root / "logs" / "supervisor.jsonl",
                 {
                     "ts": utc_now_iso(),
                     "type": "event_queue_generation_started",
                     "generation": _EVENT_Q_GENERATION,
                     "server_pid": os.getpid(),
                     "start_method": "spawn",
+                    "manager_start_wall_seconds": manager_wall, "manager_start_cpu_seconds": manager_cpu,
+                    "queue_create_wall_seconds": queue_wall, "queue_create_cpu_seconds": queue_cpu,
                 },
             )
         except Exception:
@@ -245,7 +262,7 @@ def shutdown_event_q() -> None:
         proc.join(5)
         killed = True
     try:
-        append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+        append_jsonl(getattr(manager, "_ouroboros_drive_root", DRIVE_ROOT) / "logs" / "supervisor.jsonl", {
             "ts": utc_now_iso(), "type": "event_queue_generation_stopped", "generation": generation,
             "exitcode_before_shutdown": exitcode_before, "killed": killed})
     except Exception:
@@ -1253,11 +1270,12 @@ def spawn_workers(n: int = 0) -> None:
     try:
         for i in range(count):
             in_q = _CTX.Queue()
-            proc = spawn_worker_process(_CTX, i, in_q, event_q, REPO_DIR, DRIVE_ROOT)
             # Slot 0 is the conversation lane's reserved spare (owner decision 4A), the one worker a boot starts
             # (beside an in-flight assisted update's resolver slot, ``update_merge.RESOLVER_POOL``); project
             # workers grow on demand (``reconcile_worker_capacity``), an explicit count starts the rest now.
             lane = LANE_CONVERSATION if i == 0 else LANE_PROJECT
+            proc = spawn_worker_process(_CTX, i, in_q, event_q, REPO_DIR, DRIVE_ROOT,
+                                        warm_context_sources=(lane == LANE_CONVERSATION))
             # Unassignable until the readiness seam observes this child's worker_ready row.
             new_workers[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None, reaping=True, booting=True,
                                     lane=lane)

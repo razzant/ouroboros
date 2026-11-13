@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import threading
+from concurrent.futures import Future, wait
 from typing import Any, Callable, Optional
 
 import uvicorn
@@ -164,3 +165,48 @@ def wait_supervisor_outcome(ready: threading.Event, error: Callable[[], Optional
         pass
     if error():
         raise RuntimeError(error())
+
+
+def prepare_event_queue(root: pathlib.Path, stop_requested: Callable[[], bool],
+                        document: BootDocument = BOOT) -> Future:
+    """Overlap only the process-lifetime transport with extension loading, never workers/recovery.
+
+    One retained attempt: consumers observe its exception rather than retrying creation. The
+    queue's existing lock/shutdown owner covers an in-flight manager and rechecks Stop there.
+    """
+    future = Future()
+
+    def prepare():
+        try:
+            outcome = store_switch.wait_ready(root, timeout=0.1)
+            while outcome.get("status") == "importing" and not stop_requested():
+                outcome = store_switch.wait_ready(root, timeout=0.1)
+            if stop_requested():
+                future.cancel()
+                return
+            if outcome.get("status") not in ("published", "not_started"):
+                raise RuntimeError(f"store not published: {outcome.get('status')}")
+            from supervisor.workers import get_event_q
+
+            with document.step("startup:event_queue"):
+                queue = get_event_q(drive_root=root, stop_requested=stop_requested)
+            future.set_result(queue)
+        except BaseException as exc:
+            future.set_exception(exc)
+
+    try:
+        threading.Thread(target=prepare, daemon=True, name="boot-event-queue").start()
+    except BaseException as exc:
+        future.set_exception(exc)
+    return future
+
+
+def wait_event_queue(preparation: Optional[Future], stop_requested: Callable[[], bool]) -> bool:
+    """Observe the same boot attempt; Stop never waits for its thread or retries it."""
+    if preparation is not None:
+        while not preparation.done() and not stop_requested():
+            wait([preparation], timeout=0.1)
+        if stop_requested():
+            return False
+        preparation.result()  # a TimeoutError from creation is a failure, not a poll
+    return not stop_requested()

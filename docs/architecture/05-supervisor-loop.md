@@ -82,7 +82,7 @@ Deadlines and finite execution bounds freeze under Q, mark `reaping` and enter `
 
 `pool_admission.py` admits new project processes against physical memory without stopping or cooling existing work; its docstring owns the formula, floor, unknown readings, cap/readiness fences, probe scope and residual limits. Dated readings/counts: `pool_admission.facts`.
 
-The conversation spare starts first; project workers have no spare and grow only for rows the pass chose and no idle worker took; surplus retires, no idle timer (idle memory over burst startup). Startup verification and bytecode storage: PERSISTENCE.md; `worker_boot` remains per process. Unchanged skills reuse catalogs/digests (§13). `booting` slots are capacity, unresolved reservations stay charged.
+Conversation spare first; project workers grow for chosen rows no idle slot took, without spares. Surplus retires without a timer (idle memory over burst startup). PERSISTENCE.md owns startup verification/bytecode; `worker_boot` is per process. Skill reuse: §13. Booting counts as capacity; unresolved reservations remain charged.
 
 Assignment/free counts require current live readiness (`worker_pool_lifecycle.py` docstring); growth obeys `pool_admission`'s finiteness rule. With no healthy slot, pooled ingress closes (`/review` too); `disable_exhausted_worker_pool` fails unstarted rows with a Restart hint, sparing chat, control, boot and update recovery.
 
@@ -92,7 +92,9 @@ Surplus retires only after local-work quiescence and confirmed death, keeping se
 
 ### Conversation lane
 
-Startup and auto-resume notices name still-paused places (legacy too) without changing them. Owner Main/room turns, wakes, Presence bodies and auto-resume run in `WORKERS` slots with `lane="conversation"` (`conversation_lane.py`) outside the cap, memory admission, project leases and `disable_exhausted_worker_pool`: routing admits them RUNNING, published first; my human's undetached turn a stop, Resume or its sleep returned leaves PENDING for a lane carrier (`resumes_on_lane`). The pool's one ready spare is the owner's, replenished at once; a closed repo-writer gate stops spawns, never a dispatch; spawn success is the only bound. `inline_carrier.py` runs the same body on a server thread, disclosed (`inline_executors` in `/api/health` and the vitals): `inline_call` for a live voice call; `inline_degraded`, with an owner notice, only on a physical fact (`refused_carrier_reason`; §12).
+Startup/auto-resume notices list still-paused Places, legacy included, without changing them. Main/room owner turns, wakes, Presence and auto-resume use `WORKERS`' `lane="conversation"` (`conversation_lane.py`), outside caps, memory admission, project leases and `disable_exhausted_worker_pool`. Routing publishes RUNNING first; undetached owner turns returned by Stop, Resume or sleep leave PENDING for a carrier (`resumes_on_lane`). One ready owner spare is immediately replenished; closed repo-writer gates stop spawns, not dispatch, bounded only by spawn success. `inline_carrier.py` runs that body on a server thread (`inline_executors` in health/vitals): `inline_call` for live voice; owner-notified `inline_degraded` only on a physical fact (`refused_carrier_reason`; §12).
+
+Only spares warm books/source-validated story before READY (`worker_process._warm_context_sources`), not rooms/prompts/authority/routes. Demand stays cold; birth receipts time warming (§6).
 
 ### Maintenance and custody
 

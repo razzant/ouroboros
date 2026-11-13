@@ -98,6 +98,35 @@ def test_missing_chapter_cannot_masquerade_as_a_complete_book(tmp_path):
     assert not any(book.book_id == "architecture" for book in core.reference_books)
 
 
+def test_worker_book_warm_reaches_normal_capture_and_restored_mtime_edit_is_fresh(tmp_path, monkeypatch):
+    import os
+    from ouroboros import reference_books as books
+    from supervisor.worker_process import _warm_context_sources
+
+    env, _core, task = _capture(tmp_path)
+    books._book_source.cache_clear()
+    _warm_context_sources(env)
+    memory = Memory(drive_root=env.drive_root, repo_dir=env.repo_dir)
+    cold_parse = books.parse_markdown_source
+    parses = []
+    monkeypatch.setattr(books, "parse_markdown_source", lambda *a: (parses.append(a[1]), cold_parse(*a))[1])
+    first = context._capture_context_core(env, memory, task, None, None)
+    assert parses == []
+    source = env.repo_path("docs/architecture/runtime.md")
+    stamp = source.stat()
+    source.write_bytes(source.read_bytes().replace(b"Full mechanism", b"Next mechanism"))
+    os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    after = context._capture_context_core(env, memory, task, None, None)
+    assert parses == ["docs/architecture/runtime.md"]
+    assert after.architecture_md != first.architecture_md and "Next mechanism" in after.architecture_md
+    books._book_source.cache_clear()
+    fresh = context._capture_context_core(env, memory, task, None, None)
+    assert (fresh.architecture_md, fresh.development_md, fresh.memory_view_json) == (
+        after.architecture_md, after.development_md, after.memory_view_json)
+    source.unlink()
+    assert context._capture_context_core(env, memory, task, None, None).reference_book_errors
+
+
 def test_large_nano_task_retains_exact_owner_source_without_changing_max(tmp_path):
     from ouroboros.artifacts import read_actor_source_bytes
 

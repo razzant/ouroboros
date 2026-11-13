@@ -122,3 +122,51 @@ def test_recorded_folder_download_from_real_gateway_in_chat(subscription_ui, tmp
     assert (url_prefix, 200) in seen, seen  # real detail, not a fixture JSON object
     capture(page, "tz1-real-folder-download")
     assert not subscription_ui["errors"], subscription_ui["errors"]
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_boot_substeps_are_visible_in_the_actual_room_header(subscription_ui, theme):
+    """Production SPA, controlled boot snapshots, desktop owner width and an awkward narrow bar."""
+    ui, page = subscription_ui, subscription_ui["page"]
+    current = {"supervisor_ready": False, "works_complete": True, "works": [], "rooms": {},
+               "active_chat_activities": [], "active_chat_activities_complete": True, "projects": [],
+               "boot": {"phase": "serving", "dialogue_ready": True, "tasks_ready": False, "steps": []}}
+    page.route("**/api/state*", lambda route: route.fulfill(json=current))
+    page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
+    page.route("**/api/chat/history*", lambda route: route.fulfill(json={
+        "messages": [], "progress": [], "window": {"complete": True},
+    }))
+    page.set_viewport_size({"width": 1536, "height": 864})
+    for names, word in [
+        (["extensions", "startup:event_queue"], "Chat ready, loading extensions"),
+        (["startup:bootstrap"], "Chat ready, checking program files"),
+        (["startup:worker_spawn"], "Chat ready, starting executors"),
+        (["startup:task_recovery"], "Chat ready, restoring saved work"),
+        (["supervisor_outcome"], "Chat ready, finishing startup"),
+    ]:
+        current["boot"]["steps"] = [{"name": name, "state": "running"} for name in names]
+        ui["errors"].watch(page)
+        page.goto(ui["url"])
+        page.wait_for_function("word => document.querySelector('#chat-status')?.textContent === word", arg=word)
+        if len(names) == 2:
+            assert page.locator("#chat-status").get_attribute("title") == "loading extensions · preparing task transport"
+            capture(page, f"boot-concurrent-{theme}")
+        if names == ["startup:task_recovery"]:
+            capture(page, f"boot-recovery-{theme}")
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.wait_for_timeout(100)
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            capture(page, f"boot-recovery-narrow-{theme}")
+            page.set_viewport_size({"width": 1536, "height": 864})
+    current["boot"].update(phase="failed", error="native queue failed")
+    ui["errors"].watch(page)
+    page.goto(ui["url"])
+    page.wait_for_function("document.querySelector('#chat-status')?.textContent === 'Start failed'")
+    assert page.locator("#chat-status").get_attribute("title") == "native queue failed"
+    capture(page, f"boot-failure-{theme}")
+    current["supervisor_ready"] = True
+    current["boot"].update(phase="ready", tasks_ready=True, error=None, steps=[])
+    ui["errors"].watch(page)
+    page.goto(ui["url"])
+    page.wait_for_function("document.querySelector('#chat-status')?.textContent === 'Online'")
+    assert not ui["errors"].unexpected(), ui["errors"].report()

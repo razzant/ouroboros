@@ -78,7 +78,7 @@ def _system(tmp_path, monkeypatch):
         processes[proc.pid] = proc
         return proc
 
-    def spawn(_ctx, wid, commands, _events, _repo, root):
+    def spawn(_ctx, wid, commands, _events, _repo, root, **_kwargs):
         proc = process(wid, commands)
         if wid != 0:  # slot 0 is the conversation lane's spare (spawn_workers): not a project launch
             launches.append(commands)
@@ -467,8 +467,8 @@ def test_the_resolver_readiness_proof_never_counts_the_conversation_lanes_spare(
     update_merge, _tx, _metadata = _assisted(system, monkeypatch)
     spawn = worker_process.spawn_worker_process
 
-    def project_child_dies(ctx, wid, commands, events, repo, root):
-        proc = spawn(ctx, wid, commands, events, repo, root)
+    def project_child_dies(ctx, wid, commands, events, repo, root, **kwargs):
+        proc = spawn(ctx, wid, commands, events, repo, root, **kwargs)
         if wid != 0:
             proc.terminate()
         return proc
@@ -500,8 +500,8 @@ def _spare_still_importing(system, monkeypatch, tmp_path):
 
     spawn, late, watchers = worker_process.spawn_worker_process, [], []
 
-    def spawn_spare_slower(ctx, wid, commands, events, repo, root):
-        proc = spawn(ctx, wid, commands, events, repo, root if wid else tmp_path / "unreported")
+    def spawn_spare_slower(ctx, wid, commands, events, repo, root, **kwargs):
+        proc = spawn(ctx, wid, commands, events, repo, root if wid else tmp_path / "unreported", **kwargs)
         if not wid:
             late.append(lambda: append_jsonl(root / "logs" / "events.jsonl", {
                 "type": "worker_ready", "worker_id": 0, "pid": proc.pid,

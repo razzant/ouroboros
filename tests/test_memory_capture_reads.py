@@ -144,7 +144,7 @@ def test_earlier_roots_working_notes_add_one_batch_read_and_no_source_reads(tmp_
         ds.append(tmp_path, "chat", {"chat_id": shape.MAIN, "direction": "system", "task_id": task,
                                      "root_task_id": task, "type": "task_summary", "status": "completed",
                                      "summary_kind": "terminal_result_projection", "text": "Completed prior work."})
-    batched = _counted(monkeypatch, task_results, "load_task_results")
+    batched = _counted(monkeypatch, task_results, "load_working_note_results")
     opened = _counted(monkeypatch, task_store, "open_store")
     sources = _counted(monkeypatch, artifacts, "read_actor_source_bytes")
     samples = []
@@ -156,14 +156,85 @@ def test_earlier_roots_working_notes_add_one_batch_read_and_no_source_reads(tmp_
     print(json.dumps({"section": section, "roots": 40, "result_bytes": result_bytes,
                       "source_bytes": source_bytes, "wall_ms": [s["sections_ms"][section] for s in samples],
                       "cpu_ms": [s["sections_cpu_ms"][section] for s in samples],
-                      "batch_transactions": opened.count("documents_by_ids"), "source_reads": len(sources)}))
-    assert batched == ["_working_notes"] * 3 and opened.count("documents_by_ids") == 3
+                      "batch_transactions": opened.count("working_note_documents"), "source_reads": len(sources)}))
+    assert batched == ["_working_notes"] * 3 and opened.count("working_note_documents") == 3
     assert sources == []  # the fact and exact reader come from the field; capture never opens the notes
     assert len(view.room["lane2"]) == 40
     assert all("working notes" in row["line"] and "read_file(" in row["line"] for row in view.room["lane2"])
     assert "SOURCE NOTE BODY" not in json.dumps(view.room) and result not in json.dumps(view.room)
     transactions = len(opened)
     assert mv._working_notes(tmp_path, []) == {} and len(opened) == transactions  # no roots, no added read
+    # The former full-result consumer is an equal-input oracle, not a substitute renderer.
+    with monkeypatch.context() as old:
+        old.setattr(task_results, "load_working_note_results", task_results.load_task_results)
+        with measured_sections():
+            reference = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
+            print(json.dumps({"full_result_oracle": section_spans()}))
+    assert mv.snapshot_json(reference) == mv.snapshot_json(view)
+    captured, original = [], task_store.capture
+    def narrow(*args, **kwargs):
+        answer = original(*args, **kwargs)
+        captured.append(answer.text)
+        return answer
+    monkeypatch.setattr(task_store, "capture", narrow)
+    for name in ("_fetch", "_handoff_capture", "_documents"):
+        monkeypatch.setattr(task_store, name, lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("full body read")))
+    pointers = task_results.load_working_note_results(tmp_path, [f"earlier{i:02d}" for i in range(40)])
+    assert len(pointers) == 40 and len(captured) == 1
+    wire_bytes = len(captured[0].encode())
+    assert wire_bytes < 40 * 1024 and "Completed the implementation" not in captured[0]
+    print(json.dumps({"working_note_capture_bytes": wire_bytes, "full_result_bytes": result_bytes}))
+
+
+def test_working_notes_projection_follows_real_fold_publication_and_exact_reader(tmp_path):
+    import json
+    import hashlib
+    from pathlib import Path
+    from types import SimpleNamespace
+    from ouroboros.main_context_authority import publish_working_notes, retained_reader
+    from ouroboros.task_results import write_task_result, load_working_note_results
+    from tests.test_context_renewal import NOTE, _noted
+
+    made = shape.open_rows(tmp_path, 0, rooms=1)
+    task = "folded-root"
+    write_task_result(tmp_path, task, "running", result="large result " * 20000)
+    ds.append(tmp_path, "chat", {"chat_id": shape.MAIN, "direction": "system", "task_id": task,
+              "root_task_id": task, "type": "task_summary", "status": "running",
+              "summary_kind": "host_task_facts", "text": "Working."})
+    env = SimpleNamespace(task_id=task, drive_root=tmp_path)
+    folded = _noted(tmp_path)
+    ref = publish_working_notes(env, folded)
+    view = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
+    assert ref["sha256"] in view.room["lane2"][0]["line"] and NOTE not in json.dumps(view.room)
+    reader = retained_reader(tmp_path, task, ref)
+    raw = Path(reader["arguments"]["path"]).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == ref["sha256"]
+    assert NOTE in json.loads(raw)["notes"][0]
+    write_task_result(tmp_path, task, "completed", result="new terminal result")
+    assert load_working_note_results(tmp_path, [task])[task]["status"] == "completed"
+    assert publish_working_notes(env, []) is None
+    assert mv._working_notes(tmp_path, [task]) == {}
+
+
+def test_working_notes_projection_keeps_missing_refused_and_unavailable_distinct(tmp_path, monkeypatch):
+    import json
+    from ouroboros import task_store, task_results
+    from tests._store_shared import seed_result, unavailable_store
+
+    for task in ("wrong", "status", "broken", "array", "missingbody", "good"):
+        seed_result(tmp_path, task, {"status": "running"})
+    with task_store.open_store(tmp_path, write=True) as txn:
+        for task, raw in (("wrong", json.dumps({"task_id": "other", "status": "running"})),
+                          ("status", json.dumps({"task_id": "status", "status": 7})),
+                          ("broken", "{"), ("array", "[]")):
+            txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id=?", (raw, task))
+        txn.conn.execute("DELETE FROM task_bodies WHERE task_id='missingbody'")
+    result = task_results.load_working_note_results(tmp_path, ["wrong", "status", "broken", "array", "missingbody", "good", "absent", "../bad"])
+    assert "absent" not in result and "../bad" not in result
+    assert result["good"] == {"task_id": "good", "status": "running", "working_notes": None}
+    assert all(isinstance(result[task]["_refused"], ValueError) for task in ("wrong", "status", "broken", "array", "missingbody"))
+    unavailable_store(monkeypatch)
+    assert set(task_results.load_working_note_results(tmp_path, ["good"])) == {"_unavailable"}
 
 
 def _legacy_units_fresh(root):
