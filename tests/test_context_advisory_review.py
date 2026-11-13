@@ -171,6 +171,35 @@ class TestAdvisoryReviewStatusInContext:
         assert dynamic_text.index("## Scratchpad") < dynamic_text.index("## Drive state")
         assert dynamic_text.index("## Runtime context") < dynamic_text.index("## Review Continuity")
 
+    def test_the_context_fallback_shows_earlier_obligations_when_no_attempt_is_left(self, tmp_path):
+        """Without a review-context builder the context falls back to the review status section: earlier open
+        obligations of this checkout show there even when no attempt row remains; an empty review state adds none."""
+        import json
+
+        from ouroboros.context import build_llm_messages
+        from ouroboros.memory import Memory
+        from ouroboros.review_state import make_repo_key
+
+        env = self._make_env(tmp_path)
+        (tmp_path / "repo" / ".git").mkdir(parents=True, exist_ok=True)
+        repo_key = make_repo_key(tmp_path / "repo")
+
+        def dynamic_text(document):
+            (tmp_path / "state" / "advisory_review.json").write_text(json.dumps(document), encoding="utf-8")
+            messages, _ = build_llm_messages(env=env, memory=Memory(drive_root=tmp_path),
+                                             task={"id": "task-new", "type": "task", "text": "continue"},
+                                             review_context_builder=None)
+            return messages[0]["content"][-1]["text"]
+
+        recorded = "2026-04-07T10:00:00+00:00"
+        row = {"obligation_id": "obl-0003", "item": "tests_affected", "severity": "critical",
+               "reason": "Coverage still missing", "source_attempt_ts": recorded, "source_attempt_msg": "blocked",
+               "status": "still_open", "resolved_by": "", "repo_key": repo_key,
+               "fingerprint": "finding:tests_affected:abc", "created_ts": recorded, "updated_ts": recorded}
+        shown = dynamic_text({"state_version": 3, "attempts": [], "open_obligations": [row], "next_obligation_seq": 4})
+        assert "earlier_open_obligations=1" in shown and "[obl-0003] tests_affected" in shown
+        assert "earlier_open_obligations" not in dynamic_text({"state_version": 3, "attempts": []})
+
     def test_review_continuity_shows_earlier_obligations_until_a_commit_lands_never_as_current(self, tmp_path):
         """An open obligation this checkout recorded before obligations retired shows once in each
         Review Continuity view (the fallback section's too), a foreign checkout's never, beside the continuation's
@@ -237,9 +266,9 @@ def test_the_operative_continuity_view_names_the_latest_attempts_readiness_warni
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
 
-    def lines(warnings):
+    def lines(warnings, status="blocked"):
         state = AdvisoryReviewState(attempts=[CommitAttemptRecord(
-            ts="2026-11-13T08:00:00+00:00", commit_message="m", status="blocked", repo_key=make_repo_key(repo),
+            ts="2026-11-13T08:00:00+00:00", commit_message="m", status=status, repo_key=make_repo_key(repo),
             task_id="t", attempt=1, readiness_warnings=warnings)])
         return "\n".join(continuity_status_lines(state, repo))
 
@@ -247,3 +276,4 @@ def test_the_operative_continuity_view_names_the_latest_attempts_readiness_warni
     assert "- readiness_warnings=1 (latest attempt, blocked)" in warned
     assert "The staged diff changed after review; review it again before landing." in warned
     assert "readiness_warnings" not in lines([])
+    assert "readiness_warnings" not in lines(["Review expired before landing."], status="succeeded")  # landed: owes none

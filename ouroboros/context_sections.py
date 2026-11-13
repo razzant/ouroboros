@@ -410,7 +410,8 @@ def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
         if look_unreadable:
             lines.append(f"  preflight_unreadable={look_unreadable} (marker unverified)")
     latest = state.latest_attempt_for(repo_key=repo_key)
-    warnings = [str(w) for w in (getattr(latest, "readiness_warnings", None) or []) if str(w).strip()]
+    warnings = [str(w) for w in (getattr(latest, "readiness_warnings", None) or []) if str(w).strip()
+                and getattr(latest, "status", "") != "succeeded"]  # a landed attempt owes none
     if warnings:
         lines.append(f"- readiness_warnings={len(warnings)} (latest attempt, {getattr(latest, 'status', '') or '?'})")
         lines.extend(f"  {warning}" for warning in warnings)
