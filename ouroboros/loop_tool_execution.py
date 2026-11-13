@@ -26,7 +26,7 @@ from ouroboros.deadline_utils import deadline_clamped_timeout_sec
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
-    CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement,
+    CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, HOST_INTERRUPTED, append_call_row, append_failed, claim_settlement,
     elapsed_ms, invocation_fields, new_invocation, start_log_field, persist_dispatch_source, worker_phrase,
     worker_position,
 )
@@ -116,15 +116,20 @@ def _publish_settlement(tools, drive_logs, row):
 
 
 def _settle_host_error(tools, drive_logs, live, invocation, outcome):
-    """Record a submission failure or a failed future through one settlement guard."""
+    """Record a submission failure or a failed future through one settlement guard.
+
+    A control that ended the call (Pause, Cancel, a deadline: the exception carries its ``control_reason``;
+    a send fenced by a pause being written names it as ``pausing``) settles as ``interrupted``, never as a host failure."""
     try:
         exc = outcome if isinstance(outcome, BaseException) else outcome.exception()
     except BaseException as failure:
         exc = failure
     if exc is not None and claim_settlement(invocation):
+        reason = str(getattr(exc, "control_reason", "") or ("pausing" if getattr(exc, "limit_scope", "") == "pausing" else ""))
         _publish_settlement(tools, drive_logs, {
             **live, "ts": utc_now_iso(), "type": CALL_SETTLED, "is_error": True,
-            "status": "host_error", "elapsed_ms": elapsed_ms(invocation),
+            **({"status": HOST_INTERRUPTED, "control_reason": reason} if reason else {"status": "host_error"}),
+            "elapsed_ms": elapsed_ms(invocation),
             "result_preview": f"{type(exc).__name__}: {sanitize_tool_result_for_log(str(exc))[:500]}",
             **start_log_field(invocation),
         })
@@ -447,7 +452,7 @@ def _typed_result_metadata(
 
     The rules below are deliberately NOT text classification and stay here: the
     untruncated artifact-registration fallback, the plan-review metadata, the
-    process facts with the ``run_command`` exit-0 override, and the
+    process facts, and the
     skill-publish projection — all keyed on the tool name and on trusted meta.
     """
     text = str(result or "")
@@ -477,9 +482,9 @@ def _typed_result_metadata(
         meta["artifact_registered"] = True
     if fn_name == "plan_task" and not is_error and isinstance(tool_result, ToolResult):
         # The planning organ's typed facts: which effect the call had and the record's
-        # open objections / holds / pending asks after it (never read from the text).
+        # open objections / pending asks after it (never read from the text).
         effect = tool_result.meta.get("plan_effect")
-        counts = {key: tool_result.meta.get(key) for key in ("plan_revision", "plan_open_objections", "plan_holding", "plan_pending_asks")}
+        counts = {key: tool_result.meta.get(key) for key in ("plan_revision", "plan_open_objections", "plan_pending_asks")}
         if effect in {"write", "ask", "write+ask", "read"} and all(
             type(value) is int and value >= 0 for value in counts.values()
         ):
@@ -507,8 +512,6 @@ def _typed_result_metadata(
         # undeclared outputs) keeps that code; only an otherwise-plain success is
         # relabelled, which is what the retired text scan did for every shape.
         meta["status"] = "ok_autocorrected"
-    if fn_name == "run_command" and not is_error and meta.get("exit_code") == 0 and meta["status"] != "ok_autocorrected":
-        meta["status"] = "ok"
     if fn_name == "submit_skill_to_hub":
         from ouroboros.skill_publish_result import extract_skill_publish_result_metadata
 
@@ -628,7 +631,7 @@ def _execute_single_tool(
         claim_settlement(invocation)
         _publish_settlement(tools, drive_logs, _with_correlation({
             "ts": utc_now_iso(), **settlement, "args": {}, "result_preview": result, "is_error": True,
-            "status": result_meta.get("status"), "elapsed_ms": elapsed_ms(invocation),
+            "status": result_meta.get("status"), "tool_result_code": tool_result.code, "elapsed_ms": elapsed_ms(invocation),
             "result_ref": trace_ref.get("manifest_ref") if trace_ref else None,
         }, correlation, tool_call_id=tool_call_id))
         return {
@@ -733,7 +736,9 @@ def _execute_single_tool(
         "args": args_for_log,
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
         "is_error": is_error,
-        "status": result_meta.get("status"),
+        # `status` is the code's coarse outcome bucket; the exact published code rides beside
+        # it, so the row answers "how did this call end" without opening the trace.
+        "status": result_meta.get("status"), "tool_result_code": tool_result.code,
         # The typed process facts of THIS call ride the direct tools.jsonl row
         # too: the row is the surface an operator greps, and a killed or
         # never-started child must be readable there without the trace.
@@ -991,6 +996,9 @@ def _execute_with_timeout(
     correlation = _tool_correlation(tools)
     tool_ctx = getattr(tools, "_ctx", None)
     invocation = new_invocation(tool_call_id, correlation, getattr(tool_ctx, "task_attempt", None))
+    issued = getattr(tool_ctx, "_issued_views", None) or {}
+    view = issued[tool_call_id] if tool_call_id in issued else getattr(tool_ctx, "_last_context_observation", None)
+    invocation["chronicle_lead_rule"] = (view or {}).get("chronicle_lead_rule")
     try:
         arguments = json.loads(tc.get("function", {}).get("arguments") or "{}")
     except (ValueError, TypeError):

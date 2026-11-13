@@ -49,7 +49,7 @@ AUTHOR_DISPOSITION_SCHEMA: Dict[str, Any] = {
             "additionalProperties": False,
             "description": (
                 "Optional author evidence that a helper checked this candidate. "
-                "Not a review seat and not a PASS. Blocking still needs a counted PASS."
+                "Not a review seat and not a PASS."
             ),
             "properties": {
                 "reason": {"type": "string"},
@@ -65,7 +65,7 @@ AUTHOR_DISPOSITION_SCHEMA: Dict[str, Any] = {
     "required": ["disposition", "rationale"],
     "description": (
         "Explicitly accept the candidate this call stages (omitted paths: the paths the referenced review covered) "
-        "after reading the referenced outcome. Never overrides Blocking. Optional subagent_check is author evidence, "
+        "after reading the referenced outcome. Optional subagent_check is author evidence, "
         "not a seat and not a PASS."
     ),
 }

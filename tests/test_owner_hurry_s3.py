@@ -211,12 +211,16 @@ def test_drain_routes_hurry_structurally_and_never_as_owner_prose(tmp_path, monk
     latch = oh.latched(ctx)
     assert latch["msg_id"] == "hurry:rq"
     assert latch["requested_at"]                       # drained ts survives
+    # The running work reads one typed row of the owner's act, never recorded as a directive.
+    from ouroboros.context_budget import OWNER_WORDS_KIND
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+    rows = [m for m in messages if m.get("content") == oh.HURRY_WORDS]
+    assert len(rows) == 1 and rows[0][HOST_CONTEXT_KIND_KEY] == OWNER_WORDS_KIND
+    assert oh.HURRY_WORDS not in json.dumps(ctx._owner_directives, ensure_ascii=False)
     # The worker-side projection went to APPLIED with its one named effect.
     block = load_task_result(tmp_path, "t-drain")["owner_hurry"]
     assert block["state"] == oh.STATE_APPLIED
-    assert block["effects"] == {
-        "plan_review": "task_local_advisory",
-    }
+    assert block["effects"] == {"words": "finish_sooner"}
     # The applied event rides the log_event envelope (task-detail observability
     # only), never a send_message/chat frame.
     hurry_events = [
@@ -241,10 +245,18 @@ def test_restart_re_drain_restores_exactly_one_latch(tmp_path):
     restarted = _drain_ctx(tmp_path, task_id="t-re", attempt=1)
     loop._drain_incoming_messages([], _q.Queue(), tmp_path, "t-re", None, set(), owner_ctx=restarted)
     assert oh.latched(restarted) == first_latch
-    # Same-process double drain (second hurry entry): still ONE latch.
+    # Same-process double drain (second hurry entry): still ONE latch, and no second row of words.
     write_owner_message(tmp_path, "owner_hurry", "t-re", msg_id="hurry:r2", kind=KIND_HURRY)
-    loop._drain_incoming_messages([], _q.Queue(), tmp_path, "t-re", None, set(), owner_ctx=restarted)
+    again: list = []
+    loop._drain_incoming_messages(again, _q.Queue(), tmp_path, "t-re", None, set(), owner_ctx=restarted)
     assert oh.latched(restarted) == first_latch        # first arm wins
+    assert oh.HURRY_WORDS not in json.dumps(again, ensure_ascii=False)
+    # Without a hurry entry the drain gives no such row (the control of the words).
+    quiet = _drain_ctx(tmp_path, task_id="t-quiet", attempt=1)
+    write_owner_message(tmp_path, "just words", "t-quiet", msg_id="m-quiet")
+    plain: list = []
+    loop._drain_incoming_messages(plain, _q.Queue(), tmp_path, "t-quiet", None, set(), owner_ctx=quiet)
+    assert "just words" in json.dumps(plain) and oh.HURRY_WORDS not in json.dumps(plain, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

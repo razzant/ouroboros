@@ -850,6 +850,22 @@ class ReviewPoolResponse(TypedDict):
 
 # --- Local model, MCP and the model catalog ----------------------------------------------------
 
+class ModelPriceTier(TypedDict):
+    """From ``min_prompt_tokens`` input tokens on, a request is charged these USD per 1M tokens."""
+
+    min_prompt_tokens: int
+    input: float
+    output: float
+
+
+class ModelPrice(TypedDict, total=False):
+    """A catalog's published token price, USD per 1M tokens; ``tiers`` only when input length changes it."""
+
+    input: Required[float]
+    output: Required[float]
+    tiers: List[ModelPriceTier]
+
+
 class ModelCatalogItem(TypedDict, total=False):
     """One selectable model. ``value`` is what a model setting stores: the raw id for OpenRouter,
     ``<provider_id>::<id>`` for another API provider, ``<kind>@<name>::<id>`` for a named API
@@ -882,6 +898,7 @@ class ModelCatalogItem(TypedDict, total=False):
     problem: Any
     processing: Any
     use_local: bool
+    price: ModelPrice  # OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
 
 
 class ModelCatalogResponse(TypedDict, total=False):
@@ -917,7 +934,7 @@ class LocalModelStartRequest(TypedDict):
     filename: NotRequired[str]  # required for a repo
     port: NotRequired[int]  # default 8766
     n_gpu_layers: NotRequired[int]  # default -1
-    n_ctx: NotRequired[int]  # 0 means 16384
+    n_ctx: NotRequired[int]  # 0 means the factory LOCAL_MODEL_CONTEXT_LENGTH
     chat_format: NotRequired[str]
 
 
@@ -1312,6 +1329,13 @@ class CostBreakdownResponse(TypedDict, total=False):
     by_task_category: Dict[str, Any]
     accounting: Required[Dict[str, Any]]
     unattributed: Dict[str, Any]
+    # ``?period=24h|7d|30d`` only (``gateway/cost_period.cost_period``): ``{available, period, since, until,
+    # tariff_observed_at, models: [{model, calls, cost (null: no recorded price), priced_rows, open_rows, unpriced_rows,
+    # unshared_cost, unshared_calls, uncounted_calls, uncounted_input_tokens, tokens (all calls), tokens_shared (the
+    # calls in by_class: a money line's tokens), by_class, write_price_in_reads, write_price_lifetime}], cache_writes:
+    # [{class, detail, calls, write_tokens, write_cost, unshared_calls, shared_write_tokens (the tokens write_cost is
+    # of)}]}``, or ``{available: false, period, error_code}`` (``unknown_period`` adds ``periods``).
+    period: Dict[str, Any]
 
 
 __all__ = [
@@ -1332,6 +1356,7 @@ __all__ = [
     "ClaudexorQuotaRefreshRequest", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
     "ClaudexorAccountResetReceipt", "ClaudexorLoginRequest", "ClaudexorLoginInputRequest",
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
+    "ModelPriceTier", "ModelPrice",
     "ModelCatalogItem", "ModelCatalogResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
     "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",

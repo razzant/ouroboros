@@ -248,6 +248,7 @@ def notice_world(monkeypatch, tmp_path):
     monkeypatch.setattr(upgrade_notices, "_raw_settings_document", lambda: {})
     monkeypatch.delenv("OUROBOROS_MAX_ROUNDS", raising=False)
     monkeypatch.delenv("OUROBOROS_TASK_ABS_CEILING_SEC", raising=False)
+    monkeypatch.delenv("OUROBOROS_REVIEW_ENFORCEMENT", raising=False)
     return SimpleNamespace(state=state, sent=sent, notices=upgrade_notices)
 
 
@@ -427,3 +428,34 @@ def test_notice_recovers_through_real_chat_and_state_writers(monkeypatch, tmp_pa
     # Durable web history is the owner delivery witness. External bridge loss
     # does not erase that row or require another visible notice on restart.
     assert len(delivered) == (0 if failure == "bridge" else 1)
+
+
+BLOCKING_GONE = (
+    "⚙️ This install had reviews set to Blocking. That setting is gone with this update: a reviewer's serious "
+    "finding, or a review that gave no answer, no longer stops Ouroboros. Outside Cyber Pro it still asks for a "
+    "review before changing its own code and reads the answer first; when it disagrees, it goes ahead and says "
+    "why. Each time it goes ahead over a serious finding or without an answer, the work card, the restart "
+    "message and the update description name it.")
+
+
+@pytest.mark.parametrize("where, value, environment, owed", [
+    ("document", "blocking", None, True), ("document", " Blocking ", None, True), ("absent", None, "blocking", True),
+    ("document", "", "blocking", True), ("document", "advisory", None, False), ("absent", None, "advisory", False),
+    ("document", "advisory", "blocking", False), ("document", "strictest", None, False), ("absent", None, None, False),
+    ("no_document", None, None, False), ("no_document", None, "blocking", True),
+])
+def test_an_install_that_had_blocking_hears_once_that_it_is_gone(notice_world, monkeypatch, where, value, environment,
+                                                                 owed):
+    """STEP4 7(iv) item 4: an install that ran with ``blocking`` hears one sentence once, marked, never again at the
+    next boot: its settings document said so, or it saved nothing there and its process environment did. A saved
+    choice outranked the environment, so an install that saved another value, or had none, hears nothing."""
+    document = None if where == "no_document" else {"OUROBOROS_REVIEW_ENFORCEMENT": value} if where == "document" else {}
+    monkeypatch.setattr(notice_world.notices, "_raw_settings_document", lambda: document)
+    if environment is not None:
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", environment)
+    notice_world.notices.startup_upgrade_notices({})
+    notice_world.notices.startup_upgrade_notices({})
+    texts = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "review_enforcement_notice"]
+    assert texts == ([BLOCKING_GONE] if owed else [])
+    assert ("review_enforcement_notified" in notice_world.state) is owed
+    assert notice_world.notices.review_enforcement_notice({"OUROBOROS_REVIEW_ENFORCEMENT": "blocking"}, {}) == BLOCKING_GONE

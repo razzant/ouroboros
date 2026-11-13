@@ -213,7 +213,7 @@ export function showMainMoves({ results, dialog = openConfirmDialog, doc = globa
 
 /**
  * The capsule in its room's composer row. `save(body)` is the owner write (`apiClient.ownerChatModel`), `openSettings()`
- * Settings › Accounts, `askMain({next, previous, census})` the Main chat's confirming sheet, `moveWork(taskId)` one
+ * Settings › Accounts and keys, `askMain({next, previous, census})` the Main chat's confirming sheet, `moveWork(taskId)` one
  * work's return to Main and `sayMoves({results})` the sheet of what its ticks did, `store` the window's catalog store,
  * `placeList(list)` the suggestions' place above the row.
  * Returns `{ el, capsule, syncState(data), hasPendingSave, pendingSave, pick, startSearch, destroy }`.
@@ -343,8 +343,10 @@ export function createModelControl({
             strip.style.setProperty('--thumb-width', `${Number(on?.offsetWidth) || 0}px`);
             if (rebuilt && open) control.relayout();
         }
-        // A saved API source this catalog read did not list: the settings document says why it cannot send.
-        if (said && store.status().read && !store.status().failed && sourceUnlisted(store.index(), shown())) void store.readConnections();
+        // The settings document, read only when it changes a word: why a saved API source this catalog did not list
+        // cannot send, or Main's processing tier where the catalog states prices (Fast and Economy price otherwise).
+        if (said && store.status().read && !store.status().failed
+            && (sourceUnlisted(store.index(), shown()) || store.index().priced)) void store.readConnections();
         control?.sayHint();
         if (search.on) search.rows.paint();
     }

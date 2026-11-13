@@ -4,7 +4,7 @@ import { APP_SETTINGS_ORIGIN, fetchJson, jsonPost } from './api_client.js';
 import { claudexorStatus } from './claudexor_status_store.js';
 import { startLogin } from './harness_accounts.js';
 import { createModelRolesEditor, MODEL_ACCOUNTS_KEY, modelRolesHost, parseModelSource } from './model_roles.js';
-import { API_PROVIDER_CREDENTIAL_KEYS, apiProviderLabel } from './route_editor_primitives.js';
+import { API_PROVIDER_CREDENTIAL_KEYS, apiProviderLabel, PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
 import { adoptConnectionLabels, connectionLabel, routeConnectionId } from './connection_labels.js';
 import { desiredLiveCardPhase, setLiveCardPhase } from './task_phase_chip.js';
 import { taskDoneIsTerminal } from './log_events.js';
@@ -14,6 +14,14 @@ function providerCredentials(settings = {}) {
     return { ...Object.fromEntries(API_PROVIDER_CREDENTIAL_KEYS
         .filter((key) => key in settings).map((key) => [key, settings[key]])),
     _meta: { connections: settings?._meta?.connections } };
+}
+
+/** What the picker's role editor loads: the provider credentials, the waiting route's model and account, and the
+ *  processing tier its call pays (captured before the wait; a row from before that field takes the default). The tier
+ *  only tells the editor whether a catalog price is the one paid: with showContext:false it never saves a tier. */
+export function pickerDocument(settings = {}, row = {}) {
+    return { ...providerCredentials(settings), model: row.model, [MODEL_ACCOUNTS_KEY]: { main: row.credential_profile_id || '' },
+        [PROCESSING_PREFERENCE_KEY]: String(row.processing_preference ?? settings?.[PROCESSING_PREFERENCE_KEY] ?? '') };
 }
 
 export function modelWaitRoleLabel(role = '') {
@@ -356,9 +364,8 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
                     onChange: () => onDomWrite(() => paint(taskId)) });
                 // The picker offers the same configured API providers as Models,
                 // so the wait panel needs this document's credential fields too.
-                view.editor.load({ ...providerCredentials(settings), model: view.row.model,
-                    [MODEL_ACCOUNTS_KEY]: { main: view.row.credential_profile_id || '' } },
-                { providerProfiles: settings?._meta?.setup_contract?.providerProfiles || {}, modelSlots: [
+                view.editor.load(pickerDocument(settings, view.row),
+                { providerProfiles:settings?._meta?.setup_contract?.providerProfiles || {}, modelSlots: [
                     { slot: 'main', settingKey: 'model', inputId: `${id}-model`, settingsToggleId: `${id}-local`, label: modelWaitRoleLabel(view.row.role) },
                 ] });
                 view.editor.mount();
@@ -398,10 +405,12 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         });
         node.querySelector('[data-wait-retry]').addEventListener('click', () => { void submit(taskId, view, 'retry'); });
         node.querySelector('[data-wait-repeat]').addEventListener('click', () => { void submit(taskId, view, '', {}, true); });
-        node.querySelector('[data-wait-settings]').addEventListener('click', () => { void openSettings('providers'); });
+        node.querySelector('[data-wait-settings]').addEventListener('click', () => { void openSettings('accounts'); });
         node.querySelector('[data-wait-login]').addEventListener('click', async () => {
-            if (await openSettings('providers') === false) return;
-            if (view.row.credential_harness && view.row.credential_profile_id) {
+            // The sign-in card lives on the provider's own page, so that page is the one opened.
+            const harness = view.row.credential_harness && view.row.credential_profile_id ? view.row.credential_harness : '';
+            if (await openSettings(harness ? `accounts/${encodeURIComponent(harness)}` : 'accounts') === false) return;
+            if (harness) {
                 await login(view.row.credential_harness, view.row.credential_profile_id);
             }
         });

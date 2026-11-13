@@ -90,9 +90,8 @@ class SkillReviewState:
     def is_stale_for(self, current_hash: str) -> bool:
         return not current_hash or (self.reviewed_content_hash or self.content_hash) != current_hash
 
-    def gate_for(self, current_hash: str, *, enforcement: Optional[str] = None) -> Dict[str, Any]:
-        return {**skill_review_gate(self.status, stale=self.is_stale_for(current_hash),
-                                   enforcement=enforcement, findings=self.findings,
+    def gate_for(self, current_hash: str) -> Dict[str, Any]:
+        return {**skill_review_gate(self.status, stale=self.is_stale_for(current_hash), findings=self.findings,
                                    author_disposition=self.author_disposition, current_hash=current_hash,
                                    acceptance=self.acceptance),
                 "reviewed_content_hash": self.reviewed_content_hash or self.content_hash}
@@ -870,7 +869,7 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
         return outcome
     gate = skill.review.gate_for(skill.content_hash)
     # A pending status grants only through an acceptance basis for these bytes
-    # (trusted source, owner skip/edit, Advisory author finish), never Cyber alone.
+    # (trusted source, owner skip/edit, author finish), never Cyber alone.
     if (not gate["executable_review"] or (gate["status"] == _REVIEW_STATUS_PENDING
         and gate["blocking_reason"] not in ACCEPTANCE_REASONS)):
         return outcome

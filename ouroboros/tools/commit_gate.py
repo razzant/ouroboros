@@ -1,8 +1,7 @@
 """The commit preflight (the author's named row, decision 3A) and the free deterministic
 checks every commit runs before review, durable commit-attempt recording, and the
-commit-side Max-Review-Cycles machinery (block classification, the free
-identical-diff refusal, the per-root-task paid-cycle ceiling, and the
-review-contract fingerprint)."""
+commit-side Max-Review-Cycles machinery (block classification, the per-root-task
+paid-cycle ceiling, and the review-contract fingerprint)."""
 
 from __future__ import annotations
 
@@ -19,10 +18,7 @@ from ouroboros.review_state import (
     infer_review_phase,
 )
 from ouroboros.tools.registry import ToolContext
-from ouroboros.tools.review_helpers import review_enforcement_blocks
-from ouroboros.utils import (
-    truncate_review_artifact as _truncate_review_reason,
-)
+from ouroboros.tools.review_helpers import cyber_review_authority
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +43,9 @@ def _list_or_default(items: Optional[List[Any]], fallback: List[Any]) -> List[An
     return list(items)
 
 
-def _continuation_source(status: str, *, late_result_pending: bool) -> str:
+def _continuation_source(status: str, *, late_result_pending: bool, stopped: bool = False) -> str:
     if status == "blocked":
-        return "blocked_review"
+        return "owner_stopped" if stopped else "blocked_review"
     if late_result_pending:
         return "late_result_pending"
     if status == "failed":
@@ -61,29 +57,16 @@ def _attempt_accepts_reviewing_update(existing: Any) -> bool:
     return existing is not None and _attempt_has_active_review_custody(existing)
 
 
-# Max Review Cycles semantics on the commit gate (owner Q12/Q16/Q22/Q23):
-# identical bytes are never re-reviewed for pay. From the FIRST genuine
-# review-verdict block of a staged diff, resubmitting the same
-# pre_review_fingerprint without a NEW rebuttal is refused for FREE — before
-# the advisory-freshness gate and before any paid review-wave dispatch —
-# quoting the recorded verdict. A rebuttal is identified by CONTENT
-# (sha256): a hash new to the current identical-fingerprint streak buys
-# exactly ONE paid re-review; a repeated hash is refused free, quoting the
-# previous outcome. Infra-blocks (fit overflow, sub-floor window,
-# revalidation, transport/no-quorum) are not verdicts: they never build the
-# refusal streak and retry freely. The shared OUROBOROS_REVIEW_MAX_CYCLES
-# knob (``review_max_cycles()``; ``None`` = unlimited) bounds PAID
-# review-wave cycles per ROOT task (the whole task tree shares one ceiling;
-# a manual session is its own task; a follow-up task starts a fresh one).
-# The ceiling counts MONEY: every attempt that physically dispatched a wave
-# (``paid`` recorded at dispatch) counts regardless of how it terminated —
-# only UNDISPATCHED attempts (preflight refusals, assembly failures, free
-# replays) are outside the count. Exhaustion is a
-# free typed refusal plus ``emit_review_cycles_exhausted``. Both refusals
-# honor the recorded review-contract fingerprint (roster+routes+enforcement+
-# prompt contract): a changed contract lapses the streak. Under ADVISORY
-# enforcement returns the prior outcome for an informed author choice;
-# explicit continuation buys no reviewer and does not manufacture approval.
+# Max Review Cycles semantics on the commit gate (owner Q12/Q16/Q22/Q23): the shared
+# OUROBOROS_REVIEW_MAX_CYCLES knob (``review_max_cycles()``; ``None`` = unlimited) bounds PAID
+# review-wave cycles per ROOT task (the whole task tree shares one ceiling; a manual session is
+# its own task; a follow-up task starts a fresh one). The ceiling counts MONEY: every attempt
+# that physically dispatched a wave (``paid`` recorded at dispatch) counts regardless of how it
+# terminated — only UNDISPATCHED attempts (preflight refusals, assembly failures, free replays)
+# are outside the count. Exhaustion is a free replay plus ``emit_review_cycles_exhausted``: the
+# prior outcome returns for an informed author choice; explicit continuation buys no reviewer and
+# does not manufacture approval. The free identical-diff refusal left with Blocking; its reason
+# stays for the rows that carry it.
 IDENTICAL_DIFF_BLOCK_REASON = "identical_diff_refused"
 _LEGACY_CAP_BLOCK_REASON = "attempt_cap_reached"  # pre-Q16 refusal rows
 _REFUSAL_BLOCK_REASONS = frozenset({
@@ -98,8 +81,7 @@ BLOCK_CLASS_INFRA = "infra"
 # Triad block reasons that ARE reviewer verdicts; everything else recorded at
 # phase=blocking_review is an infrastructure fact about the gate. Post-review
 # failure phases (post_commit_tests, commit_binding, tag_binding) need no set
-# of their own: the streak walker's generic terminal break already ends an
-# identical-diff streak on them, and their paid dispatch stays counted.
+# of their own: their paid dispatch stays counted.
 _TRIAD_VERDICT_BLOCK_REASONS = frozenset({"critical_findings"})
 # Failed-status phases that are pre/around-review infrastructure facts.
 _INFRA_FAILURE_PHASES = frozenset({"infra", "expired"})
@@ -154,9 +136,8 @@ def attempt_block_class(item: Any) -> str:
     if str(getattr(item, "phase", "") or "") == "revalidation":
         # Post-review revalidation blocks (fingerprint drift, fingerprint
         # unavailable, review_subject_binding_mismatch) are facts about the
-        # GATE, never reviewer verdicts: they must not anchor identical-diff
-        # refusal quotes nor build a refusal streak, while their dispatched
-        # wave (paid=True on the merged row) still counts toward the ceiling.
+        # GATE, never reviewer verdicts, while their dispatched wave
+        # (paid=True on the merged row) still counts toward the ceiling.
         return BLOCK_CLASS_INFRA
     if str(getattr(item, "phase", "") or "") != "blocking_review":
         return ""  # preflight/advisory-gate rows are neither verdict nor infra
@@ -184,12 +165,8 @@ def resolve_root_task_id(ctx: ToolContext) -> str:
 
     DELIBERATE TRADEOFF (adversarial wave, machine-3): ``origin_root_task_id``
     — the follow-up chain marker — is NOT honored here, so a scheduled
-    follow-up task is a FRESH root with its own ceiling. This makes the
-    refusal's "leave the remaining work to a follow-up task with its own
-    budget" exit real; the cost is that a follow-up can buy new paid cycles
-    for the same goal. The cross-task identical-fingerprint refusal remains
-    the anti-laundering backstop: byte-identical bytes stay refused whichever
-    task resubmits them."""
+    follow-up task is a FRESH root with its own ceiling; the cost is that a
+    follow-up can buy new paid cycles for the same goal."""
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     return str(
@@ -221,7 +198,7 @@ def commit_review_contract_material(own: Sequence[str] = (), *, packet: Optional
                                     retrieving: Sequence[str] = (), layer: str = "body",
                                     surface: str = "multi_model_review", shape: str = "two_part") -> dict:
     """What the review contract is: the one wave's seat roster + routes, the
-    ``parts`` each seat is asked (one brief, two parts), enforcement, the shipped
+    ``parts`` each seat is asked (one brief, two parts), the recorded authority, the shipped
     prompt contract (contract A, contract B, the required-source policy version)
     and the text every seat's request carries of Ouroboros's own
     (``review_admission.seat_brief_material``: the surface's words, the layer's
@@ -230,7 +207,7 @@ def commit_review_contract_material(own: Sequence[str] = (), *, packet: Optional
     RESOLVED efforts (``row_effort`` uses a compound route's encoded effort before
     the configured surface default). Changing a global effort therefore lapses
     only rows that actually inherit it (synthesis F4 — pinned by test)."""
-    from ouroboros.config import get_review_enforcement
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY
     from ouroboros.reviewer_slot_config import commit_triad_delivery
     from ouroboros.tools.review_admission import seat_brief_material, seat_vectors
     from ouroboros.tools.review_helpers import CRITICAL_FINDING_CALIBRATION, REVIEW_PREAMBLE
@@ -287,147 +264,11 @@ def commit_review_contract_material(own: Sequence[str] = (), *, packet: Optional
     # What each seat is ASKED is contract identity: a seat that gains or
     # loses the coupling question is a different review.
     parts = {str(slot_id or ""): list(seat_parts) for slot_id, seat_parts in zip(row_plan["slot_ids"], row_plan["parts"])}
-    return {"rows": rows, "parts": parts, "enforcement": str(get_review_enforcement() or ""),
+    return {"rows": rows, "parts": parts, "enforcement": RECORDED_REVIEW_AUTHORITY,
             "prompt_contract": [REVIEW_PREAMBLE, CRITICAL_FINDING_CALIBRATION, REVIEW_JSON_ARRAY_CONTRACT,
                                 REVIEW_TWO_PART_OBJECT_CONTRACT, SCOPE_REQUIRED_SOURCES_POLICY],
             "brief": seat_brief_material(row_plan, layer=layer, surface=surface, shape=shape, own=own, packet=packet,
                                          retrieving=retrieving)}
-
-
-def _quote_verdict_attempt(item: Any) -> str:
-    """Render the recorded verdict an identical resubmission is refused with."""
-    lines = [
-        f"Recorded verdict: attempt #{int(getattr(item, 'attempt', 0) or 0)} "
-        f"({getattr(item, 'ts', '') or 'unknown ts'}, block_reason="
-        f"{getattr(item, 'block_reason', '') or 'unknown'}"
-        + (f", rebuttal_sha256={str(getattr(item, 'rebuttal_sha256', '') or '')[:12]}…" if getattr(item, "rebuttal_sha256", "") else "")
-        + ")"
-    ]
-    findings = [f for f in (getattr(item, "critical_findings", None) or []) if isinstance(f, dict)]
-    for finding in findings[:5]:
-        label = str(finding.get("item") or finding.get("reason") or "?")
-        reason = _truncate_review_reason(str(finding.get("reason", "") or ""), limit=200)
-        lines.append(f"  - [CRITICAL] {label}: {reason}")
-    if len(findings) > 5:
-        lines.append(f"  … and {len(findings) - 5} more critical finding(s) in review_status.")
-    details = str(getattr(item, "block_details", "") or "").strip()
-    if details and not findings:
-        lines.append(_truncate_review_reason(details, limit=600))
-    return "\n".join(lines)
-
-
-def _walk_identical_verdict_streak(
-    attempts: List[Any], fp: str, contract_fingerprint: str
-) -> tuple[Optional[Any], set]:
-    """Trailing verdict-block streak for ``fp``: ``(last_verdict_row,
-    rebuttal_hashes_seen)``. ``(None, …)`` = no live streak. Skips in-flight
-    rows, refusal records, preflight facts and infra-blocks (none of them is a
-    verdict or evidence the diff changed); breaks on any other terminal. A
-    verdict row recorded under a DIFFERENT (or unknown) review contract lapses
-    the streak (Q22)."""
-    last_verdict: Optional[Any] = None
-    seen_rebuttals: set = set()
-    for item in reversed(attempts):
-        status = str(getattr(item, "status", "") or "")
-        if status == "reviewing":
-            continue  # in-flight marker, not a verdict
-        if str(getattr(item, "block_reason", "") or "") in _REFUSAL_BLOCK_REASONS:
-            # Free refusals never reset the streak. Their recorded rebuttal
-            # hashes are deliberately NOT harvested: a "spent" rebuttal is one
-            # that BOUGHT a dispatch — one refused without dispatching stays
-            # fresh (e.g. after the owner raises the ceiling).
-            continue
-        klass = attempt_block_class(item)
-        if status == "blocked" and not klass:
-            # Preflight facts (stale advisory, tests, protection) inherit the
-            # prior fingerprint through the ledger merge; they are neither a
-            # review verdict nor evidence the diff changed.
-            continue
-        if klass == BLOCK_CLASS_INFRA:
-            continue  # infra facts never build NOR break the streak
-        if status == "failed" and str(getattr(item, "phase", "") or "") in _INFRA_FAILURE_PHASES:
-            # Infra failures (lock/stage errors, expired reviewing rows) are
-            # transients, not verdicts and not evidence the diff changed —
-            # mirroring the ceiling's dispatch accounting, they neither build
-            # nor reset the streak (adversarial wave, machine-2).
-            continue
-        if (
-            status == "blocked"
-            and klass == BLOCK_CLASS_VERDICT
-            and str(getattr(item, "pre_review_fingerprint", "") or "") == fp
-        ):
-            row_contract = str(getattr(item, "review_contract_fingerprint", "") or "")
-            if not contract_fingerprint or row_contract != contract_fingerprint:
-                if last_verdict is None:
-                    # The streak's HEAD was recorded under another (or unknown)
-                    # contract: replay authority lapses, a paid review is due.
-                    return None, seen_rebuttals
-                # An OLDER row from a previous contract merely ends the streak;
-                # the newer same-contract verdict keeps its refusal authority.
-                break
-            if last_verdict is None:
-                last_verdict = item
-            # A rebuttal is "spent" only when it BOUGHT this dispatched,
-            # verdict-answered wave (machine-4/wording-2): harvest hashes from
-            # paid verdict rows only — never from refusal rows or infra facts.
-            rebuttal = str(getattr(item, "rebuttal_sha256", "") or "")
-            if rebuttal and bool(getattr(item, "paid", False)):
-                seen_rebuttals.add(rebuttal)
-            continue
-        break  # success / pass / different diff / post-review terminal
-    return last_verdict, seen_rebuttals
-
-
-def check_identical_verdict_refusal(
-    ctx: ToolContext,
-    fingerprint: str,
-    *,
-    rebuttal_sha256: str = "",
-    contract_fingerprint: str = "",
-) -> str:
-    """Free typed refusal for a byte-identical resubmission whose streak's last
-    terminal is a review VERDICT block and no NEW rebuttal is supplied; ""
-    allows the attempt. Fires from the FIRST verdict-block — identical bytes
-    are never re-reviewed for pay. Deliberately NOT task-scoped: the
-    byte-identical diff is the identity, so a new task with the same unchanged
-    diff cannot launder a fresh paid review (anti-laundering). Fail-open on
-    ledger errors — this is a cost guard, not a safety gate."""
-    fp = str(fingerprint or "").strip()
-    if not fp:
-        return ""
-    try:
-        from ouroboros.review_state import load_state, make_repo_key
-
-        state = load_state(pathlib.Path(ctx.drive_root))
-        attempts = state.filter_attempts(
-            repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)),
-            tool_name=_current_review_tool_name(ctx),
-        )
-        last_verdict, seen_rebuttals = _walk_identical_verdict_streak(
-            attempts, fp, str(contract_fingerprint or "")
-        )
-        if last_verdict is None:
-            return ""
-        if rebuttal_sha256 and rebuttal_sha256 not in seen_rebuttals:
-            return ""  # a NEW rebuttal buys exactly ONE paid re-review
-        repeated_note = (
-            "\nThe supplied review_rebuttal is byte-identical to one already spent on this "
-            "streak — a repeated rebuttal does not buy another review."
-            if rebuttal_sha256 else ""
-        )
-        return (
-            "⚠️ IDENTICAL_DIFF_REFUSED: this exact staged diff was already reviewed and "
-            "BLOCKED — you appear to have forgotten to change anything. Identical bytes are "
-            f"never re-reviewed for pay.{repeated_note}\n"
-            f"{_quote_verdict_attempt(last_verdict)}\n"
-            "Honest exits: change the code (any change to the staged diff starts a fresh "
-            "paid review); supply a NEW review_rebuttal with genuinely new evidence (buys "
-            "exactly one paid re-review); escalate the disagreement to the owner; or "
-            "finalize honestly without this commit."
-        )
-    except Exception:
-        log.debug("identical-verdict refusal check failed (fail-open)", exc_info=True)
-        return ""
 
 
 def count_paid_review_cycles(ctx: ToolContext, *, root_task_id: str) -> int:
@@ -498,32 +339,21 @@ def check_review_cycles_ceiling(
         return None
     if paid < cap:
         return None
-    head = (
+    message = (
         f"⚠️ REVIEW_CYCLES_EXHAUSTED: this task tree (root {root}) already spent "
         f"{paid} of {cap} paid review wave(s) "
         "(OUROBOROS_REVIEW_MAX_CYCLES). Refusing to buy another review.\n"
-    )
-    message = head + ((
-        "Honest exits: finalize honestly with what is already reviewed and committed; "
-        "escalate to the owner (the ceiling is the owner's Max Review Cycles setting — "
-        "3/5/unlimited are one settings change away); or leave the remaining work to a "
-        "follow-up task with its own budget. A rebuttal cannot buy past the ceiling — "
-        "rebuttal cycles count toward it."
-    ) if review_enforcement_blocks() else (
         "The paid review allowance is spent. Decide whether what was reviewed is enough: finish, "
         "or land with a plain statement of what was not reviewed."
-    ))
+    )
     return {"message": message, "cycles_paid": paid, "cap": cap}
 
 
 def resolve_commit_review_reference(ctx: ToolContext, reference: Any, *, state: Any = None) -> Any:
     """Resolve the exact prior outcome returned by this task's (or a recorded Continue predecessor's) commit surface."""
-    from ouroboros.config import get_review_enforcement
     from ouroboros.review_state import _load_state_unlocked, make_repo_key
     from ouroboros.tools.review_collection import continued_review_author
 
-    if review_enforcement_blocks(get_review_enforcement()):
-        raise ValueError("author continuation requires Advisory enforcement")
     if not isinstance(reference, dict) or reference.get("surface") != "commit":
         raise ValueError("review_reference must name a returned commit review")
     repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
@@ -543,7 +373,7 @@ def resolve_commit_review_reference(ctx: ToolContext, reference: Any, *, state: 
             or (source.raw_stripped and not stripped_source_bound(ctx, source, locked=locked))):
         raise ValueError("the returned review outcome is missing or no longer has its exact evidence")
     from ouroboros.review_records import review_outcome_received
-    if review_enforcement_blocks("blocking") and not review_outcome_received(  # outside Cyber Pro: feedback first
+    if not cyber_review_authority() and not review_outcome_received(  # outside Cyber Pro: feedback first
             [*source.triad_raw_results, source.scope_raw_result], findings=[*source.critical_findings, *source.advisory_findings],
             terminal=source.phase == "review_only" and source.status == "reviewed"):
         from ouroboros.tools.review_collection import ContinuationWaits
@@ -616,7 +446,7 @@ def _record_commit_attempt(
         task_id = str(getattr(ctx, "task_id", "") or "")
 
         _findings_for_attempt = critical_findings
-        if status == "blocked" and critical_findings:
+        if status == "blocked" and critical_findings and block_reason != "owner_stopped":  # no model after a stop
             try:
                 from ouroboros.tools.review_synthesis import synthesize_to_canonical_issues
                 from ouroboros.review_state import load_state as _ls_synth
@@ -627,16 +457,15 @@ def _record_commit_attempt(
                     open_obligations=_open_obs,
                     ctx=ctx,
                 )
-            except Exception as _synth_exc:
+            except Exception as _synth_exc:  # the findings stay as reviewers wrote them
                 log.debug("review_synthesis: pre-lock synthesis skipped: %s", _synth_exc)
-                _findings_for_attempt = critical_findings
 
         # C9.3: resolve semantic-dedup redirects for free-text (bug_*/risk_*) obligations
         # from a PRE-LOCK snapshot — the light-model call must stay OUTSIDE the review
         # state lock. Fail-open: any failure yields no redirect (a finding opens a new
         # obligation) and never blocks the gate. Only blocked attempts mint obligations.
         _obligation_redirects: Dict[str, str] = {}
-        if status == "blocked" and _findings_for_attempt:
+        if status == "blocked" and _findings_for_attempt and block_reason != "owner_stopped":
             try:
                 from ouroboros.review_state import (
                     compute_obligation_semantic_redirects,
@@ -645,9 +474,8 @@ def _record_commit_attempt(
                 _obligation_redirects = compute_obligation_semantic_redirects(
                     _ls_dedup(dr), _findings_for_attempt, repo_key=repo_key, drive_root=dr
                 )
-            except Exception as _dedup_exc:
+            except Exception as _dedup_exc:  # no redirect: a finding opens its own obligation
                 log.debug("obligation semantic dedup skipped: %s", _dedup_exc)
-                _obligation_redirects = {}
 
         from ouroboros.tools.review_change_custody import continued_attempt, late_write_check
         outlived = late_write_check(ctx, phase if status == "reviewing" else "", review_record_id, triad_raw_results, scope_raw_result)
@@ -681,14 +509,13 @@ def _record_commit_attempt(
                 existing = None
                 ctx._current_review_attempt_number = attempt_no
 
-            from ouroboros.review_records import validate_author_disposition
-            from ouroboros.config import get_review_enforcement
+            from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, validate_author_disposition
 
             author_record = getattr(existing, "author_disposition", {}) or {}
             if author_disposition is not None:
                 subject = pre_review_fingerprint or str(getattr(existing, "pre_review_fingerprint", "") or "")
                 author_record = validate_author_disposition(author_disposition, subject_hash=subject) or {}
-                cyber = not review_enforcement_blocks("blocking")
+                cyber = cyber_review_authority()
                 reference = author_record.get("review_reference")
                 try:
                     source = resolve_commit_review_reference(ctx, reference, state=state) if reference else None
@@ -697,8 +524,7 @@ def _record_commit_attempt(
                 same_review = bool(existing and getattr(existing, "paid", False) and subject == existing.pre_review_fingerprint)
                 if (not subject or (not cyber and not (source or same_review))
                         or (post_review_fingerprint and post_review_fingerprint != subject)
-                        or review_enforcement_blocks(get_review_enforcement())
-                        or (not cyber and author_record.get("enforcement") != "advisory")):
+                        or (not cyber and author_record.get("enforcement") != RECORDED_REVIEW_AUTHORITY)):
                     author_record = {}
             attempt = CommitAttemptRecord(
                 ts=_utc_now(),
@@ -779,7 +605,7 @@ def _record_commit_attempt(
                 ),
                 review_record_id=review_record_id or str(getattr(existing, "review_record_id", "") or ""),
             )
-            if status != "reviewing" and "late_result_pending" not in legacy_kwargs and not review_enforcement_blocks("blocking"):
+            if status != "reviewing" and "late_result_pending" not in legacy_kwargs and cyber_review_authority():
                 attempt.late_result_pending = bool(getattr(existing, "late_result_pending", False)) or _attempt_has_active_review_custody(attempt)
             stamp_paid_review_owner(attempt, paid=bool(paid) or bind_owner)
             state.record_attempt(attempt, semantic_redirects=_obligation_redirects)
@@ -798,7 +624,8 @@ def _record_commit_attempt(
                 if status == "succeeded":
                     clear_review_continuation(dr, task_id)
                 else:
-                    source = _continuation_source(status, late_result_pending=late_result_pending)
+                    source = _continuation_source(status, late_result_pending=late_result_pending,
+                                                  stopped=block_reason == "owner_stopped")
                     if source:
                         latest_state = load_state(dr)
                         latest_attempt = latest_state.latest_attempt_for(
@@ -885,7 +712,7 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
         active_attempts = update_state(pathlib.Path(ctx.drive_root), _mutate)
     except Exception as e:
         log.warning("Failed to check overlapping review attempts: %s", e)
-        if not review_enforcement_blocks("blocking"):
+        if cyber_review_authority():
             ctx._review_cyber_pending = f"Review custody is unreadable: {e}. No new reviewer will be dispatched."
             return None
         return (
@@ -930,7 +757,7 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
             ctx._pending_review_attempt = candidate
             ctx._current_review_attempt_number = int(candidate.attempt or 0)
             return None
-    if not review_enforcement_blocks("blocking"):
+    if cyber_review_authority():
         # Cyber Pro: foreign custody is no veto, and no new reviewer is bought beside it.
         ctx._review_cyber_pending = (
             "Existing review custody remains active: "
@@ -1035,12 +862,10 @@ def compose_commit_panel(ctx: ToolContext, reviewers: Sequence[str], reason: str
     """Freeze the shared own-body panel before staging or paying for review."""
     from ouroboros.tools import review_change as rc
     from ouroboros.reviewer_slot_config import review_strictness
-    from ouroboros.config import get_review_enforcement
     from ouroboros.tools import git as git_mod
 
     request = rc.parse_request({"root": "system_repo", "subject": "index", "reviewers": list(reviewers), "reason": reason})
-    return rc.compose_panel(request, body=True,
-                            strictness=review_strictness(get_review_enforcement(), git_mod._current_runtime_mode()))
+    return rc.compose_panel(request, body=True, strictness=review_strictness(git_mod._current_runtime_mode()))
 
 
 def release_diagnostics(ctx: ToolContext, paths: Optional[List[str]], source: str) -> Dict[str, Any]:
@@ -1229,26 +1054,13 @@ def watch_left_commit_review(ctx: ToolContext) -> bool:
 def disclose_commit_review_replay(ctx: ToolContext, replay: dict) -> None:
     """Keep the free replay cause separate from authority to create a commit."""
     replay_reason = str(replay.get("replay_reason") or "")
-    if not review_enforcement_blocks("blocking"):
-        progress_note = "Cyber Pro: no new reviewer dispatched; original review facts are retained and the outcome returns first."
-    elif replay_reason == IDENTICAL_DIFF_BLOCK_REASON:
-        progress_note = (
-            "Max Review Cycles: identical staged diff — reusing the recorded "
-            "review verdict, no paid review-wave dispatch."
-        )
-    else:
-        progress_note = (
-            "Max Review Cycles: paid-cycle ceiling exhausted — no review outcome "
-            "exists for this diff; inspect the returned outcome before explicitly "
-            "choosing Advisory author continuation."
-        )
-    disclosure = (
-        "Review enforcement=Advisory: no new review wave was bought for "
-        f"this commit ({replay_reason}); no fresh automatic preflight was bought. "
-        + str(replay.get("advisory_replay") or "")
-    )
-    if not review_enforcement_blocks("blocking"):
-        disclosure = "Cyber Pro: no new review was dispatched. " + str(replay.get("advisory_replay") or "")
+    cyber = cyber_review_authority()
+    progress_note = ("Cyber Pro: no new reviewer dispatched; original review facts are retained and the outcome returns first."
+                     if cyber else "Max Review Cycles: paid-cycle ceiling exhausted — no review outcome exists for this diff; "
+                     "inspect the returned outcome before explicitly choosing an author continuation.")
+    disclosure = ("Cyber Pro: no new review was dispatched. " if cyber else
+                  f"No new review wave was bought for this commit ({replay_reason}); no fresh automatic preflight was bought. "
+                  ) + str(replay.get("advisory_replay") or "")
     advisory_list = getattr(ctx, "_review_advisory", None)
     if isinstance(advisory_list, list):
         advisory_list.append(disclosure)
@@ -1264,7 +1076,7 @@ def bind_author_commit_candidate(ctx: ToolContext, commit_message: str, pre_fing
     author_source = ctx._author_commit_source
     from ouroboros.review_records import build_author_disposition_from_mapping
     from ouroboros.tools.review import _preflight_check, format_name_status_for_preflight
-    from ouroboros.config import get_review_enforcement
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY
 
     # The critic's own aggregate on ITS subject (the reference's fingerprint), never this candidate's verdict.
     signal, record = "", {}
@@ -1276,7 +1088,7 @@ def bind_author_commit_candidate(ctx: ToolContext, commit_message: str, pre_fing
         except Exception:
             log.debug("critic aggregate unavailable for the author continuation", exc_info=True)
     author = build_author_disposition_from_mapping(ctx._author_commit_decision, subject_hash=pre_fingerprint["fingerprint"],
-        reviewer_signal=signal or author_source.block_reason or author_source.status, enforcement=get_review_enforcement())
+        reviewer_signal=signal or author_source.block_reason or author_source.status, enforcement=RECORDED_REVIEW_AUTHORITY)
     author.update(review_reference=ctx._author_commit_reference, decided_by_task=str(ctx.task_id))  # the acting author
     from ouroboros.review_doctrine import enrich_author_commit
     from ouroboros.utils import utc_now_iso
@@ -1289,7 +1101,7 @@ def bind_author_commit_candidate(ctx: ToolContext, commit_message: str, pre_fing
         record_id=str(record.get("record_id") or getattr(author_source, "review_record_id", "") or ""),
         revision=int(record.get("revision") or 0),
         drive_root=getattr(ctx, "drive_root", None),
-        cyber=not review_enforcement_blocks("blocking"),
+        cyber=cyber_review_authority(),
         observed_at=utc_now_iso(),
         review_reference=ctx._author_commit_reference,
     )
@@ -1415,12 +1227,10 @@ def _review_ledger_facts(ctx: ToolContext, commit_message: str, *, goal: str, sc
                          combined_findings: Optional[list], dispatch_refusal: Optional[dict], pending: bool) -> Dict[str, Any]:
     """Everything the ledger record states about THIS attempt, read from the gate's own
     forensic fields (no second reading of any reviewer output)."""
-    from ouroboros.config import get_review_enforcement
-    from ouroboros.review_records import ReviewRequest, resolve_review_wave
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, ReviewRequest, resolve_review_wave
     from ouroboros.tools import git as git_mod
 
     task_id = str(getattr(ctx, "task_id", "") or "")
-    enforcement = str(get_review_enforcement() or "")
     # THIS wave's own execution rows (stashed by the substrate as it recorded them), never the
     # shared last-execution projection another surface may have overwritten meanwhile.
     executions = dict(getattr(ctx, "_last_review_slot_executions", {}) or {})
@@ -1429,7 +1239,6 @@ def _review_ledger_facts(ctx: ToolContext, commit_message: str, *, goal: str, sc
     except Exception:
         mode = ""
     tests_passed = getattr(ctx, "_preflight_tests_passed", None)
-    pre_fingerprint = pre_fingerprint or {}
     panel = commit_panel_facts(ctx)
     return {
         **_review_body_facts(ctx),
@@ -1445,7 +1254,7 @@ def _review_ledger_facts(ctx: ToolContext, commit_message: str, *, goal: str, sc
         "binding_fingerprint": str(pre_fingerprint.get("fingerprint") or ""),
         "review_contract_fingerprint": str(getattr(ctx, "_current_review_contract_fingerprint", "") or ""),
         "rebuttal_sha256": str(getattr(ctx, "_current_review_rebuttal_sha256", "") or ""),
-        "enforcement": enforcement, "mode": mode, "enforcement_blocks": bool(review_enforcement_blocks(enforcement)),
+        "enforcement": RECORDED_REVIEW_AUTHORITY, "mode": mode,
         "structured": dict(getattr(ctx, "_last_review_structured", {}) or {}), "slot_executions": executions,
         "triad_raw": list(getattr(ctx, "_last_triad_raw_results", []) or []),
         "blocked": bool(blocked), "block_reason": str(block_reason or ""),
@@ -1511,11 +1320,12 @@ def settle_commit_review_ledger(ctx: ToolContext, commit_message: str, *, goal: 
 
     A dispatched wave is a ``settled`` record, or ``pending`` while custody is still
     open; settling that same attempt later raises the record's ``revision``. A free
-    replay (identical diff, exhausted cycles, pending custody) and a wave the budget
+    replay (exhausted cycles, pending custody) and a wave the budget
     fence declined are ``NOT_DISPATCHED`` records naming their cause. An explicit author
     continuation buys no record: it notes the author's decision on the record it answered.
     Ledger failure never changes the gate's decision; it is logged and the id stays ""."""
     from ouroboros import review_ledger as ledger
+    from ouroboros.review_overrides import note_author_continuation
     from ouroboros.tools import git as git_mod
 
     ctx._current_review_record_id = ""
@@ -1526,6 +1336,7 @@ def settle_commit_review_ledger(ctx: ToolContext, commit_message: str, *, goal: 
             if prior and ledger.load_record(root, prior) is not None:
                 ledger.note_author_decision(root, prior, dict(getattr(ctx, "_author_commit_record", None) or {}))
                 ctx._current_review_record_id = prior
+            note_author_continuation(ctx, getattr(ctx, "_author_commit_record", None))  # over a FAIL or no verdict
             return ctx._current_review_record_id
         structured = dict(getattr(ctx, "_last_review_structured", {}) or {})
         refusal = None
@@ -1589,12 +1400,3 @@ def _bind_attempt_record_id(ctx: ToolContext, record_id: str) -> None:
             row.review_record_id = record_id
 
     update_state(pathlib.Path(ctx.drive_root), _mutate)
-
-
-def record_commit_gate_refusal(ctx: ToolContext, commit_message: str, *, goal: str = "", scope: str = "",
-                               pre_fingerprint: Optional[dict] = None, kind: str, message: str) -> str:
-    """A blocking free refusal before any dispatch (identical diff, exhausted cycles) is a
-    ``NOT_DISPATCHED`` ledger record: the owner sees WHY nothing was reviewed."""
-    return settle_commit_review_ledger(
-        ctx, commit_message, goal=goal, scope=scope, pre_fingerprint=pre_fingerprint,
-        blocked=True, block_reason=kind, advisory_replay={"replay_reason": kind, "advisory_replay": message})

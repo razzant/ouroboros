@@ -278,20 +278,24 @@ def test_feedback_labels_describe_seats_without_counting_them():
     assert classify_feedback([{"verdict": "PASS", "status": "responded", "seats": []}]) == "unknown"
 
 
-def test_blocking_refuses_a_helper_continuation_and_a_clean_pass_still_lands(candidate, monkeypatch):  # noqa: F811
+def test_a_helper_continuation_with_no_returned_outcome_is_refused_and_a_clean_pass_lands_without_the_fact(
+        candidate, monkeypatch):  # noqa: F811
     ctx = candidate
-    _mode(monkeypatch, "pro", "blocking")
+    _mode(monkeypatch, "pro", "advisory")
     _prepare(ctx, monkeypatch)
     before = _head(ctx)
     refused = git._commit_reviewed(
         ctx, "Fix amount", review_reference={"surface": "commit"},
         author_disposition={"disposition": "accepted", "rationale": "The helper checked it.", "subagent_check": _CLAIM})
-    assert "requires Advisory" in refused
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused
     assert _head(ctx) == before and FACT_KIND not in refused
     _install_reviewer(ctx, monkeypatch, _panel())
-    landed = git._commit_reviewed(ctx, "Fix amount", skip_advisory_review=True)
+    first = git._commit_reviewed(ctx, "Fix amount", skip_advisory_review=True)
+    assert "returned before commit" in first and _head(ctx) == before  # a clean PASS returns too
+    landed = git._commit_reviewed(ctx, "Fix amount", review_reference=_reference(first),
+                                  author_disposition={"disposition": "accepted", "rationale": "A clean pass."})
     assert _head(ctx) != before, landed
-    assert FACT_KIND not in landed and "landing:" not in landed
+    assert FACT_KIND not in landed
 
 
 def test_advisory_without_feedback_refuses_and_a_received_error_can_land(candidate, monkeypatch):  # noqa: F811

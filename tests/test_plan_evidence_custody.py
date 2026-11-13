@@ -158,7 +158,7 @@ def test_pending_council_keeps_session_source_loose_until_its_last_reply(harness
     [attached] = _record(harness)["asks"][0]["attached"]
     file = task_artifact_dir_path(harness.drive, ctx.task_id) / attached["ref"]["path"]
     assert all(f"`{file}`" in str(request.slot_session_tasks[slot.slot_id]) for slot in slots)
-    assert plan_record.gate_projection(_record(harness), enforcement="blocking", cyber_pro=False, hurry=False)["allow"]
+    assert plan_record.gate_projection(_record(harness), cyber_pro=False)["allow"]
     write_task_result(harness.drive, ctx.task_id, "completed", result="author finished")
     with store.open_store(harness.drive, write=False) as txn:
         assert txn.row(ctx.task_id, "review_collection_pending", "plan_collection_pending") == (0, 1)

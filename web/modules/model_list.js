@@ -19,7 +19,7 @@ const payWords = (said) => tr(`model.pay.${said.lane}`, said.pay);
 
 /** A route's facts in the owner's words: its source, how that source is paid, its window when one is known. */
 export function routeFacts(said) {
-    return [said.sourceLabel, payWords(said), said.window ? fmt('{window} window', { window: said.window }) : '']
+    return [said.sourceLabel, said.price || payWords(said), said.window ? fmt('{window} window', { window: said.window }) : '']
         .filter(Boolean).join(' · ');
 }
 
@@ -42,7 +42,7 @@ export function modelSearchField(doc, listId) {
  * The list painted into `el` and driven by `input`. `main()`, `current()` and `recents()` are the caller's routes
  * (Main's now, the chosen one, the recent ones to offer); `mainRow` puts Main's model first, tagged, and
  * `mainFacts()` says in its facts what a press on it means where that is not Main's own route facts; `rule` is the
- * line under the rows. `onRoute(route)` takes a pick, `onSettings()` the way to Settings › Accounts where nothing but
+ * line under the rows. `onRoute(route)` takes a pick, `onSettings()` the way to Settings › Accounts and keys where nothing but
  * Main can lead, `onLeave({focus})` an Escape with nothing typed (`focus`) or a Tab out; `onPaint()` follows every
  * repaint (the list may have changed size). Returns `{ paint, destroy }`.
  */
@@ -51,11 +51,12 @@ export function createModelList({ el, input, id, store, main, current, recents, 
     const search = { query: '', only: '', active: -1, rows: [], picks: new Map() };
     const describe = (route) => describeRoute(store.index(), route);
 
+    // A model whose catalog states a price says it where "paid by key" stood.
     const rowMarkup = (said, { tag = '', selected = false, extra = '', facts = '' } = {}) => `<div class="chat-model-row" role="option"`
         + ` data-row="${esc(said.key)}" aria-selected="${selected}">${sourceMark(said)}`
         + `<span class="chat-model-row-id" data-i18n-skip>${esc(said.id)}</span>`
         + (tag ? `<span class="chat-model-row-tag">${esc(tag)}</span>` : '')
-        + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts || [said.window, said.sourceLabel, payWords(said)].filter(Boolean).join(' · '))}</span>${extra}</div>`;
+        + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts || [said.window, said.sourceLabel, said.price || payWords(said)].filter(Boolean).join(' · '))}</span>${extra}</div>`;
 
     function paint() {
         const index = store.index();
@@ -86,7 +87,7 @@ export function createModelList({ el, input, id, store, main, current, recents, 
                 note(status.failed ? 'The model catalog could not be read.' : 'Only Main\'s model can lead work here.');
                 picks.set('accounts', { settings: true });
                 parts.push(`<div class="chat-model-row chat-model-door" role="option" data-row="accounts" aria-selected="false">`
-                    + '<span class="chat-model-row-id">Add a subscription or a key in Settings › Accounts</span></div>');
+                    + '<span class="chat-model-row-id">Add a subscription or a key in Settings › Accounts and keys</span></div>');
             } else if (index.sources.length === 1) {
                 // One source: its models at once, no source step.
                 section(index.sources[0].label, true);

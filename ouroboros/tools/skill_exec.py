@@ -609,8 +609,8 @@ def _skill_tool_preflight(
         return None
     return (
         "⚠️ SKILLS_UNAVAILABLE: No skills are discoverable. Point "
-        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Settings → "
-        "Behavior → External Skills Repo, or install skills into the data plane."
+        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Skills → "
+        "Sources, or install skills into the data plane."
     )
 
 
@@ -720,23 +720,19 @@ def _author_finish_existing_skill_review(
     rationale: str,
     review_reference: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Record author finish in Advisory or Cyber without buying a new panel.
+    """Record author finish without buying a new panel.
 
-    Advisory needs earlier feedback (a verdict in review.json or a settled skill record with findings) or
-    a returned terminal reference of a review that formed no verdict, plus a passing current preflight;
+    Outside Cyber Pro it needs earlier feedback (a verdict in review.json or a settled skill record with findings)
+    or a returned terminal reference of a review that formed no verdict, plus a passing current preflight;
     Cyber may continue with either missing or failed. Critic facts stay intact; only the author record
     binds the newly accepted bytes.
     """
-    from ouroboros.config import get_review_enforcement
-    from ouroboros.review_records import build_author_disposition
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, build_author_disposition
     from ouroboros.skill_loader import compute_content_hash, load_review_state, save_review_state
     from ouroboros.skill_review import _run_deterministic_preflight
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
+    from ouroboros.tools.review_helpers import cyber_review_authority
 
-    enforcement = str(get_review_enforcement() or "").strip().lower()
-    cyber = not review_enforcement_blocks("blocking")
-    if review_enforcement_blocks(enforcement):
-        return {"error": _skill_review_refusal(ctx, "LEGACY_BLOCKED", "SKILL_REVIEW_ERROR: explicit author finish requires advisory enforcement.")}
+    cyber = cyber_review_authority()
     loaded = load_bound_skill(binding)
     if loaded is None:
         return {"error": _skill_review_refusal(ctx, "LEGACY_UNAVAILABLE", "SKILL_REVIEW_ERROR: selected skill is unavailable for author finish.")}
@@ -756,13 +752,13 @@ def _author_finish_existing_skill_review(
             rationale=rationale,
             subject_hash=current_hash,
             reviewer_signal=review_state.status,
-            enforcement=enforcement,
+            enforcement=RECORDED_REVIEW_AUTHORITY,
         )
     except ValueError as exc:
         return {"error": _skill_review_refusal(ctx, "TOOL_ARG_ERROR", f"SKILL_REVIEW_ERROR: {exc}")}
     previous_hash = str(review_state.reviewed_content_hash or review_state.content_hash or "")
     preflight_facts = None
-    # Current preflight is independent evidence; Cyber may continue with its failure, Advisory may not.
+    # Current preflight is independent evidence; Cyber may continue with its failure, nothing else may.
     preflight = _run_deterministic_preflight(
         ctx, drive_root, loaded, current_hash, persist=False, binding=binding,
     )
@@ -936,13 +932,6 @@ def _non_executable_review_message(prefix: str, skill_name: str, status: str, *,
                                    gate: Dict[str, Any] | None = None, strict_review: bool = False) -> str:
     gate = gate or skill_review_gate(status, stale=stale)
     normalized_status = normalize_skill_review_status(status)
-    if gate["blocking_reason"] == "blocker_findings_under_blocking_enforcement":
-        return (
-            f"⚠️ {prefix}: skill {skill_name!r} review status is 'blockers' "
-            "and review enforcement is blocking, so it is not executable. "
-            "Fix the listed blocker findings or switch review enforcement to "
-            "advisory and reload the skill state."
-        )
     stale_note = f", stale={stale}" if stale else ""
     return (
         f"⚠️ {prefix}: skill {skill_name!r} review status is {normalized_status!r}{stale_note}, "
@@ -1381,7 +1370,7 @@ _REVIEW_SCHEMA = {
         "Max Review Cycles semantics: an identical request never buys a new "
         "panel over a verdict — the settled verdict of the same subject REPLAYS free, "
         "keyed by the shared reuse identity (the subject's bytes and rules, the "
-        "assigned seats, enforcement, the answer contract and the round: "
+        "assigned seats, the answer contract and the round: "
         "rebuttal, goal, scope), so only changed content, a changed panel or "
         "contract, or a NEW rebuttal dispatches reviewers again. After a settled "
         "wave formed no verdict, the identical request is a new paid wave; a "
@@ -1391,8 +1380,8 @@ _REVIEW_SCHEMA = {
         "task-driven reviews; the current content snapshot for the manual "
         "lane); on exhaustion the review is refused free with a typed "
         "review_cycles_exhausted event and stays honestly PENDING — no verdict "
-        "is fabricated. Whether the payload may run is the skill's review_gate "
-        "under the effective enforcement; Cyber Pro leaves it to Ouroboros's "
+        "is fabricated. Whether the payload may run is the skill's review_gate; "
+        "Cyber Pro leaves it to Ouroboros's "
         "judgment, with the review as evidence, not a PASS."
     ),
     "parameters": {
@@ -1402,8 +1391,8 @@ _REVIEW_SCHEMA = {
                 "type": "string",
                 "description": "Skill name (directory name in OUROBOROS_SKILLS_REPO_PATH).",
             },
-            "reviewers": {"type": "array", "items": {"type": "string"}, "description": "Enabled row ids/handles; omitted means the whole pool. Blocking widens to all ticked reviewers; Advisory requires at least one ticked reviewer and a reason when narrowed. Unticked advisers are heard, not counted. Cyber Pro composes freely."},
-            "reason": {"type": "string", "description": "Why these reviewers; required for a narrowed Advisory panel, including a re-review after blockers."},
+            "reviewers": {"type": "array", "items": {"type": "string"}, "description": "Enabled row ids/handles; omitted means the whole pool. Outside Cyber Pro name at least one ticked reviewer, with a reason when you name fewer than all. Unticked advisers are heard, not counted. Cyber Pro composes freely."},
+            "reason": {"type": "string", "description": "Why these reviewers; required for a narrowed panel outside Cyber Pro, including a re-review after blockers."},
             "review_rebuttal": {
                 "type": "string",
                 "description": (
@@ -1420,7 +1409,7 @@ _REVIEW_SCHEMA = {
             "author_disposition": {
                 "type": "string",
                 "enum": ["accepted", "rejected", "partial", "deferred"],
-                "description": "Optional Advisory author finish for the current content hash. Keeps original critic evidence; changed or unavailable-review cases require current deterministic preflight. For terminal partial-feedback or unavailable outcomes, pass the returned review_reference.",
+                "description": "Optional author finish for the current content hash. Keeps original critic evidence; changed or unavailable-review cases require current deterministic preflight. For terminal partial-feedback or unavailable outcomes, pass the returned review_reference.",
             },
             "review_reference": {
                 "type": "object", "properties": {"job_id": {"type": "string"}, "record_id": {"type": "string"}, "content_hash": {"type": "string"}},
@@ -1444,7 +1433,7 @@ _EXEC_SCHEMA = {
         "Run one manifest-declared script of a type=script skill. The skill must be "
         "enabled and its review_gate must permit the current bytes: outside "
         "Cyber Pro, a current executable reviewer verdict or a qualified "
-        "Advisory author acceptance of these exact bytes (the reviewer status "
+        "author acceptance of these exact bytes (the reviewer status "
         "may then still be pending or stale); Cyber Pro leaves it to "
         "Ouroboros's judgment. Requested key/permission grants and isolated "
         "dependencies still apply. Only type=script "
@@ -1495,7 +1484,7 @@ _TOGGLE_SCHEMA = {
         "Enable or disable a skill. Disabled skills are excluded from "
         "skill_exec regardless of review status. Enabling requires the "
         "skill's review_gate to permit the current bytes (outside Cyber Pro: "
-        "a current executable reviewer verdict or a qualified Advisory author "
+        "a current executable reviewer verdict or a qualified author "
         "acceptance of these exact bytes), any requested key or "
         "host-permission grants; enabling installs or refreshes the declared isolated dependencies "
         "itself (a review is never needed for packages) and repairs an enabled skill whose packages broke. "

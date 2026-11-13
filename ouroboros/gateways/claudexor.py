@@ -716,8 +716,8 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
             raise ClaudexorUnavailable("invalid_model_payload", "Model request must be a JSON object")
         digest = "sha256:" + sha256
         stage_key = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        created = _model_object(self._request(
-            "POST", "/v2/uploads",
+        created = _model_object(self._upload_request(
+            "open", "POST", "/v2/uploads",
             json_body={"purpose": "model", "kind": "file", "mime": "application/json",
                        # Bind create's existing metadata identity to the bytes too:
                        # equal length alone would let an open upload change payload.
@@ -730,7 +730,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
             raise ClaudexorUnavailable("malformed_response", "Model upload returned no upload id")
         path = f"/v2/uploads/{quote(upload_id, safe='')}"
         try:
-            status = _model_object(self._request("GET", path))
+            status = _model_object(self._upload_request("state", "GET", path))
         except ClaudexorUnavailable as exc:
             if exc.status_code != 404 or exc.code != "upload_not_found":
                 raise
@@ -742,8 +742,8 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
                 self.put_upload_bytes(upload_id, data)
             elif status.get("state") != "uploaded":
                 raise ClaudexorUnavailable("model_upload_unavailable", "Model upload is not ready for finalization")
-        resource = _model_object(self._request(
-            "POST", f"{path}/finalize", json_body={"expectedSha256": digest},
+        resource = _model_object(self._upload_request(
+            "finalize", "POST", f"{path}/finalize", json_body={"expectedSha256": digest},
             headers={"Idempotency-Key": f"model-finalize-{stage_key}"},
         ))
         if resource.get("purpose") != "model":

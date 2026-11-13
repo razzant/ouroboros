@@ -42,16 +42,16 @@ def _handle_preflight_review(
 
 
 def _next_step(projection: Dict[str, Any]) -> str:
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
+    from ouroboros.tools.review_helpers import cyber_review_authority
 
     obligations = len(projection.get("open_obligations") or [])
     carried = (f" {obligations} open obligation(s) from earlier blocked rounds ride into the next panel's brief."
                if obligations else "")
-    if not review_enforcement_blocks("blocking"):
+    if cyber_review_authority():
         return ("Cyber Pro: whether and how to commit is your judgment; findings, missing evidence and pending "
                 "operations stay recorded, and this is not a PASS." + carried)
     return ("When the edits are complete, run commit_reviewed(commit_message='...'): the deterministic checks, "
-            "the tests and the review panel run (Blocking gates; Advisory returns the outcome before any commit); "
+            "the tests and the review panel run (the outcome returns before any commit); "
             "preflight_reviewer='<enabled row>' optionally buys one early look first." + carried)
 
 

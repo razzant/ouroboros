@@ -14,7 +14,7 @@ A reviewer's configured rights separately govern checks of untrusted code in its
 
 `skill_review.py` freezes loader-hashed bytes for the shared `tools/review_skill.py` wave. The skill ledger projects into `review.json`; seats return checklist findings. Change-focused re-review counts per root or manual content version. Install/update captures caller/scope before return; async review retains task, room, authority and budget. Skills-page calls are manual.
 
-Preflight failure persists as PENDING, never advisory-overridable BLOCKERS. Records bind the release digest (`skill_identity.py`: payload plus dependency declarations, without install notes); conversion rebinds only proven unchanged bytes. Host facts admit exact bytes without a panel: trusted source, `self_check` (Cyber Pro only), owner Skip, or owner edit by the owner's selected-skill task. In ordinary tasks, owner-requested edits use `skill_owner_action` Skip with `owner_source` carrying the owner's words. Edits invalidate earlier acceptance. Review-source blockers stay off under Advisory, author finish included. Elsewhere Advisory author finish accepts after substantive feedback or the exact reference of a terminal review that formed no verdict; it runs preflight and records `author_disposition.review_reference`. A running review is not unavailable. `SkillReviewState.gate_for` supplies one authority without rewriting critic facts; Blocking needs fresh approval, Cyber keeps P0/P3 judgment. Publication: §6.
+Preflight failure persists as PENDING, never overridable BLOCKERS. Records bind the release digest (`skill_identity.py`: payload plus dependency declarations, without install notes); conversion rebinds only proven unchanged bytes. Host facts admit exact bytes without a panel: trusted source, `self_check` (Cyber Pro only), owner Skip, or owner edit by the owner's selected-skill task. In ordinary tasks, owner-requested edits use `skill_owner_action` Skip with `owner_source` carrying the owner's words. Edits invalidate earlier acceptance. Review-source blockers stay off until owner Skip, author finish included. Elsewhere author finish accepts after substantive feedback or the exact reference of a terminal review that formed no verdict; it runs preflight and records `author_disposition.review_reference`. A running review is not unavailable. `SkillReviewState.gate_for` supplies one authority without rewriting critic facts; Cyber keeps P0/P3 judgment. Publication: §6.
 
 ### Telegram built-in
 
@@ -34,7 +34,7 @@ ClawHub lands atomically with file hashes; direct review attempts precede `skill
 
 ### Desktop actions and result views
 
-`skills/unix_computer_use/`: one macOS helper: quiet AX, app-local exposure, same-window reads. `paste_chord.js`: Command-plane V, local/SSH; `key()`: layout letters. Targeting, grants, receipts: `SKILL.md`; owned native fixtures.
+`skills/unix_computer_use/`: one macOS helper: quiet AX, app-local exposure, same-window reads, `until_text`. `paste_chord.js`: Command-plane V/shortcuts, local/SSH. Targeting, grants, receipts: `SKILL.md`; owned native fixtures.
 
 Composition/`PRODUCER_RESULT_SOURCE_JSON` vs `FULL_RESULT_SOURCE_JSON`: `tools/tool_result.py`, `loop_tool_execution.py`.
 

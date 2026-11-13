@@ -27,6 +27,14 @@ its waiting line (``memory_waiting``: how many, in how many rooms, the oldest) a
 releases it, with a reason (``chronicle_store._rule_mark_release``). Showing it, a tool read or a
 mailbox acknowledgement of a notice is not that release.
 
+A left wave's mark also keeps what its record said when it was published (``review.outcome``, from
+``outcome_facts``: the verdict word, the findings of each kind, how many asked answers arrived and how
+many answers asked of advisers are unreadable, one per adviser and question), and its head says the same in words. The waiting line counts the marks whose
+outcome is a ``clean_pass`` and those of a verdict-bearing review that keep no outcome; the list
+prints each mark's outcome, reading the review record of an older mark as it stands now
+(``mark_outcome``), and what landed of a commit review's change (``mark_landing``). These are facts
+beside the words: nothing is released, hidden or ranked by them.
+
 A result review its author finished before (``pending_review=finish``) whose late verdict is a PASS of exactly
 the delivered subject also resolves that task's missing-conclusion warning (``resolve_pending_result_review``).
 
@@ -120,6 +128,9 @@ def _facts(record: Any) -> Dict[str, Any]:
     subject = facts.get("subject") or {}
     if not isinstance(subject, dict) or any(isinstance(value, (dict, list)) for value in subject.values()):
         raise ValueError("subject maps names to scalar identity values")
+    outcome = facts.get("outcome")
+    if outcome is not None and (not isinstance(outcome, dict) or any(isinstance(v, (dict, list)) for v in outcome.values())):
+        raise ValueError("outcome maps names to scalar facts of the settled record")
     return {**facts, "subject": subject, "settled_at": str(facts.get("settled_at") or "")}
 
 
@@ -137,13 +148,166 @@ def _text(facts: Mapping[str, Any]) -> str:
 def _mark(mark_id: str, room: str, facts: Mapping[str, Any]) -> Dict[str, Any]:
     ref = facts["source_ref"]
     target = {**ref, "task_id": str(ref.get("task_id") or facts["task_id"])}  # readable from any focus
+    outcome = facts.get("outcome")
     return {"id": mark_id, "kind": "mark", "room_id": room, "target_ref": target, "text": _text(facts),
             "author": {"kind": "host", "operation": LATE_REVIEW_OPERATION, "surface": facts["surface"],
                        "task_id": facts["task_id"]},
             "scope": "room", "quote": None, "visibility": "full",
             "review": {"surface": facts["surface"], "task_id": facts["task_id"],
                        "publication_id": facts["publication_id"], "settled_at": facts["settled_at"],
-                       "subject": facts["subject"], "source_read": facts.get("source_read")}}
+                       "subject": facts["subject"], "source_read": facts.get("source_read"),
+                       **({"outcome": outcome} if isinstance(outcome, dict) else {})}}
+
+
+def outcome_facts(record: Any) -> Optional[Dict[str, Any]]:
+    """What a review record says at this moment, as the scalars a late mark keeps beside its words: the verdict
+    word, how many findings of each kind the record holds, how many of the answers asked of its counted seats
+    arrived (one per seat and question; the seat count for a record that keeps no per-question tally) and how
+    many answers asked of advisers, heard outside the count, are unreadable (``unheard``: one per adviser and
+    question, an adviser that answered one question and not the other included; one per adviser whose row keeps
+    no per-question answers). A
+    record that is not settled formed no verdict: ``{"verdict": ""}``, never a guessed PASS. A plan council's
+    record is asked no verdict question: ``{"advice": True}``, never its missing findings read as none. No record
+    at all says nothing (``None``): a mark published without one keeps no outcome, so its list line reads the
+    record whenever it can be read."""
+    if not isinstance(record, Mapping):
+        return None
+    if record.get("surface") == "intention":
+        return {"advice": True}
+    if record.get("state") != "settled":
+        return {"verdict": ""}
+    from ouroboros.review_ledger import ANSWERED_STATUSES  # D15->D06 is lazy-only
+
+    verdict = record.get("verdict") or {}
+    quorum = verdict.get("quorum") or {}
+    tallies = [part for part in (quorum.get("parts") or {}).values() if isinstance(part, Mapping)] or [quorum]
+    return {"verdict": str(verdict.get("aggregate") or ""),
+            **{name: len(verdict.get(f"{name}_findings") or []) for name in ("critical", "advisory", "additional")},
+            "asked": sum(int(tally.get("assigned") or 0) for tally in tallies),
+            "answered": sum(int(tally.get("responded") or 0) for tally in tallies),
+            "unheard": sum(_unheard(row, ANSWERED_STATUSES) for row in record.get("rows") or []
+                           if isinstance(row, Mapping) and row.get("additional"))}
+
+
+def _unheard(row: Mapping[str, Any], answered: Any) -> int:
+    """The unreadable answers of one adviser's row: its asked questions without a responded answer, else one
+    when the seat itself gave no readable answer (a row that keeps no per-question answers)."""
+    parts, answers = row.get("parts") or (), row.get("answers")
+    if parts and isinstance(answers, Mapping):
+        return sum(1 for part in parts
+                   if not (isinstance(answers.get(part), Mapping) and answers[part].get("status") == "responded"))
+    return int(row.get("status") not in answered)
+
+
+def clean_pass(outcome: Any) -> bool:
+    """A PASS with nothing left to read: every answer asked of a counted seat arrived, every adviser answered
+    and the record holds no finding of any kind. A PASS with notes, a PASS short of an answer, a FAIL and a
+    missing verdict are all something else, and so is an outcome kept before advisers were counted: an
+    unknown number of unheard advisers is not zero."""
+    return (isinstance(outcome, Mapping) and outcome.get("verdict") == "PASS"
+            and not any(outcome.get(name) for name in ("critical", "advisory", "additional"))
+            and outcome.get("unheard") == 0
+            and int(outcome.get("asked") or 0) > 0 and outcome.get("answered") == outcome.get("asked"))
+
+
+def outcome_words(outcome: Any) -> str:
+    """One mark's outcome for the list of late reviews: facts in words, never advice on what to do with it."""
+    if not isinstance(outcome, Mapping):
+        return "outcome not recorded"
+    if outcome.get("advice"):
+        return "advice, not a verdict"
+    if not outcome.get("verdict"):
+        return "no verdict formed"
+    kinds = [f"{outcome[name]} {name}" for name in ("critical", "advisory", "additional") if outcome.get(name)]
+    short, unheard = int(outcome.get("asked") or 0) - int(outcome.get("answered") or 0), outcome.get("unheard")
+    return (str(outcome["verdict"]) + ", " + (", ".join(kinds) if kinds else "no findings")
+            + (f", {short} asked answer{'' if short == 1 else 's'} missing" if short > 0 else "")
+            + (", adviser answers not recorded" if unheard is None
+               else f", {unheard} adviser answer{'' if unheard == 1 else 's'} missing" if unheard else ""))
+
+
+def mark_outcome(mark: Mapping[str, Any], drive_root: Any = None) -> Optional[Dict[str, Any]]:
+    """The outcome of one late-review mark: the facts published with it when they are whole, else (asked with the
+    data root) its review record as it reads now. Facts are whole once they say how many advisers went unheard;
+    a mark kept before that, or before any outcome was kept, answers from its record, and keeps what it has when
+    the record cannot be read. A plan reply is advice by its kind, whatever its council's record holds. ``None``
+    when nothing says: the deleted acceptance panel kept no record, and an unreadable record is not a clean one."""
+    review = mark.get("review") or {}
+    kept = review["outcome"] if isinstance(review.get("outcome"), dict) else None
+    if kept is not None and ("unheard" in kept or drive_root is None):
+        return kept
+    if review.get("surface") == "plan_review":
+        return {"advice": True}
+    record_id = str((review.get("subject") or {}).get("record_id") or "")
+    if drive_root is None or not record_id:
+        return kept
+    from ouroboros.review_ledger import load_record  # D15->D06 is lazy-only
+
+    try:
+        return outcome_facts(load_record(drive_root, record_id)) or kept
+    except (OSError, ValueError):
+        return kept
+
+
+def mark_landing(mark: Mapping[str, Any], drive_root: Any) -> Optional[Dict[str, Any]]:
+    """What is recorded, as it reads now, of the change a late commit review read: the commit that landed under
+    this review (``{"commit": sha, "tree": same|different|unknown}``, the tree's relation to the one reviewed), else
+    the pull request a receipt of its task records as merged, named by its address (``{"pr": url}``: a fact about the
+    task's receipts, not proof of who merged it or that this change is in it), else the latest receipt of its task
+    with its outcome (``{"pr": url, "status": outcome}``: a merge asked for and not recorded as done, ``unknown`` or
+    ``queued`` among them; a queued one whose pull request reads otherwise since carries the owner module's
+    ``note``), else that neither is recorded (``{}``: no commit under this record and no receipt, which a
+    commit under another record of the task or a merge made outside ``pr_merge`` does not show). ``{"unread": True}``
+    when the record or the task's result cannot be read: an unread fact is never told as nothing landed. ``None``
+    for any other review. Read on request and never kept on the mark: a successor of the task may still land it."""
+    review = mark.get("review") or {}
+    if review.get("surface") != "commit_gate":
+        return None
+    from ouroboros.merge_receipts import RECEIPTS_KEY, queued_earlier_note  # the readers below are named lazily only
+    from ouroboros.review_doctrine import public_commit_landings
+    from ouroboros.review_ledger import load_record
+    from ouroboros.task_results import load_task_result
+
+    try:
+        record = load_record(drive_root, str((review.get("subject") or {}).get("record_id") or ""))
+        if record is None:
+            return {"unread": True}
+        commits = public_commit_landings(record)
+        if commits:
+            return {"commit": commits[-1]["commit_sha"], "tree": commits[-1]["reviewed_subject"]}
+        task = load_task_result(drive_root, str(review.get("task_id") or ""))
+        if not isinstance(task, dict):
+            return {"unread": True}
+        receipts = [receipt for receipt in task.get(RECEIPTS_KEY) or [] if isinstance(receipt, dict)]
+        merged = [receipt for receipt in receipts if (receipt.get("outcome") or {}).get("status") == "merged"]
+        latest = (merged or receipts or [None])[-1]
+        if latest is None:
+            return {}
+        address = str((latest.get("repo") or {}).get("url") or f"PR #{latest.get('number')}")
+        if merged:
+            return {"pr": address}
+        note = queued_earlier_note(latest)  # a queued request the pull request's later readback no longer shows
+        return {"pr": address, "status": str((latest.get("outcome") or {}).get("status") or "unknown"),
+                **({"note": note} if note else {})}
+    except Exception:  # the list the mind asked for keeps its other rows when one work's facts cannot be read
+        log.warning("Landing facts unavailable for late review mark %s", mark.get("id"), exc_info=True)
+        return {"unread": True}
+
+
+def landing_words(landing: Any) -> str:
+    """One late commit review's landing for the list: what is recorded, never a guess about lost work."""
+    if not isinstance(landing, Mapping):
+        return ""
+    if landing.get("unread"):
+        return "what landed could not be read"
+    if landing.get("commit"):
+        relation = {"same": "", "different": "; its tree differs from the reviewed one"}.get(
+            str(landing.get("tree") or ""), "; its relation to the reviewed tree is unknown")
+        return f"committed as {str(landing['commit'])[:12]} under this review{relation}"
+    if landing.get("pr"):
+        note = f" ({landing['note']})" if landing.get("note") else ""
+        return f"a receipt of its task records {landing['pr']} as {landing.get('status') or 'merged'}{note}"
+    return "no commit under this review, no merged receipt of its task"
 
 
 def publish_late_review(drive_root: Any, record: Mapping[str, Any]) -> LateReviewMark:

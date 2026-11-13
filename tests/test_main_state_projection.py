@@ -98,7 +98,9 @@ def test_optional_terminal_question_outside_history_and_sidebar_reaches_state(ga
     assert not any(row.get("quiz_id") == "format" for row in history.json()["messages"])
 
     payload = _state(gateway)
-    assert project["id"] not in {row["id"] for row in payload["projects"]}
+    # Older than the feed's recent slice, its room is still the owner's turn: the feed keeps its row (state.py).
+    assert project["id"] in {row["id"] for row in payload["projects"]}
+    assert len(payload["projects"]) == 50 + 1
     assert project["chat_id"] in payload["project_chat_ids"]
     assert payload["current_questions_complete"] is True
     [question] = payload["current_questions"]
@@ -112,6 +114,21 @@ def test_optional_terminal_question_outside_history_and_sidebar_reaches_state(ga
     assert question["project_chat_id"] == project["chat_id"]
     assert payload["main_attention"] == []
     assert load_task_result(gateway.root, task["id"])["owner_quiz"]["format"]["state"] == "expired_terminal"
+
+
+def test_a_current_question_reaches_its_rooms_turn_through_the_state_composition(gateway):
+    """What Main's pill counts is its room's turn on the wire: ``state.py`` hands Main's current questions to the work
+    projection, so the room of a question whose task ended stays the owner's turn (amber) at rest, and the tray's
+    count holds it once."""
+    project, task = _ask(gateway)
+    write_task_result(gateway.root, task["id"], "completed", result="Result ready")
+    reconcile_terminal(gateway.root, task["id"])
+    payload = _state(gateway)
+    assert [row["quiz_id"] for row in payload["current_questions"]] == ["format"]
+    room = payload["rooms"][str(project["chat_id"])]
+    assert room["turn"] == [{"kind": "open_question", "task_id": task["id"], "quiz_id": "format"}]
+    assert room["amber"] is True and room["activity"] == "idle"
+    assert payload["work_summary"]["turn"] == 1
 
 
 def test_state_carries_current_model_access_and_budget_resume_controls(gateway):
@@ -648,3 +665,29 @@ def test_a_direct_project_roots_own_warm_pause_stays_quiet_in_main(tmp_path, mon
     finally:
         owner_pause.release_fence(tmp_path, "author", reason="test_cleanup")
         parked.join(10)
+
+
+def test_project_chat_ids_is_unknown_never_empty_while_no_row_of_the_registry_can_be_read(gateway):
+    """``[]`` means "no Projects" (a fresh install); a registry no row of which can be read is ``null``; an invalid
+    row beside readable ones leaves the rooms they name. The feed's count says the same in the same body: unknown
+    while the rooms are, never "none listed" (a reader keeps the rows it shows)."""
+    def rooms_and_count():
+        body = _state(gateway)
+        return body["project_chat_ids"], body["project_listable_count"]
+
+    assert rooms_and_count() == ([], 0), "a fresh install without a registry has no Projects"
+    project = create_project(gateway.root, "known", name="Known")
+    assert rooms_and_count() == ([project["chat_id"]], 1)
+    registry = gateway.root / "state" / "projects.json"
+    intact = registry.read_bytes()
+    registry.write_bytes(intact[: len(intact) // 2])
+    assert rooms_and_count() == (None, None)
+    data = json.loads(intact)
+    registry.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
+    assert rooms_and_count() == ([project["chat_id"]], 1)
+    registry.unlink()  # lost beside its commit witness: unknown too
+    assert rooms_and_count() == (None, None)
+    registry.write_text(json.dumps({**data, "projects": [{"chat_id": 7}]}), encoding="utf-8")  # only an invalid row
+    assert rooms_and_count() == (None, None)
+    registry.write_bytes(intact)
+    assert rooms_and_count() == ([project["chat_id"]], 1)

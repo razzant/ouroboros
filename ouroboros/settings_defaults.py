@@ -224,8 +224,6 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_SUBAGENT_PRESET_RECEIPT": "",
     "OUROBOROS_ONBOARDING_COMPLETED_AT": "",
     "OUROBOROS_ONBOARDING_ATTEMPT_ID": "",
-    # Pre-commit review enforcement: advisory | blocking
-    "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     # Auto-grant reviewed-skill requests by default; grants stay bound to the
     # reviewed content hash and editing a skill still invalidates them.
     "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
@@ -311,7 +309,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "LOCAL_MODEL_FILENAME": "",
     "LOCAL_MODEL_PORT": 8766,
     "LOCAL_MODEL_N_GPU_LAYERS": 0,
-    "LOCAL_MODEL_CONTEXT_LENGTH": 16384,
+    "LOCAL_MODEL_CONTEXT_LENGTH": 65536,
     "LOCAL_MODEL_CHAT_FORMAT": "",
     "USE_LOCAL_MAIN": False,
     "USE_LOCAL_HEAVY": False,
@@ -345,6 +343,9 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT",
     # The acceptance improvement-pass and plan-swarm knobs are retired (the cap bounds result/commit/skill waves).
     "OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES",
+    # Blocking left the product: consumed before the purge (config.normalize_settings_raw), so the generic notice never
+    # names it; an install that had Blocking hears it once in its own words (upgrade_notices.review_enforcement_notice).
+    "OUROBOROS_REVIEW_ENFORCEMENT",
     "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC",
     "OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC",
     "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC",

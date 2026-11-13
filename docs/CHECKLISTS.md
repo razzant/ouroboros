@@ -12,9 +12,9 @@ governance document replaces or merges the description of the node it touches
 rather than adding beside it.
 
 **Application follows BIBLE P0/P3.** Review findings and failures are independent
-facts in every mode. In Cyber Pro they inform Ouroboros and never prohibit an
-action or require permission; the agent may configure its own subsequent work.
-Configured enforcement remains recorded as selected, and an author decision does
+facts in every mode; they inform Ouroboros, who has the last word. In Cyber Pro
+they never prohibit an action or require permission; the agent may configure its
+own subsequent work. An author decision does
 not rewrite FAIL, pending, missing source or an unperformed effect as PASS.
 Enforcement requirements below describe ordinary modes; Cyber applies the same
 checks as advice. This product rule does not replace an external developer's
@@ -45,9 +45,8 @@ explicit work-order review obligations.
   index, syntax of staged `.py` files), the tests preflight under its own policy
   (`skip_tests` is the one exemption, a documentation-only diff included; a
   managed resolution always runs it; a matching unsigned receipt of a complete run
-  counts), then the named row's look, then ONE review wave in which every seat on the panel (every pool
-  seat under Blocking; the pool seats Ouroboros named with a reason under
-  Advisory), shown the same test execution fact, answers both parts of the brief. The commit
+  counts), then the named row's look, then ONE review wave in which every seat on the panel (the pool
+  seats Ouroboros named, with a reason when narrowed), shown the same test execution fact, answers both parts of the brief. The commit
   records its preflight fact: `performed` with the record id, `skipped` for an
   explicit `skip_advisory_review=True`, `not_performed` when no row was named.
   `preflight_reviewer` and `skip_advisory_review=True` are opposite choices
@@ -61,32 +60,31 @@ explicit work-order review obligations.
   the coupling question, pre/post fingerprint and exact commit/tag binding still
   run; unresolved obligations/debt remain visible. Explain the judgment in the
   surrounding task narrative.
-- **Loud advisory enforcement (BIBLE P3 bound):** the owner chooses enforcement
-  outside Cyber Pro; Cyber may configure its own review and continue under P0;
-  `advisory` is legitimate ONLY while every decision blocking enforcement would
-  have stopped (critical findings, quorum failure, infrastructure failure,
-  missing advisory provider) leaves a durable trace: a `review_advisory_override`
+- **Loud continuation (BIBLE P3 bound):** a reviewer's answer never forbids a
+  commit; Cyber may configure its own review and continue under P0. Every
+  decision to continue over critical findings, quorum failure, infrastructure
+  failure or a missing review leaves a durable trace: a `review_advisory_override`
   event in `events.jsonl` plus the persistent `advisory_overrides_count` /
-  recent-overrides fields in `review_status`. Silent advisory is forbidden.
+  recent-overrides fields in `review_status`; restart and update notices name
+  the commits that landed over it. Silent continuation is forbidden.
 - **Author finality remains evidence, not reviewer PASS:** the authors of a task
   result, a skill and a commit may record an explicit author disposition against the
-  exact current subject after received feedback or a disclosed unavailable review under Advisory.
-  Advisory and Cyber commit outcomes return before Git; explicit continuation uses
+  exact current subject after received feedback or a disclosed unavailable review.
+  Commit outcomes return before Git; explicit continuation uses
   the returned `review_reference` and author disposition, with independent current
   preflight/test/Git checks and no new critic.
   Cyber may decide to continue without prior feedback, keeping the actual missing,
   failed or pending review separate from its own decision.
   A revised author subject keeps the original critic hash/findings separately;
   author finish precedes any repeat panel. The last paid panel still permits ordinary
-  author correction; N limits paid waves, not default author responses. Blocking may
-  save corrections and stop, but still needs fresh reviewer authority to advance.
+  author correction; N limits paid waves, not default author responses.
   An explicit unfinished stop creates neither approval nor an automatic follow-up.
   A skill's current deterministic preflight must pass; existing grants, enablement
-  and dependencies stay independent. Hub submission uses the same qualified Advisory
-  authority plus its existing publication consent and scanner, disclosing original
+  and dependencies stay independent. Hub submission uses the same qualified author
+  acceptance plus its existing publication consent and scanner, disclosing original
   critical severity and current author/published hashes without invented PASS.
   Pending physical work without feedback is not unavailable; preserved partial
-  feedback can support Advisory choice without cancelling the other actors.
+  feedback can support the author's choice without cancelling the other actors.
   Main judges semantic criteria and material evidence after acknowledging the
   observed owner source; source generation alone is not semantic supersession.
   Historical feedback remains independently addressable. For Main's finish over a
@@ -127,7 +125,7 @@ explicit work-order review obligations.
 
 ### Review-exempt operations
 
-Mechanical recovery is **exempt** from new blocking review (BIBLE P9);
+Mechanical recovery is **exempt** from new review (BIBLE P9);
 the caller's mode, root and task authority still apply:
 
 - `vcs_restore` — discards uncommitted changes (not a commit, no review needed)
@@ -193,8 +191,8 @@ The recorded review state — the verdict when one was reached and the individua
 findings, including the partial findings of a pending review; for commits also
 the open obligations and commit-readiness debt shown by `review_status` and the
 Review Continuity context section — stays recorded until a later review or
-successful commit resolves it; the author's response rewrites neither it nor the
-selected enforcement. Before the next attempt the author owes an outcome, not a
+successful commit resolves it; the author's response does not rewrite it.
+Before the next attempt the author owes an outcome, not a
 procedure: consider the open findings together against the evidence and accepted
 goal rather than patching one visible symptom. Repair what the requirement still
 needs, or replace or remove a chosen means within the applicable task authority,
@@ -212,8 +210,8 @@ unchanged material under the same review contract is not re-reviewed without a
 genuinely new rebuttal, while an infrastructure outcome such as a missed
 reviewer quorum neither replays nor lapses a verdict. If attempts stop
 converging, reconsider the approach instead of repeating it. The shared retry
-note (`review_prompt_text.py::build_self_verification_template`, in the commit
-block message and the skill review block) and the open-obligation/debt branches
+note (`review_prompt_text.py::build_self_verification_template`, in the skill
+review block) and the open-obligation/debt branches
 of `review_status` `next_step` state this same duty.
 
 ---
@@ -434,7 +432,7 @@ Ownership` section is delivered beside them.
 | 15 | light_external_artifacts | If tool/runtime policy changed, does light mode still allow external user deliverables via `user_files`, task-scoped `task_drive`/`artifact_store`, and process `outputs` while blocking Ouroboros repo/control-plane mutation? Do review prompts avoid recommending `runtime_data/uploads` or skill payloads as generic artifact transport? | critical |
 | 16 | subagent_isolation | If the diff changes delegation — `schedule_subagent`, child queueing or constraints, tool discovery/execution, reads, memory or chronicle handoff, waits — does every child still hold exactly the authority its assignment grants, on every surface? Check against ARCHITECTURE §6 "Delegated subagents" and "Tool capability and execution" rather than re-deriving them: (a) the model-visible schema stays `subagent_id` + `objective` + `expected_output` with no route selector; lineage, workspace, contract, deadline and resources are inherited, never widened; the selected row's snapshotted route is the one that starts, or a definite typed refusal ends the child at $0 (ambiguous start evidence wakes the model instead) — never a substitute; (b) a read-only child reads what its parent can read on every surface (files, queries, media, local browser) and writes only host-owned derived outputs (e.g. `extract_video_frames` under `artifact_store/video_frames`) — no commits, review, runtime or skill-lifecycle changes, shell or tool expansion; nested delegation stays within the configured depth and cap, and depth never strengthens an actor; an investigation session works in an evidence-only copy without apply authority, and readonly, Observe and Presence ceilings still narrow it; ordinary external tools follow owner policy, and an acting child gets the real registered catalog under its constraint; (c) the browser boundary keeps external HTTP(S), parent-equivalent `file://` reads and loopback except Ouroboros control endpoints, admits private origins only through host-established `resource_policy.allowed_origins` (an unidentified matching endpoint is never a foreign service), checks navigation, actions, subresources and every redirect hop, still refuses metadata, link-local and reserved targets, keeps `evaluate` off for a read-only child and on an acting child's current page, and keeps vision tools available; (d) start inputs match the child's role with every omission named (§6 "Selected first-input sources"), and my human's later words to the work still reach every running child, nanny and session at its next step or continuation, whole and dated, with nothing already sent rewritten (the tree hears what its root hears); a child or nanny writes only its own signed chronicle drafts, and accepting them stays with the integrating mind (§6 chronicle "Writers"); the full task result returns to the parent; (e) waits on cognitive work stay progress-aware and re-decidable, never a fixed cutoff that discards in-flight work (P5); (f) tests cover an allowed and a blocked path. | critical |
 | 17 | evolution_durability | If the diff can change how self-modification is tested, committed or interrupted (preflight, commit, restart and reset paths, evolution scheduling, tests): do tests and preflight never mutate the live repository or live `data/`, does a local commit succeed without a remote, and does interrupted self-modification end in a reviewed commit or a preserved rescue/transaction pointer? | critical |
-| 18 | context_budget_ssot | If the diff changes context budgets, the context layout or a section's tier, or the ContextFit deficit/reclaim contract: is there still one budget SSOT that both context profiles, the docs and the drift-guard tests read; does the always-full core (BIBLE, SYSTEM, identity, scratchpad, the shared understanding, marks) stay in view in every mode, with the knowledge index resident whole or as its outline (every active note named, people's summaries kept), the source registry whole or as its headings, and the sealed story resident; does only the physical window turn content into addresses — people's words last (ARCHITECTURE `memory_floor.py`, §6 "Context fitting") — with every degraded span named by a visible on-demand pointer (P1), and does an owner-selected smaller target bound host material only; and does the coupling question stay independent of the context mode (coupling the two is an immune-system change under P3)? Outside Cyber Pro the owner selects the context mode. (PASS with "Not applicable" if no context-budget/layout change.) | critical |
+| 18 | context_budget_ssot | If the diff changes context budgets, the context layout or a section's tier, or the ContextFit deficit/reclaim contract: is there still one budget SSOT that both context profiles, the docs and the drift-guard tests read; does the always-full core (BIBLE, SYSTEM, identity, scratchpad, the shared understanding, marks) stay in view in every mode, with the knowledge index resident whole or as its outline (every active note named, people's summaries kept), the source registry whole or as its headings, and the sealed story resident; does a tight window step what was said or told down only to the mind's own shorter tellings of those very sources, standing in the view beside their on-demand address (a later reply or read is no telling), with a bare address, excerpt or count in their place only as a recorded emergency of the window or selected mode — a conversation's read or said but untold whole until then, the unread named by who, when and how much, the owner's words last (ARCHITECTURE `memory_floor.py`, §6 "Context fitting"; P1) — and does a change of forms, floor order or what counts as a conversation carry one start's view before and after, naming what the mind stops seeing, and does an owner-selected smaller target bound host material only; and does the coupling question stay independent of the context mode (coupling the two is an immune-system change under P3)? Outside Cyber Pro the owner selects the context mode. (PASS with "Not applicable" if no context-budget/layout change.) | critical |
 | 19 | delegated_transport | If the diff touches delegated execution or review transport (ARCHITECTURE §6 "Delegated subagents" and the session executors of `review_execution.py`, matched by role, not by a file list): (a) does the exact selected `subagent_id` route start with custody-durable requested→effective evidence, or return a typed refusal — never a host-chosen substitute, any fallback being a new explicit LLM choice? (b) does a capability reduction reach the durable envelope, the child prompt and the parent result? (c) is a result received only after a hash-bound read to EOF, and does a retry replay the recorded bytes? (d) is quota exhaustion judged only on positive evidence for the route's own model (unknown stays usable), and does spend settle through custody with root/parent lineage, unknown never shown as zero? (e) does the work order carry the complete assignment and host authority once, with no arbitrary size cap, compulsory file/question transport or duplicate objective, do plan normalization and reviewer inputs keep full content and tail-sensitive identity, and do real route limits keep the original input, cause and execution state? (f) does a legacy partial request stay recoverable byte-for-byte (exact selector, digest and range validation, durable source coverage) and refuse apply until complete, with reject still available? No vendor or harness name is branched on in core; source availability never proves reading. (PASS with "Not applicable" if no delegated-transport surface changed.) | critical |
 | 20 | source_completeness | Partial views and source truth: if the diff adds or changes a bounded view (projection, summary, omission marker, status count) or review evidence (plan, change review, preflight, result review): (a) does every cut say so in band — a marker naming what was cut and a reference to the existing file, blob, record or range the deciding actor can still open after the real merge, promotion and cleanup? A new store, copy or sidecar is not required when such a reference exists; (b) does a consumer that can authorize PASS, a destructive rewrite or replacement of a full contract read the named sources first, or abstain with the existing typed incomplete/degraded outcome? A marker or host claim alone is never sufficient; (c) do review records keep exact artifact bodies and source selectors, candidate SHA, reviewer route continuity and every omission, with continuity, transport and coverage discrepancies as typed facts beside them, so a failed or truncated delivery stays DEGRADED/NOT_RUN rather than PASS? File-read coverage is diagnostic (BIBLE P3), never a reason to discard a received verdict or drop its reviewer from quorum; no disclosure discards, blanks or relabels a body or its cause. | critical when applicable |
 | 21 | canonical_memory_fork | If the diff touches Project/fork/execution roots, summaries, memory, or GC, does it preserve one canonical identity and distinguish authority/biography from execution-local state? Are referenced canonical artifacts promoted or retained before a child/root is collected, with missing legacy bytes represented as gaps? | critical when applicable |
@@ -695,7 +693,7 @@ release and is unreviewed again. No synthetic `clean` verdict is written;
 the deterministic preflight still gates the bytes an install or update lands (a
 built-in re-seeded with an app update carries the app's own release); a source's
 trust never rewrites earlier installs. A skill installed from a source that
-reviews each skill keeps blocker findings non-executable even under Advisory
+reviews each skill keeps blocker findings non-executable
 until the owner skips the review. Enablement of such installs is the
 owner's choice or the install's turn-on-when-ready request, never over an
 explicit Off. The Built in row of the source list sets built-in trust;
@@ -829,27 +827,24 @@ the reviewer's word.
 
 ### Severity rules
 
-- Skill review verdicts are enforcement-independent:
+- Skill review verdicts are mode-independent:
   - `clean` — no FAIL findings.
   - `warnings` — one or more advisory FAIL findings, no blocker findings.
   - `blockers` — one or more critical/blocker FAIL findings.
   - `pending` — no reliable completed review verdict.
-- Outside Cyber Pro, enforcement maps verdicts to execution:
-  - `OUROBOROS_REVIEW_ENFORCEMENT=blocking`: `clean` and `warnings` are
-    executable; `blockers` are not.
-  - `OUROBOROS_REVIEW_ENFORCEMENT=advisory`: `clean`, `warnings`, and
-    `blockers` are executable by operator choice. This changes
+- Outside Cyber Pro, verdicts map to execution:
+  - `clean`, `warnings`, and `blockers` are executable. This changes
     `executable_review` only; it does not rewrite the verdict, suppress
     findings, or change `skill_review_status` semantics.
   - Outside Cyber Pro, `pending` is not executable. A stale critic verdict does not authorize bytes;
-    under Advisory a separate current author acceptance may admit the payload
-    after deterministic preflight. Blocking still requires fresh critic evidence.
+    a separate current author acceptance may admit the payload
+    after deterministic preflight.
 - Review state stores findings and computes the verdict at load time. Agents
   and UI callers must use `review_gate.executable_review` / `executable_review`,
   not the raw status string, when deciding whether the skill is runnable.
 - A deterministic `skill_preflight` FAIL is a structural gate failure, not an LLM
-  verdict: it persists and aggregates to `pending`, which is non-executable under
-  ordinary enforcement mode (advisory included). Cyber keeps the failed check
+  verdict: it persists and aggregates to `pending`, which is non-executable
+  outside Cyber Pro. Cyber keeps the failed check
   and pending verdict visible while leaving the execution decision to Ouroboros.
 - Hard trust-boundary items are blocker findings on any FAIL regardless of
   reviewer-supplied severity: `manifest_schema`,
@@ -1058,7 +1053,7 @@ the reply's form and of who withdraws what. Adjudicate your own open objections 
 with why (the change or the answer removed the defect, or you were wrong), or restate what is still
 missing. A reformulation of an earlier objection is not a new one, and a new objection on a revision
 you saw before says why it was invisible then. An answer with no objection is legitimate.
-Nobody votes, and whether an open objection holds is the host's fact, not part of your judgment.
+Nobody votes; the mind weighs every open objection and decides.
 
 ### Rules for reviewers
 

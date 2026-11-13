@@ -837,7 +837,7 @@ def executor_environment(ctx: Any, cwd: Any, *, executor, map_path) -> Optional[
 
 
 def record_reviewed_commit(ctx: Any, commit_sha: str, *, row: Optional[Dict[str, Any]] = None, created_tag: str = "") -> None:
-    """The commit gate created ``commit_sha`` on this candidate under the configured enforcement
+    """The commit gate created ``commit_sha`` on this candidate
     (``row``: the candidate whose interrupted gate an evolution intent proves). The author's
     test widening stays with that commit, so a later run of the same unadopted delta keeps it."""
     bound = row or descriptor(ctx)

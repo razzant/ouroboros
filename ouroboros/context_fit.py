@@ -3,16 +3,19 @@
 This module is deliberately data-only around the existing context builder and
 capability-evidence SSOT.  It does not own routing, provider retries, or global
 context-mode state; callers supply the captured context core and exact-route
-resolver so ``ouroboros.context`` remains the public compatibility surface.
+resolver so ``ouroboros.context`` remains the public compatibility surface. It owns
+only the handle of the fit's own route question (``RouteQuestion``), asked beside the build.
 """
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
 import math
 import pathlib
+import threading
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Iterable, Callable, Dict, List, Mapping, Optional, Tuple
@@ -34,7 +37,7 @@ from ouroboros import context_budget
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
-from ouroboros.context_timing import counted, timed, timed_section
+from ouroboros.context_timing import adopt, another_pass, apart, counted, timed, timed_section
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +114,8 @@ class ContextFitPlan:
     window_record: Optional[WindowRecord] = None
     window_witness_bound: bool = True
     route_base_url: str = ""
+    account_pin: str = ""  # the profile the role pins ("": Auto, where an answer naming no route names no account)
+    window_evidence: Tuple[str, str] = ("", "")  # the start's ``capability_evidence.window_evidence``, for its receipt
     start_tool_schemas_json: Optional[str] = None  # what the start fit priced (``null``: none); None: not captured
     # The start fit's own mode and why it is below the owner's (``memory_floor.start_cause``): every reprojection
     # and route rebind keeps it, while ``initial_mode`` follows the current selection. ("", ""): not a built start;
@@ -192,7 +197,7 @@ class ContextFitPlan:
             # cut window); equal counts from another level never keep a view's budget provenance.
             old, new = (dict(facts.get("floor") or {}) for facts in (projection.memory_facts or {},
                                                                      contents[projection.mode][1] or {}))
-            return (any(old.get(key) != new.get(key) for key in ("steps", "runs", "by_budget", "target_tokens", "mode_switch"))
+            return (any(old.get(key) != new.get(key) for key in ("forms_version", "steps", "runs", "by_budget", "target_tokens", "mode_switch"))
                     or projection.memory_facts.get("host_sections_addressed")
                     != contents[projection.mode][1].get("host_sections_addressed"))
 
@@ -574,6 +579,8 @@ def _context_route(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
             credential_profile_id=account,
             model_route=task.get("model_route"),
         )
+        route["account_pin"] = str(model_account_options(route["model"], role=role, settings=settings,
+                                                         credential_profile_id=account)["credential_profile_id"])
     route["window_observation_fp"] = route_observation_scope(route, settings)
     return route, settings
 
@@ -595,6 +602,11 @@ def resolve_context_fit_route(
     from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY, model_role_option
 
     route, settings = _context_route(task)
+    # The account a restore's send will prefer (``model_route_preferred``) is looked up, never asked as a pin: without
+    # its fresh record the question stays the route's own (Auto, or the role's pin). An account observed serving (a
+    # receipt) is read as that account, its fingerprint checked.
+    carried = (route["provider"] == "claudexor" and bool(route["options"].get("account_fingerprint"))
+               and bool(task.get("model_route_preferred")))
     evidence = probe(
         DATA_DIR,
         provider=route["provider"],
@@ -602,7 +614,10 @@ def resolve_context_fit_route(
         base_url=route["base_url"],
         use_local=route["use_local"],
         allow_fetch=allow_fetch,
+        force=bool(task.get("route_read_again")),  # the horizon guard's repeat of its own failed early read
         options=route["options"] or None,
+        **({"ask": {"source_id": route["options"]["source_id"], "credential_profile_id": route["account_pin"]}}
+           if carried else {}),
     )
     if route["provider"] == "claudexor" and getattr(evidence, "account_fingerprint", ""):  # the account receipts name
         route["options"] = {**route["options"], **{key: getattr(evidence, key) for key in (
@@ -611,6 +626,93 @@ def resolve_context_fit_route(
     window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, route["model_role"],
                                    settings=settings))
     return route, with_role_window(evidence, window)
+
+
+def _route_key(task: Dict[str, Any]) -> Optional[str]:
+    """The Claudexor route a fit's question asks the engine about (``_context_route``: settings, role, pin and carried
+    account), or None: another route's evidence needs no engine question beside the build."""
+    try:
+        route = _context_route(task)[0]
+        return json.dumps(route, sort_keys=True, default=str) if route.get("provider") == "claudexor" else None
+    except Exception:
+        return None
+
+
+class RouteQuestion:
+    """The fit's route question, asked when the build starts and answered beside it (W2 H4, owner 12.11.2026).
+
+    The same question through the same resolver (``context._context_fit_route``) and the same evidence, in a thread
+    running in a copy of the starting context, where the account that just failed is only read. It counts its work in
+    a window of its own (``context_timing.apart``), adopted by the build's receipt when the fit takes its answer; a
+    voided question's work is not. One handle per build: the fit takes its answer only for the route it asked about
+    (``_route_key``, compared before and after the wait), so a changed route asks its own question, and it waits on it
+    as on its own read, with no timer.
+    ``early`` names an answer taken from it, which ``build_context_fit_plan`` asks ``again`` at the usual point when
+    using it would show less memory than the selected view, or none (``narrowed_by_window``, a refused start).
+    """
+
+    def __init__(self, task: Dict[str, Any], resolver: Optional[Callable[..., Tuple[Dict[str, Any], Any]]] = None):
+        from ouroboros import context
+
+        self.resolver, self.early, self.work = resolver or context._context_fit_route, False, {}
+        self.key, self.asked_key, self.answer, self.error = _route_key(task), None, None, None
+        self.asked = threading.Event()
+        if self.key is None:
+            self.asked.set()
+            return
+        copied = contextvars.copy_context()
+        threading.Thread(target=copied.run, args=(self._ask, dict(task)), name="fit-route-question", daemon=True).start()
+
+    def _ask(self, task: Dict[str, Any]) -> None:
+        try:
+            with apart() as self.work:  # its counts join the build's receipt only when the fit takes this answer
+                self.asked_key = _route_key(task)
+                self.answer = self.resolver(task, allow_fetch=True)
+        except Exception as error:  # the fit meets it where it would have met its own failed read
+            self.error = error
+        finally:
+            self.asked.set()
+
+    def __call__(self, task: Dict[str, Any], *, allow_fetch: bool) -> Tuple[Dict[str, Any], Any]:
+        key, self.key, self.early = self.key, None, False  # used once: any later call asks its own question
+        if allow_fetch and key is not None and _route_key(task) == key:
+            timed("fit.route_wait", self.asked.wait)
+            if self.asked_key == key and _route_key(task) == key:  # a route changed during the wait asks its own
+                self.early = True
+                adopt(self.work)
+                if self.error is not None:
+                    raise self.error
+                return self.answer
+        return timed("fit.route", self.resolver, task, allow_fetch=allow_fetch)
+
+    def again(self, task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+        """The same question at the fit's usual point (the horizon guard). When the early answer came from a read that
+        failed, the question is read anew: the failure that read wrote in this build answers nothing here."""
+        early, self.early = self.answer, False
+        failed = isinstance(early, tuple) and len(early) == 2 and getattr(early[1], "read", "") == "failed"
+        return timed("fit.route", self.resolver, {**task, "route_read_again": True} if failed else task, allow_fetch=True)
+
+
+def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mode: str, preferred: str,
+                       state: Any, delivered: Mapping[str, Any]) -> bool:
+    """Whether a start shows less memory than the selected view because of its window: a mode below the owner's, a
+    rescued input, host forms or any step of the walk the window took, collapsed task lines (F1) included. Cuts the
+    owner's own mode budget took are no narrowing of the window's, but only while that budget is below the window: a
+    window at or below the mode's target sets the start bound itself. Under the budget, only the window's physical
+    fold of this room's uncovered owner rows is the window's; it needs ordinary memory above the budget and takes F7
+    (``memory_floor.fit_memory_view``). An unknown window narrows nothing."""
+    if not state.known_window:
+        return False
+    if delivered or mode != preferred:
+        return True
+    facts = contents[mode][1] or {}
+    floor = facts.get("floor") or {}
+    target = context_budget.context_mode_limits(preferred, preferred, state.output_reserve)[0]
+    budget = bool(target) and target < state.window_record.total_equivalent
+    steps = floor.get("steps") or {}
+    cut = any(steps.values())
+    owners = budget and not (floor.get("ordinary_unfit") and steps.get("F7"))  # no physical fold: the budget cut alone
+    return bool(cut and not (floor.get("by_budget") and owners)) or bool(facts.get("host_sections_addressed") and not budget)
 
 
 def _failed_route_evidence(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
@@ -700,7 +802,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     """
     from dataclasses import replace
     from ouroboros import memory_floor as floor
-    from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars, whole_story_at
+    from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars
     from ouroboros.tool_policy import select_tool_schemas
 
     whole_core, whole_governance = core, governance
@@ -750,7 +852,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         fixed = measure(selected, sent, addressed) if fixed is None else fixed
         return floor.render_view_for_mode(snapshot, mode=selected, owner_mode=preferred, window_tokens=window, **walk,
             known_window=known_window, output_reserve=output_reserve, ratio=ratio, non_memory_tokens=fixed,
-            lowered_from=preferred if selected != preferred else None, max_room=room_fact, start_work=start_work,
+            # The Max room as the receipt settles it (``with_max_room`` decides its cause), so the floor note of a
+            # start memory lowered names what holds the room.
+            lowered_from=preferred if selected != preferred else None, start_work=start_work,
+            max_room=floor.with_max_room({}, room_fact, selected).get("max_room"),
             tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
             boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed)
 
@@ -795,12 +900,24 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
             snapshot.spec.work_room_levels if snapshot else work_room_levels)
 
-    # Max names whole books. Story is the last rung: change books before taking its pages.
-    whole_story = story_chars(snapshot) if snapshot else 0
+    # Both Max decisions use the clean-start guard's minimum ordinary memory,
+    # priced in this request with its receipt, schemas, reserve and work room.
+    ordinary_measures = {}
+    def ordinary_need():
+        if mode in ordinary_measures:
+            return ordinary_measures[mode]
+        forms = section_views(sections[mode], receipts)
+        minimum = view(mode, sent, forms, window, boundary, level=floor.ordinary_level(snapshot)) if snapshot else floor.NO_VIEW
+        price = measure(mode, sent, forms, minimum.story_chars, minimum.room_chars)
+        ordinary_measures[mode] = minimum, math.ceil(price * ratio) + reserve + work()
+        return ordinary_measures[mode]
+    minimum, need = ordinary_need() if (kept is None or start_work) and mode == "max" else (floor.NO_VIEW, 0)
     room_fact = floor.max_room_fact(snapshot, rendered_texts(core, section_views(sections[mode], receipts)),
-        render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=floor.tokens_of(whole_story),
+        render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=floor.tokens_of(minimum.story_chars),
         fixed=fixed, ratio=ratio, schemas=tool_schema_tokens(list(sent.schemas)), window=window, reserve=reserve,
         work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
+    if room_fact:
+        room_fact.update(need=need, story=floor.tokens_of(minimum.story_chars), room=floor.tokens_of(minimum.room_chars))
     if room_fact and floor.max_room_lost(room_fact):
         mode = "low"
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
@@ -813,15 +930,14 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         memory = floor.tokens_of(fit.story_chars) + floor.tokens_of(fit.room_chars)
         return known_window and math.ceil((fixed + memory) * ratio) + reserve > window
 
-    # Books step down on the frame's own completed view, never on a price of one. Max keeps whole books only beside
-    # the whole story and the work room (a start's rule); the same ordinary Nano is the last physical rescue for every
+    # Books step down on the frame's own completed view. Max keeps whole books beside
+    # ordinary memory and the work room; the same ordinary Nano is the last physical rescue for every
     # Main route, a view already shown included. A frame whose core alone cannot fit steps down unrendered. A frame
     # is judged by its pieces' prices: a frame the fit walks away from is never drawn whole.
     while True:
         shown = floor.NO_VIEW if mode != "nano" and overflows() else render()
-        books_lost = (kept is None or start_work) and mode == "max" and allowances["margin"] is not None and (
-            shown.story_chars != whole_story or (shown.level is not None and not whole_story_at(snapshot, shown.level))
-            or floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars) > allowances["margin"])
+        books_lost = ((kept is None or start_work) and mode == "max" and allowances["margin"] is not None
+                      and ordinary_need()[1] > window)
         if mode == "nano" or not (books_lost or overflows(shown)):
             break
         mode = "low" if mode == "max" else "nano"
@@ -911,33 +1027,9 @@ def build_context_fit_plan(
         preferred = "max"
 
     meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
-    try:  # a child probes its own route too: its parent's warm evidence is no fact about it
-        route, evidence = route_resolver(task, allow_fetch=True)
-    except Exception:
-        log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
-        route, evidence = _failed_route_evidence(task)
-
     user_content = json.loads(core.user_content_json)
-    # Keep the fit projection tied to the physical dispatch contract instead of
-    # duplicating its output reservation.  The lazy import avoids coupling the
-    # data-only fit representation to the high-level model loop.
-
-    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
-    route_facts = getattr(evidence, "route_facts", {}) or {}
-    working_reserve = route_facts.get("working_reserve_tokens")
-    window_basis = str(route_facts.get("basis") or "")
-    reserve = context_budget.context_mode_limits(preferred, preferred, output_reserve,
-                                                working_reserve_tokens=working_reserve)[1]
-    scope = route.get("window_observation_fp", evidence.route_fp)
-    bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
-    window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope)
-    known_window = window_record.usable is not None
-    view_args = dict(
-        preferred=preferred, tool_schemas=tool_schemas, window_tokens=window_record.total_equivalent,
-        known_window=known_window, output_reserve=output_reserve, window_record=window_record,
-        working_reserve_tokens=working_reserve)
     governance = {form: _governance_blocks(env, core, mode=form) for form in ("max", "low")}
-    from ouroboros.capability_evidence import evidence_model_route
+    from ouroboros.capability_evidence import evidence_model_route, window_evidence
     from ouroboros.memory_view import start_room, view_role
 
     view_task = {**task, "metadata": task.get("metadata") or meta}
@@ -946,21 +1038,79 @@ def build_context_fit_plan(
     # Select density before the single start walk, comparing the whole captured request at the size that can be sent.
     rows, schemas, memory_chars = _whole_request(core, governance, preferred, tool_schemas)
     counted("request_forms")
-    sendable = min(max(1, (estimate_context_prompt_tokens(rows, schemas, provider=str(route.get("provider") or ""), chars=True)
-                           + memory_chars + 3) // 4), window_record.usable or math.inf)
-    ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
-        None, str(evidence.route_fp or ""), str(route["model"] or ""), sendable, view_kind=view_kind)
-    levels, delivered = start_room(view_task, role), {}
+    levels, sized = start_room(view_task, role), {}
 
-    def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
-        return _view_projections(core, governance, user_content_json, **view_args, ratio=ratio, work_room_levels=levels)
+    def answer(ask: Callable[[], Tuple[Dict[str, Any], Any]]) -> Tuple[Dict[str, Any], Any]:
+        try:  # a child probes its own route too: its parent's warm evidence is no fact about it
+            return ask()
+        except Exception:
+            log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
+            return _failed_route_evidence(task)
+
+    def frame(route: Dict[str, Any], evidence: Any) -> SimpleNamespace:
+        """What the start walk reads of one route answer: reserves, the window record and the density."""
+        # Keep the fit projection tied to the physical dispatch contract instead of duplicating its output reservation.
+        output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
+        route_facts = getattr(evidence, "route_facts", {}) or {}
+        working_reserve = route_facts.get("working_reserve_tokens")
+        window_basis = str(route_facts.get("basis") or "")
+        reserve = context_budget.context_mode_limits(preferred, preferred, output_reserve,
+                                                    working_reserve_tokens=working_reserve)[1]
+        scope = route.get("window_observation_fp", evidence.route_fp)
+        bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
+        window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope)
+        provider = str(route.get("provider") or "")
+        if provider not in sized:  # the whole request measured once per provider, however many answers are framed
+            sized[provider] = estimate_context_prompt_tokens(rows, schemas, provider=provider, chars=True)
+        sendable = min(max(1, (sized[provider] + memory_chars + 3) // 4), window_record.usable or math.inf)
+        ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
+            None, str(evidence.route_fp or ""), str(route["model"] or ""), sendable, view_kind=view_kind)
+        limits = tuple((limit.tokens, limit.kind) if limit else None for limit in (window_record.input, window_record.total))
+        return SimpleNamespace(route=route, evidence=evidence, output_reserve=output_reserve, working_reserve=working_reserve,
+                               window_basis=window_basis, bound=bound, window_record=window_record, ratio=ratio,
+                               known_window=window_record.usable is not None,
+                               walked=(limits, window_record.usable is not None, output_reserve, working_reserve, ratio))
+
+    def walk(state: SimpleNamespace) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str, Dict[str, Any]]:
+        view_args = dict(
+            preferred=preferred, tool_schemas=tool_schemas, window_tokens=state.window_record.total_equivalent,
+            known_window=state.known_window, output_reserve=state.output_reserve, window_record=state.window_record,
+            working_reserve_tokens=state.working_reserve)
+
+        def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
+            return _view_projections(core, governance, user_content_json, **view_args, ratio=state.ratio,
+                                     work_room_levels=levels)
+        try:
+            return (*fit(core.user_content_json), {})
+        except MinimumViewUnfit as unfit:
+            # Physical rescue only (owner 2026-10-13, #1527): an exact source replaces the whole input only when no view
+            # of the known window holds it, a wake's bound projection first (``context_input_selection.rescued_start``).
+            from ouroboros.context_input_selection import rescued_start
+            return rescued_start(env, task, core.user_content_json, unfit, preferred, fit)
+
+    early = isinstance(route_resolver, RouteQuestion)  # it times its own wait (``fit.route_wait``) and read
+    state = frame(*answer(lambda: route_resolver(task, allow_fetch=True) if early else timed(
+        "fit.route", route_resolver, task, allow_fetch=True)))
+    refused = None
     try:
-        contents, initial_mode = fit(core.user_content_json)
-    except MinimumViewUnfit as unfit:
-        # Physical rescue only (owner 2026-10-13, #1527): an exact source replaces the whole input only when no view of
-        # the known window holds it, a wake's bound projection first (``context_input_selection.rescued_start``).
-        from ouroboros.context_input_selection import rescued_start
-        contents, initial_mode, delivered = rescued_start(env, task, core.user_content_json, unfit, preferred, fit)
+        contents, initial_mode, delivered = walk(state)
+    except MinimumViewUnfit as unfit:  # the early answer's window cannot hold the core: the usual point decides
+        if not (early and route_resolver.early):
+            raise
+        refused, contents, initial_mode, delivered = unfit, {}, "", {}
+    if early and route_resolver.early and (refused or narrowed_by_window(contents, initial_mode, preferred, state, delivered)):
+        # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view, or none,
+        # is asked again here, at the usual point, and that answer is used (its refusal is final); a walk that reads
+        # the same frame is not repeated unless it was refused.
+        with another_pass():  # a repeat by design, not work done again (``context_health`` names only the latter)
+            late = frame(*answer(lambda: route_resolver.again(task)))
+            if refused is not None or late.walked != state.walked:
+                contents, initial_mode, delivered = walk(late)
+        state = late
+    route, evidence, window_record, known_window = state.route, state.evidence, state.window_record, state.known_window
+    output_reserve, working_reserve, window_basis, ratio = (state.output_reserve, state.working_reserve,
+                                                            state.window_basis, state.ratio)
+    bound = state.bound
     estimates = {}  # projections that read alike are one form of the request
 
     @timed_section("fit.projections")
@@ -1037,7 +1187,8 @@ def build_context_fit_plan(
         model_role=str(route.get("model_role") or "main"),
         model_route=evidence_model_route(evidence, route["model"]) if route["provider"] == "claudexor" else {},
         evidence_source=window_record.source, window_record=window_record, window_witness_bound=bound,
-        route_base_url=str(route.get("base_url") or ""),
+        route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
+        window_evidence=window_evidence(evidence, window_record),
         core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
         start=(initial_mode, "" if initial_mode == preferred else start_cause(contents[initial_mode][1])),
     )

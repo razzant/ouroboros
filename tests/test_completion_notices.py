@@ -80,9 +80,10 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
     else:
         assert summary["completion_notice"]["neutral"] is False
         assert fragment in summary["reason_detail"]
+    unexamined = dialogue.TASK_CAUSE_PHRASES["receipt_absent"].rstrip(".")
     if case == "receipt":
-        assert summary["outcome_phase"] == "warn"  # notification calm is not a green verdict
-        assert "No host verification receipt" in summary["reason_detail"]
+        assert summary["outcome_phase"] == "done"  # nothing examined the result is a detail (9 Nov 2026)
+        assert unexamined in summary["reason_detail"]
     if case == "mixed":
         assert "receipt_absent" in summary["outcome_axes"]["objective"]["warnings"]
     _write_rows(data, [summary])
@@ -97,7 +98,7 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
     message = _Rec.sent[0][1]
     assert fragment in message
     assert "earlier version" not in message
-    assert "No host verification receipt" not in message
+    assert unexamined not in message
     if case in {"clean", "receipt"}:
         assert "⚠" not in message and "✅" not in message and "done" not in message
 
@@ -249,7 +250,7 @@ def test_the_works_review_gate_field_reaches_its_telegram_completion_copy_and_no
         "reason": "critical_findings", "task_id": "gated", "text": "x" * 300, "at": "2026-11-11T10:00:00+00:00"}}}
     plain = {**_record("clean"), "task_id": "plain"}
     rows = [terminal_projection._project_row(row["task_id"], row, {}, {"chat_id": 1}) for row in (gated, plain)]
-    line = "Review: 12× continued where Blocking would have stopped · latest: critical findings"
+    line = "Review: FAIL or no verdict 12× (latest: critical findings)"
     assert rows[0]["completion_notice"]["review_gate"] == line and "review_gate" not in rows[1]["completion_notice"]
     assert rows[0]["completion_notice"]["neutral"] is rows[1]["completion_notice"]["neutral"], "a field, not a cause"
     _write_rows(data, rows)

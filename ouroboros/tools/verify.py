@@ -5,7 +5,9 @@ One call runs the check AND attests the result, so it replaces the run the agent
 would have done anyway (≈ zero extra rounds). The contract KIND is agent-declared
 (LLM-first, P5 — the host never infers from prose whether a machine-checkable
 contract exists); the host only executes and attests what it can. Receipts feed
-the verification ledger and suppress the receipt_absent transparency flag.
+the verification ledger; an executed check after the result's last change examines it
+(``outcomes.result_unexamined``), while a declaration or a confirmed path is recorded as
+what it is and leaves the receipt_absent detail standing.
 """
 
 from __future__ import annotations
@@ -141,6 +143,17 @@ _ZERO_RUN_DECISIONS = ZERO_RUN_WRITE_DECISIONS
 # artifact_paths[1]) after the optional check — the golden-file / migration-parity
 # shape — recording a bounded hexdump of the first divergence in the receipt.
 _EXPECTED_MATCH_KINDS = ("substring", "exact", "exact_line", "json_equals", "bytes_equal")
+
+
+def _missing_check_refusal(kind: str, check: Any) -> str:
+    """A run kind sent without a command: what arrived, a ready call, the kinds that need none."""
+    received = "this call sent none" if check is None else f"check={repr(check)[:120]} holds no command"
+    return (
+        f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check`, and {received}. "
+        'Send the command the host should run, e.g. check=["pytest","-q"] or check="pytest -q"; with no '
+        "command to run use contract_kind=artifact_observation (artifact_paths) or "
+        "no_visible_machine_contract. Nothing ran; no receipt was written."
+    )
 
 
 def _expected_matches(out: str, expected: str, mode: str) -> bool:
@@ -534,7 +547,7 @@ def _record_delegation_zero_run(
     ).strip().lower()
     if decision not in _ZERO_RUN_DECISIONS:
         return (
-            "⚠️ TOOL_ARG_ERROR (verify_and_record): zero_run_decision must be one of "
+            f"⚠️ TOOL_ARG_ERROR (verify_and_record): zero_run_decision={decision!r} must be one of "
             f"{', '.join(_ZERO_RUN_DECISIONS)}."
         )
     basis = " ".join(str(
@@ -645,7 +658,7 @@ def _verify_and_record(
     skill_name = str(kwargs.get("skill_name") or "")
     kind = str(contract_kind or "").strip()
     if kind not in _CONTRACT_KINDS:
-        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind must be one of {', '.join(_CONTRACT_KINDS)}."
+        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind!r} must be one of {', '.join(_CONTRACT_KINDS)}."
     if active_tool_profile(ctx) == "local_readonly_subagent":
         # Read-only actor-first sessions need a host-owned zero-run disclosure,
         # not the general command/artifact verification surface.  Keep the
@@ -663,7 +676,7 @@ def _verify_and_record(
             )
     match_mode = str(expected_match or "substring").strip().lower() or "substring"
     if match_mode not in _EXPECTED_MATCH_KINDS:
-        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match must be one of {', '.join(_EXPECTED_MATCH_KINDS)}."
+        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match={match_mode!r} must be one of {', '.join(_EXPECTED_MATCH_KINDS)}."
     if match_mode == "bytes_equal" and kind not in _RUN_KINDS:
         # Silently accepting-and-ignoring the comparison would fake a stronger
         # verification than actually ran (adversarial r1 soft finding).
@@ -710,7 +723,7 @@ def _verify_and_record(
     # v6.54.4 criterion provenance (FLAG-ONLY, status never changes): where did
     # this success criterion come from — stated by the task, or synthesized by
     # the agent? agent_defined receipts surface to the acceptance reviewer and
-    # feed a one-shot advisory nudge (mirrors the masked-verification pattern).
+    # in the record (the call's own result says it when the check runs).
     # Default agent_defined: an UNDECLARED provenance must not read as task-stated.
     _source = str(criterion_source or "").strip().lower()
     receipt["criterion_source"] = _source if _source in ("task_stated", "agent_defined") else "agent_defined"
@@ -721,10 +734,7 @@ def _verify_and_record(
     if kind in _RUN_KINDS:
         argv = _normalize_check(check)
         if not argv:
-            return (
-                f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check` "
-                "(the verification command as argv list or a shell one-liner string)."
-            )
+            return _missing_check_refusal(kind, check)
         if match_mode == "bytes_equal" and len([p for p in (artifact_paths or []) if str(p or "").strip()]) != 2:
             return (
                 "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal requires "
@@ -878,7 +888,7 @@ def _verify_and_record(
                 receipt["artifacts_missing_after"] = _missing_after
         # Exit-masking sensor (v6.52.2, FLAG-ONLY — status unchanged): record when the check's own
         # shell pipeline can launder the real exit code (e.g. `... | tail`, `|| true`). Surfaced to
-        # the advisory reviewer + a one-shot nudge so a PASS over a masked check is reconsidered.
+        # the advisory reviewer and in this call's own result, so a PASS over a masked check is reconsidered.
         _masked, _mask_reasons = _check_has_exit_masking(argv)
         if _masked:
             receipt["check_exit_masking"] = True
@@ -941,7 +951,7 @@ def get_tools() -> List[ToolEntry]:
                 "no_visible_machine_contract records your best proxy and risk for review when no machine "
                 "check exists; delegation_zero_run records an incomplete/unknown decision for configured "
                 "session actors whose physical leaf never started (zero_run_decision + zero_run_basis). "
-                "A receipt suppresses receipt_absent on a clean turn. Verify against the task's own statement "
+                "Verify against the task's own statement "
                 "and materials, your human's words, installed oracles and your independent checks."
             ),
             "parameters": {"type": "object", "properties": {

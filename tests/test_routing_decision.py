@@ -699,13 +699,18 @@ def test_every_listed_result_says_how_its_work_ended_and_whether_its_continue_is
            continued_by={"successor_task_id": "r-next", "state": "bound", "action_nonce": "nonce-0001"})
     _ended(tmp_path, "r-owner", "2026-11-10T10:00:00Z", "cancelled", stop=True, reason_code="",
            cancel_origin={"source": "http_single", "reason": "owner stopped it"})
+    _ended(tmp_path, "r-paused", "2026-11-10T08:00:00Z", "cancelled", reason_code="owner_paused",
+           cancel_origin={"source": "agent_tool", "reason": "superseded by a newer plan"})
+    # An inline Presence turn that Stop now ended writes its own cancelled row under the rail's reason.
+    _ended(tmp_path, "r-inline", "2026-11-10T07:00:00Z", "cancelled", reason_code="owner_requested_finalization",
+           cancel_origin={"source": "http_single", "stop_policy": "immediate", "reason": "owner pressed Stop now"})
     _ended(tmp_path, "r-finish", "2026-11-10T11:00:00Z")
     _ended(tmp_path, "r-stop", "2026-11-10T11:23:57Z", stop=True, reason_code="plan_review_advisory")
     _ended(tmp_path, "r-answer", "2026-11-10T11:42:29Z")  # the owner asked why; this turn answered and ended
 
     metadata = _decision_turn_metadata(_decision_ctx(tmp_path), int(project["chat_id"]), "cm-why", {"project_id": "room"})
     listed = {row["task_id"]: row for row in metadata["project_routing_manifest"]["final_results"]}
-    assert list(listed) == ["r-answer", "r-stop", "r-finish", "r-owner", "r-bound"]
+    assert list(listed) == ["r-answer", "r-stop", "r-finish", "r-owner", "r-bound", "r-paused", "r-inline"]
     stopped = listed["r-stop"]
     assert (stopped["status"], stopped["outcome"], stopped["cause"]) == ("completed", "Stopped", "plan_review_advisory")
     assert stopped["ended_at"] == load_task_result(tmp_path, "r-stop")["terminal_time"]["occurred_at"]
@@ -717,6 +722,16 @@ def test_every_listed_result_says_how_its_work_ended_and_whether_its_continue_is
     assert finished["continuation_offer"] == {"eligible": False, "cause": "finished", "refusal": "author_finished"}
     assert listed["r-owner"]["outcome"] == "Stopped" and listed["r-owner"]["continuation_offer"]["refusal"] == "stopped_by_owner"
     assert "stop_reason" not in listed["r-owner"], "an owner's Stop is never the author's account"
+    # A cancel ended these two (audit 08-11.11 item 6): the cause is the cancel and who asked for it; the
+    # reason code a row kept from the stop before the cancel is the earlier stop, never the cause.
+    assert (listed["r-owner"]["cause"], listed["r-owner"]["cancelled_by"]) == ("cancelled", "http_single")
+    assert "earlier_stop" not in listed["r-owner"]
+    paused = listed["r-paused"]
+    assert (paused["cause"], paused["cancelled_by"], paused["earlier_stop"]) == ("cancelled", "agent_tool", "owner_paused")
+    # One press of Stop now is one event: the rail's own reason code is that stop, not a stop before it.
+    inline = listed["r-inline"]
+    assert (inline["cause"], inline["cancelled_by"]) == ("cancelled", "http_single") and "earlier_stop" not in inline
+    assert "cancelled_by" not in stopped and "earlier_stop" not in stopped  # a work no cancel ended reads as before
     assert listed["r-bound"]["continuation_offer"] == {"eligible": False, "refusal": "continuation_unconfirmed",
                                                        "state": "bound", "successor_task_id": "r-next"}  # no nonce
     pointer = metadata["project_last_task_result"]

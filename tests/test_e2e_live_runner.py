@@ -106,7 +106,7 @@ def test_scenario_table_shape():
         assert isinstance(row.settings_overrides, dict)
         assert callable(row.acceptance) and callable(row.stub_script)
     sm1 = scenarios.SCENARIOS["SM1"].settings_overrides
-    assert sm1 == {"OUROBOROS_RUNTIME_MODE": "advanced", "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"}
+    assert sm1 == {"OUROBOROS_RUNTIME_MODE": "advanced"}
     roster = json.loads(scenarios.SCENARIOS["SW1"].overrides("openai-compatible::mock-child")["OUROBOROS_SUBAGENTS"])
     assert roster["items"][0]["route"]["target_id"] == "openai-compatible::mock-child"
     assert scenarios.SCENARIOS["SW1"].overrides("x")["OUROBOROS_MAX_SUBAGENT_DEPTH"] == 1

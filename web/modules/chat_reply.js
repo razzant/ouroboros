@@ -178,13 +178,27 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         return Boolean(node) && node.dataset.portal !== '1';
     };
 
-    /** A search's first matching words, when the row's top left them out of what the reader sees: centred in the band
-     * between the room's header and search and the composer. */
+    /** A search's first matching words, when what the reader sees left them out: first each scrolling box between them
+     * and the feed (a wide code line, table or formula) brings them inside its own clip on the axis it scrolls, then
+     * the feed centres them in the band between the room's header and search and the composer. */
     function placeWords(words) {
-        const box = words?.getClientRects?.()[0];
-        if (!box) return;
-        const top = feed.getBoundingClientRect().top + headerClearance(), { bottom } = band();
-        if (box.top < top || box.bottom > bottom) feed.scrollTop += (box.top + box.bottom - top - bottom) / 2;
+        const first = () => words?.getClientRects?.()[0];
+        if (!first()) return;
+        // Into [from, to] (screen px) by `scale` screen px per scrolled px: centred, when outside.
+        const shift = (from, to, start, end, scale = 1) => (start < from || end > to ? (start + end - from - to) / 2 / scale : 0);
+        for (let box = words.startContainer.parentElement; box && box !== feed && feed.contains(box); box = box.parentElement) {
+            const style = getComputedStyle(box), edge = box.getBoundingClientRect();
+            const scale = edge.width / box.offsetWidth || 1;  // a phone drawer scales the room
+            const left = edge.left + box.clientLeft * scale, top = edge.top + box.clientTop * scale, word = first();
+            if (/auto|scroll/.test(style.overflowX) && box.scrollWidth > box.clientWidth) {
+                box.scrollLeft += shift(left, left + box.clientWidth * scale, word.left, word.right, scale);
+            }
+            if (/auto|scroll/.test(style.overflowY) && box.scrollHeight > box.clientHeight) {
+                box.scrollTop += shift(top, top + box.clientHeight * scale, word.top, word.bottom, scale);
+            }
+        }
+        const word = first(), top = feed.getBoundingClientRect().top + headerClearance(), { bottom } = band();
+        feed.scrollTop += shift(top, bottom, word.top, word.bottom);
     }
 
     async function seek(address, position, wanted, prepared, focus = true, locate = null) {

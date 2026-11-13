@@ -675,8 +675,8 @@ def test_frontend_evolution_and_consciousness_controls_are_present():
     consciousness = next(row for row in build_setup_contract()["modelSlots"] if row["slot"] == "consciousness")
     assert consciousness["settingKey"] == "OUROBOROS_MODEL_CONSCIOUSNESS"
     assert consciousness["settingsToggleId"] == "s-local-consciousness"
-    assert "modelRolesHost('settings-model-roles')" in settings_ui
-    assert "modelRoles.load(s," in settings
+    # Settings › Models draws that slot's page with the shared role editor (model_roles.js mountRole).
+    assert "modelRolesHost(hostId)" in (root / "web" / "modules" / "model_roles.js").read_text(encoding="utf-8")
     # The role effort keys are retired: evolution and wakes start at the top of the owner's
     # effort range, which only the composer's Effort control shows and edits.
     assert "OUROBOROS_EFFORT_CONSCIOUSNESS" not in settings and "OUROBOROS_EFFORT_EVOLUTION" not in settings
@@ -1003,9 +1003,9 @@ def test_memory_provenance_records_old_and_new_content(tmp_path):
         json.loads(line)
         for line in (tmp_path / "memory" / "knowledge_history.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    from tests._knowledge_history_shared import replaced
+    from tests._knowledge_history_shared import published, replaced
     assert replaced(tmp_path, history[-1]) == current.text
-    assert history[-1]["new_content"] == "---\ntype: note\n---\nnew"
+    assert published(tmp_path, history[-1]) == "---\ntype: note\n---\nnew"
 
     from hashlib import sha256
     from ouroboros.memory import Memory

@@ -20,6 +20,11 @@ def _payload(text):
     return json.JSONDecoder().raw_decode(text[text.index("{"):])[0]
 
 
+def _handback(text):
+    """The JSON a commit handback carries after its prose (which itself names ``{disposition: ...}``)."""
+    return json.JSONDecoder().raw_decode(text, text.index("\n{") + 1)[0]
+
+
 def _pool(monkeypatch):
     from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
     set_review_pool(monkeypatch, pool_roster(pool_seat("first", "test/m1", delivery="native"),
@@ -88,8 +93,7 @@ def test_reference_mutation_refuses_before_reading_subject(author, monkeypatch, 
 
 
 @pytest.mark.parametrize("changed", [False, True])
-def test_blocking_reference_resume_keeps_byte_gate(author, monkeypatch, changed):  # noqa: F811
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+def test_reference_resume_keeps_byte_gate(author, monkeypatch, changed):  # noqa: F811
     a, out = author, {}
     write_task_result(a.data, "own-child", "running", parent_task_id=TASK)
     first = _commit(a, out, wake_on={"tasks": ["own-child"]})
@@ -109,12 +113,15 @@ def test_blocking_reference_resume_keeps_byte_gate(author, monkeypatch, changed)
     if changed:  # the settled outcome reads back without the old bytes; changed bytes never inherit its PASS
         assert text.startswith("Review outcome already settled, returned read-only") and _commit_count(a) == 1, text
         assert "value = 3" in _git(a.repo, "diff", "--cached"), "the author's staged change is left as it was"
-    else:
-        assert _commit_count(a) == 2, text
+    else:  # the exact bytes: the collected outcome returns, and only the author's continuation lands them
+        assert text.startswith("Review outcome returned before commit. ") and _commit_count(a) == 1, text
+        with _parent(a):
+            landed = a.git._commit_reviewed(a.ctx, review_reference=_handback(text)["review_reference"],
+                                            author_disposition={"disposition": "accepted", "rationale": "test"})
+        assert _commit_count(a) == 2 and sorted(a.reviewer.rounds) == ["m1", "m2"], landed
 
 
-@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
-def test_pending_commit_reference_collects_read_only_after_the_index_changed(author, monkeypatch, enforcement):  # noqa: F811
+def test_pending_commit_reference_collects_read_only_after_the_index_changed(author, monkeypatch):  # noqa: F811
     """#2797: while the paid wave still runs the author fixes the files; collecting its reference joins the original
     seats over their frozen subject and returns their outcome read-only (no staging, commit or new send), and the
     reviewed bytes staged again land only through the existing exact collection."""
@@ -122,7 +129,6 @@ def test_pending_commit_reference_collects_read_only_after_the_index_changed(aut
 
     from ouroboros.tools import review_change_custody as custody
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     a, out = author, {}
     write_task_result(a.data, "own-child", "running", parent_task_id=TASK)
     first = _commit(a, out, wake_on={"tasks": ["own-child"]})
@@ -166,7 +172,7 @@ def test_pending_commit_reference_collects_read_only_after_the_index_changed(aut
     assert _git(a.repo, "write-tree") == reviewed_tree
     with _parent(a):
         landed = a.git._commit_reviewed(a.ctx, review_reference=ref)
-    assert _commit_count(a) == (2 if enforcement == "blocking" else 1), landed
+    assert _commit_count(a) == 1 and landed.startswith("Review outcome returned before commit"), landed
     assert sorted(a.reviewer.rounds) == ["m1", "m2"]
 
 
@@ -257,13 +263,13 @@ def test_a_reference_returned_before_any_send_collects_its_unpaid_reserved_wave(
 
 def test_a_commit_reference_returned_before_any_send_collects_and_commits_at_zero(author, monkeypatch):  # noqa: F811
     """The same unpaid reserved commit attempt is admitted by commit collection (``prepare_commit_collection``):
-    it joins the original operations, which send once each, and the collected PASS lands under Blocking."""
+    it joins the original operations, which send once each; the collected PASS returns, and the author's
+    continuation lands it at $0."""
     import threading
 
     from ouroboros.review_state import load_state
     from ouroboros.tools import review_collection
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     a, out = author, {}
     started, release = _hold_every_seat_before_its_send(a, monkeypatch)
     admitted, prepare = threading.Event(), review_collection.prepare_commit_collection
@@ -291,11 +297,15 @@ def test_a_commit_reference_returned_before_any_send_collects_and_commits_at_zer
         release.set()
         a.reviewer.release()
     _join(collecting)
-    if _commit_count(a) == 1:  # the collection returned while the seats ran: collect the settled wave again
+    if "reviewers are still running" in out["collected"]:  # it returned while the seats ran: collect the settled wave
         until(lambda: _notices(a))
         with _parent(a):
             out["collected"] = a.git._commit_reviewed(a.ctx, review_reference=reference)
-    assert _commit_count(a) == 2, out["collected"]
+    assert out["collected"].startswith("Review outcome returned before commit. ") and _commit_count(a) == 1, out["collected"]
+    with _parent(a):
+        landed = a.git._commit_reviewed(a.ctx, review_reference=_handback(out["collected"])["review_reference"],
+                                        author_disposition={"disposition": "accepted", "rationale": "test"})
+    assert _commit_count(a) == 2, landed
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "only the original reserved operations sent"
 
 

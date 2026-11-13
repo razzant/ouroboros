@@ -11,12 +11,14 @@ pins and the copy's one record file. Each test builds its repositories under
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import time
 
@@ -295,7 +297,7 @@ def test_each_copy_has_its_own_record_even_when_two_roots_share_a_directory_name
     assert sw._record_at(first, data) is None and sw._record_at(second, data)["task_id"] == "b"
 
 
-def test_the_legacy_registry_is_imported_once_with_a_receipt(tmp_path):
+def test_the_startup_import_alone_reads_the_legacy_registry_and_keeps_its_bytes(tmp_path, monkeypatch):
     data = tmp_path / "data"
     kept = {"path": str(tmp_path / "copies" / "acting-new"), "task_id": "acting", "note": "already a record"}
     sw._put_record(kept, data)  # a record written before the import is never replaced by a legacy row
@@ -307,15 +309,55 @@ def test_the_legacy_registry_is_imported_once_with_a_receipt(tmp_path):
     legacy = data / "state" / "subagent_worktrees.json"
     legacy.write_bytes(raw)
 
-    found = sw.find_execution_snapshot("old-run", data)
+    with monkeypatch.context() as working:  # no working reader or writer opens the old shape
+        working.setattr(sw, "_legacy_entries", lambda _raw: pytest.fail("a working path parsed the legacy registry"))
+        assert sw.find_execution_snapshot("old-run", data) is None
+        assert [row["task_id"] for row in sw.list_worktrees(data)] == ["acting"]
+        assert sw._record_at(rows[0]["path"], data) is None and legacy.read_bytes() == raw
+    receipt = sw.import_legacy_registry(data)
 
-    assert found is not None and found["task_id"] == "t-old"
-    assert not legacy.exists()
-    receipt = json.loads((data / "state" / "private_copies" / ".legacy-import.json").read_text(encoding="utf-8"))
-    assert receipt["rows"] == 3 and receipt["moved"] == 1
-    assert receipt["legacy_sha256"] == hashlib.sha256(raw).hexdigest()
+    digest = hashlib.sha256(raw).hexdigest()
+    assert not legacy.exists() and receipt["kept"] == f"archive/subagent_worktrees_{digest}.json"
+    assert (data / receipt["kept"]).read_bytes() == raw, "the original stays, byte for byte"
+    assert (receipt["rows"], receipt["moved"], receipt["legacy_sha256"]) == (3, 1, digest)
+    assert json.loads((data / "state" / "private_copies" / ".legacy-import.json").read_text(encoding="utf-8")) == receipt
+    assert sw.find_execution_snapshot("old-run", data)["task_id"] == "t-old"
     assert sw._record_at(kept["path"], data)["note"] == "already a record"
     assert sorted(row["task_id"] for row in sw.list_worktrees(data)) == ["acting", "t-old"]
+    assert sw.import_legacy_registry(data) is None, "done is the file's absence from its working place"
+
+    again = json.dumps({"worktrees": [{"task_id": "t-older-body", "path": str(tmp_path / "copies" / "later")},
+                                      {"task_id": "acting", "path": kept["path"], "note": "an older body's row"}]}).encode("utf-8")
+    legacy.write_bytes(again)  # an older body ran after a rollback and wrote its registry again
+    second = sw.import_legacy_registry(data)
+    assert (second["rows"], second["moved"]) == (2, 1) and (data / second["kept"]).read_bytes() == again
+    assert (data / receipt["kept"]).read_bytes() == raw and not legacy.exists()
+    assert sw._record_at(kept["path"], data)["note"] == "already a record"
+    assert sorted(row["task_id"] for row in sw.list_worktrees(data)) == ["acting", "t-old", "t-older-body"]
+
+    if os.name != "nt":  # Windows syncs no folder; elsewhere the original leaves only once the kept copy and the names are synced
+        synced = set()
+
+        def no_folder_sync(fd, real=os.fsync):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, "this folder could not be synced")
+            synced.add(os.fstat(fd).st_ino)
+            real(fd)
+
+        legacy.write_bytes(again)
+        with monkeypatch.context() as broken, pytest.raises(OSError):
+            broken.setattr(os, "fsync", no_folder_sync)
+            sw.import_legacy_registry(data)
+        assert legacy.read_bytes() == again and (data / second["kept"]).stat().st_ino in synced
+
+        def unsupported(fd, real=os.fsync):  # a filesystem that cannot sync a folder at all
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.ENOTSUP, "folder sync not supported")
+            real(fd)
+
+        with monkeypatch.context() as limited:
+            limited.setattr(os, "fsync", unsupported)
+            assert sw.import_legacy_registry(data)["moved"] == 0 and not legacy.exists(), "file-level durability is the limit"
 
 
 @pytest.mark.parametrize("payload", [b'{"worktrees": [', b'{"worktrees": "nope"}', b"\xff\xfe"])
@@ -326,14 +368,68 @@ def test_an_unreadable_legacy_registry_is_kept_reported_and_blocks_no_new_copy(t
     legacy.parent.mkdir(parents=True)
     legacy.write_bytes(payload)
 
-    assert sw.list_worktrees(data) == []
-    handle = provision(source, tmp_path)
+    receipt = sw.import_legacy_registry(data)
 
+    assert (receipt["rows"], receipt["moved"]) == (None, 0) and not legacy.exists()
+    assert (data / receipt["kept"]).read_bytes() == payload, "the legacy bytes are kept"
+    assert sw.list_worktrees(data) == [], "no record is invented"
+    handle = provision(source, tmp_path)
     assert sw.find_execution_snapshot("snap1", data)["path"] == handle.path
-    assert legacy.read_bytes() == payload, "the legacy bytes are kept"
-    assert not (data / "state" / "private_copies" / ".legacy-import.json").exists()
     reported = [row for row in events(data) if row.get("type") == "private_copy_record_unreadable"]
     assert [(row["op"], row["record"]) for row in reported] == [("legacy_import", str(legacy))]
+
+
+def test_the_startup_door_imports_the_registry_a_7_8_0_body_wrote(tmp_path, monkeypatch):
+    """The fixture is the registry the v7.8.0 body wrote for an acting child's copy and a delegated
+    writer's snapshot, with the recording machine's root replaced."""
+    from ouroboros.startup_migrations import prepare_startup_state
+
+    raw = (pathlib.Path(__file__).parent / "fixtures" / "nminus1" / "subagent_worktrees_v7.8.0.json").read_bytes()
+    rows = json.loads(raw.decode("utf-8"))["worktrees"]
+    data = tmp_path / "data"
+    legacy = data / "state" / "subagent_worktrees.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(raw)
+
+    report = prepare_startup_state(data)
+
+    assert report["private_copies"]["moved"] == len(rows) == 2 and not legacy.exists()
+    assert (data / report["private_copies"]["kept"]).read_bytes() == raw
+    assert [sw._record_at(row["path"], data) for row in rows] == rows, "each row is its record, unchanged"
+    assert sw.find_execution_snapshot("oldsnap0001", data)["task_id"] == "old-writer-task"
+    assert "private_copies" not in prepare_startup_state(data), "a second start finds nothing to import"
+
+    legacy.write_bytes(raw)  # an older body wrote it again, and this start's store import fails
+    with monkeypatch.context() as patch:
+        patch.setattr("ouroboros.store_import.ensure_current_store", lambda *_a, **_k: 1 / 0)
+        assert prepare_startup_state(data, strict=False)["status"] == "unavailable"
+    assert not legacy.exists(), "the copies' import waits for no other startup job"
+
+    legacy.write_bytes(raw)  # ... again, while another process holds the import's lock
+    lock = data / "state" / "private_copies" / ".legacy-import.lock"
+    held, began = sw.acquire_exclusive_file_lock(lock, timeout_sec=0.0, owner_aware_stale=True), time.monotonic()
+    try:
+        assert prepare_startup_state(data)["private_copies"] == {"busy": True} and legacy.read_bytes() == raw
+    finally:
+        sw.release_exclusive_file_lock(lock, held)
+    assert time.monotonic() - began < 60, "a start never waits out a busy import lock"
+    assert prepare_startup_state(data)["private_copies"]["moved"] == 0, "the next start finishes it"
+
+    legacy.write_bytes(raw)  # ... and when the helper takes no lock for a reason other than another import holding it
+
+    def refused(*_args, outcome=None, **_kwargs):  # e.g. a records folder this process cannot write: "unknown" today (#3229)
+        outcome.update(reason="unknown")
+        return None
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sw, "acquire_exclusive_file_lock", refused)
+        assert prepare_startup_state(data)["private_copies"] == {"error": "lock_unknown"} and legacy.read_bytes() == raw
+    assert prepare_startup_state(data)["private_copies"]["moved"] == 0, "and the next start finishes it"
+
+    legacy.write_bytes(raw)  # ... and once more, and this start cannot write its receipt
+    monkeypatch.setattr(sw, "atomic_write_json", lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")))
+    assert prepare_startup_state(data)["private_copies"] == {"error": "OSError"}, "recorded, and the start goes on"
+    assert legacy.read_bytes() == raw, "and the file waits at its place for the next one"
 
 
 def test_an_unreadable_record_is_skipped_kept_and_refuses_only_its_own_copy(tmp_path, monkeypatch):

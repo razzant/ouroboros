@@ -32,7 +32,7 @@ from ouroboros.safety_config import OWNER_RULES_KEY
 from ouroboros.safety_records import (
     _safety_drive_root, _record_safety_usage, _emit_durable_safety_event, _emit_safety_mode_skip, coalesce_verdicts,
     safety_check_wait, verdict_history_bytes, parse_safety_response as _parse_safety_response,
-    _JUDGED, _PRIOR_LOCK, _PRIOR_VERDICTS, _RETURNED, _drop, _root_id, _track_returned, _work_key,
+    _JUDGED, _PRIOR_LOCK, _PRIOR_VERDICTS, _RETURNED, _drop, _root_id, _track_returned, _work_key, tell_owner_over_flag,
 )
 from ouroboros.safety_records import clear_safety_work  # noqa: F401 - public re-export for task_results
 from ouroboros.consciousness_authority import work_kind, effective_runtime_mode
@@ -185,7 +185,6 @@ TOOL_POLICY: Dict[str, str] = {
     "cherry_pick_pr_commits": POLICY_CHECK,
     "stage_adaptations": POLICY_CHECK,
     "stage_pr_merge": POLICY_CHECK,
-    "generate_evolution_stats": POLICY_CHECK,
     "submit_skill_to_hub": POLICY_CHECK,
     "github_write": POLICY_CHECK,
     "pr_merge": POLICY_CHECK,
@@ -1334,6 +1333,8 @@ def _run_llm_check(
             failure = failure or "it returned no verdict with a reason"
     if failure:  # an optional second check that answered nothing leaves the first verdict standing
         _emit_durable_safety_event(ctx, {"type": "safety_second_check_failed", "tool": tool_name, "error": failure})
+        if verdicts[-1].get("owner"):  # its mark stays on record, but no final reading confirmed it for my human's row
+            verdicts[-1] = {**verdicts[-1], "owner_unconfirmed": True}
     status = result["status"]
     return _Assessment(status == "SAFE", "", status=status, verdicts=verdicts,
                        destination="" if status == "SAFE" else "\n".join(_destination_lines(evidence)))
@@ -1498,7 +1499,8 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     reread = bool(listed) and any(not ids & seen for ids in listed)
     if waits and not reread:
         return waiting()
-    if flag and not waits:
+    if flag and not waits:  # an owner-marked reading also tells my human, in the Supervisor's own row
+        tell_owner_over_flag(ctx, tool_name, arguments, subject, basis, level)
         return let_through("safety_sent_despite_check", "⚠️ SAFETY_NOTE: let through on your later identical call, "
                            "without a new reading; the tool's result says what happened. The Supervisor had read it "
                            f"as {level}: {_reasons(basis)}",

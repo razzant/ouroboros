@@ -7,6 +7,7 @@ import { accountRows, accountName, accountModelUnsupported } from './claudexor_s
 import { formatRelativeAge } from './ui_helpers.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { fmt, tr } from './i18n.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
 
 export const ROUTE_KIND_API_MODEL = 'api_model';
@@ -20,6 +21,8 @@ export const EFFORT_CHOICES = ['none', 'minimal', 'low', 'medium', 'high', 'xhig
 export const PROCESSING_PREFERENCE_KEY = 'OUROBOROS_PROCESSING_PREFERENCE';
 export const MODEL_PROCESSING_PREFERENCES_KEY = 'OUROBOROS_MODEL_PROCESSING_PREFERENCES';
 export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];
+/** Fast and Economy send another processing tier, which its own endpoint prices: a catalog's row is not that call's price. */
+export const tierPriced = (preference) => preference === 'fast' || preference === 'economy';
 
 export function processingLabel(value) {
     return { standard: 'Standard', fast: 'Fast', economy: 'Economy', mixed: 'Mixed', unknown: 'Unknown' }[value] || 'Route default';
@@ -223,6 +226,50 @@ export function unavailableConnectionState(id, connections = []) {
     return connectionParts(id).name ? 'removed' : 'no key';
 }
 
+/** What a route whose key cannot send says, on a role's page, the Models list and the home. */
+export const KEY_PROBLEM_WORDS = Object.freeze({ off: 'This key is turned off in Accounts; nothing is sent through it.',
+    removed: 'This key was removed in Accounts; nothing is sent through it.', 'no key': 'This source has no key in Accounts.' });
+
+/** The same fact where the key is not beside it (the Models list): the key named, then why it cannot send. */
+export function keyProblemLine(problem, label) {
+    return { off: `${label} is turned off in Accounts; nothing is sent through it.`,
+        removed: `${label} was removed in Accounts; nothing is sent through it.`, 'no key': `${label} has no key in Accounts.` }[problem] || '';
+}
+
+/** Why a saved route's API key cannot send now (`unavailableConnectionState`), or '' when it can or the route is
+ *  empty or a subscription's. A local route is the caller's to skip. */
+export function routeKeyProblem(value, settings = {}, providerProfiles = {}) {
+    const raw = String(value || '').trim();
+    const { source } = raw ? parseModelSource(raw) : { source: '' };
+    if (!source || source.startsWith('subscription:')) return '';
+    if (configuredApiProviders(settings, providerProfiles).some((provider) => provider.id === source)) return '';
+    return unavailableConnectionState(source, apiConnections(settings, providerProfiles));
+}
+
+const REFERENCE_ROLE_LABELS = Object.freeze({
+    OUROBOROS_MODEL: 'Main', OUROBOROS_MODEL_LIGHT: 'Light', OUROBOROS_MODEL_SAFETY: 'Safety Supervisor',
+    OUROBOROS_MODEL_VISION: 'Vision', OUROBOROS_MODEL_CONSCIOUSNESS: 'Consciousness',
+    OUROBOROS_MODEL_FALLBACKS: 'Fallback', OUROBOROS_MODEL_FALLBACK: 'Fallback', OUROBOROS_WEBSEARCH_MODEL: 'Web search',
+    OUROBOROS_MODEL_DEEP_SELF_REVIEW: 'Deep review', OUROBOROS_SUBAGENTS: 'Agents',
+});
+
+/** The rows a save's answer names as still pointing at a key that cannot send (`connection_references`). */
+export function connectionReferencesText(references, connections = []) {
+    const named = (Array.isArray(references) ? references : []).map((reference) => {
+        if (typeof reference === 'string') return reference.trim();
+        if (!reference || typeof reference !== 'object') return '';
+        const setting = String(reference.setting || '').trim();
+        const role = String(reference.label || REFERENCE_ROLE_LABELS[setting] || setting).trim();
+        const entry = String(reference.entry || '').trim();
+        const where = !entry ? role : setting === 'OUROBOROS_SUBAGENTS' ? `${role} · ${entry}` : `${role} ${entry}`;
+        const route = String(reference.route || '').trim();
+        const { source } = route ? parseModelSource(route) : { source: '' };
+        const id = source && !source.startsWith('subscription:') ? source : String(reference.connection || '').trim();
+        return [where, id ? `(${apiProviderLabel(id, {}, connections)})` : ''].filter(Boolean).join(' ');
+    }).filter(Boolean);
+    return named.length ? `Still naming a key that was removed or turned off, so they cannot send: ${named.join(', ')}` : '';
+}
+
 /** Account binding is supported by agent sessions and subscription model routes. */
 export function routeSupportsAccount(route) {
     return route?.kind === ROUTE_KIND_AGENT_SESSION
@@ -291,6 +338,32 @@ function routeCatalogItems(route, items = []) {
         && (!pin || !item?.credential_profile_id || item.credential_profile_id === pin));
 }
 
+// A dollar figure as the catalog states it, to four decimals and in cents at least: $4, $2.50, $0.075.
+function usd(value) {
+    const [whole, fraction = ''] = String(Math.round(value * 1e4) / 1e4).split('.');
+    return `$${whole}${fraction ? `.${fraction.padEnd(2, '0')}` : ''}`;
+}
+
+/**
+ * A catalog's published price (`ModelCatalogItem.price`) in the owner's words, USD per 1M tokens: `$4 in / $20 out`;
+ * where input length changes it, each figure's range (`$2–4 in / $10–15 out`); `free` when every figure is zero;
+ * '' when the catalog states none, or a figure cannot be read or would print a charge as zero. `unit` names the unit.
+ * The words go through the translation seam. Words only: a price never sorts, filters or admits a model.
+ */
+export function priceWords(price, { unit = false } = {}) {
+    const tiers = Array.isArray(price?.tiers) ? price.tiers : [];
+    const figures = [price?.input, price?.output, ...tiers.flatMap((tier) => [tier?.input, tier?.output])];
+    if (!figures.every((figure) => Number.isFinite(figure) && figure >= 0 && !(figure > 0 && usd(figure) === '$0'))) return '';
+    if (figures.every((figure) => figure === 0)) return tr('model.price.free', 'free');
+    const span = (key) => {
+        const own = [price[key], ...tiers.map((tier) => tier[key])];
+        const [low, high] = [usd(Math.min(...own)), usd(Math.max(...own))];
+        return low === high ? low : `${low}–${high.slice(1)}`;
+    };
+    const params = { input: span('input'), output: span('output') };
+    return unit ? fmt('{input} in / {output} out per 1M tokens', params) : fmt('{input} in / {output} out', params);
+}
+
 /**
  * One suggestion per model: the label names the model and makes no account claim
  * (DESIGN.md §7). Availability, the reading account and its observation time are
@@ -298,22 +371,26 @@ function routeCatalogItems(route, items = []) {
  * alias resolves to (`resolved_model`, shown only while every supplying row agrees)
  * and a row known only from the engine's frozen list (`origin: "hint"` on every
  * supplying row; absent origin is live). The value stays the row id either way.
+ * The catalog's price travels apart from the label, as `meta`, while every
+ * supplying row states that same price.
  */
 export function catalogModelOptions(items = []) {
     const values = new Map();
     for (const item of items) {
         const value = String(item?.value || item?.id || item);
         const name = String(item?.name || item?.label || '');
-        if (!values.has(value)) values.set(value, { value, label: value, named: false, live: false, resolved: new Set() });
+        if (!values.has(value)) values.set(value, { value, label: value, named: false, live: false, resolved: new Set(), prices: new Set() });
         const current = values.get(value);
         if (name && !current.named) Object.assign(current, { label: name, named: true });
         if (item?.origin !== 'hint') current.live = true;
         const resolved = item?.resolved_model;
         if (typeof resolved === 'string' && resolved && resolved !== value) current.resolved.add(resolved);
+        current.prices.add(priceWords(item?.price));
     }
-    return [...values.values()].map(({ value, label, live, resolved }) => {
+    return [...values.values()].map(({ value, label, live, resolved, prices }) => {
         const named = resolved.size === 1 ? `${value} → ${[...resolved][0]}` : label;
-        return { value, label: live ? named : `${named} (shipped list)` };
+        const meta = prices.size === 1 ? [...prices][0] : '';
+        return { value, label: live ? named : `${named} (shipped list)`, ...(meta ? { meta } : {}) };
     });
 }
 
@@ -558,10 +635,10 @@ export function routeChoiceGroups({
             ? modelValues
             : [{ value: '', disabled: true, label: catalogKnown && accountsKnown
                 ? (hasConfiguredAccounts
-                    ? 'No model sources listed — refresh Model Catalog'
-                    : 'No model sources listed — connect one in Accounts')
+                    ? 'No model sources listed: press Read again in Models'
+                    : 'No model sources listed: connect one in Accounts')
                 : catalogKnown ? 'No model sources listed; accounts have not been checked'
-                    : 'Model sources have not been read — use Refresh model catalog' }] }] : []),
+                    : 'Model sources not read yet: press Read again in Models' }] }] : []),
         { label: 'API keys', options: apiValues },
         ...(includeSessions ? [sessionValues.length
             ? { label: 'Agents · sessions', options: sessionValues }

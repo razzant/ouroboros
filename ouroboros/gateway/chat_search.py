@@ -6,7 +6,7 @@ lens (``history_paging.room_lens``) and its stream reader (``history_paging.hist
 room holding imported earlier messages reads in time order). One request reads the room's stored
 chat rows below its cut, newest first, through that reader's bounded ``older`` read: at most
 ``_SCAN_ROWS`` rows, ending once the rows read reach ``_SCAN_BYTES`` stored bytes (a soft bound: the
-row crossing it is read whole, never split, so no unseen row is skipped by the cursor).
+row crossing it is read whole, never split, so no unseen row is skipped by the cursor; no body past it is decoded).
 
 The host never decides whether a message's words contain the query: those are the words the room's
 renderer shows (web/modules/chat_search_words.js), which only the client draws. A page answers every
@@ -15,8 +15,11 @@ never media, a card body or other facts), except an owner's literal ASCII words 
 ASCII query (``_shows_no``) and a living card, whose body is not searched. Never searched: a row's
 metadata, attachment or file contents, a task card's content (a host placement, a child's words) or task
 narration (progress rows are read only to name a legacy child). A speaker's lineage is the room rule's
-indexed facts (``RoomResolver``), so no task result, queue snapshot, events or annotations journal is
-read. The room's authority is read strictly, as an exact row's landing reads it.
+indexed facts (``RoomResolver``), so no effective task result, queue snapshot, events or annotations journal
+is read; a question found reads only its asking task's stored question lifecycle, as history replays it, for
+the owner's settled answer its card shows (once that lifecycle is gone and the page holds no answer row, one bounded
+indexed probe of the asking tasks' later chat rows finds it). The room's authority is read strictly, as an exact row's
+landing reads it.
 
 The cursor binds the room, its view, the query as searched (NFC, white space one space) and the frozen
 end of the chat stream, and names the cut the next read continues below (a stored coordinate, or for a
@@ -49,8 +52,16 @@ from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.gateway.history import _make_thread_filter, _project_history_context, _stored_chat_id
 from ouroboros.gateway.history_deliveries import delivery_fields
 from ouroboros.gateway.history_paging import (
-    _CHRONOLOGICAL, _PROBE_ROWS, HistoryCursorError, _row_key, encode_cursor, history_source, message_elsewhere,
-    room_lens, room_member_predicate, room_view_fingerprint,
+    _CHRONOLOGICAL,
+    _PROBE_ROWS,
+    HistoryCursorError,
+    _row_key,
+    encode_cursor,
+    history_source,
+    message_elsewhere,
+    room_lens,
+    room_member_predicate,
+    room_view_fingerprint,
 )
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import is_conversation_card_content, is_task_card_message, subagent_message_meta
@@ -162,10 +173,10 @@ def _shows_no(entry, ascii_key: str) -> bool:
     return ascii_key not in " ".join(text.split()).lower()
 
 
-def _candidate(entry, data_dir) -> Dict[str, Any]:
+def _candidate(entry, data_dir, answers=None) -> Dict[str, Any]:
     """A saved message as the fields its words are drawn from (``ChatSearchCandidate``): what history gives the room's
     renderer for its text, a file's name and caption, links, question or Project answer, never its media, a file's
-    contents, a card body or other facts."""
+    contents, a card body or other facts. ``answers``: the owner's words on each settled question (``_owner_answers``)."""
     direction = str(entry.get("direction") or "").lower()
     kind = str(entry.get("system_type") or entry.get("type") or "")
     found = {"history_id": entry["history_id"], "row_address": entry["row_address"],
@@ -197,7 +208,7 @@ def _candidate(entry, data_dir) -> Dict[str, Any]:
             {"label": str(item.get("label") or ""), "url": str(item.get("url") or "")}
             for item in delivery["actions"] if isinstance(item, dict)])
     elif kind == "quiz" and isinstance(entry.get("quiz"), dict):
-        found.update(msg_type="quiz", quiz={"question": str(entry["quiz"].get("question") or "")})
+        found.update(msg_type="quiz", quiz=_question_words(entry["quiz"], (answers or {}).get(_question_key(entry))))
     if kind in _PROJECT_ROWS:  # as history reads a lifecycle row (``history._collect_chat_rows``)
         found["text"] = strip_markdown(found["text"])
         for key in ("completion_answer", "project_id", "project_name", "task_name", "completion_reason"):
@@ -206,6 +217,79 @@ def _candidate(entry, data_dir) -> Dict[str, Any]:
         if isinstance(entry.get("completion_notice"), dict):
             found["completion_notice"] = dict(entry["completion_notice"])
     return found
+
+
+def _question_words(quiz, comment: Optional[str] = None) -> Dict[str, Any]:
+    """A question row's card as its words are drawn (``ChatSearchQuestion``; the question is the row's ``text``, as
+    the card reads it): its ``quiz_id``, the offered answers' labels and details as stored (a legacy row's plain
+    labels with ``option_details``; an option of another shape stays one the card refuses), the stake and the
+    owner's own words of a card settled as answered (``comment``, question_presentation.js ``renderOwnerAnswer``),
+    never its lifecycle, assumption, materials or a recommendation."""
+    words: Dict[str, Any] = {"quiz_id": str(quiz.get("quiz_id") or "")}
+    if isinstance(quiz.get("options"), list):
+        words["options"] = [
+            option if isinstance(option, str) else
+            {"label": str(option.get("label") or ""), **({"detail": str(option["detail"])} if option.get("detail") else {})}
+            if isinstance(option, dict) else None for option in quiz["options"]]
+    if isinstance(quiz.get("option_details"), list):
+        words["option_details"] = [str(detail or "") for detail in quiz["option_details"]]
+    if quiz.get("stake"):
+        words["stake"] = str(quiz["stake"])
+    if comment:
+        words["comment"] = comment
+    return words
+
+
+def _question_key(entry) -> tuple:
+    quiz = entry.get("quiz") if isinstance(entry.get("quiz"), dict) else {}
+    return str(entry.get("task_id") or ""), str(quiz.get("quiz_id") or "")
+
+
+def _owner_answers(data_dir, found, rows, upper: Optional[int] = None) -> Dict[tuple, str]:
+    """The owner's words on each found question its card shows settled as answered, by ``(task_id, quiz_id)``: its
+    lifecycle as history replays it (``history._collect_chat_rows``) -- the asking task's stored question projection
+    (``owner_quiz``, one strict read per asking task), else the answer or closure row, else the row. An answer row
+    lies after its question, often on a newer page than the one that found it, where the room's feed already holds
+    it: a question whose projection is gone and whose answer the page does not hold reads the asking tasks' chat rows
+    after the oldest such question, below ``upper`` (the search's frozen end), in one indexed probe of at most
+    ``_PROBE_ROWS`` rows and ``_SCAN_BYTES`` stored bytes. A card whose answer lies past it stays as its row froze it."""
+    from ouroboros.task_store import read_document
+
+    asked = [entry for entry in found if entry.get("type") == "quiz" and isinstance(entry.get("quiz"), dict)]
+    if not asked:
+        return {}
+
+    def lifecycle(source):
+        return {_question_key(row): row["quiz"] for row in source
+                if row.get("type") in {"quiz_answer", "quiz_closed"} and isinstance(row.get("quiz"), dict)}
+    evidence = lifecycle(rows)
+    projections: Dict[str, Dict[str, Any]] = {}
+    pending: Dict[tuple, int] = {}  # a question with neither its projection nor its answer row: the row's coordinate
+    for entry in asked:
+        key = _question_key(entry)
+        if key[0] not in projections and key[0]:
+            raw = read_document(data_dir, key[0])
+            quizzes = raw.get("owner_quiz") if isinstance(raw, dict) else None
+            projections[key[0]] = quizzes if isinstance(quizzes, dict) else {}
+        if all(key) and not projections[key[0]].get(key[1]) and key not in evidence:
+            offset = entry["history_position"]["offset"]
+            pending[key] = min(pending.get(key, offset), offset)
+    if pending:
+        later = ds.probe_rows(data_dir, "chat", [("task_id", task) for task in sorted({key[0] for key in pending})],
+                              before=upper, lower=min(pending.values()) + 1, limit=_PROBE_ROWS, newest_first=False,
+                              max_bytes=_SCAN_BYTES)
+        evidence.update({key: quiz for key, quiz in lifecycle(row.row for row in later).items() if key in pending})
+    answers: Dict[tuple, str] = {}
+    for entry in asked:
+        key = _question_key(entry)
+        live = (projections[key[0]].get(key[1]) or evidence.get(key)) if key[0] else None
+        stored = entry["quiz"]
+        live = live if isinstance(live, dict) else {}
+        state = str(live.get("state") or stored.get("state") or "open")
+        comment = str((live if "comment" in live else stored).get("comment") or "")
+        if state == "answered" and comment:
+            answers[key] = comment
+    return answers
 
 
 def _decode_cursor(value: str, thread_id: int, view: str, digest: str, chrono: bool) -> Dict[str, Any]:
@@ -281,12 +365,13 @@ def search_room(data_dir: pathlib.Path, thread_id: int, raw_query: Any, cursor: 
         raise StoreError("Project room authority unavailable") from None  # as history's exact landing says it
     found = [entry for entry in found if not is_conversation_card_content(
         entry, str(entry.get("type") or ""), lambda row: str(row.get("task_id") or "") in named)]
+    answers = _owner_answers(data_dir, found, rows, reader.upper)
     oldest = rows[0] if rows else None
     reached = (oldest.get("_chrono_key") or [str(oldest.get("ts") or "")])[0] if oldest else ""
     next_cursor = encode_cursor({"v": 1, "kind": "search", "chat_id": thread_id, "view": view, "q": digest,
                                  "upper": reader.upper, "before": before,
                                  "cut": reader.lower_key if chrono else None}) if has_more else None
-    return {"query": query, "candidates": [_candidate(entry, data_dir) for entry in found],
+    return {"query": query, "candidates": [_candidate(entry, data_dir, answers) for entry in found],
             "has_more": has_more, "next_cursor": next_cursor,
             "searched": {"rows": len(rows), "reached_ts": reached, "beginning": beginning,
                          "importing": importing, "gaps": sorted(gaps)}}

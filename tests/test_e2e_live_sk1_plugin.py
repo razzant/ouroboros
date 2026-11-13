@@ -57,8 +57,8 @@ _CLEAN = [{"item": "a", "verdict": "PASS"}]
 @pytest.mark.parametrize("status,http,body_exec,executable,findings,expected", [
     ("clean", 200, True, True, _CLEAN, True),
     ("warnings", 200, True, True, _FINDINGS, True),        # rc.15 SK1_a2: warnings are executable
-    ("blockers", 200, True, True, _FINDINGS, True),        # rc.15 SK1_a3: blockers executable under advisory
-    ("blockers", 200, False, False, _FINDINGS, False),     # the same review under blocking enforcement
+    ("blockers", 200, True, True, _FINDINGS, True),        # rc.15 SK1_a3: blockers do not stop the skill
+    ("blockers", 200, False, False, _FINDINGS, False),     # the same review from a source that reviews each skill
     ("pending", 200, False, True, _CLEAN, False),          # duplicate job: the call's own gate says no
     ("clean", 500, True, True, _CLEAN, False),             # the review call itself failed
     ("clean", 200, True, True, [], False),                 # no recorded findings: no review actually ran
@@ -77,16 +77,16 @@ def test_sk1_review_verdict_is_the_product_gate_and_records_the_clean_state_as_a
                      "findings_failed": failed, "review_clean": bool(findings) and not failed}
 
 
-def test_the_product_gate_the_stand_relies_on_executes_warnings_and_advisory_blockers_only():
+def test_the_product_gate_the_stand_relies_on_executes_warnings_and_blockers_outside_strict_sources():
     """The contract behind ``sk1_review_gate``: ``skill_review_gate`` (the same rule the ``/api/extensions``
     row and the review call project as ``executable_review``)."""
     from ouroboros.skill_review_status import skill_review_gate
 
-    assert skill_review_gate("clean", enforcement="blocking")["executable_review"] is True
-    assert skill_review_gate("warnings", enforcement="blocking")["executable_review"] is True
-    assert skill_review_gate("blockers", enforcement="advisory")["executable_review"] is True
-    assert skill_review_gate("blockers", enforcement="blocking")["executable_review"] is False
-    assert skill_review_gate("pending", enforcement="advisory")["executable_review"] is False
+    assert skill_review_gate("clean")["executable_review"] is True
+    assert skill_review_gate("warnings")["executable_review"] is True
+    assert skill_review_gate("blockers")["executable_review"] is True
+    assert skill_review_gate("blockers", acceptance={"strict_review": True})["executable_review"] is False
+    assert skill_review_gate("pending")["executable_review"] is False
 
 
 def test_only_the_absorbing_scenario_promotes_post_task_evolution():

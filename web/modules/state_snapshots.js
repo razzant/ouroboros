@@ -1,4 +1,5 @@
 import { readState } from './api_client.js';
+import { carryOpenQuestions } from './question_presentation.js';
 
 /**
  * The page's state reads: one request/apply clock for every /api/state consumer
@@ -31,14 +32,28 @@ import { readState } from './api_client.js';
  * Each request names its `path`: once a full `task_bindings` map arrived with its revision, the
  * next read asks `bindings_since=<revision>`, and a body answering `task_bindings_unchanged` is
  * filled with that held map for that exact revision only; any other answer drops the held map,
- * so the read after it asks for the whole map again.
+ * so the read after it asks for the whole map again. The revision is the map's own digest, so the
+ * held map outlives `retire()`: whether it still stands is the server's answer to the next read.
+ * A map sent with an empty revision (a failed read) reaches no consumer: what they show stays, and
+ * the next read asks for the whole map. A body with no revision field (an older server) applies.
  */
+// A feed the server could not read (`project_listable_count: null` with no rows) is unknown, never empty: the page
+// keeps the rows it showed and the message revision they were read at, so a room that is the owner's turn keeps its
+// row, until a read names them. Rows a body carries are the feed, whatever its count says.
+const heldFeed = (prior, data) => (data?.project_listable_count === null && Array.isArray(data.projects)
+    && !data.projects.length && Array.isArray(prior?.projects) ? { ...data, projects: prior.projects,
+        project_messages_revision: prior.project_messages_revision ?? null } : data);
+
 export function createStateSnapshotSequencer(onApply, now = () => Date.now(), onUnavailable = () => {}) {
     let requestedGeneration = 0;
     let appliedGeneration = 0;
     // Newest applied body until a failed read or retire() clears it (late-mount seed).
     let latest = null;
     let held = null;  // {revision, bindings}: the last full task_bindings map this page applied
+    // The rooms (and the feed rows) of the last body that carried them: an open question its successor does not
+    // vouch against stays in its room, with its row, for every reader (question_presentation.carryOpenQuestions),
+    // across a failed read or a retire too, as Main's pill keeps it.
+    let asked = null;
     let inflight = null;
     let cancelInflight = null;  // aborts the signal of the read in flight
     let settled = null;
@@ -54,7 +69,8 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
         }
         held = revision && data.task_bindings && typeof data.task_bindings === 'object'
             ? { revision, bindings: data.task_bindings } : null;
-        return data;
+        // A present empty revision is a failed bindings read: its map is unknown, never applied as empty.
+        return data.task_bindings_revision === '' ? { ...data, task_bindings: null } : data;
     };
     const open = () => {
         const reading = new AbortController();
@@ -74,7 +90,7 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
     return {
         begin,
         retire() {
-            appliedGeneration = begin().generation; latest = null; held = null;
+            appliedGeneration = begin().generation; latest = null;
             const cancel = cancelInflight;
             settle(inflight);
             cancel?.();
@@ -90,7 +106,12 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
                 const generation = Number(request?.generation) || 0;
                 if (!generation || generation <= appliedGeneration) return false;
                 appliedGeneration = generation;
-                latest = data = withBindings(data);
+                latest = data = carryOpenQuestions(asked, heldFeed(asked, withBindings(data)));
+                if (data?.rooms && Array.isArray(data.works)) {
+                    const fed = Array.isArray(data.projects);
+                    asked = { rooms: data.rooms, projects: fed ? data.projects : asked?.projects,
+                        project_messages_revision: fed ? data.project_messages_revision : asked?.project_messages_revision };
+                }
                 onApply(data, request.requestedAt, generation);
                 return true;
             } finally { settle(request); }
@@ -110,6 +131,20 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
         },
         latest: () => latest,
     };
+}
+
+/**
+ * The complete Project room set a state body leaves the page holding (`page.projectChatIds`). A body's
+ * `project_chat_ids` replaces it; one whose field is null (the registry could not be read) or absent keeps a
+ * complete set the page holds, never an empty set or the capped `projects` rows in its place (#3067). A page that
+ * never held a complete set answers undefined while the body has rows: the caller falls back to those rows.
+ */
+export function heldProjectChatIds(data, page) {
+    if (Array.isArray(data?.project_chat_ids)) {
+        page.projectChatIdsComplete = true;
+        return data.project_chat_ids;
+    }
+    return page.projectChatIdsComplete || !data?.projects ? Array.from(page.projectChatIds || []) : undefined;
 }
 
 /**

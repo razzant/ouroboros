@@ -22,6 +22,9 @@ const PAGE_MATCHES = 20;
 // Search older messages (a press, or Enter past the last match, goes on). Before its first match a search reads on
 // until it finds one or reaches the room's beginning: a few pages without a match never read as "none".
 const AUTO_READS = 4;
+// The longest words the host searches (chat_search.py _MAX_QUERY_CHARS, Python code points): the field takes no more
+// (`clipQuery`; an HTML maxlength counts UTF-16 units, so it would refuse the second half of an emoji query).
+const MAX_QUERY_CHARS = 200;
 // How long one slice of reading candidates holds the main thread before the event loop runs (typing, Esc, a scroll).
 // A message is never split: its words are drawn and read in one step, as its bubble is drawn in one step.
 const SLICE_MS = 12;
@@ -37,6 +40,24 @@ function element(tag, className, attributes = {}) {
     if (className) node.className = className;
     for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
     return node;
+}
+
+/**
+ * Keep `field` within `MAX_QUERY_CHARS` code points, as a maxlength keeps its units: the code points just typed (those
+ * before the caret) give way first, a pair of surrogates never split. Whether it clipped. The host counts its words after
+ * NFC and one space, so the rare letter NFC writes as two (U+0958) can still be refused there (`search_query_invalid`).
+ */
+function clipQuery(field) {
+    const value = String(field.value ?? ''), points = Array.from(value);
+    const excess = points.length - MAX_QUERY_CHARS;
+    if (excess <= 0) return false;
+    const caret = Number.isInteger(field.selectionStart) ? field.selectionStart : value.length;
+    let at = 0;  // the code points wholly before the caret
+    for (let units = 0; at < points.length && units + points[at].length <= caret; at += 1) units += points[at].length;
+    const cut = Math.min(excess, at), kept = points.slice(0, at - cut).join('');
+    field.value = kept + points.slice(at, points.length - (excess - cut)).join('');
+    field.setSelectionRange?.(kept.length, kept.length);
+    return true;
 }
 
 /** The day and time a match was written, as the chat's own clock says it. */
@@ -62,7 +83,9 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
     // The search: the words it is for, its matches newest first, the one landed on, and where its next read starts.
     // `key` is the words as matched; `unread` counts candidates whose shown words could not be drawn (never "no match").
     let words = '', key = '', matches = [], active = -1, cursor = null, more = false, reached = '', reading = false;
+    // `begun`: a page of this search was read, so a read with no cursor would be its newest page again.
     let beginning = false, importing = false, gaps = new Set(), failure = null, steps = 0, reads = 0, unread = 0;
+    let begun = false;
     let generation = 0, controller = null, timer = 0, landing = 0, folded = false, unshown = false, owned = [];
     // The list draws each match once while a search reads (a page can hold thousands): `listed` is the matches it
     // draws, a new search's starting a new list, and `chosen` the one option marked selected.
@@ -98,7 +121,9 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
         note = element('div', 'chat-find-note', { role: 'status', 'aria-live': 'polite', 'data-i18n-skip': '' });
         note.hidden = true;  // shown only with something to say (render): the field alone is the sheet's capsule
         root.append(bar, list, note);
-        input.addEventListener('input', () => schedule());
+        // An IME's words are clipped once its composition ends, never while it composes them.
+        input.addEventListener('input', (event) => { if (!event.isComposing) clipQuery(input); schedule(); });
+        input.addEventListener('compositionend', () => { if (clipQuery(input)) schedule(); });
         input.addEventListener('keydown', onKeydown);
         root.addEventListener('keydown', (event) => {
             if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
@@ -124,7 +149,7 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
             const press = event.target.closest?.('[data-find-more]');
             if (!press) return;
             input.focus({ preventScroll: true });
-            if (failure && !failure.landing) { failure = null; reads = 0; void read(generation); } else readMore();
+            if (retryable()) { reads = 0; void read(generation); } else readMore();
         });
         feed.before(root);
         // The sheet's height follows its matches, its note, a fold and the window: the room re-measures what it covers,
@@ -150,6 +175,7 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
         stop();
         landing += 1;  // a landing still on its way for the old words lands nowhere
         matches = []; active = -1; cursor = null; more = false; reached = ''; beginning = false; importing = false;
+        begun = false;
         gaps = new Set(); failure = null; steps = 0; reads = 0; unread = 0; folded = false; unshown = false;
         clearHighlight();
     }
@@ -166,7 +192,10 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
 
     async function read(mine) {
         if (!open || destroyed || !present()) { if (open && !present()) closeSearch(); return; }
-        if (failure?.landing) failure = null;  // a new read speaks for itself, not the last landing
+        // A read continues from `cursor`, which a failed read left where it failed; once the room's beginning was
+        // reached there is nothing older, and no read starts again from the newest page.
+        if (begun && !cursor) { steps = 0; render(); return; }
+        failure = null;  // a new read speaks for itself, never the last landing's or the last failed read's reason
         reading = true;
         controller = new AbortController();
         render();
@@ -193,6 +222,7 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
         if (!await scan(Array.isArray(page?.candidates) ? page.candidates : [], mine)) return;
         reading = false;
         reads += 1;
+        begun = true;
         cursor = page?.next_cursor || null;
         more = Boolean(page?.has_more && cursor);
         const span = page?.searched || {};
@@ -240,6 +270,11 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
             }
         }
         return true;
+    }
+
+    /** Whether the last read failed and can be tried again (words too long to search never can). */
+    function retryable() {
+        return Boolean(failure && !failure.landing && failure.body?.reason_code !== 'search_query_invalid');
     }
 
     function readMore() {
@@ -359,6 +394,9 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
                             ? tr('chat.find.landing_source', 'Saved history holding this message could not be read. Try again.')
                             : tr('chat.find.landing_unknown', 'Could not open this message. Try again.');
         }
+        if (failure?.body?.reason_code === 'search_query_invalid') {
+            return fmt('chat.find.too_long', { n: MAX_QUERY_CHARS }, 'Search words are limited to {n} characters.');
+        }
         if (failure) {
             return isStoreMigrating(failure) ? tr('chat.find.migrating', 'Saved history is being upgraded. Try again shortly.')
                 : tr('chat.find.failed', 'Saved history could not be searched.');
@@ -419,7 +457,7 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
         const text = noteText();
         note.replaceChildren();
         if (text) note.append(Object.assign(element('span', 'chat-find-note-text'), { textContent: text }));
-        const retry = failure && !failure.landing;
+        const retry = retryable();
         if ((more && !reading && words) || retry) {
             const press = element('button', 'chat-find-more', { type: 'button', 'data-find-more': '' });
             press.textContent = retry ? tr('chat.find.retry', 'Try again') : tr('chat.find.more', 'Search older messages');

@@ -867,7 +867,7 @@ def _delegation_capability_fact() -> Optional[Dict[str, Any]]:
     """Historical identities and readers; execution bodies are chosen reads."""
     try:
         from ouroboros.reviewer_slot_config import reviewer_slot_last_executions, LAST_EXECUTION_FILENAME
-        from ouroboros.subagent_history import recorded_handle, LAST_DELEGATION_FILENAME
+        from ouroboros.subagent_history import first_call_facts, recorded_handle, LAST_DELEGATION_FILENAME
         from ouroboros.subagents import subagent_last_delegation
 
         slots = reviewer_slot_last_executions()
@@ -876,11 +876,13 @@ def _delegation_capability_fact() -> Optional[Dict[str, Any]]:
             return None
         records = last.get("latest_by_subagent")
         records = list(records.values()) if isinstance(records, dict) and records else ([last] if last else [])
+        prices = first_call_facts()
         return {"note": "Historical observations, not live health; read the records for details.",
                 "reviewer_slots_last": [{"slot": str(slot), "outcome": row.get("status", "unknown"),
                     "observed": row.get("ts")} for slot, row in sorted(slots.items()) if isinstance(row, dict)],
                 "subagents_last_executions": [{"selected_subagent_id": recorded_handle(row),
                     "outcome": row.get("outcome", "unknown"), "observed": row.get("observed_at") or row.get("ts"),
+                    **prices.get(str(row.get("selected_subagent_id") or ""), {}),
                     **{key: row[key] for key in ("task_id", "run_id", "attempt_id") if row.get(key)}}
                     for row in records if isinstance(row, dict)],
                 "readers": [{"tool": "read_file", "arguments": {"root": "runtime_data", "path": "state/" + name}}

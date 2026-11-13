@@ -767,7 +767,7 @@ TASK_CAUSE_PHRASES = {
     "finalization_grace": "The task hit a time limit and had to wrap up before it could finish cleanly",
     "deadline_local": "The task reached its deadline before it could finish cleanly",
     "context_overflow": "The task outgrew its context before it could finish cleanly",
-    "context_capacity": "This route's window cannot hold the task's context",
+    "context_capacity": "This model's window is too small for this work",
     "required_reference_unavailable": "The handbook this task requires could not be read",
     "output_recovery_exhausted": "Incomplete model replies exhausted recovery; saved work remains available",
     "children_unabsorbed": "Some sub-task results were never folded in, so the task had to wrap up",
@@ -800,7 +800,9 @@ TASK_CAUSE_PHRASES = {
     "terminal_plan_review_open": "The plan review was still open when this answer was delivered",
     "child_results_deferred": "Some sub-task results were deferred instead of being folded into this answer",
     "tool_failure": "A tool this task used failed and nothing recovered it",
-    "receipt_absent": "No host verification receipt was recorded; this does not establish whether other checks ran.",
+    "receipt_absent": "No recorded check or result review examined this result after its last change; this does not establish whether other checks ran.",
+    "verification_red_unreconciled": "A check of this result failed and no later run of the same check passed.",
+    "children_undecided": "Some finished sub-task results carry no recorded decision on how this answer used them.",
     "expected_output_ungrounded": "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
     "residual_tool_errors_without_review": "Tool errors remain in the record.",
     "artifacts_unavailable": "Some result files are missing or could not be preserved.",
@@ -1213,7 +1215,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     """
     from ouroboros.outcomes import (
         ACCEPTANCE_ACCEPTED, ACCEPTANCE_BYPASS_REASON_BY_RAIL, REASON_FINAL_MESSAGE, REASON_OWNER_REQUESTED_FINALIZATION,
-        WARN_DELEGATED_CUSTODY_UNRECONCILED, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW, plan_review_awaiting,
+        DETAIL_ONLY_WARNINGS, WARN_DELEGATED_CUSTODY_UNRECONCILED, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW, plan_review_awaiting,
     )
     from ouroboros.tool_error_words import residual_tool_errors_phrase
 
@@ -1290,7 +1292,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     warnings.append(objective.get("warning") or "")
     excluded = {"", "delegated_custody_unreconciled", "terminal_delivery_unknown", "terminal_delivery_exhausted"}
     if not include_review_details:
-        excluded.add("receipt_absent")
+        excluded |= DETAIL_ONLY_WARNINGS
     named = residual_tool_errors_phrase(execution)  # the failure the record holds, in owner words
     warning_clauses = [(str(w) == WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW and named) or TASK_CAUSE_PHRASES.get(str(w), str(w))
                        for w in warnings if str(w) not in excluded]

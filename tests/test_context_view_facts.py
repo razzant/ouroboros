@@ -71,7 +71,7 @@ def test_memory_facts_appear_once_while_visible_then_after_rebuild_or_change(mon
     p, snap = plan()
     ctx = SimpleNamespace(context_fit_plan=p, messages=[], accumulated_usage={}, active_context_mode="max",
                           active_model="test", round_idx=1, tool_schemas=[])
-    monkeypatch.setattr(lm, "cached_tariff_text", lambda *args: "tariff unknown")
+    monkeypatch.setattr(lm, "cached_tariff_text", lambda *args, **kwargs: "")
     memory = memory_facts(p, "max")
     first = lm.context_facts_line(ctx, money={}, measured=False, subagents_fact="")
     assert memory in first

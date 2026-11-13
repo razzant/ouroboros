@@ -367,12 +367,12 @@ RESULT_VIEW_PARAMS: dict[str, dict[str, Any]] = {
                            "description": "Chars of the output's tail to show in this turn (see view_head_chars)."},
 }
 
-# Declared range parameters whose presence means the caller chose the result's
+# Declared range parameters where a non-null value means the caller chose the result's
 # form (a page, a window, a cursor): such a result is a REQUESTED form that may
 # use the free room of the frame, not an unsolicited body sharing the eighth.
 EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
     RESULT_VIEW_HEAD_ARG, RESULT_VIEW_TAIL_ARG,
-    "max_chars", "max_lines", "start_char", "start_line",
+    "max_chars", "max_lines", "start_char", "end_char", "start_line",
     "source_start_char", "source_end_char", "offset", "limit", "tail_lines",
     "from", "to", "start", "after_seq",  # chronicle row bounds and continuation pages
 })
@@ -381,6 +381,7 @@ EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
 # partial view only; it exempts nothing from source persistence.
 PAGEABLE_TOOL_RESULTS: frozenset[str] = frozenset({
     "read_file", "chat_history", "journal_read", "tree_read", "recent_tasks", "query_code", "query_data",
+    "knowledge_read",
 })
 
 
@@ -396,7 +397,7 @@ def requested_result_view(tool_args: Any) -> Optional[tuple[Optional[int], Optio
     head, tail = tool_args.get(RESULT_VIEW_HEAD_ARG), tool_args.get(RESULT_VIEW_TAIL_ARG)
     if head is not None or tail is not None:
         return (_view_chars(head), _view_chars(tail))
-    if EXPLICIT_RANGE_ARGS & {str(key) for key in tool_args}:
+    if EXPLICIT_RANGE_ARGS & {str(key) for key, value in tool_args.items() if value is not None}:
         return (None, None)
     return None
 
@@ -498,8 +499,6 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     # skill payload; an orphan capture may belong to an unrelated earlier task,
     # so a read-only-children rule alone does not cover this path
     "integrate_delegated_patch", "integrate_subagent_patch",
-    # writes a local task artifact; Observe does not grant general file writes
-    "generate_evolution_stats",
     # the world beyond the repository: forms, skills, project notes, the owner's interface wording
     # and the update description shown to the owner
     "browser_action", "submit_skill_to_hub", "toggle_skill", "skill_owner_action",

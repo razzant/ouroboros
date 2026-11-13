@@ -577,6 +577,8 @@ textarea::placeholder {
   padding: 10px var(--wizard-content-pad) var(--wizard-content-pad);
   border-radius: 0 0 var(--radius-object) var(--radius-object);
   background: linear-gradient(var(--surface-object), var(--surface-object)), var(--bg);
+  /* Its own width decides whether the aside fits beside the buttons (a component follows its container). */
+  container: wizardfooter / inline-size;
 }
 
 @supports (animation-timeline: scroll()) {
@@ -618,6 +620,12 @@ textarea::placeholder {
 
 .wizard-error:not(:empty) + .footer-copy {
   display: none;
+}
+
+/* An unconfirmed save's warning is no ornament: the compact rules that drop the aside keep it, and only a reason
+   beside Continue still takes its slot. */
+.footer-copy.footer-warning {
+  display: block;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1280,22 +1288,12 @@ textarea::placeholder {
     gap: 10px;
   }
 
-  /* Title shrinks dropped with the one-off sizes they adjusted; hiding the
-     copy below reclaims far more height. */
+  /* A short or narrow window drops ornament only: the slogan, the rail's sub-labels and the rotation artwork
+     (its text stands beside it). The words a choice or a field is made by stay: a step's sentence, a card's
+     meaning, a field's note, and the footer's aside wherever it fits beside the buttons (the narrow rule
+     below). A taller step scrolls under the pinned footer (DESIGN.md §7). */
   .wizard-subtitle,
   .wizard-step-copy,
-  .step-copy,
-  .panel-card p,
-  .field-note:not(.compatible-load-status):not(.budget-shared-note),
-  .footer-copy {
-    display: none;
-  }
-
-  /* Agents step: the ARTWORK is what a short viewport drops, never the ladder.
-     Everything the diagram draws is stated in the text beside it, so hiding it
-     costs nothing and buys back ~180px. The login card's own sentences are
-     re-exempted from the blanket `.panel-card p` rule above: they are the live
-     sign-in instructions, not explanatory prose. */
   .agents-rotation-figure {
     display: none;
   }
@@ -1323,10 +1321,6 @@ textarea::placeholder {
     margin-top: 8px;
   }
 
-  .harness-login-card p {
-    display: block;
-  }
-
   .wizard-steps {
     gap: 8px;
   }
@@ -1350,10 +1344,17 @@ textarea::placeholder {
   .wizard-runtime-strip {
     padding: 10px 12px;
   }
+}
 
+/* A narrow footer: pinned over the step, its aside would take the step's own lines. */
+@container wizardfooter (max-width: 52rem) {
+  .footer-copy {
+    display: none;
+  }
 
-  .wizard-footer {
-    justify-content: flex-end;
+  /* With the aside gone the buttons stay on the right at any window size, not only below the viewport rule. */
+  .footer-actions {
+    margin-inline-start: auto;
   }
 }
 

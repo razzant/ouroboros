@@ -424,3 +424,52 @@ def test_cancellation_during_parent_handle_setup_closes_admission(handoff, monke
 
 def test_source_without_parent_handle_keeps_old_launch_behavior(successor):
     assert successor({}, None)
+
+
+def test_panic_while_a_window_leaves_full_screen_exits_at_once_and_tears_nothing_down(native_guard, monkeypatch,
+                                                                                     tmp_path):
+    """A warm macOS handoff waiting for AppKit holds nothing Panic takes: Panic persists and exits while the window
+    still animates, and the main thread's later turn finds its claim before any icon, lock or exec."""
+    from ouroboros import server_control
+    from tests.test_launcher_source_handoff import context
+
+    events, owners = [], []
+    animating, finish, exited = threading.Event(), threading.Event(), threading.Event()
+
+    def persist(*args, **kwargs):
+        owners.append(threading.current_thread())
+        events.append("persisted")
+        kwargs.get("exit_fn", os._exit)(99)
+        exited.set()
+
+    def windowed(final, cancelled):  # still leaving full screen; the main thread's turn comes once the test lets it
+        animating.set()
+        assert finish.wait(5)
+        final()
+        return True
+
+    monkeypatch.setattr(boot, "_BOOTSTRAP_COMMANDS", [])
+    monkeypatch.setattr(boot, "source_launcher_importable", lambda *a, **kw: True)
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)
+    monkeypatch.setattr(os, "_exit", lambda code: events.append(("exit", code)))  # execve stays denied
+    monkeypatch.setattr(background, "indicator_class", lambda: None)
+    monkeypatch.setattr(background, "request_tray_cleanup", lambda: None)
+    monkeypatch.setattr(server_control, "execute_panic_stop", persist)
+    monkeypatch.setattr("ouroboros.panic_source.record_source", lambda *a, **kw: None)
+    bg = background.Background(lambda: events.append("ordinary quit"), lambda: 1, threading.Event())
+    worker = threading.Thread(target=lambda: boot.exec_source_launcher(
+        context(tmp_path), [], release_lock=lambda: events.append("release"),
+        acquire_lock=lambda: events.append("acquire") or True, before_release=lambda: events.append("remove icon"),
+        on_failure=lambda: events.append("restore"), desktop=True, macos=True, cancelled=bg.shutdown.is_set,
+        windowed=windowed))
+    worker.start()
+    try:
+        assert animating.wait(5)
+        bg.request_panic()  # returns at once
+        assert exited.wait(3) and worker.is_alive(), "Panic exits while the window still animates"
+    finally:
+        finish.set()
+        worker.join(5)
+        for owner in owners:
+            owner.join(5)
+    assert not worker.is_alive() and events == ["persisted", ("exit", 99)], "no icon, unlock, exec or restore"

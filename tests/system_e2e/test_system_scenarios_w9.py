@@ -24,7 +24,8 @@ Adoption (a restart that switches the serving tree) is S37's subject.
 S37 — the restart-bound adoption on the same kind of real server. A direct (launcher-less)
 server re-executes itself in place on POSIX, so ONE server process carries both
 generations: generation A's root authors a note in its candidate, lands it through the
-blocking review organ (stub verdicts) and calls ``request_restart(adopt_commit=…)``; the
+review organ (the stub's clean outcome returns before Git, and the root's explicit
+continuation on it commits) and calls ``request_restart(adopt_commit=…)``; the
 exit tail arms the handoff only on its own stop evidence, the re-executed process's
 package-init hook switches the serving checkout before its imports, and generation B
 settles the adoption on boot and verifies the restart on the serving SHA. The serving
@@ -36,8 +37,9 @@ labelled receipt (``_record_fixture_qualification``), and a refusal or any other
 fails the scenario at once with its reason instead of waiting out the deadline.
 
 S38 — the server dies between an evolution cycle's candidate commit and its receipts.
-The supervisor mints the cycle, which commits in its candidate through the blocking
-review organ; its next model round is held, the whole tree is SIGKILLed, and the two
+The supervisor mints the cycle, which commits in its candidate through the review organ
+(the clean outcome returns first; the commit is the cycle's explicit continuation on it);
+its next model round is held, the whole tree is SIGKILLed, and the two
 receipts written after ``git commit`` (the transaction's SHA and the candidate row's
 reviewed provenance) are removed — the durable state that crash leaves, shaped the way
 S22 shapes its window. A fresh server boot on the same install and data root must
@@ -78,6 +80,7 @@ from tests.system_e2e.harness import (
     wait_durable_result,
     wait_until,
 )
+from tests.system_e2e.test_system_scenarios_w3a import _HoldingStubModel, _land_on_returned_pass
 
 
 def _s36_script(clone: pathlib.Path) -> list:
@@ -241,12 +244,16 @@ def _adopt_the_reviewed_commit(data_root: pathlib.Path, fixture: dict):
 
 
 def _s37_script(data_root: pathlib.Path, fixture: dict) -> list:
+    """For a ``_HoldingStubModel``: the clean outcome returns before Git and the root's
+    explicit continuation lands it; a landing that cannot happen is the fixture's dead end."""
+    commit = {"tool": "commit_reviewed", "arguments": {
+        "commit_message": S37_COMMIT_MESSAGE, "paths": [S37_DOC_PATH],
+        "skip_advisory_review": True, "skip_tests": True,
+        "goal": "Land the S37 note through the review organ.", "scope": f"{S37_DOC_PATH} only."}}
     return [
         {"tool": "write_file", "arguments": {"root": "system_repo", "path": S37_DOC_PATH, "content": S37_DOC}},
-        {"tool": "commit_reviewed", "arguments": {
-            "commit_message": S37_COMMIT_MESSAGE, "paths": [S37_DOC_PATH],
-            "skip_advisory_review": True, "skip_tests": True,
-            "goal": "Land the S37 note through the blocking review organ.", "scope": f"{S37_DOC_PATH} only."}},
+        commit,
+        _land_on_returned_pass(commit, "I read the clean review of the S37 note and land exactly it.", fixture),
         _adopt_the_reviewed_commit(data_root, fixture),
     ]
 
@@ -408,10 +415,10 @@ def test_s37_restart_adopts_the_reviewed_candidate_commit_on_one_real_server(tmp
     data_root = root / "data"
     fixture: dict = {}  # the qualification fixture's record, written by the scripted model step
     with candidate_checkout(REPO_ROOT, root / "source" / "repo", origin_proof=True) as source, \
-            ScriptedStubModel(_s37_script(data_root, fixture)) as stub:
+            _HoldingStubModel(_s37_script(data_root, fixture)) as stub:
         install = _committed_install(source.path, root / "install" / "repo")
         old_head = _git(install, "rev-parse", "HEAD")
-        settings = keyless_settings(stub, OUROBOROS_RUNTIME_MODE="advanced", OUROBOROS_REVIEW_ENFORCEMENT="blocking")
+        settings = keyless_settings(stub, OUROBOROS_RUNTIME_MODE="advanced")
         server = start_server(install, root, settings)
         try:
             # Generation A imported the tree under test: its static sentinel and its VERSION.
@@ -471,22 +478,59 @@ def test_s37_restart_adopts_the_reviewed_candidate_commit_on_one_real_server(tmp
 
 S38_DOC_PATH = "docs/notes/system_e2e_s38_evolution.md"
 S38_COMMIT_MESSAGE = "docs: system_e2e S38 evolution cycle note"
-S38_SCRIPT = [
-    {"tool": "write_file", "arguments": {"root": "system_repo", "path": S38_DOC_PATH,
-                                         "content": "# system_e2e S38\n\nSelf-evolution cycle payload.\n"}},
-    {"tool": "commit_reviewed", "arguments": {
-        "commit_message": S38_COMMIT_MESSAGE, "paths": [S38_DOC_PATH],
-        "skip_advisory_review": True, "skip_tests": True,
-        "goal": "Land the S38 evolution note through the blocking review organ.", "scope": f"{S38_DOC_PATH} only."}},
-]
+S38_COMMIT = {"tool": "commit_reviewed", "arguments": {
+    "commit_message": S38_COMMIT_MESSAGE, "paths": [S38_DOC_PATH],
+    "skip_advisory_review": True, "skip_tests": True,
+    "goal": "Land the S38 evolution note through the review organ.", "scope": f"{S38_DOC_PATH} only."}}
+S38_LANDING_RATIONALE = "I read the clean review of the S38 cycle note and land exactly it."
+
+
+def _s38_script(landing: dict) -> list:
+    """For a ``_HoldingStubModel``: the clean outcome returns before Git; the cycle's
+    explicit continuation on it is the commit whose receipts the crash loses."""
+    return [
+        {"tool": "write_file", "arguments": {"root": "system_repo", "path": S38_DOC_PATH,
+                                             "content": "# system_e2e S38\n\nSelf-evolution cycle payload.\n"}},
+        S38_COMMIT,
+        _land_on_returned_pass(S38_COMMIT, S38_LANDING_RATIONALE, landing),
+    ]
+
+
+def _call_arguments(call: dict) -> dict:
+    raw = (call.get("function") or {}).get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        loaded = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _after_the_commit(body: dict) -> bool:
-    """The cycle's first model round after commit_reviewed returned."""
+    """The cycle's first model round after the commit landed: after its explicit continuation
+    (the commit_reviewed call naming a review_reference) returned, never after the outcome the
+    first commit_reviewed call returned before Git."""
     return classify_call(body) == "agent" and any(
-        (call.get("function") or {}).get("name") == "commit_reviewed"
+        (call.get("function") or {}).get("name") == "commit_reviewed" and "review_reference" in _call_arguments(call)
         for message in body.get("messages") or [] if isinstance(message, dict)
         for call in message.get("tool_calls") or [] if isinstance(call, dict))
+
+
+def test_scripted_s38_gate_holds_the_round_after_the_landing_not_after_the_returned_outcome():
+    """Default lane: the S38 hold waits for the round after the continuation that commits;
+    the round after the first commit call (its outcome returned before Git) runs on."""
+    def round_after(*arguments: dict) -> dict:
+        calls = [{"id": f"c{i}", "function": {"name": "commit_reviewed", "arguments": json.dumps(args)}}
+                 for i, args in enumerate(arguments)]
+        return {"messages": [{"role": "user", "content": "go"}, {"role": "assistant", "tool_calls": calls}],
+                "tools": [{"type": "function", "function": {"name": "commit_reviewed"}}]}
+
+    first = S38_COMMIT["arguments"]
+    landing = {**first, "review_reference": {"surface": "commit", "attempt": 1},
+               "author_disposition": {"disposition": "accepted", "rationale": S38_LANDING_RATIONALE}}
+    assert not _after_the_commit(round_after(first))
+    assert _after_the_commit(round_after(first, landing))
 
 
 def _campaign(data_root: pathlib.Path) -> dict:
@@ -520,17 +564,20 @@ def test_s38_boot_recovers_a_crashed_evolution_candidate_commit_without_absorbin
     # on a host where it could run (on CI the same forced run in S22 ended red after about two
     # minutes, on its Node lane).
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "5")
-    settings_kwargs = dict(OUROBOROS_RUNTIME_MODE="advanced", OUROBOROS_REVIEW_ENFORCEMENT="blocking")
+    settings_kwargs = dict(OUROBOROS_RUNTIME_MODE="advanced")
     gate = ModelGate(_after_the_commit, timeout=600)
+    landing: dict = {}  # the outcome the cycle landed on, or why its script could not land it
     with candidate_checkout(REPO_ROOT, root / "source" / "repo", origin_proof=True) as source:
         install = _committed_install(source.path, root / "install" / "repo")
         old_head = _git(install, "rev-parse", "HEAD")
 
         # ---- Generation A: the supervisor's cycle commits in its candidate; the server dies.
-        with ScriptedStubModel(S38_SCRIPT, gate=gate) as stub:
+        with _HoldingStubModel(_s38_script(landing), gate=gate) as stub:
             server = start_server(install, root, keyless_settings(stub, **settings_kwargs))
             try:
-                assert gate.arrived.wait(600), ("the cycle never returned from commit_reviewed", stub.kinds())
+                assert wait_until(lambda: gate.arrived.is_set() or landing.get("error"), 600), (
+                    "the cycle never returned from its landing commit_reviewed", stub.kinds())
+                assert gate.arrived.is_set() and not landing.get("error"), (landing, stub.kinds())
                 tx = _campaign(data_root)["active_transaction"]
                 cand, task_id = str(tx["commit_sha"]), str(tx["task_id"])
                 rows = _candidate_rows(data_root)

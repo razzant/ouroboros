@@ -289,7 +289,7 @@ def test_the_setup_bootstrap_types_mirror_the_producer_rows():
     assert set(contract) == set(typing.get_type_hints(client_contracts.SetupContract))
     rows = {
         "steps": client_contracts.SetupStep, "providerFields": client_contracts.SetupProviderField,
-        "modelSlots": client_contracts.SetupModelSlot, "reviewModes": client_contracts.SetupModeChoice,
+        "modelSlots": client_contracts.SetupModelSlot,
         "runtimeModes": client_contracts.SetupModeChoice, "localRoutingModes": client_contracts.SetupLocalRoutingMode,
         "budgetFields": client_contracts.SetupBudgetField, "subscriptionFields": client_contracts.SetupSubscriptionField,
     }

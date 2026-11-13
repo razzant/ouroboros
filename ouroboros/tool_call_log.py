@@ -10,7 +10,12 @@ same frozen facts:
   included). It is NOT evidence that the handler ran or that any effect happened.
 - ``tool_call`` — the settlement: the handler's result (or a host refusal after
   the start), with the host-measured ``elapsed_ms`` of the whole call, distinct
-  from a process's own ``duration_ms``.
+  from a process's own ``duration_ms``. ``status`` is the outcome bucket and
+  ``tool_result_code`` the exact published code; a call a control ended before its
+  handler returned is ``interrupted`` with its ``control_reason``. A row the host
+  settles itself (``host_error``, ``interrupted``, a refused browser call) carries
+  no handler bucket or code; a pause can also refuse a launch through the handler,
+  whose typed refusal names it in ``tool_result_meta.control_reason``.
 - ``tool_call_timeout`` — the caller's wait ended; the worker may still settle
   later. Timeout and settlement are independent facts and may land in either order.
   It names where the worker stood at that moment (``worker_position``), so an
@@ -39,12 +44,22 @@ from ouroboros.utils import append_jsonl, truncate_for_log
 CALL_STARTED = "tool_call_started"
 CALL_SETTLED = "tool_call"
 CALL_WAIT_ENDED = "tool_call_timeout"
-_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status")
+# What the host settles when the handler returned nothing: its own failure (``host_error``), or
+# a control that ended the call (Pause, Cancel, a deadline), named in the row's ``control_reason``.
+HOST_INTERRUPTED = "interrupted"
+HOST_SETTLED_STATUSES = frozenset({"host_error", HOST_INTERRUPTED})
+_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status", "chronicle_lead_rule")
 _ACTIVE_CALL = ContextVar("active_tool_call", default=None)
 
 
 def current_tool_call_id() -> str:
     return str((_ACTIVE_CALL.get() or {}).get("tool_call_id") or "")
+
+
+def chronicle_lead_metadata() -> Dict[str, Any]:
+    """The producing attempt's lead fact, frozen before this worker was submitted."""
+    rule = (_ACTIVE_CALL.get() or {}).get("chronicle_lead_rule")
+    return {"lead_rule": rule} if rule is not None else {}
 
 
 def current_args_source() -> Dict[str, Any]:
@@ -223,7 +238,7 @@ def logical_calls(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     (the caller stopped waiting, no result recorded), ``unknown`` (only a start),
     ``legacy`` (a pre-identity row) or ``orphan`` (a result whose start row lies
     outside the rows given). A duplicate settlement (pre-guard data) never
-    replaces a real one with a host ``host_error`` row."""
+    replaces a real one with a row the host settled (``HOST_SETTLED_STATUSES``)."""
     calls: List[Dict[str, Any]] = []
     by_id: Dict[str, Dict[str, Any]] = {}
     slot = {CALL_STARTED: "started", CALL_SETTLED: "settled", CALL_WAIT_ENDED: "wait_ended"}
@@ -241,8 +256,8 @@ def logical_calls(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             calls.append(call)
         key = slot.get(str(row.get("type") or ""), "settled")
         held = call.get(key)
-        if held is None or (key == "settled" and held.get("status") == "host_error"
-                            and row.get("status") != "host_error"):
+        if held is None or (key == "settled" and held.get("status") in HOST_SETTLED_STATUSES
+                            and row.get("status") not in HOST_SETTLED_STATUSES):
             call[key] = row
     for call in calls:
         if "state" not in call:

@@ -211,9 +211,12 @@ test('a finished root\'s body is its work\'s name and outcome word on both wire 
         'Publish the release notes · Stopped');
     // Without a name only the word and its cause: no invented "Task", no task id, never the host sentence.
     assert.equal(chat({ outcome_phase: 'warn' }).body, 'Done with warnings');
-    assert.equal(log({ status: 'completed', outcome_axes: { objective: { status: 'pass', warning: 'receipt_absent',
-        warnings: ['receipt_absent'] } } }).body, 'Done with warnings: No host verification receipt was recorded; '
-        + 'this does not establish whether other checks ran.');
+    // A detail-only fact (nothing examined the result) keeps the word Done and still says its cause (9 Nov 2026).
+    const unexamined = { status: 'completed', outcome_axes: { objective: { status: 'pass', warning: 'receipt_absent',
+        warnings: ['receipt_absent'] } } };
+    const cause = taskReasonDetail({ type: 'task_done', chat_id: 1, ...unexamined });
+    const body = log(unexamined).body;
+    assert.ok(cause && body.startsWith('Done: ') && `Done: ${cause}`.startsWith(body.replace(/…$/, '')), body);
     assert.ok(!chat({ outcome_phase: 'error' }).body.includes('Root task'));
     // Both shapes stay one event.
     assert.equal(chat({ outcome_phase: 'done' }).key, log({ status: 'completed' }).key);
@@ -768,5 +771,11 @@ test('a reminder and a skill notice ring under the messages toggle, titled by th
     assert.equal(notice.title, 'Notice from calendar');
     assert.equal(notice.body, 'Meeting with Ivan in 15 min');
     assert.equal(noticeTitle('skill_notice', ''), 'Notice from a skill');
+    const safety = classifyLiveFrame({ ...reminder, system_type: 'safety_notice',
+        content: "Safety Supervisor · not Ouroboros's words\nOuroboros re-issued this after the flag" },
+    { kind: 'chat', isMain: true });
+    assert.equal(safety.category, 'important', "the Supervisor's own row rides the same toggle");
+    assert.equal(safety.title, 'Safety Supervisor');
+    assert.equal(safety.body, 'Ouroboros re-issued this after the flag', 'its signature stays out of the body');
     assert.equal(noticeTitle('reminder', 'owner'), 'Reminder from owner', 'a row the owner set is signed by the owner');
 });

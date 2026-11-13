@@ -340,8 +340,10 @@ def test_every_request_and_header_fact_is_published_for_the_journeys():
     assert BY_TOKEN["GET /api/tasks/{task_id}/artifacts/{name}"]["headers"] == ["Range"]
     plain = [token for token, entry in BY_TOKEN.items()
              if entry.get("request", {}).get("content_type") == "application/json" and not entry["request"]["schemas"]]
-    # The only bodies still published as plain JSON are documents of setting keys.
-    assert sorted(plain) == ["POST /api/settings", "POST /api/ui/preferences"], plain
+    # The only body still published as plain JSON is a document of setting keys; the generic save's document
+    # is open too, and publishes the two control fields it never stores.
+    assert sorted(plain) == ["POST /api/ui/preferences"], plain
+    assert requests["POST /api/settings"] == ["SettingsSaveRequest"]
 
 
 @pytest.mark.parametrize("with_summary", [False, True])

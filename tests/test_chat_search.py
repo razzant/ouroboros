@@ -15,12 +15,11 @@ import base64
 import json
 from types import SimpleNamespace
 
-
 from ouroboros import dialogue_store as ds
 from ouroboros.gateway import chat_search
 from ouroboros.gateway.chat_search import make_chat_search_endpoint
-from ouroboros.gateway.history_contracts import ChatSearchResponse
 from ouroboros.gateway.history import make_chat_history_endpoint
+from ouroboros.gateway.history_contracts import ChatSearchResponse
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.projects_registry import bind_task_to_project, create_project
 from tests import _dialogue as dialogue_test
@@ -57,9 +56,8 @@ def _say(root, index, text, *, chat_id=1, direction="in", stream="chat", **extra
 
 
 def _words(candidate):
-    """The words a candidate's row is drawn from: a question's question, a caption, a Project answer, else its text."""
-    return (candidate.get("quiz", {}).get("question") or candidate.get("caption") or candidate.get("completion_answer")
-            or candidate["text"])
+    """The words a candidate's row is drawn from: a caption, a Project answer, else its text (a question's too)."""
+    return candidate.get("caption") or candidate.get("completion_answer") or candidate["text"]
 
 
 def _texts(page):
@@ -240,6 +238,98 @@ def test_main_finds_no_copy_of_a_projects_question_which_its_project_finds(tmp_p
         "Which heron path, closed?", "Which heron path, answered?", "Which heron path, open?"]
 
 
+def test_a_settled_questions_card_carries_the_owners_own_answer_as_history_replays_it(tmp_path):
+    """A card settled as answered shows the owner's words (question_presentation.js ``renderOwnerAnswer``): its
+    candidate carries them as ``comment``, from the asking task's question lifecycle or, once that projection is gone,
+    the page's own answer row, as history replays the card. An open or closed card's lifecycle and the answer's
+    evidence row are never words."""
+    from ouroboros.owner_quiz import record_answered, record_asked, record_closed
+
+    project = create_project(tmp_path, "asking-room", name="Asking room")
+    chat = project["chat_id"]
+    for index, quiz_id in enumerate(("open", "answered", "closed", "chosen")):
+        question = f"Which heron path, {quiz_id}?"
+        record_asked(tmp_path, "asker", quiz_id=quiz_id, question=question, options=["a", "b"])
+        _say(tmp_path, index, question, chat_id=chat, direction="out", type="quiz", task_id="asker",
+             quiz={"quiz_id": quiz_id, "question": question, "options": ["a", "b"]})
+    assert record_answered(tmp_path, "asker", quiz_id="answered", option_index=None, request_id="answer",
+                           comment="Neither, follow the kingfisher upstream")["ok"]
+    assert record_answered(tmp_path, "asker", quiz_id="chosen", option_index=1, request_id="chosen",
+                           comment="b, but only at dawn")["ok"]
+    assert record_closed(tmp_path, "asker", quiz_id="closed", reason="not needed now", actor="owner",
+                         request_id="close")["ok"]
+    # An older card whose lifecycle projection is gone: the page's answer row (card evidence, never a message) speaks.
+    _say(tmp_path, 8, "Which heron path, evidence?", chat_id=chat, direction="out", type="quiz", task_id="gone",
+         quiz={"quiz_id": "old", "question": "Which heron path, evidence?", "options": ["a", "b"]})
+    _say(tmp_path, 9, "", chat_id=chat, direction="system", type="quiz_answer", task_id="gone",
+         quiz={"quiz_id": "old", "state": "answered", "comment": "Kingfisher pool first"})
+    cards = {row["quiz"]["quiz_id"]: row["quiz"] for row in _found(tmp_path, chat_id=chat, q="heron path")["candidates"]}
+    assert set(cards) == {"open", "answered", "closed", "chosen", "old"}, "the answer's evidence row is no candidate"
+    assert {quiz_id: card.get("comment") for quiz_id, card in cards.items()} == {
+        "open": None, "answered": "Neither, follow the kingfisher upstream", "closed": None,
+        "chosen": "b, but only at dawn", "old": "Kingfisher pool first"}
+    status, page = _history(tmp_path, chat_id=chat, n_human=12, n_progress=4)
+    shown = {row["quiz"]["quiz_id"]: row["quiz"] for row in page["messages"] if row.get("msg_type") == "quiz"}
+    assert status == 200 and {quiz_id: card.get("comment") if card.get("state") == "answered" else None
+                              for quiz_id, card in shown.items()} == {
+        quiz_id: card.get("comment") for quiz_id, card in cards.items()}, "the words the room's card draws"
+
+
+def test_a_settled_questions_answer_on_a_newer_page_is_found_by_one_bounded_probe(tmp_path, monkeypatch):
+    """Once the asking task's question lifecycle is gone, the answer row lies after its question, often on a newer page
+    than the one that finds the question (the room's feed already holds it there): one indexed probe of the asking
+    task's later chat rows, below the search's frozen end and within ``_PROBE_ROWS``, carries its words. An answer
+    that arrived after the search began, or one past the probe's bound, leaves the card as its row froze it."""
+    project = create_project(tmp_path, "asking-room", name="Asking room")
+    chat = project["chat_id"]
+    _say(tmp_path, 1, "Which heron path, far?", chat_id=chat, direction="out", type="quiz", task_id="gone",
+         quiz={"quiz_id": "far", "question": "Which heron path, far?", "options": ["a", "b"]})
+    _say(tmp_path, 2, "Which heron path, late?", chat_id=chat, direction="out", type="quiz", task_id="later",
+         quiz={"quiz_id": "late", "question": "Which heron path, late?", "options": ["a", "b"]})
+    for index in range(3, 7):
+        _say(tmp_path, index, f"filler {index}", chat_id=chat)
+    _say(tmp_path, 7, "", chat_id=chat, direction="system", type="quiz_answer", task_id="gone",
+         quiz={"quiz_id": "far", "state": "answered", "comment": "Kingfisher pool first"})
+    monkeypatch.setattr(chat_search, "_SCAN_ROWS", 3)
+    first = _found(tmp_path, chat_id=chat, q="heron path")
+    assert first["candidates"] == [] and first["has_more"], "the answer's page holds no question"
+    _say(tmp_path, 8, "", chat_id=chat, direction="system", type="quiz_answer", task_id="later",
+         quiz={"quiz_id": "late", "state": "answered", "comment": "arrived after the search began"})
+    cards = {}
+    cursor = first["next_cursor"]
+    while cursor:
+        page = _found(tmp_path, chat_id=chat, q="heron path", cursor=cursor)
+        cards.update({row["quiz"]["quiz_id"]: row["quiz"] for row in page["candidates"] if row.get("msg_type") == "quiz"})
+        cursor = page["next_cursor"]
+    assert {quiz_id: card.get("comment") for quiz_id, card in cards.items()} == {
+        "far": "Kingfisher pool first", "late": None}, "the probe reads below the search's frozen end"
+
+    def comments():  # a new search, every page
+        return {row["quiz"]["quiz_id"]: row["quiz"].get("comment") for page in _all(tmp_path, chat_id=chat, q="heron path")
+                for row in page["candidates"] if row.get("msg_type") == "quiz"}
+    assert comments() == {"far": "Kingfisher pool first", "late": "arrived after the search began"}
+    # A question whose task speaks once before its answer, a page of rows later.
+    _say(tmp_path, 10, "Which heron path, bounded?", chat_id=chat, direction="out", type="quiz", task_id="bounded",
+         quiz={"quiz_id": "bounded", "question": "Which heron path, bounded?", "options": ["a", "b"]})
+    _say(tmp_path, 11, "the bounded task speaks", chat_id=chat, direction="out", task_id="bounded")
+    for index in range(12, 15):
+        _say(tmp_path, index, f"filler {index}", chat_id=chat)
+    _say(tmp_path, 15, "", chat_id=chat, direction="system", type="quiz_answer", task_id="bounded",
+         quiz={"quiz_id": "bounded", "state": "answered", "comment": "past the probe"})
+    assert comments()["bounded"] == "past the probe"
+    monkeypatch.setattr(chat_search, "_PROBE_ROWS", 1)  # the probe's one row is the task's own words before it
+    assert comments()["bounded"] is None, "an answer past the probe's bound leaves the card as its row froze it"
+
+
+def test_the_search_field_takes_no_more_than_the_host_searches():
+    """The field holds the host's query bound in code points (``clipQuery``, never a UTF-16 ``maxlength``): words the
+    host would refuse cannot be typed (web/tests/chat_search.test.js pins an emoji query)."""
+    import pathlib
+
+    module = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "chat_search.js"
+    assert f"const MAX_QUERY_CHARS = {chat_search._MAX_QUERY_CHARS};" in module.read_text(encoding="utf-8")
+
+
 def _scheduled(root, index, child, *, chat_id=1):
     """The parent's progress row naming its child, the only lineage of a child whose result never entered the store."""
     _say(root, index, "Child scheduled", chat_id=chat_id, stream="progress", task_id="root-1", content="Child scheduled",
@@ -324,6 +414,45 @@ def test_a_room_in_reading_order_continues_on_its_byte_target_without_skipping(t
     pages = _all(tmp_path, chat_id=room, q="#")
     assert [text for page in pages for text in _texts(page)] == texts[::-1]
     assert len(pages) > 4 and pages[-1]["searched"]["beginning"]
+
+
+def _hydrated(monkeypatch):
+    """Every stored row a read decoded (``dialogue_store._row``, the one place a body becomes a row): its count and
+    stored bytes."""
+    seen, decode = {"rows": 0, "bytes": 0}, ds._row
+
+    def counted(record):
+        seen["rows"] += 1
+        seen["bytes"] += record["length"]
+        return decode(record)
+    monkeypatch.setattr(ds, "_row", counted)
+    return seen
+
+
+def test_a_search_of_long_messages_decodes_each_stored_row_once_in_both_orders(tmp_path, monkeypatch):
+    """The byte target bounds what a page decodes, not only what it answers: a chain of pages over long messages reads
+    each stored body once, in stored order and in reading order alike, never the rest of a probe page past its cut."""
+    long_text = "word " * 13_100  # about 64 KiB stored
+
+    def searched(chat_id):
+        stored = sum(row.length for row in ds.iter_rows(tmp_path, "chat") if row.row.get("chat_id") == chat_id)
+        seen = _hydrated(monkeypatch)
+        pages = _all(tmp_path, chat_id=chat_id, q="#")
+        monkeypatch.undo()
+        assert sum(len(page["candidates"]) for page in pages) == 200 and pages[-1]["searched"]["beginning"]
+        assert len(pages) > 20, "a page ends near its byte target"
+        return {**seen, "stored": stored, "pages": len(pages)}
+
+    for index in range(200):
+        _say(tmp_path, index, f"{long_text}#{index}", direction="out")
+    measured = [searched(1)]
+    room = 7003
+    for order in range(200):  # imported later, read earlier: the room reads in its reading order
+        _say(tmp_path, 1000 + order, f"{long_text}imported #{order}", chat_id=room, direction="out", type="place_arrival",
+             place_id="pl-1", historical_import={"id": f"imp-{order}"},
+             source_order={"time": f"2026-10-12T00:{order // 60:02d}:{order % 60:02d}Z", "order": order})
+    measured.append(searched(room))
+    assert all(seen["rows"] <= 200 + seen["pages"] and seen["bytes"] <= seen["stored"] * 1.1 for seen in measured), measured
 
 
 def test_a_request_reads_a_bounded_slice_of_the_room_never_its_history(tmp_path, monkeypatch):
@@ -478,10 +607,15 @@ def test_media_files_links_and_questions_carry_what_their_bubble_draws_from_neve
          download_url="/api/files/download?path=heron.pdf")
     _say(tmp_path, 4, "links", direction="out", type="links", title="Heron sites",
          actions=[{"label": "Weir", "url": "https://example.org/weir", "extra": "x"}])
-    _say(tmp_path, 5, "question text", direction="out", type="quiz", task_id="asker",
-         quiz={"quiz_id": "q", "question": "Which **heron**?", "options": ["a"], "stake": "s"})
+    # A question row as the host writes it (supervisor/message_bus.py send_quiz): the question is its text.
+    _say(tmp_path, 5, "Which **heron**?", direction="out", type="quiz", task_id="asker",
+         quiz={"quiz_id": "q", "options": [{"label": "Weir", "detail": "Below the mill", "recommended": True},
+                                           {"label": "Pool"}],
+               "stake": "Nesting ends soon", "assumption": "Weir", "state": "open", "wait_for_answer": True})
+    _say(tmp_path, 7, "Which older heron?", direction="out", type="quiz", task_id="asker",
+         quiz={"quiz_id": "legacy", "options": ["Weir", 3], "option_details": ["Below the mill", None]})
     _say(tmp_path, 6, "card", direction="out", type="card", card={"card_id": "c", "kind": "k", "title": "Heron card"})
-    quiz, links, document, plain, photo = _found(tmp_path, q="heron")["candidates"]
+    legacy, quiz, links, document, plain, photo = _found(tmp_path, q="heron")["candidates"]
     assert (photo["msg_type"], photo["caption"]) == ("photo", "A heron on the weir") and "download_url" not in photo
     assert "msg_type" not in plain and plain["text"] == "Photo attachment"
     assert (document["msg_type"], document["caption"], document["filename"]) == ("document", "", "heron.pdf"), \
@@ -489,7 +623,12 @@ def test_media_files_links_and_questions_carry_what_their_bubble_draws_from_neve
     assert "download_url" not in document and "mime" not in document
     assert (links["msg_type"], links["title"], links["actions"]) == (
         "links", "Heron sites", [{"label": "Weir", "url": "https://example.org/weir"}])
-    assert (quiz["msg_type"], quiz["quiz"]) == ("quiz", {"question": "Which **heron**?"})
+    # Its card's words (chat_search_words.js draws them as the card does): never its lifecycle, assumption or
+    # recommendation; an option of another shape stays one the card refuses.
+    assert (quiz["msg_type"], quiz["text"], quiz["quiz"]) == ("quiz", "Which **heron**?", {
+        "quiz_id": "q", "options": [{"label": "Weir", "detail": "Below the mill"}, {"label": "Pool"}],
+        "stake": "Nesting ends soon"})
+    assert legacy["quiz"] == {"quiz_id": "legacy", "options": ["Weir", None], "option_details": ["Below the mill", ""]}
 
 
 def test_the_search_runs_off_the_event_loop(tmp_path, monkeypatch):

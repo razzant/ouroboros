@@ -1098,6 +1098,7 @@ def mark_dispatched(
     reservation: AttemptReservation, *,
     candidate_manifest_ref: Optional[Dict[str, Any]] = None,
     local_answer_owner_pid: int = 0,
+    task_receiver: bool = True,  # False: the sender reads its own answer (``answer_owner_fields``)
 ) -> None:
     invoke_bound_api_review_paid_stamp(fail_closed=True)
     try:
@@ -1113,11 +1114,9 @@ def mark_dispatched(
     fields = {"candidate_manifest_ref": candidate_manifest_ref} if candidate_manifest_ref else {}
     if local_answer_owner_pid:
         fields["local_answer_owner_pid"] = local_answer_owner_pid
-        from ouroboros.model_wait import current_model_wait
-        owner = current_model_wait()
-        if (owner is not None and local_answer_owner_pid == os.getpid()
-                and owner.task_id == (reservation.scope or UsageScope()).task_id):
-            fields.update(owner.bind_answer_consumer())
+        if local_answer_owner_pid == os.getpid():  # only the sender itself binds or proves anything
+            from ouroboros.model_wait import answer_owner_fields
+            fields.update(answer_owner_fields((reservation.scope or UsageScope()).task_id, task_receiver=task_receiver))
     _transition(reservation, "dispatched", launch_state="claimed", transport_outcome="unknown", **fields)
     invoke_bound_api_review_paid_stamp(fail_closed=False)
 

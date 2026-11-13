@@ -645,6 +645,105 @@ def test_typed_subject_refusal_suppresses_next_auto_preference(setup):
     assert gateway.uploads[1][0]["account"] == {"mode": "auto"}
 
 
+def _plan(**change):
+    """A Main plan as ``send_account`` reads it: built on ROUTE's exact account with a known, fresh window."""
+    return SimpleNamespace(**{"provider": "claudexor", "model_role": "main", "account_pin": "", "window_witness_bound": True,
+                              "stale": False, "status": "confirmed", "model_route": dict(ROUTE), **change})
+
+
+def _planned_send(monkeypatch, plan, messages=(), **parameters):
+    monkeypatch.delenv(MODEL_ACCOUNTS_KEY, raising=False)
+    monkeypatch.setattr(transport, "current_model_wait",
+                        lambda: SimpleNamespace(tool_context=SimpleNamespace(context_fit_plan=plan)))
+    return transport._request({"source": "codex", "resolved_model": "exact-model"},
+                              [*messages, {"role": "user", "content": "hi"}], None, {"model_role": "main", **parameters})
+
+
+@pytest.mark.parametrize("change,parameters,named", [
+    ({}, {}, "account-a"),  # an exact account-bound plan: the first send names its account
+    ({"model_route": {"source": "codex", "model": "exact-model"}}, {}, None),  # a pool bound names no account
+    ({"status": "unprobeable", "stale": True}, {}, None),  # an unknown window
+    ({"model_route": {**ROUTE, "accountFingerprint": ""}}, {}, None),  # a profile name without its fingerprint
+    ({"model_route": {**ROUTE, "model": "other-model"}}, {}, None),  # another model's plan
+    ({"model_role": "light"}, {}, None),  # another role's plan
+    ({"account_pin": "account-a"}, {}, None),  # a pinned plan is no Auto plan
+    ({}, {"_no_account_preference": True}, None),  # a redo or a re-ask after a refusal
+])
+def test_the_first_send_names_the_account_of_an_exact_bound_plan_only(monkeypatch, change, parameters, named):
+    """H5 (W2, 12.11.2026): with no answer of this model in the conversation, the send names the account its plan was
+    built on as ``preferredProfileId``: advice the engine may overrule (a mark, a refusal, login or quota send it to the
+    pool), never a pin, and only for an exact account-bound record of the same source and model."""
+    payload = _planned_send(monkeypatch, _plan(**change), **parameters)
+    assert payload["account"] == ({"mode": "auto", "preferredProfileId": named} if named else {"mode": "auto"})
+
+
+def test_the_conversation_and_a_failed_account_outrank_the_plans_account(monkeypatch):
+    """The order is the pin, the last answer of this model, the plan's account. The account that just failed is named
+    by nothing: a prospective build reads that fact, only a dispatch spends it, and the plan's account returns after."""
+    from ouroboros import llm_substitution
+    from ouroboros.llm_substitution import send_account
+
+    answered = [{"role": "assistant", "content": "", "nativeContinuation": {"route": {
+        **ROUTE, "credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b"}}}]
+    assert _planned_send(monkeypatch, _plan(), answered)["account"] == {"mode": "auto", "preferredProfileId": "account-b"}
+    assert send_account({"source": "codex", "resolved_model": "exact-model"}, answered, {"model_role": "main"},
+                        plan=_plan())[1]["accountFingerprint"] == "fingerprint-b"  # the identity its evidence binds
+    monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "account-c"}))
+    assert send_account({"source": "codex", "resolved_model": "exact-model"}, answered, {"model_role": "main"},
+                        plan=_plan()) == ({"mode": "pin", "profileId": "account-c"}, {})  # a pin stays a pin
+    token = llm_substitution._FAILED_PROFILE.set(("execution-a", "codex", "exact-model", "account-a"))
+    try:
+        assert _planned_send(monkeypatch, _plan(), cache_affinity="execution-a", prospective=True)["account"] == {"mode": "auto"}
+        assert _planned_send(monkeypatch, _plan(), cache_affinity="execution-a")["account"] == {"mode": "auto"}  # spent
+        assert _planned_send(monkeypatch, _plan(), cache_affinity="execution-a")["account"] == {
+            "mode": "auto", "preferredProfileId": "account-a"}
+    finally:
+        llm_substitution._FAILED_PROFILE.reset(token)
+
+
+def test_a_round_names_the_engines_account_choice_and_its_time_until_dispatch(setup, monkeypatch):
+    """W2 H7: a round's usage carries the account its send preferred, the engine's ``routing.selectionReason`` and the
+    time until dispatch started by the engine's own record (not bytes left for the vendor); its receipt names the
+    candidate's measurement and reservation. A field the engine leaves out adds nothing."""
+    import json as _json
+    from ouroboros.llm_observability import round_receipt, round_window
+
+    _, gateway, client = setup
+    detail = gateway.detail
+
+    def timed_detail(index):
+        value = detail(index)
+        return {**value, "startedAt": "2026-11-12T10:00:00.000Z", "routing": {"selectionReason": "preferred", "poolEvents": []},
+                "dispatch": {**value["dispatch"], "startedAt": "2026-11-12T10:00:01.930Z"}}
+
+    monkeypatch.setattr(gateway, "detail", timed_detail)
+    with round_window():
+        _, usage = client.chat([result()["message"], {"role": "user", "content": "next"}], MODEL)
+        receipt = round_receipt()
+    named = {key: usage["claudexor"][key] for key in ("preferred_profile", "selection_reason", "engine_until_dispatch_ms")}
+    assert named == {"preferred_profile": "account-a", "selection_reason": "preferred", "engine_until_dispatch_ms": 1930}
+    assert len(_json.dumps(named)) < 120  # what a round's line adds, in archives kept for good
+    assert {"candidate.measure", "candidate.reserve"} <= set(receipt["host_steps"]["sections_ms"])
+    monkeypatch.setattr(gateway, "detail", detail)
+    gateway.results.append(result())
+    gateway.dispatch.append("response_received")
+    _, plain = client.chat([{"role": "user", "content": "hi"}], MODEL)
+    assert not {"preferred_profile", "selection_reason", "engine_until_dispatch_ms"} & set(plain["claudexor"])
+
+
+def test_a_correlated_retry_never_gets_the_plans_account_back(tmp_path):
+    """The one engine-granted retry on another account is built from the refused send with ``{"mode": "auto"}``."""
+    from ouroboros.llm_substitution import CapabilityRetry
+
+    invocation = SimpleNamespace(payload={"account": {"mode": "auto", "preferredProfileId": "account-a"}, "messages": []},
+                                 operation_id="op-0", root=tmp_path, task_id="", role="main")
+    error = transport.ClaudexorModelNotDispatched({"code": "model_capability_refused", "message": "refused", "context": {
+        "retryOnOtherAccount": True, "generationStarted": False, "operationId": "op-0"}}, operation_id="op-0")
+    error.physical_attempt_capture = SimpleNamespace(state="released", attempt_id="attempt-0")
+    retry = CapabilityRetry().refused(invocation, error)
+    assert retry["account"] == {"mode": "auto"} and retry["retryOfOperationId"] == "op-0"
+
+
 @pytest.mark.parametrize("change", [{"credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b"},
                                      {"model": None}, {"source": "different-source"}])
 def test_native_reset_keeps_canonical_tools_and_only_claims_a_real_account_change(setup, change):

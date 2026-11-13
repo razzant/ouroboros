@@ -567,8 +567,7 @@ def test_the_absorption_reminder_names_each_held_child_held_with_the_stop_its_pa
     write_task_result(tmp_path, "child-plain", STATUS_RUNNING, chat_id=0, parent_task_id="root-1",
                       root_task_id="root-1", delegation_role="subagent")  # an ordinary child that simply runs
     ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path), "root_task_id": "root-1"},
-                          budget_drive_root=str(tmp_path), drive_root=str(tmp_path), task_id="root-1",
-                          _subagent_handoff_signature="")
+                          budget_drive_root=str(tmp_path), drive_root=str(tmp_path), task_id="root-1")
     text = _compute_subagent_handoff(SimpleNamespace(_ctx=ctx), tmp_path, "root-1", "done")
     held, running = _section(text, _HELD_HEADER), _section(text, _RUNNING_HEADER)
     assert [row.split(":", 1)[0] for row in held] == ["- child-run", "- child-new"]

@@ -166,6 +166,14 @@ def switch_needs(repo_dir: Any, target_sha: str) -> Dict[str, bool]:
             "dialogue": dialogue is None, "threads": THREAD_FORMAT.encode("ascii") not in (dialogue or b"")}
 
 
+def lacks_wake_chain_reader(repo_dir: Any, target_sha: str) -> bool:
+    """Whether the target tree lacks the reader of the accepted wake transition chain, so a door first writes the
+    accepted transitions back in the form it reads (``_export_wake_transitions``). Not one of the ``switch_needs``:
+    such a body reads every store, so this never defers or refuses a switch (the safe-restart fallback refuses a
+    recovery point on any need, ``supervisor.git_ops_reset._recovery_checkout``)."""
+    return target_file_bytes(repo_dir, target_sha, "ouroboros/consciousness_transitions.py") is None
+
+
 _DEFERRING = ("facts", "dialogue", "threads")  # the needs only the seam meets, at the restart exit (every writer dead)
 
 
@@ -173,13 +181,18 @@ def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: st
                     reset: Callable[[], Tuple[bool, str]]) -> Tuple[bool, str, bool]:
     """A door's one decision after its writers are stopped: a target WITHOUT the store, or one that cannot
     read a dialogue row held by reference, records the intent and moves nothing (the seam exports and
-    switches at the restart exit the door requests next); any other runs the door's own reset now.
-    Returns ``(ok, message, deferred)``."""
+    switches at the restart exit the door requests next); any other runs the door's own reset now, after the
+    accepted wake transitions are written in the form a target without their reader reads (best effort, its
+    outcome logged: ``_export_wake_transitions``). Returns ``(ok, message, deferred)``."""
     needs = switch_needs(repo_dir, target_sha)
     if any(needs.get(name) for name in _DEFERRING):
         record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door)
         return True, (f"authority switch to {target_sha[:12]} recorded: the facts are exported and the checkout "
                       "moves at the restart exit"), True
+    if lacks_wake_chain_reader(repo_dir, target_sha):
+        exported = _export_wake_transitions(pathlib.Path(root))
+        log.info("Accepted wake transitions before the %s door's reset to %s: %s", door, target_sha[:12],
+                 exported.get("status"))
     refusal = _hand_off_stores(pathlib.Path(root))
     if refusal:
         store.forget_handoffs()
@@ -191,6 +204,20 @@ def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: st
             store.forget_handoffs()
         raise
     return ok, message, False
+
+
+def _export_wake_transitions(root: pathlib.Path) -> Dict[str, Any]:
+    """The accepted wake transition chain written back as the wake source an older body reads
+    (``consciousness_transitions.export_for_older_body``). Best effort: a failure is logged and returned as the
+    outcome (the seam's step, the direct door's log line), and the switch goes on; a rollback outranks the
+    precision of one observation window."""
+    from ouroboros.consciousness_transitions import export_for_older_body
+
+    try:
+        return export_for_older_body(root)
+    except Exception as exc:
+        log.warning("The accepted wake transitions were not exported for the older body", exc_info=True)
+        return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
 
 
 def _hand_off_stores(root: pathlib.Path) -> str:
@@ -414,7 +441,7 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
         return _refuse(root, intent, receipt, "second_failure", attempts=receipt["attempts"])
     if blockers:
         return _refuse(root, intent, receipt, "quiescence_unconfirmed", blockers=list(blockers))
-    needs = switch_needs(repo_dir, intent["target_sha"])
+    needs, wake = switch_needs(repo_dir, intent["target_sha"]), lacks_wake_chain_reader(repo_dir, intent["target_sha"])
     roots, refusal = _roots(root) if needs["facts"] else ([], "")
     _progress(root, "preflight", needs=needs, attempt=receipt["attempts"])
     try:
@@ -453,6 +480,10 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
 
             _progress(root, "dialogue")
             steps["dialogue"] = export_for_older_body(root)  # the post-cutover rows back into the chains
+            _write_receipt(root, receipt)
+        if wake:
+            _progress(root, "wake_transitions")
+            steps["wake_transitions"] = _export_wake_transitions(root)  # a failure is its record, never the switch's
             _write_receipt(root, receipt)
     except (OSError, store.StoreError, UsageAccountingError) as exc:
         receipt["export"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "at": utc_now_iso()}

@@ -62,18 +62,18 @@ def test_a_three_wave_series_discloses_the_open_state_never_a_past_tense() -> No
     ctx = _ctx_over(
         [_wave("REVISE_PLAN"), _wave("REVIEW_REQUIRED"), _wave("DEGRADED", findings=[_blocking("s2")])], "DEGRADED",
     )
-    decision = plan_gate_decision(ctx, {}, hard_rail="round_limit", enforcement="blocking")
+    decision = plan_gate_decision(ctx, {}, hard_rail="round_limit")
 
     disclosure = plan_review_disclosure(decision, "round_limit")
 
     assert decision["status"] == "rail_degraded" and decision["allow"] is True and decision["source"] == "legacy_v2"
-    assert "Blocking plan review is open (1 open objection: s2/s2:f1" in disclosure
+    assert "Plan review is open (1 open objection: s2/s2:f1" in disclosure and "Blocking" not in disclosure
     assert "remained" not in disclosure and "DEGRADED" not in disclosure
     assert "`round_limit`" in disclosure
 
     settled = plan_gate_decision(
         _ctx_over([_wave("REVISE_PLAN"), _wave("REVIEW_REQUIRED"), _wave("DEGRADED")], "DEGRADED"), {},
-        hard_rail="round_limit", enforcement="blocking",
+        hard_rail="round_limit",
     )
     assert settled["status"] == "rail_degraded" and settled["open_objections"] == [] and settled["pending_asks"] == []
     assert plan_review_disclosure(settled, "round_limit") == ""
@@ -86,7 +86,7 @@ def test_a_late_result_still_owed_reaches_the_owner_line() -> None:
         [_wave("DEGRADED", custody_pending=True, reasons=["review_late_result_pending"])],
         "DEGRADED",
     )
-    decision = plan_gate_decision(ctx, {}, hard_rail="round_limit", enforcement="blocking")
+    decision = plan_gate_decision(ctx, {}, hard_rail="round_limit")
 
     assert decision["pending_asks"] == ["legacy wave " + "c" * 12]
     disclosure = plan_review_disclosure(decision, "round_limit")
@@ -95,26 +95,26 @@ def test_a_late_result_still_owed_reaches_the_owner_line() -> None:
 
     quiet = plan_gate_decision(
         _ctx_over([_wave("DEGRADED")], "DEGRADED"), {},
-        hard_rail="round_limit", enforcement="blocking",
+        hard_rail="round_limit",
     )
     assert quiet["pending_asks"] == []
     assert "still on their way" not in plan_review_disclosure(quiet, "round_limit")
 
 
-def test_advisory_enforcement_also_states_what_is_open() -> None:
-    """Advisory never holds: an open objection of the legacy wave is disclosed as open NOW;
+def test_an_open_legacy_objection_is_stated_and_never_held() -> None:
+    """Nothing holds: an open objection of the legacy wave is disclosed as open NOW;
     a settled wave with no finding discloses nothing."""
     ctx = _ctx_over([_wave("DEGRADED", findings=[_blocking()])], "DEGRADED")
-    decision = plan_gate_decision(ctx, {}, enforcement="advisory")
+    decision = plan_gate_decision(ctx, {})
 
     disclosure = plan_review_disclosure(decision)
 
     assert decision["allow"] is True and decision["status"] == "objections_open"
     assert "Plan review: 1 open objection remains open — s1/s1:f1" in disclosure
     assert "remained" not in disclosure and "DEGRADED" not in disclosure
-    assert "advisory enforcement" in disclosure
+    assert "work proceeded with them open" in disclosure
 
-    quiet = plan_gate_decision(_ctx_over([_wave("DEGRADED")], "DEGRADED"), {}, enforcement="advisory")
+    quiet = plan_gate_decision(_ctx_over([_wave("DEGRADED")], "DEGRADED"), {})
     assert quiet["allow"] is True and quiet["status"] == "clear" and plan_review_disclosure(quiet) == ""
 
 
@@ -122,10 +122,10 @@ def test_a_rail_with_no_recorded_reason_renders_absence_not_an_internal_token() 
     """The owner-visible suffix quoted ``task_rail`` in backticks when the rail had no
     recorded reason, which reads as a named cause and is not one."""
     railed = {
-        "required": True, "enforcement": "blocking", "status": "rail_degraded", "allow": True, "reason": "",
-        "open_objections": [{"seat_id": "s1", "id": "s1:f1", "text": "the budget line is missing", "holds": True,
+        "required": True, "status": "rail_degraded", "allow": True, "reason": "",
+        "open_objections": [{"seat_id": "s1", "id": "s1:f1", "text": "the budget line is missing", "owner_marked": True,
                              "ask_id": "a1", "revision": 1}],
-        "holding": ["s1:s1:f1"], "pending_asks": [],
+        "pending_asks": [],
     }
 
     without_reason = plan_review_disclosure(railed)

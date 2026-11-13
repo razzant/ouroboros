@@ -1,7 +1,8 @@
-// Agent accounts (D30, regrouped in the Agents tab) — the owner-facing surface over the owned Claudexor
-// daemon's account truth. The shape is the owner's (2026-08-08: "все акки клод кода должны быть эквивалентны",
-// "в каждой секции добавить кнопку", "текст про лимиты компактнее и понятнее"): ONE CARD PER FAMILY whose head
-// carries the family's status and its own Add button; ROWS ARE ONE TYPE (every account a named registry row with
+// A provider's subscription accounts (Settings › Accounts and keys › that provider's page, whose frame
+// settings_accounts.js draws) — the owner-facing surface over the owned Claudexor daemon's account truth. The shape
+// is the owner's (2026-08-08: "все акки клод кода должны быть эквивалентны", "в каждой секции добавить кнопку",
+// "текст про лимиты компактнее и понятнее"): ONE CARD PER FAMILY whose head carries its own Add button and whose
+// first line its status; ROWS ARE ONE TYPE (every account a named registry row with
 // the same name, Enabled toggle and Remove; an engine on the pre-unified model lists none and the service banner
 // says why); TWO LINES PER ROW (the account and its status, then metadata in human words, never a raw ISO
 // instant); removal and Enabled go through the ENGINE's own contract (DELETE/PATCH credential-profiles).
@@ -37,13 +38,12 @@ import {
     quotaConstraintFact,
     readsFor,
 } from './claudexor_status_store.js';
-import { RESTART_LABEL, createRestartController } from './claudexor_restart.js';
+import { createRestartController } from './claudexor_restart.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { harnessIdentityMarkup, planLabel } from './harness_presentation.js';
-import { SIGN_IN_SCOPE_NOTE, createLoginCardController, normalizeProfileName, preserveCardFocus } from './harness_login_cards.js';
+import { planLabel } from './harness_presentation.js';
+import { createLoginCardController, normalizeProfileName, preserveCardFocus } from './harness_login_cards.js';
 import { refreshMaintenanceCatalogs } from './settings_catalog.js';
 import { createHarnessMaintenanceController } from './harness_maintenance.js';
-import { settingsSection } from './settings_controls.js';
 import { formatRelativeAge } from './ui_helpers.js';
 import { absoluteTime, escapeHtmlAttr as escapeHtml } from './utils.js';
 
@@ -573,19 +573,19 @@ export function bareRowStatusText(accountsRead, { accountsUnsupported = false } 
     if (accountsUnsupported) return ACCOUNTS_UNSUPPORTED_STATUS;
     if (accountsRead === READ_OK) return 'No account connected';
     if (accountsRead === READ_UNREAD) return 'Checking…';
-    if (accountsRead === READ_TRANSPORT) return 'Not checked — the status request did not complete';
-    if (accountsRead === READ_FAILED) return 'Not checked — the daemon did not answer this read';
+    if (accountsRead === READ_TRANSPORT) return 'Not checked: the status request did not complete';
+    if (accountsRead === READ_FAILED) return 'Not checked: the daemon did not answer this read';
     // The coarse state: the answer did not complete, and it does not say which
     // read was the one that failed — so the row claims nothing beyond that.
     // Without this branch a legacy payload's global refusal fell through to
     // "never asked", which is the opposite of what happened.
-    if (accountsRead === READ_INDETERMINATE) return 'Not checked — the status answer did not complete';
+    if (accountsRead === READ_INDETERMINATE) return 'Not checked: the status answer did not complete';
     // NOT READ says nobody asked; it does NOT say why. "the agent daemon is not
     // running" named a cause this row cannot see — a runtime awaiting repair, a
     // foreign daemon on the stale port and an ownership problem all arrive here
     // as the same unread facet, and the tab's ONE banner is the place that
-    // explains which of them it is.
-    return 'Not checked — the agent daemon was never asked';
+    // explains which of them it is. So the row says only that it has not happened yet.
+    return 'Not checked yet';
 }
 
 export function familyStatus(rows, { accountsRead = READ_OK, accountsUnsupported = false } = {}) {
@@ -660,7 +660,7 @@ export { accountName };
 export function accountMetaParts(row, payload, { quotaRead = READ_OK, nowMs = Date.now(), action = {} } = {}) {
     const parts = [];
     // The one user-settable routing fact, stated where the rotation claim lives.
-    if (row.enabled === false) parts.push({ text: 'disabled — excluded from rotation' });
+    if (row.enabled === false) parts.push({ text: 'Out of rotation' });
     const resources = resourceSummary(row, payload, { known: quotaRead === READ_OK, action });
     const quota = quotaSummary(payload?.quota || [], row.harness, row.profile_id,
         { quotaRead, nowMs, absences: payload?.quota_absences || [] });
@@ -1011,6 +1011,9 @@ const state = {
     wakeError: '',
     wakeBusy: false,
     restart: null, // the Restart Claudexor controller: its request in flight and the last outcome's note
+    family: '',    // the provider whose page is mounted ('' lists every family)
+    path: '',      // that page's Settings path: its showing is the owner's act that may activate the read
+    mark: null,    // the page's lead mark for a row: `({ row, badge, quota }) => html`
 };
 
 // The disclosure's quiet chevron (it turns when open).
@@ -1073,25 +1076,6 @@ function bindServiceDiagnostics() {
     return () => toggle.removeEventListener?.('click', onClick);
 }
 
-export function renderAgentAccountsSection() {
-    return settingsSection({
-        title: 'Accounts',
-        id: 'harness-accounts-section',
-        lead: 'Subscriptions Ouroboros signs in with; where each one works is chosen in Models and Agents.',
-        details: `Connect subscriptions and API keys here, then choose their roles in Models and Agents. Adding an account keeps
-            your existing assignments. ${SIGN_IN_SCOPE_NOTE} Check the intended route in Models or Agents separately.
-            Unpinned work uses enabled accounts; disabling keeps the login out of rotation.
-            Accounts live in Ouroboros's own agent home; personal logins are never imported.`,
-        actions: `<button type="button" class="btn btn-default" id="btn-harness-refresh">Refresh</button>
-            <button type="button" class="btn btn-default" id="btn-claudexor-restart" hidden>${RESTART_LABEL}</button>`,
-        body: `${renderAgentsServiceBanner()}
-            <div id="harness-accounts-error" class="settings-inline-status" data-tone="error" hidden></div>
-            <div id="harness-model-marks-note" class="settings-inline-status" data-tone="muted" hidden></div>
-            <div id="harness-accounts-groups" class="agent-family-list"></div>
-            <div id="harness-login-card"></div>`,
-    });
-}
-
 export function accountRowFacts(row, payload,
                                 { accountsRead = READ_OK, quotaRead = READ_OK, nowMs = Date.now(), action = {} } = {}) {
     // Each projection is gated by ITS OWN facet: the identity claim is the ACCOUNTS read, the window is the
@@ -1111,25 +1095,33 @@ export function accountRowFacts(row, payload,
     };
 }
 
+/** An account that needs its owner: in rotation, and its login was checked and did not pass (`known`: the accounts
+ *  facet was really read; a remembered row claims nothing). */
+export const needsSignIn = (row, known = true) => row.enabled !== false && verificationBadge(row, { known }).tone === 'error';
+
 function rowHtml(row, payload, facets = {}) {
     const action = facets.store?.resourceAction?.(targetFor(row)) || {};
     const { badge, quota, name, metaParts } = accountRowFacts(row, payload, { ...facets, action });
     const loginAction = rowLoginAction(row, payload);
-    // Row ACTIONS follow the engine's own routes: every named registry row has
-    // the PATCH Enabled toggle and DELETE Remove.
-    const rowActions = `
-                <button type="button" class="btn btn-default" data-harness-toggle data-enabled="${row.enabled === false ? '0' : '1'}" title="${row.enabled === false ? 'Let rotation use this account again' : 'Keep the login, take this account out of rotation'}">${row.enabled === false ? 'Enable' : 'Disable'}</button>
-                <button type="button" class="btn btn-default" data-harness-remove title="Ask the agent service to forget this account">Remove</button>`;
+    const on = row.enabled !== false;
+    // Row ACTIONS follow the engine's own routes: every named registry row has the PATCH Enabled toggle (its place in
+    // rotation, a switch that acts at once) and DELETE Remove. Sign in stands in the row while the account is not
+    // signed in; what is rare (Sign in again, Remove) waits behind More with the account's resources. A login that
+    // is verified is the quiet case and says nothing: the card's first line counts them, and a row speaks of trouble.
+    const rare = String(row?.status?.verification || '') === 'passed';
+    const login = `<button type="button" class="btn btn-default btn-sm" data-harness-login${rare ? ' data-rare' : ''}>${escapeHtml(loginAction.label)}</button>`;
     return `
-        <div class="harness-account-row${quota.exhausted ? ' harness-exhausted' : ''}" data-harness="${escapeHtml(row.harness)}" data-profile="${escapeHtml(row.profile_id)}" data-kind="${escapeHtml(row.kind)}">
+        <div class="ui-row harness-account-row${quota.exhausted ? ' harness-exhausted' : ''}" data-harness="${escapeHtml(row.harness)}" data-profile="${escapeHtml(row.profile_id)}" data-kind="${escapeHtml(row.kind)}"${on && badge.tone === 'error' ? ' data-tone="warn"' : ''}>
+            <span class="harness-account-mark" aria-hidden="true">${facets.mark?.({ row, badge, quota }) || ''}</span>
             <div class="harness-account-main">
                 <strong>${escapeHtml(name)}</strong>
-                <span class="ui-status" data-tone="${badge.tone}">${escapeHtml(badge.label)}</span>
+                ${badge.tone === 'ok' ? '' : `<span class="ui-status" data-tone="${badge.tone}">${escapeHtml(badge.label)}</span>`}
             </div>
             <div class="harness-account-meta muted">${metaParts.map((part) => `<span class="meta-fact"${part.tone ? ` data-tone="${part.tone}"` : ''}>${escapeHtml(part.text)}</span>`).join('')}${capabilityMarkup(row, payload)}</div>
-            <div class="harness-account-actions">
-                <button type="button" class="btn btn-default" data-resources aria-expanded="false" aria-controls="${escapeHtml(resourcePanelId(row))}">▸ Resources</button>
-                <button type="button" class="btn btn-default" data-harness-login>${escapeHtml(loginAction.label)}</button>${rowActions}
+            <div class="harness-account-actions">${rare ? '' : login}
+                <label class="ui-switch"><input type="checkbox" role="switch" data-harness-toggle data-enabled="${on ? '1' : '0'}" aria-checked="${on}" aria-label="${escapeHtml(`Use ${name} in rotation`)}"${on ? ' checked' : ''}><span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>
+                <button type="button" class="settings-disclosure ui-hit-area" data-resources aria-expanded="false" aria-controls="${escapeHtml(resourcePanelId(row))}">More${DISCLOSURE_CARET}</button>
+                ${rare ? login : ''}<button type="button" class="btn btn-danger btn-sm" data-harness-remove data-rare>Remove</button>
             </div>
         </div>
     `;
@@ -1139,22 +1131,26 @@ export function harnessFamilyMarkup(group, payload, facets) {
     // An empty family is a ONE-LINE card: the header already carries the verdict
     // (familyStatus falls through to it), and printing the same sentence again
     // in the body just made the card twice as tall to say nothing new.
-    const body = group.rows.map((row) => rowHtml(row, payload, facets)).join('');
+    const known = (facets?.accountsRead ?? READ_OK) === READ_OK;
+    const body = [...group.rows].sort((a, b) => Number(needsSignIn(b, known)) - Number(needsSignIn(a, known)))
+        .map((row) => rowHtml(row, payload, facets)).join('');
     const nextUp = nextUpBadge(payload, group.harness,
         { accountsRead: facets?.accountsRead ?? READ_OK });
     return `
         <section class="agent-family-card" data-family="${escapeHtml(group.harness)}">
-            <div class="agent-family-head">
-                <div class="agent-family-id">
-                    <h4>${harnessIdentityMarkup(group.harness, { label: group.label })}</h4>
+            <div class="ui-card settings-card agent-family-program" data-family-maintenance="${escapeHtml(group.harness)}"></div>
+            <div class="ui-card settings-card agent-family-accounts"${group.maintenanceOnly ? ' hidden' : ''}>
+                <div class="settings-card-head agent-family-head">
+                    <h3 class="settings-card-title">Accounts</h3>
+                    ${group.maintenanceOnly || facets?.accountsUnsupported ? '' : `<button type="button" class="btn btn-default btn-sm" data-family-add>${escapeHtml(familyActionLabel(group, payload))}</button>`}
+                </div>
+                <p class="settings-card-lead agent-family-id">
                     ${group.maintenanceOnly ? '' : `<span class="ui-status" data-tone="${group.status.tone}">${escapeHtml(group.status.label)}</span>`}
                     ${nextUp ? `<span class="agent-family-next" data-next-up>${escapeHtml(nextUp)}</span>` : ''}
-                </div>
-                ${group.maintenanceOnly || facets?.accountsUnsupported ? '' : `<button type="button" class="btn btn-default" data-family-add>${escapeHtml(familyActionLabel(group, payload))}</button>`}
+                </p>
+                <div class="agent-family-login" data-family-login="${escapeHtml(group.harness)}"></div>
+                <div class="agent-family-rows settings-rows">${body}</div>
             </div>
-            <div data-family-maintenance="${escapeHtml(group.harness)}"></div>
-            <div class="agent-family-login" data-family-login="${escapeHtml(group.harness)}"></div>
-            <div class="agent-family-rows">${body}</div>
         </section>
     `;
 }
@@ -1230,8 +1226,9 @@ function renderRows() {
                 rows: [], maintenanceOnly: true,
             });
         }
-        host.innerHTML = groups.map((group) => harnessFamilyMarkup(group, payload,
-            { accountsRead, quotaRead, store: state.store, accountsUnsupported })).join('');
+        host.innerHTML = groups.filter((group) => !state.family || group.harness === state.family)
+            .map((group) => harnessFamilyMarkup(group, payload,
+                { accountsRead, quotaRead, store: state.store, accountsUnsupported, mark: state.mark })).join('');
         state.resources?.mount(host, accountsUnsupported ? [] : accountRows(payload), payload, quotaRead);
         host.querySelectorAll('[data-harness-login]').forEach((button) => {
             button.addEventListener('click', () => {
@@ -1259,9 +1256,9 @@ function renderRows() {
         host.querySelectorAll('[data-harness-toggle]').forEach((button) => {
             button.addEventListener('click', () => {
                 const row = button.closest('[data-harness]');
-                // The button carries the state it RENDERED for, so a click flips
-                // exactly what the owner saw — never a re-read of a row the poll
-                // may have replaced mid-click.
+                // The switch carries the state it RENDERED for, so a press flips exactly what the owner saw —
+                // never a re-read of a row the poll may have replaced mid-press. In flight it is disabled and busy.
+                Object.assign(button, { disabled: true }).setAttribute?.('aria-busy', 'true');
                 toggleAccountEnabled(row?.dataset.harness, row?.dataset.profile,
                     button.dataset.enabled === '0');
             });
@@ -1423,7 +1420,7 @@ export function refreshHarnessStatus() {
 }
 
 /**
- * Opening Agents is an explicit owner action. Refresh first so an old live
+ * Opening a provider's page is an explicit owner action. Refresh first so an old live
  * snapshot cannot hide a daemon reaped by a server restart; only the exact
  * already-provisioned idle state is then restarted. First-time installation,
  * foreign ownership and repair remain behind Connect.
@@ -1448,13 +1445,14 @@ async function refreshHarnessStatusOnActivation() {
  * Mount the section. The exported destroy seam is an honest local detach, so
  * remount never waits on or invents daemon release proof.
  */
-export function initHarnessAccounts({ store = claudexorStatus, restartDeps = {} } = {}) {
-    return _init(store, restartDeps);
+export function initHarnessAccounts({ store = claudexorStatus, restartDeps = {}, family = '', path = '', mark = null } = {}) {
+    return _init(store, restartDeps, { family, path, mark });
 }
 
-async function _init(store, restartDeps) {
+async function _init(store, restartDeps, page) {
     _destroy();
-    state.store = store;
+    Object.assign(state, { store, family: String(page.family || ''), mark: page.mark,
+        path: String(page.path || `accounts/${page.family || ''}`) });
     state.resources = createAccountResourcesController({ store, render: renderRows });
     state.removeError = '';
     state.removeNotice = '';
@@ -1486,21 +1484,21 @@ async function _init(store, restartDeps) {
         });
     document.getElementById('btn-claudexor-restart')
         ?.addEventListener('click', () => (state.initialized ? state.restart?.run(restartDeps) : undefined));
-    // The SHARED surface binding: the visibility predicate that lets this
-    // section keep the poll armed, and the catch-up read when the panel becomes
-    // reachable — one implementation, released by one disposer. It carries no
-    // tab NAME on purpose, and this section is the proof: it moved from
-    // Providers to Agents in this very sprint, so a hardcoded tab name would
-    // have gone quietly dead on arrival while its comment still promised that
-    // a daemon coming up is picked up without a reload.
+    // The SHARED surface binding keeps the poll armed only while this page's rows are on screen (an inactive page or
+    // a hidden Settings level is display:none, which `offsetParent` reports). Activation is this page's own: the shell
+    // says which Settings page is shown, and only the showing of this provider's page is the owner's act that reads
+    // (and may start an idle daemon); the home and the list of providers never do.
     state.disposers.push(bindStatusSurface(state.store, {
         listener: (view) => {
             renderRows();
             if (!view?.loading) state.maintenance?.poll();
         },
         elementId: 'harness-accounts-groups',
-        onActivate: refreshHarnessStatusOnActivation,
+        activationEvents: [],
     }));
+    const onShown = (event) => (event?.detail?.path === state.path ? refreshHarnessStatusOnActivation() : undefined);
+    globalThis.window?.addEventListener?.('ouro:settings-page-shown', onShown);
+    state.disposers.push(() => globalThis.window?.removeEventListener?.('ouro:settings-page-shown', onShown));
     state.initialized = true;
     // The first read must not wait for the poll interval: init runs while the
     // page may not be visible yet, and the panel would sit on "Checking

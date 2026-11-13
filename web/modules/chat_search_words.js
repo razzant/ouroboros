@@ -3,11 +3,13 @@
 // A message's words are what the room's own renderer draws, never its stored source: `candidateBox` draws a search
 // candidate (GET /api/chat/search) through the same functions its bubble uses (chat_text_bubble.js `bubbleWords`: the
 // owner's literal words, Ouroboros's Markdown, a System sentence in the install's language; a Project ending's typed
-// view, a links row, a question's Markdown, a file's shown name and caption) into an inert document, which loads, runs
-// and fetches nothing; `wordPieces` reads those words from that box or from the landed row in the feed alike. A link's
-// hidden destination, an image's address, a code block's language and controls are not words (an address the text
-// itself shows is); a diagram or a chart is one opaque separator, never its source; a formula is its characters as
-// KaTeX draws them, in reading order (its MathML), never its TeX source. One flow serves the candidate's confirmation,
+// view, a links row, a question card's question, stake, offered answers and the owner's settled answer, a file's shown
+// name and caption) into an inert document, which loads, runs and fetches nothing; `wordPieces` reads those words from
+// that box or from the landed row in the feed alike. A link's hidden destination, an image's address, a code block's
+// language and controls are not words (an address the text itself shows is); a diagram or a chart is one opaque
+// separator, never its source;
+// a formula is its characters as KaTeX draws them, in reading order (its MathML, with a root's sign), never its TeX
+// source. One flow serves the candidate's confirmation,
 // its snippet and the landed row's ranges: white space as one space, NFC per grapheme (`wordStream`), then Unicode 17
 // full default case folding (C+F, never T: unicode_case_folding.js, the same in every browser engine), each folded
 // unit mapped back to the characters it came from. A match starts and ends on whole graphemes and whole folds:
@@ -18,20 +20,25 @@ import { mountChatMarkdown, renderLatexIn } from './chat_markdown.js';
 import { attachmentViews } from './chat_attachments.js';
 import { fileNames, linksMessageHtml } from './chat_media.js';
 import { PROJECT_ROW_TYPES, paintProjectEnding } from './project_answer.js';
+import { mountQuizStake, normalizeQuiz, quizOptionWords, renderOwnerAnswer } from './question_presentation.js';
 
 // Python's str.split() white space, which the host also collapses in the query it binds (chat_search.py::_words).
 const SPACE = /[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
 const SPACES = new RegExp(`${SPACE.source}+`, 'g');
-// What of a row is its message's words: the text, the names an owner's attachments show and a question's question,
-// never its author, time, controls, a quote of another message, a code block's language, a player, a photo's menu, a
-// closed disclosure's body, what is hidden, a formula's TeX source (`annotation`) or what assistive technology does not
-// read (a formula's drawn glyphs).
-const WORDS = '.message, .chat-quiz-question, .chat-attachments';
+// What of a row is its message's words: the text, the names an owner's attachments show and a question card's
+// question, stake, offered answers and the owner's own answer, never its author, time, controls, a quote of another
+// message, a code block's language, a player, a photo's menu, a card's labels and status, a closed disclosure's body, what is hidden, a
+// formula's TeX source (`annotation`) or what assistive technology does not read (a formula's drawn glyphs).
+const QUIZ_CARD = '.chat-quiz-card:not(.chat-routing-card)';
+const WORDS = `.message, .chat-quiz-question, ${QUIZ_CARD} > :is(.chat-quiz-stake:not(.chat-quiz-details-unavailable), `
+    + '.chat-quiz-options, .chat-quiz-answer), .chat-attachments';
 const CHROME = '.sender, .msg-time, .chat-message-actions, .chat-quote, .md-code-language, button, .chat-media-player, '
-    + '.chat-photo-actions, [hidden], [aria-hidden="true"], details:not([open]) > :not(summary), annotation';
-// A file's shown name is words even where it stands in its card's button or its player's title.
-const FILE_NAME = '.chat-file-name, .chat-media-title';
-const FILE_NAME_HOSTS = '.chat-file-card, .chat-media-player';
+    + '.chat-photo-actions, .chat-quiz-stake-label, .chat-quiz-answer-label, [hidden], [aria-hidden="true"], '
+    + 'details:not([open]) > :not(summary), annotation';
+// A file's shown name is words even where it stands in its card's button or its player's title, as an offered
+// answer's label and detail are in its button (never its `recommended` or `Your choice`).
+const FILE_NAME = '.chat-file-name, .chat-media-title, .chat-quiz-option-label, .chat-quiz-option-detail';
+const FILE_NAME_HOSTS = '.chat-file-card, .chat-media-player, .chat-quiz-option';
 const GROUP_ITEMS = '.chat-gallery-item, .chat-file-item';
 // Drawn, not written: a diagram and a chart separate the words around them and hold none.
 const OPAQUE = '.md-mermaid, .md-chart';
@@ -40,6 +47,7 @@ const OPAQUE = '.md-mermaid, .md-chart';
 const EDGES = new Set(['BR', 'P', 'DIV', 'LI', 'UL', 'OL', 'PRE', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
     'TABLE', 'TR', 'TD', 'TH', 'HR', 'FIGCAPTION', 'DL', 'DT', 'DD', 'SUMMARY']);
 const EDGE_CLASS = '.chat-link-button, .katex-display';
+const STRUCTURE = new Set(['msqrt', 'mroot', 'mfrac']);
 const SNIPPET_CHARS = 160;
 const LEAD_CHARS = 48;
 
@@ -75,13 +83,23 @@ export function candidateBox(candidate, doc) {
         box.innerHTML = linksMessageHtml(candidate);
         return box;
     }
-    if (kind === 'quiz') {  // the question as its card mounts it (chat_decision.js)
-        const question = String(candidate.quiz?.question || '');
-        if (question) {
-            const node = words('chat-quiz-question', '');
-            mountChatMarkdown(node, question);
-            renderLatexIn(node);
+    if (kind === 'quiz') {  // its card's words as the card reads the row and draws them (chat_decision.js buildQuizCard)
+        const quiz = normalizeQuiz(candidate);
+        if (!quiz.quizId || !quiz.taskId || !quiz.question || !quiz.optionsKnown) return box;  // no card is drawn
+        const card = words('chat-quiz-card', '');
+        const part = (className) => card.appendChild(Object.assign(doc.createElement('div'), { className }));
+        mountChatMarkdown(part('chat-quiz-question'), quiz.question);
+        if (quiz.stake) mountQuizStake(part('chat-quiz-stake'), quiz.stake, mountChatMarkdown);
+        if (quiz.options.length) {
+            const options = part('chat-quiz-options');
+            for (const option of quiz.options) {
+                options.appendChild(Object.assign(doc.createElement('button'), { className: 'chat-quiz-option' }))
+                    .append(...quizOptionWords(doc, option));
+            }
         }
+        // The owner's own words on a card settled as answered (the host sends `comment` for that state only).
+        renderOwnerAnswer(card, quiz.comment);
+        renderLatexIn(card);
         return box;
     }
     const { role, systemType, text, markdown } = shownRow(candidate);
@@ -142,10 +160,25 @@ export function wordPieces(row) {
             return;
         }
         if (node.matches(OPAQUE)) { pieces.push([null, ' ']); return; }
+        if (STRUCTURE.has(node.localName)) { structure(node); return; }
         const edge = EDGES.has(node.tagName) || node.matches(EDGE_CLASS);
         if (edge) pieces.push([null, ' ']);
         for (const child of node.childNodes) walk(child);
         if (edge) pieces.push([null, ' ']);
+    };
+    // A formula's structure that KaTeX draws without a character of its MathML: a root's sign `√` before its radicand,
+    // its index first (MathML holds `mroot` base, index), and a fraction's numerator and denominator apart. The sign
+    // stands at the root's element: a match holding it marks the drawn formula whole, as any match in a formula does.
+    const structure = (node) => {
+        const [first, second] = node.children;
+        if (node.localName === 'mfrac') {
+            for (const part of [first, second]) { pieces.push([null, ' ']); if (part) walk(part); }
+            pieces.push([null, ' ']);
+            return;
+        }
+        if (node.localName === 'mroot' && second) walk(second);
+        pieces.push([node, '\u221a']);
+        for (const child of node.localName === 'mroot' ? [first].filter(Boolean) : node.childNodes) walk(child);
     };
     // A grouped photo or file (chat_media.js) is a row of its own inside its bubble's message: its words are its own.
     for (const box of row.matches?.(GROUP_ITEMS) ? [row] : row.querySelectorAll(WORDS)) {

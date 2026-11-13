@@ -458,3 +458,248 @@ def test_catalog_producer_survives_flattening_without_borrowing_a_version(accoun
     payload = model_catalog_api._subscription_model_catalog("codex", "a")
     assert payload["items"] == []
     assert payload["account_catalogs"][0]["accounts"][0]["catalog"]["sourceProgram"] == program
+
+
+# --- the catalog's published price on an OpenRouter row (T06) ---------------------------------
+
+def _openrouter_items(records):
+    class Client:
+        async def get(self, url, **_kwargs):
+            return _Response({"data": records})
+
+    return asyncio.run(model_catalog_api._fetch_openrouter_model_catalog(Client(), "or-key"))
+
+
+@pytest.mark.parametrize("pricing, expected", [
+    ({"prompt": "0.000004", "completion": "0.00002"}, {"input": 4.0, "output": 20.0}),
+    ({"prompt": "0.000000075", "completion": "0.0000003", "request": "0"}, {"input": 0.075, "output": 0.3}),
+    # An explicit zero is a free model's price, not a missing one.
+    ({"prompt": "0", "completion": "0"}, {"input": 0.0, "output": 0.0}),
+    ({"prompt": "0.000002", "completion": "0.00001", "input_cache_read": "0.0000002", "overrides": [
+        {"min_prompt_tokens": 200000, "prompt": "0.000004", "completion": "0.000015"}]},
+     {"input": 2.0, "output": 10.0, "tiers": [{"min_prompt_tokens": 200000, "input": 4.0, "output": 15.0}]}),
+])
+def test_an_openrouter_row_carries_the_price_its_catalog_states(pricing, expected):
+    [item] = _openrouter_items([{"id": "vendor/model", "name": "Vendor: Model", "pricing": pricing}])
+    assert item["price"] == expected
+    assert item["label"] == "OpenRouter · Vendor: Model", "the name stays the name"
+
+
+@pytest.mark.parametrize("pricing", [
+    None, {}, {"prompt": "0.000004"}, {"completion": "0.00002"}, {"prompt": "0.000004", "completion": None},
+    {"prompt": "0.000004", "completion": "0.00002", "request": "0.005"},  # a per-request fee on every call
+    {"prompt": "0.000004", "completion": "0.00002", "request": "n/a"},
+    {"prompt": "-1", "completion": "-1"},  # the router's variable price
+    {"prompt": "n/a", "completion": "0.00002"}, {"prompt": [1], "completion": "0.00002"},
+    {"prompt": "nan", "completion": "0.00002"}, {"prompt": "0.002", "completion": "0.00002"},  # over $1000 per 1M
+    {"prompt": "0.000004", "completion": "0.00002", "overrides": [{"min_prompt_tokens": 1000, "prompt": "-0.000001"}]},
+    # A tier accounting cannot read or skips leaves the price partial: no price rather than the base alone.
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": "n/a", "completion": "0.000015"}]},
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": "inf"}]},
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [{"min_prompt_tokens": 200000, "prompt": "0.002"}]},
+    # A price that changes with the hour is not an input-length tier the picker can state.
+    {"prompt": "0.00000015", "completion": "0.0000006", "overrides": [{"utc_start": 1500, "utc_end": 100, "prompt": "0.000000075"}]},
+    # A charge four decimals per 1M would print as zero is never shown as free.
+    {"prompt": "0.00000000001", "completion": "0.00000000001"},
+    {"prompt": "0.00000000001", "completion": "0.000005"},
+    # Reasoning billed at its own rate: the output figure is not the output price.
+    {"prompt": "0.00000015", "completion": "0.0000006", "internal_reasoning": "0.0000035"},
+    # Free by tokens, yet the call is charged for something else: "free" would be false.
+    {"prompt": "0", "completion": "0", "image": "0.04"}, {"prompt": "0", "completion": "0", "web_search": "0.004"},
+    {"prompt": "0", "completion": "0", "image": "0.04", "overrides": [{"min_prompt_tokens": 1000, "prompt": "0", "completion": "0"}]},
+    # A flag is no price, and a tier with its own per-request fee is not a plain input-length tier.
+    {"prompt": False, "completion": False},
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [
+        {"min_prompt_tokens": 1000, "prompt": "0.000004", "completion": "0.00002", "request": "0.01"}]},
+    # A tier that also names an hour window is not a plain input-length tier.
+    {"prompt": "0.000002", "completion": "0.00001", "overrides": [
+        {"min_prompt_tokens": 1000, "utc_start": 1500, "utc_end": 100, "prompt": "0.000004"}]},
+])
+def test_an_openrouter_row_without_a_complete_token_price_has_no_price_field(pricing):
+    record = {"id": "vendor/model", "name": "Vendor: Model", **({} if pricing is None else {"pricing": pricing})}
+    [item] = _openrouter_items([record])
+    assert "price" not in item, "absent, never null or zero"
+    assert item["value"] == "vendor/model", "a price never decides whether a model is listed"
+
+
+def test_the_shown_price_is_the_catalog_row_fetch_openrouter_pricing_reads():
+    from unittest.mock import MagicMock, patch
+    from ouroboros.llm_pricing import fetch_openrouter_pricing, openrouter_catalog_price
+
+    record = {"id": "vendor/tiered", "pricing": {"prompt": "0.00000125", "completion": "0.00001", "overrides": [
+        {"min_prompt_tokens": 200000, "prompt": "0.0000025", "completion": "0.000015"},
+        {"min_prompt_tokens": 100000, "completion": "0.000012"}]}}
+    response = MagicMock()
+    response.json.return_value = {"data": [record]}
+    with patch("requests.get", return_value=response):
+        row = fetch_openrouter_pricing(timeout_sec=5.0)["vendor/tiered"]
+    assert openrouter_catalog_price(record) == {"input": row[0], "output": row[3], "tiers": [
+        {"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]} for minimum, tier in row.tiers]}
+    assert [tier["min_prompt_tokens"] for tier in openrouter_catalog_price(record)["tiers"]] == [100000, 200000]
+
+
+def test_a_direct_route_with_the_same_model_id_gets_no_openrouter_price(monkeypatch):
+    from ouroboros.gateway.management_contracts import ModelCatalogItem, ModelCatalogResponse
+    from ouroboros.gateway.schema import validate_ingress
+
+    priced = {"prompt": "0.000004", "completion": "0.00002"}
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"OPENROUTER_API_KEY": "or-key",
+                                                                     "OPENAI_API_KEY": "openai-key"})
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, **_kwargs):
+            # A direct server answering with the very same records, pricing field included, still prices nothing.
+            return _Response({"data": [{"id": "openai/gpt-x", "name": "OpenAI: GPT X", "pricing": priced},
+                                       *([] if "openrouter.ai" in url else [{"id": "gpt-x", "pricing": priced}])]})
+
+    monkeypatch.setattr(model_catalog_api.httpx, "AsyncClient", Client)
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+
+    prices = {item["value"]: item.get("price") for item in payload["items"]}
+    assert prices == {"openai/gpt-x": {"input": 4.0, "output": 20.0}, "openai::openai/gpt-x": None, "openai::gpt-x": None}
+    assert not any("price" in item for item in payload["items"] if item["value"].startswith("openai::"))
+    # The published shape declares the field and its type.
+    assert "price" in ModelCatalogItem.__annotations__
+    assert not validate_ingress(payload, ModelCatalogResponse)
+    damaged = {**payload, "items": [{**payload["items"][0], "price": {"input": "4", "output": 20.0}}]}
+    assert validate_ingress(damaged, ModelCatalogResponse)
+
+
+@pytest.mark.parametrize("second, expected", [
+    ({"prompt": "0.000004", "completion": "0.00002"}, {"input": 4.0, "output": 20.0}),  # the records agree: one price
+    ({"prompt": "0.000005", "completion": "0.000025"}, None),  # they disagree: no record's price is the model's
+    (None, None),  # one record states none
+])
+def test_two_catalog_records_of_one_model_show_a_price_only_when_they_agree(monkeypatch, second, expected):
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"OPENROUTER_API_KEY": "or-key"})
+    first = {"id": "vendor/x", "name": "Vendor: X", "pricing": {"prompt": "0.000004", "completion": "0.00002"}}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, **_kwargs):
+            return _Response({"data": [first, {"id": "vendor/x", "name": "Vendor: X",
+                                               **({} if second is None else {"pricing": second})}]})
+
+    monkeypatch.setattr(model_catalog_api.httpx, "AsyncClient", Client)
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+    [item] = [item for item in payload["items"] if item["value"] == "vendor/x"]
+    assert item.get("price") == expected and item["name"] == "Vendor: X", "the model stays listed either way"
+
+
+@pytest.mark.parametrize("pricing, expected", [
+    # Most reasoning models bill reasoning as output: the pair is the whole token price.
+    ({"prompt": "0.000004", "completion": "0.00002", "internal_reasoning": "0.00002"}, {"input": 4.0, "output": 20.0}),
+    ({"prompt": "0", "completion": "0", "internal_reasoning": "0", "image": "0"}, {"input": 0.0, "output": 0.0}),
+])
+def test_a_price_whose_other_fees_change_nothing_is_still_shown(pricing, expected):
+    [item] = _openrouter_items([{"id": "vendor/model", "name": "Vendor: Model", "pricing": pricing}])
+    assert item["price"] == expected
+
+
+def test_a_model_listed_first_without_a_price_keeps_none_when_a_later_record_states_one(monkeypatch):
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"OPENROUTER_API_KEY": "or-key"})
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, **_kwargs):
+            return _Response({"data": [{"id": "vendor/x", "name": "Vendor: X"},
+                                       {"id": "vendor/x", "name": "Vendor: X", "pricing": {"prompt": "0.000004", "completion": "0.00002"}}]})
+
+    monkeypatch.setattr(model_catalog_api.httpx, "AsyncClient", Client)
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+    [item] = [item for item in payload["items"] if item["value"] == "vendor/x"]
+    assert "price" not in item
+
+
+def test_the_limits_name_what_they_cannot_count_and_nothing_where_every_route_has_a_price():
+    """Dashboard › Costs says it under the limits: a call on a route without a known price adds nothing to known
+    spend (`usage_accounting.paid_admission`), so the limits count without it."""
+    from ouroboros.pricing import known_spend_gaps, price_source
+
+    routed = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OUROBOROS_MODEL_LIGHT": "openai::gpt-6-mini",
+              "OUROBOROS_MODEL_FALLBACKS": "openai::gpt-6", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
+    # An empty Safety runs on Light's slot; Vision and Consciousness follow Main, which has a catalog price.
+    assert known_spend_gaps(routed) == ["Light", "Safety Supervisor", "Fallback"]
+    assert known_spend_gaps({**routed, "OUROBOROS_MODEL_SAFETY": "anthropic/claude-opus-5.5",
+                             "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_FALLBACKS": ""}) == []
+    assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["all model roles"]
+    assert known_spend_gaps({"OUROBOROS_MODEL": "claudexor::codex=gpt-6"}) == [], "a subscription spends time, not money"
+    # A slot with its own model keeps its own local flag; only an empty one runs on Main's (route_choice).
+    assert known_spend_gaps({"OUROBOROS_MODEL": "qwen3.gguf", "USE_LOCAL_MAIN": "true", "OUROBOROS_MODEL_LIGHT": "openai::gpt-6-mini",
+                             "USE_LOCAL_LIGHT": False, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["Light", "Safety Supervisor"]
+    assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "USE_LOCAL_MAIN": "true",
+                             "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == [], "a local model costs nothing"
+    # Built-in web search by its first leg: a direct key has no catalog, OpenRouter has one, ddgs is free.
+    base = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OPENROUTER_API_KEY": "k"}
+    assert known_spend_gaps({**base, "OPENAI_API_KEY": "k", "OUROBOROS_WEBSEARCH_BACKEND": "openai"}) == ["Web search"]
+    assert known_spend_gaps({**base, "OUROBOROS_WEBSEARCH_BACKEND": "openrouter"}) == []
+    # Enabled API helpers on a route without a price; a switched-off one spends nothing.
+    helper = {"route": {"kind": "api_model", "target_id": "deepseek::deepseek-v4"}}
+    assert known_spend_gaps({**base, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}, {"items": [helper]}) == ["Agents"]
+    assert known_spend_gaps({**base, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}, {"items": [{**helper, "enabled": False}]}) == []
+    assert price_source("cloudru", {"OUROBOROS_RUB_USD_RATE": "0.012", "CLOUDRU_FOUNDATION_MODELS_API_KEY": "k"}) == "catalog"
+    assert price_source("cloudru", {"OUROBOROS_RUB_USD_RATE": "0.012"}) == "unknown", "the catalog is read with the built-in key"
+    assert price_source("cloudru", {"CLOUDRU_FOUNDATION_MODELS_API_KEY": "k"}) == "unknown", "roubles without a rate"
+
+
+def test_the_spend_gaps_follow_the_runtime_lane_of_each_role():
+    """Each role's route as the runtime resolves it (route_choice, safety_config, slot_lane_label): a remote role on a
+    direct key is named even beside a local Main, and a local one is not."""
+    from ouroboros.pricing import known_spend_gaps
+
+    local_main = {"OUROBOROS_MODEL": "qwen3-8b", "USE_LOCAL_MAIN": True, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
+    assert known_spend_gaps({**local_main, "OUROBOROS_MODEL_VISION": "openai::gpt-6"}) == ["Vision"]
+    assert known_spend_gaps({**local_main, "OUROBOROS_MODEL_SAFETY": "anthropic::claude-haiku-5-5"}) == ["Safety Supervisor"]
+    assert known_spend_gaps({**local_main, "OUROBOROS_MODEL_VISION": "openai::gpt-oss-20b (local)"}) == [], (
+        "a model stored with its local label runs locally, whatever its prefix")
+    # A stored False is a set flag: an empty Consciousness then wakes on Main's model remotely.
+    assert known_spend_gaps({**local_main, "OUROBOROS_MODEL": "openai::gpt-6",
+                             "USE_LOCAL_CONSCIOUSNESS": False}) == ["Consciousness"]
+    # An empty Safety beside an empty Light runs Main's slot and flag, not Light's leftover one.
+    assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "USE_LOCAL_LIGHT": True, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs",
+                             "OUROBOROS_MODEL_VISION": "anthropic/claude-opus-5.5"}) == [
+        "Main", "Light", "Safety Supervisor", "Consciousness"]
+    routed = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
+    helper = {"route": {"kind": "api_model", "target_id": "deepseek::deepseek-v4"}}
+    assert known_spend_gaps(routed, {"enabled": False, "items": [helper]}) == ["Agents"], (
+        "a review names any enabled row with the catalog switched off")
+    assert known_spend_gaps(routed, {"enabled": False, "items": [{**helper, "enabled": False}]}) == []
+    # An empty Consciousness with its own flag set wakes on that flag alone; Light keeps Main's lane too.
+    priced = {"OUROBOROS_MODEL_LIGHT": "anthropic/claude-opus-5.5", "OUROBOROS_MODEL_VISION": "anthropic/claude-opus-5.5"}
+    assert known_spend_gaps({**priced, "OUROBOROS_MODEL": "openai::gpt-6", "USE_LOCAL_CONSCIOUSNESS": True,
+                             "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["Main"]
+    # An empty Vision runs Main's lane whatever its own flag says (slot_lane_label).
+    assert known_spend_gaps({**priced, "OUROBOROS_MODEL_VISION": "", "OUROBOROS_MODEL": "openai::gpt-6",
+                             "USE_LOCAL_CONSCIOUSNESS": True, "USE_LOCAL_VISION": True,
+                             "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["Main", "Vision"]
+    rouble = {"OUROBOROS_RUB_USD_RATE": "0.012", "CLOUDRU_FOUNDATION_MODELS_API_KEY": "k", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
+    assert known_spend_gaps({**rouble, "OUROBOROS_MODEL": "cloudru::GigaChat-2-Max"}) == []
+    assert known_spend_gaps({**rouble, "OUROBOROS_MODEL": "cloudru@work::GigaChat-2-Max"}) == [], "one catalog for every connection"
+    rouble.pop("CLOUDRU_FOUNDATION_MODELS_API_KEY")
+    assert known_spend_gaps({**rouble, "OUROBOROS_MODEL": "cloudru@work::GigaChat-2-Max"}) == ["all model roles"], (
+        "the catalog is read with the built-in key")

@@ -23,7 +23,7 @@ def _base_payload() -> dict:
         "MINIMAX_REGION": "",
         "TOTAL_BUDGET": 10,
         "OUROBOROS_PER_TASK_COST_USD": 20,
-        "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+        "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",  # a stale client's key: retired, never written
         "LOCAL_MODEL_SOURCE": "",
         "LOCAL_MODEL_FILENAME": "",
         "LOCAL_MODEL_CONTEXT_LENGTH": 16384,
@@ -55,7 +55,7 @@ def test_prepare_onboarding_settings_accepts_openai_only_setup():
     assert prepared["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert prepared["TOTAL_BUDGET"] == 10.0
     assert prepared["OUROBOROS_PER_TASK_COST_USD"] == 20.0
-    assert prepared["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in prepared, "the retired key is never written"
     assert prepared["OUROBOROS_MODEL_CONSCIOUSNESS"] == ""
     # Onboarding no longer manages auto-grant; the global SSOT default applies.
     assert "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS" not in prepared
@@ -302,7 +302,8 @@ def test_a_finish_that_edits_nothing_keeps_the_legacy_pair_exactly():
     contract, state = bootstrap["contract"], bootstrap["initialState"]
     body = {row["settingKey"]: state[row["stateKey"]]
             for name in ("providerFields", "modelSlots", "budgetFields") for row in contract[name]}
-    body.update(OUROBOROS_REVIEW_ENFORCEMENT=state["reviewEnforcement"], OUROBOROS_RUNTIME_MODE=state["runtimeMode"])
+    assert "reviewEnforcement" not in state and "reviewModes" not in contract
+    body.update(OUROBOROS_RUNTIME_MODE=state["runtimeMode"])
     assert "OPENAI_BASE_URL" not in body
     for payload in (body, {**body, "OPENAI_BASE_URL": state["legacyCompatibleBaseUrl"]},
                     {**body, "OPENAI_BASE_URL": "http://127.0.0.1:1/v1"}):
@@ -439,7 +440,7 @@ def test_onboarding_steps_and_stylesheet_keep_their_owner_facing_shape():
     rails = {step["railCopy"] for step in contract["steps"]}
     css = (REPO / "web" / "onboarding.css").read_text(encoding="utf-8")
 
-    assert {"Connect your accounts", "Choose models", "Choose review mode", "Review limits"} <= titles
+    assert {"Connect your accounts", "Choose models", "Choose access", "Review limits"} <= titles
     assert {"Subscriptions + API", "model slots"} <= rails
     assert "@media (max-width: 720px)" in css
     assert "scroll-snap-type: x proximity;" in css
@@ -529,10 +530,12 @@ def test_setup_contract_has_no_secret_values():
 
     assert contract["hostMode"] == "web"
     assert "providerFields" in contract
-    assert budget_fields["TOTAL_BUDGET"]["settingsInputId"] == "s-total-budget"
+    # The budgets have one editor in the app, the Costs rows, which find a field by its ``stateKey``: the contract
+    # names no Settings input for them (the second editor in Settings is gone).
+    assert all("settingsInputId" not in field for field in contract["budgetFields"])
+    assert [field["stateKey"] for field in contract["budgetFields"]] == ["totalBudget", "perTaskCostUsd"]
     assert budget_fields["TOTAL_BUDGET"]["min"] == "0.01"
     assert budget_fields["TOTAL_BUDGET"]["step"] == "any"
-    assert budget_fields["OUROBOROS_PER_TASK_COST_USD"]["settingsInputId"] == "s-settings-per-task-cost"
     assert "settingsInputId" in contract["providerFields"][0]
     assert "OPENROUTER_API_KEY" in text
     assert "sk-or-v1-super-secret" not in text
@@ -725,6 +728,7 @@ def test_api_settings_exposes_setup_contract_without_secrets(tmp_path):
         patch.object(srv, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(srv, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch.object(gw_settings, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
+        patch.object(gw_settings, "settings_read_view", return_value=({"OPENROUTER_API_KEY": secret}, {})),
         patch.object(gw_settings, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch("ouroboros.server_auth.get_configured_network_password", return_value=""),
     ]

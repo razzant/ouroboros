@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import types
 
 import pytest
@@ -75,6 +76,13 @@ def launch(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "release_pid_lock", lambda: calls.append("release"))
     monkeypatch.setattr(launcher, "stop_tray_before_exit", lambda release: (calls.append("teardown"), release()))
     monkeypatch.setattr(launcher, "restore_tray_after_handoff", lambda: calls.append("restore"))
+
+    def windows_out_of_full_screen(final, cancelled):  # the main thread's turn that found every window windowed
+        calls.append("windows")
+        final()
+        return True
+
+    monkeypatch.setattr(launcher, "transfer_when_windowed", windows_out_of_full_screen, raising=False)
     monkeypatch.setattr(launcher, "check_git", lambda: calls.append("git") or True)
     background = types.SimpleNamespace(_open_pending=False, panic=threading.Event())
     background.listen = lambda path: calls.append("listen") or background
@@ -264,8 +272,8 @@ def _lifecycle(l, monkeypatch, *, returncode=42, landed=lambda: None, waited=lam
     monkeypatch.setattr(module, "_update_server_process_record_port", lambda *a: None)
     monkeypatch.setattr(module, "_wait_for_server", lambda *a, **kw: True)
     monkeypatch.setattr(module, "_cleanup_recorded_server_group_for_pid", lambda *a: None)
-    monkeypatch.setattr(module, "_sync_existing_repo_from_bundle", lambda: l.calls.append("sync"))
-    monkeypatch.setattr(module, "_install_deps", lambda: l.calls.append("deps") or True)
+    monkeypatch.setattr(module, "sync_existing_repo_from_bundle", lambda ctx: l.calls.append("sync"))
+    monkeypatch.setattr(module, "install_deps", lambda ctx: l.calls.append("deps") or True)
     monkeypatch.setattr(module.time, "sleep", lambda *a: None)
     monkeypatch.setitem(sys.modules, "ouroboros.delegate_recovery",
                         types.SimpleNamespace(acknowledge_observed_restart_exit=lambda *a, **kw: True))
@@ -313,7 +321,51 @@ def test_lifecycle_restart_and_panic_keep_the_existing_owners(launch, monkeypatc
         with pytest.raises(Handoff) as stopped:
             module.agent_lifecycle_loop()
         assert stopped.value.executable == str(l.python if mode == "legacy" else l.entry)
-        assert l.calls[:3] == ["server", "sync", "deps"] and l.calls[-2:] == ["release", "exec"]
+        assert l.calls == ["server", "sync", "deps", "probe", "windows", "teardown", "release", "exec"], \
+            "a warm desktop shell tears down only after its windows are out of full screen"
+
+
+@pytest.mark.parametrize("external_ui", [False, True])
+def test_unconfirmed_windows_keep_the_warm_shell_and_an_external_ui_has_none_to_wait_for(launch, monkeypatch,
+                                                                                         external_ui):
+    """A refusal is not a rollback: this shell starts the updated body's next generation itself, untouched."""
+    l = launch
+    _lifecycle(l, monkeypatch, returncode=42)
+    monkeypatch.setattr(l.module, "_external_ui", external_ui)
+    monkeypatch.setattr(l.module, "transfer_when_windowed", lambda final, cancelled: l.calls.append("unconfirmed") or False)
+    if external_ui:
+        with pytest.raises(Handoff):
+            l.module.agent_lifecycle_loop()
+        assert l.calls == ["server", "sync", "deps", "probe", "teardown", "release", "exec"]
+    else:
+        with pytest.raises(FrozenContinues):  # the loop's next start: no icon, unlock or exec happened
+            l.module.agent_lifecycle_loop()
+        assert l.calls == ["server", "sync", "deps", "probe", "unconfirmed"]
+
+
+@pytest.mark.parametrize("listed", [[], [types.SimpleNamespace(uid="master")]],
+                         ids=["no window yet", "created, not yet shown"])
+def test_a_warm_handoff_before_any_window_refuses_at_once_with_the_real_barrier(launch, monkeypatch, listed):
+    """An exit 42 during the first boot (a body adoption) arrives before the setup or main window exists or has run
+    its ``before_show``. The real barrier refuses at once: nothing queued for a main-thread turn, no attempt to wait on
+    or resume later, no icon, unlock or exec, and this shell starts the next generation without waiting out the
+    deadline."""
+    from ouroboros import launcher_window_chrome as chrome
+
+    l = launch
+    _lifecycle(l, monkeypatch, returncode=42)
+    posted = []
+    monkeypatch.setattr(l.module, "transfer_when_windowed", chrome.transfer_when_windowed)
+    monkeypatch.setattr(chrome, "_transfer", None)
+    monkeypatch.setattr(sys.modules["webview"], "windows", listed, raising=False)  # pywebview's registry
+    monkeypatch.setitem(sys.modules, "PyObjCTools", types.SimpleNamespace(
+        AppHelper=types.SimpleNamespace(callAfter=lambda fn, *args: posted.append(fn))))
+    started = time.monotonic()
+    with pytest.raises(FrozenContinues):  # the loop's next start, by this shell
+        l.module.agent_lifecycle_loop()
+    assert time.monotonic() - started < chrome.MACOS_HANDOFF_FULLSCREEN_WAIT_SEC / 2, "never waits out the deadline"
+    assert posted == [] and chrome._transfer is None, "nothing queued, no attempt left for a later window"
+    assert l.calls == ["server", "sync", "deps", "probe"], "no icon, unlock or exec"
 
 
 @pytest.mark.parametrize("stop_at", ["sleep", "sync", "change-check"])
@@ -326,8 +378,8 @@ def test_panic_during_exit_42_cannot_handoff(launch, monkeypatch, stop_at):
         return True
 
     target, name = {
-        "sleep": (l.module.time, "sleep"), "sync": (l.module, "_sync_existing_repo_from_bundle"),
-        "deps": (l.module, "_install_deps"), "change-check": (l.module, "launcher_sources_changed"),
+        "sleep": (l.module.time, "sleep"), "sync": (l.module, "sync_existing_repo_from_bundle"),
+        "deps": (l.module, "install_deps"), "change-check": (l.module, "launcher_sources_changed"),
     }[stop_at]
     monkeypatch.setattr(target, name, stop)
     try:

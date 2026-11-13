@@ -397,15 +397,16 @@ class HistorySource:
                               "history_position": {"source": self.source, "offset": row.seq},
                               "_history_end": row.end} for row in rows])
 
-    def _candidates(self, lower: int, before: int, *, newest_first: bool = True):
+    def _candidates(self, lower: int, before: int, *, newest_first: bool = True, max_bytes=None):
         """One probe page of the room's rows in ``[lower, before)`` plus the named owner rows the
-        page's range covers (a short page covers the whole range)."""
+        page's range covers (a short page covers the whole range). ``max_bytes`` ends the probe page
+        at the row whose stored lengths reach it: a reader ends its page there or before."""
         rows = ds.probe_rows(self.root, self.source, self.lens.keys, before=before, lower=lower,
-                             limit=_PROBE_ROWS, newest_first=newest_first)
+                             limit=_PROBE_ROWS, newest_first=newest_first, max_bytes=max_bytes)
         if not self.lens.seqs:
             return rows
         found = {row.seq: row for row in rows}
-        if len(rows) < _PROBE_ROWS:
+        if len(rows) < _PROBE_ROWS and (max_bytes is None or sum(row.length for row in rows) < max_bytes):
             covered = (lower, before)
         else:
             covered = (rows[-1].seq, before) if newest_first else (lower, rows[-1].seq + 1)
@@ -437,7 +438,8 @@ class HistorySource:
     def older(self, before, want, counts, ceiling=None, *, byte_ceiling=None):
         """Consume one backward page of ``want`` counted rows below ``before``; the read ceiling
         ends it early, as ``byte_ceiling`` does once the stored rows read reach that many bytes (a soft
-        bound: the row crossing it is read whole, never split; ``chat_search``'s page). At the import
+        bound: the row crossing it is read whole, never split, and none past it decoded; ``chat_search``'s
+        page). At the import
         frontier nothing older is readable yet: the page is empty and stays at the frontier (the
         request's caller answers "still importing")."""
         if want <= 0:
@@ -450,7 +452,7 @@ class HistorySource:
     def _page(self, before, want, counts, ceiling, window=False, *, byte_ceiling=None):
         top, selected, counted, read, seen = before, [], 0, 0, 0
         while True:
-            rows = self._candidates(self.floor, before)
+            rows = self._candidates(self.floor, before, max_bytes=None if byte_ceiling is None else byte_ceiling - seen)
             for entry in self._entries(rows):  # newest first
                 selected.append(entry)
                 before = entry["history_position"]["offset"]

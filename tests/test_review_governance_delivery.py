@@ -161,7 +161,7 @@ def _plan_prompts(**kwargs):
     the packet participant's system prompt and the retrieving participant's session prompt."""
     from ouroboros.tools import plan_ask
 
-    return [plan_ask.stable_prompt(None, system_root=REPO, enforcement="blocking", by_retrieval=by_retrieval, **kwargs)
+    return [plan_ask.stable_prompt(None, system_root=REPO, by_retrieval=by_retrieval, **kwargs)
             for by_retrieval in (False, True)]
 
 

@@ -162,7 +162,6 @@ def main(argv: list[str] | None = None) -> int:
             "OUROBOROS_DATA_DIR": str(data_dir),
             "OUROBOROS_SETTINGS_PATH": str(settings_path),
             "OUROBOROS_RUNTIME_MODE": "pro",
-            "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
             "PYTHONUNBUFFERED": "1",
         }
     )

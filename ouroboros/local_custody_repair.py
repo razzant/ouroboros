@@ -38,9 +38,17 @@ Retirement changes local capability only: the effect stays ``unknown`` and is
 never replayed, a known return stays ``returned``; delegated runs, processes,
 merge and control receipts, patches and money keep their own custody.
 
-Separately, ``ended_unbound_model_request`` reads an unbound send's retained
-raised-failure fact for the passive writer census. It classifies an ended
-request, retires nothing and preserves unresolved money and late-receipt rights.
+An UNBOUND send (no consumer, birth or task attempt: no receiver) has no
+consumer to retire. Its recorded sending pid's positive absence
+(``unbound_owner_ended``: ESRCH or a zombie, a matching ``owner_proof``'s
+different kernel birth, or on this pid an earlier custody session; never
+EPERM, a live pid without proof or this session) is persisted once, only by
+the startup sweep and the addressed actions (``_repair_absent_receivers``;
+an exit door retires a process's claims and bound receivers, never these), in
+``retired_model_consumers`` under ``UNBOUND_KEY`` + its exact attempt id, so
+a reused pid revives nothing. The passive census reads that row and the
+retained raised-failure fact (``ended_unbound_model_request``); neither
+changes money, outcome or late-receipt rights, or lifts a Stop or Panic.
 """
 
 from __future__ import annotations
@@ -153,12 +161,43 @@ def ended_unbound_model_request(attempt: Dict[str, Any]) -> bool:
     retried. Bound or partially bound receivers, still-dispatched rows and
     rows without the retained fact stay held. No writes.
     """
-    if (attempt.get("state") != "unresolved" or attempt.get("local_answer_consumer_id")
-            or attempt.get("local_answer_owner_birth")
-            or attempt.get("local_answer_task_attempt") is not None):
+    if attempt.get("state") != "unresolved" or not _unbound(attempt):
         return False
     failure = attempt.get("physical_failure")
     return isinstance(failure, dict) and failure.get("stage") == "raised_exception"
+
+
+UNBOUND_KEY = "unbound-attempt:"  # never a consumer id (uuid hex): one retired unbound send, by its attempt
+
+
+def _unbound(attempt: Dict[str, Any]) -> bool:
+    """No receiver at all; a partial binding is neither bound nor unbound and stays held."""
+    return not (attempt.get("local_answer_consumer_id") or attempt.get("local_answer_owner_birth")
+                or attempt.get("local_answer_task_attempt") is not None)
+
+
+def retired_unbound_send(attempt: Dict[str, Any], retired: Any) -> bool:
+    """The census's read: THIS unbound attempt's ended sender was recorded (``_repair_absent_receivers``)."""
+    attempt_id = str(attempt.get("attempt_id") or "")
+    row = retired.get(UNBOUND_KEY + attempt_id) if isinstance(retired, dict) and attempt_id else None
+    return (_unbound(attempt) and isinstance(row, dict) and row.get("receiver") == "unbound"
+            and row.get("attempt_id") == attempt_id and bool(row.get("retired_at")))
+
+
+def unbound_owner_ended(pid: Any, proof: Any) -> bool:
+    """Positive absence of an unbound send's recorded sender. ``proof`` counts only for its own pid; a
+    live pid needs its validated different kernel birth, this pid an earlier non-empty custody session."""
+    from ouroboros.platform_layer import pid_provably_gone
+    from ouroboros.process_identity import different_birth, process_kernel_birth
+
+    if type(pid) is not int or pid <= 0:
+        return False
+    proof = proof if isinstance(proof, dict) and proof.get("pid") == pid else {}
+    if pid == os.getpid():
+        return bool(proof.get("session")) and not _this_session(proof)
+    kernel = str(proof.get("kernel_birth") or "")
+    return (pid_provably_gone(pid) or _exited_unreaped(pid)
+            or bool(kernel) and different_birth(process_kernel_birth(pid) or "", kernel))
 
 
 def retire_process_custody(root: Any, *, pid: int, process_birth: str, kernel_birth: str = "") -> Dict[str, Any]:
@@ -242,16 +281,21 @@ def retire_ended_process(root: Any, *, pid: int, process_birth: str, kernel_birt
         return {"claims": [], "receivers": 0, "owed": True}
 
 
-def _unretired(root: Any, by_task: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
-    """Drop consumers whose retirement already landed: an idempotent pass writes nothing twice."""
+def _unretired(root: Any, by_task: Dict[str, Dict[str, Any]], *,
+               skip_taskless: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Drop rows whose retirement already landed: an idempotent pass writes nothing twice.
+    ``skip_taskless``: also a task without a lifecycle row (``put_handoffs`` refuses it; a provider
+    test's ``system:`` id), read in the same transaction and recorded nowhere: a later pass meets a row
+    that appears. A failed read still raises; it is never taken for absence."""
     from ouroboros.store import open_store
 
     if not by_task:
         return {}
     with open_store(pathlib.Path(root), write=False) as txn:
         return {task_id: kept for task_id, consumers in by_task.items()
-                if (kept := {consumer: attempt for consumer, attempt in consumers.items()
-                             if txn.handoff(task_id, consumer) is None})}
+                if (not skip_taskless or txn.row(task_id, "status"))
+                and (kept := {consumer: attempt for consumer, attempt in consumers.items()
+                              if txn.handoff(task_id, consumer) is None})}
 
 
 def _discharge(root: Any, witness_id: str, facts: Dict[str, Any]) -> bool:
@@ -486,8 +530,11 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
 
 
 def _repair_absent_receivers(root: Any, members: Optional[set], root_task_id: Optional[str]) -> List[Dict[str, Any]]:
-    """Open attempts (of this tree, or all) whose recorded answer receiver's process positively ended."""
+    """Open attempts (of this tree, or all) whose recorded receiver's process, or unbound sender, positively
+    ended. Rows are read first, then probed; each retirement is written once (``_unretired``)."""
     from ouroboros.model_wait import retire_model_consumers
+    from ouroboros.task_store import put_handoffs
+    from ouroboros.utils import utc_now_iso
     from ouroboros import usage_store
 
     try:  # the tree's own open rows (root index), or the open set at startup; never history
@@ -498,26 +545,45 @@ def _repair_absent_receivers(root: Any, members: Optional[set], root_task_id: Op
     except Exception:
         log.warning("Open attempts unreadable; receivers stay held", exc_info=True)
         return []
-    by_task: Dict[str, Dict[str, int]] = {}
-    pids: Dict[str, Any] = {}
+    by_task: Dict[str, Dict[str, Any]] = {}  # task -> consumer -> task attempt, or UNBOUND_KEY+attempt -> its row
+    pids: Dict[tuple, Any] = {}  # (task, receiver kind) -> a recorded owner pid, for the report
     for row in rows:
         consumer, attempt = row.get("local_answer_consumer_id"), row.get("local_answer_task_attempt")
-        if type(attempt) is not int or not isinstance(consumer, str) or not consumer:
-            continue
         proof = row.get("local_answer_owner_proof") if isinstance(row.get("local_answer_owner_proof"), dict) else {}
-        if owner_ended(row.get("local_answer_owner_pid"), row.get("local_answer_owner_birth"),
-                       proof if proof.get("pid") == row.get("local_answer_owner_pid") else {}):
-            task_id = str(row.get("task_id") or "")
-            by_task.setdefault(task_id, {})[consumer] = attempt
-            pids[task_id] = row.get("local_answer_owner_pid")
+        pid, task_id = row.get("local_answer_owner_pid"), str(row.get("task_id") or "")
+        if type(attempt) is int and isinstance(consumer, str) and consumer:
+            if owner_ended(pid, row.get("local_answer_owner_birth"), proof if proof.get("pid") == pid else {}):
+                by_task.setdefault(task_id, {})[consumer], pids[(task_id, "bound")] = attempt, pid
+            continue
+        if row.get("state") not in {"dispatched", "unresolved"} or not _unbound(row) or not row.get("attempt_id"):
+            continue
+        try:
+            ended = unbound_owner_ended(pid, proof)
+        except Exception:  # an unreadable probe proves nothing
+            ended = False
+        if ended:
+            by_task.setdefault(task_id, {})[UNBOUND_KEY + str(row["attempt_id"])], pids[(task_id, "unbound")] = row, pid
     repaired: List[Dict[str, Any]] = []
     try:
-        for task_id, consumers in _unretired(root, by_task).items():
-            try:
-                retire_model_consumers(pathlib.Path(root), task_id, consumers)
-                repaired.append({"kind": "receiver_owner_absent", "task_id": task_id, "pid": pids[task_id]})
-            except Exception:
-                log.warning("Ended receivers of %s not retired; they stay held", task_id, exc_info=True)
+        for task_id, retiring in _unretired(root, by_task, skip_taskless=True).items():
+            unbound = {key: {"receiver": "unbound", "attempt_id": row["attempt_id"],
+                             "owner_pid": row.get("local_answer_owner_pid"), "retired_at": utc_now_iso()}
+                       for key, row in retiring.items() if key.startswith(UNBOUND_KEY)}
+            bound = {key: attempt for key, attempt in retiring.items() if key not in unbound}
+            # Two independent writes: one refused leaves only its own rows held, and each reports itself.
+            for receiver, rows_of, write in (
+                    ("unbound", unbound, lambda: put_handoffs(  # the exact attempt names it, nothing invented
+                        pathlib.Path(root), task_id, "retired_model_consumers", unbound, only_absent=True)),
+                    ("bound", bound, lambda: retire_model_consumers(pathlib.Path(root), task_id, bound))):
+                if not rows_of:
+                    continue
+                try:
+                    write()
+                    repaired.append({"kind": "receiver_owner_absent", "task_id": task_id, "receiver": receiver,
+                                     "pid": pids[(task_id, receiver)]})
+                except Exception:
+                    log.warning("Ended %s receivers of %s not retired; they stay held", receiver, task_id,
+                                exc_info=True)
     except Exception:
         log.warning("Retired receivers unreadable; receivers stay held", exc_info=True)
     return repaired

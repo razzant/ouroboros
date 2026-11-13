@@ -92,31 +92,25 @@ test('the head holds identity, one availability word and a fixed Reviewer/action
     assert.match(head, /data-subagent-status data-tone="neutral" title="Agent session · live availability not checked">Not checked</);
 });
 
-for (const baseline of ['saved', 'generated']) {
-    test(`a page dirty indicator owns Unsaved changes while the editor keeps its ${baseline} meaning`, () => {
-        const dom = fakeEditorDom();
-        const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null,
-            hasPageDirtyIndicator: true, baseline });
-        const setting = { enabled: true, items: [session()] };
-        editor.load(setting);
-        const intent = dom.toolbar('[data-subagents-intent]');
-        const label = baseline === 'saved' ? 'Saved' : 'Generated draft';
-        assert.equal(intent.textContent, label);
-        dom.rows()[0].querySelector('[data-subagent-field="review_eligible"]')
-            .listeners.change({ target: { checked: true } });
-        assert.equal(editor.dirty, true);
-        assert.equal(intent.textContent, '');
-        assert.equal(intent.title, '');
-        assert.equal(intent.hidden, false, 'the reserved toolbar slot remains in the layout');
-        editor.load(setting);
-        assert.equal(intent.textContent, label);
-        editor.destroy();
-    });
-}
+test('setup names an edited draft itself: the intent word turns to Unsaved changes and back on a load', () => {
+    const dom = fakeEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null, baseline: 'generated' });
+    const setting = { enabled: true, items: [session()] };
+    editor.load(setting);
+    const intent = dom.toolbar('[data-subagents-intent]');
+    assert.equal(intent.textContent, 'Generated draft');
+    dom.rows()[0].querySelector('[data-subagent-field="review_eligible"]')
+        .listeners.change({ target: { checked: true } });
+    assert.equal(editor.dirty, true);
+    assert.equal(intent.textContent, 'Unsaved changes');
+    editor.load(setting);
+    assert.equal(intent.textContent, 'Generated draft');
+    editor.destroy();
+});
 
 test('the intent word is the read\'s fact: Automatic, Generated draft, Saved, and none before a load', () => {
     const dom = fakeEditorDom();
-    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null, hasPageDirtyIndicator: true });
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
     const intent = () => dom.toolbar('[data-subagents-intent]').textContent;
     editor.paint();
     assert.equal(intent(), '', 'still loading: no word');

@@ -19,6 +19,7 @@ LABEL = "post-merge-red"
 NODE_LANE = "node-lane"
 LINT_PREFIX = "ruff "  # a lint finding's id: "ruff <code> <path> <name>"
 SIZE_PREFIX = "size "  # a size check test's id: "size <nodeid>"
+BOOK_BUDGETS = "tests/test_reference_book_budgets.py"  # the size check's module that measures the books and prompts
 SYSTEMS = {"linux": "Linux", "windows": "Windows"}
 _BLOCK = re.compile(r"<!-- post-merge-red (\{.*?\}) -->", re.S)
 _AUTHOR = re.compile(r" by `([^`\n]+)` landed\. First bad commit")  # a culprit issue's opening (issue_body)
@@ -114,13 +115,16 @@ def _named(nodeid: str) -> str:
 
 
 def _size_hint(block: dict) -> str:
-    """How to see what a size test found: the release's own lane against the measured base."""
+    """How to see what a size test found, and how it stops being tracked: the release's own lane against the measured base."""
     modules = sorted({nodeid[len(SIZE_PREFIX):].split("::", 1)[0] for nodeid in block["ids"]
                       if nodeid.startswith(SIZE_PREFIX)})
     if not modules:
         return ""
+    later = (" Growth a later merge's `book-growth` label approved still counts against that base: the check stays red "
+             "until the text is no larger than it was there." if BOOK_BUDGETS in modules else "")
     return (f" The size check measures against `{size_base(block)}`: `OURO_SIZE_RATCHET_BASE_REF="
-            f"{size_base(block)} python -m pytest -m size_ratchet {' '.join(modules)}` shows what grew.")
+            f"{size_base(block)} python -m pytest -m size_ratchet {' '.join(modules)}` shows what grew. A size test "
+            f"stops being tracked only by passing against that base; a renamed one is taken off by hand.{later}")
 
 
 def issue_title(block: dict, pr: dict | None) -> str:
@@ -145,9 +149,12 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
     else:
         opening = f"These tests fail on `ouroboros` on {system}, but the post-merge check could not find the merge that broke them."
     rows = "\n".join(f"- {_named(nodeid)}" for nodeid in block["ids"])
+    sized = sum(nodeid.startswith(SIZE_PREFIX) for nodeid in block["ids"])  # a size test is never found gone: `_size_hint`
+    gone = ("" if sized == len(block["ids"]) else ", or finds one outside the size check gone" if sized
+            else ", or finds it gone")
     return (f"{opening}\n\n{rows}\n\n{seen} at `{head}`: {run_url}\n\n{_FORWARD}{_size_hint(block)} The "
-            f"post-merge check takes each test off this list once it passes on `ouroboros` on {system}, and closes "
-            f"this issue when none is left.\n\n{machine_block(block)}\n")
+            f"post-merge check takes a test off this list when a check on {system} runs it and it passes{gone}, "
+            f"and closes this issue when none is left.\n\n{machine_block(block)}\n")
 
 
 def find_merged_pr(github, sha: str) -> dict | None:
@@ -190,7 +197,9 @@ def route(github, *, classification: dict, attribution: dict, head: str, run_url
     A culprit's pull request gets one comment and one open issue per culprit pull request is
     created or extended; reds without blame not tracked yet get one issue per kind. `checkpoint(record)`
     then receives that hand-over before any recheck starts, so a step killed during the recheck still
-    leaves it. `same_run(ids)` answers the ids this run already passed at the head on this system;
+    leaves it. `same_run(ids)` answers what this run already settles: "passed" at the head on this system,
+    "kept" for an id it owes no recheck (the run ran nothing of its existing module, or its own report was no
+    whole pass);
     `recheck(ids)` runs the others once and answers `outcomes` values; `size_recheck(base, ids)` does
     so for size ids, measured against `base`. An issue loses each id that passes, named in a comment,
     and closes when none is left. A failed GitHub call becomes a warning in the record and the

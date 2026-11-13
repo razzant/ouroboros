@@ -379,6 +379,8 @@ SEARCH_LONG = ("We walked along the river for most of the afternoon and stopped 
 SEARCH_MAIN_MATCHES = {31: "The kingfisher nested by the old mill.", 100: SEARCH_LONG,
                 201: "Saw a KINGFISHER again near the bridge", 390: "Remember the kingfisher photo?"}
 SEARCH_QUESTION = "Which kingfisher route should the survey take?"
+SEARCH_QUESTION_DETAIL = "Along the alders past the mill"
+SEARCH_QUESTION_STAKE = "Nesting season closes the bank"
 
 
 def _seed_search_rooms(root):
@@ -394,12 +396,17 @@ def _seed_search_rooms(root):
         ds.append(root, "chat", {"chat_id": room["chat_id"], "ts": (SEARCH_START + timedelta(days=1, minutes=index)).isoformat(),
                                  "direction": "out" if index % 2 else "in", "text": text}, feed=True)
     # The Project's open question: Main draws it only as a copy of the Project's, so only the Project finds it.
+    # Stored as the host writes a question (supervisor/message_bus.py send_quiz): the question is the row's text, its
+    # card's offered answers, details and stake in its quiz block.
     record_asked(root, "survey-asker", quiz_id="route", question=SEARCH_QUESTION, options=["River", "Weir"],
+                 option_details=[SEARCH_QUESTION_DETAIL, ""], recommended_index=0, stake=SEARCH_QUESTION_STAKE,
                  wait_for_answer=True)
     ds.append(root, "chat", {"chat_id": room["chat_id"], "ts": (SEARCH_START + timedelta(days=1, minutes=5)).isoformat(),
                              "direction": "out", "type": "quiz", "task_id": "survey-asker", "text": SEARCH_QUESTION,
-                             "quiz": {"quiz_id": "route", "question": SEARCH_QUESTION, "options": ["River", "Weir"],
-                                      "wait_for_answer": True}}, feed=True)
+                             "quiz": {"quiz_id": "route", "options": [
+                                 {"label": "River", "detail": SEARCH_QUESTION_DETAIL, "recommended": True},
+                                 {"label": "Weir"}], "stake": SEARCH_QUESTION_STAKE, "assumption": "River",
+                                 "state": "open", "wait_for_answer": True}}, feed=True)
     return room
 
 
@@ -576,9 +583,33 @@ def test_ctrl_f_finds_saved_messages_of_the_room_in_front_and_lands_on_them(dire
             # Its question is the Project's: found and landed on here, where Main finds nothing of it.
             page.fill(f"{panel} .chat-find-input", "kingfisher route")
             _wait_search_results(page, panel, 1)
-            assert _search_state(page, panel)["results"][0]["snippet"] == SEARCH_QUESTION
+            assert _search_state(page, panel)["results"][0]["snippet"] == (
+                f"{SEARCH_QUESTION} {SEARCH_QUESTION_STAKE} River {SEARCH_QUESTION_DETAIL} Weir")
             page.keyboard.press("Enter")
             assert _search_landed(page, panel, SEARCH_QUESTION)["target"]
+            # Its stake's label stands in a span of its own (mountQuizStake), the words a search leaves out.
+            stake = page.evaluate("""feed => [...document.querySelectorAll(`${feed} .chat-quiz-stake`)].map(stake => ({
+                labels: [...stake.querySelectorAll('.chat-quiz-stake-label')].map(label => label.textContent),
+                text: stake.textContent.trim()}))""", feed)
+            assert stake == [{"labels": ["At stake:"], "text": f"At stake: {SEARCH_QUESTION_STAKE}"}], stake
+            # Its card's words are its offered answers, their details and its stake; never the card's labels, status
+            # or recommendation. A match among them is marked where the card draws it.
+            for words, count in (("along the alders", 1), ("survey take? Nesting season", 1), ("bank River", 1),
+                                 ("At stake", 0), ("recommended", 0), ("Unanswered", 0), ("Question", 0)):
+                page.fill(f"{panel} .chat-find-input", words)
+                _wait_search_results(page, panel, count)
+            for words in ("along the alders", "Nesting season", "Weir"):
+                page.fill(f"{panel} .chat-find-input", words)
+                _wait_search_results(page, panel, 1)
+                page.keyboard.press("Enter")
+                page.wait_for_function("([feed, words]) => (" + _SEARCH_CARD_MARK + ")(feed).text.toLowerCase() "
+                                       "=== words.toLowerCase()", arg=[feed, words], timeout=30_000)
+                page.evaluate(_SETTLE_RESTORE_FRAMES)
+                marks = page.evaluate(_SEARCH_CARD_MARK, feed)
+                assert marks["count"] == 1 and marks["text"].casefold() == words.casefold(), (words, marks)
+                assert marks["in"] == {"along the alders": "chat-quiz-option-detail",
+                                       "Nesting season": "chat-quiz-stake", "Weir": "chat-quiz-option-label"}[words], marks
+            _search_both_themes(page, shots / f"{browser_engine}-project-question-landed.png")
             page.keyboard.press("Escape")
             assert not _search_state(page, panel)["open"]
             assert page.locator(feed).is_visible(), "Esc closed the search, not the Project"
@@ -642,6 +673,103 @@ def test_search_lands_on_a_rendered_project_answer_and_other_pages_keep_find(dir
             browser.close()
 
 
+SEARCH_OWNER_ANSWER = "Neither: follow the heron upstream at dawn"
+
+
+@pytest.mark.parametrize("browser_engine", ["webkit", "chromium"])
+def test_an_answered_questions_owner_words_are_found_and_marked_where_its_card_draws_them(
+        direct_server_with_data, browser_engine, tmp_path):
+    """A question card settled as answered draws the owner's own words (``renderOwnerAnswer``): the Project's search
+    finds and marks them there; the card's `Owner's answer:` label is not words."""
+    from playwright.sync_api import sync_playwright
+
+    from ouroboros.owner_quiz import record_answered
+
+    root = direct_server_with_data["data_dir"]
+    room = _seed_search_rooms(root)
+    assert record_answered(root, "survey-asker", quiz_id="route", option_index=None, request_id="owner-answer",
+                           comment=SEARCH_OWNER_ANSWER)["ok"]
+    errors = []
+    with sync_playwright() as pw:
+        try:
+            browser = getattr(pw, browser_engine).launch(headless=True)
+        except Exception as error:  # an engine this host has not installed is named, never passed silently
+            if "Executable doesn't exist" in str(error):
+                pytest.skip(f"{browser_engine} is not installed for this Playwright")
+            raise
+        page = browser.new_page(viewport={"width": 1512, "height": 949}, device_scale_factor=2, color_scheme="dark")
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        try:
+            _open_main_for_search(page, direct_server_with_data["url"])
+            room_browser._open(page, room["id"])
+            panel, feed = f'[id="panel-pchat-{room["id"]}"]', f'[id="pchat-{room["id"]}-messages"]'
+            page.locator(f"{feed} .chat-quiz-answer").wait_for(timeout=30_000)
+            line = page.evaluate("""feed => { const line = document.querySelector(`${feed} .chat-quiz-answer`);
+                return {text: line.textContent, labels: [...line.querySelectorAll('.chat-quiz-answer-label')]
+                    .map(label => label.textContent)}; }""", feed)
+            assert line == {"text": f"Owner's answer: {SEARCH_OWNER_ANSWER}", "labels": ["Owner's answer:"]}, line
+            page.locator(feed).click(position={"x": 40, "y": 200})
+            page.keyboard.press("ControlOrMeta+f")
+            page.wait_for_function("() => document.activeElement?.classList.contains('chat-find-input')")
+            page.keyboard.type("heron upstream")
+            _wait_search_results(page, panel, 1)
+            result = _search_state(page, panel)["results"][0]
+            assert result["marks"] == ["heron upstream"] and SEARCH_OWNER_ANSWER in result["snippet"], result
+            page.keyboard.press("Enter")
+            assert _search_landed(page, panel, SEARCH_QUESTION)["target"]
+            page.wait_for_function("""feed => [...(CSS.highlights?.get('ouro-chat-find') || [])]
+                .some(range => document.querySelector(feed).contains(range.startContainer))""", arg=feed, timeout=30_000)
+            marks = page.evaluate("""feed => [...(CSS.highlights?.get('ouro-chat-find') || [])]
+                .filter(range => document.querySelector(feed).contains(range.startContainer))
+                .map(range => ({text: range.toString(),
+                    in: range.startContainer.parentElement.closest('.chat-quiz-answer-label, .chat-quiz-answer')
+                        ?.className || ''}))""", feed)
+            assert marks == [{"text": "heron upstream", "in": "chat-quiz-answer"}], marks
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+            page.screenshot(path=str(_search_evidence(tmp_path) / f"{browser_engine}-owner-answer-landed.png"))
+            for words in ("Owner's answer", "answer: Neither"):
+                page.fill(f"{panel} .chat-find-input", words)
+                _wait_search_results(page, panel, 0)
+            page.fill(f"{panel} .chat-find-input", "Neither: follow")
+            _wait_search_results(page, panel, 1)
+            page.keyboard.press("Escape")
+        finally:
+            browser.close()
+    assert not errors, errors
+
+
+# A finger's targets in the sheet (ui.css "Touch reach"): each control's box, what a touch 1px inside each of its edges
+# and at its centre hits (the topmost target there, as a tap does), and the field's width.
+_SEARCH_TARGETS = """scope => {
+    const find = document.querySelector(`${scope} .chat-find`);
+    const name = (node) => {
+        const target = node?.closest('.chat-find-button, .chat-find-input, .chat-find-more, .chat-find-result');
+        return target ? (target.className.match(/chat-find-(newer|older|close|input|more|result)/) || [])[1] : '';
+    };
+    const probe = (node) => {
+        const box = node.getBoundingClientRect(), x = box.left + box.width / 2, y = box.top + box.height / 2;
+        const at = (px, py) => name(document.elementFromPoint(px, py));
+        return {width: box.width, height: box.height, own: name(node), hits: [at(box.left + 1, y), at(box.right - 1, y),
+                at(x, box.top + 1), at(x, box.bottom - 1), at(x, y)]};
+    };
+    const nodes = [...find.querySelectorAll('.chat-find-input, .chat-find-button, .chat-find-more')]
+        .filter((node) => node.getClientRects().length);
+    return {coarse: matchMedia('(pointer: coarse)').matches, targets: nodes.map(probe),
+            input: find.querySelector('.chat-find-input').getBoundingClientRect().width};
+}"""
+
+
+def _search_targets(page, scope, *, touch=44):
+    """Every control of the sheet is a touch target of its own: at least ``touch`` px each way (the field as tall), and
+    a tap anywhere inside it reaches it, never a neighbour's reach."""
+    found = page.evaluate(_SEARCH_TARGETS, scope)
+    assert found["coarse"], found
+    for target in found["targets"]:
+        assert target["height"] >= touch - 0.5 and (target["own"] == "input" or target["width"] >= touch - 0.5), found
+        assert target["hits"] == [target["own"]] * 5, found
+    return found
+
+
 @pytest.mark.parametrize("browser_engine", ["webkit"])
 def test_a_finger_opens_search_from_plus_and_lands_on_a_tapped_match(direct_server_with_data, browser_engine, tmp_path):
     from playwright.sync_api import sync_playwright
@@ -661,8 +789,12 @@ def test_a_finger_opens_search_from_plus_and_lands_on_a_tapped_match(direct_serv
                 "Attach file", "Search this chat"]
             item.tap()
             page.wait_for_function("() => document.activeElement?.classList.contains('chat-find-input')")
+            _search_frame(page, "#page-chat", alone=True)  # a capsule around a finger's field too
             page.keyboard.type("kingfisher")
             _wait_search_results(page, "#page-chat", 4)
+            targets = _search_targets(page, "#page-chat")
+            assert [target["own"] for target in targets["targets"]] == ["input", "newer", "older", "close"], targets
+            assert targets["input"] >= 120, targets
             sheet = page.locator("#page-chat .chat-find").bounding_box()
             assert sheet["x"] >= 0 and sheet["x"] + sheet["width"] <= 390.5, sheet
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -673,6 +805,33 @@ def test_a_finger_opens_search_from_plus_and_lands_on_a_tapped_match(direct_serv
             page.screenshot(path=str(shots / f"{browser_engine}-phone-landed.png"))
             page.locator("#page-chat .chat-find-input").tap()
             assert page.locator("#page-chat .chat-find-results").is_visible(), "touching the field opens the list again"
+            # ↓ and ↑ under a finger step through the matches, the keyboard staying in the field.
+            page.locator("#page-chat .chat-find-newer").tap()
+            _search_landed(page, "#page-chat", "flashed blue and orange")
+            assert _search_state(page, "#page-chat")["count"] == "3 of 4"
+            page.locator("#page-chat .chat-find-older").tap()
+            _search_landed(page, "#page-chat", "The kingfisher nested by the old mill.")
+            state = _search_state(page, "#page-chat")
+            assert state["focused"] and state["count"] == "4 of 4", state
+            # A failed read's Try again is a finger's target of its own in the note.
+            page.route("**/api/chat/search?*", lambda route: route.abort())
+            page.locator("#page-chat .chat-find-input").fill("heron at dusk")
+            page.wait_for_function("() => document.querySelector('#page-chat .chat-find-more')?.textContent === 'Try again'")
+            failed = _search_targets(page, "#page-chat")
+            assert [target["own"] for target in failed["targets"]][-1] == "more", failed
+            _search_both_themes(page, shots / f"{browser_engine}-phone-try-again.png")
+            page.unroute("**/api/chat/search?*")
+            page.locator("#page-chat .chat-find-more").tap()
+            _wait_search_results(page, "#page-chat", 0)
+            # A small, short phone: the field keeps room for its words and every control its own reach.
+            page.set_viewport_size({"width": 320, "height": 568})
+            page.locator("#page-chat .chat-find-input").fill("kingfisher")
+            _wait_search_results(page, "#page-chat", 4)
+            small = _search_targets(page, "#page-chat")
+            assert small["input"] >= 72, small
+            sheet = page.locator("#page-chat .chat-find").bounding_box()
+            assert sheet["x"] >= 0 and sheet["x"] + sheet["width"] <= 320.5, sheet
+            _search_both_themes(page, shots / f"{browser_engine}-phone-small-results.png")
             page.locator("#page-chat .chat-find-close").tap()
             assert not _search_state(page, "#page-chat")["open"]
         finally:
@@ -766,6 +925,28 @@ SEARCH_HERON = "\n\n".join([f"Field log line {n}: the reeds were still and the w
                            + [f"After note {n}: nothing else moved on the pool." for n in range(20)])
 SEARCH_OSPREY = "\n\n".join([f"Survey step {n}: counted the nests along the bank." for n in range(30)]
                             + ["An osprey took the last fish of the day."])
+# A code line wider than its block, its words at the far end: the block scrolls sideways to show them.
+SEARCH_WIDE_CODE = "Wide code:\n\n```\nroute = [" + ", ".join(f"'bank{n}'" for n in range(160)) + ", 'cormorant']\n```"
+# The first mark's box inside every clipping box between it and the feed (the feed's own band is checked apart).
+_SEARCH_MARK_CLIPPED = """scope => {
+    const feed = document.querySelector(scope).querySelector('.chat-messages, #chat-messages');
+    const range = [...(CSS.highlights?.get('ouro-chat-find') || [])].find(r => feed.contains(r.startContainer));
+    const word = range?.getClientRects()[0];
+    const clips = [];
+    for (let box = range?.startContainer.parentElement; box && box !== feed; box = box.parentElement) {
+        const style = getComputedStyle(box);
+        if (style.overflowX === 'visible' && style.overflowY === 'visible') continue;
+        const r = box.getBoundingClientRect(), left = r.left + box.clientLeft, top = r.top + box.clientTop;
+        if (word.left < left - 1 || word.right > left + box.clientWidth + 1
+                || word.top < top - 1 || word.bottom > top + box.clientHeight + 1) {
+            clips.push({box: box.className || box.tagName, left, right: left + box.clientWidth, word: [word.left, word.right],
+                        scrollLeft: box.scrollLeft});
+        }
+    }
+    const pre = range?.startContainer.parentElement.closest('pre');
+    return {text: range?.toString() || '', clips, scrollLeft: pre ? pre.scrollLeft : null,
+            pageScrollX: window.scrollX, docLeft: document.scrollingElement.scrollLeft};
+}"""
 # This room's own marks in the shared highlight, the first of them with its text and box, the sheet's foot and the
 # composer's head: what the reader sees of the landing.
 _SEARCH_MARKS = """scope => {
@@ -780,6 +961,16 @@ _SEARCH_MARKS = """scope => {
             top: first?.top, bottom: first?.bottom, rowTop: row?.top, rowBottom: row?.bottom,
             sheet: find && !find.hidden ? find.getBoundingClientRect().bottom : null,
             composer: room.querySelector('[id$="input-area"]').getBoundingClientRect().top};
+}"""
+
+
+# The one search mark in a question card: its words and the part of the card it stands in.
+_SEARCH_CARD_MARK = """feed => {
+    const marks = [...(CSS.highlights?.get('ouro-chat-find') || [])]
+        .filter(range => document.querySelector(feed).contains(range.startContainer));
+    const part = marks[0]?.startContainer.parentElement.closest('.chat-quiz-option-label, .chat-quiz-option-detail, '
+        + '.chat-quiz-stake, .chat-quiz-question');
+    return {count: marks.length, text: marks[0]?.toString() || '', in: part ? part.classList[0] : ''};
 }"""
 
 
@@ -806,6 +997,8 @@ def test_a_long_reply_lands_on_its_matched_words_and_a_fold_says_where_they_are(
                               "direction": "out", "text": "Read [the guide](https://example.test/needle-only-url)."}, feed=True)
     ds.append(root, "chat", {"chat_id": 1, "ts": (SEARCH_START + timedelta(hours=9, minutes=2)).isoformat(),
                               "direction": "out", "text": "Hangul: \u1100\u1161\u11a8"}, feed=True)
+    ds.append(root, "chat", {"chat_id": 1, "ts": (SEARCH_START + timedelta(hours=9, minutes=3)).isoformat(),
+                              "direction": "out", "text": SEARCH_WIDE_CODE}, feed=True)
     for index in range(30):  # newer rows, so neither lands already on screen
         ds.append(root, "chat", {"chat_id": 1, "ts": (SEARCH_START + timedelta(hours=10, minutes=index)).isoformat(),
                                   "direction": "in", "text": f"Later chatter {index}."}, feed=True)
@@ -867,6 +1060,22 @@ def test_a_long_reply_lands_on_its_matched_words_and_a_fold_says_where_they_are(
             page.wait_for_function("scope => (" + _SEARCH_MARKS + ")(scope).count > 0", arg="#page-chat")
             assert _search_marks(page, "#page-chat")["text"] == "\u1100\u1161\u11a8"
             assert "not shown here" not in _search_state(page, "#page-chat")["note"]
+
+            # Words at the far end of a wide code line: the code block scrolls sideways to them, the page never does.
+            page.fill("#page-chat .chat-find-input", "cormorant")
+            _wait_search_results(page, "#page-chat", 1)
+            page.keyboard.press("Enter")
+            page.wait_for_function("scope => (" + _SEARCH_MARKS + ")(scope).text === 'cormorant'", arg="#page-chat",
+                                   timeout=30_000)
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+            clipped = page.evaluate(_SEARCH_MARK_CLIPPED, "#page-chat")
+            marks = _search_marks(page, "#page-chat")
+            assert clipped["text"] == "cormorant" and not clipped["clips"] and clipped["scrollLeft"] > 0, clipped
+            assert clipped["pageScrollX"] == 0 and clipped["docLeft"] == 0, clipped
+            assert marks["sheet"] - 1 <= marks["top"] and marks["bottom"] <= marks["composer"] + 1, marks
+            state = _search_state(page, "#page-chat")
+            assert state["focused"] and state["count"] == "1 of 1", state
+            page.screenshot(path=str(shots / f"{browser_engine}-{viewport[0]}-wide-code-landed.png"))
             page.keyboard.press("Escape")
             assert page.evaluate("() => CSS.highlights ? !CSS.highlights.has('ouro-chat-find') : true")
         finally:
@@ -892,6 +1101,7 @@ SEARCH_SHOWN = [
     ("out", "Unicode: Die Straße, ΟΔΟΣ, \ufb01ne, \U00010400\U00010401"),
     ("out", "Hangul **\u1100\u1161**\u11a8 split"),
     ("out", "Formula: $$E=mc^2$$ and \\(\\alpha \\le \\text{velocity}\\) here."),
+    ("out", "Roots: \\(\\sqrt{x}\\) and \\(\\sqrt[3]{y}\\) over \\(\\frac{q}{z}\\) end."),
     ("out", "Visible address: https://example.test/visible-url works."),
     ("in", "Owner link https://example.test/owner-url here"),
 ]
@@ -965,6 +1175,9 @@ def test_search_reads_the_words_the_room_shows(direct_server_with_data, browser_
                     ("старые заметки", 1, SEARCH_MEMORY_SHOWN), ("old notes", 0, None), ("Memory:", 0, None),
                     ("E=mc2", 1, "Formula: E=mc2 and α≤velocity here."), ("mc^2", 0, None), ("\\text", 0, None),
                     ("velocity here", 1, None),
+                    # A root shows its sign, its index first; a fraction's parts stand apart (MathML holds neither).
+                    ("√x", 1, "Roots: √x and 3√y over q z end."), ("3√y", 1, None), ("y3", 0, None),
+                    ("qz", 0, None), ("q z end", 1, None),
                     ("example.test/visible-url", 1, "Visible address: https://example.test/visible-url works."),
                     ("owner-url here", 1, "Owner link https://example.test/owner-url here"),
                     ("heron-survey.pdf", 1, "heron-survey.pdf The survey map"), ("survey map", 1, None),
@@ -985,7 +1198,7 @@ def test_search_reads_the_words_the_room_shows(direct_server_with_data, browser_
                                   ("_leading_name", "_leading_name"), ("STRASSE", "Straße"),
                                   ("heron-survey.pdf", "heron-survey.pdf"), ("survey-notes.txt", "survey-notes.txt"),
                                   ("egret-count.csv", "egret-count.csv"),
-                                  ("velocity", None)):  # a formula's match marks the drawn formula, whole
+                                  ("velocity", None), ("√x", None)):  # a formula's match marks it drawn, whole
                 _search_for(page, words, 1)
                 page.keyboard.press("Enter")
                 page.wait_for_function("scope => (" + _SEARCH_MARKS + ")(scope).count > 0", arg="#page-chat",
@@ -993,7 +1206,7 @@ def test_search_reads_the_words_the_room_shows(direct_server_with_data, browser_
                 page.evaluate(_SETTLE_RESTORE_FRAMES)
                 marks = _search_marks(page, "#page-chat")
                 assert marks["count"] == 1 and (marks["text"] == landed if landed else (
-                    "velocity" in marks["text"] and marks["bottom"] - marks["top"] > 4)), (words, marks)
+                    words.strip("√") in marks["text"] and marks["bottom"] - marks["top"] > 4)), (words, marks)
                 assert marks["sheet"] - 1 <= marks["top"] and marks["bottom"] <= marks["composer"] + 1, marks
                 state = _search_state(page, "#page-chat")
                 assert state["focused"] and "not shown here" not in state["note"], state

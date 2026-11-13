@@ -372,9 +372,13 @@ _PROCESS_STAMP = uuid.uuid4().hex[:8]  # this process's code shapes the map it a
 
 
 def bindings_revision(drive_root: Any) -> str:
-    """An opaque stamp of what ``all_task_project_bindings`` answers in this process: the file
-    identities of the bindings and of the registry naming their projects. ``""`` when no stamp can
-    prove the bytes unchanged: unreadable, or changed within a clock tick (``utils._RACY_NS``)."""
+    """An opaque stamp of the files ``all_task_project_bindings`` reads in this process: the identities of the
+    bindings and of the registry naming their projects, and whether the registry's commit witness exists (it tells
+    a lost registry from one never written, so it decides ``project_chat_ids``; reconcile touches it each tick, so
+    its times are no part of the stamp). ``""`` when no stamp can prove the bytes unchanged:
+    unreadable, or changed within a clock tick (``utils._RACY_NS``). It keys the state publication (a touched
+    registry is a new production); the revision a reader holds the map by is the map's own digest
+    (``gateway.state_publication.map_revision``)."""
     started, stamps = time.time_ns(), [_PROCESS_STAMP]
     for path in (_bindings_path(drive_root), _registry_path(drive_root)):
         try:
@@ -387,6 +391,7 @@ def bindings_revision(drive_root: Any) -> str:
         if max(info.st_mtime_ns, info.st_ctime_ns) >= started - utils._RACY_NS:
             return ""
         stamps.append(utils.file_identity(info))
+    stamps.append(_registry_witness_path(drive_root).exists())
     return hashlib.sha256(repr(stamps).encode("utf-8")).hexdigest()[:16]
 
 
@@ -816,15 +821,33 @@ def reserved_project_chat_ids(drive_root: Any, *, strict: bool = False) -> set:
     sections shows the task its own thread). ``strict=True`` RAISES on an
     unreadable registry instead of answering "no Projects".
     """
+    if not strict:
+        return readable_rooms(drive_root) or set()
+    projects = _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
+    return {project["chat_id"] for project in projects} - {0}
+
+
+_UNREADABLE_SAID: set = set()  # the causes of an unknown room set this process has logged
+
+
+def readable_rooms(drive_root: Any) -> Optional[set]:
+    """The chat ids the registry's readable rows reserve (a healthy row survives an invalid neighbour). ``None``
+    when the registry names no room it can vouch for: it cannot be read, is lost beside its commit witness, or
+    holds rows none of which is readable. That is an unknown set, never "no Projects"."""
     try:
-        projects = (_strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
-                    if strict else list_reserved_projects(drive_root))
-        return {project["chat_id"] for project in projects} - {0}
-    except Exception:
-        if strict:
-            raise
-        log.debug("reserved_project_chat_ids failed", exc_info=True)
-    return set()
+        rooms = {project["chat_id"] for project in list_reserved_projects(drive_root)} - {0}
+        if not rooms:  # empty is "no Projects" only where the strict reader agrees
+            _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)
+        return rooms
+    except Exception as error:
+        # Main's saved history and the room set wait on this answer, and a broken registry can outlast a restart:
+        # its cause is named once a process and cause, where a person reading the log looks.
+        if (said := f"{type(error).__name__}: {error}") not in _UNREADABLE_SAID:
+            _UNREADABLE_SAID.add(said)
+            log.warning("The Project registry vouches for no room; Main's saved history is withheld while it lasts: %s",
+                        said)
+        log.debug("readable_rooms failed", exc_info=True)
+        return None
 
 
 _THREAD_LENS_CACHE: Dict[str, tuple] = {}
@@ -1406,7 +1429,8 @@ def _with_dialogue_facts(project: Dict[str, Any], room: Optional[dict],
 def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any = None,
                      project_id: Any = None, include_pinned: bool = False, closed: Optional[bool] = None,
                      oldest_first: bool = False, start: int = 0,
-                     sidebar_rows: Optional[List[Dict[str, Any]]] = None, by_message: bool = False) -> List[Dict[str, Any]]:
+                     sidebar_rows: Optional[List[Dict[str, Any]]] = None, by_message: bool = False,
+                     keep: Any = ()) -> List[Dict[str, Any]]:
     """Sidebar, its whole list (``limit=None``) or a strict addressed room, with unread/activity from room facts.
 
     ``chat_id`` addresses an active room, ``project_id`` an active or deleting one; registry reads retain lifecycle
@@ -1414,7 +1438,8 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
     interval is never inactivity. ``sidebar_rows``, for the unaddressed list only, is the caller's own
     ``list_sidebar_projects`` read: this list and what the caller counts of it are then one registry observation.
     ``by_message`` (the owner's clients) orders and selects by ``last_message_at`` once the history is dated
-    (``room_messages``); until then the rows carry none and keep the activity order.
+    (``room_messages``); until then the rows carry none and keep the activity order. ``keep`` names chat ids whose
+    rows the pinned-and-recent list holds beyond its recent slice, after it, in the same order.
     """
     from ouroboros import dialogue_store as ds, room_messages
 
@@ -1445,8 +1470,9 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
                                by="last_active_at" if messages is None else "last_message_at")
     if not addressed and limit is not None and include_pinned:
         # Pins remain reachable without starving the ordinary recent-room slice.
-        projects = ([p for p in projects if p.get("pinned") is True]
-                    + [p for p in projects if p.get("pinned") is not True][:max(1, int(limit))])
+        recent, cut = [p for p in projects if p.get("pinned") is not True], max(1, int(limit))
+        projects = ([p for p in projects if p.get("pinned") is True] + recent[:cut]
+                    + [p for p in recent[cut:] if p["chat_id"] in keep])
     elif not addressed and limit is not None:
         start = max(0, int(start))
         projects = projects[start:start + max(1, int(limit))]

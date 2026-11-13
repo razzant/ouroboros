@@ -21,7 +21,7 @@ mid-production makes the next probe differ: one more production, never a stale b
              production read (a task's ``budget_drive_root``); ``usage`` the usage ledger's
              ``publication_marker`` of the same roots;
 ``dialogue`` one aggregate over the dialogue store's rooms (unread/activity facts, Main's revision);
-``bindings`` ``projects_registry.bindings_revision`` (bindings and registry files);
+``bindings`` ``projects_registry.bindings_revision`` (bindings and registry files: the census names Projects too);
 ``files``    the identities of ``state.json`` (and its last-good copy), ``settings.json`` and the
              evolution campaign; ``checkout`` the runtime checkout's identity;
 ``live``     the in-memory census inputs no revision covers: the direct turns (``_direct_turns_source``,
@@ -37,7 +37,7 @@ cannot be read is a value (its failure kind): the production reads it as unavail
 
 Process facts (uptime, workers, supervisor readiness, the boot document, served UI, runtime/context/
 safety modes, effort range) are assembled per request without I/O and spliced in front of the encoded
-body; ``task_bindings`` follows the request's ``bindings_since``. ``boot.jobs`` is the store's job rows
+body; ``task_bindings`` follows the request's ``bindings_since``, compared with the map's own digest (``map_revision``). ``boot.jobs`` is the store's job rows
 as the last production read them: the in-memory value ``/api/health`` serves without a store read.
 
 Display only: no mutation authority is derived from a publication (every door re-reads its own);
@@ -47,6 +47,7 @@ alone (the consciousness "due" wording, the rolling 24 h allowance) refreshes at
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import pathlib
@@ -78,6 +79,13 @@ class Publication:
 def encode(value: Any) -> bytes:
     """The same bytes ``JSONResponse`` renders (NaN refused, so a bad value fails as it did)."""
     return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":")).encode("utf-8")
+
+
+def map_revision(bindings: Any) -> str:
+    """The revision a reader holds its ``task_bindings`` map by: a digest of the bytes it was sent. The map itself
+    names its revision, so it stands while those bytes would be the same, whatever else was written meanwhile (a
+    Project touched, the serving process restarted), and it moves exactly when a reader's map would differ."""
+    return hashlib.sha256(encode(bindings)).hexdigest()[:16]
 
 
 def response_body(publication: Publication, live: Dict[str, Any], *, bindings_unchanged: bool) -> bytes:

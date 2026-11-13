@@ -260,7 +260,7 @@ def _skill_panel(reviewers: Any, reason: str, *, reason_field: str = "reason") -
 
 
 _CHECK_PROPERTIES = {
-    "reviewers": {"type": "array", "items": {"type": "string"}, "description": "Enabled row ids/handles; omitted means the whole pool. Blocking widens to all ticked reviewers; Advisory requires at least one ticked reviewer and a reason when narrowed. Unticked advisers are heard, not counted. Cyber Pro composes freely."},
+    "reviewers": {"type": "array", "items": {"type": "string"}, "description": "Enabled row ids/handles; omitted means the whole pool. Outside Cyber Pro name at least one ticked reviewer, with a reason when you name fewer than all. Unticked advisers are heard, not counted. Cyber Pro composes freely."},
     "check": {"type": "string", "enum": ["review", "self"], "description":
               "review (default): the configured reviewers check the exact release, and it runs when they leave no "
               "blockers; outside Cyber Pro this is the only check, and only the owner skips a review. self: Cyber Pro "
@@ -314,7 +314,7 @@ _SCHEMAS = {
         "properties": {
             "id": {"type": "string", "description": "Catalog id <source>/<name>."},
             "reason": {"type": "string", "description": "Why this work needs the skill."},
-            "review_reason": {"type": "string", "description": "Why these reviewers when you name fewer than the whole pool; Advisory requires it then."},
+            "review_reason": {"type": "string", "description": "Why these reviewers when you name fewer than the whole pool; required then outside Cyber Pro."},
             "replace": {"type": "boolean", "description": "Replace another skill of the same name (owner's instruction)."},
             "owner_source": _OWNER_SOURCE,
             **_CHECK_PROPERTIES,
@@ -331,7 +331,7 @@ _SCHEMAS = {
         "properties": {
             "name": {"type": "string"},
             "mode": {"type": "string", "enum": ["replace", "keep", "merge"]},
-            "reason": {"type": "string", "description": "Why these reviewers; required for a narrowed Advisory panel."},
+            "reason": {"type": "string", "description": "Why these reviewers; required for a narrowed panel outside Cyber Pro."},
             "digest": {"type": "string", "description": "The candidate release digest from skill_search."},
             "local_digest": {"type": "string", "description": "The installed copy's local_digest from skill_search."},
             **_CHECK_PROPERTIES,

@@ -399,9 +399,9 @@ def owner_authority_kinds(entries: List[Dict[str, Any]]) -> List[str]:
     return kinds
 
 
-def _pending_owner_input_kinds(ctx: Any) -> List[str]:
-    """Unread owner-authority input a source acknowledgement must not hide: a
-    peek over a COPY of the seen-set (the round top performs the real drain)."""
+def _pending_owner_input_kinds(ctx: Any, *, ids: bool = False) -> List[str]:
+    """Unread owner-authority input a source acknowledgement must not hide (``ids``: the entries' ids instead of their
+    kinds): a peek over a COPY of the seen-set (the round top performs the real drain)."""
     from ouroboros.owner_mailbox import drain_owner_entries
 
     incoming = getattr(ctx, "_acceptance_observation_incoming", None)
@@ -409,10 +409,10 @@ def _pending_owner_input_kinds(ctx: Any) -> List[str]:
     drive_root, task_id = getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or "")
     if drive_root is None or not task_id:
         return kinds
-    return kinds + owner_authority_kinds(drain_owner_entries(
-        pathlib.Path(drive_root), task_id, set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()),
-        getattr(ctx, "task_attempt", None) or 1,
-    ))
+    entries = drain_owner_entries(pathlib.Path(drive_root), task_id, set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()),
+                                  getattr(ctx, "task_attempt", None) or 1)
+    return kinds + ([str(entry.get("msg_id") or "") for entry in entries if owner_authority_kinds([entry])] if ids
+                    else owner_authority_kinds(entries))
 
 
 def capture_acceptance_observation(
@@ -741,8 +741,8 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     facts = dict(money or {})
     parts.extend(_money_facts(facts))
     parts.extend([f"quota {facts['quota']}"] if facts.get("quota") is not None else [])  # never a standing "unknown"
-    parts.append(cached_tariff_text(ctx.active_model, getattr(ctx.context_fit_plan, "provider", ""),
-                                    usage.get("_context_prompt_estimate")))
+    parts.extend(filter(None, [cached_tariff_text(ctx.active_model, getattr(ctx.context_fit_plan, "provider", ""),
+                                                  usage.get("_context_prompt_estimate"), unknown="")]))  # a quote, never a standing "unknown"
     if tool_ctx is not None:
         try:  # a facts row never takes the round down: an unreadable clock is said, not raised
             parts.append(round_clock_fact(tool_ctx, now))
@@ -883,8 +883,8 @@ def _context_components(ctx: Any, *, measured: bool) -> list:
     return sorted(sizes, key=lambda item: item[1], reverse=True)[:3]
 
 
-def cached_tariff_text(model: str, provider: str, prompt: Optional[int]) -> str:
-    """Quote fresh exact-model endpoint rates when they agree, for the facts line and [ROUTE FACTS]; never invent one."""
+def cached_tariff_text(model: str, provider: str, prompt: Optional[int], *, unknown: str = "tariff unknown") -> str:
+    """Quote fresh exact-model endpoint rates when they agree; never invent one. ``unknown`` words their absence: [ROUTE FACTS] says it, the round facts pass ""."""
     try:
         from ouroboros.pricing import get_pricing
         from ouroboros.provider_models import normalize_model_identity
@@ -896,12 +896,12 @@ def cached_tariff_text(model: str, provider: str, prompt: Optional[int]) -> str:
         for row in rows:
             rates = row
             if getattr(row, "tiers", ()) and prompt is None:
-                return "tariff unknown (input tier unmeasured)"
+                return unknown and "tariff unknown (input tier unmeasured)"
             for threshold, tier in getattr(row, "tiers", ()):
                 if int(prompt or 0) >= threshold:
                     rates = tier
             if len(rates) != 4 or rates[0] is None or rates[3] is None:
-                return "tariff unknown"
+                return unknown
             quoted.append(tuple(rates))
         if quoted and all(row == quoted[0] for row in quoted):
             rates = quoted[0]  # pricing SSOT already uses dollars per MILLION tokens.
@@ -909,7 +909,7 @@ def cached_tariff_text(model: str, provider: str, prompt: Optional[int]) -> str:
             return f"cached catalog tariff ${rates[0]:.2f}/M in, ${rates[3]:.2f}/M out, cache read {cache} (estimated input tier)"
     except Exception:
         log.debug("cached tariff unavailable for the facts line", exc_info=True)
-    return "tariff unknown"
+    return unknown
 
 
 def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:

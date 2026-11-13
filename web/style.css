@@ -1612,6 +1612,16 @@ html[data-layout="stack"] .chat-find {
 }
 .chat-find-more:hover { text-decoration: underline; }
 .chat-find-more:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
+/* A finger's targets side by side (ui.css "Touch reach"): ↑, ↓ and × are each the touch minimum themselves, abutting
+   with no reach over a neighbour's (the field keeps the width a gap would take; × ends the bar concentric with its
+   corner), and the bar is that tall already (its field is a .ui-control); the sheet's corner follows the taller field,
+   a capsule still. Search older messages and Try again are words with the minimum as their own box. */
+@media (pointer: coarse) {
+    .chat-find { --radius-sheet: calc(var(--touch-target-min) / 2 + var(--space-1)); }
+    .chat-find-bar { gap: 0; padding-inline-end: 0; }
+    .chat-find-button { width: var(--touch-target-min); height: var(--touch-target-min); }
+    .chat-find-more { min-width: var(--touch-target-min); min-height: var(--touch-target-min); }
+}
 /* The query's words in the landed message (the CSS Custom Highlight API: no node is written). */
 ::highlight(ouro-chat-find) { background-color: var(--tone-crimson-word); color: var(--bg-primary); }
 
@@ -2619,7 +2629,7 @@ html[data-layout="stack"] .chat-find {
     white-space: nowrap;
 }
 
-/* A live chip keeps the moving dots' width when the owner's dot takes their place, so its word never moves. */
+/* A live chip keeps the moving dots' width in any shape it draws, so its word never moves. */
 .chat-live-phase[data-chip-tone="live"] > .status-mark { min-width: calc(3 * var(--mark-dot) + 2 * var(--mark-gap)); }
 
 .chat-live-phase[data-chip-tone="live"] {
@@ -4317,6 +4327,7 @@ html[data-layout="stack"] #primary-sidebar {
     inset: 0 auto 0 0;
     z-index: var(--z-sidebar);  /* under the room: the room is the card that moves */
     width: var(--drawer-w);
+    border-right: 0;  /* the room card's curved edge is the drawer's edge; the desk's hairline would draw a straight double */
     /* Closed it lies under the room a little to the left and faded (p = 0), and comes up from there as the room
        slides away; it closes in 280ms and opens in 340ms on the iOS sheet curve, or at the finger's speed after a
        drag (--drawer-settle, drawer_drag.js). */
@@ -4332,7 +4343,7 @@ html[data-layout="stack"] #primary-sidebar {
    at every scroller, so it is declared on the scrollers themselves; a code block or a table inside scrolls sideways
    as its own scroller. */
 html[data-layout="stack"] :is(#chat-messages, .chat-messages, .files-list, .files-sidebar, .files-preview-content,
-    .skills-scroll, .widgets-scroll, .settings-scroll, .dashboard-body) {
+    .skills-scroll, .widgets-scroll, .settings-home, .settings-page, .dashboard-body) {
     touch-action: pan-y pinch-zoom;
 }
 /* Outside the scrollers too (a header, the composer's row of capsules, the attach button): the page itself only pans
@@ -5773,12 +5784,12 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
    fill, so fills never stack and its rows part by space alone. Neither has an edge: the transparent 1px border only
    keeps each box's size. */
 :is(.agent-family-card, .harness-account-row, .harness-login-card, .settings-effort-card,
-    .settings-model-card, .settings-custom-secret-row, .settings-extension-section, .mcp-server-card) {
+    .settings-model-card, .settings-extension-section) {
     border: 1px solid transparent; background: var(--surface-tray); border-radius: var(--radius-inner); box-shadow: none;
 }
 :is(.agent-family-card, .harness-login-card, .settings-effort-card, .settings-model-card,
-    .settings-extension-section, .mcp-server-card) :is(.harness-account-row, .harness-login-card, .settings-effort-card,
-    .settings-model-card, .settings-custom-secret-row) {
+    .settings-extension-section) :is(.harness-account-row, .harness-login-card, .settings-effort-card,
+    .settings-model-card) {
     background: transparent;
 }
 
@@ -6085,19 +6096,6 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     background: rgba(var(--neutral-rgb), 0.03);
 }
 
-/* Settings LAN reachability hint. */
-/* The hint is a tray with its words in their own ink: a warning takes the hue's word, nothing takes an outline. */
-.settings-lan-hint {
-    margin-top: 8px;
-    padding: 8px 12px;
-    border-radius: var(--radius-inner);
-    font-size: var(--type-meta);
-    background: var(--surface-tray);
-    border: 1px solid transparent;
-    color: var(--text-secondary);
-}
-.settings-lan-hint[data-tone="warn"] { color: var(--status-warn-word, var(--text-secondary)); }
-.settings-lan-hint a { color: inherit; text-decoration: underline; opacity: 0.9; }
 /* Dashboard Evolution (evolution.js): the campaign object, then one time line of versions with the chosen version
    beneath it. Both are .ui-card objects on the shared materials. The chart's inks: the line and its area, milestone
    dots ringed in the object's own colour, ticks for every version and a dashed bridge over a break in the axis. */
@@ -6223,7 +6221,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .evo-empty-line { margin: 0; max-width: 62ch; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 
 /* Dashboard › Costs (costs.js) on the Dashboard tab body: the known spend of the limit leads with its share as a thin
-   bar under it (amber only when the limit is reached, the owner's move); the budget form is the tab's action row; the
+   bar under it (amber only when the limit is reached, the owner's move); the limits card's rows save themselves; the
    four breakdowns are cards of their own, two side by side where they fit, each a short list with "Show all (N)". */
 .costs-spend-bar { height: 4px; border-radius: var(--pill-radius); background: var(--status-neutral-bg); overflow: hidden; }
 .costs-spend-bar > i { display: block; width: var(--spend-share, 0%); height: 100%; border-radius: inherit; background: var(--text-meta); }
@@ -6231,22 +6229,53 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
 /* A table's one-line scope note under its title: what it groups by (costs.js TABLES). */
 .costs-table-note { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.costs-budget-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3) var(--space-5); align-items: start; }
 .costs-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 /* The consciousness allowance under its field (costs.js allowancePresentation): the clock's own spend in its words, what
-   that leaves out in the meta ink and the door to Consciousness; then at most two status sentences (.ui-status), each
+   that leaves out in the meta ink and the door to Consciousness; then up to three status sentences (.ui-status), each
    its fact in the line's tone and what follows from it in the meta ink, a held wake's ending in its card's door. */
 .costs-allowance-spend { margin: 0; }
 .costs-allowance-spend .cost-cell-note { display: inline; }
 .costs-allowance-state { display: grid; gap: var(--space-2); }
 .costs-allowance-state:empty { display: none; }
-.costs-allowance-line { margin: 0; max-width: 72ch; }
+.costs-allowance-line { margin: 0; max-width: 72ch; min-width: 0; overflow-wrap: anywhere; }
 .costs-allowance-note { color: var(--text-meta); }
 /* Reserve each sentence link's touch overshoot before the next status or disclosure (ui.css "Touch reach"). */
 @media (pointer: coarse) {
     .costs-allowance, .costs-allowance-line:has([data-open-task]) {
         padding-block-end: max(0px, calc((var(--touch-target-min) - var(--type-meta) * var(--line-meta)) / 2));
     }
+}
+/* Costs "By period" (cost_period.js): a period's cost per model as one thin bar of four classes (and a fifth part
+   outside them: by tokens the input in no class, by money the cost not split) with their amounts
+   listed under it (identity is never colour alone), then the cache writes by what they followed. Neither the
+   crimson nor the amber series is used, so no class reads as an alarm or a warning: cache is the blue series (what
+   was written in full, what was read in its tint), output the green one, uncached input the neutral ink. */
+.costs-period { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.costs-period-choice { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.costs-period-status:empty, .costs-period-models:empty, .costs-period-writes-host:empty, .costs-period-note:empty { display: none; }
+.costs-period-models { display: grid; gap: var(--space-5); }
+.costs-period-model { display: grid; gap: var(--space-2); min-width: 0; }
+.costs-period-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
+.costs-period-name { color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+.costs-period-sum { color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.costs-period-bar { display: flex; gap: 2px; height: 10px; border-radius: var(--pill-radius); overflow: hidden; }
+.costs-period-bar > i { flex: var(--share) 0 0; min-width: 2px; }
+.costs-period-parts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: var(--space-1) var(--space-5); margin: 0; }
+/* A part's amount keeps to one line; where the card is too narrow for both, it moves under its name, still at the end. */
+.costs-period-parts > div { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 var(--space-3); min-width: 0; }
+.costs-period-parts dt { display: flex; align-items: center; gap: var(--space-2); color: var(--text-secondary); white-space: nowrap; }
+.costs-period-parts dt > i { flex: none; width: 8px; height: 8px; border-radius: 2px; }
+.costs-period-parts dd { margin: 0 0 0 auto; color: var(--text-primary); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.costs-period-subtitle { margin: var(--space-2) 0 0; color: var(--text-primary); font-size: var(--type-body); font-weight: 600; }
+[data-cost-class="cache_write"] { background: var(--chart-series-2); }  /* only the bar and swatch marks carry it */
+[data-cost-class="cache_read"] { background: var(--chart-series-2); opacity: 0.42; }  /* older WebKit has no color-mix() */
+[data-cost-class="output"] { background: var(--chart-series-3); }
+[data-cost-class="uncached_input"] { background: var(--text-meta); }
+[data-cost-class="unclassified"], [data-cost-class="unsplit"] { background: var(--text-meta); opacity: 0.4; }  /* outside the four classes */
+.costs-period-writes td:first-child { overflow-wrap: anywhere; }
+/* The period choice wraps on a narrow card: under a finger it takes the touch minimum as its height. */
+@media (pointer: coarse) {
+    .costs-period-choice { --control-h: var(--touch-target-min); }
 }
 .costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }
 .cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -6270,6 +6299,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     .cost-table :is(th, td) { border-bottom: 0; }
     .cost-table tr > :first-child { grid-column: 1 / -1; }
     .cost-table tr > :nth-child(2) { text-align: left; }
+    /* Its three figures share one line, in columns every row shares; a figure wraps between words, never inside one. */
+    .costs-period-writes tr { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr); }
+    .cost-table.costs-period-writes :is(th, td) { white-space: normal; }
     .cost-table .cost-cell-name { width: auto; max-width: none; padding-bottom: 0; }
     .cost-table .cost-cell-note { white-space: normal; }
 }
@@ -6397,8 +6429,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .storage-deleted .storage-place:focus { outline: none; }
 .storage-deleted .storage-place:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
 
-/* Free temporary space: the flow under the free-space reading in the first card. */
-.storage-auto { margin: var(--space-3) 0 0; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* Free temporary space: the flow under the free-space reading in the first card. How long finished work is kept ends
+   the card, a row that saves itself. */
+.storage-retention { margin-top: var(--space-3); }
 .storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--divider); }
 .storage-tray:empty { display: none; }
 .storage-tray p { margin: 0; }
@@ -6503,7 +6536,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .storage-cleanup-figure.is-quiet .storage-cleanup-amount { font-size:var(--type-section); }
 .storage-cleanup-door { margin-top:var(--space-3); justify-content:flex-start; }
 .storage-cleanup.has-door { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:var(--space-4); }
-.storage-cleanup.has-door > :is(.storage-card-title,.storage-auto) { grid-column:1 / -1; }
+.storage-cleanup.has-door > :is(.storage-card-title,.storage-retention) { grid-column:1 / -1; }
 .storage-cleanup.has-door > .storage-cleanup-door { align-self:center; }
 .storage-decisions { margin-top:var(--space-3); padding-top:var(--space-3); border-top:1px solid var(--divider); }
 .storage-decisions > .storage-free-sub { margin-top:0; }
@@ -6608,6 +6641,33 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* A Dashboard card's title (16/600) and its list of facts (label, value): the tabs' cards share these two parts of the
    tab body (Costs, Consciousness, Updates, Activity, Evolution). */
 .dashboard-card-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
+/* A tab's settings cards (dashboard.js mountTabSettings): rows that save themselves under the card's title and
+   lead, the rarer ones in its fold. The row, the door, the mark-led row and the choice that carries a sentence are
+   Settings' own recipes (settings.css "A page of Settings"); their host adds no box: each card is a card of the
+   tab body. */
+.dashboard-settings-cards { display: contents; }
+.dashboard-settings > .dashboard-card-title { margin-bottom: var(--space-3); }
+.dashboard-settings-lead { margin: calc(-1 * var(--space-2)) 0 var(--space-3); color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
+.dashboard-settings-fold { margin-top: var(--space-3); }
+.costs-limits .settings-row-field > .ui-control { width: 5.25rem; }  /* money: room for a larger limit than a row's short number */
+/* A card that is one row (data-solo): the row's name is the card's title, its meta the lead, its control the body. */
+.dashboard-settings[data-solo] > .settings-row { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); padding: 0; border: 0; background: none; }
+.dashboard-settings[data-solo] .ui-row-title { font-size: var(--type-section); font-weight: 600; }
+.dashboard-settings[data-solo] .ui-row-meta { font-size: var(--type-body); line-height: var(--line-body); }
+.dashboard-settings[data-solo] .ui-row-actions { margin-top: var(--space-2); justify-content: flex-start; }
+.dashboard-settings[data-solo] > .settings-row > .ui-row-actions > .ui-control { width: 100%; }
+/* A tab opened from Settings leads back there with its first row (dashboard.js settingsReturn), drawn as a Settings
+   page draws its Back (settings.css .settings-back-row, the later sheet: these rules name both classes to stand over
+   it). It stands above the tab's scroller, at the cards' edge, so it stays in place while the tab scrolls. */
+.settings-back-row.dashboard-back { position: static; flex: none; margin: var(--space-2) 0 var(--space-1); padding: 0 20px; background: none; }
+.dashboard-back + .dashboard-body { padding-top: var(--space-2); }
+html[data-layout="stack"] .settings-back-row.dashboard-back { padding-inline: var(--space-3); }
+/* The same row on a page a door of Settings opened (settings.js `leave`). Circles keeps the Dashboard's shell, so the
+   rules above place it there too; on Skills it stands right under the header, at that page's own gutter. */
+#page-skills > .settings-back-row.dashboard-back { padding-inline: var(--space-5); }
+/* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
+   screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
+html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .dashboard-facts {
     display: grid;
     grid-template-columns: fit-content(14rem) minmax(0, 1fr);
@@ -7060,48 +7120,6 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     .skills-tray-row { grid-template-columns: minmax(0, 1fr); }
     .skills-tray-actions { justify-content: flex-start; }
 }
-
-/* The switch: green when on; a switch that cannot be used now loses its colour, never its size. */
-.skills-switch {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    cursor: pointer;
-    -webkit-user-select: none;
-    user-select: none;
-    padding: 11px 4px;
-    margin: -11px -4px;
-}
-.skills-switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
-.skills-switch-track {
-    position: relative;
-    display: inline-block;
-    width: 40px;
-    height: 22px;
-    border-radius: var(--pill-radius);
-    background: var(--status-neutral-border);
-    transition: var(--motion-tone);
-}
-.skills-switch-thumb {
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--surface-capsule);
-    box-shadow: var(--elev-rest);
-    transition: transform 140ms ease;
-}
-.skills-switch input:checked + .skills-switch-track { background: var(--green); }
-.skills-switch input:checked + .skills-switch-track .skills-switch-thumb { transform: translateX(18px); }
-.skills-switch input:focus-visible + .skills-switch-track { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
-.skills-switch.is-locked,
-.skills-switch input:disabled { cursor: not-allowed; }
-.skills-switch.is-locked .skills-switch-track,
-.skills-switch input:disabled + .skills-switch-track { background: var(--status-neutral-border); }
-.skills-switch.is-locked .skills-switch-thumb,
-.skills-switch input:disabled + .skills-switch-track .skills-switch-thumb { box-shadow: none; }
 
 /* Details (the shared disclosure, right under the head, its rows the card's width): sentence-case labels in the meta
    ink at 500, values in the reading ink (DESIGN §2). */
@@ -9575,9 +9593,8 @@ html[data-layout="stack"] .project-panel {
 .ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }
 .ui-model-footer { flex: 0 0 auto; padding: var(--space-2) var(--space-3); overflow-wrap: anywhere; }
 
-/* Account rows are purpose-built (identity left, actions right), not the
-   settings key/value grid — .settings-custom-secret-row's 0.65fr/1.35fr
-   columns inverted the proportions and its align-items:end sank the text.
+/* Account rows are purpose-built (identity left, actions right), not a
+   key/value grid, whose columns inverted the proportions and sank the text.
    Two lines: the account and its status on top, muted metadata below, actions
    docked right across both (docs/DESIGN.md "Account group / row anatomy"). No
    row is privileged: the default CLI login uses this exact layout. */

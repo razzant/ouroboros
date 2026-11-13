@@ -4,7 +4,7 @@ A review is not one model call: a reading reviewer makes many calls in one wave,
 reviewer one, and every seat's verdict extraction adds a light call. The usage ledger records
 each physical attempt with its wave (``review_wave_id``) and its row (``review_slot_id``), so
 the price of one review by a row is the median, over that row's recent waves on its current
-model, of what the seat cost in one wave — every attempt summed — with how many reviews it
+model, of what the seat cost in one wave — every attempt summed (``usage_store.review_seat_costs``) — with how many reviews it
 covers and their range. No history is "cost unknown", never a one-call estimate. A session row
 spends a seat and time, not money; callers say so before asking for a price.
 
@@ -89,6 +89,8 @@ def review_price(drive_root: Any, row_id: str, model: str, *,
 
 
 def _usd(value: float) -> str:
+    if 0 < value < 0.00005:
+        return "<$0.0001"  # a charge below the printed precision is never a proven zero
     places = Decimal("0.0001") if value < 0.01 else Decimal("0.01")
     return f"${Decimal(value).quantize(places, rounding=ROUND_HALF_UP)}"
 
@@ -100,6 +102,7 @@ def review_price_text(price: Optional[ReviewPrice], unit: str = "review") -> str
         return COST_UNKNOWN
     if not price.usd and not price.high:
         return f"no API cost per {unit}"
+    about = "" if 0 < price.usd < 0.00005 else "≈"
     if price.reviews < 2:
-        return f"≈{_usd(price.usd)} per {unit} (1 measured)"
-    return f"≈{_usd(price.usd)} per {unit} (median of {price.reviews} measured, {_usd(price.low)}–{_usd(price.high)})"
+        return f"{about}{_usd(price.usd)} per {unit} (1 measured)"
+    return f"{about}{_usd(price.usd)} per {unit} (median of {price.reviews} measured, {_usd(price.low)}–{_usd(price.high)})"

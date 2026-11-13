@@ -300,6 +300,101 @@ test('a count is exact only for the whole room: the import frontier, unreadable 
     });
 });
 
+test('a continuation that fails and then reads on clears its failure; a room read to its beginning never restarts', async (t) => {
+    const reached = '2026-10-01T09:00:00Z';
+    await t.test('Enter before any match', async (st) => {
+        const f = fixture(st, { pages: [page([], { cursor: 'c1', reached }), unreadable(), page([], { reached })] });
+        f.search.open();
+        await f.type('needle');
+        assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1']);
+        assert.match(f.parts().note.textContent, /^Saved history could not be searched\.Try again$/);
+        await f.key('Enter');  // the failed cut is read once more, and this time it holds: the room's beginning
+        assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1', 'c1']);
+        assert.equal(f.parts().count.textContent, '0 found', 'the whole room was read');
+        assert.equal(f.parts().note.textContent, 'No saved message in this chat contains “needle”.',
+            'the read that held speaks, never the failed one before it');
+        assert.equal(f.parts().note.querySelector('[data-find-more]'), null, 'no Try again from the newest page');
+        await f.key('Enter');
+        assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1', 'c1'], 'nothing older is left to read');
+    });
+    await t.test('ArrowDown past the last landed match', async (st) => {
+        const migrating = Object.assign(new Error('migrating'), { status: 503, body: { reason_code: 'migrating' } });
+        const f = fixture(st, { pages: [page(twenty, { cursor: 'c1', reached }), migrating, page([], { reached })] });
+        f.search.open();
+        await f.type('needle');
+        f.parts().results[19].emit('click');
+        await flush();
+        await f.key('ArrowDown');  // past the loaded matches: the read of older history fails
+        assert.match(f.parts().note.textContent, /^Saved history is being upgraded\. Try again shortly\.Try again$/);
+        await f.key('ArrowDown');  // the same cut, read again, reaches the beginning without a new match
+        assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1', 'c1']);
+        assert.equal(f.parts().count.textContent, '20 of 20');
+        assert.doesNotMatch(f.parts().note.textContent, /being upgraded|could not be searched|Try again/);
+        assert.equal(f.parts().note.querySelector('[data-find-more]'), null);
+        assert.equal(f.parts().results.length, 20, 'no match is listed twice');
+    });
+    await t.test('Try again at the failed cut, then the beginning', async (st) => {
+        const f = fixture(st, { pages: [page([match(3)], { cursor: 'c1' }), unreadable(), unreadable(), page([match(1)])] });
+        f.search.open();
+        await f.type('needle');
+        f.parts().note.querySelector('[data-find-more]').click();
+        await flush();
+        assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1', 'c1'], 'a failed retry keeps its cut');
+        assert.match(f.parts().note.textContent, /^Saved history could not be searched\.Try again$/);
+        f.parts().note.querySelector('[data-find-more]').click();
+        await flush();
+        assert.deepEqual(f.reads.map((read) => read.cursor), [null, 'c1', 'c1', 'c1']);
+        assert.equal(f.parts().count.textContent, '2 found');
+        assert.equal(f.parts().note.hidden, true, 'no failure and no older messages are left to say');
+    });
+});
+
+test('the field takes no more words than the host searches; words it refuses are said without Try again', async (t) => {
+    const invalid = Object.assign(new Error('invalid'), { status: 400, body: { reason_code: 'search_query_invalid' } });
+    const f = fixture(t, { pages: [invalid] });
+    f.search.open();
+    assert.equal(f.parts().input.getAttribute('maxlength'), null, 'a maxlength counts UTF-16 units, not the host\'s');
+    await f.type('needle');
+    assert.equal(f.parts().note.textContent, 'Search words are limited to 200 characters.');
+    assert.equal(f.parts().note.querySelector('[data-find-more]'), null, 'the same words would be refused again');
+    assert.equal(f.parts().count.textContent, '');
+});
+
+test('the field holds as many code points as the host searches: an emoji query is never cut at half', async (t) => {
+    const f = fixture(t);
+    f.search.open();
+    const { input } = f.parts();
+    const grin = '\u{1F600}';  // one code point, two UTF-16 units
+    await f.type(grin.repeat(200));
+    assert.equal(input.value, grin.repeat(200), 'chat_search.py _MAX_QUERY_CHARS: 200 code points, 400 units');
+    assert.equal(f.reads.at(-1).q, grin.repeat(200));
+    await f.type(`${grin.repeat(200)}x${grin}`);
+    assert.equal(input.value, grin.repeat(200), 'the code points just typed give way, no surrogate split');
+    assert.equal(Array.from(f.reads.at(-1).q).length, 200);
+    assert.ok(!/[\uD800-\uDFFF]/u.test(f.reads.at(-1).q.replace(/\p{Extended_Pictographic}/gu, '')));
+    input.value = `ab${grin.repeat(198)}c`;
+    input.selectionStart = 2;  // typed "b" right after "a", the field already full
+    input.setSelectionRange = (start) => { input.selectionStart = start; };
+    input.emit('input');
+    assert.equal(input.value, `a${grin.repeat(198)}c`, 'the code point before the caret gives way, as a maxlength refuses it');
+    assert.equal(input.selectionStart, 1);
+    input.value = `a${grin.repeat(200)}`;
+    input.selectionStart = 2;  // a caret inside a pair of surrogates moves no half of it
+    input.emit('input');
+    assert.equal(input.value, grin.repeat(200), 'only whole code points before the caret give way');
+    const reads = f.reads.length;
+    input.value = 'x'.repeat(205);
+    input.selectionStart = undefined;
+    input.emit('input', { isComposing: true });
+    assert.equal(input.value.length, 205, 'an IME composing its words is never clipped');
+    input.emit('compositionend');
+    assert.equal(input.value, 'x'.repeat(200), 'its words are clipped once the composition ends');
+    t.mock.timers.tick(220);
+    await flush();
+    assert.equal(f.reads.length, reads + 1, 'and read once, clipped');
+    assert.equal(f.reads.at(-1).q, 'x'.repeat(200));
+});
+
 test('new words, Esc, a hidden room and destroy end the reads; Esc gives the field back with the draft untouched', async (t) => {
     const signals = [];
     let shown = true;

@@ -1,4 +1,4 @@
-"""Real Git: paid Advisory criticism returns before the author's free continuation."""
+"""Real Git: paid criticism returns before the author's free continuation."""
 import json
 
 import pytest
@@ -19,7 +19,6 @@ from tests.test_git_review_preflight_gate import candidate  # noqa: F401
 ])
 def test_explicit_continuation_commits_current_bytes_without_repaying(candidate, monkeypatch, corrected, cap, failure):  # noqa: F811
     ctx = candidate
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", cap)
     ctx.branch_dev = git.run_cmd(["git", "branch", "--show-current"], cwd=ctx.repo_dir).strip()
     git.run_cmd(["git", "reset", "--hard", "HEAD"], cwd=ctx.repo_dir)
@@ -78,36 +77,30 @@ def test_explicit_continuation_commits_current_bytes_without_repaying(candidate,
     assert records[-1].author_disposition["subject_hash"] == records[-1].pre_review_fingerprint
     assert (records[-1].pre_review_fingerprint != critic.pre_review_fingerprint) == corrected
     assert load_state(ctx.drive_root).attempts[-2].triad_raw_results == critic.triad_raw_results
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    refused = git._repo_commit_push(ctx, "Finish", review_reference=reference,
-        author_disposition={"disposition": "accepted", "rationale": "Cannot override Blocking."})
-    assert "requires Advisory" in refused
 
 
 @pytest.fixture
 def runtime_mode(request, monkeypatch):
     from ouroboros import config
 
-    mode, enforcement = request.param
+    mode = request.param
     config.reset_runtime_mode_baseline_for_tests()
     config.initialize_runtime_mode_baseline(mode)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
-    yield mode, enforcement
+    yield mode
     config.reset_runtime_mode_baseline_for_tests()
 
 
-@pytest.mark.parametrize("runtime_mode", [("pro", "advisory"), ("cyber_pro", "advisory"), ("cyber_pro", "blocking"),
-                                          ("pro", "blocking")], indirect=True)
+@pytest.mark.parametrize("runtime_mode", ["pro", "cyber_pro"], indirect=True)
 @pytest.mark.parametrize("outcome", ["clean", "pending"])
 def test_every_nonblocking_outcome_returns_before_git(candidate, monkeypatch, runtime_mode, outcome):  # noqa: F811
-    """#1741: under Advisory or Cyber Pro every panel outcome — a clean PASS and a still-running
-    wave included — reaches the author before commit/tag/push; the commit is the author's
-    explicit continuation over the current bytes. Ordinary Blocking keeps its one-call PASS."""
+    """#1741: every panel outcome — a clean PASS and a still-running wave included — reaches
+    the author before commit/tag/push; the commit is the author's explicit continuation over
+    the current bytes. A leftover Blocking value of the retired setting changes nothing."""
     from ouroboros import review_ledger
     from ouroboros.tools import commit_gate
 
-    mode, enforcement = runtime_mode
-    nonblocking = mode == "cyber_pro" or enforcement == "advisory"
+    mode = runtime_mode
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
     ctx = candidate
     ctx.branch_dev = git.run_cmd(["git", "branch", "--show-current"], cwd=ctx.repo_dir).strip()
     git.run_cmd(["git", "reset", "--hard", "HEAD"], cwd=ctx.repo_dir)
@@ -138,12 +131,6 @@ def test_every_nonblocking_outcome_returns_before_git(candidate, monkeypatch, ru
     monkeypatch.setattr(git, "_run_parallel_review", reviewer)
     head = git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
     first = git._repo_commit_push(ctx, "Change value", skip_advisory_review=True)
-    if not nonblocking:
-        if outcome == "clean":
-            assert git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir) != head, first
-        else:
-            assert "REVIEW_PENDING" in first and git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir) == head
-        return
     assert first.startswith("Review outcome returned before commit"), first
     assert git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir) == head and not pushes
     reference = json.loads(first.split("\n", 1)[1])["review_reference"]
@@ -173,7 +160,6 @@ def test_every_nonblocking_outcome_returns_before_git(candidate, monkeypatch, ru
 def test_no_current_test_proof_means_no_author_commit(candidate, monkeypatch):  # noqa: F811
     from ouroboros.tools.commit_gate import _record_commit_attempt
     ctx = candidate
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     git._reset_commit_review_state(ctx)
     before = git._fingerprint_staged_diff(ctx.repo_dir)
     _record_commit_attempt(ctx, "candidate", "reviewing", pre_review_fingerprint=before["fingerprint"], paid=True)
@@ -225,7 +211,6 @@ def _unrelated_paid_rows(ctx, count):
 
 def _ceiling_author(ctx, monkeypatch, failure="critical"):
     """The last allowed paid wave (cap 1) returns its outcome; returns the reviewer's sends and the first reference."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
     ctx.branch_dev = git.run_cmd(["git", "branch", "--show-current"], cwd=ctx.repo_dir).strip()
     git.run_cmd(["git", "reset", "--hard", "HEAD"], cwd=ctx.repo_dir)
@@ -271,7 +256,7 @@ def _named_row(ctx, reference):
 @pytest.mark.parametrize("history", ["small", "evicted_after", "evicted_by_author"])
 def test_a_ceiling_outcome_the_bounded_history_evicted_still_carries_the_authors_own_decision(candidate, monkeypatch, history, actor):  # noqa: F811
     """#2830, owner 9 Nov: after the last allowed review returned FAIL and the author fixed it, the next commit buys no
-    panel (the paid-cycle ceiling) and returns a free outcome and reference. Under Advisory the author explicitly decides
+    panel (the paid-cycle ceiling) and returns a free outcome and reference. The author explicitly decides
     the CURRENT bytes with that reference. Its free hot row can be evicted by other tasks' paid waves before the decision
     (``evicted_after``) or by the author's own continuation row once it validated it (``evicted_by_author``); the settled
     ledger record it names still carries the decision: no new send, the paid outcome and the ceiling's NOT_DISPATCHED
@@ -327,22 +312,6 @@ def test_a_ceiling_outcome_the_bounded_history_evicted_still_carries_the_authors
     assert sum(row.paid for row in rows if row.task_id in {"inline-task", "successor-task"}) == 1, "no new paid wave"
 
 
-def test_blocking_ignores_an_evicted_ceiling_reference_and_keeps_its_ceiling(candidate, monkeypatch):  # noqa: F811
-    """The unchanged Blocking path: neither the ceiling nor the ledger grants an author override."""
-    ctx = candidate
-    reviews, _paid = _ceiling_author(ctx, monkeypatch)
-    (ctx.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
-    ceiling = git._repo_commit_push(ctx, "Fix amount", skip_advisory_review=True)
-    reference = json.loads(ceiling.split("\n", 1)[1])["review_reference"]
-    _unrelated_paid_rows(ctx, 55)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    before = git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
-    refused = git._repo_commit_push(ctx, "", review_reference=reference, author_disposition={
-        "disposition": "accepted", "rationale": "Blocking keeps the ceiling."})
-    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and "requires Advisory" in refused, refused
-    assert git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir) == before and len(reviews) == 1
-
-
 def test_a_running_review_whose_hot_row_is_gone_is_never_taken_for_a_terminal_outcome(candidate, monkeypatch):  # noqa: F811
     """Running or UNKNOWN is not a terminal technical failure: a pending record whose hot row is missing is refused, never
     recovered as a finished outcome, and nothing lands or is sent."""
@@ -381,10 +350,10 @@ def _continue_to(ctx, successor):
 @pytest.mark.parametrize("actor", ["own", "successor"])
 def test_a_technical_failure_at_the_ceiling_is_decided_by_the_current_author_with_no_verdict(candidate, monkeypatch, actor):  # noqa: F811
     """Owner 9 Nov, the second agreed case: the last allowed paid wave (cap 1) ended in a technical failure and formed no
-    verdict, and the ceiling refuses another wave. Under Advisory the current author (or the successor its recorded
+    verdict, and the ceiling buys no other wave. The current author (or the successor its recorded
     Continue leads to), having received the failure facts, explicitly decides the current bytes with that wave's
-    reference: no panel is bought, the record keeps its own no-verdict aggregate and is never read as PASS, the decision
-    names the deciding task, and Blocking still refuses the same decision."""
+    reference: no panel is bought, the record keeps its own no-verdict aggregate and is never read as PASS, and the
+    decision names the deciding task."""
     from ouroboros.review_ledger import ledger_root, load_record
 
     ctx = candidate
@@ -402,10 +371,6 @@ def test_a_technical_failure_at_the_ceiling_is_decided_by_the_current_author_wit
     decided = {"disposition": "accepted",
                "rationale": "The review failed technically and gave no verdict; I checked the fix myself."}
     before = git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=decided)
-    assert "requires Advisory" in refused and git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir) == before
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     landed = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=decided)
     assert git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir) != before, landed
     assert git.run_cmd(["git", "show", "HEAD:change.py"], cwd=ctx.repo_dir) == "value = 3"
@@ -426,7 +391,6 @@ DECISION = {"disposition": "accepted", "rationale": "I read the returned outcome
 def _returned_partial(ctx, monkeypatch, *, cap="3"):
     """A paid wave returned while its critic still runs and its coupling seat has answered: the returned reference, the
     reviewer's sends. Real Git and the real handback; only the reviewers' transport is supplied."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", cap)
     ctx.branch_dev = git.run_cmd(["git", "branch", "--show-current"], cwd=ctx.repo_dir).strip()
     git.run_cmd(["git", "reset", "--hard", "HEAD"], cwd=ctx.repo_dir)
@@ -603,7 +567,7 @@ def test_a_reference_without_a_delivery_identity_recovers_at_no_cost(candidate, 
 
 def test_a_legacy_not_dispatched_reference_has_nothing_unread(candidate, monkeypatch):  # noqa: F811
     """A record that dispatched nothing can have no late outcome and offers nothing to collect, so an older reference to
-    it keeps the Advisory decision the owner chose on 9 November."""
+    it keeps the author's decision the owner chose on 9 November."""
     ctx = candidate
     reviews, _paid = _ceiling_author(ctx, monkeypatch)
     (ctx.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
@@ -635,7 +599,7 @@ def test_a_continue_successor_collects_late_feedback_and_decides_itself(candidat
 
 
 def test_a_late_technical_failure_is_new_feedback_and_stays_decidable(candidate, monkeypatch):  # noqa: F811
-    """A seat that closes without a verdict is still an outcome the author has not read. Once read, Advisory's explicit
+    """A seat that closes without a verdict is still an outcome the author has not read. Once read, the author's explicit
     decision (owner 9 Nov) proceeds with no verdict and no PASS."""
     ctx = candidate
     reference, reviews = _returned_partial(ctx, monkeypatch)
@@ -650,17 +614,7 @@ def test_a_late_technical_failure_is_new_feedback_and_stays_decidable(candidate,
     assert _head(ctx) != head and len(reviews) == 1 and ctx._commit_review_status == "author_continued", landed
 
 
-def test_blocking_refuses_before_reading_any_delivery_identity(candidate, monkeypatch):  # noqa: F811
-    ctx = candidate
-    reference, _reviews = _returned_partial(ctx, monkeypatch)
-    _settle_late(ctx, reference)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    head = _head(ctx)
-    refused = git._repo_commit_push(ctx, "Fix amount", review_reference=reference, author_disposition=DECISION)
-    assert "requires Advisory" in refused and _head(ctx) == head, refused
-
-
-@pytest.mark.parametrize("runtime_mode", [("cyber_pro", "advisory")], indirect=True)
+@pytest.mark.parametrize("runtime_mode", ["cyber_pro"], indirect=True)
 def test_cyber_pro_keeps_its_judgment_and_states_the_unread_outcome(candidate, monkeypatch, runtime_mode):  # noqa: F811
     """No internal veto for Cyber Pro: the decision lands, the result and row say it did not read the later outcome."""
     ctx = candidate
@@ -677,7 +631,7 @@ def test_cyber_pro_keeps_its_judgment_and_states_the_unread_outcome(candidate, m
     assert load_record(ledger_root(ctx), reference["review_record_id"])["author_decision"]["evidence_at_decision"]["unread_outcomes"] is True
 
 
-@pytest.mark.parametrize("runtime_mode", [("cyber_pro", "advisory")], indirect=True)
+@pytest.mark.parametrize("runtime_mode", ["cyber_pro"], indirect=True)
 def test_cyber_pro_evidence_names_only_a_real_gap_including_one_opened_by_the_tests(candidate, monkeypatch, runtime_mode):  # noqa: F811
     from ouroboros.review_ledger import ledger_root, load_record
 
@@ -692,7 +646,7 @@ def test_cyber_pro_evidence_names_only_a_real_gap_including_one_opened_by_the_te
     assert load_state(ctx.drive_root).attempts[-1].author_disposition["evidence_at_decision"]["unread_outcomes"] is True
 
 
-@pytest.mark.parametrize("runtime_mode", [("cyber_pro", "advisory")], indirect=True)
+@pytest.mark.parametrize("runtime_mode", ["cyber_pro"], indirect=True)
 def test_cyber_pro_evidence_claims_no_gap_when_the_outcome_was_returned(candidate, monkeypatch, runtime_mode):  # noqa: F811
     ctx = candidate
     reference, _reviews = _returned_partial(ctx, monkeypatch)

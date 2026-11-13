@@ -92,7 +92,7 @@ def cyber_settings(isolated_settings, monkeypatch):
     initial = {
         "OUROBOROS_RUNTIME_MODE": "cyber_pro", "OUROBOROS_SAFETY_MODE": "full",
         "OUROBOROS_CONTEXT_MODE": "max", "OUROBOROS_CONTEXT_MODE_AUTO_LOW": "false",
-        "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
+        "OUROBOROS_TASK_REVIEW_MODE": "required",
         **{key: "original-install-fact" for key in cfg.ENDPOINT_AUTHORED_SETTINGS},
     }
     isolated_settings.write_text(json.dumps(initial), encoding="utf-8")
@@ -140,7 +140,7 @@ def test_cyber_generic_post_saves_controls_and_preserves_fact_provenance(cyber_s
     chosen = {
         "OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_SAFETY_MODE": "off",
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true", "OUROBOROS_MODEL": "openai/test-model",
-        "OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+        "OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_TASK_REVIEW_MODE": "auto",
         "SERVICE_API_KEY": "owner-test-key",
     }
     response = TestClient(app).post("/api/settings", json={
@@ -164,7 +164,7 @@ def test_cyber_generic_post_saves_controls_and_preserves_fact_provenance(cyber_s
     change, later_change = (event for event in events if event.get("action") == "settings_changed")
     assert change["changes"]["OUROBOROS_SAFETY_MODE"] == {"old": "full", "new": "off"}
     assert change["changes"]["OUROBOROS_CONTEXT_MODE"] == {"old": "max", "new": "low"}
-    assert change["changes"]["OUROBOROS_REVIEW_ENFORCEMENT"] == {"old": "blocking", "new": "advisory"}
+    assert change["changes"]["OUROBOROS_TASK_REVIEW_MODE"] == {"old": "required", "new": "auto"}
     assert change["changes"]["OUROBOROS_RUNTIME_MODE"] == {"old": "cyber_pro", "new": "pro"}
     assert change["changes"]["SERVICE_API_KEY"] == {"withheld": "secret"}
     assert "owner-test-key" not in json.dumps(change)
@@ -220,13 +220,13 @@ def test_cyber_context_save_retains_current_task_snapshot(cyber_settings, monkey
     snapshot = task_settings_snapshot(cfg.load_settings(), dict(os.environ))
     with task_settings_scope(snapshot):
         response = TestClient(app).post("/api/settings", json={
-            "OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+            "OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_TASK_REVIEW_MODE": "auto",
         })
         assert response.status_code == 200, response.text
         assert cfg.get_owner_context_mode() == "max"
-        assert cfg.get_review_enforcement() == "blocking"
+        assert cfg.get_task_review_mode() == "required"
     assert cfg.get_owner_context_mode() == "low"
-    assert cfg.get_review_enforcement() == "advisory"
+    assert cfg.get_task_review_mode() == "auto"
     assert snapshot.settings["OUROBOROS_CONTEXT_MODE"] == "max"
 
 
@@ -1191,3 +1191,353 @@ def test_settings_save_body_runs_off_the_event_loop():
                 assert "settings_document_mutation" in text, (
                     f"new settings writer {node.name} does not hold the document lock"
                 )
+
+
+@pytest.fixture
+def row_client(isolated_settings, monkeypatch):
+    from ouroboros import config
+    from ouroboros.gateway import settings, safety_settings
+    from ouroboros.configured_subagents import normalize_configured_subagents
+
+    for key in config.SETTINGS_DEFAULTS:
+        monkeypatch.delenv(key, raising=False)
+    catalog = {"enabled": True, "items": [
+        {"subagent_id": "reviewer", "recommended_use": "Review.", "review_eligible": True,
+         "route": {"kind": "api_model", "target_id": "openai/reviewer"}},
+        {"subagent_id": "helper", "recommended_use": "Help.",
+         "route": {"kind": "api_model", "target_id": "openai/helper"}},
+    ]}
+    isolated_settings.write_text(json.dumps({
+        "OPENROUTER_API_KEY": "old-private-secret", "OUROBOROS_MODEL": "openai/main",
+        "OUROBOROS_MODEL_LIGHT": "openai/light", "OUROBOROS_MODEL_SAFETY": "openai/checker",
+        "TOTAL_BUDGET": 200, "OUROBOROS_SUBAGENTS": normalize_configured_subagents(catalog)[1],
+        "MCP_SERVERS": [],
+    }), encoding="utf-8")
+    config.initialize_runtime_mode_baseline("pro")
+    app = _settings_app(monkeypatch, isolated_settings)
+    app.routes.extend([
+        Route("/api/settings", settings.api_settings_get, methods=["GET"]),
+        Route("/api/owner/safety-model", safety_settings.api_owner_safety_model, methods=["POST"]),
+        Route("/api/owner/safety-rules", safety_settings.api_owner_safety_rules, methods=["POST"]),
+    ])
+    with TestClient(app) as client:
+        yield client, isolated_settings, app
+
+
+def _mcp_row(name):
+    return {"id": name, "name": name, "enabled": True, "transport": "streamable_http",
+            "url": "https://example.test/mcp", "allowed_tools": []}
+
+
+def test_row_receipt_is_the_audit_projection_with_commit_tokens(row_client):
+    client, path, _ = row_client
+    result = client.post("/api/settings", json={"TOTAL_BUDGET": "250", "OPENROUTER_API_KEY": "new-private-secret",
+                                               "CUSTOM_TOKEN": "custom-private", "MCP_SERVERS": [_mcp_row("a")]})
+    assert result.status_code == 200, result.text
+    changes = result.json()["changes"]
+    assert changes["TOTAL_BUDGET"] == {"old": 200.0, "new": 250.0, "token": client.get("/api/settings").json()["_meta"]["tokens"]["TOTAL_BUDGET"]}
+    audit = [json.loads(line) for line in (path.parent / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()
+             if json.loads(line).get("action") == "settings_changed"][-1]["changes"]
+    assert {k: {f: v for f, v in row.items() if f not in {"token", "old_absent"}} for k, row in changes.items()} == audit
+    assert changes["OPENROUTER_API_KEY"] == changes["CUSTOM_TOKEN"] == {"withheld": "secret"}
+    assert changes["MCP_SERVERS"]["withheld"] == "structure" and changes["MCP_SERVERS"]["token"]
+    assert all(secret not in result.text for secret in ("old-private-secret", "new-private-secret", "custom-private"))
+    tokens = client.get("/api/settings").json()["_meta"]["tokens"]
+    assert not {"OPENROUTER_API_KEY", "CUSTOM_TOKEN", "OUROBOROS_NETWORK_PASSWORD"} & tokens.keys()
+
+
+def test_owner_only_generic_write_names_its_endpoint_only_outside_cyber(row_client):
+    from ouroboros import config
+    client, path, _ = row_client
+    key = "OUROBOROS_RUNTIME_MODE"
+    refused = client.post("/api/settings", json={key: "light"})
+    assert refused.status_code == 200 and refused.json()["ignored_keys"][key] == "POST /api/owner/runtime-mode"
+    assert json.loads(path.read_text(encoding="utf-8"))[key] != "light"
+    config.reset_runtime_mode_baseline_for_tests()
+    config.initialize_runtime_mode_baseline("cyber_pro")
+    saved = client.post("/api/settings", json={key: "light"})
+    assert saved.status_code == 200 and key not in saved.json().get("ignored_keys", {})
+    assert json.loads(path.read_text(encoding="utf-8"))[key] == "light"
+
+
+def test_unrelated_change_does_not_block_a_key_condition_and_stale_undo_does(row_client):
+    client, path, _ = row_client
+    key = "TOTAL_BUDGET"
+    token = client.get("/api/settings").json()["_meta"]["tokens"][key]
+    assert client.post("/api/settings", json={"OUROBOROS_TOOL_TIMEOUT_SEC": 321}).status_code == 200
+    first = client.post("/api/settings", json={key: 250, "if_unchanged": {key: token}})
+    assert first.status_code == 200, first.text
+    assert client.post("/api/settings", json={key: 300}).status_code == 200
+    before = path.read_bytes()
+    stale = client.post("/api/settings", json={key: 200, "if_unchanged": {key: first.json()["changes"][key]["token"]}})
+    assert stale.status_code == 409 and stale.json()["saved"] is False
+    assert stale.json()["code"] == "settings_changed_elsewhere" and path.read_bytes() == before
+    fresh = client.get("/api/settings").json()["_meta"]["tokens"][key]
+    assert client.post("/api/settings", json={key: 200, "if_unchanged": {key: fresh}}).status_code == 200
+
+
+@pytest.mark.parametrize("misses", [1, 2])
+def test_generic_save_remerges_once_and_second_conflict_preserves_foreign_write(row_client, monkeypatch, misses):
+    from ouroboros.gateway import settings, owner_settings
+    client, path, _ = row_client
+    real, calls = settings._owner_write_settings, []
+
+    def interleave(*args, **kwargs):
+        calls.append(kwargs.get("expected_digest"))
+        if len(calls) <= misses:
+            # The other process has its own in-process mutex. Its actual field-transform seam holds the file lock.
+            owner_settings._owner_update_settings(owner_settings.fields_on_saved_document({"OUROBOROS_TOOL_TIMEOUT_SEC": 400 + len(calls)}))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(settings, "_owner_write_settings", interleave)
+    response = client.post("/api/settings", json={"TOTAL_BUDGET": 250})
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert calls and all(calls) and len(calls) == 2
+    assert stored["OUROBOROS_TOOL_TIMEOUT_SEC"] == 400 + misses
+    if misses == 1:
+        assert response.status_code == 200 and stored["TOTAL_BUDGET"] == 250
+    else:
+        assert response.status_code == 409 and stored["TOTAL_BUDGET"] == 200
+        assert response.json()["code"] == "settings_precondition_failed" and response.json()["saved"] is False
+
+
+def test_github_follow_up_writes_one_field_and_the_save_answers_one_receipt(row_client, monkeypatch):
+    """The repository the remote resolved lands as one field: a write another process committed after the save
+    survives it, and the answer keeps the save's old side with the follow-up's value and token."""
+    from ouroboros.gateway import owner_settings
+    from supervisor import git_ops
+    client, path, _ = row_client
+    document = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**document, "GITHUB_TOKEN": "gh-private", "GITHUB_REPO": "owner/old"}), encoding="utf-8")
+
+    def resolve(slug, token, **_kwargs):
+        owner_settings._owner_update_settings(owner_settings.fields_on_saved_document({"OUROBOROS_TOOL_TIMEOUT_SEC": 432}))
+        return True, "configured", "owner/resolved"
+
+    monkeypatch.setattr(git_ops, "configure_personal_remote", resolve)
+    response = client.post("/api/settings", json={"GITHUB_REPO": "owner/typed"})
+    assert response.status_code == 200, response.text
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["GITHUB_REPO"] == "owner/resolved" and stored["OUROBOROS_TOOL_TIMEOUT_SEC"] == 432
+    token = client.get("/api/settings").json()["_meta"]["tokens"]["GITHUB_REPO"]
+    assert response.json()["changes"]["GITHUB_REPO"] == {"old": "owner/old", "new": "owner/resolved", "token": token}
+    assert "gh-private" not in response.text
+
+
+@pytest.mark.parametrize("kind", ["structure", "checker", "scalar"])
+def test_delayed_http_answer_keeps_its_own_token_and_cannot_undo_a_later_commit(row_client, kind):
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    client, path, app = row_client
+    committed, release = threading.Event(), threading.Event()
+
+    class DelayAnswer:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            async def delayed(message):
+                if message["type"] == "http.response.start" and (b"x-test-hold", b"yes") in scope.get("headers", []):
+                    committed.set()
+                    assert await asyncio.to_thread(release.wait, 10)
+                await send(message)
+            await self.app(scope, receive, delayed)
+
+    # TestClient already started the app; wrap the built ASGI stack at the delivery boundary.
+    app.middleware_stack = DelayAnswer(app.middleware_stack)
+    initial = client.get("/api/settings").json()
+    if kind == "checker":
+        key, endpoint = "OUROBOROS_SUBAGENTS", "/api/owner/safety-model"
+        old = json.loads(initial[key])
+        a1 = {**old, "items": [{**row, "enabled": False} if row["subagent_id"] == "helper" else row for row in old["items"]]}
+        b1 = {**a1, "items": [{**row, "recommended_use": "Changed by B."} if row["subagent_id"] == "helper" else row for row in a1["items"]]}
+    else:
+        key, endpoint = ("MCP_SERVERS" if kind == "structure" else "TOTAL_BUDGET"), "/api/settings"
+        old, a1, b1 = ([], [_mcp_row("a")], [_mcp_row("b")]) if kind == "structure" else (200, 250, 300)
+
+    def post(value, token, **kwargs):
+        payload = {"settings": {key: value}} if kind == "checker" else {key: value}
+        return client.post(endpoint, json={**payload, "if_unchanged": {key: token}}, **kwargs)
+
+    token = initial["_meta"]["tokens"][key]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(post, a1, token, headers={"X-Test-Hold": "yes"})
+        try:
+            assert committed.wait(10)
+            after_a = client.get("/api/settings").json()["_meta"]["tokens"][key]
+            before = path.read_bytes()
+            stale_b = post(b1, token)
+            assert stale_b.status_code == 409 and stale_b.json()["saved"] is False and path.read_bytes() == before
+            fresh_b = post(b1, after_a)
+            assert fresh_b.status_code == 200, fresh_b.text
+            after_b = client.get("/api/settings").json()["_meta"]["tokens"][key]
+        finally:
+            release.set()
+        answer_a = future.result(timeout=10)
+    assert answer_a.status_code == 200, answer_a.text
+    own_token = answer_a.json()["changes"][key]["token"]
+    assert own_token == after_a != after_b
+    before = path.read_bytes()
+    undo = post(old, own_token)
+    assert undo.status_code == 409 and undo.json()["code"] == "settings_changed_elsewhere"
+    assert undo.json()["saved"] is False and path.read_bytes() == before
+
+
+def test_get_tokens_and_values_come_from_one_source_and_absence_has_an_inverse(row_client, monkeypatch):
+    from ouroboros.gateway import owner_settings
+    client, path, _ = row_client
+    real = owner_settings.read_settings_json_verified
+    reads = []
+
+    def interleave(*args, **kwargs):
+        document = real(*args, **kwargs)
+        reads.append(document)
+        if len(reads) == 1:
+            path.write_text(json.dumps({**document, "TOTAL_BUDGET": 999}), encoding="utf-8")
+        return document
+
+    with monkeypatch.context() as patch:
+        patch.setattr(owner_settings, "read_settings_json_verified", interleave)
+        shown = client.get("/api/settings").json()
+    assert len(reads) == 1 and shown["TOTAL_BUDGET"] == 200
+    assert shown["_meta"]["tokens"]["TOTAL_BUDGET"] == owner_settings.setting_tokens(reads[0], ["TOTAL_BUDGET"])["TOTAL_BUDGET"]
+    key = "OUROBOROS_UI_DIR"
+    missing = client.get("/api/settings").json()
+    saved = client.post("/api/settings", json={key: "none"}).json()["changes"][key]
+    assert saved["old"] == missing[key] and saved["old_absent"] is True
+    assert saved["token"] != missing["_meta"]["tokens"][key]
+    undo = client.post("/api/settings", json={"unset": [key], "if_unchanged": {key: saved["token"]}})
+    assert undo.status_code == 200 and key not in json.loads(path.read_text(encoding="utf-8")), undo.text
+    assert client.get("/api/settings").json()["_meta"]["tokens"][key] == missing["_meta"]["tokens"][key]
+    before = path.read_bytes()
+    refused = client.post("/api/settings", json={"unset": ["OUROBOROS_SAFETY_MODE"]})
+    assert refused.status_code == 400 and refused.json()["saved"] is False and path.read_bytes() == before
+
+
+def test_undo_of_a_following_slot_does_not_read_back_its_environment_mirror(row_client, monkeypatch):
+    """Every save mirrors its values into the environment, which stands in for an absent key. Undo's
+    `unset` reads the slot without that mirror, so it follows its proposal again instead of keeping the choice."""
+    from ouroboros import config
+    from ouroboros.gateway import settings
+    from ouroboros.settings_integrity import PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV
+    client, path, _ = row_client
+    for name in (PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(settings, "_apply_settings_to_env", config.apply_settings_to_env)
+    slot = "OUROBOROS_MODEL_LIGHT"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    del document[slot]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    following = client.get("/api/settings").json()
+    saved = client.post("/api/settings", json={slot: "openai/picked"}).json()["changes"][slot]
+    assert saved["old"] == following[slot] != "openai/picked" and saved["old_absent"] is True
+    undo = client.post("/api/settings", json={"unset": [slot], "if_unchanged": {slot: saved["token"]}})
+    assert undo.status_code == 200, undo.text
+    assert undo.json()["changes"][slot] == {
+        "old": "openai/picked", "new": following[slot], "token": following["_meta"]["tokens"][slot]}
+    assert slot not in json.loads(path.read_text(encoding="utf-8"))
+    assert config.load_settings()[slot] == client.get("/api/settings").json()[slot] == following[slot]
+
+
+def test_safety_projection_failure_is_saved_and_receipt_failure_is_unavailable(row_client, monkeypatch):
+    from ouroboros import config
+    from ouroboros.gateway import owner_settings
+    client, path, _ = row_client
+    real_project = config.apply_settings_to_env
+    def failed_projection(values, **kwargs):
+        if "environ" in kwargs:
+            return real_project(values, **kwargs)
+        raise RuntimeError("projection failed")
+    with monkeypatch.context() as patch:
+        patch.setattr(config, "apply_settings_to_env", failed_projection)
+        result = client.post("/api/owner/safety-rules", json={"rules": "Ask me."})
+    assert result.status_code == 500 and result.json()["saved"] is True
+    assert result.json()["changes"]["OUROBOROS_SAFETY_OWNER_RULES"]["new"] == "Ask me."
+    assert json.loads(path.read_text(encoding="utf-8"))["OUROBOROS_SAFETY_OWNER_RULES"] == "Ask me."
+    with monkeypatch.context() as patch:
+        patch.setattr(owner_settings, "_committed_changes", lambda *_: (_ for _ in ()).throw(ValueError("receipt failed")))
+        result = client.post("/api/settings", json={"TOTAL_BUDGET": 275})
+    assert result.status_code == 200 and result.json()["receipt"] == "unavailable" and "changes" not in result.json()
+    assert json.loads(path.read_text(encoding="utf-8"))["TOTAL_BUDGET"] == 275
+
+
+@pytest.mark.parametrize("case", ["plain", "recheck", "twins", "last_reviewer"])
+def test_roster_row_switches_keep_checker_and_review_pool_guards(row_client, case):
+    from ouroboros.configured_subagents import normalize_configured_subagents
+    client, path, _ = row_client
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    catalog = json.loads(stored["OUROBOROS_SUBAGENTS"])
+    if case == "recheck":
+        catalog["items"][1].update(rechecks_flags=True, delivery="packet")
+    if case == "twins":
+        old = {"recommended_use": "Old.", "route": {"kind": "api_model", "target_id": "openai/old"}}
+        catalog["items"] += [{**old, "subagent_id": "old-a"}, {**old, "subagent_id": "old-b"}]
+    stored["OUROBOROS_SUBAGENTS"] = normalize_configured_subagents(catalog)[1]
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    key = "OUROBOROS_SUBAGENTS"
+    token = client.get("/api/settings").json()["_meta"]["tokens"][key]
+    changed = json.loads(stored[key])
+    index = 0 if case == "last_reviewer" else 1
+    changed["items"][index]["enabled"] = False
+    before = path.read_bytes()
+    result = client.post("/api/settings", json={key: changed, "if_unchanged": {key: token}})
+    if case == "recheck":
+        assert result.status_code == 400 and result.json()["saved"] is False and path.read_bytes() == before
+        result = client.post("/api/owner/safety-model", json={"settings": {key: changed}, "if_unchanged": {key: token}})
+    elif case == "last_reviewer":
+        assert result.status_code == 400 and result.json()["code"] == "empty_review_pool"
+        assert result.json()["saved"] is False and path.read_bytes() == before
+        result = client.post("/api/settings", json={key: changed, "if_unchanged": {key: token}, "allow_empty_review_pool": True})
+    assert result.status_code == 200, result.text
+    saved = json.loads(json.loads(path.read_text(encoding="utf-8"))[key])
+    assert saved["items"][index]["enabled"] is False
+    if case in {"plain", "twins"}:
+        # An edit that creates a twin is judged, and so is switching a stored twin: it keeps the pair.
+        edits = [[*changed["items"], {**changed["items"][1], "subagent_id": "new-twin"}]]
+        if case == "twins":
+            edits.append([*changed["items"][:3], {**changed["items"][3], "enabled": False}])
+        for items in edits:
+            before = path.read_bytes()
+            refused = client.post("/api/settings", json={key: {**changed, "items": items}})
+            assert refused.status_code == 400 and "same engine" in refused.json()["error"], refused.text
+            assert refused.json()["saved"] is False and path.read_bytes() == before
+
+
+@pytest.mark.parametrize("endpoint,handler,body,key", [
+    ("runtime-mode", "api_owner_runtime_mode", {"mode": "light"}, "OUROBOROS_RUNTIME_MODE"),
+    ("auto-grant", "api_owner_auto_grant", {"enabled": False}, "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"),
+    ("context-mode", "api_owner_context_mode", {"mode": "low"}, "OUROBOROS_CONTEXT_MODE"),
+    ("safety-mode", "api_owner_safety_mode", {"mode": "light"}, "OUROBOROS_SAFETY_MODE"),
+])
+def test_owner_scalar_endpoints_return_effective_old_and_their_commit_token(row_client, endpoint, handler, body, key):
+    from ouroboros.gateway import settings, safety_settings
+    client, _, app = row_client
+    fn = getattr(safety_settings if endpoint == "safety-mode" else settings, handler)
+    app.routes.append(Route("/api/owner/" + endpoint, fn, methods=["POST"]))
+    before = client.get("/api/settings").json()
+    response = client.post("/api/owner/" + endpoint, json=body)
+    assert response.status_code == 200, response.text
+    change = response.json()["changes"][key]
+    after = client.get("/api/settings").json()
+    assert change["old"] == before[key] and change["new"] == after[key]
+    assert change["token"] == after["_meta"]["tokens"][key]
+    repeated = client.post("/api/owner/" + endpoint, json=body)
+    assert repeated.status_code == 200 and key not in repeated.json()["changes"]
+
+
+def test_project_context_receipt_has_only_that_rooms_old_and_new(row_client):
+    from ouroboros.gateway import settings
+    from ouroboros.projects_registry import create_project
+    client, path, app = row_client
+    create_project(path.parent, "receipt-room", name="Receipt room")
+    app.routes.append(Route("/api/owner/context-mode", settings.api_owner_context_mode, methods=["POST"]))
+    before = path.read_bytes()
+    response = client.post("/api/owner/context-mode", json={"mode": "low", "project_id": "receipt-room"})
+    assert response.status_code == 200, response.text
+    assert response.json()["changes"] == {"OUROBOROS_CONTEXT_MODE": {"old": "max", "new": "low"}}
+    assert path.read_bytes() == before
+    response = client.post("/api/owner/context-mode", json={"mode": "max", "project_id": "receipt-room"})
+    assert response.status_code == 200 and response.json()["changes"] == {"OUROBOROS_CONTEXT_MODE": {"old": "low", "new": "max"}}
+    assert path.read_bytes() == before

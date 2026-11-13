@@ -1,4 +1,4 @@
-"""Advisory permission never rewrites failed review evidence as a PASS."""
+"""Going on past a failed review never rewrites its evidence as a PASS."""
 
 import json
 from types import SimpleNamespace
@@ -18,12 +18,9 @@ def _prepared(candidate, parts):  # noqa: F811
     n = len(parts)
     retrieves = ["coupling" in p for p in parts]
     models = [f"m/{i + 1}" for i in range(n)]
-    from ouroboros.config import get_review_enforcement
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
-
     return {
         "prompt": "PACKET", "stable_prefix_len": 0, "models": models, "routes": [ReviewRouteKind.API_CHAT] * n,
-        "target_repo": candidate.repo_dir, "blocking_review": review_enforcement_blocks(get_review_enforcement()),
+        "target_repo": candidate.repo_dir,
         "layer": "body", "task_evidence": None,
         "row_plan": {"models": models, "routes": [ReviewRouteKind.API_CHAT] * n,
                      "slot_ids": [f"slot_{i + 1}" for i in range(n)], "parts": [tuple(p) for p in parts],
@@ -39,55 +36,48 @@ def _dispatch(candidate, monkeypatch, results, parts):  # noqa: F811
     return review_mod._dispatch_unified_review(candidate, "candidate", _prepared(candidate, parts))
 
 
-@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
-def test_failed_coupling_seat_keeps_full_source_and_is_never_a_pass(candidate, monkeypatch, enforcement):  # noqa: F811
+def test_failed_coupling_seat_keeps_full_source_and_is_never_a_pass(candidate, monkeypatch):  # noqa: F811
     """The one seat asked the coupling question fails technically: its record
     keeps the full raw output and the typed failure facts, Part 2 is never
-    read as answered, and advisory enforcement only waves the BLOCK through —
-    loudly — without rewriting the evidence."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    read as answered, and the outcome returns to the author — loudly —
+    without rewriting the evidence."""
     results = [
         {"model": "m/1", "slot_id": "slot_1", "text": PASS_ITEM, "verdict": "UNKNOWN"},
         {"model": "m/2", "slot_id": "slot_2", "verdict": "ERROR", "text": SOURCE,
          "failure_code": "test_failure", "transport_status": "delivery"},
     ]
     review_err = _dispatch(candidate, monkeypatch, results, [("change",), ("change", "coupling")])
-    assert (review_err is not None) == (enforcement == "blocking")
+    assert review_err is None
     row = candidate._last_triad_raw_results[1]
     assert row["status"] == "error" and row["raw_text"] == SOURCE
     assert row["failure_code"] == "test_failure" and row["transport_status"] == "delivery"
     verdict = candidate._last_review_verdict
     assert verdict["aggregate"] != "PASS" and verdict["per_question"]["coupling"] != "PASS"
     assert candidate._last_coupling_result.status != "responded"
-    if enforcement == "advisory":
-        assert "explicit author decision is required" in candidate._review_advisory[-1]
+    assert "explicit author decision is required" in candidate._review_advisory[-1]
 
 
-@pytest.mark.parametrize(("enforcement", "state", "token"), [
-    ("blocking", "in_flight", ""),
-    ("blocking", "settled", "pending-invocation"),
-    ("advisory", "custody_lost", ""),
+@pytest.mark.parametrize(("state", "token"), [
+    ("in_flight", ""),
+    ("settled", "pending-invocation"),
+    ("custody_lost", ""),
 ])
-def test_pending_seat_is_pending_not_pass_under_either_enforcement(candidate, monkeypatch, state, token, enforcement):  # noqa: F811
+def test_pending_seat_is_pending_not_pass(candidate, monkeypatch, state, token):  # noqa: F811
     """A seat whose physical operation is unresolved keeps the wave PENDING:
-    blocking enforcement blocks on it, advisory records the pending signal and
-    the verdict is NOT_PERFORMED (``review_late_result_pending``) — never a PASS
-    the gate could settle or reuse."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    the author's list records the pending signal and the verdict is
+    NOT_PERFORMED (``review_late_result_pending``) — never a PASS the gate
+    could settle or reuse."""
     results = [
         {"model": "m/1", "slot_id": "slot_1", "text": PASS_ITEM, "verdict": "UNKNOWN"},
         {"model": "m/2", "slot_id": "slot_2", "verdict": "ERROR", "text": "", "operation_state": state,
          "pending_invocation_id": token, "late_result_pending": bool(token)},
     ]
     review_err = _dispatch(candidate, monkeypatch, results, [("change",), ("change", "coupling")])
-    assert (review_err is not None) == (enforcement == "blocking")
-    if review_err:
-        assert "REVIEW_PENDING" in review_err
+    assert review_err is None
     verdict = candidate._last_review_verdict
     assert verdict["aggregate"] == "NOT_PERFORMED" and verdict["reason"] == "review_late_result_pending"
     assert candidate._last_review_block_reason == "review_late_result_pending"
-    if enforcement == "advisory":
-        assert any("review is pending" in note for note in candidate._review_advisory)
+    assert any("Review is pending" in note and "REVIEW_PENDING" in note for note in candidate._review_advisory)
 
 
 def test_actual_budget_exception_keeps_independent_origin():
@@ -99,20 +89,18 @@ def test_actual_budget_exception_keeps_independent_origin():
     assert state == "not_dispatched"
 
 
-@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
-def test_gate_and_status_keep_the_full_cause_without_changing_enforcement(candidate, monkeypatch, enforcement):  # noqa: F811
+def test_gate_and_status_keep_the_full_cause(candidate, monkeypatch):  # noqa: F811
     from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, save_state
     from ouroboros.tools.preflight_review import _handle_review_status
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     cause = "Engine refused this saved request. " * 220 + "END: measured 940000 characters; limit 900000 characters"
     results = [{"model": f"m/{i}", "slot_id": f"slot_{i}", "verdict": "ERROR", "text": cause,
                 "reported_cause": cause, "failure_code": "native_transcript_cap_exceeded",
                 "failure_details": {"measured": 940000, "limit": 900000, "unit": "characters"}}
                for i in (1, 2)]
     error = _dispatch(candidate, monkeypatch, results, [("change",), ("change",)])
-    assert (error is not None) == (enforcement == "blocking")
-    message = error or "\n".join(candidate._review_advisory)
+    assert error is None
+    message = "\n".join(str(item) for item in candidate._review_advisory)
     assert cause in message and "transient" not in message.lower()
     assert candidate._last_review_verdict["aggregate"] == "QUORUM_FAILED"
     state = load_state(candidate.drive_root)

@@ -600,6 +600,6 @@ whole-payload content-hash check, apply and publication; a stale second capture
 refuses with evidence retained. Git integration retains its target lock and
 per-path baselines: disjoint changes can apply, overlapping drift conflicts.
 Each starter still disposes each capture. There is no automatic merge arbiter.
-These rules apply to API-only, subscription-only and mixed installations and to
-Advisory, Blocking and Cyber Pro; configured route availability and review floors
+These rules apply to API-only, subscription-only and mixed installations, outside
+Cyber Pro and in it; configured route availability and review floors
 remain independent.

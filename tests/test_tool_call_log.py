@@ -12,7 +12,7 @@ import pytest
 
 import ouroboros.loop_tool_execution as execution
 from ouroboros.observability import read_call_payload
-from ouroboros.tool_call_log import logical_calls, worker_phrase, worker_position
+from ouroboros.tool_call_log import HOST_SETTLED_STATUSES, logical_calls, worker_phrase, worker_position
 from ouroboros.tools.tool_result import ToolResult
 
 
@@ -155,6 +155,47 @@ def test_early_exits_after_the_start_still_settle(tmp_path):
     calls = logical_calls(_rows(logs / "tools.jsonl"))
     assert [call["state"] for call in calls] == ["settled", "settled"]
     assert calls[1]["settled"]["status"] == "host_error" and calls[1]["settled"]["is_error"] is True
+    assert "control_reason" not in calls[1]["settled"]  # no control ended it: the host's own failure
+    assert calls[0]["settled"]["tool_result_code"] == "TOOL_ARG_ERROR"  # the handler-less refusal is typed too
+
+
+@pytest.mark.parametrize("control", ["owner_pause", "cancelled"])
+def test_a_control_that_ends_the_call_settles_as_interrupted_with_its_reason(tmp_path, control):
+    """Pause, Cancel or a deadline is no host failure (audit 08-11.11 item 6): the one settlement is
+    ``interrupted`` and names the control. No handler result exists, so the row invents no code."""
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    def ended_by_control(_name, _args):
+        raise ModelWaitInterrupted(control) if control == "owner_pause" else PhysicalDispatchInterrupted(control)
+
+    registry = _Registry(tmp_path, ended_by_control)
+    with pytest.raises((ModelWaitInterrupted, PhysicalDispatchInterrupted)):
+        _call(registry, tmp_path)
+    [call] = logical_calls(_rows(tmp_path / "child" / "logs" / "tools.jsonl"))
+    row = call["settled"]
+    assert call["state"] == "settled" and (row["status"], row["control_reason"]) == ("interrupted", control)
+    assert row["is_error"] is True and "tool_result_code" not in row
+    assert row["result_preview"].endswith(f"interrupted: {control}")
+
+
+@pytest.mark.parametrize("fenced", [True, False])
+def test_a_send_fenced_by_a_pause_is_interrupted_and_a_money_stop_is_not(tmp_path, fenced):
+    """A tool whose own model send meets the fence of a pause being written was ended by that pause: the
+    row says ``interrupted`` and ``pausing``, the fence's own word. A spend limit reached inside a tool
+    is no control of the call and stays the host's row."""
+    from ouroboros.usage_accounting import BudgetExceeded, DispatchFenced
+
+    def ended(_name, _args):
+        if fenced:
+            raise DispatchFenced("model dispatch fenced: task t is entering an exact pause", limit_scope="pausing")
+        raise BudgetExceeded("known spend reached the limit")
+
+    with pytest.raises(BudgetExceeded):
+        _call(_Registry(tmp_path, ended), tmp_path)
+    [call] = logical_calls(_rows(tmp_path / "child" / "logs" / "tools.jsonl"))
+    row = call["settled"]
+    assert (row["status"], row.get("control_reason")) == (("interrupted", "pausing") if fenced else ("host_error", None))
 
 
 def test_host_error_producer_reaches_memory_as_failure(tmp_path, monkeypatch):
@@ -311,11 +352,18 @@ def test_the_recent_tools_header_counts_calls_not_rows(tmp_path):
     assert tools.count("✓ read_file path=") == 10
 
 
+@pytest.mark.parametrize("stub", sorted(HOST_SETTLED_STATUSES))  # a new host status reaches both readers or fails here
 @pytest.mark.parametrize("real_first", [True, False])
-def test_a_duplicate_host_error_settlement_never_hides_the_real_one(real_first):
-    real, host = _log_row("tool_call", "i", status="ok"), _log_row("tool_call", "i", status="host_error")
-    [call] = logical_calls([_log_row("tool_call_started", "i"), *([real, host] if real_first else [host, real])])
+def test_a_duplicate_host_error_settlement_never_hides_the_real_one(real_first, stub):
+    real, host = _log_row("tool_call", "i", status="ok"), _log_row("tool_call", "i", status=stub)
+    rows = [_log_row("tool_call_started", "i"), *([real, host] if real_first else [host, real])]
+    [call] = logical_calls(rows)
     assert call["state"] == "settled" and call["settled"] is real
+    # The benchmark trace converter reads the same journal by the same rule.
+    from devtools.benchmarks.terminal_bench.atif import _tool_call_steps
+
+    [step] = _tool_call_steps(rows)
+    assert step["status"] == "ok"
 
 
 @pytest.mark.parametrize("exc", [RuntimeError("live emit failed"), SystemExit(3)])

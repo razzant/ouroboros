@@ -44,6 +44,14 @@ def _catalog_path(drive_root: Any) -> pathlib.Path:
     return pathlib.Path(drive_root) / "state" / "openrouter_models.json"
 
 
+def _records_prices() -> bool:
+    try:
+        return any(isinstance(row, dict) and isinstance(row.get("pricing"), dict)
+                   for row in recorded_openrouter_catalog()[0].values())
+    except Exception:
+        return False
+
+
 def recorded_openrouter_catalog() -> tuple[dict, str]:
     """Read the host's dated catalogue without fetching or asserting freshness.
 
@@ -151,6 +159,7 @@ class _CapabilityPolicyMixin:
             if cls._CATALOGUE_READS != finished:
                 return
             if cls._CAPABILITIES_FAILED_AT and _age_seconds(cls._CAPABILITIES_FAILED_AT) <= _FAILED_TTL_SEC:
+                cls._SUPPORTED_PARAMS_FETCHED, cls._CAPABILITIES_FETCH_OK = True, False  # that failure answers this reader
                 return
             try:
                 cls._read_openrouter_catalogue()
@@ -202,6 +211,8 @@ class _CapabilityPolicyMixin:
                 cl = m.get("context_length")
                 if mid and isinstance(cl, (int, float)) and cl > 0:
                     context_lengths[mid] = recorded.setdefault(mid, {})["context_length"] = int(cl)
+                if mid and isinstance(m.get("pricing"), dict):  # the tariff a display reads without a fetch (``llm_pricing``)
+                    recorded.setdefault(mid, {})["pricing"] = m["pricing"]
             cls._CONTEXT_LENGTH_CACHE, cls._CONTEXT_LENGTH_OBSERVED_AT = context_lengths, utc_now_iso()
             # Image input is a fact about this exact route: one parser, stored
             # under the OpenRouter route scope with this response's time, so any
@@ -249,9 +260,13 @@ class _CapabilityPolicyMixin:
 
     @classmethod
     def prefetch_openrouter_catalog(cls) -> None:
-        """At boot, off every turn: observe the catalogue unless a process recorded a current one."""
-        if not cls._adopt_recorded_catalog():
+        """At boot, off every turn: observe the catalogue unless a process recorded a current one with its prices (a
+        record from before prices were kept is observed once more, so Costs can split a period from the first look)."""
+        adopted = cls._adopt_recorded_catalog()
+        if not adopted or not _records_prices():
             cls._fetch_openrouter_capabilities()
+            if adopted and not cls._CAPABILITIES_FETCH_OK:
+                cls._adopt_recorded_catalog()  # a failed extra read keeps the record it had adopted
 
     @classmethod
     def metadata_fetch_attempted_and_failed(cls) -> bool:

@@ -13,6 +13,7 @@ import os
 import time
 from collections import Counter
 from contextlib import contextmanager
+from itertools import chain
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Mapping
@@ -20,7 +21,9 @@ from urllib.parse import quote, unquote, urlsplit
 
 import yaml
 
-from ouroboros import utils
+from ouroboros import knowledge_rows, knowledge_versions, text_change, utils
+# The edit compiler lives beside its one caller's module; ``compile_anchored_edits`` stays importable here.
+from ouroboros.knowledge_edits import EditRefused, compile_anchored_edits, compile_edit_items, edit_items
 from ouroboros.markdown_source import MarkdownSource, parse_markdown_navigation, parse_markdown_source
 from ouroboros.platform_layer import file_lock_exclusive, file_unlock
 from ouroboros.utils import append_jsonl, utc_now_iso, write_bytes_atomic
@@ -503,7 +506,10 @@ def knowledge_write_lock(shelf: Path):
 
 
 def rebuild_knowledge_index(address: KnowledgeAddress) -> None:
-    """Caller holds the shelf lock; all producers use the same inventory."""
+    """Caller holds the shelf lock; all producers use the same inventory.
+
+    The file is replaced only when the view's bytes differ from it, so a body-only edit leaves the
+    index file, its bytes and its identity, untouched."""
     path = address.shelf / INDEX_FILE
     old = path.read_bytes() if path.exists() else b""
     text = old.decode("utf-8")
@@ -516,7 +522,9 @@ def rebuild_knowledge_index(address: KnowledgeAddress) -> None:
         "old_sha256": hashlib.sha256(old).hexdigest(),
     }, ensure_record_boundary=True, require_lock=True):
         raise OSError("Previous knowledge index source could not be preserved")
-    write_bytes_atomic(path, knowledge_index_view(address).encode("utf-8"))
+    view = knowledge_index_view(address).encode("utf-8")
+    if view != old:
+        write_bytes_atomic(path, view)
 
 
 def knowledge_links(note: KnowledgeNote) -> tuple[dict[str, Any], ...]:
@@ -555,34 +563,6 @@ def knowledge_links(note: KnowledgeNote) -> tuple[dict[str, Any], ...]:
     return tuple(rows)
 
 
-def compile_anchored_edits(text: str, pairs: Any, anchor: str = "old_str") -> str:
-    """Replace exact ``(old, new)`` spans of one source text atomically.
-
-    Every old text is located in the ORIGINAL ``text`` before anything changes:
-    it must be non-empty and occur exactly once (an overlapping repeat is a
-    second occurrence), and no two spans may overlap, so one edit can neither
-    create, consume nor shift another's anchor. Unmentioned characters stay
-    identical. A refusal raises ``ValueError`` naming the caller's ``anchor``
-    field and applies nothing. Manual ``mode=edit`` is the one-pair case.
-    """
-    pairs = list(pairs)
-    spans = []
-    for number, (old, new) in enumerate(pairs, 1):
-        where = f" (edit {number})" if len(pairs) > 1 else ""
-        if not isinstance(old, str) or not old:
-            raise ValueError(f"edit requires a non-empty {anchor}{where}")
-        start = text.find(old)
-        if start < 0 or text.find(old, start + 1) >= 0:
-            raise ValueError(f"edit {anchor} must occur exactly once in the note body{where}")
-        spans.append((start, start + len(old), new))
-    spans.sort()
-    if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
-        raise ValueError("edits must not overlap")
-    for start, end, new in reversed(spans):
-        text = text[:start] + new + text[end:]
-    return text
-
-
 def _yaml_form(metadata: Mapping[str, Any]) -> str:
     """Loaded frontmatter spelled exactly, for comparison without ``==``.
 
@@ -593,14 +573,16 @@ def _yaml_form(metadata: Mapping[str, Any]) -> str:
 
 
 def _write_content(current: KnowledgeNote | None, content: str, mode: str,
-                   old_str: str | None = None, summary: str | None = None) -> bytes:
+                   old_str: str | None = None, summary: str | None = None, items: list | None = None) -> bytes:
     proposed = content.encode("utf-8")
     if mode == "edit":
         if current is None or current.parse_error:
             raise ValueError("edit requires an existing readable note")
         body_start = current.source.body_span.start_byte
         body = current.raw[body_start:].decode("utf-8")
-        if old_str is not None or summary is None:  # a summary-only revision keeps every body byte
+        if items is not None:
+            body = compile_edit_items(current.raw, body_start, items).decode("utf-8")
+        elif old_str is not None or summary is None:  # a summary-only revision keeps every body byte
             body = compile_anchored_edits(body, [(old_str, content)])
         if summary is None or current.metadata.get("summary") == summary:
             return current.raw[:body_start] + body.encode("utf-8")
@@ -646,47 +628,20 @@ def _lifecycle_content(current: KnowledgeNote, mode: str, reason: str) -> bytes:
     return (b"---\n" + front + b"---\n" if metadata else b"") + current.raw[current.source.body_span.start_byte:]
 
 
-# One read of the journal's tail per write, the memory reader's own journal budget: on a 300 MB
-# journal this note's newest row lies inside it for ~96 % of the repeated bytes. A miss, or a newest
-# row holding other text, only keeps the replaced version inline, as every row did before.
+# One read of the journal's tail per write, the memory reader's own journal budget: the base of the
+# replaced version is looked for there. A miss only stores both texts whole, as every row did before.
 _JOURNAL_TAIL_BYTES = 8 * 1024 * 1024
 
 
-def _recorded_version(journal: Path, address: KnowledgeAddress, text: str) -> dict[str, Any] | None:
-    """The memory reader's address of this note's newest captured row, when its ``new_content`` is ``text``.
-
-    Read under the shelf lock every writer of the journal holds. ``None`` keeps ``text`` inline: an
-    empty text, a newest row that holds other text or none (an outside edit, a write whose source
-    never landed, a digest-era row), no row within the journal's tail, or an unreadable journal. A
-    row whose source landed holds a real version even when its index failed, so it is named.
-    """
-    if not text:
-        return None
-    try:
-        with journal.open("rb") as handle:
-            size = handle.seek(0, os.SEEK_END)
-            handle.seek(0)
-            tail = utils.jsonl_window(handle, size, _JOURNAL_TAIL_BYTES)
-    except OSError:
-        return None
-    base, end, topic = size - len(tail), len(tail), json.dumps(address.topic, ensure_ascii=False).encode("utf-8")
-    while end > 0:
-        start = tail.rfind(b"\n", 0, end - 1) + 1
-        line, end = tail[start:end], start
-        if topic not in line:
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if (not isinstance(row, dict) or row.get("publication") != "source_capture" or row.get("topic") != address.topic
-                or not isinstance(row.get("address"), dict) or row["address"].get("scope") != address.scope):
-            continue
-        if row.get("new_content") != text:
-            return None
-        return {"kind": "entry", "journal": f"knowledge:{address.scope}", "offset": base + start,
-                "field": ["new_content"]}
-    return None
+def _tail_read(journal: Path, address: KnowledgeAddress, revision: str | None) -> tuple[Any, Any]:
+    """``(newest, base)``: this note's newest row and, for a ``revision`` (``None``: no base wanted), the newest
+    row holding that version that reads back (``knowledge_rows.verified_base``), each ``(offset, row)`` or
+    ``None``, from one read of the journal's tail under the shelf lock every writer of the journal holds."""
+    rows = knowledge_versions.tail_rows(journal, address, _JOURNAL_TAIL_BYTES)
+    newest = next(rows, None)
+    if newest is None or revision is None:
+        return newest, None
+    return newest, knowledge_rows.verified_base(journal, chain([newest], rows), revision)
 
 
 @dataclass(frozen=True)
@@ -697,6 +652,9 @@ class KnowledgeWriteResult:
     previous_revision: str | None = None
     delta: dict[str, Any] | None = None
     history_ref: dict[str, Any] | None = None
+    previous: dict[str, Any] | None = None  # who wrote the replaced version: knowledge_versions.row_facts
+    held: dict[str, Any] | None = None  # a stale revision this note's tail holds: knowledge_versions.held_version
+    show_source: bool = True  # a refused edit item or revert says why instead of resending the note
 
 
 def body_chars(note: KnowledgeNote | None) -> int:
@@ -719,6 +677,7 @@ def write_knowledge_note(
     *, writer: str = "", route: Any = None, writer_input_ref: Any = None,
     summary: str | None = None, focus: Any = None,
     reason: str = "", capture_previous: Callable[[KnowledgeNote], dict[str, Any]] | None = None,
+    edits: Any = None, version: str | None = None,
 ) -> KnowledgeWriteResult:
     """Publish a note against the actual current source, with no inference lock.
 
@@ -728,21 +687,33 @@ def write_knowledge_note(
     focus of the subject wrote it (``focus_signature(ctx)["focus"]``). They are
     host facts stamped on the history row, never on the note body; a caller that
     cannot name one leaves the honest ``unknown``, which is also how rows written
-    before the stamp existed read.
+    before the stamp existed read. A non-blank ``reason`` (optional on every mode,
+    required for archive, which also writes it into the frontmatter) is stored on
+    the row, never in the body.
 
-    ``summary`` (mode=edit or append) revises that one field in the same locked
-    write through the ordinary metadata merge, beside one ``old_str``
-    replacement, alone with no ``old_str``/``content``, or after the appended
-    text; replacing an existing note's summary needs its current revision, as
-    every replacement does. History retains the authored
-    ``summary`` only when supplied; the delta carries
-    ``old_chars``/``new_chars``/``change_chars``, the
-    ``removed_headings`` and ``body_changed``/``summary_changed`` (heading and
-    changed flags are ``None`` when a side has no parsed source). The history row
-    also records ``old_chars``/``new_chars``. It keeps the version it publishes
-    whole; the version it replaces stays inline unless this note's newest row within
-    the journal's tail read holds exactly those bytes, which ``old_content_ref`` then names as a
-    memory-reader entry address. Lifecycle rows keep both.
+    ``mode=edit`` replaces one ``old_str`` by ``content``, or applies ``edits``
+    (``knowledge_edits.compile_edit_items``: exact ``{old_str, new_str}`` items in the
+    original body, all or nothing; a refused item is ``edit_refused``, named).
+    ``mode=revert`` publishes the stored bytes of an earlier ``version`` of this
+    note exactly (``knowledge_versions.find_version``: verified by sha256), so the
+    new revision is that version; a version with other archive metadata is
+    ``revert_changes_archive_state``, which names both states (a revert refused
+    for its version never resends the note). ``summary`` (overwrite, append or edit)
+    revises that one field in the same locked write through the ordinary metadata
+    merge, after an overwrite's or append's own text, beside an edit or alone;
+    replacing an existing note's summary needs its current revision, as every
+    replacement does. History retains the authored ``summary`` only when supplied;
+    the delta carries ``old_chars``/``new_chars``/``change_chars``, the characters
+    ``removed_chars``/``added_chars`` from the exact change of the two texts
+    (``text_change``), ``removed_headings``/``added_headings``, ``removed_sections`` and
+    ``body_changed``/``summary_changed`` (heading and changed facts are ``None``
+    when a side has no parsed source). The row names its base, this note's newest
+    row in the journal's tail read that holds the replaced version and reads back,
+    and carries the change from it, with the whole new text by the byte rule
+    (``knowledge_rows``); without a verified base, and on lifecycle rows, both texts
+    are stored whole. That same read gives ``previous`` (who wrote the replaced
+    version) and, for a stale revision one of its rows wrote, ``held`` (that version
+    and what came since).
 
     ``archive``/``restore`` require an existing revision and own only the
     ``archive: {at, reason}`` field, never body bytes. The tool's optional
@@ -752,20 +723,32 @@ def write_knowledge_note(
     rebuild the index so a retry cannot mistake equal note bytes for recovery.
     """
     lifecycle = mode in {"archive", "restore"}
-    if mode not in {"overwrite", "append", "edit", "archive", "restore"} or not isinstance(content, str):
-        raise ValueError("content must be Markdown text; mode must be overwrite, append, edit, archive or restore")
-    if (lifecycle and content) or (mode == "archive" and address.topic in ALWAYS_ACTIVE_TOPICS):
-        raise ValueError("archive/restore take no content; the overview must stay active")
-    if not isinstance(reason, str) or (mode == "archive" and not reason.strip()) or (reason and mode != "archive"):
-        raise ValueError("reason is required for archive and used only with archive")
-    if mode != "edit" and old_str is not None:
-        raise ValueError("old_str is used only with mode=edit")
-    if mode not in {"edit", "append"} and summary is not None:
-        raise ValueError("summary is used only with mode=edit or mode=append")
+    if mode not in {"overwrite", "append", "edit", "revert", "archive", "restore"} or not isinstance(content, str):
+        raise ValueError("content must be Markdown text; mode must be overwrite, append, edit, revert, archive or restore")
+    if ((lifecycle or mode == "revert") and content) or (mode == "archive" and address.topic in ALWAYS_ACTIVE_TOPICS):
+        raise ValueError("archive/restore/revert take no content; the overview must stay active")
+    if not isinstance(reason, str) or (mode == "archive" and not reason.strip()):
+        raise ValueError("reason is required for archive and optional text on every other mode")
+    if mode != "edit" and (old_str is not None or edits is not None):
+        raise ValueError(f"{'old_str' if old_str is not None else 'edits'} is used only with mode=edit")
+    if edits is not None and (old_str is not None or content):
+        raise ValueError("edits carries its own replacements: pass edits without old_str and content")
+    if summary is not None and mode not in {"overwrite", "append", "edit"}:
+        raise ValueError("summary is used only with mode=overwrite, append or edit")
     if summary is not None and (not isinstance(summary, str) or not summary.strip()):
         raise ValueError("summary must be non-empty text")
-    if mode == "edit" and summary is not None and old_str is None and content:
+    if mode == "edit" and summary is not None and old_str is None and edits is None and content:
         raise ValueError("content replaces old_str; a summary-only edit passes neither")
+    if (mode == "revert") != (version is not None):
+        raise ValueError("version is used with mode=revert, which requires it")
+    items = edit_items(edits) if edits is not None else None
+    target: Any = None
+    if mode == "revert":  # outside the lock: a recorded row never changes
+        try:
+            target = knowledge_versions.find_version(address, version)
+        except knowledge_versions.VersionUnavailable as exc:
+            target = exc
+    journal = address.shelf.parent / knowledge_versions.JOURNAL_NAME
     with knowledge_write_lock(address.shelf):
         # Re-resolve inside the lock; a changed symlink cannot redirect a write.
         address.path.resolve().relative_to(address.shelf.resolve())
@@ -778,25 +761,42 @@ def write_knowledge_note(
         if current is None and expected_revision == "":
             expected_revision = None
         revision = current.revision if current else None
-        if (mode == "edit" or lifecycle) and current is None:
-            return KnowledgeWriteResult(False, "lifecycle_source_missing" if lifecycle else "edit_source_missing", current, revision)
+        if (mode in {"edit", "revert"} or lifecycle) and current is None:
+            return KnowledgeWriteResult(False, "lifecycle_source_missing" if lifecycle else f"{mode}_source_missing", current, revision)
         # Only adding text is blind; a summary replaced beside it is a replacement.
         if current is not None and (mode != "append" or summary is not None) and expected_revision is None:
             return KnowledgeWriteResult(False, "revision_required", current, revision)
         if expected_revision is not None and expected_revision != revision:
-            return KnowledgeWriteResult(False, "revision_conflict", current, revision)
+            return KnowledgeWriteResult(False, "revision_conflict", current, revision, held=None if not expected_revision
+                                        else knowledge_versions.held_version(journal, address, expected_revision, _JOURNAL_TAIL_BYTES,
+                                                                             current.text if current else None))
+        # A refused revert says why; its caller holds the current revision (checked above), so no note is resent.
+        if mode == "revert" and version != revision and isinstance(target, Exception):
+            return KnowledgeWriteResult(False, f"version_unavailable: {target}", current, revision, show_source=False)
         try:
-            raw = (_lifecycle_content(current, mode, reason) if lifecycle
+            raw = (current.raw if mode == "revert" and version == revision
+                   else target[0].encode("utf-8") if mode == "revert"
+                   else _lifecycle_content(current, mode, reason) if lifecycle
+                   else _write_content(current, content, mode, old_str, summary, items) if items is not None
                    else _write_content(current, content, mode, old_str, summary))
-            if mode == "append" and summary is not None:  # the appended note's summary-only edit
+            if mode in {"append", "overwrite"} and summary is not None:  # the written note's summary-only edit
                 raw = _write_content(_note(address, raw), "", "edit", None, summary)
+        except EditRefused as exc:
+            return KnowledgeWriteResult(False, f"edit_refused: {exc}", current, revision, show_source=False)
         except (ValueError, yaml.YAMLError) as exc:
             return KnowledgeWriteResult(False, f"invalid_note: {exc}", current, revision)
         updated = _note(address, raw)
         old_archive = {"archive": current.metadata["archive"]} if current and "archive" in current.metadata else {}
         new_archive = {"archive": updated.metadata["archive"]} if "archive" in updated.metadata else {}
         if not lifecycle and _yaml_form(old_archive) != _yaml_form(new_archive):
-            return KnowledgeWriteResult(False, "invalid_note: archive is owned by archive/restore modes", current, revision)
+            if mode != "revert":
+                return KnowledgeWriteResult(False, "invalid_note: archive is owned by archive/restore modes", current, revision)
+            states = (f"is {updated.state}, the current note is {current.state}; archive and restore change that state"
+                      if updated.state != current.state else
+                      f"and the current note are both {current.state}, with different archive fields; "
+                      "archive and restore own that field")
+            return KnowledgeWriteResult(False, f"revert_changes_archive_state: version {version} {states}", current,
+                                        revision, show_source=False)
         if current is not None and raw == current.raw:
             if lifecycle:
                 # Equal note bytes are no proof a prior index publication landed.
@@ -807,12 +807,14 @@ def write_knowledge_note(
             return KnowledgeWriteResult(True, "unchanged", current, revision,
                                         {"old_chars": len(current.text), "new_chars": len(current.text),
                                          "old_body_chars": body_chars(current), "new_body_chars": body_chars(current),
-                                         "change_chars": 0, "removed_headings": [],
-                                         "body_changed": False, "summary_changed": False})
+                                         "change_chars": 0, "removed_chars": 0, "added_chars": 0, "removed_headings": [],
+                                         "added_headings": [], "removed_sections": [], "body_changed": False,
+                                         "summary_changed": False})
         # A body edit keeps the preamble bytes; a revised summary (edit or append)
         # may re-render them only if every other field keeps its value (``type``
         # defaults, in the merge's key order), compared by exact YAML spelling.
-        if current is not None and (mode == "edit" or summary is not None) and (updated.parse_error or (
+        if current is not None and (mode == "edit" or (mode == "append" and summary is not None)) and (
+                updated.parse_error or (
                 bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span) or
                 updated.raw[:current.source.body_span.start_byte] !=
                 current.raw[:current.source.body_span.start_byte]) and (
@@ -825,33 +827,42 @@ def write_knowledge_note(
         after = (Counter((heading.level, heading.title) for heading in updated.source.headings)
                  if updated.source else Counter())
         known = (current is None or current.source) and updated.source
-        removed_headings = (sorted("#" * level + " " + title for (level, title) in (before - after).elements())
-                            if known else None)
+        removed_headings, added_headings = (
+            sorted("#" * level + " " + title for (level, title) in (left - right).elements()) if known else None
+            for left, right in ((before, after), (after, before)))
         # Body bytes and the resident (index) summary, each compared as published;
         # an unparseable side leaves both unknown, like its heading delta.
         old_body, old_summary = ((current.raw[current.source.body_span.start_byte:], current.summary)
                                  if current and current.source else (b"", ""))
+        change = text_change.exact_change(old_text, updated.text)
+        removed_chars, added_chars = text_change.change_chars(change)
         delta = {"old_chars": len(old_text), "new_chars": len(updated.text),
                  "old_body_chars": body_chars(current), "new_body_chars": body_chars(updated),
-                 "change_chars": len(updated.text) - len(old_text), "removed_headings": removed_headings,
+                 "change_chars": len(updated.text) - len(old_text), "removed_chars": removed_chars,
+                 "added_chars": added_chars, "removed_headings": removed_headings, "added_headings": added_headings,
+                 "removed_sections": knowledge_versions.removed_sections(current, updated),
                  "body_changed": old_body != raw[updated.source.body_span.start_byte:] if known else None,
                  "summary_changed": old_summary != updated.summary if known else None}
-        # Capture the new version, and the one it replaces unless an earlier row
-        # already holds those exact bytes, before replacing source bytes. A capture
+        # Capture the new version, and the one it replaces (by its change from a
+        # verified base, else whole), before replacing source bytes. A capture
         # is not a commit receipt; a failed publication returns its actual
         # current source, never success.
-        journal = address.shelf.parent / "knowledge_history.jsonl"
-        recorded = None if lifecycle else _recorded_version(journal, address, old_text)
+        newest, base = _tail_read(journal, address, None if lifecycle else revision) if current is not None else (None, None)
+        previous = None if current is None else {**knowledge_versions.row_facts(
+            newest[1] if newest is not None and newest[1].get("new_sha256") == revision else {}), "revision": revision}
         history = {"ts": utc_now_iso(), "task_id": task_id, "topic": address.topic, "mode": mode,
                    "address": address.as_dict(), "publication": "source_capture",
                    "writer": writer or UNKNOWN_STAMP, "route": route or UNKNOWN_STAMP,
                    "writer_input_ref": writer_input_ref or UNKNOWN_STAMP, "focus": focus or UNKNOWN_STAMP,
                    "old_chars": len(old_text), "new_chars": len(updated.text),
-                   "old_sha256": hashlib.sha256(current.raw).hexdigest() if current and current.raw else "",
-                   "new_sha256": updated.revision if raw else "",
-                   **({"old_content_ref": recorded} if recorded else {"old_content": old_text}),
-                   "new_content": updated.text, "source_ref": updated.source_ref(), "delta": delta,
-                   **({"summary": summary} if summary is not None else {})}
+                   # An existing empty file is the version sha256(b""); only a note's absence has none.
+                   "old_sha256": current.revision if current is not None else "", "new_sha256": updated.revision,
+                   **({"old_content": old_text, "new_content": updated.text} if lifecycle
+                      else knowledge_rows.encode(old_text, updated.text, base, change)),
+                   "source_ref": updated.source_ref(), "delta": delta,
+                   **({"summary": summary} if summary is not None else {}),
+                   **({"reason": reason} if reason.strip() else {}),
+                   **({"reverted_from": version} if mode == "revert" else {})}
         history_ref = None
         if lifecycle:
             history_ref = {"history_path": str(journal),
@@ -874,4 +885,4 @@ def write_knowledge_note(
                 observed = None
             return KnowledgeWriteResult(False, "publication_incomplete", observed, revision,
                                         delta if observed is not None and observed.raw == raw else None, history_ref)
-        return KnowledgeWriteResult(True, "saved", updated, revision, delta, history_ref)
+        return KnowledgeWriteResult(True, "saved", updated, revision, delta, history_ref, previous)

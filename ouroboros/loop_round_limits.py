@@ -213,13 +213,13 @@ def _drain_incoming_messages(
                 acknowledge_transcript_entry(drive_root, task_id, entry, wake_id="owner_pause_wake")
                 continue
             if kind == KIND_HURRY:
-                # HQ1 no-chat contract (§19.7.2 item 6): a typed hurry
-                # control routes structurally — never via
-                # _record_owner_directive, _owner_marked_content, messages, or
-                # owner_message_injected.
-                from ouroboros.owner_hurry import apply_latch
+                # HQ1 no-chat contract (§19.7.2 item 6): a typed hurry control routes structurally — never via
+                # _record_owner_directive, _owner_marked_content or owner_message_injected. Arming the latch gives
+                # the running work one typed row of the owner's act (``HURRY_WORDS``), never a directive.
+                from ouroboros.owner_hurry import HURRY_WORDS, apply_latch
 
-                apply_latch(owner_ctx, entry, event_queue=event_queue)
+                if apply_latch(owner_ctx, entry, event_queue=event_queue):
+                    _loop()._append_or_merge_user_message(messages, HURRY_WORDS, slot=owner_ctx, kind=OWNER_WORDS_KIND)
                 controls["hurry"] = str(entry.get("msg_id") or "hurry")
                 continue
             from ouroboros.owner_mailbox import KIND_OWNER_MODEL
@@ -723,7 +723,7 @@ class _RoundLimitContext:
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds}). Consider decomposing into subtasks via schedule_subagent."
+    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds})."
     prompt = (
         f"[ROUND_LIMIT] {finish_reason} Produce your best final answer now from the "
         "verified work so far; clearly mark anything unverified or incomplete. An honest "
@@ -905,7 +905,7 @@ def _handle_model_wait_control(
     remains the supervisor's death-then-settlement transaction.
     """
     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
-    from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait
+    from ouroboros.model_wait import OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait
     from ouroboros.transport_custody import outcome_unknown_on_chain
 
     reason = error.control_reason
@@ -914,8 +914,8 @@ def _handle_model_wait_control(
     # catches a hold's interruption raised outside the model call, must not
     # hand the same error back here.
     error.control_rails_seen = True
-    if reason == "owner_model":
-        return None  # a refused call's wait yielded; the next drain applies the durable primary
+    if reason in {"owner_model", OWNER_WORDS_WAITING}:
+        return None  # a refused call's wait or a granted repeat yielded; the next drain applies the primary or the words
     if reason == "owner_launch_authority_unavailable":
         # Only the positively unsent handoff waits, and only on positive lock contention;
         # sent effects never retry. Reuse this task's live stack and control/deadline
@@ -1248,7 +1248,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     pass (``refusal_policy``) frees a shown chosen read only after a provider's refusal (an estimate
     never cuts a chosen read)."""
     from ouroboros.context_budget import ContextReclaimRequest
-    from ouroboros.context_compaction import context_reclaim_transcript_sha256, emergency_address_view
+    from ouroboros.context_compaction import context_reclaim_transcript_sha256
+    from ouroboros.context_source_view import emergency_address_view
 
     measurement = disposition.measurement
     tool_ctx = ctx.tools._ctx

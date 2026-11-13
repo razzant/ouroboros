@@ -68,15 +68,21 @@ def test_a_standing_revision_omits_the_map_and_a_bind_sends_it_whole(read_state)
     assert moved["task_bindings_revision"] not in ("", revision)
 
 
-def test_a_renamed_project_or_another_process_moves_the_revision(read_state, monkeypatch):
+def test_the_revision_moves_exactly_when_a_readers_map_would_differ(read_state, monkeypatch):
     root, read = read_state
     revision = read()["task_bindings_revision"]
-    registry.update_project(root, "alpha", name="Alpha renamed")
+    # A Project touched by its own work rewrites the registry and no reader's map: the held map still stands.
+    registry.touch_project(root, "alpha")
+    touched = read(revision)
+    assert touched["task_bindings"] is None and touched["task_bindings_unchanged"] is True
+
+    registry.update_project(root, "alpha", name="Alpha renamed")  # the map names the Project: it differs now
     renamed = read(revision)
     assert renamed["task_bindings"]["t1"]["project_name"] == "Alpha renamed"
+    assert renamed["task_bindings_revision"] not in ("", revision)
 
-    monkeypatch.setattr(registry, "_PROCESS_STAMP", "restarted")  # the next serving process: its own code
-    assert read(renamed["task_bindings_revision"])["task_bindings_unchanged"] is False
+    monkeypatch.setattr(registry, "_PROCESS_STAMP", "restarted")  # the next serving process sends the same bytes
+    assert read(renamed["task_bindings_revision"])["task_bindings_unchanged"] is True
 
 
 def test_a_failed_read_is_never_unchanged(read_state):
@@ -90,10 +96,49 @@ def test_a_failed_read_is_never_unchanged(read_state):
     assert read("")["task_bindings_unchanged"] is False
 
 
-def test_a_store_changed_within_a_clock_tick_has_no_revision(read_state, monkeypatch):
+def test_a_registry_that_vouches_for_no_room_sends_the_map_without_a_revision(read_state):
+    """The map's Project names come from the registry: while it vouches for no room (lost beside its commit witness,
+    or only invalid rows) the map goes without a revision, so a reader keeps the one it holds instead of the
+    Project ids standing in for names. A readable registry gives back the revision it had."""
     root, read = read_state
+    registry.create_project(root, "beta", name="Beta")
+    registry.bind_task_to_project(root, "t3", "beta", origin={"absent": "system"})
+    healthy = read()
+    assert healthy["task_bindings"]["t3"]["project_name"] == "Beta" and healthy["task_bindings_revision"]
+    path = root / "state" / "projects.json"
+    intact = path.read_bytes()
+    for unknown in ("lost beside its commit witness", "only an invalid row"):
+        path.unlink(missing_ok=True)
+        if unknown == "only an invalid row":
+            path.write_text(json.dumps({**json.loads(intact), "projects": [{"chat_id": 7}]}), encoding="utf-8")
+        body = read(healthy["task_bindings_revision"])
+        assert body["task_bindings_revision"] == "" and body["task_bindings_unchanged"] is False, unknown
+        assert body["project_chat_ids"] is None and body["project_listable_count"] is None, unknown
+    path.write_bytes(intact)
+    assert read()["task_bindings_revision"] == healthy["task_bindings_revision"]
+
+
+def test_the_registry_witness_alone_moves_the_publication_stamp(read_state):
+    """A registry lost beside its commit witness is an unknown room set; with the witness gone too it is a fresh
+    install's empty one. The publication's stamp follows the witness, so a held answer never outlives it."""
+    root, read = read_state
+    (root / "state" / "projects.json").unlink()
+    lost = registry.bindings_revision(root)
+    assert lost and registry.bindings_revision(root) == lost and read()["project_chat_ids"] is None
+    (root / "state" / "projects.json.committed").touch()  # as reconcile does each tick: whether it exists decides
+    assert registry.bindings_revision(root) == lost, "a touched witness is no new production"
+    (root / "state" / "projects.json.committed").unlink()
+    assert registry.bindings_revision(root) not in ("", lost), "the witness's removal is a new production"
+    assert read()["project_chat_ids"] == []
+
+
+def test_a_store_changed_within_a_clock_tick_names_the_map_it_sent(read_state, monkeypatch):
+    root, read = read_state
+    revision = read()["task_bindings_revision"]
     monkeypatch.setattr(utils, "_RACY_NS", 2_000_000_000)
     registry.bind_task_to_project(root, "t2", "alpha", origin={"absent": "system"})
 
-    fresh = read()
-    assert fresh["task_bindings_revision"] == "" and set(fresh["task_bindings"]) == {"t1", "t2"}
+    # No file stamp proves these bytes yet; the map's own digest does, so the reader holds it from this answer on.
+    fresh = read(revision)
+    assert set(fresh["task_bindings"]) == {"t1", "t2"} and fresh["task_bindings_revision"] not in ("", revision)
+    assert read(fresh["task_bindings_revision"])["task_bindings_unchanged"] is True

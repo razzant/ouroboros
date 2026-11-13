@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import time
 from dataclasses import replace
@@ -654,7 +655,10 @@ def _web_search_openai(
             release_attempt(reservation, "deadline_exhausted_before_dispatch", candidate_manifest_ref=manifest)
             reservation = None
             return _web_search_deadline_result()
-        mark_dispatched(reservation, candidate_manifest_ref=manifest)
+        # This leg reads its own stream: its process is recorded as the sender (its death is provable),
+        # never the task's model wait, whose receiver stays unbound (``usage_accounting.mark_dispatched``).
+        mark_dispatched(reservation, candidate_manifest_ref=manifest, local_answer_owner_pid=os.getpid(),
+                        task_receiver=False)
         dispatched = True
         if _attempt == 0:
             # An attempt, not evidence that a search ran: that is the stream's own web_search_call below.

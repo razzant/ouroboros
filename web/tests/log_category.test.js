@@ -96,3 +96,21 @@ test('a delegated harness run is not labelled as a subagent in the fan-out row (
     assert.equal(summarizeLogEvent({ type: 'swarm_fanout', task_ids: ['a', 'b'] }).headline,
         'swarm fan-out: 2 subagent(s) requested');
 });
+
+test('a provider content refusal reads as the filter stopping the request, with its model and the provider\'s words', () => {
+    // Before: no branch, so the row showed the raw type name. The words are about the wire, never a verdict.
+    const refusal = summarizeLogEvent({
+        type: 'provider_content_refusal', task_id: 't', model: 'anthropic/claude-opus-5.5', round: 7,
+        response_provider: 'Amazon Bedrock', provider_message: 'This request was blocked.',
+    });
+    assert.equal(refusal.phase, 'empty');
+    assert.equal(refusal.headline, "The provider's content filter stopped this request");
+    assert.equal(refusal.body, 'The provider said: "This request was blocked."');
+    assert.deepEqual(refusal.meta, ['task=t', 'anthropic/claude-opus-5.5', 'r7', 'Amazon Bedrock']);
+    assert.equal(summarizeLogEvent({ type: 'provider_content_refusal', model: 'm' }).body, '');  // no words: none claimed
+    // A model call's own outcome: the LLM filter shows it beside the empty response (before: filed under System).
+    assert.equal(categorizeLogEvent({ type: 'provider_content_refusal', model: 'm', round: 7 }), 'llm');
+    const empty = summarizeLogEvent({ type: 'llm_empty_response', model: 'm', round: 2, provider_message: 'x' });
+    assert.equal(empty.headline, 'Model returned empty response');
+    assert.equal(empty.body, '');
+});

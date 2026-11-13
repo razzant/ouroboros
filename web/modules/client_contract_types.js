@@ -88,7 +88,7 @@
  */
 
 /**
- * A `reviewModes` or `runtimeModes` row; `value` is what the setting stores.
+ * A `runtimeModes` row; `value` is what the setting stores.
  * @typedef {Object} SetupModeChoice
  * @property {string} value
  * @property {string} label
@@ -110,7 +110,6 @@
  * @property {string} stateKey
  * @property {string} settingKey
  * @property {string} inputId
- * @property {string} settingsInputId
  * @property {string} title
  * @property {string} label
  * @property {string} note
@@ -136,7 +135,6 @@
  * @property {SetupProviderField[]} providerFields
  * @property {Object.<string,SetupProviderProfile>} providerProfiles
  * @property {SetupModelSlot[]} modelSlots
- * @property {SetupModeChoice[]} reviewModes
  * @property {SetupModeChoice[]} runtimeModes
  * @property {SetupLocalRoutingMode[]} localRoutingModes
  * @property {SetupBudgetField[]} budgetFields
@@ -160,7 +158,6 @@
  * @property {string} legacyCompatibleBaseUrl Saved OPENAI_BASE_URL, display only: completion never writes it.
  * @property {string} safetyModel
  * @property {string} providerProfile
- * @property {string} reviewEnforcement
  * @property {string} runtimeMode
  * @property {string} skillsRepoPath
  * @property {string} localPreset
@@ -214,16 +211,28 @@
 /**
  * `GET /api/settings`: every effective setting with its (masked) value, plus `_meta`.
  * @typedef {Object} SettingsReadResponse
- * @property {import('./api_types.js').SettingsMeta=} _meta
+ * @property {SettingsMeta=} _meta
+ */
+/** `_meta` of `GET /api/settings`.
+ * @typedef {Object} SettingsMeta
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
+ * @property {string[]=} custom_secret_keys
+ * @property {Object=} setup_contract
+ * @property {import('./api_types.js').AvailableSubagentsSettingsMeta=} available_subagents
+ * @property {SettingsPolicyState=} policy_state
+ * @property {SettingsRestartState=} restart_state Component application and source uncertainty.
+ * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
+ * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
+ * @property {string[]=} known_spend_gaps What spends money the limits cannot count: roles whose route has no known price.
  */
 
 /**
- * `_meta.policy_state`: configured versus effective Access, Supervisor and Review, plus what a managed
+ * `_meta.policy_state`: configured versus effective Access and Supervisor, plus what a managed
  * deployment's policy file fixes.
  * @typedef {Object} SettingsPolicyState
  * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access
  * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} supervisor
- * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} review
  * @property {boolean} running_task_snapshot
  * @property {SettingsDeploymentPolicy=} deployment  // absent outside a managed deployment
  */
@@ -599,6 +608,7 @@
  * @property {ChatHistoryAnchor=} anchor  // an `around` read only
  * @property {string=} error
  * @property {string=} reason_code
+ * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one
  */
 
 /**
@@ -619,16 +629,22 @@
  */
 
 /**
- * A question row's question, as asked.
+ * A question row's card as its words are drawn (the question is the row's `text`): the offered answers' labels and
+ * details (`QuizOption` rows, or a legacy row's labels with `option_details`), the stake and the owner's own words
+ * (`comment`) once the card is settled as answered.
  * @typedef {Object} ChatSearchQuestion
- * @property {string} question
+ * @property {string} quiz_id
+ * @property {Array<Object|string|null>=} options
+ * @property {string[]=} option_details
+ * @property {string=} stake
+ * @property {string=} comment
  */
 
 /**
  * A saved message as the fields the room's renderer draws its words from (chat_search_words.js `candidateBox`): the
  * text history gives it (`system_type`, `markdown`, `narration`, `source` and the owner's `attachments` names choose
  * how), a photo, video or file's `caption` and a file's `filename`, a links row's `title` and `actions`, a question's
- * `quiz.question`, a Project lifecycle row's answer and ending. Whether its words contain the query is the client's
+ * `quiz` card, a Project lifecycle row's answer and ending. Whether its words contain the query is the client's
  * reading.
  * `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
  * @typedef {Object} ChatSearchCandidate
@@ -1375,17 +1391,22 @@
 
 /**
  * @typedef {Object} OwnerSafetyRulesResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} rules
  */
 
 /**
  * @typedef {Object} OwnerSafetyModelRequest
+ * @property {Object<string, string>=} if_unchanged
  * @property {Object} settings
  */
 
 /**
  * @typedef {Object} OwnerSafetyModelResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  */
 
@@ -1426,4 +1447,45 @@
  * @property {number} model_calls
  * @property {number} sessions
  * @property {?number} tokens
+ */
+
+/** @typedef {Object} SettingsChange
+ * @property {*=} old
+ * @property {*=} new
+ * @property {boolean=} old_absent
+ * @property {string=} token
+ * @property {'secret'|'structure'=} withheld
+ */
+/** @typedef {Object} SettingsReceipt
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
+ */
+/** @typedef {Object} SettingsTiming
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
+ */
+/** @typedef {Object} SettingsRestartState
+ * @property {boolean=} restart_required
+ * @property {string[]=} restart_keys
+ * @property {string[]=} restart_source_unknown_keys
+ * @property {string[]=} unknown_keys
+ * @property {Object=} local_model
+ * @property {string=} summary
+ * @property {Object<string, *>=} running
+ */
+
+/**
+ * 500 AFTER settings landed: retry the named later step, never re-save (settings/onboarding writes).
+ * @typedef {Object} SettingsPostCommitFailureResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
+ * @property {string} error
+ * @property {string} status  // saved_with_post_commit_error
+ * @property {boolean} saved  // always true
+ * @property {string} post_commit_failed
+ */
+
+/** @typedef {Object} SettingsSaveRequest Open partial document of setting keys.
+ * @property {Object<string, string>=} if_unchanged
+ * @property {string[]=} unset
  */

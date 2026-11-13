@@ -320,7 +320,7 @@ def build_self_verification_template(
     return (
         f"\n\nBefore the next {tool_name}:\n"
         "The recorded review state and the individual findings below stand; your "
-        "response does not rewrite them or the configured enforcement.\n"
+        "response does not rewrite them.\n"
         f"{REVIEW_REPAIR_JUDGMENT}\n"
         f"Whether the next {tool_name} is replayed or refused for free, rejoins "
         "unresolved review work, or pays for a new review follows the gate's "

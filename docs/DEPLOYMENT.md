@@ -47,6 +47,45 @@ updated `budget_drive_root`, `drive_root`/`child_drive_root` as applicable, and
 cleared `reason_code`/`reason_detail`. Keep sources through adoption.
 Copying the directory alone never rewrites those pointers.
 
+## First Run Without the Wizard
+
+The setup wizard opens while no model access is configured. A server that finds
+access in its environment (a provider key, a subscription Main or a local route)
+starts working at once and does not open it; the wizard stays reachable at
+`/onboarding`. The check is that access is configured, not that it works: a wrong
+key shows at the first request. That is the usual first run of a container or a
+service unit configured by variables alone, and of a Colab notebook, whose launch
+writes the whole factory settings document with the budget and the Access level it
+was given. No wizard choice is saved then, and what the wizard would have asked
+keeps its factory value:
+
+| | Factory value | After completing the wizard on fresh data |
+|---|---|---|
+| Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
+| Access level | `advanced` | the level chosen |
+| Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
+| Consciousness | off; $20 over 24 hours once started | off unless ticked |
+
+Reviewers and helpers are proposed from the reachable Main at each read (none while
+the keys present do not settle which provider serves Main) until they are edited on
+the Agents page or saved by the wizard; other saves, the Models page's among them,
+leave them proposed. A Colab launch saves the ones it proposes from the key it was
+given. Subscription sessions join them through Settings or the wizard.
+
+A setting the file does not hold is read from the environment variable of its name
+(a Colab launch writes the ones named here into its file: `TOTAL_BUDGET` and
+`OUROBOROS_RUNTIME_MODE` from the notebook's variables at each launch that sets them,
+the rest as the file held them, or at factory values on a first launch), for example
+`TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
+`OUROBOROS_RUNTIME_MODE` (read at a start). The exceptions are the choices only the
+owner's controls author, Safety coverage and the Context mode among them: Settings
+shows their saved or factory value whatever the environment says. Neither is
+consistent there today: while none is saved, the Safety Supervisor still reads a
+forwarded `OUROBOROS_SAFETY_MODE`, and a task still starts in a forwarded
+`OUROBOROS_CONTEXT_MODE` (#3202), so choose both in Settings to have one answer. A
+deployment policy file (below) can cap the Access level and raise the minimum
+coverage.
+
 ## Unknown model role at startup
 
 An error such as `OUROBOROS_MODEL_CONTEXT_WINDOWS: unknown model role(s)`
@@ -106,7 +145,7 @@ profile per volume set; never point two containers at one data volume.
 | | Immutable image (`ouroboros-web`) | Managed body (`ouroboros-managed`) |
 |---|---|---|
 | Code and packages | the image's `/app` | a checkout and runtime venv on a volume |
-| Update | build and deploy a new image | Settings → Update, as on the desktop |
+| Update | build and deploy a new image | Dashboard → Updates, as on the desktop |
 | Entry | `python server.py` | the common launcher, `--no-ui` |
 | Volumes | data, work, `HOME` | one parent volume, or body/data/work/home |
 
@@ -115,7 +154,7 @@ CPython 3.10.22 and SQLite 3.53.1, the same assets
 `scripts/download_python_standalone.sh` and `scripts/download_python_standalone.ps1`
 pin for the desktop packages. It is not Debian's `python:3.10-slim` (SQLite 3.46.1).
 Desktop installs receive that interpreter only by installing the app again.
-Settings → Update replaces the repository and its packages; it does not replace
+Dashboard → Updates replaces the repository and its packages; it does not replace
 the bundled interpreter. A managed container keeps its runtime venv on a volume.
 A venv whose interpreter no longer matches this image is left untouched, and the
 log names the recovery step: stop, move that directory aside, start again. Code
@@ -228,7 +267,7 @@ directory with its own `index.html`, laid out like `web/`. It applies when the
 server starts, so a saved change waits for a restart. A saved value, an empty one
 included, beats the environment variable; the environment counts only while the
 setting was never saved, and Ouroboros never copies it into `settings.json`. To
-return to the builtin interface, clear the setting (in Settings → Advanced, or in
+return to the builtin interface, clear the setting (in Settings → This computer → Advanced, or in
 `settings.json` while Ouroboros is stopped), restart and reopen the address.
 `GET /api/state` reports what is actually served as `served_ui`.
 
@@ -316,7 +355,7 @@ docker run --rm -p 127.0.0.1:8765:8765 \
   ouroboros-web
 ```
 
-On a desktop install the same key lives in Settings → Advanced. It covers the
+On a desktop install the same key lives in Settings → This computer → Advanced. It covers the
 provider calls: model requests, model catalogs, Provider Test, pricing and
 capability probes. Everything else keeps its own trust store: `git`, `uv`,
 `pip`, the Claudexor engine and its runtime downloads, the Telegram skill, MCP
@@ -359,7 +398,7 @@ An unknown or repeated field or a wrong type refuses the whole file. Safety is m
 full coverage, on the organization's checker only when the file names all three of
 `access.max` at most `pro`, `safety.min_coverage: full` and `safety.checker`: without the cap an
 employee may still choose Cyber Pro, where Safety findings are advice; without the floor
-coverage may be lowered to Light or Off; without `safety.checker` the employee's own
+coverage may be lowered to Outgoing or Off; without `safety.checker` the employee's own
 Supervisor route checks.
 
 - `access.max` (`light`, `advanced` or `pro`) caps effective Access, keeping Cyber Pro out of reach.

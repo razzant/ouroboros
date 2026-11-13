@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import open_settings
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
@@ -30,7 +31,7 @@ def _inventory_row(harness, *, exact=True):
 
 @pytest.mark.parametrize("width", [1440, 390])
 @pytest.mark.parametrize("account_count", [1, 18])
-def test_maintenance_lost_reply_cancel_and_drafts(subscription_ui, width, account_count):
+def test_maintenance_lost_reply_cancel_and_saved_assignments(subscription_ui, width, account_count):
     from playwright.sync_api import expect
 
     ui, page = subscription_ui, subscription_ui["page"]
@@ -77,10 +78,11 @@ def test_maintenance_lost_reply_cancel_and_drafts(subscription_ui, width, accoun
 
     page.route("**/api/claudexor/maintenance/**", maintenance)
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, "models/role/main")
     model = page.locator('[data-model-role="main"] [data-model-role-model]')
-    model.fill("owner-unsaved-model")
-    page.locator('[data-settings-tab="providers"]').click()
+    expect(model).to_have_value("gpt-test")
+    # Separate pages dispose unsaved editors; maintenance must leave the saved assignment alone.
+    open_settings(page, "accounts/codex")
     family = page.locator('.agent-family-card[data-family="codex"]')
     expect(family.locator('[data-family-maintenance]')).to_have_count(1)
     expect(family.locator('.harness-account-row')).to_have_count(account_count)
@@ -114,6 +116,8 @@ def test_maintenance_lost_reply_cancel_and_drafts(subscription_ui, width, accoun
     expect(family.get_by_role('button', name='Update', exact=True)).to_be_enabled()
     family.locator('.agent-family-head').scroll_into_view_if_needed()
     capture(page, f"maintenance-{width}-cancelled")
+    open_settings(page, "accounts")
+    open_settings(page, "accounts/agy")
     native_family = page.locator('.agent-family-card[data-family="agy"]')
     expect(native_family.get_by_role('button', name='Update', exact=True)).to_be_visible()
     native_family.get_by_role('button', name='Details', exact=True).click()
@@ -122,8 +126,8 @@ def test_maintenance_lost_reply_cancel_and_drafts(subscription_ui, width, accoun
     assert native_family.locator('[data-maintenance-action="previous"]').count() == 0
     assert native_family.locator('[data-family-add]').count() == 0
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    page.locator('[data-settings-tab="models"]').click()
-    expect(model).to_have_value("owner-unsaved-model")
+    open_settings(page, "models/role/main")
+    expect(model).to_have_value("gpt-test")
     assert not any("/login" in path or path == "/api/settings" for path, _ in ui["posts"])
 
 
@@ -139,7 +143,7 @@ def test_old_engine_explains_missing_capability(subscription_ui, reason):
         "error": {"code": "maintenance_unavailable", "message": reason},
     }))
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/codex")
     family = page.locator('.agent-family-card[data-family="codex"]')
     expect(family).to_contain_text(f"Program inspection unavailable: {reason}")
     assert family.inner_text().count("Program inspection unavailable") == 1
@@ -164,8 +168,9 @@ def test_connect_card_shows_only_maintenance_problem_actions(subscription_ui, wi
         "context": {"operationId": "accepted-install"} if maintenance else {},
     }))
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/codex")
     family = page.locator('.agent-family-card[data-family="codex"]')
+    family.locator('[data-resources]').first.click()
     family.locator('[data-harness-login]').first.click()
     card = family.locator('[data-login-card]')
     expect(card).to_contain_text(message)
@@ -203,7 +208,7 @@ def test_historical_unknown_effect_preserves_newer_version(subscription_ui, term
 
     page.route("**/api/claudexor/maintenance/**", maintenance)
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/codex")
     family = page.locator('.agent-family-card[data-family="codex"]')
     expect(family.locator('.harness-maintenance-line')).to_contain_text("Program 3.1.0")
     if termination == "confirmed":
@@ -262,7 +267,7 @@ def _remount(page):
         const accounts = await import('/static/modules/harness_accounts.js');
         const {claudexorStatus} = await import('/static/modules/claudexor_status_store.js');
         accounts.destroyHarnessAccounts();
-        await accounts.initHarnessAccounts({store: claudexorStatus});
+        await accounts.initHarnessAccounts({store: claudexorStatus, family: 'codex', path: 'accounts/codex'});
     }""")
 
 
@@ -287,7 +292,7 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
         current = query.get("fresh") == ["true"] or query.get("checkLatest") == ["true"]
         reads.append(current)
         assert route.request.method == "GET", "Inspecting never posts"
-        if world.get("hold") and query.get("harness") == ["agy"]:
+        if world.get("hold") and query.get("harness") == ["codex"]:
             held.append(route)
         elif current and world["broken"]:
             route.fulfill(status=status, json=failure)
@@ -296,10 +301,9 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
 
     page.route("**/api/claudexor/maintenance/**", maintenance)
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/codex")
     banner = page.locator("#agents-service-banner")
     codex = page.locator('.agent-family-card[data-family="codex"]')
-    agy = page.locator('.agent-family-card[data-family="agy"]')
     expect(codex.locator(".harness-maintenance-line")).to_contain_text("Program 2.0.0")
     expect(banner).not_to_contain_text("no longer present")
 
@@ -312,7 +316,7 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
     expect(banner).to_contain_text("it ends every run on the engine, and success is not guaranteed.")
     expect(banner).to_have_attribute("data-tone", "warn")
     expect(banner).not_to_contain_text("ENOENT")
-    for family in (codex, agy):
+    for family in (codex,):
         line = family.locator(".harness-maintenance-line")
         expect(line).to_contain_text("Last known")
         expect(line).to_contain_text("2026")
@@ -336,17 +340,16 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
     page.locator(".agents-service").scroll_into_view_if_needed()
     capture(page, f"maintenance-missing-executable-{width}-{theme}")
 
-    # A failed read lands without rebuilding the rows: another family's Details keeps its focus and open state.
+    # A failed read lands without rebuilding the row: its Details keeps focus and open state.
     details = codex.get_by_role("button", name="Details", exact=True)
     world["hold"] = True
-    agy.get_by_role("button", name="Details", exact=True).click()
-    agy.get_by_role("button", name="Check latest", exact=True).click()
-    expect(agy.get_by_role("button", name="Checking…", exact=True)).to_be_disabled()
+    codex.get_by_role("button", name="Check latest", exact=True).click()
+    expect(codex.get_by_role("button", name="Checking…", exact=True)).to_be_disabled()
     details.focus()
     assert held
     world["hold"] = False
     held.pop().fulfill(status=status, json=failure)
-    expect(agy.get_by_role("button", name="Check latest", exact=True)).to_be_enabled()
+    expect(codex.get_by_role("button", name="Check latest", exact=True)).to_be_enabled()
     expect(details).to_be_focused()
     expect(details).to_have_attribute("aria-expanded", "true")
 
@@ -375,7 +378,6 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
     expect(banner).not_to_contain_text("no longer present")
     expect(banner).not_to_contain_text("Restart")
     expect(codex.locator(".harness-maintenance-line")).not_to_contain_text("Last known")
-    expect(agy.locator(".harness-maintenance-line")).not_to_contain_text("Last known")
     expect(page.locator('#agents-service-diagnostics [data-fact="Last program inspection"]')).to_have_count(0)
     expect(codex.get_by_role("button", name="Update", exact=True)).to_be_visible()
     assert not any("restart" in path or "login" in path or "maintenance" in path for path, _ in ui["posts"])
@@ -404,7 +406,7 @@ def test_retained_failed_operation_on_a_healthy_replacement_advises_nothing(subs
 
     page.route("**/api/claudexor/maintenance/**", maintenance)
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/codex")
     family = page.locator('.agent-family-card[data-family="codex"]')
     expect(family).to_contain_text("Update failed · Installed files may have changed")
     family.get_by_role("button", name="Details", exact=True).click()
@@ -442,7 +444,7 @@ def test_program_facts_and_outcome_stay_once_in_their_places(subscription_ui, wi
 
     page.route("**/api/claudexor/maintenance/**", reply)
     page.goto(ui["url"] + "/#settings")
-    page.get_by_role("tab", name="Accounts", exact=True).click()
+    open_settings(page, "accounts/codex")
     family = page.locator('[data-family="codex"]')
     expect(family.locator(".harness-account-row")).to_have_count(account_count)
     family.locator("[data-maintenance-details]").click()
@@ -485,7 +487,7 @@ def test_release_notes_uses_host_opener_and_keeps_the_app(subscription_ui, width
     page.route("**/api/claudexor/maintenance/harnesses*", lambda route: route.fulfill(json={"harnesses": [row]}))
     page.set_viewport_size({"width": width, "height": 950})
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/codex")
     family = page.locator('.agent-family-card[data-family="codex"]')
     family.get_by_role("button", name="Details", exact=True).click()
     expect(family.get_by_role("link", name="Release notes")).to_have_count(0)

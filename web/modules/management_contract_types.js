@@ -655,6 +655,22 @@
  */
 
 /**
+ * From `min_prompt_tokens` input tokens on, a request is charged these USD per 1M tokens.
+ * @typedef {Object} ModelPriceTier
+ * @property {number} min_prompt_tokens
+ * @property {number} input
+ * @property {number} output
+ */
+
+/**
+ * A catalog's published token price, USD per 1M tokens; `tiers` only when input length changes it.
+ * @typedef {Object} ModelPrice
+ * @property {number} input
+ * @property {number} output
+ * @property {ModelPriceTier[]=} tiers
+ */
+
+/**
  * One selectable model; `value` is what a model setting stores. The local model's row says `use_local`: `id` names
  * it and its `value` is a label, never a route.
  * @typedef {Object} ModelCatalogItem
@@ -683,6 +699,7 @@
  * @property {*=} problem
  * @property {*=} processing
  * @property {boolean=} use_local
+ * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
  */
 
 /**
@@ -1000,6 +1017,7 @@
  * @property {Object=} by_task_category
  * @property {Object} accounting
  * @property {Object=} unattributed
+ * @property {Object=} period  only with `?period=24h|7d|30d`: that period's models and cache writes (cost_period.js)
  */
 
 /**

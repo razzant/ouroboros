@@ -11,12 +11,13 @@ monkeypatch ``context._STRAY_PROBE_CACHE``) keeps working unchanged.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import json
 import pathlib
 import re
 from collections import Counter
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Optional
 
 from ouroboros.jsonl_tail import cached_tail_objects
 from ouroboros.utils import read_json_dict, read_text
@@ -41,35 +42,36 @@ def safe_read(path: pathlib.Path, fallback: str = "") -> str:
         return fallback
 
 
-def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
+# The tail of each log these checks read; a health line names it as its source.
+_RECENT_LOG_BYTES = 256_000
+
+
+def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = _RECENT_LOG_BYTES):
     """The log's bounded tail, read once per file identity and shared with the Runtime section's body fact."""
     yield from cached_tail_objects(path, max_bytes)
 
 
 def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
     """What the running code's recent builds did past one pass, from their ``context_memory_view`` receipts: work repeated
-    on the same input (a ``<verb>_again`` above zero) and rows read past those open and new. A fact for the mind, and
-    only when one of the two is there: in a healthy state nothing is added."""
+    on the same input (a ``<verb>_again`` above zero). A fact for the mind, and only when it is there: in a healthy state
+    nothing is added. The rows a capture read stay in the receipts and are no line: the tail is read whole on every
+    capture, stored or live, so that fact stood in the contexts whatever the host did."""
     from ouroboros.transcript_prefix import _running_code
 
     code = _running_code()
     builds = [dict(receipt.get("work") or {}) for receipt in receipts if receipt.get("code") == code and receipt.get("work")]
-    if not builds:
-        return ""
     repeats: Counter = Counter()
     repeating = 0
     for work in builds:
         again = {verb[:-len("_again")]: n for verb, n in work.items() if verb.endswith("_again") and n}
         repeats.update(again)
         repeating += bool(again)
-    newest = builds[-1]
-    read, opened, new = (int(newest.get(name) or 0) for name in ("rows_read", "rows_open", "rows_new"))
-    facts = [f"the newest capture read {read:,} rows of the chat tail for {opened:,} open and {new:,} new"] if read > opened + new else []
-    if repeats:
-        facts.append(f"{repeating} of {len(builds)} recent builds did work again on an input they already had "
-                     f"({', '.join(f'{verb} {n:,}' for verb, n in repeats.most_common())})")
-    return (f"INFO: HOST WORK BEYOND ONE PASS under the running code ({code if ' ' in code else code[:12]}) — {'; '.join(facts)}. "
-            "Receipts: logs/events.jsonl, context_memory_view, field work.") if facts else ""
+    if not repeats:
+        return ""
+    return (f"INFO: HOST WORK BEYOND ONE PASS under the running code ({code if ' ' in code else code[:12]}) — "
+            f"{repeating} of {len(builds)} recent builds did work again on an input they already had "
+            f"({', '.join(f'{verb} {n:,}' for verb, n in repeats.most_common())}). "
+            "Receipts: logs/events.jsonl, context_memory_view, field work.")
 
 
 def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
@@ -127,15 +129,16 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
         host_work = _host_work_line(view_receipts)
         if host_work:
             checks.append(host_work)
+        source = f"source: logs/events.jsonl, last {_RECENT_LOG_BYTES // 1000} KB"
         if llm_error_models:
             top = ", ".join(f"{model} x{count}" for model, count in llm_error_models.most_common(3))
-            checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}). Reliability or failover may need attention.")
+            checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}); {source}.")
         if local_overflow_models:
             top = ", ".join(f"{model} x{count}" for model, count in local_overflow_models.most_common(3))
-            checks.append(f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) ({top}). Local context may need more compaction or a larger window.")
+            checks.append(f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) ({top}); {source}.")
         if remote_overflow_models:
             top = ", ".join(f"{model} x{count}" for model, count in remote_overflow_models.most_common(3))
-            checks.append(f"WARNING: REMOTE CONTEXT OVERFLOW — {sum(remote_overflow_models.values())} recent provider context-window rejection(s) ({top}). Switch to low context mode or reduce the prompt footprint before retrying the same request.")
+            checks.append(f"WARNING: REMOTE CONTEXT OVERFLOW — {sum(remote_overflow_models.values())} recent provider context-window rejection(s) ({top}); {source}.")
     except Exception:
         pass
 
@@ -157,9 +160,9 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
             if recent:
                 checks.append(
                     f"WARNING: RESCUE SNAPSHOT AVAILABLE — {', '.join(recent)}. "
-                    "Uncommitted changes were saved before last restart. "
-                    "Use read_file(root='runtime_data', path='archive/rescue/<dirname>/rescue_meta.json') "
-                    "and changes.diff to decide if recovery is needed."
+                    "Uncommitted changes were saved before last restart in "
+                    "read_file(root='runtime_data', path='archive/rescue/<dirname>/rescue_meta.json') "
+                    "and changes.diff beside it."
                 )
     except Exception:
         pass
@@ -230,21 +233,115 @@ def _plan_review_note(env: Any, task_id: str) -> str:
         return ""
 
 
-def _identity_age_line(env: Any) -> str:
-    """When ``identity.md`` was last written, as a fact; whether that is long is the mind's reading
-    (the STALE/THIN identity and EMPTY/BLOATED scratchpad verdicts and their OK lines left with the
-    owner's rule that no threshold stands in for judgment). An absent file is no fact. A write's timestamp can run
-    ahead of a coarse clock (Windows, Python 3.10: 15.6 ms), so a file written just now is 0.0 h old, never -0.0."""
-    import time as _time
+# "Who I am" and "where I am": each file, its publication journal, the tool that writes both and whether the
+# file's bytes are compared with its last record. The map's are not: the host rewrites its measured block at
+# every start without a journal row, so a difference there would speak of the host.
+_SELF_FILES = (("identity.md", "identity_journal.jsonl", "update_identity", True),
+               ("WORLD.md", "world_journal.jsonl", "update_world", False))
+# One journal record holds the whole old and new text and two previews. With either file at its context
+# budget (``context._SECTION_BUDGETS``: identity 80 000 chars, the map 16 000) and four bytes a character
+# a record stays under 700 KB: this tail holds one such record together with the line break before it.
+_SELF_JOURNAL_TAIL_BYTES = 1024 * 1024
+# Whether each self-file journal's last line parses, once per file identity: ``{path: (identity, parses)}``.
+_SELF_LAST_LINES: Dict[str, tuple] = {}
+
+
+def _last_line_parses(journal: pathlib.Path, info: Any) -> bool:
+    """Whether the journal's last non-empty line is a JSON object. An interrupted append leaves a torn last
+    line: the newest record is unknown, never the one before it. ``publish_memory_file`` starts its next row
+    on a line of its own (``ensure_record_boundary``), so the torn line stays behind that row; a writer
+    without the repair (the profiler's first fencing of the map) joins it into one line that does not parse.
+    Read back from the end within the journal's tail, once per file identity: a last line longer than the
+    tail holds no record the tail could show either."""
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+    kept = _SELF_LAST_LINES.get(str(journal))
+    if kept is not None and kept[0] == identity:
+        return kept[1]
+    with journal.open("rb") as handle:
+        start = max(0, info.st_size - _SELF_JOURNAL_TAIL_BYTES)
+        handle.seek(start)
+        body = handle.read(info.st_size - start).rstrip()
+    last = body.rsplit(b"\n", 1)
+    try:
+        parses = (len(last) == 2 or start == 0) and isinstance(json.loads(last[-1]), dict) if body else True
+    except ValueError:
+        parses = False
+    _SELF_LAST_LINES[str(journal)] = (identity, parses)
+    return parses
+
+
+def _age_in_hours(seconds: float) -> str:
+    """An age in whole hours. These lines open the dynamic part of the request, where a text that moves
+    every minute ends the prefix a provider can reuse between two turns of one conversation; an age in
+    hours moves once an hour and still says what the fact is for."""
+    hours = max(0, int(seconds)) // 3600
+    if hours >= 24:
+        return f"{hours // 24} d {hours % 24} h ago"
+    return f"{hours} h ago" if hours else "less than an hour ago"
+
+
+def _focus_role(row: Mapping[str, Any]) -> str:
+    focus = row.get("focus")
+    return str(focus.get("role") or "") if isinstance(focus, dict) else ""
+
+
+def _last_self_update(journal: pathlib.Path, tool: str, compared: Optional[pathlib.Path] = None) -> str:
+    """What ``journal`` says about the mind's last ``tool`` call: the newest readable record of its tail
+    that is not the host's (``legacy_wrap``, role ``host``: the profiler's first fencing of the map), with
+    its age and the writing focus's role. No journal, or a journal read whole without such a record, is no
+    record. A tail that holds bytes but no record of the mind's (a record longer than the tail, lines that
+    do not parse), a last line that does not parse (``_last_line_parses``), or a newest record without a
+    date, is unreadable: unknown, never "no record" and never the record before it.
+    ``compared`` is the file the journal belongs to: when the dated record carries the hash it published
+    (``new_sha256``) and the file's bytes hash otherwise, the line says so, as a fact without a cause or an
+    author. A record without that hash, or bytes that cannot be read, add nothing."""
+    from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 
     try:
-        identity_path = env.drive_path("memory/identity.md")
-        if identity_path.exists():
-            age = max(0.0, _time.time() - identity_path.stat().st_mtime)
-            return f"identity.md last updated {age / 3600:.1f} h ago"
-    except Exception:
-        pass
-    return ""
+        info = journal.stat()
+        size = info.st_size
+        rows = cached_tail_objects(journal, _SELF_JOURNAL_TAIL_BYTES)
+        torn = not _last_line_parses(journal, info)
+    except FileNotFoundError:
+        return f"no {tool} record"
+    except OSError:
+        return f"last {tool} record unreadable"
+    if torn:
+        return f"last {tool} record unreadable"
+    mine = [row for row in rows if row.get("source_type") != "legacy_wrap" and _focus_role(row) != "host"]
+    if not mine:
+        whole = size <= _SELF_JOURNAL_TAIL_BYTES and (bool(rows) or not size)
+        return f"no {tool} record" if whole else f"last {tool} record unreadable"
+    written = parse_deadline_ts(mine[-1].get("ts"))
+    if written is None:
+        return f"last {tool} record unreadable"
+    who, recorded = _focus_role(mine[-1]), mine[-1].get("new_sha256")
+    line = f"last {tool} {_age_in_hours((utc_now() - written).total_seconds())}" + (f" ({who})" if who else "")
+    if compared is not None and recorded and isinstance(recorded, str):
+        try:
+            if hashlib.sha256(compared.read_bytes()).hexdigest() != recorded:
+                line += "; the file differs from that record"
+        except OSError:
+            pass
+    return line
+
+
+def _self_update_lines(env: Any) -> List[str]:
+    """When the mind last published ``identity.md`` and ``WORLD.md``, one fact a file, from the journal its
+    tool appends (``memory_publication.publish_memory_file``) and never the file's mtime: a restore moves
+    the mtime, and the host rewrites the map's measured block at every start. Whether an age is long is the
+    mind's reading: no threshold stands in for that judgment, so a line carries no verdict and no advice.
+    ``identity.md`` is also compared with its last record (``_SELF_FILES``). An absent file is no fact."""
+    lines: List[str] = []
+    for name, journal, tool, compare in _SELF_FILES:
+        try:
+            path = env.drive_path(f"memory/{name}")
+            if path.exists():
+                fact = _last_self_update(env.drive_path(f"memory/{journal}"), tool, path if compare else None)
+                lines.append(f"{name}: {fact}")
+        except Exception:
+            log.debug("Self-update fact unavailable for %s", name, exc_info=True)
+    return lines
 
 
 def _unread_output_line(custody_root: Any, run: Any, task_id: str) -> str:
@@ -459,7 +556,7 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
         except (KeyError, TypeError, ValueError):
             checks.append("WARNING: BUDGET DRIFT — the saved drift figures are unreadable (state/state.json)")
 
-    checks.extend(filter(None, [_identity_age_line(env)]))
+    checks.extend(_self_update_lines(env))
 
     # state/crash_report.json retired (CPL4-C9, owner 2A): its writer — the
     # crash-rollback path — no longer exists in this tree, so the reader and
