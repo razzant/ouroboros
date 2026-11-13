@@ -242,3 +242,17 @@ def test_update_focus_retains_the_page_bytes_not_the_reads_revision_line(tmp_pat
     page.write_bytes(b"x" * (pj._FOCUS_SOURCE_MAX_BYTES + 1))
     body, refusal = pj._read_focus_source(ctx, {"reader": "workpad_read", "project_id": PID})
     assert body == "" and "the workpad has no narrower page" in refusal and "offset/snapshot" not in refusal
+
+
+def test_the_resident_page_carries_the_revision_of_the_bytes_shown(tmp_path, store):
+    from ouroboros.context_sections import build_knowledge_sections
+
+    page, _journal = store
+    page.parent.mkdir(parents=True)
+    raw = "# План\r\n\r\n- колёса\r\n".encode("utf-8")
+    page.write_bytes(raw)
+    env = types.SimpleNamespace(drive_path=lambda name: tmp_path / "data" / name)
+    sections = [str(section) for section in build_knowledge_sections(env, project_id=PID)]
+    pad = next(section for section in sections if section.startswith(f"## Project workpad ({PID})"))
+    assert pad == f"## Project workpad ({PID})\n\n" + raw.decode("utf-8") + \
+        f"\nRevision of this workpad: {_sha(raw)}.\n"

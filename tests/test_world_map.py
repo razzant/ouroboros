@@ -495,3 +495,19 @@ def test_revert_to_a_stock_legacy_profile_drops_its_generated_lines(tmp_path, mo
     text = world.read_text(encoding="utf-8")
     assert reply.startswith("OK:") and "- **OS**: old" not in text and "Generated automatically" not in text, reply
     assert text.count(wprof.MEASURED_START) == 1 and _measured("host") in text and "## My notes\n- kept" in text
+
+
+def test_the_resident_map_shows_its_exact_bytes_and_their_revision_and_its_fold_says_it_is_partial(tmp_path):
+    from ouroboros.context import build_memory_sections
+    from ouroboros.memory import Memory
+
+    raw = f"{wprof.TITLE}\r\n\r\n{_measured('host')}\r\n\r\n## What lives here\r\n- a note\r\n\r\n".encode()
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "WORLD.md").write_bytes(raw)
+    world = next(section for section in build_memory_sections(Memory(drive_root=tmp_path), partition="stable")
+                 if str(section).startswith("## My World"))
+    revision = hashlib.sha256(raw).hexdigest()
+    assert str(world).endswith(raw.decode() + f"\nRevision of this map: {revision}.\n")  # not stripped: these bytes
+    folded = world.operative_view
+    assert "a partial view: its headings only" in folded and f"memory_read(source='world', version='{revision}')" in folded
+    assert "Revision of this map" not in folded  # a fold proves no reading of the whole

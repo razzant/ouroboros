@@ -69,6 +69,7 @@ from ouroboros.utils import (
     get_git_info,
     read_text,
     safe_relpath,
+    sha256_text,
     utc_now_iso,
 )
 
@@ -638,7 +639,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
 
 from ouroboros.context_sections import (  # noqa: E402,F401 — existing public builder surface
     build_knowledge_sections, knowledge_navigation_sections, _build_registry_section,
-    _build_installed_skills_section, _drive_state_section, runtime_host_section,
+    _build_installed_skills_section, _drive_state_section, runtime_host_section, revision_line,
     _SHARED_UNDERSTANDING_GAP,
 )
 from ouroboros.section_floor import HostSection, capture_sections, labelled_section  # noqa: E402
@@ -686,16 +687,17 @@ def build_memory_sections(memory: Memory, partition: str = "all", *, include_scr
                         "read_file(root='runtime_data', path='memory/scratchpad.md'))\n\n" + scratchpad_body))
 
     if include_stable:
-        identity_raw = memory.load_identity()
+        identity_raw = memory.load_identity()  # one byte capture: the text shown and its revision
         _warn_if_over_budget("identity", identity_raw)
         reader = _canonical_runtime_reader(ctx, memory.drive_root, "memory/identity.md")
-        sections.append(HostSection("identity", f"## Identity (already loaded from `{memory.identity_path()}`; read current bytes before revising)\n"
-                                   f"Source reader: {reader}\n\n" + identity_raw))
+        sections.append(HostSection("identity", f"## Identity (already loaded from `{memory.identity_path()}`; the "
+                                   "revision under it is update_identity's expected_revision)\n"
+                                   f"Source reader: {reader}\n\n" + identity_raw + revision_line(
+                                       "identity", identity_raw, sha256_text(identity_raw))))
         world_file = memory.load_world_profile()
-        world_raw = world_file.strip()
-        if world_raw:
+        if world_file.strip():
             # The map loads whole; oversize is the mind's to compact (detail to knowledge).
-            _warn_if_over_budget("world", world_raw)
+            _warn_if_over_budget("world", world_file)
             sections.append(_world_section(world_file))
 
     if partition == "all":
@@ -710,16 +712,20 @@ def build_memory_sections(memory: Memory, partition: str = "all", *, include_scr
 
 
 def _world_section(world_file: str) -> HostSection:
-    """WORLD.md whole, with its own heading map as the operative view (line ranges into the file)."""
+    """WORLD.md whole, exactly as stored, with its revision; its own heading map is the operative view (line ranges
+    into the file), which says it is partial."""
     from ouroboros.context_layout import generate_doc_nav_map
 
     reader = "read_file(root='runtime_data', path='memory/WORLD.md', start_line=A, max_lines=N)"
+    revision = sha256_text(world_file)
     full = ("## My World (from `memory/WORLD.md` — already loaded; the measured block refreshes at startup, "
-            "the rest is mine to keep current with update_world; compact, detail in knowledge)\n\n" + world_file.strip())
+            "the rest is mine to keep current with update_world; compact, detail in knowledge)\n\n" + world_file
+            + revision_line("map", world_file, revision))
     headings = generate_doc_nav_map(world_file, title="My World", rel_path="memory/WORLD.md",
                                     instructions=False).split("\n", 2)[2]  # below its own title line
-    return HostSection("world", full, f"## My World (from `memory/WORLD.md`)\n\n{headings}\n\n"
-                                      f"Its line ranges read with {reader}.")
+    return HostSection("world", full, f"## My World (from `memory/WORLD.md`; a partial view: its headings only)\n\n"
+                                      f"{headings}\n\nIts line ranges read with {reader}; the whole map, before an "
+                                      f"edit: memory_read(source='world', version='{revision}').")
 
 
 def build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[str]:
